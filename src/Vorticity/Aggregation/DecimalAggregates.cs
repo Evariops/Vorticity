@@ -42,6 +42,30 @@ public static class DecimalAggregates
         /// <returns>The symbol of the mean; null when no row holds a value.</returns>
         public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
             Aggregators.Filtered(Aggregators.Average(Aggregators.Input(aggregates.Binding, column)), aggregates.Filter);
+
+        /// <summary>The sample variance of a decimal <paramref name="column"/>, over <c>n − 1</c>.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the variance; null below two values.</returns>
+        public Sym<double?> Variance(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(aggregates.Binding, column), deviation: false), aggregates.Filter);
+
+        /// <summary>The sample variance of the non-null values of a nullable decimal <paramref name="column"/>.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the variance; null below two values.</returns>
+        public Sym<double?> Variance(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(aggregates.Binding, column), deviation: false), aggregates.Filter);
+
+        /// <summary>The sample standard deviation of a decimal <paramref name="column"/>.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the standard deviation; null below two values.</returns>
+        public Sym<double?> StandardDeviation(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(aggregates.Binding, column), deviation: true), aggregates.Filter);
+
+        /// <summary>The sample standard deviation of the non-null values of a nullable decimal <paramref name="column"/>.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the standard deviation; null below two values.</returns>
+        public Sym<double?> StandardDeviation(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(aggregates.Binding, column), deviation: true), aggregates.Filter);
     }
 
     extension<TRecord, TKey>(Group<TRecord, TKey> group)
@@ -69,6 +93,30 @@ public static class DecimalAggregates
         /// <returns>The symbol of the mean.</returns>
         public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
             Aggregators.Filtered(Aggregators.Average(Aggregators.Input(group.Binding, column)), group.Filter);
+
+        /// <summary>The sample variance of a decimal <paramref name="column"/> in the group, over <c>n − 1</c>.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the variance; null below two values.</returns>
+        public Sym<double?> Variance(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(group.Binding, column), deviation: false), group.Filter);
+
+        /// <summary>The sample variance of the non-null values of a nullable decimal <paramref name="column"/> in the group.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the variance; null below two values.</returns>
+        public Sym<double?> Variance(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(group.Binding, column), deviation: false), group.Filter);
+
+        /// <summary>The sample standard deviation of a decimal <paramref name="column"/> in the group.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the standard deviation; null below two values.</returns>
+        public Sym<double?> StandardDeviation(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(group.Binding, column), deviation: true), group.Filter);
+
+        /// <summary>The sample standard deviation of the non-null values of a nullable decimal <paramref name="column"/> in the group.</summary>
+        /// <param name="column">The column.</param>
+        /// <returns>The symbol of the standard deviation; null below two values.</returns>
+        public Sym<double?> StandardDeviation(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
+            Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(group.Binding, column), deviation: true), group.Filter);
     }
 
     extension<TRecord>(Scan<TRecord> scan)

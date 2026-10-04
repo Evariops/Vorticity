@@ -161,7 +161,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
         _partition = new AggregationPartition(
-            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, Streaming(_query));
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, Streaming(_query), host.Source);
         _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
         _inner = host.Source.BatchesAsync(pass, host.Metrics).GetAsyncEnumerator(_cancellationToken);
     }

@@ -13,6 +13,8 @@ internal enum AggregateKind : byte
     Custom,
     Any,
     All,
+    Variance,
+    StandardDeviation,
 }
 
 /// <summary>A result of an aggregation, whatever its type: what an element of a selection of several values is.</summary>
@@ -99,8 +101,9 @@ internal interface IAggregateNode
     /// <summary>The rows of its group it reads, for an aggregate of a filtered group; null for every row.</summary>
     RowFilter? Filter { get; }
 
-    /// <summary>A fresh, empty state for one partition.</summary>
-    AggregateSlot Create();
+    /// <summary>A fresh, empty state for one partition of a run over <paramref name="source"/>.</summary>
+    /// <param name="source">The source the run reads, whose statistics a state may take what the whole run shares from; null for none.</param>
+    AggregateSlot Create(ScanSource? source);
 
     /// <summary>The answer the file statistics give for the whole file, or null when they do not give it exactly.</summary>
     AggregateSlot? Settle(StatisticsView view);
@@ -111,11 +114,18 @@ internal delegate bool Settler<T>(StatisticsView view, out T value);
 
 internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 {
-    private readonly Func<AggregateSlot<T>> _create;
+    private readonly Func<ScanSource?, AggregateSlot<T>> _create;
     private readonly Settler<T>? _settle;
 
     internal AggregateNode(
         AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null)
+        : this(kind, input, _ => create(), settle, detail, record, filter)
+    {
+    }
+
+    /// <summary>An aggregate whose states take what the run shares from its source's statistics, as a variance its center.</summary>
+    internal AggregateNode(
+        AggregateKind kind, ColumnShape? input, Func<ScanSource?, AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null)
     {
         Kind = kind;
         Input = input;
@@ -152,7 +162,7 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     public RowFilter? Filter { get; }
 
-    public AggregateSlot Create() => _create();
+    public AggregateSlot Create(ScanSource? source) => _create(source);
 
     public AggregateSlot? Settle(StatisticsView view) =>
         _settle is not null && _settle(view, out T value) ? new SettledSlot<T>(value) : null;

@@ -20,7 +20,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 1 ✅ | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
 > | 2 ✅ | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
-> | 4, the filtered group and reproducible sums ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
+> | 4, the filtered group, reproducible sums, variance ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6 | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §9 |
 
@@ -335,7 +335,9 @@ and a filter changes no grid. A part is at most 2^26 units, so a sum takes 2^36 
 billion, in one group or one scan, and throws `OverflowException` past them rather than lose its
 exactness. A NaN is skipped; a sum holding +∞ and not −∞ is +∞, one holding both is NaN, as IEEE 754
 gives. An average is that sum over the count; a variance comes from the reproducible sums of
-`x − c` and `(x − c)²`, `c` the midpoint of the column's bounds, fixed per query.
+`x − c` and `(x − c)²`, `c` the midpoint of the column's bounds over the whole source where its
+statistics hold them, a file's, and zero where they do not, fixed per query: the nearer `c` lies to
+a group's mean, the fewer digits the difference of the two sums cancels.
 
 Every answer of §5 is therefore the same bits at every degree and in every cut, but those that
 depend on the order of rows by definition: `First`, `Last`, and a tie of `MinBy` or `MaxBy`.

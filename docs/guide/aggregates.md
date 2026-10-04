@@ -22,9 +22,10 @@ AggAsync, four answers             2.3 ms  min 10.1, max 49.9, 100000 rows, 8 ci
 over the rows the scan keeps: one answer comes as itself, `await scan.AggAsync(a => a.Count())`,
 and several, of any number, go into the record `AggAsync<TResult>` names, whose members take them
 in order, each of its answer's type or of its nullable form. The members of `a` are `Count()`,
-`CountDistinct`, `Sum`, `Min`, `Max`, `Average` and `Aggregate`, each over a column named as in a
-filter, and `Count`, `Any` and `All` of a predicate, and `Where`, which filters the aggregates that
-follow it ([a filtered group](#a-filtered-group)). Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
+`CountDistinct`, `Sum`, `Min`, `Max`, `Average`, `Variance`, `StandardDeviation` and `Aggregate`,
+each over a column named as in a filter, and `Count`, `Any` and `All` of a predicate, and `Where`,
+which filters the aggregates that follow it ([a filtered group](#a-filtered-group)). `Variance` and
+`StandardDeviation` are of the sample, over `n − 1`, and null below two values. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
 your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
 14 left, of which one had a column brought to the canonical form; the others were read as runs and
 dictionaries.

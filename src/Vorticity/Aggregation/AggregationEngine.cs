@@ -156,7 +156,7 @@ internal sealed class AggregationPartition
     private int[] _componentOf = [];
     private int[] _componentRows = [];
 
-    internal AggregationPartition(AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1)
+    internal AggregationPartition(AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null)
     {
         _columns = columns;
         _inputs = inputs;
@@ -167,7 +167,7 @@ internal sealed class AggregationPartition
         Slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
         {
-            Slots[i] = settled[i] ?? plan.Aggregates[i].Create();
+            Slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
         }
 
         Keys = plan.Grouped ? plan.CreateKeys(sorted) : null;
@@ -560,7 +560,7 @@ internal static class AggregationEngine
         RowRange[]? ranges = Partition(source, pass);
         if (ranges is null)
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted);
+            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
             await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
             partitions = [only];
         }
@@ -569,7 +569,7 @@ internal static class AggregationEngine
             partitions = new AggregationPartition[ranges.Length];
             for (int p = 0; p < partitions.Length; p++)
             {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted);
+                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
             }
 
             // One read of the zone maps and indexes for every range, as a single scan would make,

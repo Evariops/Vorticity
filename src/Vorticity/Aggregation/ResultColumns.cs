@@ -112,6 +112,8 @@ internal static class ResultTypes
             case AggregateKind.All:
                 return VortexType.Bool;
             case AggregateKind.Average:
+            case AggregateKind.Variance:
+            case AggregateKind.StandardDeviation:
                 return VortexType.Float64.Nullable;
             case AggregateKind.Min:
             case AggregateKind.Max:

@@ -18,6 +18,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 {
     private readonly StorageKind _kind;
     private readonly Func<TState, TResult> _finish;
+    private readonly TState _seed;
     private TState[] _states = [];
     private int _groups;
     private ValuesCache<TValue> _values;
@@ -25,9 +26,16 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     private int[] _counts = [];
 
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish)
+        : this(kind, finish, TOp.Seed())
+    {
+    }
+
+    /// <summary>A slot whose groups start from <paramref name="seed"/>: a state that carries what its run fixed, as a variance its center.</summary>
+    internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed)
     {
         _kind = kind;
         _finish = finish;
+        _seed = seed;
     }
 
     internal override void EnsureGroups(int groups)
@@ -39,7 +47,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
         for (int g = _groups; g < groups; g++)
         {
-            _states[g] = TOp.Seed();
+            _states[g] = _seed;
         }
 
         _groups = Math.Max(_groups, groups);

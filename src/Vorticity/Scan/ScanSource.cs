@@ -90,6 +90,17 @@ internal abstract class ScanSource
 
     /// <summary>Which key source <see cref="OpenKeysAsync"/> would walk.</summary>
     internal abstract ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The smallest and the largest value of the column at <paramref name="path"/> over the whole
+    /// source, whatever a scan keeps of it, when its statistics hold them.
+    /// </summary>
+    internal virtual bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    {
+        min = FilterLiteral.Null;
+        max = FilterLiteral.Null;
+        return false;
+    }
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -203,6 +214,21 @@ internal sealed class FileScanSource : ScanSource
     private bool Refuted(ScanSpec spec) => spec.Filter is { } filter && !MayMatch(filter);
 
     internal override bool MayMatch(VortexExpr filter) => Compute.FileStatisticsPruner.MayMatch(_file, filter);
+
+    /// <remarks>The file statistics are one entry per top-level column.</remarks>
+    internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    {
+        min = FilterLiteral.Null;
+        max = FilterLiteral.Null;
+        if (!_file.HasFileStatistics || path.Length != 1 || !_file.Schema.RootIsStruct || path[0] >= _file.Statistics.Count)
+        {
+            return false;
+        }
+
+        FieldStatistics statistics = _file.Statistics[path[0]];
+        return statistics.HasMin && statistics.HasMax
+            && FileStatisticsPruner.TryLiteral(statistics.Min, out min) && FileStatisticsPruner.TryLiteral(statistics.Max, out max);
+    }
 
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);

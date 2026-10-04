@@ -182,6 +182,64 @@ internal static class Aggregators
         return new Sym<double?>(new AggregateNode<double?>(AggregateKind.Average, shape, create, (StatisticsView view, out double? value) => SettleAvg(shape, view, out value)));
     }
 
+    /// <summary>
+    /// The sample variance of a numeric column, or with <paramref name="deviation"/> its square root:
+    /// from the indexed sums of <c>x − c</c> and <c>(x − c)²</c>, <c>c</c> fixed for the run.
+    /// </summary>
+    internal static Sym<double?> Variance(ColumnShape shape, bool deviation)
+    {
+        Func<VarianceState, double?> finish = deviation
+            ? static s => s.Variance is double variance ? Math.Sqrt(variance) : null
+            : static s => s.Variance;
+        Func<ScanSource?, AggregateSlot<double?>> create = shape.Kind switch
+        {
+            StorageKind.Primitive => shape.PType switch
+            {
+                PType.I8 => source => new FixedSlot<sbyte, VarianceState, VarianceOp<sbyte>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.I16 => source => new FixedSlot<short, VarianceState, VarianceOp<short>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.I32 => source => new FixedSlot<int, VarianceState, VarianceOp<int>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.I64 => source => new FixedSlot<long, VarianceState, VarianceOp<long>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.U8 => source => new FixedSlot<byte, VarianceState, VarianceOp<byte>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.U16 => source => new FixedSlot<ushort, VarianceState, VarianceOp<ushort>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.U32 => source => new FixedSlot<uint, VarianceState, VarianceOp<uint>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.U64 => source => new FixedSlot<ulong, VarianceState, VarianceOp<ulong>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.F16 => source => new FixedSlot<Half, VarianceState, VarianceOp<Half>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.F32 => source => new FixedSlot<float, VarianceState, VarianceOp<float>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                _ => source => new FixedSlot<double, VarianceState, VarianceOp<double>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+            },
+            StorageKind.Decimal => source =>
+                new FixedSlot<Int128, VarianceState, VarianceOp<Int128>, double?>(StorageKind.Decimal, finish, Centered(source, shape, Math.Pow(10, -shape.Type.Scale))),
+            _ => throw shape.Unsupported(deviation ? "a standard deviation" : "a variance"),
+        };
+
+        return new Sym<double?>(new AggregateNode<double?>(deviation ? AggregateKind.StandardDeviation : AggregateKind.Variance, shape, create, null));
+    }
+
+    /// <summary>
+    /// A variance's first state: its center, the middle of the column's bounds over the whole
+    /// source where its statistics hold them, zero where they do not; the same for every group and
+    /// every partition of the run.
+    /// </summary>
+    private static VarianceState Centered(ScanSource? source, ColumnShape shape, double unit)
+    {
+        double center = 0;
+        if (source is not null && source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max))
+        {
+            double middle = (Number(min, unit) * 0.5) + (Number(max, unit) * 0.5);
+            center = double.IsFinite(middle) ? middle : 0;
+        }
+
+        return new VarianceState { Center = center, Unit = unit };
+    }
+
+    private static double Number(Expressions.FilterLiteral bound, double unit) => bound.Kind switch
+    {
+        Expressions.FilterLiteralKind.Signed => bound.SignedValue * unit,
+        Expressions.FilterLiteralKind.Unsigned => bound.UnsignedValue * unit,
+        Expressions.FilterLiteralKind.Float => bound.FloatValue,
+        _ => double.NaN,
+    };
+
     internal static Sym<T?> Extreme<T>(ColumnShape shape, bool max)
     {
         Func<AggregateSlot<T?>> create = shape.Kind switch

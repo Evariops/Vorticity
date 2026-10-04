@@ -121,6 +121,38 @@ public readonly struct Group<TRecord, TKey>
         where T : struct, INumber<T> =>
         Aggregators.Filtered(Aggregators.Average(Aggregators.Input(_binding, column)), _filter);
 
+    /// <summary>The sample variance of <paramref name="column"/> in the group, over <c>n − 1</c>.</summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the variance; null below two values.</returns>
+    public Sym<double?> Variance<T>(Func<Probe<TRecord>, Sym<T>> column)
+        where T : INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: false), _filter);
+
+    /// <summary>The sample variance of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the variance; null below two values.</returns>
+    public Sym<double?> Variance<T>(Func<Probe<TRecord>, Sym<T?>> column)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: false), _filter);
+
+    /// <summary>The sample standard deviation of <paramref name="column"/> in the group: the square root of its variance.</summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the standard deviation; null below two values.</returns>
+    public Sym<double?> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T>> column)
+        where T : INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: true), _filter);
+
+    /// <summary>The sample standard deviation of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the standard deviation; null below two values.</returns>
+    public Sym<double?> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T?>> column)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: true), _filter);
+
     /// <summary>The state <typeparamref name="TAggregator"/> folds <paramref name="column"/> into, per group.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>
     /// <typeparam name="TAggregator">The aggregator.</typeparam>
