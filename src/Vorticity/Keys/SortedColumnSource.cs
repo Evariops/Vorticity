@@ -156,8 +156,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         }
 
         FieldMaskBuilder builder = new FieldMaskBuilder();
-        Projection.IncludePath(schema, path, builder, nameof(path));
-        FieldMask mask = Projection.Create(builder.Build()).RootMask;
+        ScanProjection.IncludePath(schema, path, builder, nameof(path));
+        FieldMask mask = ScanProjection.Create(builder.Build()).RootMask;
 
         return (
             new SortedColumnSource(file, tree, field, mask, zones, kind, firstRow, file.RowCount) { Metrics = metrics },

@@ -14,7 +14,7 @@ namespace Vorticity.Scanning;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <c>default(Projection)</c> is <see cref="All"/>, matching <c>default(FieldMask)</c>: a scan
+/// <c>default(ScanProjection)</c> is <see cref="All"/>, matching <c>default(FieldMask)</c>: a scan
 /// handed a default projection materializes everything, which is slower than intended but never
 /// wrong. The opposite default would silently drop columns.
 /// </para>
@@ -31,19 +31,19 @@ namespace Vorticity.Scanning;
 /// which one is column zero.
 /// </para>
 /// </remarks>
-internal readonly struct Projection
+internal readonly struct ScanProjection
 {
     private readonly FieldMask _mask;
     private readonly int _leafCount;
 
-    private Projection(FieldMask mask, int leafCount)
+    private ScanProjection(FieldMask mask, int leafCount)
     {
         _mask = mask;
         _leafCount = leafCount;
     }
 
-    /// <summary>Every field of every struct, recursively. Also <c>default(Projection)</c>.</summary>
-    public static Projection All => default;
+    /// <summary>Every field of every struct, recursively. Also <c>default(ScanProjection)</c>.</summary>
+    public static ScanProjection All => default;
 
     /// <summary>
     /// Compiles <paramref name="paths"/> against <paramref name="schema"/>.
@@ -60,7 +60,7 @@ internal readonly struct Projection
     /// caller error, not a malformed file.
     /// </exception>
     /// <exception cref="ArgumentNullException">A path is <see langword="null"/>.</exception>
-    public static Projection Parse(DType schema, ReadOnlySpan<string> paths)
+    public static ScanProjection Parse(DType schema, ReadOnlySpan<string> paths)
     {
         if (paths.Length == 0)
         {
@@ -118,7 +118,7 @@ internal readonly struct Projection
     /// <summary>Wraps a mask a builder produced, counting its leaves once.</summary>
     /// <param name="mask">The compiled mask.</param>
     /// <returns>The projection.</returns>
-    internal static Projection Create(FieldMask mask) => new Projection(mask, CountLeaves(in mask, depth: 1));
+    internal static ScanProjection Create(FieldMask mask) => new ScanProjection(mask, CountLeaves(in mask, depth: 1));
 
     /// <summary>
     /// Resolves one dotted path against <paramref name="schema"/> and adds it to

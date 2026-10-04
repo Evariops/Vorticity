@@ -26,6 +26,12 @@ public readonly struct Sym<T> : ISymbol
 
     Aggregating.IResultNode ISymbol.Result(SymNode[] components) => Aggregating.AggregationPlan.Result(this, components);
 
+    IProjectionElement ISymbol.Projected(int position) =>
+        Node is ColumnSym column
+            ? new ProjectionElement<T>(column)
+            : throw new InvalidOperationException(
+                $"Element {position + 1} of the projection, '{this}', is not a column of the scan: a projection reads columns, and an aggregate belongs to a group.");
+
     internal ColumnSym Column =>
         Node as ColumnSym ?? throw new InvalidOperationException("Only a column can be compared; an aggregate or a group key is a result, not a filter.");
 
@@ -159,6 +165,10 @@ internal interface ISymbol
     /// <summary>The result this symbol stands for in a selection: an aggregate, or a component of the key among <paramref name="components"/>.</summary>
     /// <exception cref="InvalidOperationException">The symbol is neither.</exception>
     Aggregating.IResultNode Result(SymNode[] components);
+
+    /// <summary>The column this symbol stands for as element <paramref name="position"/> of a projection.</summary>
+    /// <exception cref="InvalidOperationException">The symbol is not a column.</exception>
+    IProjectionElement Projected(int position);
 }
 
 /// <summary>A column of the scanned file, with the type the file gives it.</summary>

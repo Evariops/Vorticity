@@ -434,14 +434,14 @@ public sealed class RecordBatchTests
         RecordBatch batch = f.Batch(
             f.Arena.AddStruct(schema, 3, Validity.NonNullable, [keys, nested]), startRow: 70);
 
-        using RecordBatch dropped = batch.Project(Projection.Parse(batch.DType, ["inner"]));
+        using RecordBatch dropped = batch.Project(ScanProjection.Parse(batch.DType, ["inner"]));
         Assert.Equal(f.Types.Struct(["inner"], [inner], Nullability.NonNullable), dropped.DType);
         Assert.Equal(3, dropped.RowCount);
         Assert.Equal(70L, dropped.StartRow);
         Assert.Equal([4, 5, 6], dropped.Column(0).AsStruct().GetField("d"u8).AsPrimitive<int>().Values.ToArray());
 
         // A nested leaf: the struct above it is rebuilt around that one field.
-        using RecordBatch leaf = batch.Project(Projection.Parse(batch.DType, ["key", "inner.d"]));
+        using RecordBatch leaf = batch.Project(ScanProjection.Parse(batch.DType, ["key", "inner.d"]));
         DType narrowed = f.Types.Struct(["d"], [i32], Nullability.NonNullable);
         Assert.Equal(f.Types.Struct(["key", "inner"], [i64, narrowed], Nullability.NonNullable), leaf.DType);
         Assert.Equal([10L, 20L, 30L], leaf.Column(0).AsPrimitive<long>().Values.ToArray());
@@ -453,7 +453,7 @@ public sealed class RecordBatchTests
         Assert.Equal(d, leaf.Arena.GetNode(root.GetFieldIndex(1)).GetFieldIndex(0));
 
         // Everything is the batch itself, and the source is untouched by any of it.
-        using RecordBatch all = batch.Project(Projection.All);
+        using RecordBatch all = batch.Project(ScanProjection.All);
         Assert.Equal(schema, all.DType);
         Assert.Equal(schema, batch.DType);
         Assert.Equal([10L, 20L, 30L], batch.Column(0).AsPrimitive<long>().Values.ToArray());
@@ -467,10 +467,10 @@ public sealed class RecordBatchTests
         DType table = f.Types.Struct(
             ["a"], [f.Types.Primitive(PType.I32, Nullability.NonNullable)], Nullability.NonNullable);
 
-        Assert.Throws<ArgumentException>(() => batch.Project(Projection.Parse(table, ["a"])));
+        Assert.Throws<ArgumentException>(() => batch.Project(ScanProjection.Parse(table, ["a"])));
 
         batch.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => batch.Project(Projection.All));
+        Assert.Throws<ObjectDisposedException>(() => batch.Project(ScanProjection.All));
     }
 
     private static bool[] Bits(VortexColumn column)

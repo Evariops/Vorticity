@@ -34,6 +34,27 @@ internal abstract class ResultQuery
 
     /// <summary>The plan of the query's scan.</summary>
     internal abstract ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken);
+
+    /// <summary>The same query, its result's columns named and typed by the members of a record, in order.</summary>
+    /// <param name="record">The record's schema.</param>
+    /// <param name="type">The record's type, for a message.</param>
+    /// <exception cref="VortexSchemaException">The record has another number of members, or a member does not take its element.</exception>
+    internal abstract ResultQuery As(VortexSchema record, Type type);
+
+    /// <summary>The same query, its rows past the first <paramref name="skip"/> of those it delivers, <paramref name="take"/> of them at most.</summary>
+    internal abstract ResultQuery Limit(long skip, long take);
+
+    /// <summary>How the values of column <paramref name="column"/> are records: a custom aggregate's state; null for a column of values.</summary>
+    internal virtual IVortexRecord? RecordOf(int column) => null;
+
+    /// <summary>The window [<paramref name="skip"/>, <paramref name="skip"/> + <paramref name="take"/>) of a window [<paramref name="skipped"/>, <paramref name="skipped"/> + <paramref name="taken"/>): the operators in the order written.</summary>
+    internal static (long Skip, long Take) Within(long skipped, long taken, long skip, long take)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(skip);
+        ArgumentOutOfRangeException.ThrowIfNegative(take);
+        long left = taken == long.MaxValue ? long.MaxValue : Math.Max(0, taken - skip);
+        return (skipped + skip, Math.Min(left, take));
+    }
 }
 
 /// <summary>

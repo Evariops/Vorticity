@@ -10,10 +10,14 @@ Vorticity:     method Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<T
 Vorticity:     method Sym<long> Count()
 Vorticity:     method Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity: sealed class Vorticity.Aggregation
+Vorticity:     method Aggregation Skip(int)
+Vorticity:     method Aggregation Take(int)
 Vorticity:     method Scan<TRecord> As<TRecord>()
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     property ScanStatistics Statistics { get; }
 Vorticity: sealed class Vorticity.Aggregation<TResult>
+Vorticity:     method Aggregation<TResult> Skip(int)
+Vorticity:     method Aggregation<TResult> Take(int)
 Vorticity:     method Aggregation<TResult> WithCancellation(CancellationToken)
 Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken = default)
@@ -1052,6 +1056,25 @@ Vorticity:     method Sym<T> Column<T>(int)
 Vorticity:     method Sym<T> Column<T>(string)
 Vorticity:     property Predicate IsNotNull { get; }
 Vorticity:     property Predicate IsNull { get; }
+Vorticity: sealed class Vorticity.Projection
+Vorticity:     method Aggregation Distinct()
+Vorticity:     method Projection Skip(int)
+Vorticity:     method Projection Take(int)
+Vorticity:     method Scan<TRecord> As<TRecord>()
+Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
+Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity: sealed class Vorticity.Projection<TResult>
+Vorticity:     method Aggregation<TResult> Distinct()
+Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
+Vorticity:     method IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken = default)
+Vorticity:     method Projection<TResult> Skip(int)
+Vorticity:     method Projection<TResult> Take(int)
+Vorticity:     method Projection<TResult> WithCancellation(CancellationToken)
+Vorticity:     method Scan<TRecord> As<TRecord>()
+Vorticity:     method ValueTask<List<TResult>> ToListAsync(CancellationToken = default)
+Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
+Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = default)
+Vorticity:     property ScanStatistics Statistics { get; }
 Vorticity: sealed class Vorticity.PruningStep : IEquatable<PruningStep>
 Vorticity:     ctor PruningStep(string, int, int, long)
 Vorticity:     method PruningStep <Clone>$()
@@ -1116,6 +1139,8 @@ Vorticity:     method GroupedScan<TRecord, TKey> GroupBy<TKey>(Func<Probe<TRecor
 Vorticity:     method IAsyncEnumerable<RecordBatch> ToBatchesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerable<TRecord> ToRecordsAsync(CancellationToken = default)
 Vorticity:     method KeyCursorBuilder<TKey> Keys<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
+Vorticity:     method Projection Select(Func<Probe<TRecord>, ITuple>)
+Vorticity:     method Projection<T> Select<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
 Vorticity:     method Scan<TRecord> OrderByDescending<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
 Vorticity:     method Scan<TRecord> Rows(ReadOnlySpan<long>)

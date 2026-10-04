@@ -102,7 +102,7 @@ they are read. Either way, `As<TRecord>()` returns a scan, on which the plan's o
 | written | why |
 |---|---|
 | a column outside an aggregate after `into g`, or in `g => …` | the row's probe is out of scope: a group's columns exist only inside the lambda of an aggregate, so a result is a key or an aggregate (CS0103) |
-| `let`, `join`, a second `from` | there is no `Select` of an anonymous type, no `Join`, no `SelectMany` (CS1942, CS1936) |
+| `let`, `join`, a second `from` | there is no `Select` of an anonymous type, no `Join`, no `SelectMany` (CS0029, CS1936) |
 | arithmetic on a column or a result | the operators are `[Obsolete(error)]`: computing with results is C# after the sink |
 | a literal of another type than the symbol's | as in a filter ([14-public-api.md](14-public-api.md) §5.2) |
 | `await` on a builder, `foreach` over a `GroupedScan` | a builder is not awaitable; a group is not a value, a `Select` says what of it to deliver |

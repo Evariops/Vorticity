@@ -43,7 +43,7 @@ public sealed partial class Scan<TRecord>
         }
 
         // Checked before the scan runs: a record that does not take the answers reads nothing.
-        AggregationQuery query = new AggregationQuery(Host, new AggregationPlan(results, []), nodes, []).As(TResult.Schema, typeof(TResult));
+        AggregationQuery query = new AggregationQuery(Host, new AggregationPlan(results, []), nodes, []).Typed(TResult.Schema, typeof(TResult));
         GroupBatches batches = query.Groups(cancellationToken);
         await using (batches.ConfigureAwait(false))
         {

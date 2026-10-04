@@ -20,17 +20,19 @@ internal sealed class AggregationQuery : ResultQuery
     private VortexSchema? _schema;
 
     internal AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys)
-        : this(host, plan, nodes, keys, Natural(nodes, keys))
+        : this(host, plan, nodes, keys, Natural(nodes, keys), 0, long.MaxValue)
     {
     }
 
-    private AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, ResultColumn[] columns)
+    private AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, ResultColumn[] columns, long skip, long take)
     {
         Host = host;
         Plan = plan;
         Nodes = nodes;
         Keys = keys;
         Columns = columns;
+        Skip = skip;
+        Take = take;
     }
 
     internal AggregationHost Host { get; }
@@ -44,6 +46,12 @@ internal sealed class AggregationQuery : ResultQuery
     internal ColumnShape[] Keys { get; }
 
     internal ResultColumn[] Columns { get; }
+
+    /// <summary>The groups the result passes over before its first, in the order they are delivered.</summary>
+    internal long Skip { get; }
+
+    /// <summary>The groups the result delivers at most; <see cref="long.MaxValue"/> for every one.</summary>
+    internal long Take { get; }
 
     /// <summary>The result's columns, by name and type.</summary>
     internal override VortexSchema Schema
@@ -69,11 +77,18 @@ internal sealed class AggregationQuery : ResultQuery
 
     internal override ScanMetrics Metrics => Host.Metrics;
 
+    internal override ResultQuery As(VortexSchema record, Type type) => Typed(record, type);
+
+    internal override ResultQuery Limit(long skip, long take)
+    {
+        (long from, long count) = Within(Skip, Take, skip, take);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, Columns, from, count);
+    }
+
+    internal override IVortexRecord? RecordOf(int column) => Columns[column].Record;
+
     /// <summary>The same query, its result's columns named and typed by the members of a record, in order.</summary>
-    /// <param name="record">The record's schema.</param>
-    /// <param name="type">The record's type, for a message.</param>
-    /// <exception cref="VortexSchemaException">The record has another number of members, or a member does not take its element.</exception>
-    internal AggregationQuery As(VortexSchema record, Type type)
+    internal AggregationQuery Typed(VortexSchema record, Type type)
     {
         if (record.Count != Nodes.Length)
         {
@@ -87,7 +102,7 @@ internal sealed class AggregationQuery : ResultQuery
             columns[i] = Nodes[i].Column(record[i], Keys, i, type);
         }
 
-        return new AggregationQuery(Host, Plan, Nodes, Keys, columns);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, columns, Skip, Take);
     }
 
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
@@ -178,14 +193,20 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     {
         AggregationOutcome outcome = _outcome!;
         int[] order = outcome.Order;
-        if (_next >= order.Length)
+        if (_next == 0 && _query.Skip > 0)
+        {
+            _next = (int)Math.Min(_query.Skip, order.Length);
+        }
+
+        long end = _query.Take == long.MaxValue ? order.Length : Math.Min(order.Length, _query.Skip + _query.Take);
+        if (_next >= end)
         {
             Release();
             return false;
         }
 
         _cancellationToken.ThrowIfCancellationRequested();
-        int count = Math.Min(_batchRows, order.Length - _next);
+        int count = (int)Math.Min(_batchRows, end - _next);
         ReadOnlySpan<int> groups = order.AsSpan(_next, count);
         StructStore store = Store();
         store.Truncate(0);
@@ -199,7 +220,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         CanonicalArena arena = _arena!;
         arena.ResetKeepingBlocks();
         int root = store.Build(arena, count);
-        _current = RecordBatch.Over(arena, root, _next, _current);
+        _current = RecordBatch.Over(arena, root, _next - _query.Skip, _current);
         _next += count;
         return true;
     }
@@ -235,7 +256,8 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
 /// <typeparam name="T">The value's type.</typeparam>
 internal sealed class ValueEnumerator<T> : IAsyncEnumerator<T>
 {
-    private readonly GroupBatches _batches;
+    private readonly IAsyncEnumerator<RecordBatch> _batches;
+    private readonly VortexType _type;
     private readonly IVortexRecord? _record;
     private readonly VortexExtensionRegistry? _extensions;
     private readonly CancellationTokenSource? _linked;
@@ -243,12 +265,23 @@ internal sealed class ValueEnumerator<T> : IAsyncEnumerator<T>
     private int _count;
     private int _index;
 
-    internal ValueEnumerator(GroupBatches batches, IVortexRecord? record, VortexExtensionRegistry? extensions, CancellationTokenSource? linked)
+    internal ValueEnumerator(ResultQuery query, CancellationTokenSource? linked, CancellationToken cancellationToken)
     {
-        _batches = batches;
-        _record = record;
-        _extensions = extensions;
+        _batches = query.Batches(cancellationToken);
+        _type = query.Schema[0].Type;
+        _record = query.RecordOf(0);
+        _extensions = query.Session.Options.Extensions;
         _linked = linked;
+    }
+
+    /// <summary>The values of a result of one value, read by <paramref name="query"/>'s owner with the token its caller gave.</summary>
+    internal static ValueEnumerator<T> Of(ResultQuery query, CancellationToken own, CancellationToken given)
+    {
+        CancellationTokenSource? linked = own.CanBeCanceled && given.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(own, given)
+            : null;
+        CancellationToken token = linked?.Token ?? (given.CanBeCanceled ? given : own);
+        return new ValueEnumerator<T>(query, linked, token);
     }
 
     public T Current => _values[_index];
@@ -299,7 +332,7 @@ internal sealed class ValueEnumerator<T> : IAsyncEnumerator<T>
         }
 
         int column = arena.GetNode(batch.RootIndex).GetFieldIndex(0);
-        ResultValues.Copy(batch, arena, column, _batches.Schema[0].Type, _extensions, _values, _record);
+        ResultValues.Copy(batch, arena, column, _type, _extensions, _values, _record);
         _count = rows;
         return rows > 0;
     }

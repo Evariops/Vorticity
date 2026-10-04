@@ -61,7 +61,7 @@ internal sealed class TerminalScan
         RowRange rows,
         bool wholeFile,
         long cap,
-        Projection read,
+        ScanProjection read,
         RowSelection? take,
         bool prune,
         TerminalTiers tiers,

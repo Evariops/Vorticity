@@ -62,9 +62,10 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
 
         List<ITypeSymbol>? elements = method.Name switch
         {
-            "As" when KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.ValueAggregation) =>
+            "As" when KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.ValueAggregation)
+                || KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.ValueProjection) =>
                 [((INamedTypeSymbol)method.ContainingType).TypeArguments[0]],
-            "As" when KnownSymbols.Is(method.ContainingType, known.Aggregation) => SelectedBy(invocation.Instance, known),
+            "As" when IsSeveral(method.ContainingType, known) => SelectedBy(invocation.Instance, known),
             "AggAsync" when KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.TypedScan) && invocation.Arguments.Length > 0
                 && method.Parameters[0].Type is INamedTypeSymbol { TypeArguments.Length: 2 } lambda && lambda.TypeArguments[1].Name == "ITuple" =>
                 Elements(invocation.Arguments[0].Value, known),
@@ -152,10 +153,18 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
             "Several answers go into a record: declare a [VortexRecord] whose members take them in order, and name it, AggAsync<TResult>(…)"));
     }
 
-    /// <summary>The types of the elements a <c>Select</c> of several values selects, when the receiver is that call.</summary>
+    /// <summary>
+    /// The types of the elements a <c>Select</c> of several values selects, when the receiver is that
+    /// call, or that call followed by what keeps its elements: <c>Distinct</c>, <c>Skip</c>, <c>Take</c>.
+    /// </summary>
     private static List<ITypeSymbol>? SelectedBy(IOperation? receiver, KnownSymbols known)
     {
         IOperation? current = Unwrapped(receiver);
+        while (current is IInvocationOperation { TargetMethod.Name: "Distinct" or "Skip" or "Take", Instance: { } instance })
+        {
+            current = Unwrapped(instance);
+        }
+
         return current is IInvocationOperation { TargetMethod.Name: "Select", Arguments.Length: > 0 } select
             ? Elements(select.Arguments[0].Value, known)
             : null;
@@ -201,7 +210,8 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
         || (member is INamedTypeSymbol { OriginalDefinition.SpecialType: SpecialType.System_Nullable_T } nullable
             && SymbolEqualityComparer.Default.Equals(nullable.TypeArguments[0], element));
 
-    private static bool IsSeveral(ITypeSymbol? type, KnownSymbols known) => type is not null && KnownSymbols.Is(type, known.Aggregation);
+    private static bool IsSeveral(ITypeSymbol? type, KnownSymbols known) =>
+        type is not null && (KnownSymbols.Is(type, known.Aggregation) || KnownSymbols.Is(type, known.Projection));
 
     private static IOperation? Unwrapped(IOperation? value)
     {

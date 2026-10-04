@@ -24,6 +24,8 @@ internal sealed class KnownSymbols
         Sym = compilation.GetTypeByMetadataName("Vorticity.Sym`1");
         Aggregation = compilation.GetTypeByMetadataName("Vorticity.Aggregation");
         ValueAggregation = compilation.GetTypeByMetadataName("Vorticity.Aggregation`1");
+        Projection = compilation.GetTypeByMetadataName("Vorticity.Projection");
+        ValueProjection = compilation.GetTypeByMetadataName("Vorticity.Projection`1");
         ToolScan = compilation.GetTypeByMetadataName("Vorticity.Scan");
         FilterHandler = compilation.GetTypeByMetadataName("Vorticity.FilterHandler");
         RowRange = compilation.GetTypeByMetadataName("Vorticity.RowRange");
@@ -90,6 +92,12 @@ internal sealed class KnownSymbols
 
     /// <summary>The results of a grouped scan, one per group.</summary>
     public INamedTypeSymbol? ValueAggregation { get; }
+
+    /// <summary>Several values per row of a scan, read through a record.</summary>
+    public INamedTypeSymbol? Projection { get; }
+
+    /// <summary>One value per row of a scan.</summary>
+    public INamedTypeSymbol? ValueProjection { get; }
 
     public INamedTypeSymbol? RecordBatch { get; }
 

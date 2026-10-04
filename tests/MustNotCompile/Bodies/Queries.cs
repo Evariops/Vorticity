@@ -41,6 +41,25 @@ internal static class Queries
         }
     }
 
+    // A projection of several values is read through a record too.
+    internal static async Task EnumerateSeveralColumns(VortexFile file)
+    {
+        await foreach (var row in file.Scan<Reading>().Select(r => (r.City, r.Day))) // expect: CS8411 VX1011
+        {
+            _ = row;
+        }
+    }
+
+    // A projection's record takes its elements by the same rule as a selection's.
+    internal static object ProjectionRecordOfOtherTypes(VortexFile file) =>
+        file.Scan<Reading>().Select(r => (r.City, r.Celsius)).As<CityCount>(); // expect: VX1010 "Element 2"
+
+    // A let names a value per row, which a query over a table has no Select of an anonymous type to carry.
+    internal static object LetInAQuery(VortexFile file) =>
+        from r in file.Scan<Reading>()
+        let hot = r.Celsius // expect: CS0029 CS1662
+        select hot;
+
     // What reads values is a result of one value's.
     internal static object CollectSeveralValues(VortexFile file) =>
         file.Scan<Reading>().GroupBy(r => r.City).Select(g => (g.Key, g.Count())).ToListAsync(); // expect: CS0411 VX1011

@@ -105,6 +105,33 @@ public sealed class ResultBatchTests
     }
 
     [Fact]
+    public async Task SkipAndTakeCutTheGroupsInTheOrderTheyAreDelivered()
+    {
+        (_, string path) = await WriteAsync();
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
+            List<long> all = await file.Scan<Sale>().GroupBy(r => r.Units).Select(g => g.Key).ToListAsync(Ct);
+            Assert.Equal(all.Skip(70_000).Take(10), await file.Scan<Sale>().GroupBy(r => r.Units).Select(g => g.Key).Skip(70_000).Take(10).ToListAsync(Ct));
+            Assert.Equal(all.Skip(3).Take(5).Skip(2), await file.Scan<Sale>().GroupBy(r => r.Units).Select(g => g.Key).Skip(3).Take(5).Skip(2).ToListAsync(Ct));
+            Assert.Empty(await file.Scan<Sale>().GroupBy(r => r.Units).Select(g => g.Key).Take(0).ToListAsync(Ct));
+
+            List<ShopTotal> shops = [];
+            await foreach (ShopTotal shop in file.Scan<Sale>().GroupBy(r => r.Shop).Select(g => (g.Key, g.Sum(r => r.Units))).Skip(1).Take(2).As<ShopTotal>().ToRecordsAsync(Ct))
+            {
+                shops.Add(shop);
+            }
+
+            List<string> names = await file.Scan<Sale>().GroupBy(r => r.Shop).Select(g => g.Key).ToListAsync(Ct);
+            Assert.Equal(names.Skip(1).Take(2), shops.Select(s => s.Shop));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task AStateComesAsARecordOrAsANumber()
     {
         (Sale[] rows, string path) = await WriteAsync();
@@ -189,6 +216,10 @@ public sealed class ResultBatchTests
 
 [VortexRecord]
 public partial record struct Sale(string Shop, int Day, DateTime At, decimal Amount, double? Price, bool Paid, Guid Customer, long Units);
+
+/// <summary>A shop and the sum of its units.</summary>
+[VortexRecord]
+public partial record struct ShopTotal(string Shop, long Units);
 
 /// <summary>A count and a sum, a state a column holds as a struct of two.</summary>
 [VortexRecord]

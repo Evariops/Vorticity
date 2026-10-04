@@ -94,8 +94,9 @@ public sealed class GroupedScan<TRecord, TKey>
 }
 
 /// <summary>
-/// The results of a grouped scan, one per group, computed in one pass when enumerated:
-/// <c>await foreach (long count in aggregation)</c>.
+/// The results of a query, one value each, computed when enumerated: a group's of a grouped scan,
+/// <c>await foreach (long count in scan.GroupBy(r =&gt; r.City).Select(g =&gt; g.Count()))</c>, or the
+/// distinct values of a projection.
 /// </summary>
 /// <typeparam name="TResult">The result of one group.</typeparam>
 /// <remarks>
@@ -107,16 +108,16 @@ public sealed class GroupedScan<TRecord, TKey>
 /// </remarks>
 public sealed class Aggregation<TResult>
 {
-    private readonly AggregationQuery _query;
+    private readonly ResultQuery _query;
     private CancellationToken _cancellationToken;
 
-    internal Aggregation(AggregationQuery query) => _query = query;
+    internal Aggregation(ResultQuery query) => _query = query;
 
     /// <summary>What the scan did; valid once the aggregation has been enumerated.</summary>
-    public ScanStatistics Statistics => _query.Host.Statistics;
+    public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);
 
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
-    internal AggregationPlan Plan => _query.Plan;
+    internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;
 
     /// <summary>Makes <paramref name="cancellationToken"/> cancel the enumeration, as <c>WithCancellation</c> does a stream's.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
@@ -126,6 +127,18 @@ public sealed class Aggregation<TResult>
         _cancellationToken = cancellationToken;
         return this;
     }
+
+    /// <summary>The results past the first <paramref name="count"/>, in the order they are delivered.</summary>
+    /// <param name="count">The results to pass over.</param>
+    /// <returns>The same query, which delivers fewer.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    public Aggregation<TResult> Skip(int count) => new Aggregation<TResult>(_query.Limit(count, long.MaxValue));
+
+    /// <summary>The first <paramref name="count"/> results, in the order they are delivered; the query stops reading once they are, where its input streams.</summary>
+    /// <param name="count">The results to deliver at most.</param>
+    /// <returns>The same query, which delivers fewer.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    public Aggregation<TResult> Take(int count) => new Aggregation<TResult>(_query.Limit(0, count));
 
     /// <summary>The result as a scan of a record of one member, which takes the value: <c>Select(g =&gt; g.Count()).As&lt;Total&gt;()</c>.</summary>
     /// <typeparam name="TRecord">The record, whose one member is of the result's type or its nullable form.</typeparam>
@@ -144,57 +157,32 @@ public sealed class Aggregation<TResult>
     /// <summary>Runs the aggregation, then enumerates the groups' results.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary, with the token <see cref="WithCancellation"/> gave.</param>
     /// <returns>The enumerator.</returns>
-    public IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken cancellationToken = default) => Values(cancellationToken);
+    public IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
+        ValueEnumerator<TResult>.Of(_query, _cancellationToken, cancellationToken);
 
     /// <summary>The results as a stream, for the operators of <c>System.Linq.AsyncEnumerable</c>, which then run on the values delivered.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>The results.</returns>
-    public IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken cancellationToken = default) => new ValueStream(this, cancellationToken);
+    public IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken cancellationToken = default) =>
+        new ValueStream<TResult>(_query, _cancellationToken, cancellationToken);
 
     /// <summary>Runs the aggregation and collects the results, a batch at a time.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>The results, in the order they are delivered.</returns>
-    public async ValueTask<List<TResult>> ToListAsync(CancellationToken cancellationToken = default)
-    {
-        List<TResult> list = [];
-        ValueEnumerator<TResult> values = Values(cancellationToken);
-        await using (values.ConfigureAwait(false))
-        {
-            while (await values.NextBatchAsync().ConfigureAwait(false))
-            {
-                list.AddRange(values.Batch);
-            }
-        }
-
-        return list;
-    }
+    public ValueTask<List<TResult>> ToListAsync(CancellationToken cancellationToken = default) =>
+        ValueStream<TResult>.ListAsync(ValueEnumerator<TResult>.Of(_query, _cancellationToken, cancellationToken));
 
     /// <summary>Runs the aggregation and collects the results into an array, a batch at a time.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>The results, in the order they are delivered.</returns>
     public async ValueTask<TResult[]> ToArrayAsync(CancellationToken cancellationToken = default) =>
         [.. await ToListAsync(cancellationToken).ConfigureAwait(false)];
-
-    private ValueEnumerator<TResult> Values(CancellationToken cancellationToken)
-    {
-        CancellationTokenSource? linked = _cancellationToken.CanBeCanceled && cancellationToken.CanBeCanceled
-            ? CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken, cancellationToken)
-            : null;
-        CancellationToken token = linked?.Token ?? (cancellationToken.CanBeCanceled ? cancellationToken : _cancellationToken);
-        return new ValueEnumerator<TResult>(_query.Groups(token), _query.Columns[0].Record, _query.Session.Options.Extensions, linked);
-    }
-
-    /// <summary>The results as an <see cref="IAsyncEnumerable{T}"/>, enumerated once.</summary>
-    private sealed class ValueStream(Aggregation<TResult> aggregation, CancellationToken cancellationToken) : IAsyncEnumerable<TResult>
-    {
-        public IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken token = default) =>
-            aggregation.Values(token.CanBeCanceled ? token : cancellationToken);
-    }
 }
 
 /// <summary>
-/// The results of a grouped scan, several per group, computed in one pass and read through a
-/// record: <c>Select(g =&gt; (g.Key, g.Count())).As&lt;CityCount&gt;()</c>.
+/// The results of a query, several values each, computed when read through a record: a grouped
+/// scan's, <c>Select(g =&gt; (g.Key, g.Count())).As&lt;CityCount&gt;()</c>, or the distinct tuples of
+/// a projection.
 /// </summary>
 /// <remarks>
 /// Several values have no .NET type until a record gives them one: the record names them, types
@@ -203,15 +191,27 @@ public sealed class Aggregation<TResult>
 /// </remarks>
 public sealed class Aggregation
 {
-    private readonly AggregationQuery _query;
+    private readonly ResultQuery _query;
 
-    internal Aggregation(AggregationQuery query) => _query = query;
+    internal Aggregation(ResultQuery query) => _query = query;
 
     /// <summary>What the scan did; valid once the result has been read.</summary>
-    public ScanStatistics Statistics => _query.Host.Statistics;
+    public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);
 
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
-    internal AggregationPlan Plan => _query.Plan;
+    internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;
+
+    /// <summary>The results past the first <paramref name="count"/>, in the order they are delivered.</summary>
+    /// <param name="count">The results to pass over.</param>
+    /// <returns>The same query, which delivers fewer.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    public Aggregation Skip(int count) => new Aggregation(_query.Limit(count, long.MaxValue));
+
+    /// <summary>The first <paramref name="count"/> results, in the order they are delivered; the query stops reading once they are, where its input streams.</summary>
+    /// <param name="count">The results to deliver at most.</param>
+    /// <returns>The same query, which delivers fewer.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    public Aggregation Take(int count) => new Aggregation(_query.Limit(0, count));
 
     /// <summary>
     /// The result as a scan of <typeparamref name="TRecord"/>, whose members take the elements of the
@@ -231,10 +231,32 @@ public sealed class Aggregation
         _query.ExplainAsync(cancellationToken);
 
     /// <summary>A scan of a query's result, typed by <typeparamref name="TRecord"/>.</summary>
-    internal static Scan<TRecord> Scan<TRecord>(AggregationQuery query)
+    internal static Scan<TRecord> Scan<TRecord>(ResultQuery query)
         where TRecord : IVortexRecord<TRecord>
     {
-        AggregationQuery typed = query.As(TRecord.Schema, typeof(TRecord));
+        ResultQuery typed = query.As(TRecord.Schema, typeof(TRecord));
         return new Scan<TRecord>(new ResultScanSource(typed), typed.Metrics);
+    }
+}
+
+/// <summary>The values of a result of one value as an <see cref="IAsyncEnumerable{T}"/>, for <c>System.Linq</c>.</summary>
+internal sealed class ValueStream<T>(ResultQuery query, CancellationToken own, CancellationToken given) : IAsyncEnumerable<T>
+{
+    public IAsyncEnumerator<T> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
+        ValueEnumerator<T>.Of(query, own, cancellationToken.CanBeCanceled ? cancellationToken : given);
+
+    /// <summary>Collects every value, a batch at a time: an await per batch, none per value.</summary>
+    internal static async ValueTask<List<T>> ListAsync(ValueEnumerator<T> values)
+    {
+        List<T> list = [];
+        await using (values.ConfigureAwait(false))
+        {
+            while (await values.NextBatchAsync().ConfigureAwait(false))
+            {
+                list.AddRange(values.Batch);
+            }
+        }
+
+        return list;
     }
 }

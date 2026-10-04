@@ -53,7 +53,7 @@ public sealed class DTypeImportTests
         DTypeArena source = new DTypeArena();
         DType schema = WideSchema(source);
 
-        Projection projection = Projection.Parse(schema, ["payload"]);
+        ScanProjection projection = ScanProjection.Parse(schema, ["payload"]);
         DType projected = projection.ProjectedSchema(schema, new DTypeArena());
 
         Assert.Equal(1, projected.FieldCount);

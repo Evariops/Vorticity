@@ -824,7 +824,7 @@ internal sealed class DatasetScanBuilder
         // The key is read whatever the projection says, and dropped before a batch goes out.
         FieldMask mask = _mask ?? FieldMask.All;
         bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _version.Schema.DType, path));
-        Projection? kept = null;
+        ScanProjection? kept = null;
         KeyOrderedMerge merge = new KeyOrderedMerge(
             _version,
             MergeObjectsAsync(paths, cancellationToken),
@@ -849,7 +849,7 @@ internal sealed class DatasetScanBuilder
                         continue;
                     }
 
-                    kept ??= Projection.Parse(run.DType, PathsOf(mask, _version.Schema.DType));
+                    kept ??= ScanProjection.Parse(run.DType, PathsOf(mask, _version.Schema.DType));
                     RecordBatch projected = run.Project(kept.Value);
                     try
                     {
