@@ -11,6 +11,7 @@
     <Project Path="bench/Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.Scenarios.csproj" />
     <Project Path="bench/Vorticity.Benchmarks.Churn/Vorticity.Benchmarks.Churn.csproj" />
     <Project Path="bench/Vorticity.Benchmarks.Runner/Vorticity.Benchmarks.Runner.csproj" />
+    <Project Path="bench/Vorticity.Benchmarks.Queries/Vorticity.Benchmarks.Queries.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Vorticity.Samples/Vorticity.Samples.csproj" />

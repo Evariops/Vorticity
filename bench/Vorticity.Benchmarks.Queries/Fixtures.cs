@@ -1,0 +1,118 @@
+using System;
+using System.IO;
+using System.Threading.Tasks;
+
+namespace Vorticity.Benchmarks.Queries;
+
+/// <summary>
+/// The files the queries read, written once by this library's writer and kept under
+/// ~/.cache/vorticity/queries: the same bytes on every run, so two runs compare the code and not the
+/// data.
+/// </summary>
+internal static class Fixtures
+{
+    internal static readonly string[] Cities = ["Paris", "Lyon", "Marseille", "Toulouse", "Nice", "Nantes", "Strasbourg", "Lille"];
+
+    internal static readonly string[] Endpoints =
+    [
+        "/api/users", "/api/orders", "/api/cart", "/api/search", "/api/login", "/api/logout", "/api/items",
+        "/api/payments", "/api/shipping", "/api/reviews", "/api/stock", "/api/admin", "/health", "/metrics",
+    ];
+
+    /// <summary>The distinct users of the request log: a key that rarely repeats in a batch.</summary>
+    internal const int Users = 1_000_000;
+
+    private static readonly DateTime Start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    private static string Directory
+    {
+        get
+        {
+            string root = Environment.GetEnvironmentVariable("VORTICITY_QUERIES_CORPUS")
+                ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "vorticity", "queries");
+            System.IO.Directory.CreateDirectory(root);
+            return root;
+        }
+    }
+
+    /// <summary>The readings file of <paramref name="rows"/> rows, written on first use.</summary>
+    internal static async ValueTask<string> ReadingsAsync(int rows)
+    {
+        string path = Path.Combine(Directory, $"readings-{rows}.vortex");
+        if (System.IO.File.Exists(path))
+        {
+            return path;
+        }
+
+        string partial = path + ".partial";
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>(partial))
+        {
+            Reading[] block = new Reading[writer.BlockRows];
+            for (int first = 0; first < rows; first += block.Length)
+            {
+                int count = Math.Min(block.Length, rows - first);
+                for (int i = 0; i < count; i++)
+                {
+                    int row = first + i;
+                    block[i] = new Reading(row / 1_000, row % 50 == 0 ? null : 10.0 + (row % 400 / 10.0), Cities[row / 7 % Cities.Length]);
+                }
+
+                await writer.WriteAsync<Reading>(block.AsSpan(0, count)).ConfigureAwait(false);
+            }
+
+            await writer.CompleteAsync().ConfigureAwait(false);
+        }
+
+        System.IO.File.Move(partial, path, overwrite: true);
+        return path;
+    }
+
+    /// <summary>The request log of <paramref name="rows"/> rows, one a second, written on first use.</summary>
+    internal static async ValueTask<string> RequestsAsync(int rows)
+    {
+        string path = Path.Combine(Directory, $"requests-{rows}.vortex");
+        if (System.IO.File.Exists(path))
+        {
+            return path;
+        }
+
+        string partial = path + ".partial";
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Request>(partial))
+        {
+            Request[] block = new Request[writer.BlockRows];
+            for (int first = 0; first < rows; first += block.Length)
+            {
+                int count = Math.Min(block.Length, rows - first);
+                for (int i = 0; i < count; i++)
+                {
+                    int row = first + i;
+                    ulong mix = Mix((ulong)row);
+                    int duration = (int)(mix % 2_000);
+                    block[i] = new Request(
+                        Start.AddSeconds(row),
+                        (int)((mix >> 20) % Users),
+                        Endpoints[(int)((mix >> 40) % (ulong)Endpoints.Length)],
+                        (mix >> 50) % 50 == 0 ? 500 : 200,
+                        duration,
+                        duration + ((mix >> 8) % 1_000 / 1_000.0));
+                }
+
+                await writer.WriteAsync<Request>(block.AsSpan(0, count)).ConfigureAwait(false);
+            }
+
+            await writer.CompleteAsync().ConfigureAwait(false);
+        }
+
+        System.IO.File.Move(partial, path, overwrite: true);
+        return path;
+    }
+
+    /// <summary>SplitMix64: a fixed, well-spread stream from the row number.</summary>
+    private static ulong Mix(ulong x)
+    {
+        x += 0x9E3779B97F4A7C15UL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+        return x ^ (x >> 31);
+    }
+}
