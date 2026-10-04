@@ -12,7 +12,7 @@ namespace Vorticity.Aggregating;
 /// a constant as one weighted value, a run-end block a weighted value per run, a dictionary block a
 /// weighted value per distinct code, and a canonical block through the dense kernels.
 /// </summary>
-internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TResult>
+internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TResult>, IMeanSlot
     where TValue : unmanaged
     where TOp : IValueOp<TValue, TState>
 {
@@ -206,6 +206,8 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     }
 
     internal override TResult Result(int group) => _finish(_states[group]);
+
+    public double? Mean(int group) => TOp.Mean(in _states[group]);
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {

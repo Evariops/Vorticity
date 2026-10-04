@@ -35,6 +35,10 @@ internal interface IValueOp<TValue, TState>
     /// <c>i % 64</c> of word <c>i / 64</c> is set.
     /// </summary>
     static abstract void AddWords(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words);
+
+    /// <summary>The mean a sum's state holds, its total over its count, for a mean that shares the sum's slot; null with no value.</summary>
+    /// <exception cref="NotSupportedException">The state is not a sum's.</exception>
+    static virtual double? Mean(in TState state) => throw new NotSupportedException($"{typeof(TState).Name} holds no mean.");
 }
 
 /// <summary>A running sum at the widened type, and how many values it holds.</summary>
@@ -85,6 +89,8 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         into.Count += other.Count;
     }
 
+    public static double? Mean(in SumState<Int128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
     [SkipLocalsInit]
     public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
@@ -130,6 +136,8 @@ internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<lon
         into.Count += other.Count;
     }
 
+    public static double? Mean(in SumState<long> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
     [SkipLocalsInit]
     public static void AddWords(ref SumState<long> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
@@ -171,6 +179,8 @@ internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<u
         into.Count += other.Count;
     }
 
+    public static double? Mean(in SumState<ulong> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
     [SkipLocalsInit]
     public static void AddWords(ref SumState<ulong> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
@@ -211,6 +221,8 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
+
+    public static double? Mean(in SumState<UInt128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
 
     [SkipLocalsInit]
     public static void AddWords(ref SumState<UInt128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)

@@ -44,10 +44,43 @@ internal sealed class AggregationPlan
             }
         }
 
+        // A mean of a group by reads the slot of the sum of its column and its rows, when the
+        // selection holds one: the sum's states keep the total and the count both need.
+        List<(AggregateIdentity Mean, IAggregateNode Sum)> shares = [];
+        if (keys.Length > 0)
+        {
+            for (int i = aggregates.Count - 1; i >= 0; i--)
+            {
+                IAggregateNode mean = aggregates[i];
+                if (mean.Kind != AggregateKind.Average || mean.Input is not { Kind: StorageKind.Primitive } input)
+                {
+                    continue;
+                }
+
+                IAggregateNode? sum = aggregates.Find(known =>
+                    known.Kind == AggregateKind.Sum && known.Input is { } summed && summed.Is(input)
+                    && string.Equals(known.Filter?.Key, mean.Filter?.Key, StringComparison.Ordinal));
+                if (sum is not null)
+                {
+                    shares.Add((mean.Identity, sum));
+                    aggregates.RemoveAt(i);
+                }
+            }
+        }
+
         Aggregates = [.. aggregates];
+        Shares = new (AggregateIdentity, int)[shares.Count];
+        for (int s = 0; s < shares.Count; s++)
+        {
+            Shares[s] = (shares[s].Mean, IndexOf(shares[s].Sum));
+        }
+
         Chosen = [.. chosen];
         Filters = new FilterPlan(Aggregates);
     }
+
+    /// <summary>The means that read the slot of a sum, and that slot.</summary>
+    internal (AggregateIdentity Mean, int Sum)[] Shares { get; }
 
     /// <summary>The columns read from chosen rows, each once: fetched after the pass by the rows' positions.</summary>
     internal IChosenColumn[] Chosen { get; }
@@ -129,6 +162,9 @@ internal sealed class AggregationOutcome
     private readonly AggregateSlot[] _slots;
     private readonly ChosenValues[] _chosen;
 
+    // The means read from the slots of sums, by the sum's slot, made on the first read.
+    private AggregateSlot?[]? _views;
+
     internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order)
     {
         _plan = plan;
@@ -152,9 +188,21 @@ internal sealed class AggregationOutcome
     internal AggregateSlot SlotOf(IAggregateNode node)
     {
         int index = _plan.IndexOf(node);
-        return index >= 0
-            ? _slots[index]
-            : throw new InvalidOperationException($"'{node}' belongs to another aggregation.");
+        if (index >= 0)
+        {
+            return _slots[index];
+        }
+
+        foreach ((AggregateIdentity mean, int sum) in _plan.Shares)
+        {
+            if (mean.Equals(node.Identity))
+            {
+                _views ??= new AggregateSlot?[_slots.Length];
+                return _views[sum] ??= new MeanView((IMeanSlot)_slots[sum]);
+            }
+        }
+
+        throw new InvalidOperationException($"'{node}' belongs to another aggregation.");
     }
 
     /// <summary>The values of a column of chosen rows, as the last fetch left them.</summary>

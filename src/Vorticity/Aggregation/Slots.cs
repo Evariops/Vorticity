@@ -75,6 +75,42 @@ internal abstract class AggregateSlot<TResult> : AggregateSlot
     }
 }
 
+/// <summary>A slot whose states are a sum's, which hold a mean as well.</summary>
+internal interface IMeanSlot
+{
+    /// <summary>The mean of <paramref name="group"/>: its total over its count, null with no value.</summary>
+    double? Mean(int group);
+}
+
+/// <summary>
+/// A mean read from the slot of the sum of the same column and the same rows: the sum's states hold
+/// its total and its count, so the column is folded once for both.
+/// </summary>
+internal sealed class MeanView(IMeanSlot sum) : AggregateSlot<double?>
+{
+    internal override void EnsureGroups(int groups)
+    {
+    }
+
+    internal override void StepRange(in BatchInput input, int start, int end, int group)
+    {
+    }
+
+    internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
+    {
+    }
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    {
+    }
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+    }
+
+    internal override double? Result(int group) => sum.Mean(group);
+}
+
 /// <summary>An aggregate answered before the scan, from the file statistics or a count: nothing to step.</summary>
 internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
 {

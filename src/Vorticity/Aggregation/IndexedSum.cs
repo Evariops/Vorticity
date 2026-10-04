@@ -508,6 +508,8 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
 
     public static void Merge(ref IndexedSum into, in IndexedSum other) => into.Merge(in other);
 
+    public static double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
+
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]
     public static void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
