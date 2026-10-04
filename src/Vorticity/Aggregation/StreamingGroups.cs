@@ -68,23 +68,33 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _resultTake = query.Take;
     }
 
-    /// <summary>Whether a query's groups stream: one key the statistics say is sorted, and no order but by it, ascending.</summary>
-    internal static bool Streams(AggregationQuery query)
+    /// <summary>
+    /// The component of a query's key its groups stream on, or -1: the first the statistics say is
+    /// sorted, and no order but one that starts with it, ascending.
+    /// </summary>
+    internal static int Streaming(AggregationQuery query)
     {
-        if (query.Plan.Keys.Length != 1 || !AggregationEngine.IsSorted(query.Host.Source, query.Plan.Keys[0]))
+        ColumnShape[] keys = query.Plan.Keys;
+        int streaming = -1;
+        for (int c = 0; c < keys.Length && streaming < 0; c++)
         {
-            return false;
+            streaming = AggregationEngine.IsSorted(query.Host.Source, keys[c]) ? c : -1;
+        }
+
+        if (streaming < 0)
+        {
+            return -1;
         }
 
         foreach (GroupOperator op in query.Operators)
         {
-            if (op is GroupOrder order && (order.Keys[0].Field.Component != 0 || order.Keys[0].Descending))
+            if (op is GroupOrder order && (order.Keys[0].Field.Component != streaming || order.Keys[0].Descending))
             {
-                return false;
+                return -1;
             }
         }
 
-        return true;
+        return streaming;
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -150,7 +160,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns);
-        _partition = new AggregationPartition(plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: true);
+        _partition = new AggregationPartition(
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, Streaming(_query));
         _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
         _inner = host.Source.BatchesAsync(pass, host.Metrics).GetAsyncEnumerator(_cancellationToken);
     }
@@ -162,32 +173,31 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private void Close(bool all)
     {
         AggregationPartition partition = _partition!;
-        GroupKeys keys = partition.Keys!;
-        int count = keys.Count;
-        int nullGroup = keys.NullNumber;
+        int count = partition.Keys!.Count;
+        int nullComponent = partition.ComponentNull;
         int last = all ? -1 : partition.LastValueGroup;
         Scratch.Grow(ref _closed, count);
-        Scratch.Grow(ref _open, 2);
+        Scratch.Grow(ref _open, count);
         _closedCount = 0;
         _openCount = 0;
         for (int g = 0; g < count; g++)
         {
-            if (g == nullGroup || g == last)
+            int component = partition.ComponentOf(g);
+            if (component == nullComponent || component == last)
             {
-                if (!all)
-                {
-                    _open[_openCount++] = g;
-                }
-
+                // Open, and at the end the groups of the null component, which go out last.
+                _open[_openCount++] = g;
                 continue;
             }
 
             _closed[_closedCount++] = g;
         }
 
-        if (all && nullGroup >= 0)
+        if (all)
         {
-            _closed[_closedCount++] = nullGroup;
+            _open.AsSpan(0, _openCount).CopyTo(_closed.AsSpan(_closedCount));
+            _closedCount += _openCount;
+            _openCount = 0;
         }
 
         _closedNext = 0;
@@ -220,8 +230,18 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 case GroupWindow:
                     count = Window(ref _skips[o], ref _takes[o], count);
                     break;
+                case GroupOrder order when _query.Plan.Keys.Length > 1 || order.Keys.Length > 1:
+                {
+                    // An order that starts with the streaming component: the groups closed together
+                    // hold every group of their values of it, so sorting them is sorting the result.
+                    (int[] sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
+                    sorted.AsSpan(0, sortedCount).CopyTo(_closed);
+                    count = sortedCount;
+                    break;
+                }
+
                 default:
-                    // An order on the key, ascending: the stream is in it already.
+                    // An order on the one key, ascending: the stream is in it already.
                     break;
             }
         }

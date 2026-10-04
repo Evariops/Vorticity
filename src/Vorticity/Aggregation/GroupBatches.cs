@@ -124,7 +124,7 @@ internal sealed class AggregationQuery : ResultQuery
 
     /// <summary>The result's batches: as the groups close, on a key that streams; once the pass has run, on any other.</summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
-        StreamingGroupBatches.Streams(this) ? new StreamingGroupBatches(this, cancellationToken) : new GroupBatches(this, cancellationToken);
+        StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken) : new GroupBatches(this, cancellationToken);
 
     internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken, RowFilter);
 
@@ -412,7 +412,7 @@ internal static class GroupSelection
     /// The groups in the order's order, the first <paramref name="keep"/> at most: the columns of the
     /// results it reads, and of the key, which breaks every tie, built for every group at once.
     /// </summary>
-    private static (int[] Groups, int Count) Order(
+    internal static (int[] Groups, int Count) Order(
         AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int count, long keep, CancellationToken cancellationToken)
     {
         ColumnShape[] keys = query.Keys;

@@ -71,15 +71,11 @@ internal sealed class AggregationPlan
     internal int IndexOf(IAggregateNode node) => Array.FindIndex(Aggregates, known => known.Identity.Equals(node.Identity));
 
     /// <summary>The index of the groups of one partition.</summary>
-    internal GroupKeys CreateKeys(bool sorted)
-    {
-        if (Keys.Length > 1)
-        {
-            return new CompositeKeys(Keys);
-        }
+    internal GroupKeys CreateKeys(bool sorted) => Keys.Length > 1 ? new CompositeKeys(Keys) : Single(Keys[0], sorted);
 
-        ColumnShape key = Keys[0];
-        return key.Kind switch
+    /// <summary>The index of a key of one column.</summary>
+    internal static GroupKeys Single(ColumnShape key, bool sorted) =>
+        key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
@@ -102,7 +98,6 @@ internal sealed class AggregationPlan
             StorageKind.Bytes => new BytesKeys(key, sorted),
             _ => throw key.Unsupported("a group key"),
         };
-    }
 }
 
 /// <summary>An aggregation that has run: the merged states and keys, and the order of the groups.</summary>
@@ -144,7 +139,16 @@ internal sealed class AggregationPartition
     private int[] _rowGroups = [];
     private long _batch;
 
-    internal AggregationPartition(AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted)
+    // The component of a composite key that streams, its own index, the component group of each
+    // group and of each row of the batch: what tells a group a later row may still join from one
+    // no row to come can.
+    private readonly int _streaming = -1;
+    private readonly GroupKeys? _componentKeys;
+    private readonly GroupRanges _componentRanges = new GroupRanges();
+    private int[] _componentOf = [];
+    private int[] _componentRows = [];
+
+    internal AggregationPartition(AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1)
     {
         _columns = columns;
         _inputs = inputs;
@@ -157,6 +161,12 @@ internal sealed class AggregationPartition
         }
 
         Keys = plan.Grouped ? plan.CreateKeys(sorted) : null;
+        if (streaming >= 0 && _keyCount > 1)
+        {
+            _streaming = streaming;
+            _componentKeys = AggregationPlan.Single(plan.Keys[streaming], sorted: true);
+        }
+
         if (Keys is null)
         {
             foreach (AggregateSlot slot in Slots)
@@ -170,8 +180,17 @@ internal sealed class AggregationPartition
 
     internal GroupKeys? Keys { get; }
 
-    /// <summary>The group of the last row read whose key is not null, or -1: the group a key that streams keeps open.</summary>
+    /// <summary>
+    /// The group of the last row read whose key is not null, or -1: the group a key that streams
+    /// keeps open; on a composite key, the group of the streaming component's value.
+    /// </summary>
     internal int LastValueGroup { get; private set; } = -1;
+
+    /// <summary>The value of the streaming component a group holds, as the number <see cref="LastValueGroup"/> is: the group itself on a key of one column.</summary>
+    internal int ComponentOf(int group) => _componentKeys is null ? group : _componentOf[group];
+
+    /// <summary>The number of the streaming component's null, or -1.</summary>
+    internal int ComponentNull => (_componentKeys ?? Keys!).NullNumber;
 
     /// <summary>
     /// Keeps the groups <paramref name="groups"/> alone, keys and states, numbered again from 0 in
@@ -179,13 +198,44 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void Keep(ReadOnlySpan<int> groups)
     {
+        if (_componentKeys is not null)
+        {
+            // The values of the component the kept groups hold, kept too and numbered again.
+            Span<int> components = stackalloc int[2];
+            int count = 0;
+            foreach (int group in groups)
+            {
+                int component = _componentOf[group];
+                if (components[..count].IndexOf(component) < 0)
+                {
+                    if (count == components.Length)
+                    {
+                        throw new InvalidOperationException("A streaming group by keeps the groups of one value of its component and of its null.");
+                    }
+
+                    components[count++] = component;
+                }
+            }
+
+            components[..count].Sort();
+            _componentKeys.Keep(components[..count]);
+            for (int i = 0; i < groups.Length; i++)
+            {
+                _componentOf[i] = components[..count].IndexOf(_componentOf[groups[i]]);
+            }
+
+            LastValueGroup = components[..count].IndexOf(LastValueGroup);
+        }
+        else
+        {
+            LastValueGroup = groups.IndexOf(LastValueGroup);
+        }
+
         Keys!.Keep(groups);
         foreach (AggregateSlot slot in Slots)
         {
             slot.Keep(groups);
         }
-
-        LastValueGroup = groups.IndexOf(LastValueGroup);
     }
 
     internal void Process(RecordBatch batch)
@@ -226,9 +276,12 @@ internal sealed class AggregationPartition
 
         Scratch.Grow(ref _rowGroups, rows);
         _ranges.Clear();
+        int before = Keys.Count;
         bool ranged = Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges);
         int groups = Keys.Count;
-        LastValueGroup = LastValue(ranged, rows, selection, LastValueGroup);
+        LastValueGroup = _componentKeys is null
+            ? LastValue(ranged, rows, selection, LastValueGroup)
+            : Components(arena, rows, selection, before, groups);
         for (int i = 0; i < Slots.Length; i++)
         {
             Slots[i].EnsureGroups(groups);
@@ -267,6 +320,45 @@ internal sealed class AggregationPartition
                 slot.StepRange(input, _ranges.StartAt(r), _ranges.EndAt(r), _ranges.GroupAt(r));
             }
         }
+    }
+
+    /// <summary>
+    /// The value of the streaming component each new group holds, and the last one read that is
+    /// not null: the component's own index assigns every row, and a group takes the value of the
+    /// row that made it.
+    /// </summary>
+    private int Components(CanonicalArena arena, int rows, ReadOnlySpan<ulong> selection, int before, int groups)
+    {
+        GroupKeys components = _componentKeys!;
+        Scratch.Grow(ref _componentRows, rows);
+        _componentRanges.Clear();
+        if (components.Assign(arena, _nodes.AsSpan(_streaming, 1), rows, selection, _componentRows, _componentRanges))
+        {
+            Span<int> rowComponents = _componentRows.AsSpan(0, rows);
+            for (int r = 0; r < _componentRanges.Count; r++)
+            {
+                rowComponents[_componentRanges.StartAt(r).._componentRanges.EndAt(r)].Fill(_componentRanges.GroupAt(r));
+            }
+        }
+
+        Scratch.Grow(ref _componentOf, groups);
+        _componentOf.AsSpan(before, groups - before).Fill(-1);
+        int nullComponent = components.NullNumber;
+        int last = LastValueGroup;
+        RowCursor cursor = new RowCursor(selection, 0, rows);
+        while (cursor.Next(out int row))
+        {
+            int group = _rowGroups[row];
+            int component = _componentRows[row];
+            if (_componentOf[group] < 0)
+            {
+                _componentOf[group] = component;
+            }
+
+            last = component != components.NullNumber ? component : last;
+        }
+
+        return nullComponent == last ? LastValueGroup : last;
     }
 
     /// <summary>The group of the batch's last selected row whose key is not null; <paramref name="previous"/> when every one is null.</summary>

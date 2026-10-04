@@ -22,6 +22,8 @@ public sealed partial class StreamingGroupTests
     // The nullable sorted key's nulls come first: the order a sorted column holds them in.
     private const int Nulls = 700;
 
+    private static readonly string[] Desks = ["rates", "fx", "credit", "equity", "commodities"];
+
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
@@ -118,6 +120,36 @@ public sealed partial class StreamingGroupTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ACompositeKeyStreamsOnItsSortedComponent(int degree)
+    {
+        (Tick[] rows, string path) = await WriteAsync();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<HourDesk> expected = [.. rows.GroupBy(r => (r.Hour, r.Desk))
+                .OrderBy(g => g.Key.Hour is null ? 1 : 0).ThenBy(g => g.Key.Hour).ThenBy(g => g.Key.Desk, StringComparer.Ordinal)
+                .Select(g => new HourDesk(g.Key.Hour, g.Key.Desk, g.Count()))];
+
+            // In key order when asked: the hours as they stream, the desks of an hour sorted with it.
+            Vorticity.Aggregation ordered = file.Scan<Tick>().GroupBy(r => (r.Hour, r.Desk)).OrderBy(g => g.Key).Select(g => (g.Key.Hour, g.Key.Desk, g.Count()));
+            Assert.Equal(expected, await ListAsync(ordered.As<HourDesk>()));
+            Assert.True(((AggregationQuery)ordered.Query).PeakGroups < expected.Count / 4, $"the streaming group by held {((AggregationQuery)ordered.Query).PeakGroups} groups of {expected.Count}");
+
+            // Without an order, the hours still in order, the desks of each as they were met.
+            List<HourDesk> met = await ListAsync(file.Scan<Tick>().GroupBy(r => (r.Hour, r.Desk)).Select(g => (g.Key.Hour, g.Key.Desk, g.Count())).As<HourDesk>());
+            Assert.Equal(expected.Select(g => g.Hour), met.Select(g => g.Hour));
+            Assert.Equal(expected.OrderBy(g => g.Hour).ThenBy(g => g.Desk, StringComparer.Ordinal), met.OrderBy(g => g.Hour).ThenBy(g => g.Desk, StringComparer.Ordinal));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static async Task<List<T>> ListAsync<T>(Scan<T> scan)
@@ -145,7 +177,8 @@ public sealed partial class StreamingGroupTests
                 row / 3,
                 $"n{row / 20_000:D3}",
                 row % 50 + (row % 7 / 10.0),
-                (int)((row * 7_919L) % 100_000));
+                (int)((row * 7_919L) % 100_000),
+                Desks[row % 7 % Desks.Length]);
         }
 
         await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Tick>(path))
@@ -158,7 +191,10 @@ public sealed partial class StreamingGroupTests
     }
 
     [VortexRecord]
-    public partial record struct Tick(int? Hour, int Second, string Name, double Price, int Shuffled);
+    public partial record struct Tick(int? Hour, int Second, string Name, double Price, int Shuffled, string Desk);
+
+    [VortexRecord]
+    public partial record struct HourDesk(int? Hour, string Desk, long Count);
 
     [VortexRecord]
     public partial record struct HourStats(int? Hour, long Count, double? Mean);
