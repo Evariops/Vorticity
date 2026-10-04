@@ -10,10 +10,12 @@
 // each hinted file under the hint's name, paired by relative path, which is what
 // `bench/crosscheck.sh` hands `verify_written`.
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Globalization;
 using System.IO;
+using System.IO.Hashing;
 using System.Linq;
 using System.Reflection;
 using System.Text;
@@ -54,27 +56,24 @@ public sealed class TypeEncodingMatrixTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         AllTypes[] rows = MatrixRows.Build(shape);
         string path = Temp();
-        string twin = Temp();
         try
         {
             WriteReport report = await WriteAsync(path, rows, hint, ct);
-            await WriteAsync(twin, rows, EncodingHint.Canonical, ct);
 
-            // The rows, member by member, as the record reads them.
-            AllTypes[] read = await ReadRecordsAsync(path, ct);
-            Assert.Equal(rows.Length, read.Length);
-            for (int i = 0; i < rows.Length; i++)
+            // The read-back, once per distinct file: a hint that leaves every column of a shape as
+            // another hint does writes the same bytes, which read back alike -- 30 of the 112 cases
+            // -- so the cases of one file share its read-back, and its failure.
+            UInt128 content = XxHash128.HashToUInt128(await System.IO.File.ReadAllBytesAsync(path, ct));
+            (EncodingHint first, Lazy<Task> readBack) = ReadBacks.GetOrAdd(
+                content, _ => (hint, new Lazy<Task>(() => ReadBackAsync(path, rows, shape, hint))));
+            try
             {
-                string expected = Render(rows[i]);
-                string actual = Render(read[i]);
-                if (expected != actual)
-                {
-                    Assert.Fail($"{shape} under {hint}, row {i}:\n  wrote {expected}\n  read  {actual}");
-                }
+                await readBack.Value;
             }
-
-            // The values, column by column, as the file stores them: the same as the canonical twin's.
-            Assert.Equal(await DescribeAsync(twin, ct), await DescribeAsync(path, ct));
+            catch (Exception error) when (first != hint)
+            {
+                Assert.Fail($"{shape} under {hint} writes the file {first} writes, whose read-back failed:\n{error.Message}");
+            }
 
             // The lists a builder filled are contiguous, and go out as `vortex.list`, one offset a
             // row, as the reference writes them; only the entries of a map stay a list view.
@@ -106,9 +105,93 @@ public sealed class TypeEncodingMatrixTests
         finally
         {
             System.IO.File.Delete(path);
-            System.IO.File.Delete(twin);
         }
     }
+
+    /// <summary>
+    /// The read-back of one distinct file, shared by the cases that write it: no case's cancellation
+    /// ends it.
+    /// </summary>
+    private static readonly ConcurrentDictionary<UInt128, (EncodingHint First, Lazy<Task> ReadBack)> ReadBacks = new();
+
+    /// <summary>
+    /// The file's rows, member by member, as the record reads them, and its values, column by
+    /// column, as the file stores them: the canonical twin's.
+    /// </summary>
+    private static async Task ReadBackAsync(string path, AllTypes[] rows, Shape shape, EncodingHint hint)
+    {
+        // The rows, member by member, as the record reads them, each compared as it arrives and
+        // dropped: the matrix reads over a million records, and holding a file's worth of them kept
+        // the collector busier than the reads.
+        int read = 0;
+        StringBuilder expected = new StringBuilder();
+        StringBuilder actual = new StringBuilder();
+        await using (VortexFile file = await VortexFile.OpenAsync(path))
+        {
+            await foreach (AllTypes row in file.Scan<AllTypes>().ToRecordsAsync())
+            {
+                if (read == rows.Length)
+                {
+                    Assert.Fail($"{shape} under {hint}: more than the {rows.Length} rows written");
+                }
+
+                Render(rows[read], expected.Clear());
+                Render(row, actual.Clear());
+                if (!expected.Equals(actual))
+                {
+                    Assert.Fail($"{shape} under {hint}, row {read}:\n  wrote {expected}\n  read  {actual}");
+                }
+
+                read++;
+            }
+        }
+
+        Assert.Equal(rows.Length, read);
+
+        // The values, column by column, as the file stores them: the same as the canonical twin's.
+        // Compared by digest, and described line by line only when they differ.
+        UInt128[] values = await DigestAsync(path, CancellationToken.None);
+        UInt128[] twinValues = await TwinAsync(shape);
+        int differs = values.AsSpan().CommonPrefixLength(twinValues);
+        if (differs < Math.Max(values.Length, twinValues.Length))
+        {
+            // The digests decide; the lines say what differs.
+            string twin = Temp();
+            try
+            {
+                await WriteAsync(twin, rows, EncodingHint.Canonical, CancellationToken.None);
+                Assert.Equal(await DescribeAsync(twin, CancellationToken.None), await DescribeAsync(path, CancellationToken.None));
+            }
+            finally
+            {
+                System.IO.File.Delete(twin);
+            }
+
+            Assert.Fail($"{shape} under {hint}: row {differs} of {values.Length} differs from the canonical twin's {twinValues.Length}");
+        }
+    }
+
+    /// <summary>
+    /// The digest of each row of a shape's canonical twin. Every hint's file must hold the twin's
+    /// values, so the twin is written and read once per shape rather than once per hint.
+    /// </summary>
+    private static readonly ConcurrentDictionary<Shape, Lazy<Task<UInt128[]>>> Twins = new();
+
+    private static Task<UInt128[]> TwinAsync(Shape shape) =>
+        Twins.GetOrAdd(shape, key => new Lazy<Task<UInt128[]>>(async () =>
+        {
+            // Shared by the cases of the shape, so no one case's cancellation ends it.
+            string twin = Temp();
+            try
+            {
+                await WriteAsync(twin, MatrixRows.Build(key), EncodingHint.Canonical, CancellationToken.None);
+                return await DigestAsync(twin, CancellationToken.None);
+            }
+            finally
+            {
+                System.IO.File.Delete(twin);
+            }
+        })).Value;
 
     // ------------------------------------------------------------------------------ the table
 
@@ -344,18 +427,6 @@ public sealed class TypeEncodingMatrixTests
         return await writer.CompleteAsync(ct);
     }
 
-    internal static async Task<AllTypes[]> ReadRecordsAsync(string path, CancellationToken ct)
-    {
-        List<AllTypes> rows = [];
-        await using VortexFile file = await VortexFile.OpenAsync(path, ct);
-        await foreach (AllTypes row in file.Scan<AllTypes>().ToRecordsAsync(ct))
-        {
-            rows.Add(row);
-        }
-
-        return [.. rows];
-    }
-
     private static async Task<List<string>> ArrayIdsAsync(string path, CancellationToken ct)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
@@ -378,6 +449,18 @@ public sealed class TypeEncodingMatrixTests
         }
 
         return rows;
+    }
+
+    private static async Task<UInt128[]> DigestAsync(string path, CancellationToken ct)
+    {
+        List<UInt128> rows = [];
+        await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(ct))
+        {
+            Values.DigestRows(batch, rows);
+        }
+
+        return [.. rows];
     }
 
     /// <summary>
@@ -411,19 +494,29 @@ public sealed class TypeEncodingMatrixTests
 
     private static readonly PropertyInfo[] Members = typeof(AllTypes).GetProperties(BindingFlags.Public | BindingFlags.Instance);
 
-    /// <summary>Every member of a row as exact text: a float by its bits, a decimal by its value, an instant by its ticks.</summary>
-    internal static string Render(AllTypes row)
+    /// <summary>Every member of a row as exact text, appended to <paramref name="text"/>: a float by its bits, a decimal by its value, an instant by its ticks.</summary>
+    internal static StringBuilder Render(AllTypes row, StringBuilder text)
     {
-        StringBuilder text = new StringBuilder();
+        // Boxed once: a record struct of ninety members, boxed by every GetValue, would be gigabytes
+        // of copies per case.
+        object boxed = row;
         foreach (PropertyInfo member in Members)
         {
             text.Append(member.Name).Append('=');
-            RenderValue(member.GetValue(row), text);
+            RenderValue(member.GetValue(boxed), text);
             text.Append(' ');
         }
 
-        return text.ToString();
+        return text;
     }
+
+    /// <summary>
+    /// The members reflection reads on a pair or a memory, held here: the runtime's own cache of them
+    /// is weak, and a collection that takes it makes every later read emit its accessor again.
+    /// </summary>
+    private static readonly ConcurrentDictionary<Type, (PropertyInfo Key, PropertyInfo Value)> Pairs = new();
+
+    private static readonly ConcurrentDictionary<Type, MethodInfo> ToArrays = new();
 
     private static void RenderValue(object? value, StringBuilder text)
     {
@@ -489,10 +582,11 @@ public sealed class TypeEncodingMatrixTests
         Type type = value.GetType();
         if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(KeyValuePair<,>))
         {
+            (PropertyInfo key, PropertyInfo pairValue) = Pairs.GetOrAdd(type, static t => (t.GetProperty("Key")!, t.GetProperty("Value")!));
             text.Append('(');
-            RenderValue(type.GetProperty("Key")!.GetValue(value), text);
+            RenderValue(key.GetValue(value), text);
             text.Append(':');
-            RenderValue(type.GetProperty("Value")!.GetValue(value), text);
+            RenderValue(pairValue.GetValue(value), text);
             text.Append(')');
             return;
         }
@@ -514,7 +608,7 @@ public sealed class TypeEncodingMatrixTests
 
         if (type.IsGenericType && (type.GetGenericTypeDefinition() == typeof(ReadOnlyMemory<>) || type.GetGenericTypeDefinition() == typeof(Memory<>)))
         {
-            object array = type.GetMethod(nameof(ReadOnlyMemory<int>.ToArray))!.Invoke(value, null)!;
+            object array = ToArrays.GetOrAdd(type, static t => t.GetMethod(nameof(ReadOnlyMemory<int>.ToArray))!).Invoke(value, null)!;
             text.Append('[');
             bool first = true;
             foreach (object? element in (System.Collections.IEnumerable)array)
