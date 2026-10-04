@@ -23,6 +23,7 @@ internal static class References
         ("run-end key against the hand loop", "group by city (run-end), count avg", "hand loop city (run-end), count sum", null),
         ("dictionary key against the hand loop", "group by endpoint (dictionary), count avg", "hand loop endpoint (dictionary), count sum", null),
         ("custom aggregator against built-ins, run-end key", "group by city (run-end), welford", "group by city (run-end), count avg", null),
+        ("filtered group against the filter before the group by", "group by endpoint (dictionary), errors in the group", "group by endpoint (dictionary), errors filtered before", null),
         ("first batch of a full scan, 16M against 1M", "first batch, full scan, 16M", "first batch, full scan", null),
         ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", null),
         ("first group of a sorted key, 16M against 1M", "first group, group by day (sorted), 16M", "first group, group by day (sorted)", null),

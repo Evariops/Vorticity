@@ -23,25 +23,25 @@ public static class DecimalAggregates
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the sum, at the column's scale; zero when no row holds a value. Reading it throws <see cref="OverflowException"/> when the sum passes 76 digits.</returns>
         public Sym<VortexDecimal> Sum(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
-            Aggregators.SumDecimal(Aggregators.Input(aggregates.Binding, column));
+            Aggregators.Filtered(Aggregators.SumDecimal(Aggregators.Input(aggregates.Binding, column)), aggregates.Filter);
 
         /// <summary>The sum of the non-null values of a nullable decimal <paramref name="column"/>.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the sum, at the column's scale; zero when no row holds a value.</returns>
         public Sym<VortexDecimal> Sum(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
-            Aggregators.SumDecimal(Aggregators.Input(aggregates.Binding, column));
+            Aggregators.Filtered(Aggregators.SumDecimal(Aggregators.Input(aggregates.Binding, column)), aggregates.Filter);
 
         /// <summary>The mean of a decimal <paramref name="column"/>, from its exact sum.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean; null when no row holds a value.</returns>
         public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
-            Aggregators.Average(Aggregators.Input(aggregates.Binding, column));
+            Aggregators.Filtered(Aggregators.Average(Aggregators.Input(aggregates.Binding, column)), aggregates.Filter);
 
         /// <summary>The mean of the non-null values of a nullable decimal <paramref name="column"/>.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean; null when no row holds a value.</returns>
         public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
-            Aggregators.Average(Aggregators.Input(aggregates.Binding, column));
+            Aggregators.Filtered(Aggregators.Average(Aggregators.Input(aggregates.Binding, column)), aggregates.Filter);
     }
 
     extension<TRecord, TKey>(Group<TRecord, TKey> group)
@@ -50,25 +50,25 @@ public static class DecimalAggregates
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the sum; reading it throws <see cref="OverflowException"/> when the sum passes 76 digits.</returns>
         public Sym<VortexDecimal> Sum(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
-            Aggregators.SumDecimal(Aggregators.Input(group.Binding, column));
+            Aggregators.Filtered(Aggregators.SumDecimal(Aggregators.Input(group.Binding, column)), group.Filter);
 
         /// <summary>The sum of the non-null values of a nullable decimal <paramref name="column"/> in the group.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the sum.</returns>
         public Sym<VortexDecimal> Sum(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
-            Aggregators.SumDecimal(Aggregators.Input(group.Binding, column));
+            Aggregators.Filtered(Aggregators.SumDecimal(Aggregators.Input(group.Binding, column)), group.Filter);
 
         /// <summary>The mean of a decimal <paramref name="column"/> in the group.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean; null when no row of the group holds a value.</returns>
         public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
-            Aggregators.Average(Aggregators.Input(group.Binding, column));
+            Aggregators.Filtered(Aggregators.Average(Aggregators.Input(group.Binding, column)), group.Filter);
 
         /// <summary>The mean of the non-null values of a nullable decimal <paramref name="column"/> in the group.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean.</returns>
         public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
-            Aggregators.Average(Aggregators.Input(group.Binding, column));
+            Aggregators.Filtered(Aggregators.Average(Aggregators.Input(group.Binding, column)), group.Filter);
     }
 
     extension<TRecord>(Scan<TRecord> scan)

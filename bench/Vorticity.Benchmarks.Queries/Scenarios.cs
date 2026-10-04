@@ -26,6 +26,8 @@ internal static class Scenarios
         yield return ("readings", new Scenario("group by city day (composite), count avg", GroupByCityDayAsync, 1_000));
         yield return ("requests", new Scenario("group by endpoint (dictionary), count avg", GroupByEndpointAsync));
         yield return ("requests", new Scenario("hand loop endpoint (dictionary), count sum", HandEndpointAsync));
+        yield return ("requests", new Scenario("group by endpoint (dictionary), errors in the group", ErrorsInTheGroupAsync));
+        yield return ("requests", new Scenario("group by endpoint (dictionary), errors filtered before", ErrorsFilteredBeforeAsync));
         yield return ("requests", new Scenario("group by user (1M groups), count avg", GroupByUserAsync, 100_000));
         yield return ("requests", new Scenario("group by user (1M groups), as records", GroupByUserRecordsAsync, 100_000));
         yield return ("readings", new Scenario("first batch, full scan", FirstBatchAsync));
@@ -217,6 +219,39 @@ internal static class Scenarios
         {
             run.Answer();
             rows += count + (name.Length > 0 && sum > 0 ? 0 : 1);
+        }
+
+        return rows;
+    }
+
+    /// <summary>A filtered group: every request and the failures of each endpoint, in one pass.</summary>
+    private static async Task<long> ErrorsInTheGroupAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<EndpointErrors> groups in file.Scan<Request>()
+            .GroupBy(r => r.Endpoint)
+            .Select(g => (g.Key, g.Count(), g.Count(r => r.Status >= 500), g.Where(r => r.Status >= 500).Average(r => r.Latency)))
+            .As<EndpointErrors>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values) + Sum(groups.Column<long>(2).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>The failures alone, the filter before the group by: the floor of the filtered group's predicate.</summary>
+    private static async Task<long> ErrorsFilteredBeforeAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<EndpointStats> groups in file.Scan<Request>()
+            .Where(r => r.Status >= 500)
+            .GroupBy(r => r.Endpoint)
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .As<EndpointStats>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values);
         }
 
         return rows;

@@ -125,6 +125,10 @@ public partial record struct CityDayStats(string City, int Day, long Count, doub
 [VortexRecord]
 public partial record struct EndpointStats(string Endpoint, long Count, double? Mean);
 
+/// <summary>An endpoint's requests, those that failed, and the mean latency of the failures.</summary>
+[VortexRecord]
+public partial record struct EndpointErrors(string Endpoint, long Count, long Errors, double? ErrorMean);
+
 /// <summary>A user's requests and their mean latency.</summary>
 [VortexRecord]
 public partial record struct UserStats(int User, long Count, double? Mean);

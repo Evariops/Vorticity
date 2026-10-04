@@ -11,6 +11,8 @@ internal enum AggregateKind : byte
     Max,
     Average,
     Custom,
+    Any,
+    All,
 }
 
 /// <summary>A result of an aggregation, whatever its type: what an element of a selection of several values is.</summary>
@@ -72,14 +74,16 @@ internal abstract class ResultNode<T> : SymNode, IResultNode
 }
 
 /// <summary>
-/// What makes two aggregates one: the same function over the same input, delivered as the same type,
-/// by the same aggregator. The <c>g.Count()</c> of a filter, an order and a selection is one state.
+/// What makes two aggregates one: the same function over the same input and the same rows, delivered
+/// as the same type, by the same aggregator. The <c>g.Count()</c> of a filter, an order and a
+/// selection is one state.
 /// </summary>
 /// <param name="Kind">The function.</param>
 /// <param name="Input">The input's path; null for a count of rows.</param>
 /// <param name="Result">The type the answer is delivered as.</param>
 /// <param name="Detail">The caller's aggregator, for a custom aggregate.</param>
-internal readonly record struct AggregateIdentity(AggregateKind Kind, string? Input, Type Result, Type? Detail);
+/// <param name="Filter">The key of the rows of a filtered group it reads; null for every row of the group.</param>
+internal readonly record struct AggregateIdentity(AggregateKind Kind, string? Input, Type Result, Type? Detail, string? Filter);
 
 /// <summary>An aggregate, whatever its result type: what the engine plans and steps.</summary>
 internal interface IAggregateNode
@@ -91,6 +95,9 @@ internal interface IAggregateNode
 
     /// <summary>The column it reads; null for a count of rows.</summary>
     ColumnShape? Input { get; }
+
+    /// <summary>The rows of its group it reads, for an aggregate of a filtered group; null for every row.</summary>
+    RowFilter? Filter { get; }
 
     /// <summary>A fresh, empty state for one partition.</summary>
     AggregateSlot Create();
@@ -107,21 +114,29 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     private readonly Func<AggregateSlot<T>> _create;
     private readonly Settler<T>? _settle;
 
-    internal AggregateNode(AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null)
+    internal AggregateNode(
+        AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null)
     {
         Kind = kind;
         Input = input;
         _create = create;
-        _settle = settle;
+
+        // The statistics hold every row's values, never those of a filtered group alone.
+        _settle = filter is null ? settle : null;
         Record = record;
-        Identity = new AggregateIdentity(kind, input?.Path, typeof(T), detail);
+        Filter = filter;
+        Identity = new AggregateIdentity(kind, input?.Path, typeof(T), detail, filter?.Key);
     }
 
     /// <summary>How a state that is a record is read and written, for a custom aggregate whose state is one.</summary>
     internal IVortexRecord? Record { get; }
 
     /// <summary>The name of the aggregate's column where a filter or an order on groups reads it, the same for one aggregate wherever it is written.</summary>
-    internal string HiddenName => $"${Identity.Kind}({Identity.Input}):{Identity.Result.FullName}:{Identity.Detail?.FullName}";
+    internal string HiddenName => $"${Identity.Kind}({Identity.Input}):{Identity.Result.FullName}:{Identity.Detail?.FullName}:{Identity.Filter}";
+
+    /// <summary>The same aggregate over the rows <paramref name="filter"/> keeps of its group; this one for none.</summary>
+    internal AggregateNode<T> Filtered(RowFilter? filter) =>
+        filter is null ? this : new AggregateNode<T>(Kind, Input, _create, null, Identity.Detail, Record, filter);
 
     internal override ColumnSym? Comparable => _comparable ??= Kind == AggregateKind.Custom
         ? throw new InvalidOperationException($"'{this}' is the state of a custom aggregator, which has no order: compare a value a built-in aggregate delivers.")
@@ -134,6 +149,8 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     public AggregateIdentity Identity { get; }
 
     public ColumnShape? Input { get; }
+
+    public RowFilter? Filter { get; }
 
     public AggregateSlot Create() => _create();
 
@@ -162,7 +179,11 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
         return same;
     }
 
-    public override string ToString() => Input is null ? $"{Kind}()" : $"{Kind}({Input.Path})";
+    public override string ToString()
+    {
+        string of = Input is null ? $"{Kind}()" : $"{Kind}({Input.Path})";
+        return Filter is null ? of : $"{of} where {Filter}";
+    }
 }
 
 /// <summary>A component of a group's key, delivered as a result.</summary>

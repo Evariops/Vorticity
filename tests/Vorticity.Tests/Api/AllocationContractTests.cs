@@ -150,6 +150,14 @@ public sealed class AllocationContractTests
                     GC.KeepAlive(group.City);
                 }
             }),
+            ("GroupBy, filtered group", all, async scan =>
+            {
+                await foreach (CityFiltered group in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Count(x => x.Celsius > 30.0), g.Any(x => x.Day > 900))).As<CityFiltered>().ToRecordsAsync())
+                {
+                    GC.KeepAlive(group.City);
+                }
+            }),
+            ("AggAsync, filtered", all, async scan => await scan.AggAsync<SumAndCount>(a => (a.Where(r => r.Celsius > 30.0).Sum(r => r.Celsius), a.Count()))),
             ("CountAsync", filtered, async scan => await scan.CountAsync()),
             ("SumAsync, filtered", filtered, async scan => await scan.SumAsync(r => r.Day)),
         ];

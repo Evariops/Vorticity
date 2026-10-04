@@ -23,7 +23,8 @@ over the rows the scan keeps: one answer comes as itself, `await scan.AggAsync(a
 and several, of any number, go into the record `AggAsync<TResult>` names, whose members take them
 in order, each of its answer's type or of its nullable form. The members of `a` are `Count()`,
 `CountDistinct`, `Sum`, `Min`, `Max`, `Average` and `Aggregate`, each over a column named as in a
-filter. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
+filter, and `Count`, `Any` and `All` of a predicate, and `Where`, which filters the aggregates that
+follow it ([a filtered group](#a-filtered-group)). Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
 your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
 14 left, of which one had a column brought to the canonical form; the others were read as runs and
 dictionaries.
@@ -94,6 +95,46 @@ daily from the hourly, `CountAsync` and the other single answers read it, and a 
 Groups arrive in key order, nulls last, when the key comes from a dictionary or from a column the
 statistics say is sorted, and in no promised order otherwise; a null key is a group of its own.
 Memory follows the number of groups, 8 000 for this composite key, not the number of rows.
+
+## A filtered group
+
+`g.Where(r => p)` is the group's rows where `p` is true, with every aggregate: SQL's
+`FILTER (WHERE …)`, computed beside the aggregates of the whole group in the same pass.
+
+```csharp
+await foreach (CityHeat city in file.Scan<Reading>()
+    .GroupBy(r => r.City)
+    .Select(g => (
+        g.Key,
+        g.Count(),
+        g.Count(r => r.Celsius > 45.0),
+        g.Where(r => r.Celsius > 45.0).Average(r => r.Celsius),
+        g.Any(r => r.Celsius >= 49.9),
+        g.All(r => r.Celsius >= 10.0)))
+    .As<CityHeat>()
+    .ToRecordsAsync())
+
+[VortexRecord]
+public partial record struct CityHeat(string City, long Rows, long Hot, double? HotMean, bool AnyTop, bool AllWarm);
+```
+
+```
+  Paris      15001 of 125006 above 45, mean 47.50, any at 49.9 False, all at 10 or more False
+  Lyon       15352 of 125000 above 45, mean 47.46, any at 49.9 True, all at 10 or more False
+  ...
+```
+
+`g.Count(r => p)` is `g.Where(r => p).Count()`; `g.Any(r => p)` asks whether `p` is true for a row
+of the group, `g.All(r => p)` whether it is true for every one. The predicate is in the language of
+a scan's `Where`, and a row counts where it is true, not where it is unknown: every temperature
+present is above 10, but one in fifty is missing, so `All` is false. Two `Where` keep the rows both
+keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same over the scan's rows.
+
+Each predicate is evaluated once a batch, however many aggregates read it, and its columns join the
+pass. On a million requests grouped by endpoint, the count, the failures and their mean latency took
+3.4 ms in one pass, and the failures alone, filtered before the group by, 4.6 ms. A filter written
+before the group by is still the one to write when the other rows are not wanted and the zone maps
+can skip blocks with it.
 
 ## An aggregator of your own
 

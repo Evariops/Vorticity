@@ -24,12 +24,36 @@ internal static class Aggregators
         return new ColumnShape(column(new Probe<TRecord>(binding)).Column);
     }
 
+    /// <summary>The predicate of a filtered group, built over the rows' probe.</summary>
+    internal static Predicate Rows<TRecord>(RecordBinding? binding, Func<Probe<TRecord>, Predicate> predicate)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        if (binding is null)
+        {
+            throw new InvalidOperationException("A filtered group is built inside the lambda of Select or AggAsync, which hands it its columns.");
+        }
+
+        return predicate(new Probe<TRecord>(binding));
+    }
+
+    /// <summary>The aggregate over the rows <paramref name="filter"/> keeps of its group: the aggregate itself for none.</summary>
+    internal static Sym<T> Filtered<T>(Sym<T> aggregate, RowFilter? filter) =>
+        filter is null ? aggregate : new Sym<T>(((AggregateNode<T>)aggregate.Node).Filtered(filter));
+
     internal static Sym<long> Count() =>
         new Sym<long>(new AggregateNode<long>(AggregateKind.Count, null, static () => new CountSlot(), static (StatisticsView view, out long value) =>
         {
             value = view.Rows;
             return true;
         }));
+
+    /// <summary>
+    /// Whether the group holds a row <paramref name="filter"/> keeps: <c>Any(p)</c> when its last
+    /// condition is <c>p</c> true, and with <paramref name="all"/>, <c>All(p)</c>, when it is
+    /// <c>p</c> not true.
+    /// </summary>
+    internal static Sym<bool> Exists(RowFilter? filter, bool all) =>
+        new Sym<bool>(new AggregateNode<bool>(all ? AggregateKind.All : AggregateKind.Any, null, all ? static () => new ExistsSlot(true) : static () => new ExistsSlot(false), null, filter: filter));
 
     internal static Sym<long> CountDistinct(ColumnShape shape)
     {

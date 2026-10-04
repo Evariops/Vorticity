@@ -108,6 +108,9 @@ internal static class ResultTypes
             case AggregateKind.Count:
             case AggregateKind.CountDistinct:
                 return VortexType.Int64;
+            case AggregateKind.Any:
+            case AggregateKind.All:
+                return VortexType.Bool;
             case AggregateKind.Average:
                 return VortexType.Float64.Nullable;
             case AggregateKind.Min:

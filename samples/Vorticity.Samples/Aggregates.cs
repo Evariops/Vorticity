@@ -42,6 +42,33 @@ internal static class Aggregates
             Console.WriteLine(line);
         }
 
+        await BestOfThreeAsync("GroupBy(City), filtered", async () =>
+        {
+            lines = new string[Demo.Cities.Length];
+            int line = 0;
+            await foreach (CityHeat city in file.Scan<Reading>()
+                .GroupBy(r => r.City)
+                .Select(g => (
+                    g.Key,
+                    g.Count(),
+                    g.Count(r => r.Celsius > 45.0),
+                    g.Where(r => r.Celsius > 45.0).Average(r => r.Celsius),
+                    g.Any(r => r.Celsius >= 49.9),
+                    g.All(r => r.Celsius >= 10.0)))
+                .As<CityHeat>()
+                .ToRecordsAsync())
+            {
+                lines[line++] = $"  {city.City,-10} {city.Hot} of {city.Rows} above 45, mean {city.HotMean:F2}, any at 49.9 {city.AnyTop}, all at 10 or more {city.AllWarm}";
+            }
+
+            return $"{line} groups";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
         await BestOfThreeAsync("Welford(Celsius), encoded", async () =>
         {
             Scan<Reading> scan = file.Scan<Reading>();
@@ -254,3 +281,7 @@ public partial record struct CitySpread(string City, double? Mean, WelfordState 
 /// <summary>A city's day: its total and the state of its variance.</summary>
 [VortexRecord]
 public partial record struct CityDaySpread(string City, int Day, double Total, WelfordState State);
+
+/// <summary>A city's readings, the hot ones and their mean, and two questions about all of them.</summary>
+[VortexRecord]
+public partial record struct CityHeat(string City, long Rows, long Hot, double? HotMean, bool AnyTop, bool AllWarm);

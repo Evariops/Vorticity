@@ -39,9 +39,13 @@ internal sealed class AggregationPlan
         }
 
         Aggregates = [.. aggregates];
+        Filters = new FilterPlan(Aggregates);
     }
 
     internal IAggregateNode[] Aggregates { get; }
+
+    /// <summary>The filters of the aggregates of filtered groups, and the predicates they read.</summary>
+    internal FilterPlan Filters { get; }
 
     internal ColumnShape[] Keys { get; }
 
@@ -135,6 +139,10 @@ internal sealed class AggregationPartition
     private readonly int[] _inputs;
     private readonly int _keyCount;
     private readonly int[] _nodes;
+
+    // The filter of each aggregate, or -1, and the selection of each filter over the batch.
+    private readonly int[] _filterOf;
+    private readonly FilterMasks? _masks;
     private readonly GroupRanges _ranges = new GroupRanges();
     private int[] _rowGroups = [];
     private long _batch;
@@ -154,6 +162,8 @@ internal sealed class AggregationPartition
         _inputs = inputs;
         _keyCount = plan.Keys.Length;
         _nodes = new int[columns.Length];
+        _filterOf = plan.Filters.FilterOf;
+        _masks = plan.Filters.Filters.Length > 0 ? new FilterMasks(plan.Filters) : null;
         Slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
         {
@@ -261,11 +271,12 @@ internal sealed class AggregationPartition
             _nodes[c] = node;
         }
 
+        _masks?.Evaluate(arena, root, rows, selection);
         if (Keys is null)
         {
             for (int i = 0; i < Slots.Length; i++)
             {
-                if (_inputs[i] != Settled)
+                if (_inputs[i] != Settled && Folds(i))
                 {
                     Slots[i].StepRange(Input(number, arena, i, rows, selection), 0, rows, 0);
                 }
@@ -305,7 +316,10 @@ internal sealed class AggregationPartition
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
             for (int i = 0; i < Slots.Length; i++)
             {
-                Slots[i].StepRows(Input(number, arena, i, rows, selection), rowGroups);
+                if (Folds(i))
+                {
+                    Slots[i].StepRows(Input(number, arena, i, rows, selection), rowGroups);
+                }
             }
 
             return;
@@ -313,6 +327,11 @@ internal sealed class AggregationPartition
 
         for (int i = 0; i < Slots.Length; i++)
         {
+            if (!Folds(i))
+            {
+                continue;
+            }
+
             AggregateSlot slot = Slots[i];
             BatchInput input = Input(number, arena, i, rows, selection);
             for (int r = 0; r < _ranges.Count; r++)
@@ -426,11 +445,16 @@ internal sealed class AggregationPartition
     /// </summary>
     internal const int ShortRange = 64;
 
+    /// <summary>The aggregate's input over the batch: its column, and the rows the scan kept, or those its filter keeps of them.</summary>
     private BatchInput Input(long number, CanonicalArena arena, int slot, int rows, ReadOnlySpan<ulong> selection)
     {
         int column = _inputs[slot];
-        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, selection);
+        int filter = _filterOf[slot];
+        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter));
     }
+
+    /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>
+    private bool Folds(int slot) => _filterOf[slot] < 0 || !_masks!.KeepsNone(_filterOf[slot]);
 }
 
 /// <summary>The scan an aggregation runs on, whatever its record type.</summary>
@@ -466,7 +490,7 @@ internal abstract class AggregationHost
     internal ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
     {
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        return Source.ExplainAsync(AggregationEngine.PassSpec(Spec(rows), columns), cancellationToken);
+        return Source.ExplainAsync(AggregationEngine.PassSpec(Spec(rows), columns, plan, Source.Schema), cancellationToken);
     }
 
     /// <summary>The scan's spec, its filter joined with <paramref name="rows"/>: the conjuncts on a group's key, which filter rows.</summary>
@@ -499,7 +523,8 @@ internal static class AggregationEngine
 
         if (!plan.Grouped && OnlyCountsLeft(aggregates, settled))
         {
-            // A count reads no column: the terminal answers it from the structures, a pass would decode.
+            // A count reads no column: the terminal answers it from the structures, a pass would
+            // decode. A count or an any of filtered rows is the scan's, its filter joined.
             long count = -1;
             AggregateSlot[] answers = new AggregateSlot[aggregates.Length];
             for (int i = 0; i < aggregates.Length; i++)
@@ -510,8 +535,18 @@ internal static class AggregationEngine
                     continue;
                 }
 
-                count = count >= 0 ? count : await source.CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
-                answers[i] = new SettledSlot<long>(count);
+                RowFilter? filter = aggregates[i].Filter;
+                if (filter is null)
+                {
+                    count = count >= 0 ? count : await source.CountAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+                    answers[i] = new SettledSlot<long>(count);
+                    continue;
+                }
+
+                ScanSpec rows = filter.IsNothing ? spec with { MatchesNothing = true } : spec with { Filter = Joined(spec.Filter, filter) };
+                answers[i] = aggregates[i].Kind == AggregateKind.Any
+                    ? new SettledSlot<bool>(await source.AnyAsync(rows, metrics, cancellationToken).ConfigureAwait(false))
+                    : new SettledSlot<long>(await source.CountAsync(rows, metrics, cancellationToken).ConfigureAwait(false));
             }
 
             return new AggregationOutcome(plan, answers, null, [0]);
@@ -519,7 +554,7 @@ internal static class AggregationEngine
 
         (ColumnShape[] columns, int[] inputs) = Columns(plan, settled);
         bool sorted = plan.Keys.Length == 1 && IsSorted(source, plan.Keys[0]);
-        ScanSpec pass = PassSpec(spec, columns);
+        ScanSpec pass = PassSpec(spec, columns, plan, source.Schema);
 
         AggregationPartition[] partitions;
         RowRange[]? ranges = Partition(source, pass);
@@ -567,12 +602,18 @@ internal static class AggregationEngine
     /// only when an aggregate expands them, whole blocks with their selection, no key order, and no
     /// row's place read.
     /// </summary>
-    internal static ScanSpec PassSpec(ScanSpec spec, ColumnShape[] columns)
+    internal static ScanSpec PassSpec(ScanSpec spec, ColumnShape[] columns, AggregationPlan plan, VortexSchema schema)
     {
         FieldMaskBuilder mask = new FieldMaskBuilder();
         foreach (ColumnShape column in columns)
         {
             mask.Include(column.Column.FieldPath);
+        }
+
+        // The columns the filters of filtered groups read, evaluated on each batch of the pass.
+        foreach (FieldExpr field in plan.Filters.Fields())
+        {
+            mask.Include(ToolPaths.Resolve(schema, field.Segments ?? field.Path.Split('.'), field.Path));
         }
 
         return spec with
@@ -620,17 +661,54 @@ internal static class AggregationEngine
         return ([.. columns], inputs);
     }
 
+    /// <summary>
+    /// Whether every answer left is a count the scan's structures give: of every row, and of the rows
+    /// of one filter, a count or an any whose conditions are each a predicate true. Several filters
+    /// are one pass, rather than a scan each.
+    /// </summary>
     private static bool OnlyCountsLeft(IAggregateNode[] aggregates, AggregateSlot?[] settled)
     {
+        string? filtered = null;
         for (int i = 0; i < aggregates.Length; i++)
         {
-            if (settled[i] is null && aggregates[i].Kind != AggregateKind.Count)
+            if (settled[i] is not null)
+            {
+                continue;
+            }
+
+            IAggregateNode aggregate = aggregates[i];
+            RowFilter? filter = aggregate.Filter;
+            if (filter is null ? aggregate.Kind != AggregateKind.Count : aggregate.Kind is not (AggregateKind.Count or AggregateKind.Any))
             {
                 return false;
             }
+
+            if (filter is null || filter.IsNothing)
+            {
+                continue;
+            }
+
+            if (Array.Exists(filter.Conditions, condition => !condition.Holds) || (filtered is not null && !string.Equals(filtered, filter.Key, StringComparison.Ordinal)))
+            {
+                return false;
+            }
+
+            filtered = filter.Key;
         }
 
         return true;
+    }
+
+    /// <summary>The scan's filter and the conditions of a filter that are each a predicate true, joined.</summary>
+    private static VortexExpr Joined(VortexExpr? scan, RowFilter filter)
+    {
+        VortexExpr? joined = scan;
+        foreach (RowCondition condition in filter.Conditions)
+        {
+            joined = joined is null ? condition.Predicate : Expr.Logical(true, joined, condition.Predicate);
+        }
+
+        return joined!;
     }
 
     /// <summary>Whether the statistics say the key column is sorted, so that its rows come in runs of one key.</summary>

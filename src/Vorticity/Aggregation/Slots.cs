@@ -163,6 +163,66 @@ internal sealed class CountSlot : AggregateSlot<long>
 }
 
 /// <summary>
+/// Whether a group holds a row of those its filter keeps: <c>Any(p)</c> over the rows where
+/// <c>p</c> is true, and <c>All(p)</c>, which is no row where it is not.
+/// </summary>
+internal sealed class ExistsSlot(bool all) : AggregateSlot<bool>
+{
+    private bool[] _seen = [];
+    private int _groups;
+
+    internal override void EnsureGroups(int groups)
+    {
+        if (groups > _seen.Length)
+        {
+            Array.Resize(ref _seen, Math.Max(groups, _seen.Length * 2));
+        }
+
+        _groups = Math.Max(_groups, groups);
+    }
+
+    internal override void StepRange(in BatchInput input, int start, int end, int group)
+    {
+        if (!_seen[group] && RowMasks.Count(input.Selection, start, end) > 0)
+        {
+            _seen[group] = true;
+        }
+    }
+
+    internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
+    {
+        bool[] seen = _seen;
+        RowCursor rows = new RowCursor(input.Selection, 0, input.Rows);
+        while (rows.Next(out int row))
+        {
+            seen[groups[row]] = true;
+        }
+    }
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    {
+        ExistsSlot from = (ExistsSlot)other;
+        for (int g = 0; g < from._groups; g++)
+        {
+            _seen[map[g]] |= from._seen[g];
+        }
+    }
+
+    internal override bool Result(int group) => _seen[group] != all;
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _seen[i] = _seen[groups[i]];
+        }
+
+        _seen.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
+}
+
+/// <summary>
 /// The conjunction of two masks of one batch's column, worked out once and reused by every range
 /// the batch is folded in; either mask when the other is every row.
 /// </summary>

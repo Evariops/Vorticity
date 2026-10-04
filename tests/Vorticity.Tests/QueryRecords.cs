@@ -26,3 +26,7 @@ public partial record struct WideDecimalCount([VortexColumn(Precision = 76, Scal
 /// <summary>A sum of a nullable float column and the rows.</summary>
 [VortexRecord]
 public partial record struct SumAndCount(double Sum, long Count);
+
+/// <summary>A text key, the rows a filter keeps of its group, and whether one row answers another.</summary>
+[VortexRecord]
+public partial record struct CityFiltered(string City, long Kept, bool Any);
