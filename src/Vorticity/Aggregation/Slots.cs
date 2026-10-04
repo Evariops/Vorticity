@@ -54,6 +54,15 @@ internal abstract class AggregateSlot
 internal abstract class AggregateSlot<TResult> : AggregateSlot
 {
     internal abstract TResult Result(int group);
+
+    /// <summary>The answers of <paramref name="groups"/>, in order: a batch of a result column.</summary>
+    internal virtual void Results(ReadOnlySpan<int> groups, Span<TResult> into)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = Result(groups[i]);
+        }
+    }
 }
 
 /// <summary>An aggregate answered before the scan, from the file statistics or a count: nothing to step.</summary>
@@ -121,6 +130,15 @@ internal sealed class CountSlot : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override void Results(ReadOnlySpan<int> groups, Span<long> into)
+    {
+        long[] counts = _counts;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = counts[groups[i]];
+        }
+    }
 }
 
 /// <summary>

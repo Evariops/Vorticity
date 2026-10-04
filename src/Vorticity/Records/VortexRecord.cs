@@ -1,4 +1,5 @@
 using System;
+using Vorticity.Arrays;
 
 namespace Vorticity;
 
@@ -13,7 +14,7 @@ namespace Vorticity;
 /// type must fit the column's. A file with more columns than the record is fine: the record is the
 /// projection.
 /// </remarks>
-public interface IVortexRecord<TSelf>
+public interface IVortexRecord<TSelf> : IVortexRecord
     where TSelf : IVortexRecord<TSelf>
 {
     /// <summary>The record's columns, in member order.</summary>
@@ -28,6 +29,38 @@ public interface IVortexRecord<TSelf>
     /// <param name="builder">The builder, bound to the record.</param>
     /// <param name="rows">The rows.</param>
     static abstract void WriteRows(ColumnsBuilder<TSelf> builder, ReadOnlySpan<TSelf> rows);
+
+    VortexSchema IVortexRecord.RecordSchema => TSelf.Schema;
+
+    void IVortexRecord.ReadRecords(RecordBatch? batch, CanonicalArena arena, int node, VortexType type, VortexExtensionRegistry? extensions, Array rows, int count)
+    {
+        RecordBinding binding = RecordBinding.For<TSelf>(VortexSchema.Create(type.FieldArray), extensions);
+        TSelf.ReadRows(new Columns<TSelf>(batch!, arena, node, binding, 0, default, 0, projected: false), ((TSelf[])rows).AsSpan(0, count));
+    }
+
+    void IVortexRecord.WriteRecords(Writing.StructStore store, Array rows, int count)
+    {
+        ColumnsBuilder<TSelf> builder = store.TypedFacade as ColumnsBuilder<TSelf>
+            ?? new ColumnsBuilder<TSelf>(store, WriteBinding.Map(typeof(TSelf), TSelf.Schema, store.Type.FieldArray), null);
+        store.TypedFacade = builder;
+        TSelf.WriteRows(builder, ((TSelf[])rows).AsSpan(0, count));
+    }
+}
+
+/// <summary>
+/// A record, whatever its type: what the library reads and writes one through when only its value
+/// is at hand, a custom aggregate's state for one. <see cref="IVortexRecord{TSelf}"/> implements it.
+/// </summary>
+public interface IVortexRecord
+{
+    /// <summary>The record's columns, in member order.</summary>
+    internal VortexSchema RecordSchema { get; }
+
+    /// <summary>Fills the first <paramref name="count"/> records of <paramref name="rows"/> from the struct node <paramref name="node"/> of type <paramref name="type"/>.</summary>
+    internal void ReadRecords(RecordBatch? batch, CanonicalArena arena, int node, VortexType type, VortexExtensionRegistry? extensions, Array rows, int count);
+
+    /// <summary>Appends the first <paramref name="count"/> records of <paramref name="rows"/> to a struct store of the record's columns.</summary>
+    internal void WriteRecords(Writing.StructStore store, Array rows, int count);
 }
 
 /// <summary>Marks a <c>partial</c> type whose members become columns; the generator implements <see cref="IVortexRecord{TSelf}"/> for it.</summary>

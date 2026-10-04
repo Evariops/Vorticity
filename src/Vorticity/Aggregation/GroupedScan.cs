@@ -43,7 +43,7 @@ public sealed class GroupedScan<TRecord, TKey>
     {
         ArgumentNullException.ThrowIfNull(aggregate);
         ResultNode<T1> n1 = Result(aggregate(Group()));
-        return new Aggregation<T1>(_scan.Host, Plan([n1]), outcome => n1.Bind(outcome));
+        return new Aggregation<T1>(new AggregationQuery(_scan.Host, Plan([n1]), [n1.Column("Item1", _keys)]));
     }
 
     /// <summary>Two answers per group, computed in one pass.</summary>
@@ -262,15 +262,26 @@ public sealed class GroupedScan<TRecord, TKey>
 /// Enumerated once, like the scan it runs, and by the pattern of <c>await foreach</c> rather than
 /// as an <see cref="IAsyncEnumerable{T}"/>, as a scan is: what returns a stream to await carries
 /// <c>Async</c> in its name, and <c>Select</c> builds a query. <see cref="ToValuesAsync"/> hands the
-/// answers to <c>System.Linq.AsyncEnumerable</c>.
+/// answers to <c>System.Linq.AsyncEnumerable</c>. The answers come as batches of the result's
+/// column, each read into values once, so that a batch costs an <c>await</c> and a value none.
 /// </remarks>
 public sealed class Aggregation<TResult>
 {
     private readonly AggregationHost _host;
     private readonly AggregationPlan _plan;
-    private readonly Func<AggregationOutcome, Func<int, TResult>> _bind;
+    private readonly AggregationQuery? _query;
+    private readonly Func<AggregationOutcome, Func<int, TResult>>? _bind;
     private CancellationToken _cancellationToken;
 
+    /// <summary>One value per group, read from the column of the result's batches.</summary>
+    internal Aggregation(AggregationQuery query)
+    {
+        _host = query.Host;
+        _plan = query.Plan;
+        _query = query;
+    }
+
+    /// <summary>A tuple per group, read from the states, for the selections by arity of the 0.4 surface.</summary>
     internal Aggregation(AggregationHost host, AggregationPlan plan, Func<AggregationOutcome, Func<int, TResult>> bind)
     {
         _host = host;
@@ -303,12 +314,57 @@ public sealed class Aggregation<TResult>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary, with the token <see cref="WithCancellation"/> gave.</param>
     /// <returns>The enumerator.</returns>
     public IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-        ToValuesAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
+        _query is not null ? Values(cancellationToken) : EnumerateAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
 
     /// <summary>The answers as a stream, for the operators of <c>System.Linq.AsyncEnumerable</c>, which then run on the values delivered.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>The answers.</returns>
-    public IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken cancellationToken = default) => EnumerateAsync(cancellationToken);
+    public IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken cancellationToken = default) =>
+        _query is not null ? new ValueStream(this, cancellationToken) : EnumerateAsync(cancellationToken);
+
+    /// <summary>Runs the aggregation and collects the answers, a batch at a time.</summary>
+    /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
+    /// <returns>The answers, in the order they are delivered.</returns>
+    public async ValueTask<List<TResult>> ToListAsync(CancellationToken cancellationToken = default)
+    {
+        List<TResult> list = [];
+        if (_query is null)
+        {
+            await foreach (TResult value in EnumerateAsync(cancellationToken).ConfigureAwait(false))
+            {
+                list.Add(value);
+            }
+
+            return list;
+        }
+
+        ValueEnumerator<TResult> values = Values(cancellationToken);
+        await using (values.ConfigureAwait(false))
+        {
+            while (await values.NextBatchAsync().ConfigureAwait(false))
+            {
+                list.AddRange(values.Batch);
+            }
+        }
+
+        return list;
+    }
+
+    /// <summary>Runs the aggregation and collects the answers into an array, a batch at a time.</summary>
+    /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
+    /// <returns>The answers, in the order they are delivered.</returns>
+    public async ValueTask<TResult[]> ToArrayAsync(CancellationToken cancellationToken = default) =>
+        [.. await ToListAsync(cancellationToken).ConfigureAwait(false)];
+
+    private ValueEnumerator<TResult> Values(CancellationToken cancellationToken)
+    {
+        CancellationTokenSource? linked = _cancellationToken.CanBeCanceled && cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken, cancellationToken)
+            : null;
+        CancellationToken token = linked?.Token ?? (cancellationToken.CanBeCanceled ? cancellationToken : _cancellationToken);
+        ResultColumn column = _query!.Columns[0];
+        return new ValueEnumerator<TResult>(_query.Batches(token), column.Record, _host.Source.Session.Options.Extensions, linked);
+    }
 
     private async IAsyncEnumerable<TResult> EnumerateAsync([EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -317,10 +373,17 @@ public sealed class Aggregation<TResult>
             : null;
         CancellationToken token = linked?.Token ?? (cancellationToken.CanBeCanceled ? cancellationToken : _cancellationToken);
         AggregationOutcome outcome = await _host.RunAsync(_plan, token).ConfigureAwait(false);
-        Func<int, TResult> read = _bind(outcome);
+        Func<int, TResult> read = _bind!(outcome);
         foreach (int group in outcome.Order)
         {
             yield return read(group);
         }
+    }
+
+    /// <summary>The answers as an <see cref="IAsyncEnumerable{T}"/>, enumerated once.</summary>
+    private sealed class ValueStream(Aggregation<TResult> aggregation, CancellationToken cancellationToken) : IAsyncEnumerable<TResult>
+    {
+        public IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken token = default) =>
+            aggregation.Values(token.CanBeCanceled ? token : cancellationToken);
     }
 }

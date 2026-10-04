@@ -13,7 +13,9 @@ Vorticity: sealed class Vorticity.Aggregation<TResult>
 Vorticity:     method Aggregation<TResult> WithCancellation(CancellationToken)
 Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken = default)
+Vorticity:     method ValueTask<List<TResult>> ToListAsync(CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
+Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = default)
 Vorticity:     property ScanStatistics Statistics { get; }
 Vorticity: sealed class Vorticity.AlignedMemoryPool : MemoryPool<byte>
 Vorticity:     ctor AlignedMemoryPool(int = default, long = default)
@@ -886,7 +888,8 @@ Vorticity:     method TSelf FromStorage(ReadOnlySpan<byte>, ReadOnlySpan<byte>)
 Vorticity:     method void ToStorage(in TSelf, Span<byte>, ReadOnlySpan<byte>)
 Vorticity:     property VortexType StorageType { get; }
 Vorticity:     property string Id { get; }
-Vorticity: interface Vorticity.IVortexRecord<TSelf>
+Vorticity: interface Vorticity.IVortexRecord
+Vorticity: interface Vorticity.IVortexRecord<TSelf> : IVortexRecord
 Vorticity:     method void ReadRows(Columns<TSelf>, Span<TSelf>)
 Vorticity:     method void WriteRows(ColumnsBuilder<TSelf>, ReadOnlySpan<TSelf>)
 Vorticity:     property VortexSchema Schema { get; }

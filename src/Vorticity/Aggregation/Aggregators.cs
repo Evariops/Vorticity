@@ -197,7 +197,9 @@ internal static class Aggregators
                 $"'{shape.Path}' is {shape.Type}; an aggregator over {ClrFit.Name(typeof(T))} reads a column stored as {ClrFit.Name(typeof(T))}.");
         }
 
-        return new Sym<TState>(new AggregateNode<TState>(AggregateKind.Custom, shape, CustomFactory<T, TAggregator, TState>.Create, null, typeof(TAggregator)));
+        // A state that is a record is written and read through it; the seed is a value of the type to ask.
+        IVortexRecord? record = TAggregator.Seed() as IVortexRecord;
+        return new Sym<TState>(new AggregateNode<TState>(AggregateKind.Custom, shape, CustomFactory<T, TAggregator, TState>.Create, null, typeof(TAggregator), record));
     }
 
     private static Func<AggregateSlot<TState>> EncodedFactory<T, TAggregator, TState>()

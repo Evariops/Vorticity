@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Compute;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -80,6 +82,13 @@ internal abstract class GroupKeys
 
     /// <summary>Reads component <paramref name="component"/> of a group's key as <typeparamref name="T"/>.</summary>
     internal abstract Func<int, T> Reader<T>(int component);
+
+    /// <summary>
+    /// Appends component <paramref name="component"/> of the keys of <paramref name="groups"/>, in
+    /// order, to a store of the key column's own type: the values as the index holds them, a null
+    /// group as a null.
+    /// </summary>
+    internal abstract void Append(int component, ColumnStore store, ReadOnlySpan<int> groups);
 
     private protected void Saw(ColumnEncoding encoding)
     {
@@ -303,6 +312,41 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         ColumnShape shape = _shape;
         return group => group == _null ? default! : StorageValues.ToClr<TValue, T>(_keys[group], shape);
+    }
+
+    internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
+    {
+        TValue[] keys = _keys;
+        int nullGroup = _null;
+        StorageKind kind = _shape.Kind;
+        if (kind == StorageKind.Primitive && store.Leaf is FixedStore leaf && leaf.Width == Unsafe.SizeOf<TValue>())
+        {
+            foreach (int group in groups)
+            {
+                if (group == nullGroup)
+                {
+                    KeyStores.AppendNull(store);
+                }
+                else
+                {
+                    leaf.Append(keys[group]);
+                }
+            }
+
+            return;
+        }
+
+        foreach (int group in groups)
+        {
+            if (group == nullGroup)
+            {
+                KeyStores.AppendNull(store);
+            }
+            else
+            {
+                KeyStores.AppendFixed(store, keys[group], kind);
+            }
+        }
     }
 
     /// <summary>The rows of a sorted column as runs of one key: one comparison per row, one lookup per run.</summary>
@@ -550,6 +594,22 @@ internal sealed class BytesKeys : GroupKeys
         return group => group == _null ? default! : StorageValues.BytesToClr<T>(_table.KeyOf(_entryOfGroup[group]), shape);
     }
 
+    internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
+    {
+        VarBinStore leaf = (VarBinStore)store.Leaf;
+        foreach (int group in groups)
+        {
+            if (group == _null)
+            {
+                KeyStores.AppendNull(store);
+            }
+            else
+            {
+                leaf.Append(_table.KeyOf(_entryOfGroup[group]));
+            }
+        }
+    }
+
     private int Compare(int a, int b)
     {
         if (a == _null || b == _null)
@@ -671,6 +731,23 @@ internal sealed class BoolKeys : GroupKeys
     {
         ColumnShape shape = _shape;
         return group => _keyOf[group] == 2 ? default! : StorageValues.BoolToClr<T>(_keyOf[group] == 1, shape);
+    }
+
+    internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
+    {
+        BoolStore leaf = (BoolStore)store.Leaf;
+        foreach (int group in groups)
+        {
+            byte key = _keyOf[group];
+            if (key == 2)
+            {
+                KeyStores.AppendNull(store);
+            }
+            else
+            {
+                leaf.Append(key == 1);
+            }
+        }
     }
 
     /// <summary>The group of false (0), true (1) or null (2).</summary>

@@ -19,6 +19,11 @@ internal abstract class ResultNode<T> : SymNode
 {
     /// <summary>How to read the result of each group once the aggregation has run.</summary>
     internal abstract Func<int, T> Bind(AggregationOutcome outcome);
+
+    /// <summary>The result's column, of its own type, named <paramref name="name"/>.</summary>
+    /// <param name="name">The column's name.</param>
+    /// <param name="keys">The columns of the group key.</param>
+    internal abstract ResultColumn Column(string name, ColumnShape[] keys);
 }
 
 /// <summary>
@@ -57,14 +62,18 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     private readonly Func<AggregateSlot<T>> _create;
     private readonly Settler<T>? _settle;
 
-    internal AggregateNode(AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null)
+    internal AggregateNode(AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null)
     {
         Kind = kind;
         Input = input;
         _create = create;
         _settle = settle;
+        Record = record;
         Identity = new AggregateIdentity(kind, input?.Path, typeof(T), detail);
     }
+
+    /// <summary>How a state that is a record is read and written, for a custom aggregate whose state is one.</summary>
+    internal IVortexRecord? Record { get; }
 
     public AggregateKind Kind { get; }
 
@@ -78,6 +87,9 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
         _settle is not null && _settle(view, out T value) ? new SettledSlot<T>(value) : null;
 
     internal override Func<int, T> Bind(AggregationOutcome outcome) => ((AggregateSlot<T>)outcome.SlotOf(this)).Result;
+
+    internal override ResultColumn Column(string name, ColumnShape[] keys) =>
+        new ValueResultColumn<T>(name, ResultTypes.Of<T>(this, Record), this, Record);
 
     public override string ToString() => Input is null ? $"{Kind}()" : $"{Kind}({Input.Path})";
 }
@@ -103,6 +115,8 @@ internal sealed class KeyNode<T> : ResultNode<T>, IKeyNode
 
     internal override Func<int, T> Bind(AggregationOutcome outcome) =>
         (outcome.Keys ?? throw new InvalidOperationException("A group key is a result of a grouped scan only.")).Reader<T>(Component);
+
+    internal override ResultColumn Column(string name, ColumnShape[] keys) => new KeyResultColumn(name, keys[Component].Type, Component);
 
     public override string ToString() => $"Key({_name})";
 }

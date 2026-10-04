@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Types.Numerics;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -163,6 +164,34 @@ internal sealed class CompositeKeys : GroupKeys
                 _ => StorageValues.Read<T>(key[offset..], shape),
             };
         };
+    }
+
+    internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
+    {
+        ColumnShape shape = _parts[component];
+        foreach (int group in groups)
+        {
+            ReadOnlySpan<byte> key = _table.KeyOf(group);
+            int offset = 0;
+            for (int part = 0; part < component; part++)
+            {
+                offset = Skip(_parts[part], key, offset);
+            }
+
+            byte tag = key[offset++];
+            if (tag == 0)
+            {
+                KeyStores.AppendNull(store);
+            }
+            else if (shape.Kind == StorageKind.Bool)
+            {
+                ((BoolStore)store.Leaf).Append(tag == 2);
+            }
+            else
+            {
+                KeyStores.AppendPart(store, key[offset..], shape);
+            }
+        }
     }
 
     private static int Skip(ColumnShape shape, ReadOnlySpan<byte> key, int offset)
