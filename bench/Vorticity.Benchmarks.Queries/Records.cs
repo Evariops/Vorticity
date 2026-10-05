@@ -192,3 +192,58 @@ public partial record struct InstantHour(DateTime Hour, long Count, double? Mean
 /// <summary>A user's requests and their mean latency.</summary>
 [VortexRecord]
 public partial record struct UserStats(int User, long Count, double? Mean);
+
+/// <summary>
+/// A row of the high-cardinality matrix: a key column per cardinality, from 10³ to 10⁷ values, a key
+/// ten rows a value and one a row a value, and two values to aggregate; stored canonical.
+/// </summary>
+[VortexRecord]
+public partial record struct Spread(int K3, int K4, int K5, int K6, int K7, int Tenfold, int Unique, long Value, double Real);
+
+/// <summary>The matrix's keys at a regular stride, identifiers whose sequence field is zero: a key shifted left by 22 bits.</summary>
+[VortexRecord]
+public partial record struct Strided(long K3, long K4, long K5, long K6, long K7, long Value, double Real);
+
+/// <summary>Keys of a skewed popularity: a Zipf law of exponent 1.1 over a million values, and hot keys that change as the rows go.</summary>
+[VortexRecord]
+public partial record struct Skews(int Zipf, int Drift, long Value);
+
+/// <summary>Text keys: a URL of about forty bytes among a million, a UUID among a million, a small integer; an integer key of a million values.</summary>
+[VortexRecord]
+public partial record struct Page(string Url, Guid Id, int Small, int Key, long Value);
+
+/// <summary>A visit: one of ten million users, on one of 365 days, the days in order.</summary>
+[VortexRecord]
+public partial record struct Visit(int User, int Day);
+
+/// <summary>An integer key's rows.</summary>
+[VortexRecord]
+public partial record struct KeyCount(int Key, long Count);
+
+/// <summary>An integer key's rows and the mean of a float.</summary>
+[VortexRecord]
+public partial record struct KeyMean(int Key, long Count, double? Mean);
+
+/// <summary>An integer key's rows, the total and the largest of a value, and the mean of a float.</summary>
+[VortexRecord]
+public partial record struct KeyFour(int Key, long Count, long Total, double? Mean, long? Largest);
+
+/// <summary>A long key's rows and the sum of their values.</summary>
+[VortexRecord]
+public partial record struct LongKeyTotal(long Key, long Count, long Total);
+
+/// <summary>An integer key's least and greatest text.</summary>
+[VortexRecord]
+public partial record struct KeyTexts(int Key, string? Least, string? Greatest);
+
+/// <summary>A UUID key's rows.</summary>
+[VortexRecord]
+public partial record struct IdCount(Guid Id, long Count);
+
+/// <summary>A text and a small integer, the pair's rows.</summary>
+[VortexRecord]
+public partial record struct UrlSmallCount(string Url, int Small, long Count);
+
+/// <summary>A day's distinct users.</summary>
+[VortexRecord]
+public partial record struct DayUsers(int Day, long Users);

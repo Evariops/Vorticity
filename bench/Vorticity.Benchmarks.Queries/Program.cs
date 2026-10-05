@@ -8,6 +8,8 @@
 //   … -- --large 4000000                                                               a smaller "large" file, for a quick look
 //   … -- --parallel                                                                    every query at degree 1 and at one lane per processor
 //   … -- --degrees 1,2,4,8                                                             every query at each of these degrees
+//   … -- --matrix small                                                                the high-cardinality matrix of every A/B, at degrees 1 and N (HighCardinality.cs)
+//   … -- --matrix full                                                                 the full one, of the milestones, at degrees 1, 4 and N
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
@@ -27,7 +29,8 @@ using Vorticity.Benchmarks.Queries;
 int rounds = Option(args, "--rounds", 5);
 int large = Option(args, "--large", 16_000_000);
 bool check = args.Contains("--check");
-int[] degrees = Degrees(args);
+string? matrix = Text(args, "--matrix");
+int[] degrees = Degrees(args, matrix);
 string? tsv = Text(args, "--tsv");
 Switches.Switch? compared = Switches.Find(Text(args, "--switch"));
 
@@ -49,6 +52,15 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["names"] = () => Fixtures.NamesAsync(2_000_000),
     ["skewed"] = () => Fixtures.SkewedAsync(4_000_000),
     [$"skewed-{large}"] = () => Fixtures.SkewedAsync(large),
+    [$"spread-random-{HighCardinality.SmallRows}"] = () => Fixtures.RandomSpreadAsync(HighCardinality.SmallRows),
+    [$"spread-ordered-{HighCardinality.SmallRows}"] = () => Fixtures.OrderedSpreadAsync(HighCardinality.SmallRows),
+    [$"spread-strided-{HighCardinality.SmallRows}"] = () => Fixtures.StridedSpreadAsync(HighCardinality.SmallRows),
+    [$"spread-random-{HighCardinality.FullRows}"] = () => Fixtures.RandomSpreadAsync(HighCardinality.FullRows),
+    [$"spread-ordered-{HighCardinality.FullRows}"] = () => Fixtures.OrderedSpreadAsync(HighCardinality.FullRows),
+    [$"spread-strided-{HighCardinality.FullRows}"] = () => Fixtures.StridedSpreadAsync(HighCardinality.FullRows),
+    ["skews"] = () => Fixtures.SkewsAsync(8_000_000),
+    ["pages"] = () => Fixtures.PagesAsync(4_000_000),
+    ["visits"] = () => Fixtures.VisitsAsync(20_000_000),
     ["medium"] = () => Fixtures.MediumAsync(4_000_000),
     ["late"] = () => Fixtures.LateAsync(4_000_000),
     ["readings-1"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 1, deleted: false),
@@ -63,9 +75,9 @@ Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc M
 foreach (int degree in degrees)
 {
     await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
-    foreach ((string fileName, Scenario scenario) in Scenarios.All(large).Concat(EngineScenarios.All(large)))
+    foreach ((string fileName, Scenario scenario) in Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()))
     {
-        if (only.Length > 0 && !only.Any(word => scenario.Name.Contains(word, StringComparison.OrdinalIgnoreCase)))
+        if (!Selected(scenario, matrix, only))
         {
             continue;
         }
@@ -95,7 +107,7 @@ foreach (int degree in degrees)
     // The datasets: their directories written once as the files are, each opened by the session.
     foreach ((string datasetName, DatasetScenario scenario) in DatasetScenarios.All())
     {
-        if (only.Length > 0 && !only.Any(word => scenario.Name.Contains(word, StringComparison.OrdinalIgnoreCase)))
+        if (matrix is not null || (only.Length > 0 && !only.Any(word => scenario.Name.Contains(word, StringComparison.OrdinalIgnoreCase))))
         {
             continue;
         }
@@ -220,7 +232,7 @@ static void Record(string? path, string name, int degree, Measurement m)
         $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}\t{m.Gen2:F2}{engine}\n"));
 }
 
-static int[] Degrees(string[] args)
+static int[] Degrees(string[] args, string? matrix)
 {
     int at = Array.IndexOf(args, "--degrees");
     if (at >= 0 && at + 1 < args.Length)
@@ -228,5 +240,22 @@ static int[] Degrees(string[] args)
         return [.. args[at + 1].Split(',').Select(d => int.Parse(d, CultureInfo.InvariantCulture))];
     }
 
-    return args.Contains("--parallel") ? [1, Environment.ProcessorCount] : [1];
+    // The small matrix at one lane and one a processor; the full one at four lanes too.
+    return matrix switch
+    {
+        "small" => [1, Environment.ProcessorCount],
+        "full" => [1, 4, Environment.ProcessorCount],
+        _ => args.Contains("--parallel") ? [1, Environment.ProcessorCount] : [1],
+    };
 }
+
+// Whether a query is run: in the matrix asked for, if one is, and named by a word asked for, if any is.
+static bool Selected(Scenario scenario, string? matrix, string[] only) =>
+    matrix switch
+    {
+        "small" => scenario.Matrix == Matrix.Small,
+        "full" => scenario.Matrix != Matrix.None,
+        null => true,
+        _ => throw new ArgumentException($"No matrix named '{matrix}': small, full."),
+    }
+    && (only.Length == 0 || only.Any(word => scenario.Name.Contains(word, StringComparison.OrdinalIgnoreCase)));
