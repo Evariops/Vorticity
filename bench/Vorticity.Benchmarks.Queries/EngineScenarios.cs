@@ -47,6 +47,9 @@ internal static class EngineScenarios
 
         // 6d2: a hot key and a long tail, and keys each seen twenty times.
         yield return ("skewed", new Scenario("group by skewed key (one key 30 %, 1M rare), count sum", KeyedAsync, 100_000));
+
+        // The same key on a file of many chunks a lane: what the last ranges a queue hands out weigh.
+        yield return ($"skewed-{large}", new Scenario($"group by skewed key (one key 30 %, 1M rare), count sum, {large / 1_000_000}M", KeyedAsync, 100_000));
         yield return ("medium", new Scenario("group by medium key (200k keys x 20), count sum", KeyedAsync, 10_000));
         yield return ("late", new Scenario("group by nearly sorted key (1M keys, late by 2 500), count sum", (file, run) => LateKeysAsync(file, run, blocking: false), 100_000));
         yield return ("late", new Scenario("group by nearly sorted key (1M keys, late by 2 500), count sum, blocking", (file, run) => LateKeysAsync(file, run, blocking: true), 100_000));

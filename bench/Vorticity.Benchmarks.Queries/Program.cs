@@ -9,6 +9,8 @@
 //   … -- --parallel                                                                    every query at degree 1 and at one lane per processor
 //   … -- --degrees 1,2,4,8                                                             every query at each of these degrees
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
+//   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
+//   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -27,6 +29,14 @@ int large = Option(args, "--large", 16_000_000);
 bool check = args.Contains("--check");
 int[] degrees = Degrees(args);
 string? tsv = Text(args, "--tsv");
+Switches.Switch? compared = Switches.Find(Text(args, "--switch"));
+
+// One setting of the switch alone, A or B, for a profile of that side: the query measured once.
+if (compared is not null && Text(args, "--setting") is { } setting)
+{
+    Action<AggregationPlan> set = setting == "B" ? compared.SetB : compared.SetA;
+    compared = new Switches.Switch(setting == "B" ? compared.B : compared.A, set, setting == "B" ? compared.B : compared.A, set);
+}
 string[] only = [.. args.Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal) && (i == 0 || !args[i - 1].StartsWith("--", StringComparison.Ordinal) || args[i - 1] is "--check" or "--parallel"))];
 
 // Each file is written the first time a query asks for it, and kept.
@@ -38,6 +48,7 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["draws"] = () => Fixtures.DrawsAsync(2_000_000),
     ["names"] = () => Fixtures.NamesAsync(2_000_000),
     ["skewed"] = () => Fixtures.SkewedAsync(4_000_000),
+    [$"skewed-{large}"] = () => Fixtures.SkewedAsync(large),
     ["medium"] = () => Fixtures.MediumAsync(4_000_000),
     ["late"] = () => Fixtures.LateAsync(4_000_000),
     ["readings-1"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 1, deleted: false),
@@ -48,7 +59,7 @@ Dictionary<string, string> files = new Dictionary<string, string>(StringComparer
 
 Dictionary<string, Measurement> measured = new Dictionary<string, Measurement>(StringComparer.Ordinal);
 List<(string Key, Measurement Measurement)> engines = [];
-Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc MiB",10} {"live MiB",9} {"result",12}");
+Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc MiB",10} {"live MiB",9} {"gen2",5} {"result",12}");
 foreach (int degree in degrees)
 {
     await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
@@ -66,17 +77,19 @@ foreach (int degree in degrees)
         }
 
         await using VortexFile file = await session.OpenAsync(path).ConfigureAwait(false);
-        Measurement m = await Measure.RunAsync(run => scenario.Query(file, run), rounds, scenario.ProbeEvery).ConfigureAwait(false);
-        string key = degree == 1 ? scenario.Name : $"{scenario.Name}, degree {degree}";
-        measured[key] = m;
-        if (m.Engine is not null)
+        foreach ((string name, Measurement m, string versus) in await MeasuredAsync(run => scenario.Query(file, run), scenario.Name, scenario.ProbeEvery).ConfigureAwait(false))
         {
-            engines.Add((key, m));
-        }
+            string key = degree == 1 ? name : $"{name}, degree {degree}";
+            measured[key] = m;
+            if (m.Engine is not null)
+            {
+                engines.Add((key, m));
+            }
 
-        Console.WriteLine(
-            $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Result,12}");
-        Record(tsv, scenario.Name, degree, m);
+            Console.WriteLine(
+                $"{name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Gen2,5:F1} {m.Result,12}{versus}");
+            Record(tsv, name, degree, m);
+        }
     }
 
     // The datasets: their directories written once as the files are, each opened by the session.
@@ -110,7 +123,7 @@ foreach (int degree in degrees)
         }
 
         Console.WriteLine(
-            $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Result,12} {requests,9:F1} requests");
+            $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Gen2,5:F1} {m.Result,12} {requests,9:F1} requests");
         Record(tsv, scenario.Name, degree, m);
     }
 }
@@ -119,7 +132,7 @@ if (engines.Count > 0)
 {
     // What each lane did in the best round: the busiest against the mean, and the merge's share.
     Console.WriteLine();
-    Console.WriteLine($"{"engine",-74} {"lanes",5} {"max ms",8} {"mean ms",8} {"max/mean",8} {"merge ms",9} {"merge %",8} {"parts",5} {"groups",9}");
+    Console.WriteLine($"{"engine",-74} {"lanes",5} {"ranges",6} {"max ms",8} {"mean ms",8} {"max/mean",8} {"merge ms",9} {"merge %",8} {"parts",5} {"groups",9}");
     foreach ((string key, Measurement m) in engines)
     {
         AggregationRun run = m.Engine!;
@@ -128,7 +141,7 @@ if (engines.Count > 0)
         double merge = run.MergeTicks * 1_000.0 / Stopwatch.Frequency;
         long groups = run.Lanes.Sum(lane => (long)lane.Groups);
         Console.WriteLine(
-            $"{key,-74} {run.Lanes.Length,5} {max,8:F2} {mean,8:F2} {(mean > 0 ? max / mean : 0),8:F2} {merge,9:F2} {100 * merge / m.Millis,8:F1} {run.MergeParts,5} {groups,9}");
+            $"{key,-74} {run.Lanes.Length,5} {run.Lanes.Sum(lane => lane.Ranges),6} {max,8:F2} {mean,8:F2} {(mean > 0 ? max / mean : 0),8:F2} {merge,9:F2} {100 * merge / m.Millis,8:F1} {run.MergeParts,5} {groups,9}");
     }
 }
 
@@ -161,6 +174,22 @@ static int Option(string[] args, string name, int fallback)
         : fallback;
 }
 
+// A query measured, or under each setting of the switch compared, the second against the first.
+async Task<(string Name, Measurement M, string Versus)[]> MeasuredAsync(Func<Run, Task<long>> query, string name, int probeEvery)
+{
+    if (compared is null)
+    {
+        return [(name, await Measure.RunAsync(query, rounds, probeEvery).ConfigureAwait(false), string.Empty)];
+    }
+
+    (Measurement a, Measurement b) = await Measure.CompareAsync(query, rounds, probeEvery, compared.SetA, compared.SetB).ConfigureAwait(false);
+    return
+    [
+        ($"{name} [{compared.A}]", a, string.Empty),
+        ($"{name} [{compared.B}]", b, string.Create(CultureInfo.InvariantCulture, $"  x{b.Millis / a.Millis:F3}")),
+    ];
+}
+
 static string? Text(string[] args, string name)
 {
     int at = Array.IndexOf(args, name);
@@ -188,7 +217,7 @@ static void Record(string? path, string name, int degree, Measurement m)
 
     System.IO.File.AppendAllText(path, string.Create(
         CultureInfo.InvariantCulture,
-        $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}{engine}\n"));
+        $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}\t{m.Gen2:F2}{engine}\n"));
 }
 
 static int[] Degrees(string[] args)

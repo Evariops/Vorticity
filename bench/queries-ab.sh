@@ -110,18 +110,19 @@ awk -F '\t' '
         if (!(key in seen)) { seen[key] = 1; order[++n] = key }
         k = side SUBSEP key
         if (!(k in ms) || $3 + 0 < ms[k] + 0) {
-            ms[k] = $3; first[k] = $4; alloc[k] = $5; live[k] = $6
-            spread[k] = (NF >= 11 && $10 + 0 > 0) ? sprintf("%.2f", $9 / $10) : "-"
-            merge[k] = (NF >= 11) ? sprintf("%.2f", $11) : "-"
+            ms[k] = $3; first[k] = $4; alloc[k] = $5; live[k] = $6; gen2[k] = $8
+            spread[k] = (NF >= 12 && $11 + 0 > 0) ? sprintf("%.2f", $10 / $11) : "-"
+            busiest[k] = (NF >= 12) ? sprintf("%.2f", $10) : "-"
+            merge[k] = (NF >= 12) ? sprintf("%.2f", $12) : "-"
         }
         if (key in result && result[key] != $7) differs[key] = 1
         result[key] = $7
     }
     END {
-        printf "%-72s %9s %9s %7s %17s %17s %11s %13s\n", "query (degree)", "before", "after", "ratio", "first ms b/a", "live MiB b/a", "max/mean", "merge ms b/a"
+        printf "%-72s %9s %9s %7s %17s %17s %17s %11s %13s %11s %13s\n", "query (degree)", "before", "after", "ratio", "first ms b/a", "alloc MiB b/a", "live MiB b/a", "gen2 b/a", "lane ms b/a", "max/mean", "merge ms b/a"
         for (i = 1; i <= n; i++) {
             key = order[i]; b = "b" SUBSEP key; a = "a" SUBSEP key
             if (!(b in ms) || !(a in ms)) continue
-            printf "%-72s %9.2f %9.2f %7.3f %8.2f/%-8.2f %8.1f/%-8.1f %5s/%-5s %6s/%-6s%s\n", key, ms[b], ms[a], ms[a] / ms[b], first[b], first[a], live[b], live[a], spread[b], spread[a], merge[b], merge[a], (key in differs) ? "  RESULT DIFFERS" : ""
+            printf "%-72s %9.2f %9.2f %7.3f %8.2f/%-8.2f %8.1f/%-8.1f %8.1f/%-8.1f %5.1f/%-5.1f %6s/%-6s %5s/%-5s %6s/%-6s%s\n", key, ms[b], ms[a], ms[a] / ms[b], first[b], first[a], alloc[b], alloc[a], live[b], live[a], gen2[b], gen2[a], busiest[b], busiest[a], spread[b], spread[a], merge[b], merge[a], (key in differs) ? "  RESULT DIFFERS" : ""
         }
     }' "$out/before.tsv" "$out/after.tsv"
