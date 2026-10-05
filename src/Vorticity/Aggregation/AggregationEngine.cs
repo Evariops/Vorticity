@@ -110,6 +110,16 @@ internal sealed class AggregationPlan
     /// <summary>What the plan's last run did, lane by lane, and its merge; null before one.</summary>
     internal AggregationRun? LastRun { get; set; }
 
+    /// <summary>Called with the lanes' partitions once made, before the pass: what a test watches their tables by. Null but in tests.</summary>
+    internal Action<AggregationPartition[]>? Watch { get; set; }
+
+    /// <summary>
+    /// Whether the lanes' groups merge in parts (true) or in series (false), or as the merge weighs
+    /// them (null, the default): the switch the tests force each merge with, whichever lane the
+    /// queue gave most ranges.
+    /// </summary>
+    internal bool? MergeInParts { get; set; }
+
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
@@ -350,9 +360,29 @@ internal sealed class AggregationPartition
         }
     }
 
-    internal AggregateSlot[] Slots { get; }
+    internal AggregateSlot[] Slots { get; private set; }
 
-    internal GroupKeys? Keys { get; }
+    internal GroupKeys? Keys { get; private set; }
+
+    /// <summary>
+    /// Drops the partition's groups, its keys, states and scratch, once another holds them: a lane's
+    /// tables die with the merge, whatever still holds the partition. Frames of the pass do: a
+    /// blocking group by goes out in continuations of the lane or the merge worker that finished
+    /// last, on its stack, and the compiler clears an async method's hoisted locals as their scope
+    /// ends, never its parameters (the partitions of <c>MergeAsync</c>, <c>RunQueueAsync</c> and
+    /// <c>RunPartitionAsync</c>) nor what a lane's closure captured.
+    /// </summary>
+    internal void Release()
+    {
+        Keys = null;
+        Slots = [];
+        _rowGroups = [];
+        _narrowed = [];
+        _componentOf = [];
+        _componentRows = [];
+        _followMap = [];
+        _followComponents = [];
+    }
 
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
     internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source)
@@ -974,12 +1004,22 @@ internal static class AggregationEngine
                 partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top is { FirstMet: true } ? null : top };
             }
 
+            plan.Watch?.Invoke(partitions);
             await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
         }
 
         long merging = Stopwatch.GetTimestamp();
         (GroupKeys? keys, AggregateSlot[] slots, int parts) = await MergeAsync(partitions, plan, settled, inputs, degree, source, cancellationToken).ConfigureAwait(false);
         plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts);
+
+        // The lanes' tables die with the merge, but the one a merge in series kept as the result.
+        foreach (AggregationPartition partition in partitions)
+        {
+            if (!ReferenceEquals(partition.Slots, slots))
+            {
+                partition.Release();
+            }
+        }
 
         // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
         int[] order = keys is null ? [0] : keys.Order(sorted: false);
@@ -1022,7 +1062,8 @@ internal static class AggregationEngine
         }
 
         long serial = entries - (biggest.Keys?.Count ?? 0);
-        if (partitions.Length == 1 || parts == 1 || 2 * entries >= Math.Min(degree, parts) * serial)
+        bool inParts = plan.MergeInParts ?? (parts > 1 && 2 * entries < Math.Min(degree, parts) * serial);
+        if (partitions.Length == 1 || biggest.Keys is null || !inParts)
         {
             for (int p = 0; p < partitions.Length; p++)
             {
@@ -1035,6 +1076,7 @@ internal static class AggregationEngine
             return (biggest.Keys, biggest.Slots, partitions.Length - 1);
         }
 
+        parts = Math.Max(parts, 2);
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
         GroupKeys[] keysOf = new GroupKeys[partitions.Length];
