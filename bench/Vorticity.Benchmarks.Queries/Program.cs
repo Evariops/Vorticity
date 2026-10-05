@@ -8,6 +8,7 @@
 //   … -- --large 4000000                                                               a smaller "large" file, for a quick look
 //   … -- --parallel                                                                    every query at degree 1 and at one lane per processor
 //   … -- --degrees 1,2,4,8                                                             every query at each of these degrees
+//   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -25,6 +26,7 @@ int rounds = Option(args, "--rounds", 5);
 int large = Option(args, "--large", 16_000_000);
 bool check = args.Contains("--check");
 int[] degrees = Degrees(args);
+string? tsv = Text(args, "--tsv");
 string[] only = [.. args.Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal) && (i == 0 || !args[i - 1].StartsWith("--", StringComparison.Ordinal) || args[i - 1] is "--check" or "--parallel"))];
 
 // Each file is written the first time a query asks for it, and kept.
@@ -74,6 +76,7 @@ foreach (int degree in degrees)
 
         Console.WriteLine(
             $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Result,12}");
+        Record(tsv, scenario.Name, degree, m);
     }
 
     // The datasets: their directories written once as the files are, each opened by the session.
@@ -108,6 +111,7 @@ foreach (int degree in degrees)
 
         Console.WriteLine(
             $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Result,12} {requests,9:F1} requests");
+        Record(tsv, scenario.Name, degree, m);
     }
 }
 
@@ -155,6 +159,36 @@ static int Option(string[] args, string name, int fallback)
     return at >= 0 && at + 1 < args.Length && int.TryParse(args[at + 1], CultureInfo.InvariantCulture, out int value) && value > 0
         ? value
         : fallback;
+}
+
+static string? Text(string[] args, string name)
+{
+    int at = Array.IndexOf(args, name);
+    return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+}
+
+// A measure as one line of tab-separated fields, appended: the query, its degree, its times, bytes and
+// result, then its lanes when it tracks its aggregation (their count, the busiest, the mean, the merge
+// and its parts), or nothing.
+static void Record(string? path, string name, int degree, Measurement m)
+{
+    if (path is null)
+    {
+        return;
+    }
+
+    string engine = string.Empty;
+    if (m.Engine is { } run)
+    {
+        double max = run.Lanes.Max(lane => lane.ActiveTicks) * 1_000.0 / Stopwatch.Frequency;
+        double mean = run.Lanes.Average(lane => lane.ActiveTicks) * 1_000.0 / Stopwatch.Frequency;
+        double merge = run.MergeTicks * 1_000.0 / Stopwatch.Frequency;
+        engine = string.Create(CultureInfo.InvariantCulture, $"\t{run.Lanes.Length}\t{max:F3}\t{mean:F3}\t{merge:F3}\t{run.MergeParts}");
+    }
+
+    System.IO.File.AppendAllText(path, string.Create(
+        CultureInfo.InvariantCulture,
+        $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}{engine}\n"));
 }
 
 static int[] Degrees(string[] args)
