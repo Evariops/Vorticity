@@ -75,7 +75,7 @@ Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc M
 foreach (int degree in degrees)
 {
     await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
-    foreach ((string fileName, Scenario scenario) in Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()))
+    foreach ((string fileName, Scenario scenario) in Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()).Concat(HandKernels.All()))
     {
         if (!Selected(scenario, matrix, only))
         {
