@@ -120,6 +120,9 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool? MergeInParts { get; set; }
 
+    /// <summary>The parts a merge in parts cuts the key space into, a power of two up to 256, or null for the merge's own count: the switch the bench sweeps them with.</summary>
+    internal int? MergeParts { get; set; }
+
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
@@ -1036,8 +1039,8 @@ internal static class AggregationEngine
     /// The partitions' groups merged into one outcome. With few groups, in series, into the partition
     /// that holds the most, whose cells stay where they are. With many, the key space cut into parts
     /// by the top bits of a hash of the keys seeded for the merge, a power of two of them, at most
-    /// twice the degree: each part merged from every partition by a task the merge's workers take
-    /// from a queue, and the parts read as one, without a copy.
+    /// twice the degree (<see cref="Parts"/>): each part merged from every partition by a task the
+    /// merge's workers take from a queue, and the parts read as one, without a copy.
     /// </summary>
     /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series.</returns>
     private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts)> MergeAsync(
@@ -1054,7 +1057,7 @@ internal static class AggregationEngine
         // share of that is below the entries the series would merge into the largest. Measured, two
         // lanes merge faster in series, eight in parts, four about alike.
         AggregationPartition biggest = partitions[largest];
-        int parts = biggest.Keys is null ? 1 : Parts(degree, biggest.Keys.Count);
+        int parts = biggest.Keys is null ? 1 : plan.MergeParts ?? Parts(degree, biggest.Keys.Count);
         long entries = 0;
         foreach (AggregationPartition partition in partitions)
         {
@@ -1188,6 +1191,12 @@ internal static class AggregationEngine
     }
 
     /// <summary>The parts a merge cuts its keys into: a power of two, at most twice the degree, and a part of <see cref="PartGroups"/> groups of the largest partition at least.</summary>
+    /// <remarks>
+    /// A part gathers its entries from every partition, every <c>parts</c>-th group of each in
+    /// effect: past a stride the prefetchers follow, each entry costs a miss of its own. Measured at
+    /// fourteen lanes, 32, 64, 128 and 256 parts each merged slower than 16, by 10 to 250 %, though
+    /// they balance the workers and fit a part's table in a core's private cache.
+    /// </remarks>
     private static int Parts(int degree, int largest)
     {
         int most = Math.Min(MostParts, Math.Min(2 * degree, largest / PartGroups));

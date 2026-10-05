@@ -17,6 +17,17 @@ internal static class Switches
     {
         null => null,
         "merge" => new Switch("in series", plan => plan.MergeInParts = false, "in parts", plan => plan.MergeInParts = true),
-        _ => throw new ArgumentException($"No switch named '{name}': merge."),
+        _ when name.StartsWith("parts:", StringComparison.Ordinal) => Parts(name),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B."),
     };
+
+    /// <summary><c>parts:A:B</c>, a merge in A parts against one in B, either of them <c>auto</c> for the merge's own count.</summary>
+    private static Switch Parts(string name)
+    {
+        string[] counts = name.Split(':');
+        return new Switch($"{counts[1]} parts", Set(counts[1]), $"{counts[2]} parts", Set(counts[2]));
+
+        static Action<AggregationPlan> Set(string count) =>
+            count == "auto" ? static _ => { } : plan => plan.MergeParts = int.Parse(count, System.Globalization.CultureInfo.InvariantCulture);
+    }
 }
