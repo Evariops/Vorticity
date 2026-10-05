@@ -1463,16 +1463,32 @@ internal static class AggregationEngine
         spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : source.Session.Options.MaxDegreeOfParallelism;
 
     /// <summary>
-    /// The ranges of rows a queue hands its lanes: about <see cref="RangesPerLane"/> a lane, of as
-    /// many live rows each, cut at the plan's boundaries, a dead block joining the range before it;
-    /// null when the pass runs as one range: a degree of one, a take by position, a source that is
-    /// not a file, or live rows too few for two ranges of a block each.
+    /// The ranges of rows a queue hands its lanes, the largest first: a quarter of a lane's share of
+    /// the live rows each, then, once half of them are handed out, a share of what is left that
+    /// shrinks down to a block, each cut at the plan's boundaries, a dead block joining the range
+    /// before it. Null when the pass runs as one range: a degree of one, a take by position, a
+    /// source that is not a file, or live rows too few for two blocks.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// Lanes do not all go at one pace: one runs on a slower core, waits on its reads, or shares its
+    /// core with another process. Whatever the cause, the queue does not ask: each range is at most
+    /// a share of what is left of the rows (<see cref="ShrinkingShares"/>), so the lane that takes
+    /// the last ones finishes soon after the others, down to a lane half as fast as the mean.
+    /// </para>
+    /// <para>
+    /// A range ends where a chunk does, so that no chunk is read twice, and the last ranges shrink
+    /// down to a chunk. Cut at a block's end instead, a file read in place balanced its lanes to
+    /// within 2 to 15 %, but each range a lane took cost it 0.1 to 0.6 ms more than its rows at
+    /// fourteen lanes, for reasons not isolated: no faster on a group by of a million keys, slower
+    /// by up to a fifth at a thousand.
+    /// </para>
+    /// <para>
     /// The live rows are the mask's when the pass has one, so that a filter keeping a few contiguous
     /// blocks shares them among the lanes rather than leaving them to the one whose rows hold them.
+    /// </para>
     /// </remarks>
-    private static RowRange[]? Ranges(ScanSource source, ScanSpec spec, int degree)
+    internal static RowRange[]? Ranges(ScanSource source, ScanSpec spec, int degree)
     {
         if (degree <= 1 || spec.Take is not null || spec.MatchesNothing || source is not FileScanSource file)
         {
@@ -1492,13 +1508,14 @@ internal static class AggregationEngine
         SplitPlan plan = SplitPlan.Compute(tree, rows, in mask, blockRows);
         BlockMask? live = spec.Pruned ? spec.Live : null;
         long alive = Live(live, rows);
-        long count = Math.Min(degree * (long)RangesPerLane, alive / blockRows);
-        if (count < 2)
+        if (alive < 2 * blockRows)
         {
             return null;
         }
 
-        long share = alive / count;
+        long first = Math.Max(blockRows, alive / (degree * (long)RangesPerLane));
+        long left = alive;
+        long target = ShrinkingShares(first, left, degree, blockRows);
         List<RowRange> parts = [];
         long start = rows.Start;
         long held = 0;
@@ -1513,9 +1530,11 @@ internal static class AggregationEngine
 
             held += Live(live, new RowRange(previous, at));
             previous = at;
-            if (held >= share && parts.Count < count - 1)
+            if (held >= target)
             {
                 parts.Add(new RowRange(start, at));
+                left -= held;
+                target = ShrinkingShares(first, left, degree, blockRows);
                 start = at;
                 held = 0;
             }
@@ -1525,8 +1544,18 @@ internal static class AggregationEngine
         return parts.Count > 1 ? [.. parts] : null;
     }
 
-    /// <summary>The ranges a queue holds per lane: enough for a lane on a slow core to leave its last one to the others.</summary>
+    /// <summary>The ranges a queue holds per lane at first, before they shrink: a quarter of a lane's share each.</summary>
     private const int RangesPerLane = 4;
+
+    /// <summary>
+    /// The live rows of the next range: <paramref name="first"/>, until what is left is half of the
+    /// rows; then a share of what is left, <paramref name="left"/> over twice the degree, down to a
+    /// block. A lane that takes a range when <paramref name="left"/> rows remain then finishes it
+    /// no later than the others finish theirs and the rest, as long as it goes at least half as fast
+    /// as the mean lane: guided self-scheduling, halved.
+    /// </summary>
+    private static long ShrinkingShares(long first, long left, int degree, long blockRows) =>
+        Math.Max(blockRows, Math.Min(first, left / (2L * degree)));
 
     /// <summary>The live rows of <paramref name="rows"/>: every one without a mask.</summary>
     private static long Live(BlockMask? live, RowRange rows)
