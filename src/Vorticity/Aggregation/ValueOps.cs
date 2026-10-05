@@ -35,6 +35,10 @@ internal interface IValueOp<TValue, TState>
     /// <c>i % 64</c> of word <c>i / 64</c> is set.
     /// </summary>
     static abstract void AddWords(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words);
+
+    /// <summary>The mean a sum's state holds, its total over its count, for a mean that shares the sum's slot; null with no value.</summary>
+    /// <exception cref="NotSupportedException">The state is not a sum's.</exception>
+    static virtual double? Mean(in TState state) => throw new NotSupportedException($"{typeof(TState).Name} holds no mean.");
 }
 
 /// <summary>A running sum at the widened type, and how many values it holds.</summary>
@@ -85,6 +89,8 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         into.Count += other.Count;
     }
 
+    public static double? Mean(in SumState<Int128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
     [SkipLocalsInit]
     public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
@@ -92,6 +98,96 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         selected = selected[..block.Length];
         WordFold.Select(block, words, TValue.Zero, selected);
         state.Sum += SumKernels.Signed(selected);
+        state.Count += WordFold.Count(words);
+    }
+}
+
+/// <summary>
+/// A sum of signed integers in 64 bits, for a column whose statistics prove its rows times its
+/// largest magnitude stay below 2^63: no sum of any of its rows can then overflow, in any order.
+/// Half the state of <see cref="SignedSum{TValue}"/>, and an add a row.
+/// </summary>
+internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<long>>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public static SumState<long> Seed() => default;
+
+    public static void Add(ref SumState<long> state, TValue value)
+    {
+        state.Sum += long.CreateTruncating(value);
+        state.Count++;
+    }
+
+    public static void AddWeighted(ref SumState<long> state, TValue value, long count)
+    {
+        state.Sum += long.CreateTruncating(value) * count;
+        state.Count += count;
+    }
+
+    public static void AddSpan(ref SumState<long> state, ReadOnlySpan<TValue> values)
+    {
+        state.Sum += (long)SumKernels.Signed(values);
+        state.Count += values.Length;
+    }
+
+    public static void Merge(ref SumState<long> into, in SumState<long> other)
+    {
+        into.Sum += other.Sum;
+        into.Count += other.Count;
+    }
+
+    public static double? Mean(in SumState<long> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
+    [SkipLocalsInit]
+    public static void AddWords(ref SumState<long> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state.Sum += (long)SumKernels.Signed(selected);
+        state.Count += WordFold.Count(words);
+    }
+}
+
+/// <summary>A sum of unsigned integers in 64 bits, for a column whose statistics prove its rows times its largest value stay below 2^64.</summary>
+internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<ulong>>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public static SumState<ulong> Seed() => default;
+
+    public static void Add(ref SumState<ulong> state, TValue value)
+    {
+        state.Sum += ulong.CreateTruncating(value);
+        state.Count++;
+    }
+
+    public static void AddWeighted(ref SumState<ulong> state, TValue value, long count)
+    {
+        state.Sum += ulong.CreateTruncating(value) * (ulong)count;
+        state.Count += count;
+    }
+
+    public static void AddSpan(ref SumState<ulong> state, ReadOnlySpan<TValue> values)
+    {
+        state.Sum += (ulong)SumKernels.Unsigned(values);
+        state.Count += values.Length;
+    }
+
+    public static void Merge(ref SumState<ulong> into, in SumState<ulong> other)
+    {
+        into.Sum += other.Sum;
+        into.Count += other.Count;
+    }
+
+    public static double? Mean(in SumState<ulong> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
+    [SkipLocalsInit]
+    public static void AddWords(ref SumState<ulong> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state.Sum += (ulong)SumKernels.Unsigned(selected);
         state.Count += WordFold.Count(words);
     }
 }
@@ -126,6 +222,8 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
         into.Count += other.Count;
     }
 
+    public static double? Mean(in SumState<UInt128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+
     [SkipLocalsInit]
     public static void AddWords(ref SumState<UInt128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
@@ -134,60 +232,6 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
         WordFold.Select(block, words, TValue.Zero, selected);
         state.Sum += SumKernels.Unsigned(selected);
         state.Count += WordFold.Count(words);
-    }
-}
-
-/// <summary>A sum of floating-point values in a double, NaN skipped.</summary>
-internal readonly struct FloatSum<TValue> : IValueOp<TValue, SumState<double>>
-    where TValue : unmanaged, INumberBase<TValue>
-{
-    public static SumState<double> Seed() => default;
-
-    public static void Add(ref SumState<double> state, TValue value)
-    {
-        double widened = double.CreateTruncating(value);
-        if (!double.IsNaN(widened))
-        {
-            state.Sum += widened;
-            state.Count++;
-        }
-    }
-
-    public static void AddWeighted(ref SumState<double> state, TValue value, long count)
-    {
-        double widened = double.CreateTruncating(value);
-        if (!double.IsNaN(widened))
-        {
-            state.Sum += widened * count;
-            state.Count += count;
-        }
-    }
-
-    public static void AddSpan(ref SumState<double> state, ReadOnlySpan<TValue> values)
-    {
-        state.Sum += SumKernels.Float(values, out long counted);
-        state.Count += counted;
-    }
-
-    public static void Merge(ref SumState<double> into, in SumState<double> other)
-    {
-        into.Sum += other.Sum;
-        into.Count += other.Count;
-    }
-
-    /// <remarks>
-    /// The rows left out read as zero, which adds nothing, and the NaN the kernel skips among the
-    /// run are all rows kept: zero is not NaN. A NaN would do as well for the sum, but a sum with a
-    /// NaN in it is the kernel's slow path.
-    /// </remarks>
-    [SkipLocalsInit]
-    public static void AddWords(ref SumState<double> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
-    {
-        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
-        selected = selected[..block.Length];
-        WordFold.Select(block, words, TValue.Zero, selected);
-        state.Sum += SumKernels.Float<TValue>(selected, out long counted);
-        state.Count += WordFold.Count(words) - (selected.Length - counted);
     }
 }
 

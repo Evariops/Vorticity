@@ -4,11 +4,16 @@ namespace Vorticity;
 
 public sealed partial class Scan<TRecord>
 {
-    /// <summary>A cursor over the keys of <paramref name="column"/>, in the file's key order.</summary>
+    /// <summary>
+    /// A cursor over the keys of <paramref name="column"/>, in key order: a file's sorted column or
+    /// index, or a result's values, read whole when the cursor opens and sorted in memory unless
+    /// they arrive in order.
+    /// </summary>
     /// <typeparam name="TKey">The key column's type, inferred from the member.</typeparam>
     /// <param name="column">The key column.</param>
     /// <returns>The cursor's builder.</returns>
     /// <exception cref="InvalidOperationException">The scan has a filter or selects rows: a cursor walks the whole column.</exception>
+    /// <exception cref="ArgumentException">The column is a function of one, which has no key source.</exception>
     public KeyCursorBuilder<TKey> Keys<TKey>(Func<Probe<TRecord>, Sym<TKey>> column)
     {
         ArgumentNullException.ThrowIfNull(column);
@@ -18,6 +23,11 @@ public sealed partial class Scan<TRecord>
         }
 
         ColumnSym key = column(new Probe<TRecord>(Binding)).Column;
+        if (key.Field is Compute.FunctionFieldExpr)
+        {
+            throw new ArgumentException($"'{key.Field.Key}' is a function of a column, which has no key source of its own.", nameof(column));
+        }
+
         return new KeyCursorBuilder<TKey>(Source, key, _options.UseIndexes);
     }
 }

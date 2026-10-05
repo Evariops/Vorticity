@@ -15,9 +15,9 @@ internal static class Aggregates
         await BestOfThreeAsync("AggAsync, four answers", async () =>
         {
             Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
-            (double? min, double? max, long n, long cities) = await recent
-                .AggAsync(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
-            return $"min {min}, max {max}, {n} rows, {cities} cities; {recent.Statistics.BlocksDecoded} blocks decoded";
+            Summary s = await recent
+                .AggAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+            return $"min {s.Min}, max {s.Max}, {s.Rows} rows, {s.Cities} cities; {recent.Statistics.BlocksDecoded} blocks decoded";
         });
 
         string[] lines = [];
@@ -25,12 +25,61 @@ internal static class Aggregates
         {
             lines = new string[Demo.Cities.Length];
             int line = 0;
-            Aggregation<(string, double?, WelfordState)> byCity = file.Scan<Reading>()
+            Scan<CitySpread> byCity = file.Scan<Reading>()
                 .GroupBy(r => r.City)
-                .AggAsync(g => (g.Key, g.Avg(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
-            await foreach ((string city, double? mean, WelfordState state) in byCity)
+                .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+                .As<CitySpread>();
+            await foreach (CitySpread city in byCity.ToRecordsAsync())
             {
-                lines[line++] = $"  {city,-10} mean {mean:F4}  variance {state.Variance:F4}";
+                lines[line++] = $"  {city.City,-10} mean {city.Mean:F4}  variance {city.State.Variance:F4}";
+            }
+
+            return $"{line} groups";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
+        await BestOfThreeAsync("GroupBy(City), filtered", async () =>
+        {
+            lines = new string[Demo.Cities.Length];
+            int line = 0;
+            await foreach (CityHeat city in file.Scan<Reading>()
+                .GroupBy(r => r.City)
+                .Select(g => (
+                    g.Key,
+                    g.Count(),
+                    g.Count(r => r.Celsius > 45.0),
+                    g.Where(r => r.Celsius > 45.0).Average(r => r.Celsius),
+                    g.Any(r => r.Celsius >= 49.9),
+                    g.All(r => r.Celsius >= 10.0)))
+                .As<CityHeat>()
+                .ToRecordsAsync())
+            {
+                lines[line++] = $"  {city.City,-10} {city.Hot} of {city.Rows} above 45, mean {city.HotMean:F2}, any at 49.9 {city.AnyTop}, all at 10 or more {city.AllWarm}";
+            }
+
+            return $"{line} groups";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
+        await BestOfThreeAsync("GroupBy(City), chosen rows", async () =>
+        {
+            lines = new string[Demo.Cities.Length];
+            int line = 0;
+            await foreach (CityHottest city in file.Scan<Reading>()
+                .GroupBy(r => r.City)
+                .Select(g => (g.Key, g.First().Celsius, g.Max(r => r.Celsius), g.MaxBy(r => r.Celsius).Day, g.Last().Celsius))
+                .As<CityHottest>()
+                .ToRecordsAsync())
+            {
+                lines[line++] = $"  {city.City,-10} first {city.First}, hottest {city.Hottest} on day {city.HottestDay}, last {city.Last}";
             }
 
             return $"{line} groups";
@@ -77,16 +126,68 @@ internal static class Aggregates
             return Describe(await scan.AggregateAsync<double, Welford<double>, WelfordState>(r => r.Celsius), scan);
         });
 
+        // An int column sums as a long, which nothing on the way overflows; a long column sums as
+        // itself, and throws when the exact total does not fit one.
         string visits = await Demo.VisitsAsync();
         await using VortexFile visitFile = await VortexFile.OpenAsync(visits);
-        try
+        long total = await visitFile.Scan<Visit>().SumAsync(v => v.DurationMs);
+        Console.WriteLine($"SumAsync(v => v.DurationMs), an int column: {total} as a long");
+
+        // A day of visits, hour by hour on Paris's calendar: the day's filter is the range of
+        // instants it stands for, and the hours of sorted instants stream.
+        TimeZoneInfo paris = TimeZoneInfo.FindSystemTimeZoneById("Europe/Paris");
+        DateTime second = new DateTime(2026, 9, 2, 0, 0, 0, DateTimeKind.Utc);
+        await BestOfThreeAsync("GroupBy(StartedAt, by hour)", async () =>
         {
-            int total = await visitFile.Scan<Visit>().SumAsync(v => v.DurationMs);
-            Console.WriteLine($"sum of DurationMs: {total}");
+            lines = new string[3];
+            int hours = 0;
+            Scan<Visit> day = visitFile.Scan<Visit>().Where(v => v.StartedAt.Truncate(CalendarUnit.Day) == second);
+            await foreach (VisitHour hour in day
+                .GroupBy(v => v.StartedAt.Truncate(CalendarUnit.Hour, paris))
+                .Select(g => (g.Key, g.Count(), g.Average(v => v.DurationMs)))
+                .As<VisitHour>()
+                .ToRecordsAsync())
+            {
+                if (hours < lines.Length)
+                {
+                    lines[hours] = $"  {TimeZoneInfo.ConvertTimeFromUtc(hour.Hour, paris):yyyy-MM-dd HH:mm} Paris  {hour.Visits} visits, mean {hour.MeanMs:F0} ms";
+                }
+
+                hours++;
+            }
+
+            return $"{hours} hours; {day.Statistics.BlocksDecoded} blocks decoded";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
         }
-        catch (OverflowException error)
+
+        await BestOfThreeAsync("GroupBy(DurationMs, buckets)", async () =>
         {
-            Console.WriteLine($"SumAsync(v => v.DurationMs): {error.GetType().Name}: {error.Message}");
+            lines = new string[6];
+            int bucket = 0;
+            await foreach ((int from, long count) in visitFile.Scan<Visit>()
+                .GroupBy(v => v.DurationMs.Bucket(15_000))
+                .Select(g => (g.Key, g.Count()))
+                .As<DurationBucket>()
+                .ToRecordsAsync())
+            {
+                if (bucket < lines.Length)
+                {
+                    lines[bucket] = $"  from {from,6} ms  {count} visits";
+                }
+
+                bucket++;
+            }
+
+            return $"{bucket} buckets";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
         }
     }
 
@@ -99,7 +200,9 @@ internal static class Aggregates
         (string City, int Day, double Variance) widest = default;
         await foreach (var (city, day, total, state) in file.Scan<Reading>()
             .GroupBy(r => (r.City, r.Day))
-            .AggAsync(g => (g.Key.Item1, g.Key.Item2, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+            .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+            .As<CityDaySpread>()
+            .ToRecordsAsync())
         {
             groups++;
             if (state.Variance > widest.Variance && total > 0)
@@ -214,13 +317,15 @@ public readonly struct CanonicalWelford<T> : IAggregator<T, WelfordState>
     public static void Merge(ref WelfordState into, in WelfordState other) => Welford<T>.Merge(ref into, in other);
 }
 
-/// <summary>What the fold keeps: the count, the mean and the sum of squared deviations.</summary>
-public struct WelfordState
+/// <summary>What the fold keeps: the count, the mean and the sum of squared deviations; a record, so that a result holds it as a column of three.</summary>
+[VortexRecord]
+public partial struct WelfordState
 {
     public long Count;
     public double Mean;
     public double M2;
 
+    [VortexIgnore]
     public readonly double Variance => Count > 1 ? M2 / (Count - 1) : double.NaN;
 
     public void Add(double value, long weight)
@@ -237,3 +342,31 @@ public struct WelfordState
         Count = count;
     }
 }
+
+/// <summary>The answers of one pass over the scan.</summary>
+[VortexRecord]
+public partial record struct Summary(double? Min, double? Max, long Rows, long Cities);
+
+/// <summary>A city's mean and the state of its variance.</summary>
+[VortexRecord]
+public partial record struct CitySpread(string City, double? Mean, WelfordState State);
+
+/// <summary>A city's day: its total and the state of its variance.</summary>
+[VortexRecord]
+public partial record struct CityDaySpread(string City, int Day, double Total, WelfordState State);
+
+/// <summary>A city's first reading, its hottest and the day of it, and its last.</summary>
+[VortexRecord]
+public partial record struct CityHottest(string City, double? First, double? Hottest, int? HottestDay, double? Last);
+
+/// <summary>A city's readings, the hot ones and their mean, and two questions about all of them.</summary>
+[VortexRecord]
+public partial record struct CityHeat(string City, long Rows, long Hot, double? HotMean, bool AnyTop, bool AllWarm);
+
+/// <summary>An hour of visits: its start, how many began in it, and their mean duration.</summary>
+[VortexRecord]
+public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanMs);
+
+/// <summary>A bucket of durations, from its lower end: how many visits fell in it.</summary>
+[VortexRecord]
+public partial record struct DurationBucket(int From, long Visits);

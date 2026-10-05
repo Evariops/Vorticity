@@ -84,7 +84,7 @@ internal enum ComparisonOp : byte
 }
 
 /// <summary>A column reference, by dotted path.</summary>
-internal sealed class FieldExpr : VortexExpr
+internal class FieldExpr : VortexExpr
 {
     // An empty segment is the schema's business, not this constructor's: a field name may be
     // empty, so nothing is refused here and a path that names nothing fails at the scan, which
@@ -141,6 +141,9 @@ internal sealed class FieldExpr : VortexExpr
 
     /// <summary>The dotted path, e.g. <c>payload.size</c>.</summary>
     public string Path { get; }
+
+    /// <summary>What makes two references one value: the path, and the function a value expression applies to it.</summary>
+    internal virtual string Key => Path;
 
     /// <summary>The path's segments as UTF-8, encoded once at construction.</summary>
     internal byte[][] SegmentsUtf8 { get; }

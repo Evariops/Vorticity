@@ -99,9 +99,10 @@ batch with `dict.Values.GetString(code)`.
 ## And why you rarely write it
 
 ```csharp
-Aggregation<(string, double)> byCity = file.Scan<Reading>()
+Scan<CityTotal> byCity = file.Scan<Reading>()
     .GroupBy(r => r.City)
-    .AggAsync(g => (g.Key, g.Sum(r => r.Celsius)));
+    .Select(g => (g.Key, g.Sum(r => r.Celsius)))
+    .As<CityTotal>();
 ```
 
 The group by does the dictionary case by code, the run-end case by run and the canonical case by

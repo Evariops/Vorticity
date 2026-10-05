@@ -45,6 +45,7 @@ and never repeats it.
 | [encoded-forms.md](encoded-forms.md) | a dictionary or run-end column read as it is stored, grouped by code or by run with nothing decoded |
 | [selection.md](selection.md) | a filtered block delivered whole with the rows that passed, instead of a copy of them |
 | [aggregates.md](aggregates.md) | several answers in one pass, a group by, and an aggregator of your own |
+| [queries.md](queries.md) | a group by as a query or a chain, its groups filtered, ordered and cut, and the groups that go out as they close |
 
 ## Going further on reading
 

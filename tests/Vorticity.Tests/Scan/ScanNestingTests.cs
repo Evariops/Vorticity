@@ -40,7 +40,7 @@ public sealed class ScanNestingTests
             path.Append("inner");
         }
 
-        Projection projection = Projection.Parse(current, [path.ToString()]);
+        ScanProjection projection = ScanProjection.Parse(current, [path.ToString()]);
         Assert.Equal(1, projection.LeafCount);
 
         DType projected = projection.ProjectedSchema(current, new DTypeArena());
@@ -70,7 +70,7 @@ public sealed class ScanNestingTests
             path.Append(".a");
         }
 
-        Assert.Throws<ArgumentException>(() => Projection.Parse(root, [path.ToString()]));
+        Assert.Throws<ArgumentException>(() => ScanProjection.Parse(root, [path.ToString()]));
     }
 
     [Theory]

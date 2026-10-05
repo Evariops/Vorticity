@@ -135,7 +135,7 @@ internal sealed class ScanBuilder
     {
         for (int i = 0; i < paths.Length; i++)
         {
-            Projection.IncludePath(_file.DType, paths[i], Fields(), nameof(paths));
+            ScanProjection.IncludePath(_file.DType, paths[i], Fields(), nameof(paths));
         }
 
         return this;
@@ -263,6 +263,7 @@ internal sealed class ScanBuilder
     public ScanBuilder Where(VortexExpr filter)
     {
         ArgumentNullException.ThrowIfNull(filter);
+        filter = Compute.FunctionFieldExpr.Ranges(filter);
 
         List<FieldExpr> paths = [];
         FieldsOf(filter, paths);
@@ -272,7 +273,7 @@ internal sealed class ScanBuilder
         FieldMaskBuilder probe = new FieldMaskBuilder();
         for (int i = 0; i < paths.Count; i++)
         {
-            Projection.IncludeField(_file.DType, paths[i], probe, nameof(filter));
+            ScanProjection.IncludeField(_file.DType, paths[i], probe, nameof(filter));
         }
 
         // Same place, same reason, for the constants: a comparison the schema cannot make yields
@@ -545,11 +546,11 @@ internal sealed class ScanBuilder
         // Parsed at most once per open file rather than once per scan: the tree is a function of
         // the file's bytes and nothing else.
         LayoutTree tree = _file.LayoutTree;
-        Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
+        ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
 
         // Filter first, projection second: the scan reads the union so the filter has its columns,
         // and the enumerator trims back down to `keep` once the filter has decided.
-        Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
+        ScanProjection read = _filter is null ? keep : Union(keep, _filterPaths!);
         (RowRange rows, long natural, long cap) = Frame(tree);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
@@ -580,9 +581,21 @@ internal sealed class ScanBuilder
         // The wrapper exists for the filter's own two jobs -- prune before reading, skip emptied
         // batches after -- and a take needs the second of them too: a split whose wanted rows are
         // all it holds still produces a batch, but one gathered down to nothing must not.
-        return _filter is null && _take is null
-            ? batches
-            : new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+        if (_filter is null && _take is null)
+        {
+            // A mask with no filter is an aggregation's: the blocks its zone maps answered, which
+            // no split reads.
+            return _pruned && _live is not null ? new LiveBatches(batches, _live) : batches;
+        }
+
+        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+    }
+
+    /// <summary>The batches of an unfiltered scan that reads only the splits a mask keeps.</summary>
+    private sealed class LiveBatches(BatchAsyncEnumerable batches, BlockMask live) : IAsyncEnumerable<RecordBatch>
+    {
+        public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
+            batches.GetAsyncEnumerator(live, cancellationToken);
     }
 
     /// <summary>Hands the scan a sink it adds its counters to as it runs.</summary>
@@ -621,8 +634,8 @@ internal sealed class ScanBuilder
         System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
-        Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
-        Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
+        ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
+        ScanProjection read = _filter is null ? keep : Union(keep, _filterPaths!);
         (RowRange rows, long natural, long cap) = Frame(tree);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
@@ -820,6 +833,7 @@ internal sealed class ScanBuilder
     {
         Compute.ZonePruner? zones = pruning.Zones;
         if (_orderPath is not null || !_compact || !_prune || _filter is null || _take is not null || pruning.Located
+            || !Keys.ExactCover.MayExist(_file, _filter, _indexes)
             || !FilteredBatches.MayFitBatch(plan, natural, zones, pruning.Live))
         {
             return (null, null, null);
@@ -1024,7 +1038,7 @@ internal sealed class ScanBuilder
     private string Resolved(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        Projection.IncludePath(_file.DType, path, new FieldMaskBuilder(), nameof(path));
+        ScanProjection.IncludePath(_file.DType, path, new FieldMaskBuilder(), nameof(path));
         return path;
     }
 
@@ -1083,8 +1097,8 @@ internal sealed class ScanBuilder
     private TerminalScan Terminal(string? extraPath = null, IRowExclusion? excluded = null)
     {
         LayoutTree tree = _file.LayoutTree;
-        Projection read = _filter is null && extraPath is null
-            ? Projection.All
+        ScanProjection read = _filter is null && extraPath is null
+            ? ScanProjection.All
             : Only(_filterPaths, extraPath);
         (RowRange rows, _, long cap) = Frame(tree);
         bool wholeFile = !_rowsSet && _take is null;
@@ -1099,23 +1113,23 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
-    private Projection Only(List<FieldExpr>? filterPaths, string? extraPath)
+    private ScanProjection Only(List<FieldExpr>? filterPaths, string? extraPath)
     {
         FieldMaskBuilder builder = new FieldMaskBuilder();
         if (filterPaths is not null)
         {
             for (int i = 0; i < filterPaths.Count; i++)
             {
-                Projection.IncludeField(_file.DType, filterPaths[i], builder, "filter");
+                ScanProjection.IncludeField(_file.DType, filterPaths[i], builder, "filter");
             }
         }
 
         if (extraPath is not null)
         {
-            Projection.IncludePath(_file.DType, extraPath, builder, nameof(extraPath));
+            ScanProjection.IncludePath(_file.DType, extraPath, builder, nameof(extraPath));
         }
 
-        return Projection.Create(builder.Build());
+        return ScanProjection.Create(builder.Build());
     }
 
     /// <summary>Whether the key column, or a struct above it, is nullable: whether rows can have no key.</summary>
@@ -1152,11 +1166,11 @@ internal sealed class ScanBuilder
     /// split is at most one batch, so the descending tail reverses one batch at a time and memory
     /// stays one batch.
     /// </remarks>
-    private IAsyncEnumerable<RecordBatch> NullKeysAsync(LayoutTree tree, RowRange rows, Projection keep, long cap)
+    private IAsyncEnumerable<RecordBatch> NullKeysAsync(LayoutTree tree, RowRange rows, ScanProjection keep, long cap)
     {
         VortexExpr isNull = Expr.IsNull(Expr.Field(_orderPath!));
         VortexExpr filter = _filter is null ? isNull : Expr.And(isNull, _filter);
-        Projection read = Union(keep, [.. _filterPaths ?? [], Expr.Field(_orderPath!)]);
+        ScanProjection read = Union(keep, [.. _filterPaths ?? [], Expr.Field(_orderPath!)]);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
         return _descending
             ? ReversedAsync(tree, rows, read, keep, plan, filter)
@@ -1167,7 +1181,7 @@ internal sealed class ScanBuilder
 
     /// <summary>The splits of <paramref name="plan"/> last first, each batch's rows reversed.</summary>
     private async IAsyncEnumerable<RecordBatch> ReversedAsync(
-        LayoutTree tree, RowRange rows, Projection read, Projection keep, SplitPlan plan, VortexExpr filter)
+        LayoutTree tree, RowRange rows, ScanProjection read, ScanProjection keep, SplitPlan plan, VortexExpr filter)
     {
         // One pipeline for the whole walk, reading the plan's splits last one first. Building one
         // per split would cost a plan, an enumerable and a filter for every batch -- a split is a
@@ -1219,16 +1233,16 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>The projection widened by every field a filter reads.</summary>
-    private Projection Union(Projection keep, List<FieldExpr> filterPaths)
+    private ScanProjection Union(ScanProjection keep, List<FieldExpr> filterPaths)
     {
         FieldMaskBuilder builder = new FieldMaskBuilder();
         builder.Include(keep.RootMask);
         for (int i = 0; i < filterPaths.Count; i++)
         {
-            Projection.IncludeField(_file.DType, filterPaths[i], builder, "filter");
+            ScanProjection.IncludeField(_file.DType, filterPaths[i], builder, "filter");
         }
 
-        return Projection.Create(builder.Build());
+        return ScanProjection.Create(builder.Build());
     }
 
     /// <summary>Every column a filter reads, in the order it names them.</summary>

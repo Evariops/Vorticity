@@ -23,6 +23,9 @@ public enum KeySourceKind : byte
 
     /// <summary>A dictionary's values child: keys without rows.</summary>
     Dictionary = 4,
+
+    /// <summary>A query's result: its column's values, read and sorted in memory when the cursor opens.</summary>
+    InMemory = 5,
 }
 
 /// <summary>What a cursor over one column would be served by.</summary>

@@ -82,11 +82,11 @@ each one costs, are tabled in §5.6 of [14-public-api.md](../design/14-public-ap
 ## Or let the scan do it
 
 ```csharp
-double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
+double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
 ```
 
 ```
-AvgAsync: mean 30.0000, 1.8 ms
+AverageAsync: mean 30.0000, 1.8 ms
   1 blocks decoded, 17 requests, 1150428 bytes
 ```
 
@@ -99,7 +99,7 @@ canonical form; it folded the other 122 in the form they are stored in
 
 A file this library writes carries, per column, a null count, order flags and, for a numeric
 column, a minimum and a maximum; it carries no sum. `MinAsync`, `MaxAsync` and `CountAsync`
-without a filter answer from those statistics and read nothing; `SumAsync` and `AvgAsync` read
+without a filter answer from those statistics and read nothing; `SumAsync` and `AverageAsync` read
 the column. [aggregates.md](aggregates.md) has the rest of the operators.
 
 ## What it costs

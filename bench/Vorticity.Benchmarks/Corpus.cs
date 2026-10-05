@@ -84,7 +84,7 @@ internal static class Corpus
         }
 
         // A FILE WITHOUT THAT COLUMN FAILS HERE, BY NAME. `Project` throws its own
-        // `ArgumentException` -- "a projection on a non-struct root may only be Projection.All" --
+        // `ArgumentException` -- "a projection on a non-struct root may only be ScanProjection.All" --
         // which is true and tells the reader nothing about which variable put them there.
         IAsyncEnumerable<RecordBatch> batches;
         try

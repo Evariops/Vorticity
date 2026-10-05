@@ -37,8 +37,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 {
     private readonly VortexFile _file;
     private readonly LayoutTree _tree;
-    private readonly Projection _read;
-    private readonly Projection _keep;
+    private readonly ScanProjection _read;
+    private readonly ScanProjection _keep;
     private readonly SplitPlan _plan;
     private readonly int _degree;
     private readonly bool _reverse;
@@ -63,8 +63,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal BatchAsyncEnumerable(
         VortexFile file,
         LayoutTree tree,
-        Projection read,
-        Projection keep,
+        ScanProjection read,
+        ScanProjection keep,
         SplitPlan plan,
         int degree,
         VortexExpr? filter,
@@ -110,13 +110,13 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public DType Schema => _schema;
 
     /// <summary>The compiled projection this scan runs under: what a batch carries.</summary>
-    public Projection Projection => _keep;
+    public ScanProjection Projection => _keep;
 
     /// <summary>
     /// What the scan actually decodes. Equal to <see cref="Projection"/> unless a filter reads
     /// columns the caller did not project.
     /// </summary>
-    public Projection ReadProjection => _read;
+    public ScanProjection ReadProjection => _read;
 
     /// <summary>Starts a scan.</summary>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
@@ -299,8 +299,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     internal BatchAsyncEnumerator(
         VortexFile file,
         LayoutTree tree,
-        Projection read,
-        Projection keep,
+        ScanProjection read,
+        ScanProjection keep,
         DType schema,
         SplitPlan plan,
         int degree,
@@ -1007,7 +1007,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         return _evaluator?.Filter switch
         {
-            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 =>
+            // A function of the column is not the column, whose encoding answers for its own values.
+            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 && comparison.Field is not Compute.FunctionFieldExpr =>
                 new PushedPredicate(comparison.Field, comparison.Op, comparison.Value, Prefix: false),
             StringMatchExpr { Op: StringMatchOp.StartsWith } match
                 when match.Field.SegmentsUtf8.Length == 1 && match.Pattern.Kind == FilterLiteralKind.Bytes =>

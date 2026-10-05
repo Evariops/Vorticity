@@ -231,6 +231,49 @@ public sealed partial class VortexFileWriter
         }
     }
 
+    /// <summary>
+    /// Writes every batch of a scan as it comes, a batch at a time: a file's, which copies its rows,
+    /// or a query's result, <c>As&lt;TRecord&gt;()</c>, which writes a rollup without building a record.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the scan is typed by; its members cover every column of the file.</typeparam>
+    /// <param name="scan">The scan, whose one sink this is.</param>
+    /// <param name="cancellationToken">Cancels the scan and the writes.</param>
+    /// <returns>A task that completes when every row is taken.</returns>
+    /// <exception cref="VortexSchemaException">A column of the file has no member, or a member's column is not of the file's type.</exception>
+    public async ValueTask WriteAsync<TRecord>(Scan<TRecord> scan, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(scan);
+        ThrowIfDone();
+        Scan<TRecord>.AsyncEnumerator batches = scan.GetAsyncEnumerator(cancellationToken);
+        await using (batches.ConfigureAwait(false))
+        {
+            while (await batches.MoveNextAsync().ConfigureAwait(false))
+            {
+                await WriteAsync(batches.Current, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>Writes every batch of a tool scan as it comes, a batch at a time.</summary>
+    /// <param name="scan">The scan, whose one sink this is; its columns are the file's.</param>
+    /// <param name="cancellationToken">Cancels the scan and the writes.</param>
+    /// <returns>A task that completes when every row is taken.</returns>
+    /// <exception cref="VortexSchemaException">The scan's columns are not of the file's types.</exception>
+    public async ValueTask WriteAsync(Scan scan, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scan);
+        ThrowIfDone();
+        Scan.AsyncEnumerator batches = scan.GetAsyncEnumerator(cancellationToken);
+        await using (batches.ConfigureAwait(false))
+        {
+            while (await batches.MoveNextAsync().ConfigureAwait(false))
+            {
+                await WriteAsync(batches.Current, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
     /// <summary>Writes a batch of a tool scan: the columns decode once and encode once.</summary>
     /// <param name="batch">The batch, borrowed until the returned task completes; its columns are the file's.</param>
     /// <param name="cancellationToken">Cancels the writes.</param>

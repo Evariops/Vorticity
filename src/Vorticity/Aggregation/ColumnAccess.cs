@@ -58,8 +58,11 @@ internal sealed class ColumnShape
 
     internal string Path => Column.Field.Path;
 
-    /// <summary>Whether both shapes read the same column.</summary>
-    internal bool Is(ColumnShape other) => string.Equals(Path, other.Path, StringComparison.Ordinal);
+    /// <summary>What makes two shapes one value: the column's path, and the function a value expression applies to it.</summary>
+    internal string Key => Column.Field.Key;
+
+    /// <summary>Whether both shapes read the same values: the same column through the same functions.</summary>
+    internal bool Is(ColumnShape other) => string.Equals(Key, other.Key, StringComparison.Ordinal);
 
     internal VortexUnsupportedException Unsupported(string what) =>
         new VortexUnsupportedException(Type.ToString(), ComponentKind.Feature, $"'{Path}' is {Type}, which {what} does not read.");
@@ -369,6 +372,10 @@ internal readonly ref struct BytesBlock
         ref readonly CanonicalRecord record = ref arena.RecordRef(views);
         return new BytesBlock(arena, record.BufferA.Span, record.DataBufferStart, record.DataBufferCount, record.Length);
     }
+
+    /// <summary>A canonical block over its views and data buffers, resolved once by a caller that compares many of its values.</summary>
+    internal static BytesBlock Over(CanonicalArena arena, ReadOnlySpan<byte> views, int dataStart, int dataCount, int length) =>
+        new BytesBlock(arena, views, dataStart, dataCount, length);
 
     /// <summary>The one value of a constant node.</summary>
     internal static ReadOnlySpan<byte> Constant(CanonicalArena arena, int node)

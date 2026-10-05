@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Benchmarks.Queries</RootNamespace>
+    <AssemblyName>vortex-queries</AssemblyName>
+    <Description>What a query costs: its time against the loop a caller would write by hand, its first batch, its memory. The gate of docs/design/16-queries.md §13.</Description>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

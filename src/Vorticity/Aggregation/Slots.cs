@@ -8,14 +8,18 @@ namespace Vorticity.Aggregating;
 /// <summary>One column of one batch, as an aggregate is handed it.</summary>
 internal readonly ref struct BatchInput
 {
-    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection)
+    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0)
     {
         Batch = batch;
         Arena = arena;
         Node = node;
         Rows = rows;
         Selection = selection;
+        StartRow = startRow;
     }
+
+    /// <summary>The source's row the batch's first row is: what a chosen row is kept as, its position.</summary>
+    internal long StartRow { get; }
 
     /// <summary>The batch's number in its partition, from 1: what a slot keys its per-batch work on.</summary>
     internal long Batch { get; }
@@ -46,14 +50,220 @@ internal abstract class AggregateSlot
     /// <summary>Folds each selected row into the group <paramref name="groups"/> gives it.</summary>
     internal abstract void StepRows(in BatchInput input, ReadOnlySpan<int> groups);
 
+    /// <summary>
+    /// Whether <see cref="StepRanges"/> folds ranges of a few rows of <paramref name="input"/> for
+    /// less than a group per row: in one call, its column's form read once, and in less work per
+    /// range than its rows would cost. Otherwise ranges that short are folded row by row.
+    /// </summary>
+    internal virtual bool FoldsRanges(in BatchInput input) => false;
+
+    /// <summary>Folds the selected rows of each range into its group, the ranges ascending.</summary>
+    internal virtual void StepRanges(in BatchInput input, GroupRanges ranges)
+    {
+        for (int r = 0; r < ranges.Count; r++)
+        {
+            StepRange(input, ranges.StartAt(r), ranges.EndAt(r), ranges.GroupAt(r));
+        }
+    }
+
     /// <summary>Merges the same aggregate of another partition, whose group <c>g</c> is this one's <c>map[g]</c>.</summary>
-    internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map);
+    internal void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map) => MergeFrom(other, Numbers.Upto(map.Length), map);
+
+    /// <summary>
+    /// Merges groups <paramref name="from"/> of the same aggregate of another partition into this
+    /// one's groups <paramref name="into"/>, pair by pair: the part of a partition a parallel merge
+    /// hands one of its tasks.
+    /// </summary>
+    internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into);
+
+    /// <summary>
+    /// The groups of several partitions merged apart, read as one: group <c>g</c> is group
+    /// <c>g - offsets[p]</c> of <c>parts[p]</c>, <c>p</c> the last whose offset is at or below it.
+    /// </summary>
+    internal abstract AggregateSlot Joined(AggregateSlot[] parts, int[] offsets);
+
+    /// <summary>
+    /// Keeps the states of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
+    /// <c>i</c>: the groups a streaming group by has not closed. <paramref name="groups"/> ascend.
+    /// </summary>
+    internal abstract void Keep(ReadOnlySpan<int> groups);
 }
 
 /// <summary>An aggregate whose answer per group is a <typeparamref name="TResult"/>.</summary>
 internal abstract class AggregateSlot<TResult> : AggregateSlot
 {
     internal abstract TResult Result(int group);
+
+    /// <summary>The answers of <paramref name="groups"/>, in order: a batch of a result column.</summary>
+    internal virtual void Results(ReadOnlySpan<int> groups, Span<TResult> into)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = Result(groups[i]);
+        }
+    }
+
+    internal override AggregateSlot Joined(AggregateSlot[] parts, int[] offsets) => new JoinedSlot<TResult>(parts, offsets);
+}
+
+/// <summary>The numbers 0, 1, 2 and on, shared: the groups of a whole partition for a merge that takes them all.</summary>
+internal static class Numbers
+{
+    private static int[] s_numbers = [];
+
+    /// <summary>The first <paramref name="count"/> numbers.</summary>
+    internal static ReadOnlySpan<int> Upto(int count)
+    {
+        int[] numbers = s_numbers;
+        if (numbers.Length < count)
+        {
+            // A wider array replaces the field whole: a reader holds one long enough, whichever.
+            numbers = new int[Scratch.Capacity(count, numbers.Length)];
+            for (int i = 0; i < numbers.Length; i++)
+            {
+                numbers[i] = i;
+            }
+
+            s_numbers = numbers;
+        }
+
+        return numbers.AsSpan(0, count);
+    }
+}
+
+/// <summary>
+/// The answers of an aggregate merged in parts, read as one slot: each group's answer from the part
+/// that holds it, a mean too where the parts hold one.
+/// </summary>
+internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) : AggregateSlot<TResult>, IMeanSlot
+{
+    private int[] _local = [];
+
+    internal override TResult Result(int group)
+    {
+        int part = JoinedParts.PartOf(offsets, group);
+        return ((AggregateSlot<TResult>)parts[part]).Result(group - offsets[part]);
+    }
+
+    /// <summary>The groups a run at a time of one part, their numbers in it: a batch in delivery order comes in long runs.</summary>
+    internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
+    {
+        Scratch.Grow(ref _local, groups.Length);
+        int start = 0;
+        while (start < groups.Length)
+        {
+            int part = JoinedParts.PartOf(offsets, groups[start]);
+            int low = offsets[part];
+            int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
+            int end = start;
+            while (end < groups.Length && groups[end] >= low && groups[end] < high)
+            {
+                _local[end] = groups[end] - low;
+                end++;
+            }
+
+            ((AggregateSlot<TResult>)parts[part]).Results(_local.AsSpan(start, end - start), into[start..end]);
+            start = end;
+        }
+    }
+
+    public double? Mean(int group)
+    {
+        int part = JoinedParts.PartOf(offsets, group);
+        return ((IMeanSlot)parts[part]).Mean(group - offsets[part]);
+    }
+
+    internal override void EnsureGroups(int groups) => throw JoinedParts.Read();
+
+    internal override void StepRange(in BatchInput input, int start, int end, int group) => throw JoinedParts.Read();
+
+    internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups) => throw JoinedParts.Read();
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into) => throw JoinedParts.Read();
+
+    internal override void Keep(ReadOnlySpan<int> groups) => throw JoinedParts.Read();
+}
+
+/// <summary>What the slots of distinct values share, whose pairs are keyed by group: a merge of some of their groups.</summary>
+internal static class Distinct
+{
+    /// <summary>The group each of <paramref name="groups"/> groups merges into, -1 for one not merged, from the pairs <paramref name="from"/> and <paramref name="into"/>.</summary>
+    internal static int[] Targets(int groups, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        int[] targets = new int[groups];
+        Array.Fill(targets, -1);
+        for (int i = 0; i < from.Length; i++)
+        {
+            targets[from[i]] = into[i];
+        }
+
+        return targets;
+    }
+}
+
+/// <summary>What the slots and keys merged in parts share: which part holds a group.</summary>
+internal static class JoinedParts
+{
+    /// <summary>The part holding <paramref name="group"/>: the last whose offset is at or below it.</summary>
+    internal static int PartOf(int[] offsets, int group)
+    {
+        int low = 0;
+        int high = offsets.Length - 1;
+        while (low < high)
+        {
+            int middle = (low + high + 1) >> 1;
+            if (offsets[middle] <= group)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>A joined slot or index is read, never stepped nor merged again.</summary>
+    internal static InvalidOperationException Read() =>
+        new InvalidOperationException("The groups merged in parts are read, not stepped or merged again.");
+}
+
+/// <summary>A slot whose states are a sum's, which hold a mean as well.</summary>
+internal interface IMeanSlot
+{
+    /// <summary>The mean of <paramref name="group"/>: its total over its count, null with no value.</summary>
+    double? Mean(int group);
+}
+
+/// <summary>
+/// A mean read from the slot of the sum of the same column and the same rows: the sum's states hold
+/// its total and its count, so the column is folded once for both.
+/// </summary>
+internal sealed class MeanView(IMeanSlot sum) : AggregateSlot<double?>
+{
+    internal override void EnsureGroups(int groups)
+    {
+    }
+
+    internal override void StepRange(in BatchInput input, int start, int end, int group)
+    {
+    }
+
+    internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
+    {
+    }
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+    }
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+    }
+
+    internal override double? Result(int group) => sum.Mean(group);
 }
 
 /// <summary>An aggregate answered before the scan, from the file statistics or a count: nothing to step.</summary>
@@ -75,7 +285,11 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
     {
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+    }
+
+    internal override void Keep(ReadOnlySpan<int> groups)
     {
     }
 
@@ -92,7 +306,7 @@ internal sealed class CountSlot : AggregateSlot<long>
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Math.Max(groups, _counts.Length * 2));
+            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -111,16 +325,122 @@ internal sealed class CountSlot : AggregateSlot<long>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    /// <summary>A range's count is its length, or its selected rows: a word or two whatever its rows.</summary>
+    internal override bool FoldsRanges(in BatchInput input) => true;
+
+    internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
-        CountSlot from = (CountSlot)other;
-        for (int g = 0; g < from._groups; g++)
+        long[] counts = _counts;
+        ReadOnlySpan<int> starts = ranges.Starts;
+        ReadOnlySpan<int> ends = ranges.Ends;
+        ReadOnlySpan<int> groups = ranges.Groups;
+        ReadOnlySpan<ulong> selection = input.Selection;
+        if (selection.IsEmpty)
         {
-            _counts[map[g]] += from._counts[g];
+            for (int r = 0; r < starts.Length; r++)
+            {
+                counts[groups[r]] += ends[r] - starts[r];
+            }
+
+            return;
+        }
+
+        for (int r = 0; r < starts.Length; r++)
+        {
+            counts[groups[r]] += RowMasks.Count(selection, starts[r], ends[r]);
+        }
+    }
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        long[] counts = ((CountSlot)other)._counts;
+        for (int i = 0; i < from.Length; i++)
+        {
+            _counts[into[i]] += counts[from[i]];
         }
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _counts[i] = _counts[groups[i]];
+        }
+
+        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
+
+    internal override void Results(ReadOnlySpan<int> groups, Span<long> into)
+    {
+        long[] counts = _counts;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = counts[groups[i]];
+        }
+    }
+}
+
+/// <summary>
+/// Whether a group holds a row of those its filter keeps: <c>Any(p)</c> over the rows where
+/// <c>p</c> is true, and <c>All(p)</c>, which is no row where it is not.
+/// </summary>
+internal sealed class ExistsSlot(bool all) : AggregateSlot<bool>
+{
+    private bool[] _seen = [];
+    private int _groups;
+
+    internal override void EnsureGroups(int groups)
+    {
+        if (groups > _seen.Length)
+        {
+            Array.Resize(ref _seen, Scratch.Capacity(groups, _seen.Length));
+        }
+
+        _groups = Math.Max(_groups, groups);
+    }
+
+    internal override void StepRange(in BatchInput input, int start, int end, int group)
+    {
+        if (!_seen[group] && RowMasks.Count(input.Selection, start, end) > 0)
+        {
+            _seen[group] = true;
+        }
+    }
+
+    internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
+    {
+        bool[] seen = _seen;
+        RowCursor rows = new RowCursor(input.Selection, 0, input.Rows);
+        while (rows.Next(out int row))
+        {
+            seen[groups[row]] = true;
+        }
+    }
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        bool[] seen = ((ExistsSlot)other)._seen;
+        for (int i = 0; i < from.Length; i++)
+        {
+            _seen[into[i]] |= seen[from[i]];
+        }
+    }
+
+    internal override bool Result(int group) => _seen[group] != all;
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _seen[i] = _seen[groups[i]];
+        }
+
+        _seen.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
 }
 
 /// <summary>

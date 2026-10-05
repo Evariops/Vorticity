@@ -108,9 +108,12 @@ internal static class ZoneMapWriter
                 RequireAggregate(encodings.Target, "vortex.max");
                 specs.Add("vortex.min"u8, SkipNaNs);
                 specs.Add("vortex.max"u8, SkipNaNs);
-                DType bound = types.Primitive(column.PType, Nullability.Nullable);
-                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: true), Named(types, AggregateId.Min, SkipNaNs, name), bound);
-                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: false), Named(types, AggregateId.Max, SkipNaNs, name), bound);
+
+                // A scalar of the column's own type, made nullable, as the reader derives it: an
+                // extension's bounds are its storage's values under its dtype.
+                DType bound = DTypeImport.Into(types, column).WithNullability(Nullability.Nullable);
+                Field(columns, names, dtypes, ref at, Bounds(arena, types, bound, zones, wantMin: true), Named(types, AggregateId.Min, SkipNaNs, name), bound);
+                Field(columns, names, dtypes, ref at, Bounds(arena, types, bound, zones, wantMin: false), Named(types, AggregateId.Max, SkipNaNs, name), bound);
             }
 
             if (bounded)
@@ -201,10 +204,15 @@ internal static class ZoneMapWriter
     }
 
     private static int Bounds(
-        CanonicalArena arena, DTypeArena types, DType column,
+        CanonicalArena arena, DTypeArena types, DType bound,
         IReadOnlyList<BlockStats> zones, bool wantMin)
     {
-        PType ptype = column.PType;
+        if (bound.Kind == DTypeKind.Extension)
+        {
+            return arena.AddExtension(bound, zones.Count, Bounds(arena, types, bound.StorageType, zones, wantMin));
+        }
+
+        PType ptype = bound.PType;
         int width = ptype.ByteWidth();
         int count = zones.Count;
 
@@ -222,8 +230,7 @@ internal static class ZoneMapWriter
         }
 
         Validity validity = Validity(arena, types, zones, valid, count);
-        DType dtype = types.Primitive(ptype, Nullability.Nullable);
-        return arena.AddPrimitive(dtype, count, validity, ptype, values);
+        return arena.AddPrimitive(bound, count, validity, ptype, values);
     }
 
     private static int NullCounts(
@@ -433,7 +440,8 @@ internal static class ZoneMapWriter
         return Arrays.Validity.Bitmap(node);
     }
 
-    private static void Write(Span<byte> destination, PType ptype, FilterLiteral value)
+    /// <summary>A bound as the bytes of a value of <paramref name="ptype"/>, little-endian, filling <paramref name="destination"/>.</summary>
+    internal static void Write(Span<byte> destination, PType ptype, FilterLiteral value)
     {
         switch (ptype)
         {

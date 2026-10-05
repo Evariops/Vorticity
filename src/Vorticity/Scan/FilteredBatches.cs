@@ -122,6 +122,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         {
             ZonePruner? zones = pruning.Zones;
             if (!_prune || _filter is null || _source.HasTake || pruning.Located
+                || !ExactCover.MayExist(_source.File, _filter, _indexes)
                 || !MayFitBatch(_source.Plan, SplitPlan.NaturalBatchRows(_source.Tree), zones, pruning.Live))
             {
                 return null;

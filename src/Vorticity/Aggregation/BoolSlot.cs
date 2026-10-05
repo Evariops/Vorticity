@@ -133,7 +133,7 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
     {
         if (groups > _flags.Length)
         {
-            Array.Resize(ref _flags, Math.Max(groups, _flags.Length * 2));
+            Array.Resize(ref _flags, Scratch.Capacity(groups, _flags.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -171,16 +171,27 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        BoolSlot<TResult> from = (BoolSlot<TResult>)other;
-        for (int g = 0; g < from._groups; g++)
+        BoolSlot<TResult> source = (BoolSlot<TResult>)other;
+        for (int i = 0; i < from.Length; i++)
         {
-            _flags[map[g]] |= from._flags[g];
+            _flags[into[i]] |= source._flags[from[i]];
         }
     }
 
     internal override TResult Result(int group) => _finish(_flags[group]);
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _flags[i] = _flags[groups[i]];
+        }
+
+        _flags.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
 
     /// <summary>The block's values and validity, copied once per batch whatever the number of ranges folded.</summary>
     private ReadOnlySpan<ulong> Load(in BatchInput input, out ReadOnlySpan<ulong> validity)

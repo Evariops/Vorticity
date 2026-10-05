@@ -167,7 +167,7 @@ public sealed class DatasetDeletionVectorTests
                     foreach (VortexDataset dataset in (VortexDataset[])[marked, rewritten])
                     {
                         Scan<NullableKeyRow> scan = late ? dataset.Scan<NullableKeyRow>().Where(r => r.Payload >= 100) : dataset.Scan<NullableKeyRow>();
-                        List<NullableKeyRow> ordered = await scan.OrderBy(r => r.Key, descending).ToRecordsAsync(ct).ToListAsync(ct);
+                        List<NullableKeyRow> ordered = await (descending ? scan.OrderByDescending(r => r.Key) : scan.OrderBy(r => r.Key)).ToRecordsAsync(ct).ToListAsync(ct);
                         Assert.Equal(expected.Select(row => row.Key), ordered.Select(row => row.Key));
                         Assert.Equal(
                             expected.GroupBy(row => row.Key).Select(group => (group.Key, string.Join(',', group.Select(row => row.Payload).Order()))),
@@ -410,6 +410,9 @@ public sealed class DatasetDeletionVectorTests
     /// <summary>The level a header records, by number.</summary>
     private static CommitLevel LevelOf(CommitHeader header, int level) => header.Levels.Single(recorded => recorded.Level == level);
 
+    private static Scan<ChangeRow> Ordered(Scan<ChangeRow> scan, bool descending) =>
+        descending ? scan.OrderByDescending(r => r.Key) : scan.OrderBy(r => r.Key);
+
     /// <summary>The header of the version the handle reads, as a reader opening it finds it.</summary>
     private static async Task<CommitHeader> LatestAsync(IObjectStore store, VortexDataset dataset, CancellationToken ct) =>
         (await CommitObject.OpenAsync(store, CommitKey.For(dataset.Version), ct)).Header;
@@ -599,11 +602,11 @@ public sealed class DatasetDeletionVectorTests
         foreach (bool descending in (bool[])[false, true])
         {
             Assert.Equal(
-                await rewritten.Scan<ChangeRow>().OrderBy(r => r.Key, descending).ToRecordsAsync(ct).ToListAsync(ct),
-                await marked.Scan<ChangeRow>().OrderBy(r => r.Key, descending).ToRecordsAsync(ct).ToListAsync(ct));
+                await Ordered(rewritten.Scan<ChangeRow>(), descending).ToRecordsAsync(ct).ToListAsync(ct),
+                await Ordered(marked.Scan<ChangeRow>(), descending).ToRecordsAsync(ct).ToListAsync(ct));
             Assert.Equal(
-                await rewritten.Scan<ChangeRow>().Where(r => r.City != "Paris").OrderBy(r => r.Key, descending).ToRecordsAsync(ct).ToListAsync(ct),
-                await marked.Scan<ChangeRow>().Where(r => r.City != "Paris").OrderBy(r => r.Key, descending).ToRecordsAsync(ct).ToListAsync(ct));
+                await Ordered(rewritten.Scan<ChangeRow>().Where(r => r.City != "Paris"), descending).ToRecordsAsync(ct).ToListAsync(ct),
+                await Ordered(marked.Scan<ChangeRow>().Where(r => r.City != "Paris"), descending).ToRecordsAsync(ct).ToListAsync(ct));
         }
 
         // The key cursor: every entry up and down, its ranks, its seeks and its selections; each
@@ -648,8 +651,9 @@ public sealed class DatasetDeletionVectorTests
         List<(string City, long Rows, long Keys)> groups = [];
         await foreach ((string city, long rows, long keys) in dataset.Scan<ChangeRow>()
             .GroupBy(r => r.City)
-            .AggAsync(g => (g.Key, g.Count(), g.Sum(r => r.Key)))
-            .WithCancellation(ct))
+            .Select(g => (g.Key, g.Count(), g.Sum(r => r.Key)))
+            .As<CityRowsKeys>()
+            .ToRecordsAsync(ct))
         {
             groups.Add((city, rows, keys));
         }
@@ -792,3 +796,7 @@ public sealed class DatasetDeletionVectorTests
 
     private static List<ChangeRow> Sorted(IEnumerable<ChangeRow> rows) => [.. rows.OrderBy(row => row.Key).ThenBy(row => row.Measure)];
 }
+
+/// <summary>A city, its rows and the sum of their keys.</summary>
+[VortexRecord]
+public partial record struct CityRowsKeys(string City, long Rows, long Keys);

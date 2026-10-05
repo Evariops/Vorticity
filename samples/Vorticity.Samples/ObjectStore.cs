@@ -47,7 +47,7 @@ internal static class ObjectStore
         {
             Console.WriteLine($"open from the store: {opened.RowCount} rows; {Cost(counting)}");
             counting.Reset();
-            double? mean = await opened.Scan<Reading>().Where(r => r.Day >= 900).AvgAsync(r => r.Celsius);
+            double? mean = await opened.Scan<Reading>().Where(r => r.Day >= 900).AverageAsync(r => r.Celsius);
             Console.WriteLine($"mean of Celsius for Day >= 900: {mean:F3}; {Cost(counting)}");
             counting.Reset();
             long rows = 0;

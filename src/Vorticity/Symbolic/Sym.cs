@@ -13,7 +13,7 @@ namespace Vorticity;
 /// A lambda over <see cref="Probe{TRecord}"/> runs once, when the scan is built: a breakpoint in it
 /// sees symbols, not values, and hits once. Arithmetic is not pushed down and does not compile.
 /// </remarks>
-public readonly struct Sym<T>
+public readonly struct Sym<T> : ISymbol
 {
     internal Sym(SymNode node)
     {
@@ -22,8 +22,22 @@ public readonly struct Sym<T>
 
     internal SymNode Node { get; }
 
+    SymNode ISymbol.Node => Node;
+
+    Aggregating.IResultNode ISymbol.Result(SymNode[] components) => Aggregating.AggregationPlan.Result(this, components);
+
+    ColumnSym ISymbol.Compared => Column;
+
+    IProjectionElement ISymbol.Projected(int position) =>
+        Node is ColumnSym column
+            ? new ProjectionElement<T>(column)
+            : throw new InvalidOperationException(
+                $"Element {position + 1} of the projection, '{this}', is not a column of the scan: a projection reads columns, and an aggregate belongs to a group.");
+
     internal ColumnSym Column =>
-        Node as ColumnSym ?? throw new InvalidOperationException("Only a column can be compared; an aggregate or a group key is a result, not a filter.");
+        Node as ColumnSym
+        ?? (Node as Aggregating.ResultNode<T>)?.Comparable
+        ?? throw new InvalidOperationException("Only a column or an aggregate can be compared: a filter on groups compares the group's key and its aggregates.");
 
     /// <summary>The rows whose value equals <paramref name="value"/>; <c>== null</c> is <see cref="IsNull"/>.</summary>
     public static Predicate operator ==(Sym<T> column, T value) => SymLowering.Compare(column.Column, ComparisonOp.Equal, value);
@@ -145,6 +159,24 @@ public readonly struct Sym<T>
 /// <summary>What a <see cref="Sym{T}"/> stands for.</summary>
 internal abstract class SymNode
 {
+}
+
+/// <summary>A symbol whatever its type: what a tuple of symbols, read through <see cref="System.Runtime.CompilerServices.ITuple"/>, holds.</summary>
+internal interface ISymbol
+{
+    SymNode Node { get; }
+
+    /// <summary>The result this symbol stands for in a selection: an aggregate, or a component of the key among <paramref name="components"/>.</summary>
+    /// <exception cref="InvalidOperationException">The symbol is neither.</exception>
+    Aggregating.IResultNode Result(SymNode[] components);
+
+    /// <summary>The column a comparison or an order reads: the column itself, or the column of a group's results an aggregate is.</summary>
+    /// <exception cref="InvalidOperationException">The symbol is neither.</exception>
+    ColumnSym Compared { get; }
+
+    /// <summary>The column this symbol stands for as element <paramref name="position"/> of a projection.</summary>
+    /// <exception cref="InvalidOperationException">The symbol is not a column.</exception>
+    IProjectionElement Projected(int position);
 }
 
 /// <summary>A column of the scanned file, with the type the file gives it.</summary>

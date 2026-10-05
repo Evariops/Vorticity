@@ -42,6 +42,9 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// <summary>How many objects are open, leased or idle.</summary>
     internal int Count => _open.Count;
 
+    /// <summary>How many open objects a lease holds: none once every read has given its objects back.</summary>
+    internal int Leased => _open.Count - _idle.Count;
+
     /// <summary><see cref="OpenOptions"/> with the index fragments an object's entry names.</summary>
     internal static VortexOpenOptions OpenOptionsWith(List<ReadOnlyMemory<byte>> fragments) =>
         fragments.Count == 0 ? OpenOptions : OpenOptions with { Read = new VortexReadOptions { IndexFragments = fragments } };

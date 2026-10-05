@@ -57,7 +57,7 @@ internal static class WriteAFile
         }
 
         await using VortexFile file = await VortexFile.OpenAsync(path);
-        double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
+        double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
         Console.WriteLine($"read back: {file.RowCount} rows, {new FileInfo(path).Length} bytes on disk, mean {mean:F4} °C");
     }
 

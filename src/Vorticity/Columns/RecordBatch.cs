@@ -577,7 +577,7 @@ public sealed class RecordBatch : IDisposable
 
     /// <summary>A batch over the same rows holding only the columns <paramref name="projection"/> names.</summary>
     /// <param name="projection">
-    /// The columns, compiled against <em>this batch's</em> schema with <see cref="Projection.Parse"/>.
+    /// The columns, compiled against <em>this batch's</em> schema with <see cref="ScanProjection.Parse"/>.
     /// Compiled once, it serves every batch of a stream that shares the schema.
     /// </param>
     /// <returns>The projected batch, which the caller disposes.</returns>
@@ -601,7 +601,7 @@ public sealed class RecordBatch : IDisposable
     /// </remarks>
     /// <exception cref="ArgumentException">The projection names fields and the batch's root is not a struct.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    internal RecordBatch Project(Projection projection)
+    internal RecordBatch Project(ScanProjection projection)
     {
         ThrowIfDisposed();
         if (projection.IsAll)

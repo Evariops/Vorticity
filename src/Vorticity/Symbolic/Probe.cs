@@ -13,19 +13,25 @@ public readonly struct Probe<TRecord>
 {
     private readonly string[]? _path;
 
-    internal Probe(RecordBinding binding, string[]? path = null)
+    // A chosen row of a group, whose columns are results; null for the rows themselves.
+    private readonly Aggregating.AggregateNode<long>? _chosen;
+
+    internal Probe(RecordBinding binding, string[]? path = null, Aggregating.AggregateNode<long>? chosen = null)
     {
         Binding = binding;
         _path = path;
+        _chosen = chosen;
     }
 
     internal RecordBinding Binding { get; }
 
     /// <summary>The rows where this nested record is null; none for the scan's own record, which is never null.</summary>
-    public Predicate IsNull => _path is null ? Predicate.None : new Predicate(new NullCheckExpr(new FieldExpr(_path), isNull: true));
+    /// <exception cref="InvalidOperationException">The probe is a group's chosen row, whose columns are results.</exception>
+    public Predicate IsNull => _path is null ? Predicate.None : new Predicate(new NullCheckExpr(new FieldExpr(Rows()), isNull: true));
 
     /// <summary>The rows where this nested record is present; all of them for the scan's own record.</summary>
-    public Predicate IsNotNull => _path is null ? Predicate.All : new Predicate(new NullCheckExpr(new FieldExpr(_path), isNull: false));
+    /// <exception cref="InvalidOperationException">The probe is a group's chosen row, whose columns are results.</exception>
+    public Predicate IsNotNull => _path is null ? Predicate.All : new Predicate(new NullCheckExpr(new FieldExpr(Rows()), isNull: false));
 
     /// <summary>The column of member <paramref name="index"/>.</summary>
     /// <typeparam name="T">The member's .NET type.</typeparam>
@@ -36,8 +42,11 @@ public readonly struct Probe<TRecord>
     {
         RecordBinding binding = Bound();
         binding.Require<T>(index);
-        return new Sym<T>(new ColumnSym(
-            new FieldExpr(binding.Paths[index]), binding.TypeOf(index), binding.Extensions, binding, index, binding.IndexPaths[index]));
+        ColumnSym column = new ColumnSym(
+            new FieldExpr(binding.Paths[index]), binding.TypeOf(index), binding.Extensions, binding, index, binding.IndexPaths[index]);
+
+        // A column of a chosen row is that row's value of it, a result of the group.
+        return _chosen is null ? new Sym<T>(column) : new Sym<T>(new Aggregating.ChosenColumnNode<T>(_chosen, column));
     }
 
     /// <summary>The column of the member named <paramref name="name"/>.</summary>
@@ -54,9 +63,14 @@ public readonly struct Probe<TRecord>
         where TNested : IVortexRecord<TNested>
     {
         RecordBinding binding = Bound();
-        return new Probe<TNested>(binding.NestedFor<TNested>(index), binding.Paths[index]);
+        return new Probe<TNested>(binding.NestedFor<TNested>(index), binding.Paths[index], _chosen);
     }
 
     private RecordBinding Bound() =>
         Binding ?? throw new InvalidOperationException("A probe exists only inside the lambda a scan runs; default(Probe) has no columns.");
+
+    private string[] Rows() =>
+        _chosen is null
+            ? _path!
+            : throw new InvalidOperationException("A chosen row's columns are results of its group: a filter on rows reads the rows themselves.");
 }

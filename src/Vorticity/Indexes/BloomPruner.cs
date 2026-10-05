@@ -389,7 +389,8 @@ internal sealed class BloomPruner
                 Plan(logical.Right);
                 break;
 
-            case ComparisonExpr { Op: ComparisonOp.Equal } equal
+            // A function of a column is not the column: its filter holds the column's values.
+            case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal
                 when _columns.TryGetValue(equal.Field.Path, out Column? column) && !column.IsList:
                 _questions[expr] = new Question(column, [equal.Value]);
                 break;
@@ -400,7 +401,7 @@ internal sealed class BloomPruner
                 _questions[expr] = new Question(column, [contains.Value]);
                 break;
 
-            case InExpr @in when _columns.TryGetValue(@in.Field.Path, out Column? column) && !column.IsList:
+            case InExpr { Field: not Compute.FunctionFieldExpr } @in when _columns.TryGetValue(@in.Field.Path, out Column? column) && !column.IsList:
                 _questions[expr] = new Question(column, @in.Values);
                 break;
 
@@ -459,10 +460,10 @@ internal sealed class BloomPruner
                 CollectEqualities(logical.Left, equalities, matches);
                 CollectEqualities(logical.Right, equalities, matches);
                 break;
-            case ComparisonExpr { Op: ComparisonOp.Equal } equal:
+            case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal:
                 equalities.Add(equal.Field.Path);
                 break;
-            case InExpr @in:
+            case InExpr { Field: not Compute.FunctionFieldExpr } @in:
                 equalities.Add(@in.Field.Path);
                 break;
             case ListContainsExpr contains:

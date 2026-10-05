@@ -77,6 +77,73 @@ public sealed class PublicSurfaceTests
     }
 
     /// <summary>
+    /// Rule 6 of docs/design/14-public-api.md: a member that starts the work, an awaitable or a stream
+    /// to await, ends in <c>Async</c>; a member that only describes a query does not.
+    /// </summary>
+    [Fact]
+    [RequiresUnreferencedCode(NotTrimmable)]
+    public void AsyncNamesWhatRunsAndNoBuilderCarriesIt()
+    {
+        List<string> wrong = [];
+        foreach (string line in Render().Split('\n'))
+        {
+            if (!TryMethod(line, out string returned, out string name))
+            {
+                continue;
+            }
+
+            bool runs = returned.StartsWith("ValueTask", StringComparison.Ordinal)
+                || returned.StartsWith("Task", StringComparison.Ordinal)
+                || returned.StartsWith("IAsyncEnumerable<", StringComparison.Ordinal);
+            bool builds = Builders.Any(builder => returned == builder || returned.StartsWith(builder + "<", StringComparison.Ordinal));
+            if (runs && !name.EndsWith("Async", StringComparison.Ordinal))
+            {
+                wrong.Add($"runs without Async: {line.Trim()}");
+            }
+
+            if (builds && name.EndsWith("Async", StringComparison.Ordinal))
+            {
+                wrong.Add($"builds with Async: {line.Trim()}");
+            }
+        }
+
+        Assert.True(wrong.Count == 0, string.Join(Environment.NewLine, wrong));
+    }
+
+    /// <summary>The types a member returns when it describes a query rather than running it.</summary>
+    private static readonly string[] Builders = ["Scan", "GroupedScan", "OrderedGroupedScan", "Aggregation", "Projection", "KeyCursorBuilder"];
+
+    /// <summary>The return type and the name of a rendered method line: <c>method ValueTask&lt;T1&gt; AggAsync&lt;T1&gt;(…)</c>.</summary>
+    private static bool TryMethod(string line, out string returned, out string name)
+    {
+        returned = name = string.Empty;
+        int method = line.IndexOf(" method ", StringComparison.Ordinal);
+        int paren = line.IndexOf('(', StringComparison.Ordinal);
+        if (method < 0 || paren < 0)
+        {
+            return false;
+        }
+
+        // Past the method's own type arguments, back to the end of its name.
+        int end = paren;
+        if (line[end - 1] == '>')
+        {
+            int depth = 0;
+            do
+            {
+                end--;
+                depth += line[end] == '>' ? 1 : line[end] == '<' ? -1 : 0;
+            }
+            while (depth > 0);
+        }
+
+        int start = line.LastIndexOf(' ', end - 1) + 1;
+        name = line[start..end];
+        returned = line[(method + " method ".Length)..start].Trim();
+        return name.Length > 0;
+    }
+
+    /// <summary>
     /// A count per assembly, printed on every run so the totals come from the test output rather
     /// than from a count made by hand.
     /// </summary>

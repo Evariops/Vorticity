@@ -2,11 +2,12 @@
 
 What the compiler tells you about your use of the library, and how to fix each one.
 
-The `Vorticity.Generators` package ships the `[VortexRecord]` generator and four analyzers.
-Together they report eight diagnostics. VX1001 to VX1004 are warnings about code that compiles
+The `Vorticity.Generators` package ships the `[VortexRecord]` generator and six analyzers.
+Together they report eleven diagnostics. VX1001 to VX1004 are warnings about code that compiles
 but would misbehave or throw; VX1005 to VX1008 are errors about a `[VortexRecord]` type the
-generator cannot implement, and the generator emits nothing for a type that has one. Every
-diagnostic's help link points at its section below.
+generator cannot implement, and the generator emits nothing for a type that has one; VX1009 to
+VX1011 are errors about a query that would throw when it is built, or that the compiler refuses
+without naming the fix. Every diagnostic's help link points at its section below.
 
 | id | severity | reported when |
 |---|---|---|
@@ -18,6 +19,9 @@ diagnostic's help link points at its section below.
 | [VX1006](#vx1006) | error | a record type, or a type containing it, is not `partial` |
 | [VX1007](#vx1007) | error | a type cannot be a record at all |
 | [VX1008](#vx1008) | error | a record member cannot be filled when rows are read |
+| [VX1009](#vx1009) | error | a component of a group key is not a column |
+| [VX1010](#vx1010) | error | a record does not take the values of a selection |
+| [VX1011](#vx1011) | error | several values are read without a record |
 
 ## VX1001
 
@@ -311,3 +315,77 @@ A private setter on the record's own member is fine: the generated code is part 
 **Fix:** give the member a setter or an `init` accessor, make it a constructor parameter, or mark
 a computed member `[VortexIgnore]`. For a `required` member you ignore, remove `required`, or put
 `[SetsRequiredMembers]` on the constructor that reading uses.
+
+## VX1009
+
+**A component of a group key is not a column.** Error.
+
+A group by takes a column of the scan, or a tuple of them, and each row falls into the group of its
+values. A literal, or a value captured from outside the lambda, is the same for every row: it
+groups nothing, and `GroupBy` refuses it with `ArgumentException` when it is built. The analyzer
+flags it in the tuple, in method and in query syntax.
+
+```csharp
+file.Scan<Reading>().GroupBy(r => (r.City, 42));          // VX1009: component 2, '42', is an int
+
+from r in file.Scan<Reading>()
+group r by (r.Day, "all") into g                          // VX1009: component 2, '"all"', is a string
+select (g.Key.Day, g.Count());
+```
+
+**Fix:** group by the columns alone, `r => (r.City, r.Day)`. A constant that should appear in every
+row of the result belongs to C# after the query.
+
+## VX1010
+
+**A record does not take the values of a selection.** Error.
+
+A selection of several values is read through a record: `As<TRecord>()` after a `Select`, and
+`AggAsync<TResult>` for the answers of a whole scan. The record's members, in declaration order,
+take the elements in order, one each, and a member is of its element's type or of its nullable
+form. `As` and `AggAsync` check it when they are built and throw `VortexSchemaException`; the
+analyzer reads the types of the tuple's elements in the lambda and flags it at compile time.
+
+```csharp
+[VortexRecord]
+public partial record struct CityDays(string City, int Days);
+
+file.Scan<Reading>().GroupBy(r => r.City)
+    .Select(g => (g.Key, g.Count()))
+    .As<CityDays>();                         // VX1010: element 2 is of type long, which member 'Days', of type int, does not take
+
+file.Scan<Reading>().GroupBy(r => r.City)
+    .Select(g => (g.Key, g.Count(), g.Max(r => r.Day)))
+    .As<CityDays>();                         // VX1010: CityDays has 2 members and the selection 3 elements
+```
+
+A selection kept in a variable and read in another method is checked when `As` runs: the analyzer
+sees only a `Select` it is called on.
+
+**Fix:** declare the member of the element's type, `long Days`, or of its nullable form, `long?`:
+a count is a `long`, an average a `double?`, a key component or a minimum the column's type. One
+member per element, in the order of the tuple.
+
+## VX1011
+
+**Several values are read without a record.** Error, beside the compiler's.
+
+Several values have no .NET type until a record gives them one, so a `Select` of several values
+returns an `Aggregation`, which is not enumerable, and `AggAsync` of several answers needs the
+record they go into. The compiler refuses both, CS8411 for an `await foreach`, CS0411 for an
+`AggAsync` whose type it cannot infer or for the operators of `System.Linq` asked of an
+`Aggregation`, with a message that does not say what to do; the analyzer reports this one beside
+it.
+
+```csharp
+await foreach (var (city, count) in file.Scan<Reading>()
+    .GroupBy(r => r.City)
+    .Select(g => (g.Key, g.Count())))            // CS8411 and VX1011
+
+var (min, max) = await file.Scan<Reading>()
+    .AggAsync(a => (a.Min(r => r.Day), a.Max(r => r.Day)));   // CS0411 and VX1011
+```
+
+**Fix:** declare a `[VortexRecord]` whose members take the values in order, and read the selection
+through it: `.As<CityCount>()`, enumerated as batches or with `ToRecordsAsync()`, or
+`AggAsync<MinMax>(a => (…))`. A selection of one value, `Select(g => g.Count())`, comes as itself.

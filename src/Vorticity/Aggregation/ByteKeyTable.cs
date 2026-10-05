@@ -76,8 +76,52 @@ internal sealed class ByteKeyTable
         return number;
     }
 
+    /// <summary>Forgets every key, keeping the buffers and the seed.</summary>
+    internal void Clear()
+    {
+        Count = 0;
+        _used = 0;
+        Array.Clear(_slots);
+    }
+
     /// <summary>The bytes of key <paramref name="index"/>.</summary>
     internal ReadOnlySpan<byte> KeyOf(int index) => _bytes.AsSpan(_offsets[index], _lengths[index]);
+
+    /// <summary>
+    /// Keeps keys <paramref name="entries"/> alone, key <c>entries[i]</c> becoming key <c>i</c>: their
+    /// bytes moved to the front in place and the slots filled again from the hashes kept, so that no
+    /// key is copied out or hashed again. <paramref name="entries"/> ascend.
+    /// </summary>
+    internal void Retain(ReadOnlySpan<int> entries)
+    {
+        int used = 0;
+        for (int i = 0; i < entries.Length; i++)
+        {
+            // Keys only move toward the front, into the room of those left out before them.
+            int entry = entries[i];
+            int length = _lengths[entry];
+            _bytes.AsSpan(_offsets[entry], length).CopyTo(_bytes.AsSpan(used));
+            _offsets[i] = used;
+            _lengths[i] = length;
+            _hashes[i] = _hashes[entry];
+            used += length;
+        }
+
+        Count = entries.Length;
+        _used = used;
+        Array.Clear(_slots);
+        int mask = _slots.Length - 1;
+        for (int index = 0; index < Count; index++)
+        {
+            int slot = (int)_hashes[index] & mask;
+            while (_slots[slot] != 0)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            _slots[slot] = index + 1;
+        }
+    }
 
     private void Append(ReadOnlySpan<byte> key, ulong hash)
     {
@@ -92,7 +136,7 @@ internal sealed class ByteKeyTable
 
         if (_used + key.Length > _bytes.Length)
         {
-            Array.Resize(ref _bytes, Math.Max(_used + key.Length, _bytes.Length * 2));
+            Array.Resize(ref _bytes, Scratch.Capacity(_used + key.Length, _bytes.Length));
         }
 
         key.CopyTo(_bytes.AsSpan(_used));

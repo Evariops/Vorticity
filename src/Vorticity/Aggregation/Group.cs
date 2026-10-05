@@ -5,37 +5,104 @@ using Vorticity.Aggregating;
 namespace Vorticity;
 
 /// <summary>
-/// One group of a grouped scan, for the lambda of <c>AggAsync</c>: its key, and the aggregates of
+/// One group of a grouped scan, for the lambda of <c>Select</c>: its key, and the aggregates of
 /// <see cref="Aggregates{TRecord}"/> over the group's rows.
 /// </summary>
 /// <typeparam name="TRecord">The record the scan is typed by.</typeparam>
-/// <typeparam name="TKey">The key: one column's type, or the tuple of a composite key, whose components are <c>Key.Item1</c> to <c>Key.Item4</c>.</typeparam>
+/// <typeparam name="TKey">The key: the symbol of one column, or the tuple of symbols of a composite key, under the names the key's lambda gave them.</typeparam>
 public readonly struct Group<TRecord, TKey>
 {
     private readonly RecordBinding? _binding;
+    private readonly RowFilter? _filter;
 
-    internal Group(RecordBinding binding, Sym<TKey> key)
+    internal Group(RecordBinding binding, TKey key)
     {
         _binding = binding;
         Key = key;
     }
 
-    /// <summary>The group's key.</summary>
-    public Sym<TKey> Key { get; }
+    private Group(RecordBinding? binding, TKey key, RowFilter? filter)
+    {
+        _binding = binding;
+        Key = key;
+        _filter = filter;
+    }
+
+    /// <summary>The group's key: the symbol of its column, or the tuple of symbols of a composite key, each a result of the group.</summary>
+    public TKey Key { get; }
 
     /// <summary>The binding the aggregates read their columns through, for the extensions that add aggregates.</summary>
     internal RecordBinding? Binding => _binding;
 
+    /// <summary>The rows of the group its aggregates read, for a filtered group; null for every row.</summary>
+    internal RowFilter? Filter => _filter;
+
+    /// <summary>
+    /// The group's rows where <paramref name="predicate"/> is true, with every aggregate, and its key:
+    /// SQL's <c>FILTER (WHERE …)</c>. Two of them keep the rows both keep.
+    /// </summary>
+    /// <param name="predicate">A predicate over the rows, in the language of a scan's <c>Where</c>.</param>
+    /// <returns>The filtered group, whose aggregates read those rows alone.</returns>
+    /// <exception cref="InvalidOperationException">The predicate compares an aggregate: a filtered group keeps rows.</exception>
+    public Group<TRecord, TKey> Where(Func<Probe<TRecord>, Predicate> predicate) =>
+        new Group<TRecord, TKey>(_binding, Key, RowFilter.And(_filter, Aggregators.Rows(_binding, predicate), holds: true));
+
     /// <summary>The number of rows of the group, nulls included.</summary>
     /// <returns>The symbol of the count.</returns>
-    public Sym<long> Count() => Aggregators.Count();
+    public Sym<long> Count() => Aggregators.Filtered(Aggregators.Count(), _filter);
+
+    /// <summary>The number of rows of the group where <paramref name="predicate"/> is true: <c>Where(predicate).Count()</c>.</summary>
+    /// <param name="predicate">A predicate over the rows.</param>
+    /// <returns>The symbol of the count.</returns>
+    public Sym<long> Count(Func<Probe<TRecord>, Predicate> predicate) => Where(predicate).Count();
+
+    /// <summary>Whether <paramref name="predicate"/> is true for a row of the group.</summary>
+    /// <param name="predicate">A predicate over the rows.</param>
+    /// <returns>The symbol of the answer; false for a filtered group that keeps no row.</returns>
+    public Sym<bool> Any(Func<Probe<TRecord>, Predicate> predicate) =>
+        Aggregators.Exists(RowFilter.And(_filter, Aggregators.Rows(_binding, predicate), holds: true), all: false);
+
+    /// <summary>Whether <paramref name="predicate"/> is true for every row of the group: no row where it is false or unknown.</summary>
+    /// <param name="predicate">A predicate over the rows.</param>
+    /// <returns>The symbol of the answer; true for a filtered group that keeps no row.</returns>
+    public Sym<bool> All(Func<Probe<TRecord>, Predicate> predicate) =>
+        Aggregators.Exists(RowFilter.And(_filter, Aggregators.Rows(_binding, predicate), holds: false), all: true);
+
+    /// <summary>
+    /// The group's first row in file order, the order the rows the scan keeps lie in the source,
+    /// whatever its <c>OrderBy</c>; its columns are results: <c>g.First().Price</c>.
+    /// </summary>
+    /// <returns>A probe of the row, whose columns are read after the pass, for the chosen rows alone.</returns>
+    public Probe<TRecord> First() => Chosen(AggregateKind.First, null);
+
+    /// <summary>The group's last row in file order; its columns are results: <c>g.Last().Price</c>.</summary>
+    /// <returns>A probe of the row, whose columns are read after the pass, for the chosen rows alone.</returns>
+    public Probe<TRecord> Last() => Chosen(AggregateKind.Last, null);
+
+    /// <summary>
+    /// The group's row holding the smallest value of <paramref name="by"/>, the first in file order
+    /// of equal ones; a null or a NaN is never one. Its columns are results.
+    /// </summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="by">The column the row is chosen by.</param>
+    /// <returns>A probe of the row; its columns are null, or a value type's default, when no row of the group holds a value.</returns>
+    public Probe<TRecord> MinBy<T>(Func<Probe<TRecord>, Sym<T>> by) => Chosen(AggregateKind.MinBy, Aggregators.Input(_binding, by));
+
+    /// <summary>
+    /// The group's row holding the largest value of <paramref name="by"/>, the first in file order
+    /// of equal ones; a null or a NaN is never one. Its columns are results.
+    /// </summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="by">The column the row is chosen by.</param>
+    /// <returns>A probe of the row; its columns are null, or a value type's default, when no row of the group holds a value.</returns>
+    public Probe<TRecord> MaxBy<T>(Func<Probe<TRecord>, Sym<T>> by) => Chosen(AggregateKind.MaxBy, Aggregators.Input(_binding, by));
 
     /// <summary>The number of distinct non-null values of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the count.</returns>
     public Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>> column) =>
-        Aggregators.CountDistinct(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.CountDistinct(Aggregators.Input(_binding, column)), _filter);
 
     /// <summary>The sum of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
@@ -43,7 +110,7 @@ public readonly struct Group<TRecord, TKey>
     /// <returns>The symbol of the sum; reading it throws <see cref="OverflowException"/> when the sum does not fit <typeparamref name="T"/>.</returns>
     public Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<T>> column)
         where T : INumber<T> =>
-        Aggregators.Sum<T>(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
 
     /// <summary>The sum of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
@@ -51,37 +118,123 @@ public readonly struct Group<TRecord, TKey>
     /// <returns>The symbol of the sum.</returns>
     public Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
-        Aggregators.Sum<T>(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>The sum of <paramref name="column"/> in the group, as a long, which no sum of narrower integers overflows on the way.</summary>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the sum.</returns>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<sbyte>> column) => Widened<long, sbyte>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<sbyte?>> column) => Widened<long, sbyte?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<short>> column) => Widened<long, short>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<short?>> column) => Widened<long, short?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<int>> column) => Widened<long, int>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<int?>> column) => Widened<long, int?>(column);
+
+    /// <summary>The sum of <paramref name="column"/> in the group, as an unsigned long, which no sum of narrower integers overflows on the way.</summary>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the sum.</returns>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte>> column) => Widened<ulong, byte>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte?>> column) => Widened<ulong, byte?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort>> column) => Widened<ulong, ushort>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort?>> column) => Widened<ulong, ushort?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint>> column) => Widened<ulong, uint>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint?>> column) => Widened<ulong, uint?>(column);
+
+    /// <summary>The sum of <paramref name="column"/> in the group, as a double: the reproducible sum of its values.</summary>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the sum.</returns>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<float>> column) => Widened<double, float>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{float}})"/>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<float?>> column) => Widened<double, float?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{float}})"/>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<Half>> column) => Widened<double, Half>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{float}})"/>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<Half?>> column) => Widened<double, Half?>(column);
 
     /// <summary>The smallest non-null value of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the minimum.</returns>
     public Sym<T?> Min<T>(Func<Probe<TRecord>, Sym<T>> column) =>
-        Aggregators.Extreme<T>(Aggregators.Input(_binding, column), max: false);
+        Aggregators.Filtered(Aggregators.Extreme<T>(Aggregators.Input(_binding, column), max: false), _filter);
 
     /// <summary>The largest non-null value of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the maximum.</returns>
     public Sym<T?> Max<T>(Func<Probe<TRecord>, Sym<T>> column) =>
-        Aggregators.Extreme<T>(Aggregators.Input(_binding, column), max: true);
+        Aggregators.Filtered(Aggregators.Extreme<T>(Aggregators.Input(_binding, column), max: true), _filter);
 
     /// <summary>The mean of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the mean; null when no row of the group holds a value.</returns>
-    public Sym<double?> Avg<T>(Func<Probe<TRecord>, Sym<T>> column)
+    public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T>> column)
         where T : INumber<T> =>
-        Aggregators.Avg(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.Average(Aggregators.Input(_binding, column)), _filter);
 
     /// <summary>The mean of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the mean.</returns>
-    public Sym<double?> Avg<T>(Func<Probe<TRecord>, Sym<T?>> column)
+    public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
-        Aggregators.Avg(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.Average(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>The sample variance of <paramref name="column"/> in the group, over <c>n − 1</c>.</summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the variance; null below two values.</returns>
+    public Sym<double?> Variance<T>(Func<Probe<TRecord>, Sym<T>> column)
+        where T : INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: false), _filter);
+
+    /// <summary>The sample variance of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the variance; null below two values.</returns>
+    public Sym<double?> Variance<T>(Func<Probe<TRecord>, Sym<T?>> column)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: false), _filter);
+
+    /// <summary>The sample standard deviation of <paramref name="column"/> in the group: the square root of its variance.</summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the standard deviation; null below two values.</returns>
+    public Sym<double?> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T>> column)
+        where T : INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: true), _filter);
+
+    /// <summary>The sample standard deviation of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the standard deviation; null below two values.</returns>
+    public Sym<double?> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T?>> column)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Variance(Aggregators.Input(_binding, column), deviation: true), _filter);
 
     /// <summary>The state <typeparamref name="TAggregator"/> folds <paramref name="column"/> into, per group.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>
@@ -92,7 +245,19 @@ public readonly struct Group<TRecord, TKey>
     public Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T>> column)
         where T : unmanaged
         where TAggregator : IAggregator<T, TState> =>
-        Aggregators.Custom<T, TAggregator, TState>(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.Custom<T, TAggregator, TState>(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>The sum of a column of <typeparamref name="TColumn"/> as a <typeparamref name="TSum"/>, wider than the column's.</summary>
+    private Sym<TSum> Widened<TSum, TColumn>(Func<Probe<TRecord>, Sym<TColumn>> column)
+        where TSum : INumber<TSum> =>
+        Aggregators.Filtered(Aggregators.Sum<TSum>(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>A probe of the row a choice keeps, of the rows the group's filter keeps.</summary>
+    private Probe<TRecord> Chosen(AggregateKind kind, ColumnShape? by) =>
+        new Probe<TRecord>(
+            _binding ?? throw new InvalidOperationException("A chosen row is taken inside the lambda of Select or AggAsync, which hands it its columns."),
+            null,
+            Aggregators.Chosen(kind, by, _filter));
 
     /// <summary>The state <typeparamref name="TAggregator"/> folds a nullable <paramref name="column"/> into, per group.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>
@@ -103,5 +268,5 @@ public readonly struct Group<TRecord, TKey>
     public Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : unmanaged
         where TAggregator : IAggregator<T, TState> =>
-        Aggregators.Custom<T, TAggregator, TState>(Aggregators.Input(_binding, column));
+        Aggregators.Filtered(Aggregators.Custom<T, TAggregator, TState>(Aggregators.Input(_binding, column)), _filter);
 }

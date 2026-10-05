@@ -104,6 +104,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The store it reads and writes.</summary>
     internal IObjectStore Store => _store;
 
+    /// <summary>How many of its open objects a read holds: none once every read has given its objects back.</summary>
+    internal int LeasedObjects => _objects.Leased;
+
     /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
     internal DatasetLevels Levels => Snapshot.Levels;
 

@@ -30,6 +30,13 @@ internal sealed record ScanSpec
 
     internal bool Descending { get; init; }
 
+    /// <summary>
+    /// Whether the splits come last one first, each still in file order, on one lane: a stream on a
+    /// sorted column read from its greatest values down, which needs the order of the splits and
+    /// not that of the rows inside one.
+    /// </summary>
+    internal bool Backward { get; init; }
+
     internal ScanOptions Options { get; init; } = ScanOptions.Default;
 
     /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
@@ -90,6 +97,36 @@ internal abstract class ScanSource
 
     /// <summary>Which key source <see cref="OpenKeysAsync"/> would walk.</summary>
     internal abstract ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The smallest and the largest value of the column at <paramref name="path"/> over the whole
+    /// source, whatever a scan keeps of it, when its statistics hold them.
+    /// </summary>
+    internal virtual bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    {
+        min = FilterLiteral.Null;
+        max = FilterLiteral.Null;
+        return false;
+    }
+
+    /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
+    internal virtual long RowBound => -1;
+
+    /// <summary>
+    /// The ranges of rows a pass of <paramref name="degree"/> lanes reads side by side, each a range
+    /// of <see cref="ScanSpec.Rows"/> the source reads alone: the objects of a dataset, or parts of a
+    /// large one. Null when the source has none of its own; a file's are cut by the engine, at its
+    /// chunks.
+    /// </summary>
+    internal virtual ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken) => default;
+
+    /// <summary>
+    /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>)
+    /// brings its rows in it at a cost a stream can bear: a dataset on the first column of its
+    /// clustering key, whose objects a key-ordered read opens as the order reaches them. A file
+    /// whose statistics say a column is sorted needs no asking.
+    /// </summary>
+    internal virtual bool OrdersOnAsking(FieldExpr column) => false;
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -204,6 +241,23 @@ internal sealed class FileScanSource : ScanSource
 
     internal override bool MayMatch(VortexExpr filter) => Compute.FileStatisticsPruner.MayMatch(_file, filter);
 
+    /// <remarks>The file statistics are one entry per top-level column.</remarks>
+    internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    {
+        min = FilterLiteral.Null;
+        max = FilterLiteral.Null;
+        if (!_file.HasFileStatistics || path.Length != 1 || !_file.Schema.RootIsStruct || path[0] >= _file.Statistics.Count)
+        {
+            return false;
+        }
+
+        FieldStatistics statistics = _file.Statistics[path[0]];
+        return statistics.HasMin && statistics.HasMax
+            && FileStatisticsPruner.TryLiteral(statistics.Min, out min) && FileStatisticsPruner.TryLiteral(statistics.Max, out max);
+    }
+
+    internal override long RowBound => _file.RowCount;
+
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);
 
@@ -248,6 +302,10 @@ internal sealed class FileScanSource : ScanSource
         if (spec.OrderPath is { } order)
         {
             builder.InKeyOrder(order, spec.Descending);
+        }
+        else if (spec.Backward)
+        {
+            builder.InReverse();
         }
 
         ScanOptions options = spec.Options;

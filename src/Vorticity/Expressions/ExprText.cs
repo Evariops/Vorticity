@@ -167,6 +167,12 @@ internal static class ExprText
                 text.Append('"').Append(name.Replace("\"", "\"\"", StringComparison.Ordinal)).Append('"');
             }
         }
+
+        // A value expression shows its functions, which the grammar does not read back.
+        if (field is Compute.FunctionFieldExpr function)
+        {
+            text.Append(function.Key, function.Path.Length, function.Key.Length - function.Path.Length);
+        }
     }
 
     private static void AppendLiteral(StringBuilder text, FilterLiteral literal)

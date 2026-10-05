@@ -11,8 +11,8 @@ namespace Vorticity.Tests.Aggregation;
 /// The sum kernels against a sum taken one value at a time: every integer width, lengths either
 /// side of the 32- and 64-value blocks the wide kernels take and of the pairs they unroll, and the
 /// extremes -- all bytes 255 or -128, all words 65 535 or -32 768, all longs at either end -- that an overflowing lane or a
-/// bias applied the wrong way shows. Floats, with NaN among them and without, are held to a tolerance, since their order of addition
-/// is the kernel's, and their NaN count exactly.
+/// bias applied the wrong way shows. Floats, with NaN among them and without, are the indexed sum's
+/// spans against its values one at a time, to the bit, and their NaN count exactly.
 /// </summary>
 public sealed class SumKernelsTests
 {
@@ -54,40 +54,35 @@ public sealed class SumKernelsTests
     }
 
     [Fact]
-    public void FloatSumsCountTheNumbersAndSumThemClosely()
+    public void FloatSpansAreTheValuesSummedOneByOneToTheBit()
     {
         Random random = new Random(20260928);
         foreach ((int length, bool nans) in Lengths.SelectMany(length => new[] { (length, false), (length, true) }))
         {
             double[] doubles = new double[length];
             float[] singles = new float[length];
-            double expected = 0;
+            IndexedSum doublesOneByOne = default;
+            IndexedSum singlesOneByOne = default;
             long numbers = 0;
             for (int i = 0; i < length; i++)
             {
                 double value = nans && random.Next(10) == 0 ? double.NaN : (random.NextDouble() - 0.3) * 1000;
                 doubles[i] = value;
                 singles[i] = (float)value;
-                if (!double.IsNaN(value))
-                {
-                    expected += (float)value;
-                    numbers++;
-                }
+                doublesOneByOne.Add(value);
+                singlesOneByOne.Add((float)value);
+                numbers += double.IsNaN(value) ? 0 : 1;
             }
 
-            double fromSingles = SumKernels.Float<float>(singles, out long countedSingles);
-            Assert.Equal(numbers, countedSingles);
-            Assert.True(Math.Abs(fromSingles - expected) <= 1e-9 * Math.Max(1, Math.Abs(expected)) + 1e-6, $"{length}: {fromSingles} against {expected}");
+            IndexedSum fromSingles = default;
+            IndexedFloatSum<float>.AddSpan(ref fromSingles, singles);
+            Assert.Equal(numbers, fromSingles.Count);
+            Assert.Equal(BitConverter.DoubleToInt64Bits(singlesOneByOne.Value), BitConverter.DoubleToInt64Bits(fromSingles.Value));
 
-            double exact = 0;
-            foreach (double value in doubles)
-            {
-                exact += double.IsNaN(value) ? 0 : value;
-            }
-
-            double fromDoubles = SumKernels.Float<double>(doubles, out long countedDoubles);
-            Assert.Equal(numbers, countedDoubles);
-            Assert.True(Math.Abs(fromDoubles - exact) <= 1e-9 * Math.Max(1, Math.Abs(exact)) + 1e-6, $"{length}: {fromDoubles} against {exact}");
+            IndexedSum fromDoubles = default;
+            IndexedFloatSum<double>.AddSpan(ref fromDoubles, doubles);
+            Assert.Equal(numbers, fromDoubles.Count);
+            Assert.Equal(BitConverter.DoubleToInt64Bits(doublesOneByOne.Value), BitConverter.DoubleToInt64Bits(fromDoubles.Value));
         }
     }
 
@@ -109,16 +104,19 @@ public sealed class SumKernelsTests
     [Fact]
     public void InfinitiesAreNumbersAndOpposedOnesMakeNaN()
     {
-        double[] rising = Enumerable.Repeat(double.PositiveInfinity, 40).ToArray();
-        Assert.Equal(double.PositiveInfinity, SumKernels.Float<double>(rising, out long counted));
-        Assert.Equal(40, counted);
+        IndexedSum rising = default;
+        IndexedFloatSum<double>.AddSpan(ref rising, Enumerable.Repeat(double.PositiveInfinity, 40).ToArray());
+        Assert.Equal(double.PositiveInfinity, rising.Value);
+        Assert.Equal(40, rising.Count);
 
         float[] opposed = Enumerable.Repeat(1f, 70).ToArray();
         opposed[3] = float.PositiveInfinity;
         opposed[40] = float.NegativeInfinity;
         opposed[50] = float.NaN;
-        Assert.True(double.IsNaN(SumKernels.Float<float>(opposed, out counted)));
-        Assert.Equal(69, counted);
+        IndexedSum sum = default;
+        IndexedFloatSum<float>.AddSpan(ref sum, opposed);
+        Assert.True(double.IsNaN(sum.Value));
+        Assert.Equal(69, sum.Count);
     }
 
     private static void Check<T>(byte[] bytes, int length)

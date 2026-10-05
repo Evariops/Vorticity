@@ -33,8 +33,8 @@ public sealed class MaskedAccumulateTests
     [Fact]
     public void FloatSumsFoldTheMaskedNumbers()
     {
-        Run<double, SumState<double>, FloatSum<double>>(random => Number(random), Close);
-        Run<float, SumState<double>, FloatSum<float>>(random => (float)Number(random), Close);
+        Run<double, IndexedSum, IndexedFloatSum<double>>(random => Number(random), Same);
+        Run<float, IndexedSum, IndexedFloatSum<float>>(random => (float)Number(random), Same);
     }
 
     [Fact]
@@ -48,8 +48,9 @@ public sealed class MaskedAccumulateTests
 
     private static double Number(Random random) => random.Next(8) == 0 ? double.NaN : (random.NextDouble() - 0.3) * 1000;
 
-    private static bool Close(SumState<double> a, SumState<double> b) =>
-        a.Count == b.Count && Math.Abs(a.Sum - b.Sum) <= 1e-9 * Math.Max(1, Math.Abs(b.Sum));
+    // A float sum is the same bits whatever the path its values take.
+    private static bool Same(IndexedSum a, IndexedSum b) =>
+        a.Count == b.Count && BitConverter.DoubleToInt64Bits(a.Value) == BitConverter.DoubleToInt64Bits(b.Value);
 
     private static void Run<TValue, TState, TOp>(Func<Random, TValue> next, Func<TState, TState, bool> same)
         where TValue : unmanaged

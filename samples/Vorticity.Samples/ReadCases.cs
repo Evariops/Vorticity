@@ -19,5 +19,6 @@ internal static class ReadCases
         samples["encoded-forms"] = EncodedForms.RunAsync;
         samples["selection"] = SelectionCase.RunAsync;
         samples["aggregates"] = Aggregates.RunAsync;
+        samples["queries"] = Queries.RunAsync;
     }
 }

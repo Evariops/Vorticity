@@ -5,8 +5,11 @@ own, on as many cores as the session allows.
 
 ```csharp
 Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
-(double? min, double? max, long n, long cities) = await recent
-    .AggAsync(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+Summary s = await recent
+    .AggAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+
+[VortexRecord]
+public partial record struct Summary(double? Min, double? Max, long Rows, long Cities);
 ```
 
 ```
@@ -15,16 +18,20 @@ AggAsync, four answers             2.3 ms  min 10.1, max 49.9, 100000 rows, 8 ci
 
 ## Several answers in one pass
 
-`AggAsync` takes a lambda over an `Aggregates<Reading>` and returns a tuple of one to eight answers,
-computed in a single pass over the rows the scan keeps. The members are `Count()`,
-`CountDistinct`, `Sum`, `Min`, `Max`, `Avg` and `Aggregate`, each over a column named as in a
-filter. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
+`AggAsync` takes a lambda over an `Aggregates<Reading>` and computes its answers in a single pass
+over the rows the scan keeps: one answer comes as itself, `await scan.AggAsync(a => a.Count())`,
+and several, of any number, go into the record `AggAsync<TResult>` names, whose members take them
+in order, each of its answer's type or of its nullable form. The members of `a` are `Count()`,
+`CountDistinct`, `Sum`, `Min`, `Max`, `Average`, `Variance`, `StandardDeviation` and `Aggregate`,
+each over a column named as in a filter, and `Count`, `Any` and `All` of a predicate, and `Where`,
+which filters the aggregates that follow it ([a filtered group](#a-filtered-group)). `Variance` and
+`StandardDeviation` are of the sample, over `n − 1`, and null below two values. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
 your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
 14 left, of which one had a column brought to the canonical form; the others were read as runs and
 dictionaries.
 
 For one answer there are the sinks of the scan itself: `CountAsync`, `AnyAsync`, `MinAsync`,
-`MaxAsync`, `SumAsync`, `AvgAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
+`MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
 block by block on the encoded form, never hands a batch to your code, keeps one state per chunk,
 and merges the states at the end; §5.5 of [14-public-api.md](../design/14-public-api.md) tables
 what each encoding lets it skip.
@@ -32,13 +39,17 @@ what each encoding lets it skip.
 ## Group by
 
 ```csharp
-Aggregation<(string, double?, WelfordState)> byCity = file.Scan<Reading>()
+Scan<CitySpread> byCity = file.Scan<Reading>()
     .GroupBy(r => r.City)
-    .AggAsync(g => (g.Key, g.Avg(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
-await foreach ((string city, double? mean, WelfordState state) in byCity)
+    .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+    .As<CitySpread>();
+await foreach (CitySpread city in byCity.ToRecordsAsync())
 {
-    lines[line++] = $"  {city,-10} mean {mean:F4}  variance {state.Variance:F4}";
+    lines[line++] = $"  {city.City,-10} mean {city.Mean:F4}  variance {city.State.Variance:F4}";
 }
+
+[VortexRecord]
+public partial record struct CitySpread(string City, double? Mean, WelfordState State);
 ```
 
 ```
@@ -49,19 +60,185 @@ await foreach ((string city, double? mean, WelfordState state) in byCity)
 ```
 
 `Welford<double>` is the aggregator of the next section, a mean and a variance in one pass.
-`g.Key` is the key, and the other members of `g` are those of `Aggregates`. The result is an
-`Aggregation<T>`, enumerated with `await foreach`, with its own `ExplainAsync` and `Statistics`. A
-composite key has up to four columns, reached as `g.Key.Item1` to `Item4`:
+`g.Key` is the key, and the other members of `g` are those of `Aggregates`. A selection of one
+value, `Select(g => g.Count())`, is an `Aggregation<long>`, enumerated with `await foreach`, a
+`long` per group. Several values have no .NET type until a record gives them one: the selection is
+an `Aggregation`, and `As<TRecord>()` makes it a `Scan<TRecord>` of the result, whose members take
+the values in order. It is read as a file's scan is: as batches, the default, whose columns are
+borrowed and allocate nothing per group, or as records through `ToRecordsAsync()`, a record per
+group. A state is a column like the others: `WelfordState` is a `[VortexRecord]`, three columns
+in one.
+
+A composite key is a tuple of columns, of any length, whose names are the key's, `g.Key.City` and
+`g.Key.Day`:
 
 ```csharp
 await foreach (var (city, day, total, state) in file.Scan<Reading>()
     .GroupBy(r => (r.City, r.Day))
-    .AggAsync(g => (g.Key.Item1, g.Key.Item2, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+    .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+    .As<CityDaySpread>()
+    .ToRecordsAsync())
 ```
+
+The same query in query syntax is the same plan:
+
+```csharp
+(from r in file.Scan<Reading>()
+ group r by (r.City, r.Day) into g
+ select (g.Key.City, g.Key.Day, g.Sum(x => x.Celsius)))
+.As<CityDayTotal>()
+```
+
+The result's scan is a scan: a `Where` filters its batches, a `GroupBy` aggregates it again, the
+daily from the hourly, `CountAsync` and the other single answers read it, and a writer writes it,
+`writer.WriteAsync(result)`, a batch at a time.
 
 Groups arrive in key order, nulls last, when the key comes from a dictionary or from a column the
 statistics say is sorted, and in no promised order otherwise; a null key is a group of its own.
 Memory follows the number of groups, 8 000 for this composite key, not the number of rows.
+
+## A filtered group
+
+`g.Where(r => p)` is the group's rows where `p` is true, with every aggregate: SQL's
+`FILTER (WHERE …)`, computed beside the aggregates of the whole group in the same pass.
+
+```csharp
+await foreach (CityHeat city in file.Scan<Reading>()
+    .GroupBy(r => r.City)
+    .Select(g => (
+        g.Key,
+        g.Count(),
+        g.Count(r => r.Celsius > 45.0),
+        g.Where(r => r.Celsius > 45.0).Average(r => r.Celsius),
+        g.Any(r => r.Celsius >= 49.9),
+        g.All(r => r.Celsius >= 10.0)))
+    .As<CityHeat>()
+    .ToRecordsAsync())
+
+[VortexRecord]
+public partial record struct CityHeat(string City, long Rows, long Hot, double? HotMean, bool AnyTop, bool AllWarm);
+```
+
+```
+  Paris      15001 of 125006 above 45, mean 47.50, any at 49.9 False, all at 10 or more False
+  Lyon       15352 of 125000 above 45, mean 47.46, any at 49.9 True, all at 10 or more False
+  ...
+```
+
+`g.Count(r => p)` is `g.Where(r => p).Count()`; `g.Any(r => p)` asks whether `p` is true for a row
+of the group, `g.All(r => p)` whether it is true for every one. The predicate is in the language of
+a scan's `Where`, and a row counts where it is true, not where it is unknown: every temperature
+present is above 10, but one in fifty is missing, so `All` is false. Two `Where` keep the rows both
+keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same over the scan's rows.
+
+Each predicate is evaluated once a batch, however many aggregates read it, and its columns join the
+pass. On a million requests grouped by endpoint, the count, the failures and their mean latency took
+3.4 ms in one pass, and the failures alone, filtered before the group by, 4.6 ms. A filter written
+before the group by is still the one to write when the other rows are not wanted and the zone maps
+can skip blocks with it.
+
+## Chosen rows
+
+`g.First()` and `g.Last()` are the group's first and last row in file order, `g.MinBy(r => e)` and
+`g.MaxBy(r => e)` the row holding the smallest and the largest value of `e`. Each is a probe whose
+columns are results of the group:
+
+```csharp
+.Select(g => (g.Key, g.First().Celsius, g.Max(r => r.Celsius), g.MaxBy(r => r.Celsius).Day, g.Last().Celsius))
+.As<CityHottest>()
+
+[VortexRecord]
+public partial record struct CityHottest(string City, double? First, double? Hottest, int? HottestDay, double? Last);
+```
+
+```
+  Paris      first , hottest 49.8 on day 0, last 49.8
+  Lyon       first 10.7, hottest 49.9 on day 0, last 49.9
+  ...
+```
+
+File order is the order the rows the scan keeps lie in the file, whatever its `OrderBy`, and it is
+the same at every degree: of equal values, `MinBy` and `MaxBy` take the first row, and a null or a
+NaN is never chosen. Paris's first row has no temperature, so its `First` is null: `First()` is a
+row, not the first value. Columns read from one chosen row are one row: `g.MaxBy(r => r.Celsius).Day`
+and `.City` come from the same reading. A group with no candidate, every value null, reads null
+where the member is nullable and a value type's default where it is not.
+
+The pass keeps each group's row as its position and the value it is chosen by; the columns read
+from the rows are fetched once the groups are known, by position, which decodes only those rows
+where the encoding allows: for the groups the result delivers, or, when a `Where` or an `OrderBy`
+after the group by compares one, for the groups that reach it. An `OrderByDescending` with a
+`Take(10)` reads ten rows whatever the number of groups, and the first and last rows of a day share
+one read. A group by that streams fetches them for each batch of groups it closes. A chosen row's
+column is a result: a `Where` or an `OrderBy` after the group by compares it, and an aggregate does
+not read it.
+
+## Buckets of time and of numbers
+
+```csharp
+TimeZoneInfo paris = TimeZoneInfo.FindSystemTimeZoneById("Europe/Paris");
+DateTime second = new DateTime(2026, 9, 2, 0, 0, 0, DateTimeKind.Utc);
+Scan<Visit> day = visitFile.Scan<Visit>().Where(v => v.StartedAt.Truncate(CalendarUnit.Day) == second);
+await foreach (VisitHour hour in day
+    .GroupBy(v => v.StartedAt.Truncate(CalendarUnit.Hour, paris))
+    .Select(g => (g.Key, g.Count(), g.Average(v => v.DurationMs)))
+    .As<VisitHour>()
+    .ToRecordsAsync())
+
+[VortexRecord]
+public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanMs);
+```
+
+```
+GroupBy(StartedAt, by hour)        0.8 ms  24 hours; 5 blocks decoded
+  2026-09-02 02:00 Paris  1200 visits, mean 29400 ms
+  2026-09-02 03:00 Paris  1200 visits, mean 30600 ms
+  ...
+```
+
+`Truncate(unit)` is the start of the `Minute`, `Hour`, `Day`, `Week` (from Monday), `Month`,
+`Quarter` or `Year` holding an instant or a date, `Truncate(unit, zone)` the same on a zone's
+calendar, and `Bucket(width)` the bucket of a `TimeSpan` holding an instant, counted from
+1970-01-01. Each is a column of the column's type, valid wherever a column is: a key, a filter, an
+aggregate's input, a selection. A `DateTime` is truncated as it is stored, here in UTC, so the day
+is the UTC day and its hours, on Paris's calendar, start at 02:00 in Paris. On a zone's calendar each
+instant takes its interval's offset: the autumn's repeated hour is two hours, and its day one of 25
+hours. A `DateTimeOffset` read from a zoned column is truncated on its column's calendar. A null
+stays null.
+
+The filter is not evaluated through the function. A comparison of a function with a constant is the
+range of the column it stands for, the day `StartedAt >= 2026-09-02 && StartedAt < 2026-09-03`, so
+the zone maps, the statistics and a sorted column prune, count and locate it as they would the range
+written by hand: the scan decoded the 5 blocks of 13 that hold the day. The instants being sorted,
+their hours are too, and the group by streams, an hour at a time.
+
+When every aggregate is a count, a minimum or a maximum, a block whose rows all fall in one bucket
+is not read at all: its zone map gives the bucket, the block's rows and the extremes of its columns,
+and the group by decodes only the blocks that straddle a boundary. On a log of a million requests,
+one a second, the days with their count, their fastest and their slowest request took 1.3 ms, against
+4.1 ms reading every block. Under a filter, a block is left to its zone map when the zone maps prove
+the filter keeps it whole.
+
+On a number, `Bucket(width)` is `⌊v / w⌋ × w`, in integers for an integer column and rounded to the
+column's type for a float:
+
+```csharp
+.GroupBy(v => v.DurationMs.Bucket(15_000))
+.Select(g => (g.Key, g.Count()))
+.As<DurationBucket>()
+```
+
+```
+  from      0 ms  25000 visits
+  from  15000 ms  15000 visits
+  ...
+  from  75000 ms  15000 visits
+```
+
+A comparison with a float's bucket, an `In` over a function and two functions compared are evaluated
+through the function, and prune by the zones' bounds taken through it. A decimal's bucket is not
+there yet. A function has no key source of its own, so it cannot be the key of a scan's `OrderBy` or
+of `Keys`.
 
 ## An aggregator of your own
 
@@ -154,8 +331,19 @@ Welford(Celsius), degree 14        1.3 ms  980000 values, mean 30.0000, variance
 Parallelism is the session's, 1 by default: a library does not take a host's cores without being
 asked. With it, chunks aggregate concurrently, one state per group per chunk, and `Merge` joins
 them: the same answers, 3.5 times faster for the composite group by on 14 cores, 3.7 times for the
-Welford fold. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
+Welford fold. A group by whose key streams streams on every lane too: ranges of rows are grouped
+side by side and each follows the one before it in the order of the rows, so the groups still come
+out in key order as they close, the first ones once the first block is grouped, and the memory is
+that of the ranges in flight. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
 ([threads.md](threads.md)).
+
+The first groups of an order on the key cost what they keep. `OrderBy(g => g.Key).Take(10)` keeps,
+on each lane, the ten best keys it has met, trimmed back as others come, and a row whose integer key
+lies past them is not grouped at all: a key of a million values is held ten groups a lane at a time.
+On a sorted key, `OrderByDescending(g => g.Key).Take(7)` reads the file's chunks from the last one
+back and stops once the seventh group is out. A top on an aggregate,
+`OrderByDescending(g => g.Count()).Take(10)`, holds every group to the end, since a count is known
+only then.
 
 ## Decimals, at any precision
 
@@ -167,7 +355,7 @@ converted once, at the end:
 ```csharp
 decimal total = await file.Scan<Invoice>().SumAsync(i => i.Amount);          // decimal(18, 2): as decimal
 VortexDecimal wide = await file.Scan<Ledger>().SumAsync(l => l.Balance);     // decimal(76, 10): as VortexDecimal
-double? mean = await file.Scan<Ledger>().AvgAsync(l => l.Balance);
+double? mean = await file.Scan<Ledger>().AverageAsync(l => l.Balance);
 ```
 
 A sum as `VortexDecimal` carries 38 digits while it fits them, as a SQL sum of a narrower decimal
@@ -179,16 +367,33 @@ dictionary or run-end block included.
 
 ## Watch out
 
-* **A sum has the column's type.** It accumulates exactly in 128 bits and throws when the result
-  does not fit: `SumAsync(v => v.DurationMs)` over the `int` column of the visits file throws
-  `OverflowException`. Sum it with an aggregator whose state is a `long`, as `Welford` keeps a
-  `long` count.
+* **A sum widens what could overflow.** An `sbyte`, `short` or `int` column sums as a `long`, a
+  `byte`, `ushort` or `uint` one as a `ulong`, a `Half` or a `float` one as a `double`:
+  `SumAsync(v => v.DurationMs)` over the `int` column of the visits file is a `long`, where it used
+  to overflow an `int`. A `long`, a `ulong` or a `decimal` column sums as itself, exactly, and
+  throws `OverflowException` only when the exact total does not fit it. The engine keeps 64 bits a
+  group where the file statistics prove the rows times the column's largest value fit them, and 128
+  otherwise.
 * **The file carries no sum.** `MinAsync`, `MaxAsync` and `CountAsync` without a filter answer from
-  the file statistics; `SumAsync` and `AvgAsync` read the column ([scan-a-table.md](scan-a-table.md)).
+  the file statistics; `SumAsync` and `AverageAsync` read the column ([scan-a-table.md](scan-a-table.md)).
 * **NaN is skipped** by a float sum, mean, minimum and maximum, and counted as one value by a
   distinct count. An aggregation ignores the scan's `OrderBy`.
+* **A float sum is the same bits** at every degree, in every order of the rows and however the
+  data is cut into files or objects, and closer to the exact sum than a plain one: each value is
+  split into three integer parts on a grid of exponents, summed exactly, and the total is rounded
+  once. It takes 69 billion values in one group or one scan, and throws `OverflowException` past
+  them. Grouped row by row, it costs about a fifth more than a plain sum would; over runs and
+  sorted keys, nothing measurable.
 * **Encoded steps need generic instantiation at run time.** Under Native AOT the scan calls `Step`
   with the canonical form instead ([native-aot.md](native-aot.md)).
+* **The first passes of a process run on code the JIT has not optimized yet.** Tiered compilation
+  starts every method unoptimized and recompiles the ones called often, so the best of three passes
+  of a query on one lane takes about half as long again as its steady state: 15 to 16 ms against
+  10 for `GroupBy(City)`, 23 against 16 for `GroupBy(City, Day)`. A library cannot choose this for
+  its host. The host can: with `<TieredCompilation>false</TieredCompilation>` in its project, every
+  method is optimized on its first call, at the cost of a slower start, and in this sample the
+  steady state is then no slower, often faster (13 ms for `GroupBy(City, Day)`, 4.8 for Welford
+  against 6.5). Under Native AOT, nothing is left to warm.
 
 The figures come from one run of the sample on the demonstration file of a million rows, on a
 machine of 14 cores; each timing is the best of three passes.

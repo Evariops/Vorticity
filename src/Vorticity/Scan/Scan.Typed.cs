@@ -23,7 +23,7 @@ public sealed partial class Scan<TRecord>
     where TRecord : IVortexRecord<TRecord>
 {
     private readonly ScanSource _source;
-    private readonly ScanMetrics _metrics = new ScanMetrics();
+    private readonly ScanMetrics _metrics;
     private RecordBinding? _binding;
     private Predicate _filter = Predicate.All;
     private RowRange? _rows;
@@ -36,8 +36,15 @@ public sealed partial class Scan<TRecord>
     private int _used;
 
     internal Scan(ScanSource source)
+        : this(source, new ScanMetrics())
+    {
+    }
+
+    /// <summary>A scan that reports <paramref name="metrics"/> as its own: a result's, whose reads are its query's.</summary>
+    internal Scan(ScanSource source, ScanMetrics metrics)
     {
         _source = source;
+        _metrics = metrics;
     }
 
     internal RecordBinding Binding => _binding ??= RecordBinding.For<TRecord>(_source.Schema, _source.Session.Options.Extensions);
@@ -51,7 +58,13 @@ public sealed partial class Scan<TRecord>
     public Scan<TRecord> Where(Func<Probe<TRecord>, Predicate> predicate)
     {
         ArgumentNullException.ThrowIfNull(predicate);
-        _filter &= predicate(new Probe<TRecord>(Binding));
+        Predicate rows = predicate(new Probe<TRecord>(Binding));
+        if (rows.Node is { } node && Aggregating.GroupPredicates.ReadsResults(node))
+        {
+            throw new InvalidOperationException("A filter on rows compares columns: an aggregate is a result of a group, filtered by a Where after the GroupBy.");
+        }
+
+        _filter &= rows;
         return this;
     }
 
@@ -96,15 +109,31 @@ public sealed partial class Scan<TRecord>
         return this;
     }
 
-    /// <summary>Delivers the rows in the order of <paramref name="key"/>, from its key source: a column the statistics say is sorted, or a sorted-runs index.</summary>
+    /// <summary>Delivers the rows in the ascending order of <paramref name="key"/>, from its key source: a column the statistics say is sorted, or a sorted-runs index.</summary>
     /// <typeparam name="TKey">The key column's type.</typeparam>
     /// <param name="key">The key column.</param>
-    /// <param name="descending">Whether the order is reversed; a null key comes last either way.</param>
     /// <returns>This scan.</returns>
-    public Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>> key, bool descending = false)
+    /// <remarks>A null key comes last; <c>orderby r.Key</c> in a query is this.</remarks>
+    public Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>> key) => Ordered(key, descending: false);
+
+    /// <summary>Delivers the rows in the descending order of <paramref name="key"/>, from its key source.</summary>
+    /// <typeparam name="TKey">The key column's type.</typeparam>
+    /// <param name="key">The key column.</param>
+    /// <returns>This scan.</returns>
+    /// <remarks>A null key comes last here too; <c>orderby r.Key descending</c> in a query is this.</remarks>
+    public Scan<TRecord> OrderByDescending<TKey>(Func<Probe<TRecord>, Sym<TKey>> key) => Ordered(key, descending: true);
+
+    private Scan<TRecord> Ordered<TKey>(Func<Probe<TRecord>, Sym<TKey>> key, bool descending)
     {
         ArgumentNullException.ThrowIfNull(key);
         ColumnSym column = key(new Probe<TRecord>(Binding)).Column;
+        if (column.Field is Compute.FunctionFieldExpr)
+        {
+            throw new ArgumentException(
+                $"'{column.Field.Key}' is a function of a column: a scan's order walks a column's key source, and a function of one has none. Order the groups of a GroupBy by it instead.",
+                nameof(key));
+        }
+
         _orderPath = column.Field.Path;
         _descending = descending;
         return this;

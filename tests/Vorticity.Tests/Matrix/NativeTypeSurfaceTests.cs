@@ -72,7 +72,7 @@ public sealed class NativeTypeSurfaceTests
         // A key of each: one group per distinct value, counted.
         Dictionary<char, int> chars = rows.GroupBy(r => r.Char).ToDictionary(g => g.Key, g => g.Count());
         int seen = 0;
-        await foreach ((char key, long count) in file.Scan<AllTypes>().GroupBy(r => r.Char).AggAsync(g => (g.Key, g.Count())).WithCancellation(ct))
+        await foreach ((char key, long count) in file.Scan<AllTypes>().GroupBy(r => r.Char).Select(g => (g.Key, g.Count())).As<CharCount>().ToRecordsAsync(ct))
         {
             Assert.Equal(chars[key], count);
             seen++;
@@ -81,7 +81,7 @@ public sealed class NativeTypeSurfaceTests
         Assert.Equal(chars.Count, seen);
         Dictionary<Int128, int> wides = rows.GroupBy(r => r.I128Wide).ToDictionary(g => g.Key, g => g.Count());
         seen = 0;
-        await foreach ((Int128 key, long count) in file.Scan<AllTypes>().GroupBy(r => r.I128Wide).AggAsync(g => (g.Key, g.Count())).WithCancellation(ct))
+        await foreach ((Int128 key, long count) in file.Scan<AllTypes>().GroupBy(r => r.I128Wide).Select(g => (g.Key, g.Count())).As<WideIntegerCount>().ToRecordsAsync(ct))
         {
             Assert.Equal(wides[key], count);
             seen++;

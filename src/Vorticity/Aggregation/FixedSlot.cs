@@ -12,12 +12,13 @@ namespace Vorticity.Aggregating;
 /// a constant as one weighted value, a run-end block a weighted value per run, a dictionary block a
 /// weighted value per distinct code, and a canonical block through the dense kernels.
 /// </summary>
-internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TResult>
+internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TResult>, IMeanSlot
     where TValue : unmanaged
     where TOp : IValueOp<TValue, TState>
 {
     private readonly StorageKind _kind;
     private readonly Func<TState, TResult> _finish;
+    private readonly TState _seed;
     private TState[] _states = [];
     private int _groups;
     private ValuesCache<TValue> _values;
@@ -25,21 +26,28 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     private int[] _counts = [];
 
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish)
+        : this(kind, finish, TOp.Seed())
+    {
+    }
+
+    /// <summary>A slot whose groups start from <paramref name="seed"/>: a state that carries what its run fixed, as a variance its center.</summary>
+    internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed)
     {
         _kind = kind;
         _finish = finish;
+        _seed = seed;
     }
 
     internal override void EnsureGroups(int groups)
     {
         if (groups > _states.Length)
         {
-            Array.Resize(ref _states, Math.Max(groups, _states.Length * 2));
+            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
         }
 
         for (int g = _groups; g < groups; g++)
         {
-            _states[g] = TOp.Seed();
+            _states[g] = _seed;
         }
 
         _groups = Math.Max(_groups, groups);
@@ -92,40 +100,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
-                if (end - start < dictionary.Length)
-                {
-                    // Fewer rows than distinct values: counting per code would cost more than it saves.
-                    RowCursor few = new RowCursor(rows, start, end);
-                    while (few.Next(out int row))
-                    {
-                        int code = (int)codes[row];
-                        if (StorageValues.IsValid(valid, code))
-                        {
-                            TOp.Add(ref state, dictionary[code]);
-                        }
-                    }
-
-                    return;
-                }
-
-                Scratch.Grow(ref _counts, dictionary.Length);
-                Span<int> counts = _counts.AsSpan(0, dictionary.Length);
-                counts.Clear();
-                RowCursor all = new RowCursor(rows, start, end);
-                while (all.Next(out int row))
-                {
-                    counts[(int)codes[row]]++;
-                }
-
-                for (int code = 0; code < counts.Length; code++)
-                {
-                    if (counts[code] > 0 && StorageValues.IsValid(valid, code))
-                    {
-                        TOp.AddWeighted(ref state, dictionary[code], counts[code]);
-                    }
-                }
-
+                FoldCodes(ref state, codes, dictionary, valid, _rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 return;
             }
 
@@ -134,6 +109,47 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 Accumulate(ref state, values, _rows.And(input, input.Selection, valid), start, end);
                 return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Folds the rows of [start, end) the mask holds, of a dictionary block: a value a row when the
+    /// range has fewer rows than the dictionary has values, a weighted value per code met otherwise.
+    /// </summary>
+    private void FoldCodes(
+        ref TState state, ReadOnlySpan<uint> codes, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid, ReadOnlySpan<ulong> rows, int start, int end)
+    {
+        if (end - start < dictionary.Length)
+        {
+            // Fewer rows than distinct values: counting per code would cost more than it saves.
+            RowCursor few = new RowCursor(rows, start, end);
+            while (few.Next(out int row))
+            {
+                int code = (int)codes[row];
+                if (StorageValues.IsValid(valid, code))
+                {
+                    TOp.Add(ref state, dictionary[code]);
+                }
+            }
+
+            return;
+        }
+
+        Scratch.Grow(ref _counts, dictionary.Length);
+        Span<int> counts = _counts.AsSpan(0, dictionary.Length);
+        counts.Clear();
+        RowCursor all = new RowCursor(rows, start, end);
+        while (all.Next(out int row))
+        {
+            counts[(int)codes[row]]++;
+        }
+
+        for (int code = 0; code < counts.Length; code++)
+        {
+            if (counts[code] > 0 && StorageValues.IsValid(valid, code))
+            {
+                TOp.AddWeighted(ref state, dictionary[code], counts[code]);
             }
         }
     }
@@ -188,16 +204,130 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    /// <summary>
+    /// A run-end or a constant column folds a range as a weighted value per run it overlaps, where
+    /// its rows would expand the column first: ranges however short. A dictionary or a canonical
+    /// one costs a value per row either way, and a range of a few rows its setup on top.
+    /// </summary>
+    internal override bool FoldsRanges(in BatchInput input) =>
+        FixedReader.EncodingOf(input.Arena, input.Node, _kind) is ColumnEncoding.RunEnd or ColumnEncoding.Constant;
+
+    internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
-        FixedSlot<TValue, TState, TOp, TResult> from = (FixedSlot<TValue, TState, TOp, TResult>)other;
-        for (int g = 0; g < from._groups; g++)
+        TState[] states = _states;
+        CanonicalArena arena = input.Arena;
+        int node = input.Node;
+        ReadOnlySpan<int> starts = ranges.Starts;
+        ReadOnlySpan<int> ends = ranges.Ends;
+        ReadOnlySpan<int> groups = ranges.Groups;
+        switch (FixedReader.EncodingOf(arena, node, _kind))
         {
-            TOp.Merge(ref _states[map[g]], in from._states[g]);
+            case ColumnEncoding.Constant:
+            {
+                TValue value = FixedReader.Constant<TValue>(arena, node, _kind);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    int count = RowMasks.Count(rows, starts[r], ends[r]);
+                    if (count > 0)
+                    {
+                        TOp.AddWeighted(ref states[groups[r]], value, count);
+                    }
+                }
+
+                return;
+            }
+
+            case ColumnEncoding.RunEnd:
+            {
+                // The value's runs and the key's ranges both ascend: walked together, each range
+                // folds the runs it overlaps, a weighted value each.
+                int runs = EncodedForms.RunEnd(arena, node, out ReadOnlySpan<uint> runEnds);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, runs, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                int run = 0;
+                int runStart = 0;
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    int start = starts[r];
+                    int end = ends[r];
+                    while (run < runEnds.Length && (int)runEnds[run] <= start)
+                    {
+                        runStart = (int)runEnds[run++];
+                    }
+
+                    ref TState state = ref states[groups[r]];
+                    int at = run;
+                    int atStart = runStart;
+                    for (; at < runEnds.Length && atStart < end; at++)
+                    {
+                        int atEnd = Math.Min((int)runEnds[at], input.Rows);
+                        if (StorageValues.IsValid(valid, at))
+                        {
+                            int count = RowMasks.Count(rows, Math.Max(atStart, start), Math.Min(atEnd, end));
+                            if (count > 0)
+                            {
+                                TOp.AddWeighted(ref state, values[at], count);
+                            }
+                        }
+
+                        atStart = atEnd;
+                    }
+                }
+
+                return;
+            }
+
+            case ColumnEncoding.Dictionary:
+            {
+                int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    FoldCodes(ref states[groups[r]], codes, dictionary, valid, rows, starts[r], ends[r]);
+                }
+
+                return;
+            }
+
+            default:
+            {
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, valid);
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    Accumulate(ref states[groups[r]], values, rows, starts[r], ends[r]);
+                }
+
+                return;
+            }
+        }
+    }
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        TState[] states = ((FixedSlot<TValue, TState, TOp, TResult>)other)._states;
+        for (int i = 0; i < from.Length; i++)
+        {
+            TOp.Merge(ref _states[into[i]], in states[from[i]]);
         }
     }
 
     internal override TResult Result(int group) => _finish(_states[group]);
+
+    public double? Mean(int group) => TOp.Mean(in _states[group]);
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _states[i] = _states[groups[i]];
+        }
+
+        // The groups past them are seeded again when they are made.
+        _groups = groups.Length;
+    }
 
     /// <summary>
     /// Folds the rows of [start, end) the mask holds: a run of words of <see cref="WordFold.Dense"/>
@@ -304,7 +434,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Math.Max(groups, _counts.Length * 2));
+            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -405,15 +535,52 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        foreach (DistinctEntry<TValue> entry in ((FixedDistinctSlot<TValue>)other)._seen)
+        // The pairs are keyed by group: each one's group found in the groups merged, which are every
+        // one of the other's, or a part of them whose targets a table gives.
+        FixedDistinctSlot<TValue> source = (FixedDistinctSlot<TValue>)other;
+        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
+        foreach (DistinctEntry<TValue> entry in source._seen)
         {
-            Add(map[entry.Group], entry.Value);
+            int target = targets[entry.Group];
+            if (target >= 0)
+            {
+                Add(target, entry.Value);
+            }
         }
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        int[] renumbered = new int[_groups];
+        Array.Fill(renumbered, -1);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            renumbered[groups[i]] = i;
+            _counts[i] = _counts[groups[i]];
+        }
+
+        List<DistinctEntry<TValue>> kept = [];
+        foreach (DistinctEntry<TValue> entry in _seen)
+        {
+            if (renumbered[entry.Group] >= 0)
+            {
+                kept.Add(new DistinctEntry<TValue>(renumbered[entry.Group], entry.Value));
+            }
+        }
+
+        _seen.Clear();
+        foreach (DistinctEntry<TValue> entry in kept)
+        {
+            _seen.Add(entry);
+        }
+
+        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
 
     /// <summary>The values of a range of fewer rows than its dictionary has codes, each once.</summary>
     /// <remarks>Each walk of a dictionary range is a method of its own, so that neither loop takes its shape from the other.</remarks>
@@ -474,14 +641,19 @@ internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override int GetHashCode()
     {
-        (ulong low, ulong high) = Words(Value);
+        (ulong low, ulong high) = KeyWords.Of(Value);
         return KeyHash.Chained(low, high, Group);
     }
+}
 
+/// <summary>A fixed-width value as the words a hash reads.</summary>
+internal static class KeyWords
+{
     /// <summary>A value's bits as two words, zero-extended, a float's made one pattern per value.</summary>
     /// <remarks>Cast rather than read through a reference, which would take the value through memory before the multiply.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static (ulong Low, ulong High) Words(TValue value)
+    internal static (ulong Low, ulong High) Of<TValue>(TValue value)
+        where TValue : unmanaged
     {
         if (typeof(TValue) == typeof(double))
         {

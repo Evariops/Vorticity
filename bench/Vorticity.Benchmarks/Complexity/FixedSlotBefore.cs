@@ -190,16 +190,19 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        FixedSlotBefore<TValue, TState, TOp, TResult> from = (FixedSlotBefore<TValue, TState, TOp, TResult>)other;
-        for (int g = 0; g < from._groups; g++)
+        TState[] states = ((FixedSlotBefore<TValue, TState, TOp, TResult>)other)._states;
+        for (int i = 0; i < from.Length; i++)
         {
-            TOp.Merge(ref _states[map[g]], in from._states[g]);
+            TOp.Merge(ref _states[into[i]], in states[from[i]]);
         }
     }
 
     internal override TResult Result(int group) => _finish(_states[group]);
+
+    // The benchmarks fold and merge; no group by of theirs streams.
+    internal override void Keep(ReadOnlySpan<int> groups) => throw new NotSupportedException("The original slot predates the group by that streams.");
 
     /// <summary>Folds the rows of [start, end) the mask holds: a dense span where the mask is full, a value at a time where it is not.</summary>
     private static void Accumulate(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)

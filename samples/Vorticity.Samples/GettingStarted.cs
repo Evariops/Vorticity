@@ -39,7 +39,7 @@ internal static class GettingStarted
 
         Console.WriteLine($"{batches} batches, {rows} rows, {nulls} without a temperature");
 
-        double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
+        double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
         Console.WriteLine($"mean {mean:F2} degrees");
 
         long hot = await file.Scan<Reading>().Where(r => r.Celsius > 45.0 && r.City == "Paris").CountAsync();

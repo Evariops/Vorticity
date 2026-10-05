@@ -40,6 +40,12 @@ internal struct GroupIndex<TValue>
     /// <summary>How many keys there are.</summary>
     internal readonly int Count => _groups.Count;
 
+    /// <summary>Forgets every key.</summary>
+    internal readonly void Clear() => _groups.Clear();
+
+    /// <summary>Makes room for <paramref name="count"/> keys at once, which then come without a growth.</summary>
+    internal readonly void Reserve(int count) => _groups.EnsureCapacity(count);
+
     /// <summary>The group slot of <paramref name="value"/>, added when it is new; valid until <see cref="Doubled"/>.</summary>
     /// <param name="value">The key.</param>
     /// <param name="exists">Whether it was there.</param>

@@ -724,7 +724,7 @@ internal sealed class FilterEvaluator
                     $"'{field.Path}' has {arena.GetNode(only).Length} rows in a batch of {rows}.", nameof(field));
             }
 
-            return only;
+            return field is FunctionFieldExpr alone ? alone.Apply(arena, only) : only;
         }
 
         int current = rootIndex;
@@ -761,7 +761,8 @@ internal sealed class FilterEvaluator
                 $"'{field.Path}' has {column.Length} rows in a batch of {rows}.", nameof(field));
         }
 
-        return current;
+        // A value expression reads the column through its function, applied where the block lies.
+        return field is FunctionFieldExpr function ? function.Apply(arena, current) : current;
     }
 
     /// <summary>The dtype of the validity bitmaps made here; a bitmap's own dtype is never read.</summary>

@@ -79,38 +79,6 @@ internal static class SumKernels
         return total;
     }
 
-    /// <summary>The sum of floating-point values as a double, NaN skipped as the statistics skip it.</summary>
-    /// <param name="values">The values.</param>
-    /// <param name="counted">How many values were not NaN.</param>
-    internal static double Float<T>(ReadOnlySpan<T> values, out long counted)
-        where T : unmanaged, INumberBase<T>
-    {
-        if (typeof(T) == typeof(double))
-        {
-            return Double(MemoryMarshal.Cast<T, double>(values), out counted);
-        }
-
-        if (typeof(T) == typeof(float))
-        {
-            return Single(MemoryMarshal.Cast<T, float>(values), out counted);
-        }
-
-        double total = 0;
-        long seen = 0;
-        foreach (T value in values)
-        {
-            double widened = double.CreateTruncating(value);
-            if (!double.IsNaN(widened))
-            {
-                total += widened;
-                seen++;
-            }
-        }
-
-        counted = seen;
-        return total;
-    }
-
     private static long Int32(ReadOnlySpan<int> values)
     {
         long total = 0;
@@ -502,168 +470,6 @@ internal static class SumKernels
         return total;
     }
 
-    /// <summary>A vector's numbers, a NaN lane zero and counted in <paramref name="nan"/>.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector512<double> Numbers(Vector512<double> v, ref Vector512<long> nan)
-    {
-        Vector512<double> number = Vector512.Equals(v, v);
-        nan += Vector512<long>.One + number.AsInt64();
-        return v & number;
-    }
-
-    private static double Double(ReadOnlySpan<double> values, out long counted)
-    {
-        double total = 0;
-        long skipped = 0;
-        int i = 0;
-        if (Vector512.IsHardwareAccelerated && values.Length >= 32)
-        {
-            // Four sums, so that no addition waits on the one before: one sum is held to the
-            // latency of a floating add a vector. The order of the additions is this loop's, as it
-            // was the narrower vectors' before, and a total's last bits follow it.
-            //
-            // A NaN among the values makes the sum NaN, so the sum is taken first as if there were
-            // none, and again with each NaN lane zeroed and counted only when it came out NaN --
-            // where an infinity met its opposite as well, whose second sum is NaN again. Zeroed
-            // lanes add nothing, so the two sums agree to the bit where both are taken.
-            ref double first = ref MemoryMarshal.GetReference(values);
-            int whole = values.Length & ~31;
-            Vector512<double> a = Vector512<double>.Zero;
-            Vector512<double> b = Vector512<double>.Zero;
-            Vector512<double> c = Vector512<double>.Zero;
-            Vector512<double> d = Vector512<double>.Zero;
-            for (; i < whole; i += 32)
-            {
-                a += Vector512.LoadUnsafe(ref first, (nuint)i);
-                b += Vector512.LoadUnsafe(ref first, (nuint)(i + 8));
-                c += Vector512.LoadUnsafe(ref first, (nuint)(i + 16));
-                d += Vector512.LoadUnsafe(ref first, (nuint)(i + 24));
-            }
-
-            total = Vector512.Sum((a + b) + (c + d));
-            if (double.IsNaN(total))
-            {
-                a = b = c = d = Vector512<double>.Zero;
-                Vector512<long> nan = Vector512<long>.Zero;
-                for (i = 0; i < whole; i += 32)
-                {
-                    a += Numbers(Vector512.LoadUnsafe(ref first, (nuint)i), ref nan);
-                    b += Numbers(Vector512.LoadUnsafe(ref first, (nuint)(i + 8)), ref nan);
-                    c += Numbers(Vector512.LoadUnsafe(ref first, (nuint)(i + 16)), ref nan);
-                    d += Numbers(Vector512.LoadUnsafe(ref first, (nuint)(i + 24)), ref nan);
-                }
-
-                total = Vector512.Sum((a + b) + (c + d));
-                skipped = Vector512.Sum(nan);
-            }
-        }
-        else if (Vector.IsHardwareAccelerated && values.Length >= Vector<double>.Count)
-        {
-            Vector<double> acc = Vector<double>.Zero;
-            Vector<long> nan = Vector<long>.Zero;
-            for (; i <= values.Length - Vector<double>.Count; i += Vector<double>.Count)
-            {
-                Vector<double> v = new Vector<double>(values.Slice(i));
-                Vector<long> number = Vector.Equals(v, v);
-                acc += Vector.ConditionalSelect(number, v, Vector<double>.Zero);
-                nan += Vector<long>.One + number;
-            }
-
-            total = Vector.Sum(acc);
-            skipped = Vector.Sum(nan);
-        }
-
-        for (; i < values.Length; i++)
-        {
-            double value = values[i];
-            if (double.IsNaN(value))
-            {
-                skipped++;
-            }
-            else
-            {
-                total += value;
-            }
-        }
-
-        counted = values.Length - skipped;
-        return total;
-    }
-
-    private static double Single(ReadOnlySpan<float> values, out long counted)
-    {
-        double total = 0;
-        long skipped = 0;
-        int i = 0;
-        if (Vector512.IsHardwareAccelerated && Avx512F.IsSupported && values.Length >= 32)
-        {
-            // Four loads of eight singles a step, each converted to eight doubles in one
-            // instruction, into four sums, NaN or not first, as the doubles' loop: widening a
-            // 512-bit load would take its upper half out first.
-            ref float first = ref MemoryMarshal.GetReference(values);
-            int whole = values.Length & ~31;
-            Vector512<double> a = Vector512<double>.Zero;
-            Vector512<double> b = Vector512<double>.Zero;
-            Vector512<double> c = Vector512<double>.Zero;
-            Vector512<double> d = Vector512<double>.Zero;
-            for (; i < whole; i += 32)
-            {
-                a += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)i));
-                b += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 8)));
-                c += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 16)));
-                d += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 24)));
-            }
-
-            total = Vector512.Sum((a + b) + (c + d));
-            if (double.IsNaN(total))
-            {
-                a = b = c = d = Vector512<double>.Zero;
-                Vector512<long> nan = Vector512<long>.Zero;
-                for (i = 0; i < whole; i += 32)
-                {
-                    a += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)i)), ref nan);
-                    b += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 8))), ref nan);
-                    c += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 16))), ref nan);
-                    d += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 24))), ref nan);
-                }
-
-                total = Vector512.Sum((a + b) + (c + d));
-                skipped = Vector512.Sum(nan);
-            }
-        }
-        else if (Vector.IsHardwareAccelerated && values.Length >= Vector<float>.Count)
-        {
-            Vector<double> acc = Vector<double>.Zero;
-            Vector<long> nan = Vector<long>.Zero;
-            for (; i <= values.Length - Vector<float>.Count; i += Vector<float>.Count)
-            {
-                Vector.Widen(new Vector<float>(values.Slice(i)), out Vector<double> low, out Vector<double> high);
-                Vector<long> lowNumber = Vector.Equals(low, low);
-                Vector<long> highNumber = Vector.Equals(high, high);
-                acc += Vector.ConditionalSelect(lowNumber, low, Vector<double>.Zero) + Vector.ConditionalSelect(highNumber, high, Vector<double>.Zero);
-                nan += (Vector<long>.One + lowNumber) + (Vector<long>.One + highNumber);
-            }
-
-            total = Vector.Sum(acc);
-            skipped = Vector.Sum(nan);
-        }
-
-        for (; i < values.Length; i++)
-        {
-            float value = values[i];
-            if (float.IsNaN(value))
-            {
-                skipped++;
-            }
-            else
-            {
-                total += value;
-            }
-        }
-
-        counted = values.Length - skipped;
-        return total;
-    }
 }
 
 /// <summary>The smallest and largest value of dense spans, NaN skipped, with <see cref="Vector{T}"/> where the type has lanes.</summary>
@@ -845,21 +651,25 @@ internal static class RowMasks
         return into;
     }
 
-    /// <summary>The rows of <paramref name="mask"/> inside [<paramref name="start"/>, <paramref name="end"/>), in <paramref name="scratch"/>.</summary>
-    internal static ReadOnlySpan<ulong> Clip(ReadOnlySpan<ulong> mask, int rows, int start, int end, ref ulong[] scratch, out int count)
+    /// <summary>
+    /// The rows of <paramref name="mask"/> inside [<paramref name="start"/>, <paramref name="end"/>), as a
+    /// selection over <paramref name="scratch"/>: only the range's words are written, which every
+    /// other word of the scratch leaves zero, and <see cref="Unclip"/> clears them again once the
+    /// selection is read. A range costs its own words, not its block's.
+    /// </summary>
+    internal static Selection Window(ReadOnlySpan<ulong> mask, int rows, int start, int end, ref ulong[] scratch)
     {
         int words = (rows + 63) >> 6;
         Scratch.Grow(ref scratch, words);
         Span<ulong> into = scratch.AsSpan(0, words);
-        into.Clear();
-        count = 0;
         if (end <= start)
         {
-            return into;
+            return new Selection(into, rows, 0, 0, 0);
         }
 
         int first = start >> 6;
         int last = (end - 1) >> 6;
+        int count = 0;
         for (int w = first; w <= last; w++)
         {
             ulong word = mask.IsEmpty ? ulong.MaxValue : (w < mask.Length ? mask[w] : 0);
@@ -881,7 +691,17 @@ internal static class RowMasks
             count += BitOperations.PopCount(word);
         }
 
-        return into;
+        return new Selection(into, rows, count, first, last + 1);
+    }
+
+    /// <summary>Gives back the words <see cref="Window"/> wrote for [<paramref name="start"/>, <paramref name="end"/>), cleared, as it found them.</summary>
+    internal static void Unclip(ulong[] scratch, int start, int end)
+    {
+        if (end > start)
+        {
+            int first = start >> 6;
+            scratch.AsSpan(first, ((end - 1) >> 6) - first + 1).Clear();
+        }
     }
 }
 
@@ -893,7 +713,19 @@ internal static class Scratch
     {
         if (array.Length < length)
         {
-            array = new T[Math.Max(length, array.Length * 2)];
+            array = new T[Capacity(length, array.Length)];
         }
+    }
+
+    /// <summary>
+    /// The length an array of <paramref name="current"/> elements grows to so that it holds
+    /// <paramref name="needed"/>: twice its length at least, rounded up to a power of two. A group by
+    /// that streams holds, at each batch, the open group of the last besides its own: sized exactly
+    /// by the first batch, every array would grow again at the second.
+    /// </summary>
+    internal static int Capacity(int needed, int current)
+    {
+        long wanted = Math.Max(needed, 2L * current);
+        return wanted > 1L << 30 ? Array.MaxLength : (int)BitOperations.RoundUpToPowerOf2((uint)wanted);
     }
 }

@@ -86,6 +86,7 @@ internal static class KeyOrder
         return a.CompareTo(b);
     }
 
-    private static ulong Ordered(ulong bits) =>
+    /// <summary>A double's bits as an unsigned integer in the total order.</summary>
+    internal static ulong Ordered(ulong bits) =>
         bits ^ ((bits >> 63) == 0 ? 0x8000_0000_0000_0000ul : 0xFFFF_FFFF_FFFF_FFFFul);
 }

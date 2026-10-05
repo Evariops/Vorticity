@@ -232,6 +232,7 @@ internal sealed class ColumnWriter
             }
 
             case CanonicalKind.Extension:
+                _extension = true;
                 Children(1)[0].Accumulate(arena, node.StorageIndex, start, count);
                 return;
 
@@ -290,6 +291,7 @@ internal sealed class ColumnWriter
             }
 
             case CanonicalKind.Extension:
+                _extension = true;
                 Children(1)[0].Shape(arena, node.StorageIndex);
                 return;
 
@@ -699,6 +701,13 @@ internal sealed class ColumnWriter
         {
             children[i].CloseBlock();
         }
+
+        // An extension's block is its storage's: the bounds and the order its filters, its zone map
+        // and the file's statistics compare in, which the pass took on the storage, its only child.
+        if (_extension && children[0]._closed.Count == _closed.Count)
+        {
+            _closed.At(_closed.Count - 1) = children[0]._closed[_closed.Count - 1];
+        }
     }
 
     /// <summary>
@@ -768,6 +777,9 @@ internal sealed class ColumnWriter
 
     /// <summary>Blocks taken from an existing file, which a child created later is given too.</summary>
     private int _seeded;
+
+    /// <summary>Whether this column is an extension, whose closed blocks are its storage's.</summary>
+    private bool _extension;
 
     private ColumnWriter[] Children(int count)
     {

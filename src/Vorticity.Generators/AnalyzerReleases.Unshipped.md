@@ -13,3 +13,6 @@ VX1005 | Usage | Error | RecordGenerator
 VX1006 | Usage | Error | RecordGenerator
 VX1007 | Usage | Error | RecordGenerator
 VX1008 | Usage | Error | RecordGenerator
+VX1009 | Usage | Error | GroupKeyAnalyzer
+VX1010 | Usage | Error | SelectionRecordAnalyzer
+VX1011 | Usage | Error | SelectionRecordAnalyzer

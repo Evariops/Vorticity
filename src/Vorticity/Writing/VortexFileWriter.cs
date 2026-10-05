@@ -2255,9 +2255,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int[] entries = ArrayPool<int>.Shared.Rent(Math.Max(fields, 1));
         for (int field = 0; field < fields; field++)
         {
-            DType column = _isTabular ? _schema.GetField(field) : _schema;
             ColumnWriter writer = _columns[field];
             BlockStats merged = writer.Chunk(0, writer.Blocks.Count);
+
+            // An extension's blocks are its storage's: a timestamp's bounds are its integers'.
+            DType stored = Stored(_isTabular ? _schema.GetField(field) : _schema);
 
             ArrayStatsValues values = default;
             values.MinPrecision = StatPrecision.Exact;
@@ -2271,10 +2273,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 values.NullCount = (ulong)merged.NullCount;
                 values.IsSorted = merged.IsSorted;
                 values.IsStrictSorted = merged.IsStrictSorted;
-                if (merged.HasBounds && column.Kind == DTypeKind.Primitive)
+                if (merged.HasBounds && stored.Kind == DTypeKind.Primitive)
                 {
-                    values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, column.PType, merged.Min));
-                    values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, column.PType, merged.Max));
+                    values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Min));
+                    values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Max));
                 }
             }
 
@@ -2287,6 +2289,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         builder.AddOffset(SchemaFieldIds.FileStatisticsFieldStats, vector);
         int table = builder.EndTable();
         return builder.FinishMemory(table);
+    }
+
+    /// <summary>The dtype a column's values are stored as, through any extension over it.</summary>
+    internal static DType Stored(DType column)
+    {
+        for (int depth = 0; depth < VortexLimits.MaxDTypeDepth && column.Kind == DTypeKind.Extension; depth++)
+        {
+            column = column.StorageType;
+        }
+
+        return column;
     }
 
     /// <summary>

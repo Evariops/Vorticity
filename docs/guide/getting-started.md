@@ -79,7 +79,7 @@ await foreach (var (day, celsius, _) in file.Scan<Reading>())
     nulls += celsius.NullCount;
 }
 
-double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
+double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
 long hot = await file.Scan<Reading>().Where(r => r.Celsius > 45.0 && r.City == "Paris").CountAsync();
 ```
 
@@ -101,7 +101,7 @@ mean 30.00 degrees
   file's 8 192-row blocks. `day`, `celsius` and `city` are `Column<T>` values over the decoded
   batch. They are borrowed: valid inside the loop body, and the compiler refuses to let one outlive
   it ([scan-a-table.md](scan-a-table.md)).
-* **`AvgAsync` ran inside the scan.** No batch reached the caller; the nulls were skipped for you.
+* **`AverageAsync` ran inside the scan.** No batch reached the caller; the nulls were skipped for you.
   An aggregate is an operator, not a loop you write ([aggregates.md](aggregates.md)).
 * **The filter is not a delegate.** The lambda given to `Where` runs once, when the scan is built,
   over a symbolic record: `r.Celsius` is a `Sym<double?>`, and `>` records a predicate instead of

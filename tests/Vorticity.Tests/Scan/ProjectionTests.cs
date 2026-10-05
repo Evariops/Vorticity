@@ -39,23 +39,23 @@ public sealed class ProjectionTests
     [Fact]
     public void DefaultProjectionIsAll()
     {
-        Projection projection = default;
+        ScanProjection projection = default;
         Assert.True(projection.IsAll);
         Assert.True(projection.RootMask.IsAll);
         Assert.Equal(-1, projection.LeafCount);
-        Assert.True(Projection.All.IsAll);
+        Assert.True(ScanProjection.All.IsAll);
     }
 
     [Fact]
     public void AnEmptyPathListIsAll()
     {
-        Assert.True(Projection.Parse(Schema(), ReadOnlySpan<string>.Empty).IsAll);
+        Assert.True(ScanProjection.Parse(Schema(), ReadOnlySpan<string>.Empty).IsAll);
     }
 
     [Fact]
     public void OneTopLevelPath()
     {
-        Projection projection = Projection.Parse(Schema(), ["id"]);
+        ScanProjection projection = ScanProjection.Parse(Schema(), ["id"]);
 
         Assert.False(projection.IsAll);
         Assert.Equal(1, projection.LeafCount);
@@ -69,7 +69,7 @@ public sealed class ProjectionTests
     [Fact]
     public void TwoNonAdjacentPaths()
     {
-        Projection projection = Projection.Parse(Schema(), ["id", "ts"]);
+        ScanProjection projection = ScanProjection.Parse(Schema(), ["id", "ts"]);
 
         Assert.Equal(2, projection.LeafCount);
         Assert.True(projection.RootMask.Includes(0));
@@ -80,7 +80,7 @@ public sealed class ProjectionTests
     [Fact]
     public void ANestedPathSelectsOnlyThatLeaf()
     {
-        Projection projection = Projection.Parse(Schema(), ["payload.size"]);
+        ScanProjection projection = ScanProjection.Parse(Schema(), ["payload.size"]);
 
         Assert.Equal(1, projection.LeafCount);
         Assert.True(projection.RootMask.Includes(1));
@@ -94,11 +94,11 @@ public sealed class ProjectionTests
     public void AnAncestorSubsumesItsDescendant()
     {
         // "payload" then "payload.size" must stay "the whole payload", in either order.
-        Projection wide = Projection.Parse(Schema(), ["payload", "payload.size"]);
+        ScanProjection wide = ScanProjection.Parse(Schema(), ["payload", "payload.size"]);
         Assert.True(wide.RootMask.Descend(1).IsAll);
         Assert.Equal(1, wide.LeafCount);
 
-        Projection reversed = Projection.Parse(Schema(), ["payload.size", "payload"]);
+        ScanProjection reversed = ScanProjection.Parse(Schema(), ["payload.size", "payload"]);
         Assert.True(reversed.RootMask.Descend(1).IsAll);
         Assert.Equal(1, reversed.LeafCount);
     }
@@ -106,7 +106,7 @@ public sealed class ProjectionTests
     [Fact]
     public void ADuplicatePathIsIdempotent()
     {
-        Projection projection = Projection.Parse(Schema(), ["id", "id"]);
+        ScanProjection projection = ScanProjection.Parse(Schema(), ["id", "id"]);
         Assert.Equal(1, projection.LeafCount);
     }
 
@@ -114,11 +114,11 @@ public sealed class ProjectionTests
     public void AnUnknownPathIsACallerError()
     {
         ArgumentException error = Assert.Throws<ArgumentException>(
-            () => Projection.Parse(Schema(), ["nope"]));
+            () => ScanProjection.Parse(Schema(), ["nope"]));
         Assert.Contains("nope", error.Message, StringComparison.Ordinal);
 
         ArgumentException nested = Assert.Throws<ArgumentException>(
-            () => Projection.Parse(Schema(), ["payload.nope"]));
+            () => ScanProjection.Parse(Schema(), ["payload.nope"]));
         Assert.Contains("payload.nope", nested.Message, StringComparison.Ordinal);
     }
 
@@ -126,7 +126,7 @@ public sealed class ProjectionTests
     public void APathThroughALeafIsACallerError()
     {
         ArgumentException error = Assert.Throws<ArgumentException>(
-            () => Projection.Parse(Schema(), ["id.deeper"]));
+            () => ScanProjection.Parse(Schema(), ["id.deeper"]));
         Assert.Contains("id.deeper", error.Message, StringComparison.Ordinal);
     }
 
@@ -135,7 +135,7 @@ public sealed class ProjectionTests
     {
         string?[] paths = [null];
         Assert.Throws<ArgumentNullException>(
-            () => Projection.Parse(Schema(), new ReadOnlySpan<string>(paths!)));
+            () => ScanProjection.Parse(Schema(), new ReadOnlySpan<string>(paths!)));
     }
 
     [Fact]
@@ -144,8 +144,8 @@ public sealed class ProjectionTests
         DTypeArena arena = new DTypeArena();
         DType scalar = arena.Primitive(PType.I64, Nullability.NonNullable);
 
-        Assert.True(Projection.Parse(scalar, ReadOnlySpan<string>.Empty).IsAll);
-        Assert.Throws<ArgumentException>(() => Projection.Parse(scalar, ["anything"]));
+        Assert.True(ScanProjection.Parse(scalar, ReadOnlySpan<string>.Empty).IsAll);
+        Assert.Throws<ArgumentException>(() => ScanProjection.Parse(scalar, ["anything"]));
     }
 
     [Fact]
@@ -155,7 +155,7 @@ public sealed class ProjectionTests
         DTypeArena target = new DTypeArena();
 
         // Selected out of order; the result must still be id, ts - the schema's own order.
-        DType projected = Projection.Parse(schema, ["ts", "id"]).ProjectedSchema(schema, target);
+        DType projected = ScanProjection.Parse(schema, ["ts", "id"]).ProjectedSchema(schema, target);
 
         Assert.Equal(DTypeKind.Struct, projected.Kind);
         Assert.Equal(2, projected.FieldCount);
@@ -169,7 +169,7 @@ public sealed class ProjectionTests
     {
         DType schema = Schema();
         DTypeArena target = new DTypeArena();
-        DType projected = Projection.Parse(schema, ["payload.name"]).ProjectedSchema(schema, target);
+        DType projected = ScanProjection.Parse(schema, ["payload.name"]).ProjectedSchema(schema, target);
 
         Assert.Equal(1, projected.FieldCount);
         Assert.Equal("payload", projected.GetFieldName(0));
@@ -184,14 +184,14 @@ public sealed class ProjectionTests
     {
         DType schema = Schema();
         DTypeArena target = new DTypeArena();
-        Assert.Equal(schema, Projection.All.ProjectedSchema(schema, target));
+        Assert.Equal(schema, ScanProjection.All.ProjectedSchema(schema, target));
     }
 
     [Fact]
     public void ProjectedSchemaRejectsADefaultSchema()
     {
-        Assert.Throws<ArgumentException>(() => Projection.All.ProjectedSchema(default, new DTypeArena()));
-        Assert.Throws<ArgumentNullException>(() => Projection.All.ProjectedSchema(Schema(), null!));
+        Assert.Throws<ArgumentException>(() => ScanProjection.All.ProjectedSchema(default, new DTypeArena()));
+        Assert.Throws<ArgumentNullException>(() => ScanProjection.All.ProjectedSchema(Schema(), null!));
     }
 
     // ---------------------------------------------------------------- against the real schema
