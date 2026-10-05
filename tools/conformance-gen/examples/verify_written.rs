@@ -28,7 +28,9 @@ use vortex::array::Canonical;
 use vortex::array::ExecutionCtx;
 use vortex::array::IntoArray;
 use vortex::array::VortexSessionExecute;
+use vortex::array::arrays::Extension;
 use vortex::array::arrays::Struct;
+use vortex::array::arrays::extension::ExtensionArrayExt;
 use vortex::array::arrays::struct_::StructArrayExt;
 use vortex::array::expr::stats::Stat;
 use vortex::array::stream::ArrayStreamExt;
@@ -266,7 +268,8 @@ async fn check_string_pruning(
 /// it over the data the reference just read back: min, max, null_count, and the two order flags
 /// the reference writer never emits (vortex-layout-0.86.1 layouts/file_stats.rs drops IsSorted
 /// and IsStrictSorted at the file level), so this is the one place their meaning is checked
-/// against the implementation that defines it.
+/// against the implementation that defines it; an extension's, which it does not define, against
+/// its storage's.
 async fn check_statistics(
     session: &VortexSession,
     ours: &Path,
@@ -302,6 +305,17 @@ async fn check_statistics(
         // own tests exercise, so the column is canonicalized before it is asked.
         let column = encoded.clone().execute::<Canonical>(ctx)?.into_array();
 
+        // AN EXTENSION'S ORDER IS ITS STORAGE'S. The reference defines no order flag on an
+        // extension dtype (vortex-array-0.86.1 aggregate_fn/fns/is_sorted: its return dtype is
+        // None there, so `is_sorted` answers false without reading a value), while a timestamp or
+        // a date orders as its storage's integers, the domain its filters, its zone maps and a
+        // group by that streams on it compare in. The two flags are held to the reference's own
+        // kernel over the storage instead, so a wrong claim still fails.
+        let mut ordered = column.clone();
+        while let Some(storage) = ordered.as_opt::<Extension>().map(|e| e.storage_array().clone()) {
+            ordered = storage.execute::<Canonical>(ctx)?.into_array();
+        }
+
         for (stat, precision) in set.iter() {
             if !checked.contains(stat) {
                 continue;
@@ -309,10 +323,14 @@ async fn check_statistics(
             let Precision::Exact(claimed) = precision else {
                 continue;
             };
-            let Some(stat_dtype) = stat.dtype(column.dtype()) else {
+            let target = match stat {
+                Stat::IsSorted | Stat::IsStrictSorted => &ordered,
+                _ => &column,
+            };
+            let Some(stat_dtype) = stat.dtype(target.dtype()) else {
                 anyhow::bail!("field {index}: {} is claimed on a type it has no meaning for", stat.name());
             };
-            let Some(computed) = column.statistics().compute_stat(*stat, ctx)? else {
+            let Some(computed) = target.statistics().compute_stat(*stat, ctx)? else {
                 anyhow::bail!("field {index}: {} is claimed but the reference cannot compute it", stat.name());
             };
 
