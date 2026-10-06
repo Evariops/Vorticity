@@ -139,28 +139,62 @@ internal abstract class AggregateSlot<TResult> : AggregateSlot
     internal override AggregateSlot Joined(AggregateSlot[] parts, int[] offsets) => new JoinedSlot<TResult>(parts, offsets);
 }
 
-/// <summary>The numbers 0, 1, 2 and on, shared: the groups of a whole partition for a merge that takes them all.</summary>
+/// <summary>
+/// The numbers 0, 1, 2 and on: the groups of a whole partition, for a merge that takes them all. The
+/// numbers every thread shares stop at <see cref="Shared"/>; past them a merge numbers an array of its
+/// own, which goes with it (PLAN-HIGH-CARDINALITY, H1, reduction 7): no array the size of the largest
+/// merge a process ever ran stays for its life.
+/// </summary>
 internal static class Numbers
 {
+    /// <summary>The most numbers every thread shares: 256 KiB of them.</summary>
+    internal const int Shared = 1 << 16;
+
     private static int[] s_numbers = [];
 
-    /// <summary>The first <paramref name="count"/> numbers.</summary>
+    /// <summary>The numbers every thread shares now, at most <see cref="Shared"/>.</summary>
+    internal static int SharedCount => s_numbers.Length;
+
+    /// <summary>The first <paramref name="count"/> numbers: shared, or past <see cref="Shared"/> in an array of the call's own.</summary>
     internal static ReadOnlySpan<int> Upto(int count)
     {
-        int[] numbers = s_numbers;
-        if (numbers.Length < count)
+        int[]? own = null;
+        return Upto(count, ref own);
+    }
+
+    /// <summary>The first <paramref name="count"/> numbers: shared, or past <see cref="Shared"/> in <paramref name="own"/>, made or grown as they need.</summary>
+    internal static ReadOnlySpan<int> Upto(int count, scoped ref int[]? own)
+    {
+        if (count <= Shared)
         {
-            // A wider array replaces the field whole: a reader holds one long enough, whichever.
-            numbers = new int[Scratch.Capacity(count, numbers.Length)];
-            for (int i = 0; i < numbers.Length; i++)
+            int[] numbers = s_numbers;
+            if (numbers.Length < count)
             {
-                numbers[i] = i;
+                // A wider array replaces the field whole: a reader holds one long enough, whichever.
+                numbers = Numbered(Math.Min(Shared, Scratch.Capacity(count, numbers.Length)));
+                s_numbers = numbers;
             }
 
-            s_numbers = numbers;
+            return numbers.AsSpan(0, count);
         }
 
-        return numbers.AsSpan(0, count);
+        if (own is null || own.Length < count)
+        {
+            own = Numbered(Scratch.Capacity(count, own?.Length ?? 0));
+        }
+
+        return own.AsSpan(0, count);
+    }
+
+    private static int[] Numbered(int length)
+    {
+        int[] numbers = new int[length];
+        for (int i = 0; i < numbers.Length; i++)
+        {
+            numbers[i] = i;
+        }
+
+        return numbers;
     }
 }
 

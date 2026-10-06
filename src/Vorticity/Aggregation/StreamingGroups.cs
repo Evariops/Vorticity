@@ -57,11 +57,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     // Each filter on groups and what it reads their results into, by the operator's place.
     private GroupSelection.GroupFilterRun?[]? _filters;
 
-    // On several lanes: the ranges grouped side by side, what each did, and the time spent
-    // following them.
+    // On several lanes: the ranges grouped side by side, what each did, the time spent following
+    // them, and the numbers of a range's groups past those every thread shares.
     private StreamingRanges? _ranges;
     private List<AggregationRun.Lane>? _lanes;
     private long _mergeTicks;
+    private int[]? _numbers;
 
     // On a key its zones prove final as the read goes: the floors, the first row not read yet, and
     // the ranges' rows when they go side by side.
@@ -213,7 +214,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 }
 
                 long merging = Stopwatch.GetTimestamp();
-                _partition!.Follow(range);
+                _partition!.Follow(range, ref _numbers);
                 _mergeTicks += Stopwatch.GetTimestamp() - merging;
                 _nextRow = _rangeRows[_followed++].End;
                 (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd));

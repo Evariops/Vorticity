@@ -797,18 +797,21 @@ internal sealed class AggregationPartition
     /// folded: its groups mapped onto this one's by key, the new ones numbered after, in the order
     /// they were met; the streaming component of each, and the last value met, carried over.
     /// </summary>
-    internal void Follow(AggregationPartition next)
+    /// <param name="next">The partition of the next range.</param>
+    /// <param name="numbers">The numbers of the groups of a partition past those every thread shares (<see cref="Numbers"/>), the caller's.</param>
+    internal void Follow(AggregationPartition next, ref int[]? numbers)
     {
         int before = Keys!.Count;
         Scratch.Grow(ref _followMap, next.Keys!.Count);
         Span<int> map = _followMap.AsSpan(0, next.Keys.Count);
-        next.Keys.MergeInto(Keys, map);
+        ReadOnlySpan<int> all = Numbers.Upto(map.Length, ref numbers);
+        next.Keys.MergeInto(Keys, all, map);
         for (int i = 0; i < Slots.Length; i++)
         {
             Slots[i].EnsureGroups(Keys.Count);
             if (_inputs[i] != Settled)
             {
-                Slots[i].MergeFrom(next.Slots[i], map);
+                Slots[i].MergeFrom(next.Slots[i], all, map);
             }
         }
 
@@ -821,7 +824,7 @@ internal sealed class AggregationPartition
         // The values of the streaming component the new groups hold, in this partition's numbers.
         Scratch.Grow(ref _followComponents, next._componentKeys!.Count);
         Span<int> components = _followComponents.AsSpan(0, next._componentKeys.Count);
-        next._componentKeys.MergeInto(_componentKeys, components);
+        next._componentKeys.MergeInto(_componentKeys, Numbers.Upto(components.Length, ref numbers), components);
         Scratch.Grow(ref _componentOf, Keys.Count);
         for (int g = 0; g < map.Length; g++)
         {
@@ -835,7 +838,9 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>Folds another partition into this one, its groups mapped onto this one's by key.</summary>
-    internal void MergeFrom(AggregationPartition other)
+    /// <param name="other">The partition folded in.</param>
+    /// <param name="numbers">The numbers of the groups of a partition past those every thread shares (<see cref="Numbers"/>), the caller's.</param>
+    internal void MergeFrom(AggregationPartition other, ref int[]? numbers)
     {
         int[] map;
         if (Keys is null)
@@ -845,18 +850,19 @@ internal sealed class AggregationPartition
         else
         {
             map = new int[other.Keys!.Count];
-            other.Keys.MergeInto(Keys, map);
+            other.Keys.MergeInto(Keys, Numbers.Upto(map.Length, ref numbers), map);
             foreach (AggregateSlot slot in Slots)
             {
                 slot.EnsureGroups(Keys.Count);
             }
         }
 
+        ReadOnlySpan<int> all = Numbers.Upto(map.Length, ref numbers);
         for (int i = 0; i < Slots.Length; i++)
         {
             if (_inputs[i] != Settled)
             {
-                Slots[i].MergeFrom(other.Slots[i], map);
+                Slots[i].MergeFrom(other.Slots[i], all, map);
             }
         }
     }
@@ -1133,11 +1139,12 @@ internal static class AggregationEngine
         bool inParts = plan.MergeInParts ?? (parts > 1 && 2 * entries < Math.Min(degree, parts) * serial);
         if (partitions.Length == 1 || biggest.Keys is null || !inParts)
         {
+            int[]? numbers = null;
             for (int p = 0; p < partitions.Length; p++)
             {
                 if (p != largest)
                 {
-                    biggest.MergeFrom(partitions[p]);
+                    biggest.MergeFrom(partitions[p], ref numbers);
                 }
             }
 
