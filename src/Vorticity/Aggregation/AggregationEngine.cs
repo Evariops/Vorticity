@@ -731,7 +731,7 @@ internal sealed class AggregationPartition
     /// <summary>Gives back what the partition reserved past what its groups hold: the room for a doubling, once its table grows no more.</summary>
     internal void Trim()
     {
-        long unshelved = Unshelved;
+        long unshelved = Math.Max(0, Unshelved - AggregationEngine.LaneTables);
         if (Memory is { } memory && Accounted > unshelved)
         {
             memory.Shrink(Accounted - unshelved);
@@ -763,7 +763,8 @@ internal sealed class AggregationPartition
             Measured = footprint;
         }
 
-        long need = (2 * footprint) - Accounted;
+        // The lane's first tables come out of the working memory it was admitted with.
+        long need = (2 * Math.Max(0, footprint - AggregationEngine.LaneTables)) - Accounted;
         if (need <= 0)
         {
             return;
@@ -1287,20 +1288,23 @@ internal static class AggregationEngine
             ?? (degree > 1 && pass.Take is null && !pass.MatchesNothing && source is not FileScanSource
                 ? await source.PiecesAsync(pass, degree, cancellationToken).ConfigureAwait(false)
                 : null);
-        // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
-        // partition is then its cache, which no table of groups sized on the source's rows fills.
-        GroupCore? core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, ranges is null ? 1 : Math.Min(degree, ranges.Length));
-        if (core is not null)
-        {
-            facts = GroupCore.CacheFacts(facts);
-        }
-
         // What the lanes' tables and the merge hold, reserved in the session's budget as they grow,
         // brought down to the result once the groups are merged and given back when it is delivered;
         // all of it as soon as the query fails (PLAN-HIGH-CARDINALITY, H2).
         QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         try
         {
+            // Admitted first, each lane's working memory: on fewer lanes when its budget is short.
+            int lanes = Admit(memory, ranges is null ? 1 : Math.Min(degree, ranges.Length));
+
+            // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
+            // partition is then its cache, which no table of groups sized on the source's rows fills.
+            GroupCore? core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes);
+            if (core is not null)
+            {
+                facts = GroupCore.CacheFacts(facts);
+            }
+
             if (ranges is null)
             {
                 AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
@@ -1321,7 +1325,7 @@ internal static class AggregationEngine
             {
                 // A worker per lane, each with its partition from one range to the next: the merge
                 // stays in as many parts as lanes, however many ranges the queue holds.
-                partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
+                partitions = new AggregationPartition[lanes];
                 for (int p = 0; p < partitions.Length; p++)
                 {
                     partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
@@ -1339,7 +1343,7 @@ internal static class AggregationEngine
             if (core is { Engaged: true })
             {
                 // The sub-tables are the result; the lanes' caches die with the pass.
-                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await core.FinishAsync(partitions, degree, cancellationToken).ConfigureAwait(false);
+                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await core.FinishAsync(partitions, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = core.Run() };
                 foreach (AggregationPartition partition in partitions)
                 {
@@ -1349,7 +1353,7 @@ internal static class AggregationEngine
                 return Counted(new AggregationOutcome(plan, heldSlots, held, held.Order(sorted: false)), memory, heldBytes);
             }
 
-            (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, memory, cancellationToken).ConfigureAwait(false);
+            (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, lanes, source, memory, cancellationToken).ConfigureAwait(false);
             plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, merged);
 
             // The lanes' tables die with the merge, but the one a merge in series kept as the result.
@@ -1377,12 +1381,49 @@ internal static class AggregationEngine
         }
     }
 
-    /// <summary>The result keeps <paramref name="bytes"/> of its query's memory, what its groups hold, until it is delivered; the rest is given back.</summary>
+    /// <summary>
+    /// The result keeps <paramref name="bytes"/> of its query's memory, what its groups hold, and the
+    /// order they are delivered in, until it is delivered; the rest is given back.
+    /// </summary>
     private static AggregationOutcome Counted(AggregationOutcome outcome, QueryMemory memory, long bytes)
     {
-        memory.Keep(bytes);
+        memory.Keep(bytes + ((long)outcome.Order.Length * sizeof(int)));
         outcome.Memory = memory;
         return outcome;
+    }
+
+    /// <summary>
+    /// What a lane holds besides its tables, reserved for it before the pass: a batch's scratch, its
+    /// keys' homes, the decoding of its columns. A quarter of a megabyte a lane on the bench's files,
+    /// measured (PLAN-HIGH-CARDINALITY, H2); four times that, for wider rows, until H14 sets it.
+    /// </summary>
+    private const long LaneBytes = 1 << 20;
+
+    /// <summary>
+    /// The tables a lane holds within the working memory it was admitted with, a quarter of it: a
+    /// query of few groups reserves nothing past its admission, where a megabyte ahead a lane would
+    /// take fourteen for tables of a few kilobytes.
+    /// </summary>
+    internal const long LaneTables = LaneBytes / 4;
+
+    /// <summary>
+    /// The lanes a query starts on: each lane's working memory reserved, <paramref name="lanes"/> of
+    /// them if its budget grants it, else half as many, down to one, before it fails (H2, the admission).
+    /// </summary>
+    private static int Admit(QueryMemory memory, int lanes)
+    {
+        while (!memory.TryGrow(lanes * LaneBytes))
+        {
+            if (lanes == 1)
+            {
+                throw memory.Exceeded("group by", 0, LaneBytes);
+            }
+
+            lanes = Math.Max(1, lanes / 2);
+        }
+
+        memory.Measure(lanes * LaneBytes);
+        return lanes;
     }
 
     /// <summary>The parts a parallel merge cuts the key space into, at most.</summary>

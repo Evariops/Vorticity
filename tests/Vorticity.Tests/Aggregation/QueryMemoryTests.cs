@@ -102,6 +102,36 @@ public sealed partial class QueryMemoryTests
     }
 
     [Fact]
+    public async Task AQueryItsBudgetCannotGiveEveryLaneStartsOnFewer()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            // A lane's working memory is a megabyte: eight grant seven lanes of fourteen, and their few tables.
+            QueryMemoryBudget budget = new QueryMemoryBudget(8 << 20);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 14;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Aggregation<long> counts = file.Scan<Row>().GroupBy(r => r.Value).Select(g => g.Count());
+            List<long> answered = await counts.ToListAsync(Ct);
+            Assert.Equal(100, answered.Count);
+            Assert.Equal(Rows, answered.Sum());
+
+            int lanes = ((AggregationQuery)counts.Query).Plan.LastRun!.Lanes.Length;
+            Assert.True(lanes is > 1 and < 14, $"{lanes} lanes");
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task ATableReservesWhatItHoldsNotTwice()
     {
         string path = await WriteAsync();
