@@ -139,6 +139,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<TState> states = States;
@@ -481,6 +482,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         CanonicalArena arena = input.Arena;
