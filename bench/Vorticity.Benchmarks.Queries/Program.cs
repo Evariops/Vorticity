@@ -46,6 +46,12 @@ if (compared is not null && Text(args, "--setting") is { } setting)
 }
 string[] only = [.. args.Where((a, i) => !a.StartsWith("--", StringComparison.Ordinal) && (i == 0 || !args[i - 1].StartsWith("--", StringComparison.Ordinal) || args[i - 1] is "--check" or "--parallel"))];
 
+// --micro keys: a key's groups found alone, in memory, with the statistics' bounds and without (KeyMicro.cs).
+if (Text(args, "--micro") == "keys")
+{
+    return KeyMicro.Run(rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {
