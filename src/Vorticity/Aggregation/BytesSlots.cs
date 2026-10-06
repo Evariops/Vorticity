@@ -402,11 +402,21 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     private MaskCache _rows;
     private CodeSet _distinct;
 
+    // Each pair chained to the pair its group met before, by their numbers in the table plus one, and
+    // each group's last pair (PLAN-HIGH-CARDINALITY, H9): a group's pairs read without another's.
+    private int[] _next = [];
+    private int[] _first = [];
+
     internal override void EnsureGroups(int groups)
     {
         if (groups > _counts.Length)
         {
             Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
+        }
+
+        if (groups > _first.Length)
+        {
+            Array.Resize(ref _first, Scratch.Capacity(groups, _first.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -426,56 +436,63 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        // The pairs are keyed by group: each one's group found in the groups merged, which are every
-        // one of the other's, or a part of them whose targets a table gives.
+        // Every group of the other: its pairs in the order they lie, each to its group's target. Some
+        // of them, a part of a parallel merge: their chains alone (PLAN-HIGH-CARDINALITY, H9).
         BytesDistinctSlot source = (BytesDistinctSlot)other;
-        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
         ByteKeyTable seen = source._seen;
-        for (int i = 0; i < seen.Count; i++)
+        if (from.Length == source._groups)
         {
-            ReadOnlySpan<byte> key = seen.KeyOf(i);
-            int target = targets[BinaryPrimitives.ReadInt32LittleEndian(key)];
-            if (target >= 0)
+            for (int i = 0; i < seen.Count; i++)
             {
-                Add(target, key[4..]);
+                ReadOnlySpan<byte> key = seen.KeyOf(i);
+                Add(into[BinaryPrimitives.ReadInt32LittleEndian(key)], key[4..]);
+            }
+
+            return;
+        }
+
+        int[] next = source._next;
+        for (int i = 0; i < from.Length; i++)
+        {
+            int group = from[i];
+            for (int number = group < source._first.Length ? source._first[group] : 0; number != 0; number = next[number - 1])
+            {
+                Add(into[i], seen.KeyOf(number - 1)[4..]);
             }
         }
     }
 
     internal override long Result(int group) => _counts[group];
 
-    /// <summary>The table of its (group, value) pairs and the counts.</summary>
-    internal override long Footprint => _seen.Footprint + ((long)_counts.Length * sizeof(long)) + _key.Length;
+    /// <summary>The table of its (group, value) pairs, their chains, and the counts.</summary>
+    internal override long Footprint =>
+        _seen.Footprint + ((long)_counts.Length * sizeof(long)) + ((long)(_next.Length + _first.Length) * sizeof(int)) + _key.Length;
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        int[] renumbered = new int[_groups];
-        Array.Fill(renumbered, -1);
+        // The pairs of the groups kept, their chains alone read: the values, each after its length, in
+        // one buffer, then a table emptied of every pair, which takes them back under their new groups.
+        byte[] values = [];
+        int used = 0;
         for (int i = 0; i < groups.Length; i++)
         {
-            renumbered[groups[i]] = i;
-        }
-
-        // The pairs of the groups kept, numbered again, in a table emptied of the others.
-        List<byte[]> kept = [];
-        for (int entry = 0; entry < _seen.Count; entry++)
-        {
-            ReadOnlySpan<byte> key = _seen.KeyOf(entry);
-            int group = renumbered[BinaryPrimitives.ReadInt32LittleEndian(key)];
-            if (group >= 0)
+            for (int number = _first[groups[i]]; number != 0; number = _next[number - 1])
             {
-                byte[] copy = key.ToArray();
-                BinaryPrimitives.WriteInt32LittleEndian(copy, group);
-                kept.Add(copy);
+                ReadOnlySpan<byte> value = _seen.KeyOf(number - 1)[4..];
+                if (values.Length < used + 8 + value.Length)
+                {
+                    Array.Resize(ref values, Scratch.Capacity(used + 8 + value.Length, values.Length));
+                }
+
+                BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used), i);
+                BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used + 4), value.Length);
+                value.CopyTo(values.AsSpan(used + 8));
+                used += 8 + value.Length;
             }
         }
 
         _seen.Clear();
-        foreach (byte[] key in kept)
-        {
-            _seen.GetOrAdd(key, out _);
-        }
-
+        Array.Clear(_first);
         for (int i = 0; i < groups.Length; i++)
         {
             _counts[i] = _counts[groups[i]];
@@ -483,19 +500,43 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
 
         _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
         _groups = groups.Length;
+        for (int at = 0; at < used;)
+        {
+            int group = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at));
+            int length = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at + 4));
+            Chain(group, values.AsSpan(at + 8, length));
+            at += 8 + length;
+        }
     }
 
     private void Add(int group, ReadOnlySpan<byte> value)
+    {
+        if (Chain(group, value))
+        {
+            _counts[group]++;
+        }
+    }
+
+    /// <summary>Adds the pair to the table, chained to its group's pair before it; whether it was new.</summary>
+    private bool Chain(int group, ReadOnlySpan<byte> value)
     {
         int length = 4 + value.Length;
         Scratch.Grow(ref _key, length);
         BinaryPrimitives.WriteInt32LittleEndian(_key, group);
         value.CopyTo(_key.AsSpan(4));
-        _seen.GetOrAdd(_key.AsSpan(0, length), out bool added);
+        int number = _seen.GetOrAdd(_key.AsSpan(0, length), out bool added);
         if (added)
         {
-            _counts[group]++;
+            if (number >= _next.Length)
+            {
+                Array.Resize(ref _next, Scratch.Capacity(number + 1, _next.Length));
+            }
+
+            _next[number] = _first[group];
+            _first[group] = number + 1;
         }
+
+        return added;
     }
 
     private readonly struct Sink : IBytesSink

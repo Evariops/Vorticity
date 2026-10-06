@@ -413,7 +413,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     where TValue : unmanaged, IEquatable<TValue>
 {
     private readonly StorageKind _kind;
-    private readonly HashSet<DistinctEntry<TValue>> _seen = [];
+    private readonly DistinctPairs<TValue> _pairs = new DistinctPairs<TValue>();
     private long[] _counts = [];
     private int _groups;
     private ValuesCache<TValue> _values;
@@ -429,6 +429,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
+        _pairs.EnsureGroups(groups);
         _groups = Math.Max(_groups, groups);
     }
 
@@ -529,48 +530,32 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        // The pairs are keyed by group: each one's group found in the groups merged, which are every
-        // one of the other's, or a part of them whose targets a table gives.
+        // Every group of the other: its pairs in the order they lie, each to its group's target. Some
+        // of them, a part of a parallel merge: their chains alone (PLAN-HIGH-CARDINALITY, H9).
         FixedDistinctSlot<TValue> source = (FixedDistinctSlot<TValue>)other;
-        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
-        foreach (DistinctEntry<TValue> entry in source._seen)
+        if (from.Length == source._groups)
         {
-            int target = targets[entry.Group];
-            if (target >= 0)
-            {
-                Add(target, entry.Value);
-            }
+            _pairs.MergeAll(source._pairs, into, _counts);
+            return;
+        }
+
+        for (int i = 0; i < from.Length; i++)
+        {
+            _counts[into[i]] += _pairs.MergeGroup(source._pairs, from[i], into[i]);
         }
     }
 
     internal override long Result(int group) => _counts[group];
 
-    /// <summary>The set of its (group, value) pairs and the counts.</summary>
-    internal override long Footprint => Footprints.Set<DistinctEntry<TValue>>(_seen.Capacity) + ((long)_counts.Length * sizeof(long));
+    /// <summary>The (group, value) pairs and the counts.</summary>
+    internal override long Footprint => _pairs.Footprint + ((long)_counts.Length * sizeof(long));
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        int[] renumbered = new int[_groups];
-        Array.Fill(renumbered, -1);
+        _pairs.Keep(groups);
         for (int i = 0; i < groups.Length; i++)
         {
-            renumbered[groups[i]] = i;
             _counts[i] = _counts[groups[i]];
-        }
-
-        List<DistinctEntry<TValue>> kept = [];
-        foreach (DistinctEntry<TValue> entry in _seen)
-        {
-            if (renumbered[entry.Group] >= 0)
-            {
-                kept.Add(new DistinctEntry<TValue>(renumbered[entry.Group], entry.Value));
-            }
-        }
-
-        _seen.Clear();
-        foreach (DistinctEntry<TValue> entry in kept)
-        {
-            _seen.Add(entry);
         }
 
         _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
@@ -615,7 +600,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
     private void Add(int group, TValue value)
     {
-        if (_seen.Add(new DistinctEntry<TValue>(group, value)))
+        if (_pairs.Add(group, value))
         {
             _counts[group]++;
         }
@@ -624,21 +609,25 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
 /// <summary>A value seen by one group.</summary>
 /// <remarks>
-/// Hashed under multipliers drawn once a process (<see cref="KeyHash.Chained"/>): the default hash
-/// of a 64-bit value folds its halves together, and a prime bucket count takes an integer's
-/// multiples to one bucket, so values could be built to share one chain of the set and make every
-/// insert a walk of the values before it. Equal values hash alike: every NaN and both zeros of a
-/// float are equal, so they are given one pattern of bits first.
+/// Hashed under seeds drawn once a process (<see cref="KeyHash.Pair"/>), the group the tag: the
+/// default hash of a 64-bit value folds its halves together, and a prime bucket count takes an
+/// integer's multiples to one bucket, so values could be built to share one run of a table and make
+/// every insert a walk of the values before it. Equal values hash alike: every NaN and both zeros of
+/// a float are equal, so they are given one pattern of bits first.
 /// </remarks>
 internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
     where TValue : unmanaged, IEquatable<TValue>
 {
+    /// <summary>The hash of the pair (<paramref name="group"/>, <paramref name="value"/>), for a table that probes linearly: good in its low bits.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public override int GetHashCode()
+    internal static ulong Hash(int group, TValue value)
     {
-        (ulong low, ulong high) = KeyWords.Of(Value);
-        return KeyHash.Chained(low, high, Group);
+        (ulong low, ulong high) = KeyWords.Of(value);
+        return KeyHash.Pair(low, high, group);
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public override int GetHashCode() => (int)Hash(Group, Value);
 }
 
 /// <summary>A fixed-width value as the words a hash reads.</summary>

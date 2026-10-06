@@ -57,6 +57,10 @@ internal static class HighCardinality
             yield return Spread("random", FullRows, key, "four", Matrix.Full);
         }
 
+        // A distinct count by a million keys, twenty values a key: the pairs a merge in parts hands
+        // each part (PLAN-HIGH-CARDINALITY, H9).
+        yield return Spread("random", FullRows, "1e6", "count distinct", Matrix.Full);
+
         // A popularity law and hot keys that change as the rows go.
         yield return ("skews", new Scenario("hc zipf 1e6, count sum", (file, run) => SkewsAsync(file, run, zipf: true), 16, Matrix.Full));
         yield return ("skews", new Scenario("hc drift, count sum", (file, run) => SkewsAsync(file, run, zipf: false), 16, Matrix.Full));
@@ -90,6 +94,7 @@ internal static class HighCardinality
                 "four" => (file, run) => FourAsync(file, run, Key(groups)),
                 "count range" => (file, run) => RangeAsync(file, run, Key(groups)),
                 "count deviation" => (file, run) => DeviationAsync(file, run, Key(groups)),
+                "count distinct" => (file, run) => CountDistinctAsync(file, run, Key(groups)),
                 _ => (file, run) => TotalAsync(file, run, Key(groups)),
             };
         return ($"spread-{distribution}-{rows}", new Scenario(name, query, probe, matrix));
@@ -179,6 +184,18 @@ internal static class HighCardinality
         }
 
         return rows;
+    }
+
+    private static async Task<long> CountDistinctAsync(VortexFile file, Run run, Func<Probe<Spread>, Sym<int>> key)
+    {
+        long values = 0;
+        await foreach (Columns<KeyCount> groups in run.Track(file.Scan<Spread>().GroupBy(key).Select(g => (g.Key, g.CountDistinct(s => s.Value)))).As<KeyCount>())
+        {
+            run.Answer();
+            values += Sum(groups.Column<long>(1).Values);
+        }
+
+        return values;
     }
 
     private static async Task<long> FourAsync(VortexFile file, Run run, Func<Probe<Spread>, Sym<int>> key)

@@ -306,23 +306,6 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     internal override void Keep(ReadOnlySpan<int> groups) => throw JoinedParts.Read();
 }
 
-/// <summary>What the slots of distinct values share, whose pairs are keyed by group: a merge of some of their groups.</summary>
-internal static class Distinct
-{
-    /// <summary>The group each of <paramref name="groups"/> groups merges into, -1 for one not merged, from the pairs <paramref name="from"/> and <paramref name="into"/>.</summary>
-    internal static int[] Targets(int groups, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
-    {
-        int[] targets = new int[groups];
-        Array.Fill(targets, -1);
-        for (int i = 0; i < from.Length; i++)
-        {
-            targets[from[i]] = into[i];
-        }
-
-        return targets;
-    }
-}
-
 /// <summary>What the slots and keys merged in parts share: which part holds a group.</summary>
 internal static class JoinedParts
 {
