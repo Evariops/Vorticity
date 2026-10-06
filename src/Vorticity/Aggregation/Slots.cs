@@ -329,17 +329,22 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
     internal override TResult Result(int group) => _value;
 }
 
-/// <summary>The rows of each group, nulls included.</summary>
-internal sealed class CountSlot : RecordSlot<long, long>
+/// <summary>
+/// The rows of each group, nulls included, counted in <typeparamref name="TCount"/>: 32 bits where the
+/// source's rows stay below 2^32, which no group's count can then pass (PLAN-HIGH-CARDINALITY, H1,
+/// reduction 2), 64 where they are not known.
+/// </summary>
+internal sealed class CountSlot<TCount> : RecordSlot<TCount, long>
+    where TCount : unmanaged, IBinaryInteger<TCount>
 {
-    internal override long Seed => 0;
+    internal override TCount Seed => TCount.Zero;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group) =>
-        State(group) += RowMasks.Count(input.Selection, start, end);
+        State(group) += TCount.CreateTruncating(RowMasks.Count(input.Selection, start, end));
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
-        StateView<long> counts = States;
+        StateView<TCount> counts = States;
         RowCursor rows = new RowCursor(input.Selection, input.Start, input.End);
         while (rows.Next(out int row))
         {
@@ -352,7 +357,7 @@ internal sealed class CountSlot : RecordSlot<long, long>
 
     internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
-        StateView<long> counts = States;
+        StateView<TCount> counts = States;
         ReadOnlySpan<int> starts = ranges.Starts;
         ReadOnlySpan<int> ends = ranges.Ends;
         ReadOnlySpan<int> groups = ranges.Groups;
@@ -361,7 +366,7 @@ internal sealed class CountSlot : RecordSlot<long, long>
         {
             for (int r = 0; r < starts.Length; r++)
             {
-                counts[groups[r]] += ends[r] - starts[r];
+                counts[groups[r]] += TCount.CreateTruncating(ends[r] - starts[r]);
             }
 
             return;
@@ -369,28 +374,28 @@ internal sealed class CountSlot : RecordSlot<long, long>
 
         for (int r = 0; r < starts.Length; r++)
         {
-            counts[groups[r]] += RowMasks.Count(selection, starts[r], ends[r]);
+            counts[groups[r]] += TCount.CreateTruncating(RowMasks.Count(selection, starts[r], ends[r]));
         }
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        StateView<long> counts = States;
-        StateView<long> others = StatesOf(other);
+        StateView<TCount> counts = States;
+        StateView<TCount> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
             counts[into[i]] += others[from[i]];
         }
     }
 
-    internal override long Result(int group) => State(group);
+    internal override long Result(int group) => long.CreateTruncating(State(group));
 
     internal override void Results(ReadOnlySpan<int> groups, Span<long> into)
     {
-        StateView<long> counts = States;
+        StateView<TCount> counts = States;
         for (int i = 0; i < groups.Length; i++)
         {
-            into[i] = counts[groups[i]];
+            into[i] = long.CreateTruncating(counts[groups[i]]);
         }
     }
 }

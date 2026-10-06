@@ -22,7 +22,7 @@ public sealed partial class GroupRecordsTests
     {
         AggregateSlot[] slots =
         [
-            new CountSlot(),
+            new CountSlot<long>(),
             new FixedSlot<long, SumState<long>, NarrowSignedSum<long>, long>(StorageKind.Primitive, static s => s.Sum),
             new ExistsSlot(false),
             new BoolSlot<bool?>(BoolFlags.Min),
@@ -55,14 +55,30 @@ public sealed partial class GroupRecordsTests
     [InlineData(80, 80)]
     public void ARecordRoundsToAPowerOfTwoWhenThatAddsAThirdAtMost(int bytes, int stride)
     {
-        AggregateSlot[] slots = [.. Enumerable.Range(0, bytes / 8).Select(_ => (AggregateSlot)new CountSlot())];
+        AggregateSlot[] slots = [.. Enumerable.Range(0, bytes / 8).Select(_ => (AggregateSlot)new CountSlot<long>())];
         Assert.Equal(stride / 8, RecordLayout.Of(slots)!.Stride);
+    }
+
+    /// <summary>
+    /// A count of 32 bits shares a word with a state of four bytes: a count, a sum and the least of an
+    /// int make a record of 16 bytes, where a count of 64 bits made 20, rounded to 32.
+    /// </summary>
+    [Fact]
+    public void ACountOf32BitsSharesAWord()
+    {
+        static AggregateSlot Total() => new FixedSlot<long, long, NarrowSignedTotal<long>, long>(StorageKind.Primitive, static s => s);
+        static AggregateSlot Least() => new FixedSlot<int, int, SeededMinOp<int>, int?>(StorageKind.Primitive, static s => s, int.MaxValue);
+
+        RecordLayout narrow = RecordLayout.Of([new CountSlot<uint>(), Total(), Least()])!;
+        Assert.Equal([8, 0, 12], narrow.Offsets);
+        Assert.Equal(2, narrow.Stride);
+        Assert.Equal(4, RecordLayout.Of([new CountSlot<long>(), Total(), Least()])!.Stride);
     }
 
     [Fact]
     public void RecordsGrowSeededAndKeepTheGroupsKept()
     {
-        AggregateSlot[] slots = [new CountSlot(), new RowSlot(last: false)];
+        AggregateSlot[] slots = [new CountSlot<long>(), new RowSlot(last: false)];
         RecordLayout layout = RecordLayout.Of(slots)!;
         GroupRecords records = new GroupRecords(layout);
         int count = layout.Offsets[0];
@@ -123,10 +139,11 @@ public sealed partial class GroupRecordsTests
                 read.Add(group.Key, group);
             }
 
-            // The count, then the sums of a long proven narrow, of a long and an unsigned long the
-            // statistics prove nothing of, and of an unsigned int proven narrow: the first keeps its
-            // count beside its total when the mean of its column reads it.
-            Assert.Equal([8, shared ? 16 : 8, 16, 8, 16], bytes[..5]);
+            // The count, of 32 bits for a file's rows, then the sums of a long proven narrow, of a
+            // long and an unsigned long the statistics prove nothing of, and of an unsigned int
+            // proven narrow: the first keeps its count beside its total when the mean of its column
+            // reads it.
+            Assert.Equal([4, shared ? 16 : 8, 16, 8, 16], bytes[..5]);
             Assert.Equal(5_000, read.Count);
             foreach (IGrouping<int, Row> group in rows.GroupBy(r => r.Key))
             {

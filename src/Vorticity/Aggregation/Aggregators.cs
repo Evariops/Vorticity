@@ -84,11 +84,15 @@ internal static class Aggregators
         filter is null ? aggregate : new Sym<T>(((AggregateNode<T>)aggregate.Node).Filtered(filter));
 
     internal static Sym<long> Count() =>
-        new Sym<long>(new AggregateNode<long>(AggregateKind.Count, null, static () => new CountSlot(), static (StatisticsView view, out long value) =>
+        new Sym<long>(new AggregateNode<long>(AggregateKind.Count, null, static source => Counter(source), static (StatisticsView view, out long value) =>
         {
             value = view.Rows;
             return true;
         }));
+
+    /// <summary>A count of 32 bits where the source's rows are known to stay below 2^32, of 64 otherwise.</summary>
+    private static AggregateSlot<long> Counter(ScanSource? source) =>
+        source is { RowBound: >= 0 and <= uint.MaxValue } ? new CountSlot<uint>() : new CountSlot<long>();
 
     /// <summary>
     /// Whether the group holds a row <paramref name="filter"/> keeps: <c>Any(p)</c> when its last
