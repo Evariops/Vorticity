@@ -79,6 +79,18 @@ internal sealed class ScanBuilder
     private bool _keepEncodings;
     private bool _sinkDecodes;
 
+    /// <summary>
+    /// Decodes nothing ahead and reads the next splits of a scan of one lane while it decodes one,
+    /// over a source whose read is a round trip (<see cref="ScanSpec.ReadAhead"/>): a prefetch of
+    /// <see cref="BatchAsyncEnumerable.ReadsAhead"/>, in the field a prefetch is held in, since these
+    /// paths are held to a ceiling in bytes.
+    /// </summary>
+    internal ScanBuilder WithReadAhead()
+    {
+        _prefetch = BatchAsyncEnumerable.ReadsAhead;
+        return this;
+    }
+
     /// <summary>Whether the decoders may deliver dictionary and run-end columns encoded.</summary>
     internal bool KeepEncodings => _keepEncodings;
 

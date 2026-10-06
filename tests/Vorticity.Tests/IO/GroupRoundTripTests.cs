@@ -72,6 +72,53 @@ public sealed partial class GroupRoundTripTests
         }
     }
 
+    // An aggregation's lane decodes on its own flow, nothing ahead, and reads ahead of its decode over
+    // a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6): two splits in flight, so that
+    // its reads pair up into half as many steps as a read at a time takes, for the same rows and the
+    // same requests.
+    [Fact]
+    public async Task ALaneReadsAheadOfItsDecode()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            (long rows, long requests, long steps) alone = await LaneAsync(path, readAhead: false);
+            (long rows, long requests, long steps) ahead = await LaneAsync(path, readAhead: true);
+            Assert.Equal(Rows, alone.rows);
+            Assert.Equal(Rows, ahead.rows);
+            Assert.Equal(alone.requests, ahead.requests);
+            Assert.True(alone.steps >= alone.requests - 1, $"{alone.steps} steps for {alone.requests} requests, a read at a time");
+            Assert.InRange(ahead.steps, 1, (ahead.requests / 2) + 2);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>The rows, requests and steps of a scan as an aggregation's lane reads it: one lane, no prefetch.</summary>
+    private static async Task<(long Rows, long Requests, long Steps)> LaneAsync(string path, bool readAhead)
+    {
+        CountingSource source = new CountingSource(MemoryMappedSegmentSource.Open(path));
+        long rows = 0;
+        await using (VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions { LeaveSourceOpen = true }, Ct))
+        {
+            source.Reset();
+            ScanSpec spec = new ScanSpec
+            {
+                Options = new ScanOptions { DegreeOfParallelism = 1, Prefetch = 0 },
+                ReadAhead = readAhead,
+            };
+            await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(spec, new Vorticity.Scanning.ScanMetrics()).WithCancellation(Ct))
+            {
+                rows += batch.RowCount;
+            }
+        }
+
+        await source.DisposeAsync();
+        return (rows, source.Requests, source.Steps);
+    }
+
     private static async Task<(long Requests, long Steps)> MeasureAsync(string path, string query, int degree)
     {
         CountingSource source = new CountingSource(MemoryMappedSegmentSource.Open(path));

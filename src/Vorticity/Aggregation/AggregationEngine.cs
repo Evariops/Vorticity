@@ -1781,8 +1781,9 @@ internal static class AggregationEngine
         CancellationToken token = failed.Token;
 
         // The degree is the parallelism: a partition already runs on the pool, and decoding ahead
-        // inside each one would put twice the degree's lanes on it.
-        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
+        // inside each one would put twice the degree's lanes on it. Its reads go ahead of its decode
+        // instead, on a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6).
+        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = true };
         int[] next = [-1];
         Task[] lanes = new Task[partitions.Length];
         for (int p = 0; p < partitions.Length; p++)

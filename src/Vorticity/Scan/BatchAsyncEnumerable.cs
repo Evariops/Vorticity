@@ -130,10 +130,18 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
+            readAhead: Prefetch == ReadsAhead);
 
-    /// <summary>Batches decoded ahead of the consumer, on lanes of their own.</summary>
+    /// <summary>Batches decoded ahead of the consumer, on lanes of their own; or <see cref="ReadsAhead"/>.</summary>
     internal int Prefetch { get; init; }
+
+    /// <summary>
+    /// The <see cref="Prefetch"/> of a scan of one lane that decodes nothing ahead and reads its next
+    /// splits while it decodes one, over a source whose read is a round trip (PLAN-HIGH-CARDINALITY,
+    /// R6): an aggregation's lanes.
+    /// </summary>
+    internal const int ReadsAhead = -1;
 
     /// <summary>Whether a filtered batch is compacted to its surviving rows rather than delivered whole with a selection.</summary>
     internal bool Compact { get; init; } = true;
@@ -182,7 +190,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows);
+            zones: zones, widenRows: WidenRows, readAhead: Prefetch == ReadsAhead);
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -203,7 +211,8 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
-            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
+            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
+            readAhead: Prefetch == ReadsAhead);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -296,6 +305,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private bool _drained;
     private bool _disposed;
 
+    // A scan of one lane over a source that fetches its bytes reads splits ahead of the one it
+    // decodes (PLAN-HIGH-CARDINALITY, R6); null for every other scan, which pays one reference for it:
+    // these paths are held to a ceiling in bytes.
+    private readonly AheadReads? _ahead;
+
+    /// <summary>
+    /// The splits a scan of one lane reads ahead of the one it decodes, over a source whose read is a
+    /// round trip: two. Measured on 2026-10-06 at fourteen lanes and 20 ms a request, four read no
+    /// faster and held 10 to 28 MiB more: what is left is each range's first read.
+    /// </summary>
+    private const int ReadAheadSplits = 2;
+
     internal BatchAsyncEnumerator(
         VortexFile file,
         LayoutTree tree,
@@ -316,7 +337,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool keepEncodings = false,
         bool sinkDecodes = false,
         ZonePruner? zones = null,
-        int widenRows = 0)
+        int widenRows = 0,
+        bool readAhead = false)
     {
         _compact = compact;
         _widenRows = widenRows > plan.MaxRows && compact && !filterProven && !reverse && take is null &&
@@ -336,7 +358,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _evaluator = filter is null ? null : new FilterEvaluator(filter) { Zones = zones };
         _token = cancellationToken;
         _cursor = plan.CreateCursor(reverse);
-        _segments = new ScanSegments(degree);
+
+        // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
+        // reads ahead over a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6). Over a
+        // mapping a read is a view, and there is nothing to overlap; the file the scan reads through
+        // may be the one the open read whole, which is asked of its source.
+        _ahead = readAhead && window == 1 && !file.Source.ReadsInPlace ? new AheadReads(ReadAheadSplits) : null;
+        _segments = new ScanSegments(_ahead is { } ahead ? ahead.Lanes.Length : degree);
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses
         // how to read it.
@@ -357,6 +385,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _free = degree;
         _lanes = new Lane?[window];
         _lanes[0] = NewLane(file, live, metrics, keepEncodings);
+        if (_ahead is not null)
+        {
+            _ahead.Lanes[0] = _lanes[0];
+        }
     }
 
     /// <summary>A lane on a context of its own, bound to what outlives every batch of the scan.</summary>
@@ -416,6 +448,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         if (_token.IsCancellationRequested)
         {
             return ValueTask.FromCanceled<bool>(_token);
+        }
+
+        if (_ahead is { } ahead)
+        {
+            return MoveNextAheadAsync(ahead);
         }
 
         if (_drained || !TryNextSplit(out RowRange split))
@@ -525,6 +562,179 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         return produced;
     }
 
+    // ------------------------------------------------------------------------------- reading ahead
+
+    /// <summary>
+    /// The next batch of a scan of one lane that reads ahead: the oldest read in flight awaited, the
+    /// next split's read started in its place, then the split decoded here, on the caller's flow, as
+    /// a scan of one lane decodes.
+    /// </summary>
+    /// <remarks>
+    /// A read in flight is a <see cref="Task"/>, awaited by this step or by the dispose: a value task
+    /// kept to be awaited later is one a failure could leave unawaited. A read that fails gives up
+    /// its claims and resets its lane itself.
+    /// </remarks>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<bool> MoveNextAheadAsync(AheadReads ahead)
+    {
+        FillAhead(ahead);
+        if (ahead.Count == 0)
+        {
+            return false;
+        }
+
+        (Lane lane, Task read) = ahead.TakeOldest(_started);
+        await read.ConfigureAwait(false);
+
+        _currentLane = lane;
+        ScanMetrics.Served(_metrics, lane.Context.Segments);
+        _segments.Release(lane.Sequence);
+
+        // The place this split leaves goes to the next one, whose read runs while this one decodes
+        // and the caller folds it.
+        FillAhead(ahead);
+        bool produced = CompleteBatch();
+        _retained.Release(lane.Sequence);
+        return produced;
+    }
+
+    /// <summary>Starts reads until <paramref name="ahead"/> has as many in flight as it reads ahead, or no split is left.</summary>
+    private void FillAhead(AheadReads ahead)
+    {
+        while (ahead.Count < ahead.Reads.Length && !_drained)
+        {
+            if (!TryNextSplit(out RowRange split))
+            {
+                _drained = true;
+                return;
+            }
+
+            long sequence = _started++;
+            Lane lane = ahead.Lanes[(int)(sequence % ahead.Lanes.Length)] ??= NextLane();
+            lane.Rows = split;
+            lane.Sequence = sequence;
+            lane.Context.Batch = sequence;
+            if (_take is not null && !_filterProven)
+            {
+                SplitExecution.Alone(lane.Context, split);
+            }
+            else
+            {
+                SplitExecution.Window(lane.Context, _cursor.Plan, split);
+            }
+
+            try
+            {
+                Register(lane.Context, split);
+            }
+            catch
+            {
+                lane.Context.ResetBatch();
+                throw;
+            }
+
+            ahead.Add(ReadAheadAsync(lane));
+        }
+    }
+
+    /// <summary>
+    /// A split's read, started ahead: its claims, waiting for a segment an earlier split is reading
+    /// rather than reading it twice, then the read of what it claimed, published at once for the
+    /// splits after it.
+    /// </summary>
+    private async Task ReadAheadAsync(Lane lane)
+    {
+        try
+        {
+            while (_segments.Claim(lane.Context.Segments, lane.Sequence, lane))
+            {
+                await lane.ReadByOthersAsync().ConfigureAwait(false);
+            }
+
+            bool read = NoteRequests(lane.Context);
+            await ReadAsync(lane.Context.Segments, read).ConfigureAwait(false);
+            if (read)
+            {
+                _segments.Publish(lane.Context.Segments, lane.Sequence);
+            }
+        }
+        catch
+        {
+            _segments.Abandon(lane.Sequence);
+            try
+            {
+                lane.Context.ResetBatch();
+            }
+            catch
+            {
+                // The read's failure is what the caller needs to see, not a release failure behind it.
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>The reads still in flight awaited, their failures dropped, and every lane released.</summary>
+    private async Task DisposeAheadAsync(AheadReads ahead)
+    {
+        ReleaseCurrent();
+        while (ahead.Count > 0)
+        {
+            (Lane lane, Task read) = ahead.TakeOldest(_started);
+            try
+            {
+                await read.ConfigureAwait(false);
+                lane.Context.ResetBatch();
+            }
+            catch (Exception)
+            {
+                // Disposal must not throw, and a read nobody waits for has no one to report to.
+            }
+        }
+
+        DisposeLanes();
+    }
+
+    /// <summary>
+    /// The reads a scan of one lane has in flight ahead of the split it decodes: each on a lane of
+    /// its own, the split numbered s on lane s modulo their count, one more than the reads, for the
+    /// split being decoded; the reads in the order of their splits, oldest first.
+    /// </summary>
+    private sealed class AheadReads
+    {
+        private int _first;
+
+        internal AheadReads(int depth)
+        {
+            Lanes = new Lane?[depth + 1];
+            Reads = new Task?[depth];
+        }
+
+        internal Lane?[] Lanes { get; }
+
+        internal Task?[] Reads { get; }
+
+        /// <summary>The reads in flight.</summary>
+        internal int Count { get; private set; }
+
+        internal void Add(Task read)
+        {
+            Reads[(_first + Count) % Reads.Length] = read;
+            Count++;
+        }
+
+        /// <summary>The oldest read in flight and its lane, given the number of the next split to start.</summary>
+        internal (Lane Lane, Task Read) TakeOldest(long started)
+        {
+            Lane lane = Lanes[(int)((started - Count) % Lanes.Length)]!;
+            Task read = Reads[_first]!;
+            Reads[_first] = null;
+            _first = (_first + 1) % Reads.Length;
+            Count--;
+            return (lane, read);
+        }
+    }
+
     /// <summary>Releases everything, whether the enumeration finished, threw, or was abandoned.</summary>
     /// <returns>A task that completes once every in-flight split has been observed and released.</returns>
     public ValueTask DisposeAsync()
@@ -536,6 +746,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         _disposed = true;
         _drained = true;
+
+        if (_ahead is { Count: > 0 } ahead)
+        {
+            return new ValueTask(DisposeAheadAsync(ahead));
+        }
 
         if (HasPendingWork())
         {
@@ -1629,6 +1844,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             {
                 lane.Stop();
                 ScanContexts.Shared.Return(lane.Context);
+            }
+        }
+
+        // The lanes of the reads ahead past the first, which is the scan's first lane.
+        if (_ahead is { } ahead)
+        {
+            for (int i = 1; i < ahead.Lanes.Length; i++)
+            {
+                if (ahead.Lanes[i] is { } lane)
+                {
+                    ScanContexts.Shared.Return(lane.Context);
+                }
             }
         }
 

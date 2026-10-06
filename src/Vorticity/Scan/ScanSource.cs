@@ -49,6 +49,13 @@ internal sealed record ScanSpec
     internal bool SinkDecodes { get; init; }
 
     /// <summary>
+    /// Whether a scan of one lane reads its next splits while it decodes one, over a source whose read
+    /// is a round trip (PLAN-HIGH-CARDINALITY, R6): an aggregation's lanes, which decode nothing ahead
+    /// and read every split they are given, so that no read ahead is wasted.
+    /// </summary>
+    internal bool ReadAhead { get; init; }
+
+    /// <summary>
     /// Whether the consumer reads no row's place, as an aggregation folds values without asking
     /// where they lie, so that a source may leave a row out of a batch by its selection alone rather
     /// than gather the others: the rows kept are right, their numbering from the batch's start is not.
@@ -318,6 +325,11 @@ internal sealed class FileScanSource : ScanSource
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
         builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings, spec.SinkDecodes);
+        if (spec.ReadAhead)
+        {
+            builder.WithReadAhead();
+        }
+
         if (spec.Pruned)
         {
             builder.WithPruned(spec.Live);
