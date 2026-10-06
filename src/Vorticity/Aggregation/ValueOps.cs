@@ -235,6 +235,106 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
     }
 }
 
+/// <summary>
+/// A sum of signed integers in 64 bits that no mean reads: the total alone, eight bytes a group where
+/// <see cref="NarrowSignedSum{TValue}"/> keeps the count a mean needs beside it. The statistics prove
+/// it cannot overflow, as for that one.
+/// </summary>
+internal readonly struct NarrowSignedTotal<TValue> : IValueOp<TValue, long>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public static long Seed() => 0;
+
+    public static void Add(ref long state, TValue value) => state += long.CreateTruncating(value);
+
+    public static void AddWeighted(ref long state, TValue value, long count) => state += long.CreateTruncating(value) * count;
+
+    public static void AddSpan(ref long state, ReadOnlySpan<TValue> values) => state += (long)SumKernels.Signed(values);
+
+    public static void Merge(ref long into, in long other) => into += other;
+
+    [SkipLocalsInit]
+    public static void AddWords(ref long state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += (long)SumKernels.Signed(selected);
+    }
+}
+
+/// <summary>A sum of signed integers in 128 bits that no mean reads: the total alone, as <see cref="SignedSum{TValue}"/> without its count.</summary>
+internal readonly struct SignedTotal<TValue> : IValueOp<TValue, Int128>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public static Int128 Seed() => default;
+
+    public static void Add(ref Int128 state, TValue value) => state += Int128.CreateTruncating(value);
+
+    public static void AddWeighted(ref Int128 state, TValue value, long count) => state += Int128.CreateTruncating(value) * count;
+
+    public static void AddSpan(ref Int128 state, ReadOnlySpan<TValue> values) => state += SumKernels.Signed(values);
+
+    public static void Merge(ref Int128 into, in Int128 other) => into += other;
+
+    [SkipLocalsInit]
+    public static void AddWords(ref Int128 state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += SumKernels.Signed(selected);
+    }
+}
+
+/// <summary>A sum of unsigned integers in 64 bits that no mean reads, as <see cref="NarrowUnsignedSum{TValue}"/> without its count.</summary>
+internal readonly struct NarrowUnsignedTotal<TValue> : IValueOp<TValue, ulong>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public static ulong Seed() => 0;
+
+    public static void Add(ref ulong state, TValue value) => state += ulong.CreateTruncating(value);
+
+    public static void AddWeighted(ref ulong state, TValue value, long count) => state += ulong.CreateTruncating(value) * (ulong)count;
+
+    public static void AddSpan(ref ulong state, ReadOnlySpan<TValue> values) => state += (ulong)SumKernels.Unsigned(values);
+
+    public static void Merge(ref ulong into, in ulong other) => into += other;
+
+    [SkipLocalsInit]
+    public static void AddWords(ref ulong state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += (ulong)SumKernels.Unsigned(selected);
+    }
+}
+
+/// <summary>A sum of unsigned integers in 128 bits that no mean reads, as <see cref="UnsignedSum{TValue}"/> without its count.</summary>
+internal readonly struct UnsignedTotal<TValue> : IValueOp<TValue, UInt128>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public static UInt128 Seed() => default;
+
+    public static void Add(ref UInt128 state, TValue value) => state += UInt128.CreateTruncating(value);
+
+    public static void AddWeighted(ref UInt128 state, TValue value, long count) => state += UInt128.CreateTruncating(value) * (ulong)count;
+
+    public static void AddSpan(ref UInt128 state, ReadOnlySpan<TValue> values) => state += SumKernels.Unsigned(values);
+
+    public static void Merge(ref UInt128 into, in UInt128 other) => into += other;
+
+    [SkipLocalsInit]
+    public static void AddWords(ref UInt128 state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += SumKernels.Unsigned(selected);
+    }
+}
+
 /// <summary>A sum of unscaled decimals in 128 bits, checked.</summary>
 internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
 {

@@ -149,7 +149,20 @@ internal static class Aggregators
             _ => throw shape.Unsupported("a sum"),
         };
 
-        return new Sym<T>(new AggregateNode<T>(AggregateKind.Sum, shape, create, (StatisticsView view, out T value) => SettleSum(shape, view, out value)));
+        Func<ScanSource?, AggregateSlot<T>>? alone = shape.Kind != StorageKind.Primitive ? null : shape.PType switch
+        {
+            PType.I8 => SignedAlone<sbyte, T>(shape),
+            PType.I16 => SignedAlone<short, T>(shape),
+            PType.I32 => SignedAlone<int, T>(shape),
+            PType.I64 => SignedAlone<long, T>(shape),
+            PType.U8 => UnsignedAlone<byte, T>(shape),
+            PType.U16 => UnsignedAlone<ushort, T>(shape),
+            PType.U32 => UnsignedAlone<uint, T>(shape),
+            PType.U64 => UnsignedAlone<ulong, T>(shape),
+            _ => null,
+        };
+
+        return new Sym<T>(new AggregateNode<T>(AggregateKind.Sum, shape, create, (StatisticsView view, out T value) => SettleSum(shape, view, out value), alone: alone));
     }
 
     /// <summary>
@@ -172,6 +185,25 @@ internal static class Aggregators
         source => Proven(source, shape, ulong.MaxValue)
             ? new FixedSlot<TValue, SumState<ulong>, NarrowUnsignedSum<TValue>, TResult>(StorageKind.Primitive, narrow)
             : new FixedSlot<TValue, SumState<UInt128>, UnsignedSum<TValue>, TResult>(StorageKind.Primitive, wide);
+
+    /// <summary>
+    /// The state of a sum of signed integers that no mean reads: its total alone, of the width
+    /// <see cref="Signed{TValue, TResult}"/> chooses, without the count only a mean divides by.
+    /// </summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> SignedAlone<TValue, TResult>(ColumnShape shape)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+        where TResult : INumber<TResult> =>
+        source => Proven(source, shape, (UInt128)long.MaxValue)
+            ? new FixedSlot<TValue, long, NarrowSignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s))
+            : new FixedSlot<TValue, Int128, SignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s));
+
+    /// <summary>The state of a sum of unsigned integers that no mean reads: its total alone.</summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> UnsignedAlone<TValue, TResult>(ColumnShape shape)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+        where TResult : INumber<TResult> =>
+        source => Proven(source, shape, ulong.MaxValue)
+            ? new FixedSlot<TValue, ulong, NarrowUnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s))
+            : new FixedSlot<TValue, UInt128, UnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s));
 
     /// <summary>Whether the source's rows times the column's largest magnitude, from its statistics, stay at or below <paramref name="limit"/>.</summary>
     private static bool Proven(ScanSource? source, ColumnShape shape, UInt128 limit)

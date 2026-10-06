@@ -94,23 +94,66 @@ public sealed partial class GroupRecordsTests
         Assert.Equal(-1L, records.View<long>(row)[2]);
     }
 
+    /// <summary>
+    /// A sum keeps the count a mean divides by only when a mean of its column reads its slot: its
+    /// total alone otherwise, of the width the statistics prove, signed or not; a mean of another
+    /// column reads its own.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ASumNoMeanReadsKeepsItsTotalAlone(bool shared)
+    {
+        Row[] rows = Rows();
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 2);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation grouped = file.Scan<Row>()
+                .GroupBy(r => r.Key)
+                .Select(g => (
+                    g.Key, g.Count(), g.Sum(r => r.Value), g.Sum(r => r.Big), g.Sum(r => r.Small), g.Sum(r => r.Huge),
+                    shared ? g.Average(r => r.Value) : g.Average(r => r.Real)));
+            int[] bytes = [];
+            grouped.Plan.Watch = partitions => bytes = [.. partitions[0].Slots.Select(slot => slot.StateBytes)];
+            Dictionary<int, Sums> read = [];
+            await foreach (Sums group in grouped.As<Sums>().ToRecordsAsync(Ct))
+            {
+                read.Add(group.Key, group);
+            }
+
+            // The count, then the sums of a long proven narrow, of a long and an unsigned long the
+            // statistics prove nothing of, and of an unsigned int proven narrow: the first keeps its
+            // count beside its total when the mean of its column reads it.
+            Assert.Equal([8, shared ? 16 : 8, 16, 8, 16], bytes[..5]);
+            Assert.Equal(5_000, read.Count);
+            foreach (IGrouping<int, Row> group in rows.GroupBy(r => r.Key))
+            {
+                Sums sums = read[group.Key];
+                Assert.Equal(group.Count(), sums.Count);
+                Assert.Equal(group.Sum(r => r.Value), sums.Values);
+                Assert.Equal(group.Sum(r => r.Big), sums.Bigs);
+                Assert.Equal(group.Aggregate(0UL, (total, r) => total + r.Small), sums.Smalls);
+                Assert.Equal(group.Aggregate(0UL, (total, r) => total + r.Huge), sums.Huges);
+                Assert.Equal(shared ? group.Average(r => r.Value) : group.Average(r => r.Real), sums.Mean!.Value, 9);
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
     public async Task AStateHoldingAReferenceKeepsAnArrayBesideTheRecords(int degree)
     {
-        string path = Path.Combine(AppContext.BaseDirectory, "group-records");
-        Directory.CreateDirectory(path);
-        path = Path.Combine(path, $"rows-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
-        Row[] rows = [.. Enumerable.Range(0, 100_000).Select(r => new Row(r * 7_919 % 5_000, r % 97, r % 89 * 1.5))];
+        Row[] rows = Rows();
+        string path = await WriteAsync(rows);
         try
         {
-            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path, new VortexWriteOptions { RowBlockSize = 8_192, ChunkTargetBytes = 1 << 16 }))
-            {
-                await writer.WriteAsync<Row>(rows, Ct);
-                await writer.CompleteAsync(Ct);
-            }
-
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Dictionary<int, (long Count, long Sum, Largest Largest)> read = [];
@@ -141,11 +184,37 @@ public sealed partial class GroupRecordsTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    /// <summary>
+    /// Five thousand keys in no order, twenty rows each; a long and an unsigned int whose rows times
+    /// largest value fit 64 bits, and a long and an unsigned long whose do not, though every group's
+    /// sum does.
+    /// </summary>
+    private static Row[] Rows() =>
+        [.. Enumerable.Range(0, 100_000).Select(r => new Row(
+            r * 7_919 % 5_000, r % 97, r % 89 * 1.5, (r % 3 - 1) * (long.MaxValue / 1_000), (uint)r, (ulong)(r % 5) * (ulong.MaxValue / 1_000)))];
+
+    private static async Task<string> WriteAsync(Row[] rows)
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "group-records");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"rows-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path, new VortexWriteOptions { RowBlockSize = 8_192, ChunkTargetBytes = 1 << 16 }))
+        {
+            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        return path;
+    }
+
     [VortexRecord]
-    public partial record struct Row(int Key, long Value, double Real);
+    public partial record struct Row(int Key, long Value, double Real, long Big, uint Small, ulong Huge);
 
     [VortexRecord]
     public partial record struct KeyLargest(int Key, long Count, long Sum, Largest Largest);
+
+    [VortexRecord]
+    public partial record struct Sums(int Key, long Count, long Values, long Bigs, ulong Smalls, ulong Huges, double? Mean);
 }
 
 /// <summary>The largest value seen, and its text: a state that holds a reference.</summary>

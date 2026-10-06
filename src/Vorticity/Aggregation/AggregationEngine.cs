@@ -73,9 +73,11 @@ internal sealed class AggregationPlan
 
         Aggregates = [.. aggregates];
         Shares = new (AggregateIdentity, int)[shares.Count];
+        MeanRead = new bool[Aggregates.Length];
         for (int s = 0; s < shares.Count; s++)
         {
             Shares[s] = (shares[s].Mean, IndexOf(shares[s].Sum));
+            MeanRead[Shares[s].Sum] = true;
         }
 
         Chosen = [.. chosen];
@@ -85,6 +87,12 @@ internal sealed class AggregationPlan
 
     /// <summary>The means that read the slot of a sum, and that slot.</summary>
     internal (AggregateIdentity Mean, int Sum)[] Shares { get; }
+
+    /// <summary>
+    /// Whether a mean reads the slot of each aggregate (<see cref="Shares"/>): a sum that none reads
+    /// keeps its total alone, without the count a mean divides by.
+    /// </summary>
+    internal bool[] MeanRead { get; }
 
     /// <summary>The columns read from chosen rows, each once: fetched after the pass by the rows' positions.</summary>
     internal IChosenColumn[] Chosen { get; }
@@ -426,7 +434,7 @@ internal sealed class AggregationPartition
         AggregateSlot[] slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
         {
-            slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
+            slots[i] = settled[i] ?? plan.Aggregates[i].Create(source, plan.MeanRead[i]);
         }
 
         records = null;

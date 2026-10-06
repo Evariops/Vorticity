@@ -107,7 +107,8 @@ internal interface IAggregateNode
 
     /// <summary>A fresh, empty state for one partition of a run over <paramref name="source"/>.</summary>
     /// <param name="source">The source the run reads, whose statistics a state may take what the whole run shares from; null for none.</param>
-    AggregateSlot Create(ScanSource? source);
+    /// <param name="meanRead">Whether a mean reads the slot (<see cref="AggregationPlan.Shares"/>), which a sum then keeps its count for.</param>
+    AggregateSlot Create(ScanSource? source, bool meanRead);
 
     /// <summary>The answer the file statistics give for the whole file, or null when they do not give it exactly.</summary>
     AggregateSlot? Settle(StatisticsView view);
@@ -121,6 +122,10 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     private readonly Func<ScanSource?, AggregateSlot<T>> _create;
     private readonly Settler<T>? _settle;
 
+    // The slot when no mean reads it, whose state can leave out what only a mean needs; null when
+    // the slot is the same either way.
+    private readonly Func<ScanSource?, AggregateSlot<T>>? _alone;
+
     internal AggregateNode(
         AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null)
         : this(kind, input, _ => create(), settle, detail, record, filter)
@@ -129,11 +134,13 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     /// <summary>An aggregate whose states take what the run shares from its source's statistics, as a variance its center.</summary>
     internal AggregateNode(
-        AggregateKind kind, ColumnShape? input, Func<ScanSource?, AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null)
+        AggregateKind kind, ColumnShape? input, Func<ScanSource?, AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null, IVortexRecord? record = null, RowFilter? filter = null,
+        Func<ScanSource?, AggregateSlot<T>>? alone = null)
     {
         Kind = kind;
         Input = input;
         _create = create;
+        _alone = alone;
 
         // The statistics hold every row's values, never those of a filtered group alone.
         _settle = filter is null ? settle : null;
@@ -150,7 +157,7 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     /// <summary>The same aggregate over the rows <paramref name="filter"/> keeps of its group; this one for none.</summary>
     internal AggregateNode<T> Filtered(RowFilter? filter) =>
-        filter is null ? this : new AggregateNode<T>(Kind, Input, _create, null, Identity.Detail, Record, filter);
+        filter is null ? this : new AggregateNode<T>(Kind, Input, _create, null, Identity.Detail, Record, filter, _alone);
 
     internal override ColumnSym? Comparable => _comparable ??= Kind == AggregateKind.Custom
         ? throw new InvalidOperationException($"'{this}' is the state of a custom aggregator, which has no order: compare a value a built-in aggregate delivers.")
@@ -166,7 +173,7 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     public RowFilter? Filter { get; }
 
-    public AggregateSlot Create(ScanSource? source) => _create(source);
+    public AggregateSlot Create(ScanSource? source, bool meanRead) => !meanRead && _alone is not null ? _alone(source) : _create(source);
 
     public AggregateSlot? Settle(StatisticsView view) =>
         _settle is not null && _settle(view, out T value) ? new SettledSlot<T>(value) : null;
