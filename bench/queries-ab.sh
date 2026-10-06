@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 # Two commits of the library, the same queries, run in turns: what a change does to the query bench.
 #
-#   bench/queries-ab.sh <before-commit> [--after <commit>] [--pairs N] [bench args…]
+#   bench/queries-ab.sh <before-commit> [--after <commit>] [--pairs N] [--isolate] [--rest S] [bench args…]
 #
 #   bench/queries-ab.sh HEAD~1 --after HEAD --degrees 1,14 skewed medium
+#   bench/queries-ab.sh HEAD~1 --after HEAD --isolate --rest 40 --matrix full --rounds 15 "random 1e6, four" unique
+#
+# WITH --isolate, EACH FILTER RUNS IN A PROCESS OF ITS OWN, before and after in turns, filter after
+# filter. In one process a query inherits what the ones before it left: code the JIT recompiled with
+# their profiles, a heap their tables grew, a machine they heated. On 2026-10-06, the engine's own
+# key table read the same at degree 1 both ways (x0.555 in a full matrix in one process, x0.532
+# alone), but at degree 14 the full matrix read its late queries x1.5 to x2.4 slower on both sides
+# than each query alone, and a million groups x1.78 where alone read x0.78. With --rest S, S seconds
+# of rest before every turn: fourteen lanes heat a laptop, which slows the turns after them.
+# Isolated queries want --rounds 15 or so, enough for the tiers of the JIT to settle.
 #
 # BOTH SIDES ARE BUILT THE SAME WAY, in git worktrees under bench/.ab/ (git-ignored), each with
 # TODAY'S queries bench copied in, so that they run the same scenarios and print the same lines.
@@ -19,15 +29,32 @@
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[ $# -ge 1 ] || { echo "usage: bench/queries-ab.sh <before-commit> [--after <commit>] [--pairs N] [bench args…]" >&2; exit 2; }
+[ $# -ge 1 ] || { echo "usage: bench/queries-ab.sh <before-commit> [--after <commit>] [--pairs N] [--isolate] [--rest S] [bench args…]" >&2; exit 2; }
 before_commit="$1"; shift
 after_commit=""
 pairs=4
+isolate=0
+rest=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --after) after_commit="$2"; shift 2 ;;
         --pairs) pairs="$2"; shift 2 ;;
+        --isolate) isolate=1; shift ;;
+        --rest) rest="$2"; shift 2 ;;
         *) break ;;
+    esac
+done
+
+# The bench's options, each with its value but the flags, and its filters, the words a query's name
+# holds: with --isolate, each filter runs with every option.
+options=()
+filters=()
+args=("$@")
+for ((k = 0; k < ${#args[@]}; k++)); do
+    case "${args[k]}" in
+        --check|--parallel|--cold) options+=("${args[k]}") ;;
+        --*) options+=("${args[k]}" "${args[k + 1]}"); k=$((k + 1)) ;;
+        *) filters+=("${args[k]}") ;;
     esac
 done
 
@@ -82,23 +109,36 @@ after_bin="$side_bin"
 out="$root/bench/.ab/queries-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$out"
 turn() {
-    local side="$1" bin="$2" i="$3"
-    echo "pair $i of $pairs: $side"
-    "$bin" "${@:4}" --tsv "$out/$side.tsv" > "$out/$side-$i.log" 2>&1 || {
-        echo "the $side side failed:" >&2; tail -20 "$out/$side-$i.log" >&2; exit 1; }
+    local side="$1" bin="$2" i="$3" j="$4"
+    [ "$rest" -gt 0 ] && sleep "$rest"
+    echo "pair $i of $pairs: $side${5:+ ($5)}"
+    "$bin" "${@:6}" --tsv "$out/$side.tsv" > "$out/$side-$i-$j.log" 2>&1 || {
+        echo "the $side side failed:" >&2; tail -20 "$out/$side-$i-$j.log" >&2; exit 1; }
 }
 
 # THE ORDER ALTERNATES, before-after then after-before: a null control (the same commit on both
 # sides) read the second process of every pair 3 to 10 % faster, so a fixed order would credit that
 # to whichever side always ran second.
+runs=1
+((isolate)) && ((${#filters[@]} > 0)) && runs=${#filters[@]}
 for ((i = 1; i <= pairs; i++)); do
-    if ((i % 2 == 1)); then
-        turn before "$before_bin" "$i" "$@"
-        turn after "$after_bin" "$i" "$@"
-    else
-        turn after "$after_bin" "$i" "$@"
-        turn before "$before_bin" "$i" "$@"
-    fi
+    for ((j = 0; j < runs; j++)); do
+        if ((runs > 1)); then
+            label="${filters[j]}"
+            set -- ${options[@]+"${options[@]}"} "$label"
+        else
+            label=""
+            set -- ${args[@]+"${args[@]}"}
+        fi
+
+        if ((i % 2 == 1)); then
+            turn before "$before_bin" "$i" "$j" "$label" "$@"
+            turn after "$after_bin" "$i" "$j" "$label" "$@"
+        else
+            turn after "$after_bin" "$i" "$j" "$label" "$@"
+            turn before "$before_bin" "$i" "$j" "$label" "$@"
+        fi
+    done
 done
 
 # The best turn of each side by query and degree, its first answer, memory and lanes taken from
