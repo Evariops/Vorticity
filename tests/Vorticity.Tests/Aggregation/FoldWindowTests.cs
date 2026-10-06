@@ -35,7 +35,7 @@ public sealed partial class FoldWindowTests
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             List<Stats> whole = await RunAsync(file, filtered, window: 0);
-            Assert.True(whole.Count > 4_900, $"{whole.Count} groups");
+            Assert.True(whole.Count > 19_900, $"{whole.Count} groups");
             foreach (int window in (int[])[1, 7, 64])
             {
                 Assert.Equal(whole, await RunAsync(file, filtered, window));
@@ -68,8 +68,9 @@ public sealed partial class FoldWindowTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// A key of five thousand values in no order, whose records outgrow the size under which a batch
-    /// is folded whole; values with nulls, a float, a flag, a text and a small integer.
+    /// A key of twenty thousand values in no order, whose records, some 88 bytes each, outgrow the
+    /// 1 MiB under which a batch is folded whole on every lane; values with nulls, a float, a flag, a
+    /// text and a small integer.
     /// </summary>
     private static async Task<string> WriteAsync()
     {
@@ -81,7 +82,7 @@ public sealed partial class FoldWindowTests
         {
             ulong mix = (ulong)row * 0x9E37_79B9_7F4A_7C15UL;
             rows[row] = new Row(
-                (int)((mix >> 24) % 5_000),
+                (int)((mix >> 24) % 20_000),
                 row % 13 == 0 ? null : (long)((mix >> 8) % 100),
                 ((mix >> 16) % 1_000) / 8.0,
                 (mix >> 40) % 3 == 0,

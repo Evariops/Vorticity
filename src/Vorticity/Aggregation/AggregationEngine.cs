@@ -341,11 +341,13 @@ internal sealed class AggregationPartition
     private readonly int _window;
 
     /// <summary>
-    /// The bytes of records past which the slots fold a batch a window at a time: 256 KiB, what the
-    /// private cache of any current core holds (PLAN-HIGH-CARDINALITY, principle 14). Under it the
-    /// records of every group stay in cache from one slot to the next anyway.
+    /// The bytes of records past which the slots fold a batch a window at a time: 1 MiB, the private
+    /// second level of cache of a current core (PLAN-HIGH-CARDINALITY, principle 14). Under it the
+    /// records of every group stay in cache from one slot to the next anyway: in one process, windows
+    /// cost a count and a float mean on ten thousand groups 3 %, records of 640 KiB, and won nothing
+    /// before a hundred thousand.
     /// </summary>
-    private const long WindowedBytes = 256 * 1024;
+    private const long WindowedBytes = 1024 * 1024;
 
     // The source's row the current batch starts at, which a chosen row keeps.
     private long _startRow;
