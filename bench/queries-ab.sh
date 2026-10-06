@@ -111,9 +111,9 @@ awk -F '\t' '
         k = side SUBSEP key
         if (!(k in ms) || $3 + 0 < ms[k] + 0) {
             ms[k] = $3; first[k] = $4; alloc[k] = $5; live[k] = $6; gen2[k] = $8
-            spread[k] = (NF >= 12 && $11 + 0 > 0) ? sprintf("%.2f", $10 / $11) : "-"
-            busiest[k] = (NF >= 12) ? sprintf("%.2f", $10) : "-"
-            merge[k] = (NF >= 12) ? sprintf("%.2f", $12) : "-"
+            spread[k] = (NF >= 14 && $13 + 0 > 0) ? sprintf("%.2f", $12 / $13) : "-"
+            busiest[k] = (NF >= 14) ? sprintf("%.2f", $12) : "-"
+            merge[k] = (NF >= 14) ? sprintf("%.2f", $14) : "-"
         }
         if (key in result && result[key] != $7) differs[key] = 1
         result[key] = $7

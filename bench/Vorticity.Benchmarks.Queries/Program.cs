@@ -10,6 +10,7 @@
 //   … -- --degrees 1,2,4,8                                                             every query at each of these degrees
 //   … -- --matrix small                                                                the high-cardinality matrix of every A/B, at degrees 1 and N (HighCardinality.cs)
 //   … -- --matrix full                                                                 the full one, of the milestones, at degrees 1, 4 and N
+//   … -- --latency 20                                                                  every file read as a store would serve it, 20 ms a round trip: requests and dependent steps
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
@@ -30,6 +31,7 @@ int rounds = Option(args, "--rounds", 5);
 int large = Option(args, "--large", 16_000_000);
 bool check = args.Contains("--check");
 string? matrix = Text(args, "--matrix");
+int latency = Option(args, "--latency", 0);
 int[] degrees = Degrees(args, matrix);
 string? tsv = Text(args, "--tsv");
 Switches.Switch? compared = Switches.Find(Text(args, "--switch"));
@@ -71,7 +73,7 @@ Dictionary<string, string> files = new Dictionary<string, string>(StringComparer
 
 Dictionary<string, Measurement> measured = new Dictionary<string, Measurement>(StringComparer.Ordinal);
 List<(string Key, Measurement Measurement)> engines = [];
-Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc MiB",10} {"live MiB",9} {"gen2",5} {"result",12}");
+Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc MiB",10} {"live MiB",9} {"gen2",5} {"faults",8} {"LOH MiB",8} {"result",12}");
 foreach (int degree in degrees)
 {
     await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
@@ -88,8 +90,18 @@ foreach (int degree in degrees)
             files[fileName] = path;
         }
 
-        await using VortexFile file = await session.OpenAsync(path).ConfigureAwait(false);
-        foreach ((string name, Measurement m, string versus) in await MeasuredAsync(run => scenario.Query(file, run), scenario.Name, scenario.ProbeEvery).ConfigureAwait(false))
+        // Over a round trip of --latency ms, as an object store serves it: its requests and dependent
+        // steps counted, the warm-up's and the memory pass's with the rounds'.
+        LatencySource? remote = latency > 0 ? new LatencySource(path, TimeSpan.FromMilliseconds(latency)) : null;
+        await using VortexFile file = remote is null
+            ? await session.OpenAsync(path).ConfigureAwait(false)
+            : await session.OpenAsync(remote).ConfigureAwait(false);
+        (long Requests, long Steps) opened = (remote?.Requests ?? 0, remote?.Steps ?? 0);
+        (string Name, Measurement M, string Versus)[] results = await MeasuredAsync(run => scenario.Query(file, run), scenario.Name, scenario.ProbeEvery).ConfigureAwait(false);
+        string trips = remote is null ? string.Empty : string.Create(
+            CultureInfo.InvariantCulture,
+            $"  {(remote.Requests - opened.Requests) / (double)(results.Length * (rounds + 2)),7:F1} requests {(remote.Steps - opened.Steps) / (double)(results.Length * (rounds + 2)),6:F1} steps");
+        foreach ((string name, Measurement m, string versus) in results)
         {
             string key = degree == 1 ? name : $"{name}, degree {degree}";
             measured[key] = m;
@@ -99,7 +111,7 @@ foreach (int degree in degrees)
             }
 
             Console.WriteLine(
-                $"{name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Gen2,5:F1} {m.Result,12}{versus}");
+                $"{name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Gen2,5:F1} {m.Faults,8} {m.LargeBytes / 1048576.0,8:F1} {m.Result,12}{versus}{trips}");
             Record(tsv, name, degree, m);
         }
     }
@@ -135,7 +147,7 @@ foreach (int degree in degrees)
         }
 
         Console.WriteLine(
-            $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Gen2,5:F1} {m.Result,12} {requests,9:F1} requests");
+            $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Gen2,5:F1} {m.Faults,8} {m.LargeBytes / 1048576.0,8:F1} {m.Result,12} {requests,9:F1} requests");
         Record(tsv, scenario.Name, degree, m);
     }
 }
@@ -229,7 +241,7 @@ static void Record(string? path, string name, int degree, Measurement m)
 
     System.IO.File.AppendAllText(path, string.Create(
         CultureInfo.InvariantCulture,
-        $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}\t{m.Gen2:F2}{engine}\n"));
+        $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}\t{m.Gen2:F2}\t{m.Faults}\t{m.LargeBytes / 1048576.0:F2}{engine}\n"));
 }
 
 static int[] Degrees(string[] args, string? matrix)

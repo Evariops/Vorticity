@@ -73,10 +73,16 @@ internal sealed class Run
 /// <param name="Result">What the query returned, so that the work cannot be skipped and two sides can be compared.</param>
 /// <param name="Engine">The engine's counts in the best round, lane by lane, when the query tracks its aggregation.</param>
 /// <param name="Gen2">The collections of the second generation over the timed rounds, per round.</param>
-internal readonly record struct Measurement(double Millis, double FirstMillis, long Allocated, long Live, long Result, AggregationRun? Engine = null, double Gen2 = 0);
+/// <param name="Faults">The minor page faults of the best round, -1 where the system does not count them.</param>
+/// <param name="LargeBytes">The bytes allocated in the large object heap by the memory pass.</param>
+internal readonly record struct Measurement(
+    double Millis, double FirstMillis, long Allocated, long Live, long Result, AggregationRun? Engine = null, double Gen2 = 0, long Faults = -1, long LargeBytes = 0);
 
 internal static class Measure
 {
+    /// <summary>The listener of the large object heap's allocations, made once: a memory pass listens to it.</summary>
+    private static readonly LargeAllocations Large = new LargeAllocations();
+
     /// <summary>Runs <paramref name="query"/> a warm-up and <paramref name="rounds"/> timed rounds, then a memory pass.</summary>
     internal static async Task<Measurement> RunAsync(Func<Run, Task<long>> query, int rounds, int probeEvery)
     {
@@ -120,6 +126,7 @@ internal static class Measure
         private double _best = double.MaxValue;
         private double _first;
         private long _allocated;
+        private long _faults = -1;
         private int _gen2;
         private int _rounds;
         private long _result;
@@ -135,11 +142,13 @@ internal static class Measure
             GC.Collect();
             long before = GC.GetTotalAllocatedBytes(precise: true);
             int collections = GC.CollectionCount(2);
+            long faults = ProcessCounters.MinorFaults();
             Stopwatch clock = Stopwatch.StartNew();
             Run run = new Run(clock, 0, 0, configure);
             long result = await query(run).ConfigureAwait(false);
             double millis = clock.Elapsed.TotalMilliseconds;
             long bytes = GC.GetTotalAllocatedBytes(precise: true) - before;
+            faults = faults < 0 ? -1 : ProcessCounters.MinorFaults() - faults;
             _gen2 += GC.CollectionCount(2) - collections;
             _rounds++;
             _result = result;
@@ -148,6 +157,7 @@ internal static class Measure
                 _best = millis;
                 _first = run.First?.TotalMilliseconds ?? millis;
                 _allocated = bytes;
+                _faults = faults;
                 _engine = run.Plan?.LastRun;
             }
         }
@@ -161,8 +171,10 @@ internal static class Measure
             GC.Collect();
             long baseline = GC.GetTotalMemory(forceFullCollection: true);
             Run memory = new Run(Stopwatch.StartNew(), baseline, probeEvery, configure);
+            Large.Start();
             await query(memory).ConfigureAwait(false);
-            return new Measurement(_best, _first, _allocated, memory.Live, _result, _engine, _rounds > 0 ? (double)_gen2 / _rounds : 0);
+            long large = Large.Stop();
+            return new Measurement(_best, _first, _allocated, memory.Live, _result, _engine, _rounds > 0 ? (double)_gen2 / _rounds : 0, _faults, large);
         }
     }
 }
