@@ -76,6 +76,19 @@ internal sealed class ByteKeyTable
         return number;
     }
 
+    /// <summary>
+    /// A number no key finds: an entry without bytes that no lookup reaches, for a group with no key,
+    /// the null of a text key, whose groups are then the table's entries (PLAN-HIGH-CARDINALITY, H1,
+    /// reduction 6). Its bytes are never read.
+    /// </summary>
+    internal int AddDetached()
+    {
+        int number = Count;
+        Append([], 0);
+        _lengths[number] = -1;
+        return number;
+    }
+
     /// <summary>Forgets every key, keeping the buffers and the seed.</summary>
     internal void Clear()
     {
@@ -97,14 +110,19 @@ internal sealed class ByteKeyTable
         int used = 0;
         for (int i = 0; i < entries.Length; i++)
         {
-            // Keys only move toward the front, into the room of those left out before them.
+            // Keys only move toward the front, into the room of those left out before them; a
+            // detached entry has no bytes to move.
             int entry = entries[i];
             int length = _lengths[entry];
-            _bytes.AsSpan(_offsets[entry], length).CopyTo(_bytes.AsSpan(used));
+            if (length > 0)
+            {
+                _bytes.AsSpan(_offsets[entry], length).CopyTo(_bytes.AsSpan(used));
+            }
+
             _offsets[i] = used;
             _lengths[i] = length;
             _hashes[i] = _hashes[entry];
-            used += length;
+            used += Math.Max(length, 0);
         }
 
         Count = entries.Length;
@@ -113,6 +131,11 @@ internal sealed class ByteKeyTable
         int mask = _slots.Length - 1;
         for (int index = 0; index < Count; index++)
         {
+            if (_lengths[index] < 0)
+            {
+                continue;
+            }
+
             int slot = (int)_hashes[index] & mask;
             while (_slots[slot] != 0)
             {
@@ -153,7 +176,10 @@ internal sealed class ByteKeyTable
         _seed = Random.Shared.NextInt64(1, long.MaxValue);
         for (int index = 0; index < Count; index++)
         {
-            _hashes[index] = XxHash3.HashToUInt64(KeyOf(index), _seed);
+            if (_lengths[index] >= 0)
+            {
+                _hashes[index] = XxHash3.HashToUInt64(KeyOf(index), _seed);
+            }
         }
 
         Rehash(_slots.Length);
@@ -165,6 +191,11 @@ internal sealed class ByteKeyTable
         int mask = slots.Length - 1;
         for (int index = 0; index < Count; index++)
         {
+            if (_lengths[index] < 0)
+            {
+                continue;
+            }
+
             int slot = (int)_hashes[index] & mask;
             while (slots[slot] != 0)
             {

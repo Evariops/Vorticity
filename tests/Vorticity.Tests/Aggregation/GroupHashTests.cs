@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Hashing;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
@@ -106,16 +107,7 @@ public sealed class GroupHashTests
     [Fact]
     public void ByteKeysCraftedToShareASlotReseedTheTable()
     {
-        List<byte[]> keys = [];
-        for (int i = 0; keys.Count < 1_024; i++)
-        {
-            byte[] key = Encoding.ASCII.GetBytes("k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if ((XxHash3.HashToUInt64(key) & 0x7FF) == 0)
-            {
-                keys.Add(key);
-            }
-        }
-
+        List<byte[]> keys = Crowded();
         ByteKeyTable table = new ByteKeyTable();
         for (int i = 0; i < keys.Count; i++)
         {
@@ -129,6 +121,42 @@ public sealed class GroupHashTests
             Assert.Equal(i, table.GetOrAdd(keys[i], out bool added));
             Assert.False(added);
         }
+    }
+
+    // The null of a text key is an entry no key finds (PLAN-HIGH-CARDINALITY.md, H1, reduction 6):
+    // numbered with the keys, kept by Retain, passed over when the table rehashes or takes a seed;
+    // the empty key is a key of its own.
+    [Fact]
+    public void ADetachedEntryNumbersAGroupNoKeyFinds()
+    {
+        List<byte[]> keys = Crowded();
+        ByteKeyTable table = new ByteKeyTable();
+        Assert.Equal(0, table.GetOrAdd(keys[0], out bool added));
+        Assert.Equal(1, table.AddDetached());
+        Assert.Equal(2, table.GetOrAdd([], out added));
+        Assert.True(added);
+        for (int i = 1; i < keys.Count; i++)
+        {
+            Assert.Equal(i + 2, table.GetOrAdd(keys[i], out added));
+            Assert.True(added);
+        }
+
+        Assert.True(table.Reseeded);
+        Assert.Equal(2, table.GetOrAdd([], out added));
+        Assert.False(added);
+
+        // Every entry kept but the first: the detached one numbered 0 and found by no key.
+        table.Retain([.. Enumerable.Range(1, table.Count - 1)]);
+        Assert.Equal(1, table.GetOrAdd([], out added));
+        Assert.False(added);
+        for (int i = 1; i < keys.Count; i++)
+        {
+            Assert.Equal(i + 1, table.GetOrAdd(keys[i], out added));
+            Assert.False(added);
+        }
+
+        Assert.Equal(keys.Count + 1, table.GetOrAdd(keys[0], out added));
+        Assert.True(added);
     }
 
     [Fact]
@@ -145,6 +173,22 @@ public sealed class GroupHashTests
 
     /// <summary>Key <paramref name="a"/> of a column whose every key has the default hash 0.</summary>
     private static long Crowded(int a) => a * ((1L << 32) + 1);
+
+    /// <summary>A thousand text keys whose unseeded XxHash3 share their low eleven bits.</summary>
+    private static List<byte[]> Crowded()
+    {
+        List<byte[]> keys = [];
+        for (int i = 0; keys.Count < 1_024; i++)
+        {
+            byte[] key = Encoding.ASCII.GetBytes("k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if ((XxHash3.HashToUInt64(key) & 0x7FF) == 0)
+            {
+                keys.Add(key);
+            }
+        }
+
+        return keys;
+    }
 
     /// <summary>
     /// The group of <paramref name="value"/>, numbered <paramref name="next"/> when it is new; the

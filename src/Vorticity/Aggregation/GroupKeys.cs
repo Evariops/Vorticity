@@ -870,9 +870,9 @@ internal sealed class BytesKeys : GroupKeys
 {
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
+
+    // A group is the table's entry of its key; the null group an entry no key finds.
     private readonly ByteKeyTable _table = new ByteKeyTable();
-    private int[] _groupOfEntry = new int[16];
-    private int[] _entryOfGroup = new int[16];
     private int _null = -1;
 
     internal BytesKeys(ColumnShape shape, bool sorted)
@@ -1012,36 +1012,10 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        // The entries of the kept keys, which ascend with their groups, the null group having none:
-        // listed where the groups of the entries go, which are numbered again below.
-        int nullGroup = -1;
-        int kept = 0;
-        for (int i = 0; i < groups.Length; i++)
-        {
-            if (groups[i] == _null)
-            {
-                nullGroup = i;
-                continue;
-            }
-
-            _groupOfEntry[kept++] = _entryOfGroup[groups[i]];
-        }
-
-        _table.Retain(_groupOfEntry.AsSpan(0, kept));
-        int entry = 0;
-        for (int i = 0; i < groups.Length; i++)
-        {
-            if (i == nullGroup)
-            {
-                _entryOfGroup[i] = -1;
-                continue;
-            }
-
-            _groupOfEntry[entry] = i;
-            _entryOfGroup[i] = entry++;
-        }
-
-        _null = nullGroup;
+        // The kept groups ascend, and are the entries the table keeps, the null group's with them.
+        int nullGroup = groups.IndexOf(_null);
+        _table.Retain(groups);
+        _null = _null < 0 ? -1 : nullGroup;
         Count = groups.Length;
         Renumbered();
     }
@@ -1052,7 +1026,7 @@ internal sealed class BytesKeys : GroupKeys
         for (int i = 0; i < groups.Length; i++)
         {
             int g = groups[i];
-            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(_entryOfGroup[g]));
+            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(g));
         }
 
         MergeSeen(target);
@@ -1062,7 +1036,7 @@ internal sealed class BytesKeys : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(_table.KeyOf(_entryOfGroup[g]), seed) >> shift);
+            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(_table.KeyOf(g), seed) >> shift);
         }
     }
 
@@ -1076,7 +1050,7 @@ internal sealed class BytesKeys : GroupKeys
             return leftNull == rightNull ? 0 : leftNull ? 1 : -1;
         }
 
-        return _table.KeyOf(_entryOfGroup[a]).SequenceCompareTo(right._table.KeyOf(right._entryOfGroup[b]));
+        return _table.KeyOf(a).SequenceCompareTo(right._table.KeyOf(b));
     }
 
     internal override int[] Order(bool sorted)
@@ -1103,7 +1077,7 @@ internal sealed class BytesKeys : GroupKeys
     internal override Func<int, T> Reader<T>(int component)
     {
         ColumnShape shape = _shape;
-        return group => group == _null ? default! : StorageValues.BytesToClr<T>(_table.KeyOf(_entryOfGroup[group]), shape);
+        return group => group == _null ? default! : StorageValues.BytesToClr<T>(_table.KeyOf(group), shape);
     }
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
@@ -1117,7 +1091,7 @@ internal sealed class BytesKeys : GroupKeys
             }
             else
             {
-                leaf.Append(_table.KeyOf(_entryOfGroup[group]));
+                leaf.Append(_table.KeyOf(group));
             }
         }
     }
@@ -1129,7 +1103,7 @@ internal sealed class BytesKeys : GroupKeys
             return a == b ? 0 : a == _null ? 1 : -1;
         }
 
-        return _table.KeyOf(_entryOfGroup[a]).SequenceCompareTo(_table.KeyOf(_entryOfGroup[b]));
+        return _table.KeyOf(a).SequenceCompareTo(_table.KeyOf(b));
     }
 
     private static bool SameKey(BytesBlock values, ReadOnlySpan<ulong> validity, int left, int right)
@@ -1138,21 +1112,15 @@ internal sealed class BytesKeys : GroupKeys
         return leftValid == StorageValues.IsValid(validity, right) && (!leftValid || values[left].SequenceEqual(values[right]));
     }
 
+    /// <summary>The group of <paramref name="value"/>, its entry in the table, numbered as it first comes.</summary>
     private int Lookup(ReadOnlySpan<byte> value)
     {
-        int entry = _table.GetOrAdd(value, out bool added);
-        if (!added)
+        int group = _table.GetOrAdd(value, out bool added);
+        if (added)
         {
-            return _groupOfEntry[entry];
+            Count = _table.Count;
         }
 
-        if (entry == _groupOfEntry.Length)
-        {
-            Array.Resize(ref _groupOfEntry, entry * 2);
-        }
-
-        int group = NewGroup(entry);
-        _groupOfEntry[entry] = group;
         return group;
     }
 
@@ -1160,21 +1128,11 @@ internal sealed class BytesKeys : GroupKeys
     {
         if (_null < 0)
         {
-            _null = NewGroup(-1);
+            _null = _table.AddDetached();
+            Count = _table.Count;
         }
 
         return _null;
-    }
-
-    private int NewGroup(int entry)
-    {
-        if (Count == _entryOfGroup.Length)
-        {
-            Array.Resize(ref _entryOfGroup, Count * 2);
-        }
-
-        _entryOfGroup[Count] = entry;
-        return Count++;
     }
 }
 
