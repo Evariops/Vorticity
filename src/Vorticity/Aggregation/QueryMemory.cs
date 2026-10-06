@@ -78,8 +78,14 @@ internal sealed class QueryMemory : IDisposable
     private readonly QueryMemoryBudget _budget;
     private long _held;
     private long _measured;
+    private int _left;
 
-    internal QueryMemory(QueryMemoryBudget budget) => _budget = budget;
+    /// <summary>A query's memory under <paramref name="budget"/>, one more query to share its ceiling with until it is given back.</summary>
+    internal QueryMemory(QueryMemoryBudget budget)
+    {
+        _budget = budget;
+        budget.Enter();
+    }
 
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);
@@ -87,7 +93,10 @@ internal sealed class QueryMemory : IDisposable
     /// <summary>The bytes its tables hold, as last measured: at most what it holds of its budget, which keeps room for their growth.</summary>
     internal long Measured => Volatile.Read(ref _measured);
 
-    /// <summary>Reserves <paramref name="bytes"/> more; false, and nothing reserved, past the budget's ceiling or the process's.</summary>
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> more; false, and nothing reserved, past the budget's ceiling or
+    /// the process's, or past its threshold when the query holds more than its share.
+    /// </summary>
     internal bool TryGrow(long bytes)
     {
         if (bytes <= 0)
@@ -95,7 +104,7 @@ internal sealed class QueryMemory : IDisposable
             return true;
         }
 
-        if (!_budget.TryReserve(bytes))
+        if (!_budget.TryReserve(bytes, Held))
         {
             return false;
         }
@@ -108,7 +117,7 @@ internal sealed class QueryMemory : IDisposable
     /// Whether the budget would grant <paramref name="bytes"/> more now, without reserving them: a lane
     /// asks it before a batch, to turn to the core while its table can still be emptied into it.
     /// </summary>
-    internal bool CanGrow(long bytes) => _budget.CanReserve(bytes);
+    internal bool CanGrow(long bytes) => _budget.CanReserve(bytes, Held);
 
     /// <summary>Reserves and measures <paramref name="bytes"/> the result holds until it is delivered, for <paramref name="what"/>; past the budget, the query fails.</summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant them.</exception>
@@ -196,6 +205,11 @@ internal sealed class QueryMemory : IDisposable
         {
             _budget.Measure(-measured);
         }
+
+        if (Interlocked.Exchange(ref _left, 1) == 0)
+        {
+            _budget.Leave();
+        }
     }
 
     /// <summary>
@@ -209,8 +223,12 @@ internal sealed class QueryMemory : IDisposable
         string holds = groups >= 0
             ? string.Create(CultureInfo.InvariantCulture, $"holds {groups:N0} groups in {Held:N0} bytes")
             : string.Create(CultureInfo.InvariantCulture, $"holds {Held:N0} bytes");
+        int active = _budget.ActiveQueries;
+        string shared = active > 1
+            ? string.Create(CultureInfo.InvariantCulture, $"; {active} queries share it, a share of {_budget.CeilingBytes / active:N0} each once it is seven eighths full")
+            : string.Empty;
         return new VortexMemoryException(string.Create(
             CultureInfo.InvariantCulture,
-            $"The {what} {holds} and asks for {asking:N0} more, past its memory budget of {_budget.CeilingBytes:N0} bytes, {_budget.ReservedBytes:N0} of which every query under it holds; the process leaves its queries {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. Give its session a larger QueryMemoryBudget, group by fewer keys at once, or lower the degree of parallelism: each lane holds a table of the groups it meets."));
+            $"The {what} {holds} and asks for {asking:N0} more, past its memory budget of {_budget.CeilingBytes:N0} bytes, {_budget.ReservedBytes:N0} of which every query under it holds{shared}; the process leaves its queries {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. Give its session a larger QueryMemoryBudget, group by fewer keys at once, or lower the degree of parallelism: each lane holds a table of the groups it meets."));
     }
 }

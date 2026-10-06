@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.IO;
 using System.Threading;
+using Vorticity.Buffers;
 
 namespace Vorticity;
 
@@ -24,14 +25,19 @@ namespace Vorticity;
 /// </remarks>
 public sealed class QueryMemoryBudget
 {
+    // The container's limit less its margin, which the engine's native memory counts against beside the
+    // heap; null outside a container.
+    private static readonly long? s_container = ContainerLimit() is long container ? container / 4 * 3 : null;
+
     // The process's budget, which this one reserves in too; null for the process's own.
     private readonly QueryMemoryBudget? _process;
 
     // The host's ceiling; the process's limit, less a margin, for the process's own. What its queries
-    // hold, and the most they held at once.
+    // hold, the most they held at once, and the queries that hold memory under it now.
     private readonly long _ceiling;
     private long _reserved;
     private long _peak;
+    private int _active;
 
     // The process's own: the bytes the queries' tables hold, as last measured; the rest of the
     // process, read after the last full collection; what the queries let go since, still in the heap;
@@ -92,27 +98,70 @@ public sealed class QueryMemoryBudget
         }
     }
 
-    /// <summary>Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved, when either would pass its ceiling.</summary>
-    internal bool TryReserve(long bytes)
+    /// <summary>The queries that hold memory under the budget now, those of its sessions; every query of the process, for the process's own.</summary>
+    internal int ActiveQueries => Volatile.Read(ref _active);
+
+    /// <summary>A query starts under the budget, and under the process's: one more to share their ceilings with.</summary>
+    internal void Enter()
+    {
+        Interlocked.Increment(ref _active);
+        _process?.Enter();
+    }
+
+    /// <summary>A query under the budget ended, everything it held given back.</summary>
+    internal void Leave()
+    {
+        Interlocked.Decrement(ref _active);
+        _process?.Leave();
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> under this budget and the process's for a query that holds
+    /// <paramref name="held"/>; false, and nothing reserved, when either would pass its ceiling, or its
+    /// threshold for a query past its share (<see cref="Fair"/>).
+    /// </summary>
+    internal bool TryReserve(long bytes, long held = 0)
     {
         if (_process is null)
         {
             Observe();
-            return TryAdd(ref _reserved, bytes, Available()) || (Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after));
+            long available = Available();
+            if (!Fair(bytes, held, available))
+            {
+                return false;
+            }
+
+            return TryAdd(ref _reserved, bytes, available) || (Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after));
         }
 
-        if (!TryAdd(ref _reserved, bytes, _ceiling))
+        if (!Fair(bytes, held, _ceiling) || !TryAdd(ref _reserved, bytes, _ceiling))
         {
             return false;
         }
 
-        if (!_process.TryReserve(bytes))
+        if (!_process.TryReserve(bytes, held))
         {
             Interlocked.Add(ref _reserved, -bytes);
             return false;
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Whether a query holding <paramref name="held"/> may take <paramref name="bytes"/> more of a
+    /// ceiling of <paramref name="ceiling"/> (PLAN-HIGH-CARDINALITY, H2, the fair share). Past the
+    /// threshold, seven eighths of the ceiling, a query that would hold more than its share, the ceiling
+    /// over the queries active under the budget, is refused: under pressure its lanes turn to the core
+    /// first, and the last eighth stays for the queries within their share. Alone, a query's share is
+    /// the whole ceiling.
+    /// </summary>
+    private bool Fair(long bytes, long held, long ceiling)
+    {
+        int active = Volatile.Read(ref _active);
+        return active <= 1
+            || ReservedBytes + bytes <= ceiling - (ceiling / 8)
+            || held + bytes <= ceiling / active;
     }
 
     /// <summary>
@@ -126,16 +175,17 @@ public sealed class QueryMemoryBudget
         _process?.Force(bytes);
     }
 
-    /// <summary>Whether this budget and the process's would grant <paramref name="bytes"/> more now, without reserving them.</summary>
-    internal bool CanReserve(long bytes)
+    /// <summary>Whether this budget and the process's would grant <paramref name="bytes"/> more now to a query that holds <paramref name="held"/>, without reserving them.</summary>
+    internal bool CanReserve(long bytes, long held = 0)
     {
         if (_process is null)
         {
             Observe();
-            return ReservedBytes + bytes <= Available();
+            long available = Available();
+            return ReservedBytes + bytes <= available && Fair(bytes, held, available);
         }
 
-        return ReservedBytes + bytes <= _ceiling && _process.CanReserve(bytes);
+        return ReservedBytes + bytes <= _ceiling && Fair(bytes, held, _ceiling) && _process.CanReserve(bytes, held);
     }
 
     /// <summary>Gives back <paramref name="bytes"/> reserved, to this budget and the process's.</summary>
@@ -162,8 +212,22 @@ public sealed class QueryMemoryBudget
     /// <summary>Arrays of <paramref name="bytes"/> the queries' tables replaced with larger ones: in the heap until a collection takes them.</summary>
     internal void Discard(long bytes) => Interlocked.Add(ref (_process ?? this)._pending, bytes);
 
-    /// <summary>What the process's limit leaves the queries past the rest of its memory.</summary>
-    private long Available() => Math.Max(0, _ceiling - RestBytes);
+    /// <summary>
+    /// What the process's limits leave the queries past the rest of its memory: the collector's, past
+    /// the rest of its heap; in a container, the container's too, past the heap's rest and the engine's
+    /// native blocks, which it counts and the collector does not.
+    /// </summary>
+    private long Available()
+    {
+        long rest = RestBytes;
+        long available = _ceiling - rest;
+        if (s_container is long container)
+        {
+            available = Math.Min(available, container - rest - NativeSegmentOwner.NativeBytes);
+        }
+
+        return Math.Max(0, available);
+    }
 
     /// <summary>
     /// The rest of the process, read again after each full collection, in two parts. What its heap
@@ -275,14 +339,18 @@ public sealed class QueryMemoryBudget
         }
     }
 
-    /// <summary>The process's limit, less a margin for what the collector needs to work: an eighth of the collector's limit, a quarter of a container's.</summary>
+    /// <summary>
+    /// The process's limit, less a margin for what the collector needs to work: an eighth of the
+    /// collector's limit; a container's, a quarter of it, applies past the native memory too
+    /// (<see cref="Available"/>).
+    /// </summary>
     private static long ProcessLimit()
     {
         long collector = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
         long limit = collector - (collector / 8);
-        if (ContainerLimit() is long container)
+        if (s_container is long container)
         {
-            limit = Math.Min(limit, container / 4 * 3);
+            limit = Math.Min(limit, container);
         }
 
         return Math.Max(limit, 64L << 20);

@@ -114,6 +114,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The bytes of the arrays a lane's shelf handed out that its tables hold: what its query's memory counts of them.</summary>
     internal long Out => _out;
 
+    /// <summary>The most bytes the shelf keeps on its piles; past it, what it is given goes.</summary>
+    internal long Budget => _budget;
+
     /// <summary>
     /// Whether a lane's shelf takes an array its budget refuses all the same, counted past the ceiling:
     /// a lane that can turn to the core, which it does at the next batch (H4, milestone 2).

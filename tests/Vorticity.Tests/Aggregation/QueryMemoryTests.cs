@@ -102,6 +102,34 @@ public sealed partial class QueryMemoryTests
     }
 
     [Fact]
+    public void ASmallQueryBesideABigOneKeepsItsShare()
+    {
+        // Two queries under 64 MiB, a share of 32 each once the budget is seven eighths full (56 MiB):
+        // the big one takes past its share below that threshold, not past it; the small one takes what
+        // its share leaves it.
+        const long MiB = 1 << 20;
+        QueryMemoryBudget budget = new QueryMemoryBudget(64 * MiB);
+        QueryMemory big = new QueryMemory(budget);
+        QueryMemory small = new QueryMemory(budget);
+        Assert.Equal(2, budget.ActiveQueries);
+        Assert.True(big.TryGrow(40 * MiB));
+        Assert.True(big.TryGrow(10 * MiB));
+        Assert.False(big.CanGrow(8 * MiB));
+        Assert.False(big.TryGrow(8 * MiB));
+        Assert.True(small.CanGrow(8 * MiB));
+        Assert.True(small.TryGrow(8 * MiB));
+        Assert.Equal(58 * MiB, budget.ReservedBytes);
+
+        // Alone again, the big one's share is the whole ceiling.
+        small.Dispose();
+        Assert.Equal(1, budget.ActiveQueries);
+        Assert.True(big.TryGrow(12 * MiB));
+        big.Dispose();
+        Assert.Equal(0, budget.ReservedBytes);
+        Assert.Equal(0, budget.ActiveQueries);
+    }
+
+    [Fact]
     public async Task AThousandQueriesLeaveTheirBudgetsAtZero()
     {
         const int rows = 20_000;
@@ -165,6 +193,11 @@ public sealed partial class QueryMemoryTests
             Assert.Equal(100, failures);
             Assert.Equal(0, budget.ReservedBytes);
             Assert.Equal(0, tiny.ReservedBytes);
+
+            // Every query left the queries that share the budgets, answered or failed: no share stays
+            // divided by a query gone.
+            Assert.Equal(0, budget.ActiveQueries);
+            Assert.Equal(0, tiny.ActiveQueries);
         }
         finally
         {
