@@ -138,7 +138,7 @@ internal sealed class FixedDistinctSlotBefore<TValue> : AggregateSlot<long>
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
         FixedDistinctSlotBefore<TValue> source = (FixedDistinctSlotBefore<TValue>)other;
-        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
+        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Targets(source._groups, from, into);
         foreach (DistinctEntry<TValue> entry in source._seen)
         {
             if (targets[entry.Group] >= 0)
@@ -159,5 +159,18 @@ internal sealed class FixedDistinctSlotBefore<TValue> : AggregateSlot<long>
         {
             _counts[group]++;
         }
+    }
+
+    /// <summary>The group each of <paramref name="groups"/> groups merges into, -1 for one not merged: the helper the library had then.</summary>
+    private static int[] Targets(int groups, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        int[] targets = new int[groups];
+        Array.Fill(targets, -1);
+        for (int i = 0; i < from.Length; i++)
+        {
+            targets[from[i]] = into[i];
+        }
+
+        return targets;
     }
 }
