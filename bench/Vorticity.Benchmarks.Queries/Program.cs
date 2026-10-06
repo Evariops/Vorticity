@@ -12,6 +12,7 @@
 //   … -- --matrix full                                                                 the full one, of the milestones, at degrees 1, 4 and N
 //   … -- --latency 20                                                                  every file read as a store would serve it, 20 ms a round trip: requests and dependent steps
 //   … -- --cold --matrix small                                                         each query once in a process of its own: the first query's time and page faults
+//   … -- --concurrent 8 --matrix small                                                 each query alone, then eight copies at once; with DOTNET_GCHeapHardLimit, under a capped heap
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
@@ -113,6 +114,33 @@ if (args.Contains("--cold"))
             await child.WaitForExitAsync().ConfigureAwait(false);
             string[] cold = output.Split('\n').FirstOrDefault(line => line.StartsWith("cold\t", StringComparison.Ordinal))?.Split('\t') ?? ["cold", "-1", "-1", "-1"];
             Console.WriteLine($"{scenario.Name,-62} {degree,6} {double.Parse(cold[1], CultureInfo.InvariantCulture),9:F2} {cold[2],8} {cold[3].Trim(),12}");
+        }
+    }
+
+    return 0;
+}
+
+// --concurrent N: each query selected alone, then N copies of it at once on the same open file: the
+// slowest copy's time against the query's alone.
+if (Option(args, "--concurrent", 0) is int copies and > 0)
+{
+    Console.WriteLine($"{"query",-62} {"degree",6} {"alone ms",9} {$"{copies} at once",10} {"ratio",7}");
+    foreach (int degree in degrees)
+    {
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+        foreach ((string fileName, Scenario scenario) in scenarios)
+        {
+            if (!Selected(scenario, matrix, only))
+            {
+                continue;
+            }
+
+            string path = await fixtures[fileName]().ConfigureAwait(false);
+            await using VortexFile file = await session.OpenAsync(path).ConfigureAwait(false);
+            Measurement alone = await Measure.RunAsync(run => scenario.Query(file, run), rounds, probeEvery: 0).ConfigureAwait(false);
+            (double together, bool agree) = await Measure.ConcurrentAsync(run => scenario.Query(file, run), rounds, copies).ConfigureAwait(false);
+            Console.WriteLine(
+                $"{scenario.Name,-62} {degree,6} {alone.Millis,9:F2} {together,10:F2} {together / alone.Millis,7:F2}{(agree ? string.Empty : "  RESULTS DIFFER")}");
         }
     }
 

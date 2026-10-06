@@ -120,6 +120,38 @@ internal static class Measure
         return (await first.FinishAsync(query, probeEvery).ConfigureAwait(false), await second.FinishAsync(query, probeEvery).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// Runs <paramref name="copies"/> of <paramref name="query"/> at once, <paramref name="rounds"/>
+    /// times after a warm-up: the best round's slowest copy, and whether every copy answered the same.
+    /// What two or eight queries of one process cost each other, which a host serving several users
+    /// pays; under <c>DOTNET_GCHeapHardLimit</c>, also where they stop fitting.
+    /// </summary>
+    internal static async Task<(double Millis, bool Agree)> ConcurrentAsync(Func<Run, Task<long>> query, int rounds, int copies)
+    {
+        await query(new Run(Stopwatch.StartNew(), 0, 0)).ConfigureAwait(false);
+        double best = double.MaxValue;
+        bool agree = true;
+        Task<long>[] running = new Task<long>[copies];
+        for (int i = 0; i < rounds; i++)
+        {
+            await Task.Yield();
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+            Stopwatch clock = Stopwatch.StartNew();
+            for (int c = 0; c < copies; c++)
+            {
+                running[c] = Task.Run(() => query(new Run(clock, 0, 0)));
+            }
+
+            long[] results = await Task.WhenAll(running).ConfigureAwait(false);
+            best = Math.Min(best, clock.Elapsed.TotalMilliseconds);
+            agree &= Array.TrueForAll(results, result => result == results[0]);
+        }
+
+        return (best, agree);
+    }
+
     /// <summary>One setting's rounds: the best so far, and what that round allocated, answered first and counted.</summary>
     private sealed class Side(Action<AggregationPlan>? configure)
     {
