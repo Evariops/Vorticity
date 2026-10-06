@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Aggregating;
 
@@ -110,6 +111,62 @@ internal struct KeyTable<TValue>
         return Search(key, next);
     }
 
+    /// <summary>
+    /// Each key's group where the key sits in its home slot, -1 where it does not (past its home, or
+    /// absent), with no branch on the keys (PLAN-HIGH-CARDINALITY, H15): the first pass over a batch,
+    /// whose rows left go through <see cref="GetOrAdd"/> in their order. With <paramref name="ahead"/>
+    /// rows, the slot of the row that far on is read first, its miss on its way while the rows before
+    /// it compare; what those reads find goes to the sink returned, so that the JIT keeps them.
+    /// </summary>
+    /// <param name="keys">The keys of the batch.</param>
+    /// <param name="groups">Each key's group, or -1.</param>
+    /// <param name="homes">Room for each key's home slot, as many as the keys.</param>
+    /// <param name="ahead">How many rows on a slot is read before its row compares; 0 for none.</param>
+    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead)
+    {
+        Slot[] slots = _slots;
+        if (slots.Length == 0)
+        {
+            groups[..keys.Length].Fill(-1);
+            return 0;
+        }
+
+        homes = homes[..keys.Length];
+        groups = groups[..keys.Length];
+
+        // The table's fields in locals: a store to the homes could alias them for all the JIT knows.
+        ulong seed = _seed;
+        ulong multiplier = _multiplier;
+        uint length = (uint)slots.Length;
+        for (int i = 0; i < keys.Length; i++)
+        {
+            homes[i] = HomeOf(keys[i], seed, multiplier, length);
+        }
+
+        // Every home is below the slots' length, by the fast modulo: no bound to check. A match is a
+        // bit, and the group its mask over the slot's group plus one, less one: the JIT branched on
+        // the choice of the group or -1, even with both at hand.
+        ref Slot first = ref MemoryMarshal.GetArrayDataReference(slots);
+        int sink = 0;
+        int row = 0;
+        for (int touched = ahead > 0 ? keys.Length - ahead : 0; row < touched; row++)
+        {
+            sink ^= Unsafe.Add(ref first, (nint)homes[row + ahead]).Group;
+            ref Slot slot = ref Unsafe.Add(ref first, (nint)homes[row]);
+            int match = Unsafe.BitCast<bool, byte>(slot.Key.Equals(keys[row]));
+            groups[row] = (slot.Group & -match) - 1;
+        }
+
+        for (; row < keys.Length; row++)
+        {
+            ref Slot slot = ref Unsafe.Add(ref first, (nint)homes[row]);
+            int match = Unsafe.BitCast<bool, byte>(slot.Key.Equals(keys[row]));
+            groups[row] = (slot.Group & -match) - 1;
+        }
+
+        return sink;
+    }
+
     /// <summary>Makes room for <paramref name="keys"/> keys without growing on the way.</summary>
     internal void Reserve(int keys)
     {
@@ -203,13 +260,17 @@ internal struct KeyTable<TValue>
 
     /// <summary>The slot <paramref name="key"/> starts from: its folded bits, mixed under the seed once there is one, modulo the slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private readonly uint Home(TValue key)
+    private readonly uint Home(TValue key) => HomeOf(key, _seed, _multiplier, (uint)_slots.Length);
+
+    /// <summary>As <see cref="Home"/>, the table's seed, multiplier and length given.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint HomeOf(TValue key, ulong seed, ulong multiplier, uint length)
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         uint hash;
-        if (_seed != 0)
+        if (seed != 0)
         {
-            hash = (uint)((Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, _seed) : MergeHash.Of(low, high, _seed)) >> 32);
+            hash = (uint)((Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed)) >> 32);
         }
         else if (Unsafe.SizeOf<TValue>() <= sizeof(uint))
         {
@@ -221,7 +282,7 @@ internal struct KeyTable<TValue>
             hash = (uint)(folded ^ (folded >> 32));
         }
 
-        return FastMod(hash, (uint)_slots.Length, _multiplier);
+        return FastMod(hash, length, multiplier);
     }
 
     /// <summary>Places every key again in <paramref name="length"/> slots, a prime, under the seed the table has.</summary>

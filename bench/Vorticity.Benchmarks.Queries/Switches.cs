@@ -26,7 +26,8 @@ internal static class Switches
         "merge" => new Switch("in series", Set("MergeInParts", false), "in parts", Set("MergeInParts", true)),
         _ when name.StartsWith("parts:", StringComparison.Ordinal) => Pair(name, "MergeParts", "parts"),
         _ when name.StartsWith("window:", StringComparison.Ordinal) => Pair(name, "FoldWindow", "window"),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B."),
+        _ when name.StartsWith("probe:", StringComparison.Ordinal) => Pair(name, "ProbeAhead", "probe"),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B."),
     };
 
     /// <summary><c>name:A:B</c>, the integer switch <paramref name="property"/> at A against B, either of them <c>auto</c> for the engine's own.</summary>

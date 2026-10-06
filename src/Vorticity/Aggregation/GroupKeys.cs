@@ -306,16 +306,24 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private TValue[] _values = [];
     private ValuesCache<TValue> _entries;
 
+    // The hashed path in two passes (AggregationPlan.ProbeAhead): each row's home slot, then the rows
+    // the first pass left; what its reads ahead found, written so that they stay.
+    private readonly int _probeAhead;
+    private uint[] _homes = [];
+    private int[] _left = [];
+    private int _sink;
+
     // The group of each value from the statistics' smallest, -1 for a value not met yet: what the
     // index would answer, read without a hash.
     private readonly int[]? _direct;
     private readonly long _directMin;
 
-    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null)
+    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead)
     {
         _shape = shape;
         _sorted = sorted;
         _bounds = bounds;
+        _probeAhead = probeAhead;
         if (Integers && bounds is { } known && known.Max >= known.Min && (ulong)(known.Max - known.Min) < DirectValues)
         {
             _direct = new int[(int)(known.Max - known.Min + 1)];
@@ -560,6 +568,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return false;
         }
 
+        if (_probeAhead >= 0 && selection.IsEmpty)
+        {
+            TwoPasses(canonical, validity, rows, rowGroups);
+            return false;
+        }
+
         RowCursor selected = new RowCursor(selection, 0, rows);
         bool hasLast = false;
         TValue last = default;
@@ -584,6 +598,45 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Every row's group in two passes (PLAN-HIGH-CARDINALITY, H15): the group of each key that sits in
+    /// its home slot, with no branch on the keys; then, in their order, the rows that pass left (keys
+    /// past their home, new keys, nulls) through the whole lookup, which numbers a new key as it first
+    /// comes. The rows left are gathered without a branch either.
+    /// </summary>
+    private void TwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    {
+        Scratch.Grow(ref _homes, rows);
+        Scratch.Grow(ref _left, rows);
+        Span<int> groups = rowGroups.AsSpan(0, rows);
+        _sink ^= _index.FindAtHome(canonical[..rows], groups, _homes, _probeAhead);
+
+        int[] left = _left;
+        int count = 0;
+        if (validity.IsEmpty)
+        {
+            for (int row = 0; row < rows; row++)
+            {
+                left[count] = row;
+                count += groups[row] >>> 31;
+            }
+        }
+        else
+        {
+            for (int row = 0; row < rows; row++)
+            {
+                left[count] = row;
+                count += (groups[row] >>> 31) | (int)(~(validity[row >> 6] >> (row & 63)) & 1);
+            }
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            int row = left[i];
+            rowGroups[row] = StorageValues.IsValid(validity, row) ? Lookup(canonical[row]) : NullGroup();
+        }
     }
 
     /// <summary>
@@ -642,11 +695,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return at < (ulong)_direct!.Length;
     }
 
-    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds);
+    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds, _probeAhead);
 
-    /// <summary>The index, the keys of the groups, the table of small integers and the values a batch reads.</summary>
+    /// <summary>The index, the keys of the groups, the table of small integers, the values a batch reads and its homes and rows left.</summary>
     internal override long Footprint =>
-        _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>()) + ((long)(_direct?.Length ?? 0) * sizeof(int));
+        _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
+        + ((long)((_direct?.Length ?? 0) + _homes.Length + _left.Length) * sizeof(int));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
     internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);

@@ -141,6 +141,22 @@ internal sealed class AggregationPlan
     /// <summary>The window of <see cref="FoldWindow"/>: 2 048 rows, their groups, a column of values and the records they touch within the first level of cache of current cores.</summary>
     internal const int DefaultFoldWindow = 2_048;
 
+    /// <summary>
+    /// How a key of one fixed-width column finds its rows' groups on the hashed path
+    /// (PLAN-HIGH-CARDINALITY, H15): -1 a row at a time; 0 in two passes, each row's home slot with no
+    /// branch on the keys, then the rows left in their order; more, in two passes whose first reads the
+    /// slot that many rows on ahead of each row. The switch the bench sweeps the distance with.
+    /// </summary>
+    internal int ProbeAhead { get; set; } = DefaultProbeAhead;
+
+    /// <summary>
+    /// The setting of <see cref="ProbeAhead"/>: two passes, no slot read ahead. Measured on 2026-10-06
+    /// at degree 1, a read 16 to 64 rows ahead took 6 to 10 % off ten million keys in no order and off
+    /// a key a row, nothing off a million, and added 2 to 8 % to keys in a row, at a stride, hot keys
+    /// and ten rows a key.
+    /// </summary>
+    internal const int DefaultProbeAhead = 0;
+
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
@@ -202,33 +218,33 @@ internal sealed class AggregationPlan
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
     internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null) => Keys.Length switch
     {
-        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0]),
+        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead),
         2 => new PackedKeys<ulong>(Keys, facts),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts),
         _ => new CompositeKeys(Keys),
     };
 
     /// <summary>The index of a key of one column.</summary>
-    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null) =>
+    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead) =>
         key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
-                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds),
-                PType.I16 => new FixedKeys<short>(key, sorted, bounds),
-                PType.I32 => new FixedKeys<int>(key, sorted, bounds),
-                PType.I64 => new FixedKeys<long>(key, sorted, bounds),
-                PType.U8 => new FixedKeys<byte>(key, sorted, bounds),
-                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds),
-                PType.U32 => new FixedKeys<uint>(key, sorted, bounds),
-                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds),
-                PType.F16 => new FixedKeys<Half>(key, sorted),
-                PType.F32 => new FixedKeys<float>(key, sorted),
-                _ => new FixedKeys<double>(key, sorted),
+                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead),
+                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead),
+                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead),
+                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead),
+                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead),
+                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead),
+                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead),
+                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead),
+                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead),
+                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead),
+                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead),
             },
-            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted),
-            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted),
-            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted),
+            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead),
+            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead),
+            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead),
             StorageKind.Bool => new BoolKeys(key),
             StorageKind.Bytes => new BytesKeys(key, sorted),
             _ => throw key.Unsupported("a group key"),
