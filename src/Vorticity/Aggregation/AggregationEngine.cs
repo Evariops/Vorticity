@@ -328,6 +328,13 @@ internal sealed class AggregationPartition
     // The rows the slots fold together before the next window (AggregationPlan.FoldWindow).
     private readonly int _window;
 
+    /// <summary>
+    /// The bytes of records past which the slots fold a batch a window at a time: 256 KiB, what the
+    /// private cache of any current core holds (PLAN-HIGH-CARDINALITY, principle 14). Under it the
+    /// records of every group stay in cache from one slot to the next anyway.
+    /// </summary>
+    private const long WindowedBytes = 256 * 1024;
+
     // The source's row the current batch starts at, which a chosen row keeps.
     private long _startRow;
 
@@ -649,10 +656,13 @@ internal sealed class AggregationPartition
         {
             // The slots fold the batch a window at a time: the window's groups and values, and the
             // records of its groups, stay in the first level of cache from one slot to the next.
+            // Records that all fit a private cache stay there whatever the slot, and the batch is
+            // folded whole: a window would cost its calls for nothing.
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
-            for (int start = 0; start < rows; start += _window)
+            int window = Records is { } records && (long)groups * records.Layout.Stride * sizeof(ulong) > WindowedBytes ? _window : rows;
+            for (int start = 0; start < rows; start += window)
             {
-                int end = Math.Min(rows, start + _window);
+                int end = Math.Min(rows, start + window);
                 for (int i = 0; i < Slots.Length; i++)
                 {
                     if (Folds(i))
