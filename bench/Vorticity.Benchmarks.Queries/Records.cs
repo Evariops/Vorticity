@@ -232,6 +232,10 @@ public partial record struct KeyFour(int Key, long Count, long Total, double? Me
 [VortexRecord]
 public partial record struct KeyRange(int Key, long Count, long? Least, long? Most);
 
+/// <summary>An integer key's rows and the standard deviation of a float.</summary>
+[VortexRecord]
+public partial record struct KeyDeviation(int Key, long Count, double? Deviation);
+
 /// <summary>A long key's rows and the sum of their values.</summary>
 [VortexRecord]
 public partial record struct LongKeyTotal(long Key, long Count, long Total);

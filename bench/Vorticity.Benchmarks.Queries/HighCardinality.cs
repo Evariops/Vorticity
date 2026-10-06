@@ -45,6 +45,7 @@ internal static class HighCardinality
                     yield return Spread(distribution, FullRows, groups, "count mean", Matrix.Full);
                     yield return Spread(distribution, FullRows, groups, "four", Matrix.Full);
                     yield return Spread(distribution, FullRows, groups, "count range", Matrix.Full);
+                    yield return Spread(distribution, FullRows, groups, "count deviation", Matrix.Full);
                 }
             }
         }
@@ -88,6 +89,7 @@ internal static class HighCardinality
                 "count mean" => (file, run) => MeanAsync(file, run, Key(groups)),
                 "four" => (file, run) => FourAsync(file, run, Key(groups)),
                 "count range" => (file, run) => RangeAsync(file, run, Key(groups)),
+                "count deviation" => (file, run) => DeviationAsync(file, run, Key(groups)),
                 _ => (file, run) => TotalAsync(file, run, Key(groups)),
             };
         return ($"spread-{distribution}-{rows}", new Scenario(name, query, probe, matrix));
@@ -156,6 +158,21 @@ internal static class HighCardinality
             .GroupBy(key)
             .Select(g => (g.Key, g.Count(), g.Min(s => s.Value), g.Max(s => s.Value))))
             .As<KeyRange>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> DeviationAsync(VortexFile file, Run run, Func<Probe<Spread>, Sym<int>> key)
+    {
+        long rows = 0;
+        await foreach (Columns<KeyDeviation> groups in run.Track(file.Scan<Spread>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.StandardDeviation(s => s.Real))))
+            .As<KeyDeviation>())
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
