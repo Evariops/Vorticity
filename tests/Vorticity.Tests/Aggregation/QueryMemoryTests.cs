@@ -101,6 +101,77 @@ public sealed partial class QueryMemoryTests
         }
     }
 
+    [Fact]
+    public async Task AThousandQueriesLeaveTheirBudgetsAtZero()
+    {
+        const int rows = 20_000;
+        Row[] data = new Row[rows];
+        for (int row = 0; row < rows; row++)
+        {
+            data[row] = new Row((int)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % 5_000), row % 100);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "query-memory", $"small-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(data, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            QueryMemoryBudget tiny = new QueryMemoryBudget(1 << 16);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexSession refusing = VortexSession.Create(options => options.MemoryBudget = tiny);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            await using VortexFile refused = await refusing.OpenAsync(path, cancellationToken: Ct);
+            int failures = 0;
+            for (int query = 0; query < 1_000; query++)
+            {
+                switch (query % 5)
+                {
+                    case 0:
+                        Assert.Equal(5_000, (await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value)).ToListAsync(Ct)).Count);
+                        break;
+                    case 1:
+                        Assert.Equal(10, (await file.Scan<Row>().GroupBy(r => r.Key).OrderByDescending(g => g.Count()).ThenBy(g => g.Key).Take(10).Select(g => g.Key).ToListAsync(Ct)).Count);
+                        break;
+                    case 2:
+                        Assert.Equal(5_000, await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+                        break;
+                    case 3:
+                        Assert.Equal(100, (await file.Scan<Row>().Select(r => r.Value).Distinct().ToListAsync(Ct)).Count);
+                        break;
+                    default:
+                        Assert.Equal(5_000, (await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Last().Value).ToListAsync(Ct)).Count);
+                        break;
+                }
+
+                if (query % 10 == 0)
+                {
+                    // Every tenth, a query its budget refuses: everything it took given back.
+                    await Assert.ThrowsAsync<VortexMemoryException>(async () => await refused.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct));
+                    failures++;
+                }
+            }
+
+            Assert.Equal(100, failures);
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Equal(0, tiny.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(14)]
