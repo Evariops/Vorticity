@@ -132,7 +132,7 @@ internal static class BytesWalk
             case ColumnEncoding.Constant:
             {
                 ReadOnlySpan<byte> value = BytesBlock.Constant(arena, node);
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     sink.Take(groups[row], value);
@@ -145,7 +145,7 @@ internal static class BytesWalk
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 BytesBlock dictionary = BytesBlock.Canonical(arena, entries, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     int code = (int)codes[row];
@@ -161,7 +161,7 @@ internal static class BytesWalk
             default:
             {
                 BytesBlock values = BytesBlock.Canonical(arena, node, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, valid), 0, input.Rows);
+                RowCursor rows = new RowCursor(mask.And(input, input.Selection, valid), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     sink.Take(groups[row], values[row]);

@@ -38,7 +38,7 @@ internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TS
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<T> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
         StateView<TState> states = States;
         while (rows.Next(out int row))
         {
@@ -174,7 +174,7 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
             case ColumnEncoding.Constant:
             {
                 T value = FixedReader.Constant<T>(arena, node, StorageKind.Primitive);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     TAggregator.StepConstant(ref states[groups[row]], value, 1);
@@ -187,7 +187,7 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<T> dictionary = FixedReader.Values(arena, entries, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     int code = (int)codes[row];
@@ -203,7 +203,7 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
             default:
             {
                 ReadOnlySpan<T> values = FixedReader.Values(arena, node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     TAggregator.StepConstant(ref states[groups[row]], values[row], 1);

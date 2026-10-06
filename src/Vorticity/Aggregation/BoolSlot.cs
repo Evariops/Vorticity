@@ -155,7 +155,7 @@ internal sealed class BoolSlot<TResult> : RecordSlot<byte, TResult>
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<ulong> bits = Load(input, out ReadOnlySpan<ulong> valid);
-        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
         StateView<byte> flags = States;
         while (rows.Next(out int row))
         {

@@ -24,7 +24,7 @@ internal sealed class RowSlot(bool last) : RecordSlot<long, long>
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<long> rows = States;
-        RowCursor cursor = new RowCursor(input.Selection, 0, input.Rows);
+        RowCursor cursor = new RowCursor(input.Selection, input.Start, input.End);
         while (cursor.Next(out int row))
         {
             Choose(ref rows[groups[row]], input.StartRow + row);
@@ -114,7 +114,7 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : RecordS
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, kind, out ReadOnlySpan<ulong> valid);
-        RowCursor cursor = new RowCursor(_mask.And(input, input.Selection, valid), 0, input.Rows);
+        RowCursor cursor = new RowCursor(_mask.And(input, input.Selection, valid), input.Start, input.End);
         StateView<ChosenRow<TValue>> states = States;
         while (cursor.Next(out int row))
         {

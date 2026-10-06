@@ -123,6 +123,16 @@ internal sealed class AggregationPlan
     /// <summary>The parts a merge in parts cuts the key space into, a power of two up to 256, or null for the merge's own count: the switch the bench sweeps them with.</summary>
     internal int? MergeParts { get; set; }
 
+    /// <summary>
+    /// The rows each slot folds before the next slot folds them, on the hashed path: a window whose
+    /// groups, values and records stay in the first level of cache from one slot to the next
+    /// (<see cref="DefaultFoldWindow"/>); 0 for the whole batch, the switch the bench compares them in.
+    /// </summary>
+    internal int? FoldWindow { get; set; } = DefaultFoldWindow;
+
+    /// <summary>The window of <see cref="FoldWindow"/>: 2 048 rows, their groups, a column of values and the records they touch within the first level of cache of current cores.</summary>
+    internal const int DefaultFoldWindow = 2_048;
+
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
@@ -315,6 +325,9 @@ internal sealed class AggregationPartition
     private int[] _rowGroups = [];
     private long _batch;
 
+    // The rows the slots fold together before the next window (AggregationPlan.FoldWindow).
+    private readonly int _window;
+
     // The source's row the current batch starts at, which a chosen row keeps.
     private long _startRow;
 
@@ -346,6 +359,7 @@ internal sealed class AggregationPartition
         _nodes = new int[columns.Length];
         _filterOf = plan.Filters.FilterOf;
         _masks = plan.Filters.Filters.Length > 0 ? new FilterMasks(plan.Filters) : null;
+        _window = plan.FoldWindow is int window and > 0 ? window : int.MaxValue;
         Slots = NewSlots(plan, settled, source, out GroupRecords? records);
         Records = records;
         Keys = plan.Grouped ? plan.CreateKeys(sorted, facts) : null;
@@ -633,12 +647,18 @@ internal sealed class AggregationPartition
 
         if (!ranged)
         {
+            // The slots fold the batch a window at a time: the window's groups and values, and the
+            // records of its groups, stay in the first level of cache from one slot to the next.
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
-            for (int i = 0; i < Slots.Length; i++)
+            for (int start = 0; start < rows; start += _window)
             {
-                if (Folds(i))
+                int end = Math.Min(rows, start + _window);
+                for (int i = 0; i < Slots.Length; i++)
                 {
-                    Slots[i].StepRows(Input(number, arena, i, rows, selection), rowGroups);
+                    if (Folds(i))
+                    {
+                        Slots[i].StepRows(Input(number, arena, i, rows, selection).Window(start, end), rowGroups);
+                    }
                 }
             }
 

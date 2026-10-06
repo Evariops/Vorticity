@@ -18,8 +18,19 @@ internal static class Switches
         null => null,
         "merge" => new Switch("in series", plan => plan.MergeInParts = false, "in parts", plan => plan.MergeInParts = true),
         _ when name.StartsWith("parts:", StringComparison.Ordinal) => Parts(name),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B."),
+        _ when name.StartsWith("window:", StringComparison.Ordinal) => Windows(name),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B."),
     };
+
+    /// <summary><c>window:A:B</c>, the slots folding windows of A rows against B, 0 for the whole batch.</summary>
+    private static Switch Windows(string name)
+    {
+        string[] rows = name.Split(':');
+        return new Switch($"window {rows[1]}", Set(rows[1]), $"window {rows[2]}", Set(rows[2]));
+
+        static Action<AggregationPlan> Set(string rows) =>
+            plan => plan.FoldWindow = int.Parse(rows, System.Globalization.CultureInfo.InvariantCulture);
+    }
 
     /// <summary><c>parts:A:B</c>, a merge in A parts against one in B, either of them <c>auto</c> for the merge's own count.</summary>
     private static Switch Parts(string name)

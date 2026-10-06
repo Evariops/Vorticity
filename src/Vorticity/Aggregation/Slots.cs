@@ -9,6 +9,11 @@ namespace Vorticity.Aggregating;
 internal readonly ref struct BatchInput
 {
     internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0)
+        : this(batch, arena, node, rows, selection, startRow, 0, rows)
+    {
+    }
+
+    private BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, int start, int end)
     {
         Batch = batch;
         Arena = arena;
@@ -16,7 +21,22 @@ internal readonly ref struct BatchInput
         Rows = rows;
         Selection = selection;
         StartRow = startRow;
+        Start = start;
+        End = end;
     }
+
+    /// <summary>
+    /// The first row of the window <see cref="AggregateSlot.StepRows"/> folds, 0 for the batch: a
+    /// window of rows whose states, keys and values every slot reads while they are in the first
+    /// level of cache.
+    /// </summary>
+    internal int Start { get; }
+
+    /// <summary>The row past the window <see cref="AggregateSlot.StepRows"/> folds, <see cref="Rows"/> for the batch.</summary>
+    internal int End { get; }
+
+    /// <summary>The same column, the rows of [<paramref name="start"/>, <paramref name="end"/>) folded alone.</summary>
+    internal BatchInput Window(int start, int end) => new BatchInput(Batch, Arena, Node, Rows, Selection, StartRow, start, end);
 
     /// <summary>The source's row the batch's first row is: what a chosen row is kept as, its position.</summary>
     internal long StartRow { get; }
@@ -47,7 +67,7 @@ internal abstract class AggregateSlot
     /// <summary>Folds the selected rows of [<paramref name="start"/>, <paramref name="end"/>) into one group.</summary>
     internal abstract void StepRange(in BatchInput input, int start, int end, int group);
 
-    /// <summary>Folds each selected row into the group <paramref name="groups"/> gives it.</summary>
+    /// <summary>Folds each selected row of the window [<see cref="BatchInput.Start"/>, <see cref="BatchInput.End"/>) into the group <paramref name="groups"/> gives it.</summary>
     internal abstract void StepRows(in BatchInput input, ReadOnlySpan<int> groups);
 
     /// <summary>
@@ -320,7 +340,7 @@ internal sealed class CountSlot : RecordSlot<long, long>
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<long> counts = States;
-        RowCursor rows = new RowCursor(input.Selection, 0, input.Rows);
+        RowCursor rows = new RowCursor(input.Selection, input.Start, input.End);
         while (rows.Next(out int row))
         {
             counts[groups[row]]++;
@@ -395,7 +415,7 @@ internal sealed class ExistsSlot(bool all) : RecordSlot<bool, bool>
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<bool> seen = States;
-        RowCursor rows = new RowCursor(input.Selection, 0, input.Rows);
+        RowCursor rows = new RowCursor(input.Selection, input.Start, input.End);
         while (rows.Next(out int row))
         {
             seen[groups[row]] = true;
