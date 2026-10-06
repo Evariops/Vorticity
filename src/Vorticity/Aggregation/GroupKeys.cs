@@ -143,6 +143,9 @@ internal abstract class GroupKeys
     /// </summary>
     internal virtual void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => throw NotEntries();
 
+    /// <summary>Counts every group but the null one by the part <see cref="Scatter"/> copies it to.</summary>
+    internal virtual void CountParts(Span<int> counts) => throw NotEntries();
+
     /// <summary>The sub-table of each entry of <paramref name="batch"/> in its part's directory: the bits of its key's hash from <paramref name="shift"/> up, under <paramref name="mask"/>.</summary>
     internal virtual void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) => throw NotEntries();
 
@@ -921,6 +924,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal override GroupKeys? Appending() => new FixedKeys<TValue>(_shape, sorted: false, appending: true);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
+
+    internal override void CountParts(Span<int> counts) => EntryKeys.CountParts<TValue>(_keys.AsSpan(0, Count), _null, counts);
 
     internal override void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) =>
         EntryKeys.TablesOf<TValue>(batch, shape, shift, mask, tables);

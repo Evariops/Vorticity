@@ -29,6 +29,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     private const long LeastCounted = 4096;
 
+    /// <summary>
+    /// What a lane's shelf reserves ahead of its tables: a quarter of a megabyte, sixteen pages of a key
+    /// numbered by value, so that its pages meet the budget's count once in sixteen; a megabyte held
+    /// ahead on every lane outweighed the small tables of a lane turned to the core.
+    /// </summary>
+    private const long Ahead = 256 * 1024;
+
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<(Type Type, int Length), Pile> _piles = [];
     private readonly ArrayShelf? _parent;
@@ -61,9 +68,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// A lane's shelf under its query's memory (PLAN-HIGH-CARDINALITY, H2, decision 13): an array it
     /// hands out is reserved before it is allocated, and given back when its table lets it go, which
     /// leaves it to the next collection; it keeps none. A table that doubles reserves its new arrays
-    /// while it still holds the old ones: what the copy holds, no more. It reserves a megabyte ahead,
-    /// and keeps up to two of what its tables give back, so that the pages of a key numbered by value,
-    /// sixteen kilobytes each, meet the budget's count once a megabyte; one lane uses it at a time,
+    /// while it still holds the old ones: what the copy holds, no more. It reserves <see cref="Ahead"/>
+    /// at a time, and keeps up to twice that of what its tables give back; one lane uses it at a time,
     /// and it takes no lock.
     /// </summary>
     internal ArrayShelf(QueryMemory memory)
@@ -116,6 +122,20 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>Whether the shelf took an array past its budget, which turns its lane to the core at the next batch.</summary>
     internal bool Overdrawn { get; private set; }
+
+    /// <summary>
+    /// The pressure the core whose shelf this is was made under (H4, milestone 2): while a lane still
+    /// holds a table it gives back, the shelf takes past the budget what a stack judged to fit asks
+    /// more, lanes having met on the room left.
+    /// </summary>
+    internal CorePressure? Pressure { get; set; }
+
+    /// <summary>
+    /// Whether a lane's shelf reserves each array alone, nothing ahead: the cache of a lane turned to the
+    /// core under pressure (H4, milestone 2), which a quarter of a megabyte ahead on every lane would
+    /// outweigh.
+    /// </summary>
+    internal bool Exact { get; set; }
 
     /// <summary>
     /// <paramref name="array"/> grown to <paramref name="length"/>, its elements copied and the new
@@ -182,7 +202,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         {
             if (!memory.TryGrow(counted))
             {
-                if (!overdraw)
+                if (!overdraw && Pressure is not { Holding: true })
                 {
                     throw memory.Exceeded("group by", -1, counted);
                 }
@@ -221,6 +241,12 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
     }
 
+    /// <summary>
+    /// An array the shelf handed out that nothing will take again, of a length no other asks: it leaves
+    /// the query's count, to the next collection, rather than wait on a pile.
+    /// </summary>
+    internal void Drop<T>(T[] array) => Leave(array.Length * (long)Unsafe.SizeOf<T>());
+
     /// <summary>The bytes of an array that leaves a query's shelf under its memory, let go or handed to the process's: given back, left to the next collection.</summary>
     private void Leave(long bytes)
     {
@@ -246,16 +272,16 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
     }
 
-    /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else a megabyte more.</summary>
+    /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else <see cref="Ahead"/> more.</summary>
     private void Reserve(QueryMemory memory, long bytes)
     {
         if (_credit < bytes)
         {
-            long more = Math.Max(bytes - _credit, QueryMemory.Chunk);
+            long more = Math.Max(bytes - _credit, Exact ? 0 : Ahead);
             if (!memory.TryGrow(more))
             {
-                // The megabyte ahead may be what does not fit: the array alone, before failing, or before
-                // taking it past the budget when the lane turns to the core at the next batch.
+                // What it reserves ahead may be what does not fit: the array alone, before failing, or
+                // before taking it past the budget when the lane turns to the core at the next batch.
                 more = bytes - _credit;
                 if (!memory.TryGrow(more))
                 {
@@ -277,16 +303,17 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         memory.Measure(bytes);
     }
 
-    /// <summary>The bytes of an array a lane's table let go: kept ahead up to two megabytes, the rest given back; the array, left to the next collection.</summary>
+    /// <summary>The bytes of an array a lane's table let go: kept ahead up to twice <see cref="Ahead"/>, the rest given back; the array, left to the next collection.</summary>
     private void Unreserve(QueryMemory memory, long bytes)
     {
         _out -= bytes;
         _credit += bytes;
         memory.Measure(-bytes);
-        if (_credit > 2 * QueryMemory.Chunk)
+        long kept = Exact ? 0 : Ahead;
+        if (_credit > 2 * kept)
         {
-            memory.Shrink(_credit - QueryMemory.Chunk);
-            _credit = QueryMemory.Chunk;
+            memory.Shrink(_credit - kept);
+            _credit = kept;
         }
     }
 

@@ -332,7 +332,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         int degree = pass.Options.DegreeOfParallelism > 0 ? pass.Options.DegreeOfParallelism : host.Source.Session.Options.MaxDegreeOfParallelism;
         if (descending || AggregationEngine.StreamingRanges(host.Source, pass, degree) is not { } ranges)
         {
-            AggregationEngine.Admit(_memory, 1);
+            AggregationEngine.Admit(_memory, 1, pass.Options.BatchRows);
             if (settling is not null)
             {
                 _partition.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -359,7 +359,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         QueryMemory memory = _memory;
         _ranges = new StreamingRanges(
             ranges,
-            AggregationEngine.Admit(memory, degree),
+            AggregationEngine.Admit(memory, degree, pass.Options.BatchRows),
             async (rows, token) =>
             {
                 AggregationPartition range = new AggregationPartition(
