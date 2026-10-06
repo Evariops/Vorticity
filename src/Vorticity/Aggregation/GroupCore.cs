@@ -53,6 +53,16 @@ internal sealed class GroupCore
     /// <summary>The most α: past it, reading the sub-tables back weighs a few percent of the batches' bytes, and only the memory grows.</summary>
     private const int MostAlpha = 8;
 
+    /// <summary>
+    /// The lanes from which the core holds a query's groups. Measured on the Mac on 2026-10-06, each
+    /// row of the core costs two to four times a row of a lane's table alone, its cache, its entry and
+    /// its application, which a lane's table repays only when many lanes each build a table of every
+    /// key and the merge rehashes them all: at one lane two to three times slower, at two 1.3 to 1.9,
+    /// at four about even, at eight and fourteen faster by a sixth to a half. Below, the lanes' tables;
+    /// to measure again with the governor, which bounds memory at every degree (H2), and on x64 (X1).
+    /// </summary>
+    internal const int DefaultLanes = 8;
+
     /// <summary>The most bits of the hash a part's directory takes past the part's: never reached below 2^31 groups.</summary>
     internal const int MostDepth = 24;
 
@@ -86,6 +96,7 @@ internal sealed class GroupCore
     // holds a part takes back those others applied, so that the batches made follow the entries in
     // flight, not the deposits. Chains go in and out whole, a lock a slab's worth.
     private readonly Lock _freeGate = new Lock();
+    private readonly List<ulong[]> _slabs = [];
     private PartBatch? _free;
     private int _freeCount;
     private readonly int _batchWords;
@@ -166,14 +177,15 @@ internal sealed class GroupCore
     internal ScanSource? Source => _source;
 
     /// <summary>
-    /// The core of a query, or null when it runs on its lanes' tables alone: the switch is off, the key
-    /// does not travel in batches (<see cref="GroupKeys.EntryBytes"/>), a state lies apart from the
-    /// records, the key is sorted, or a top keeps a lane's best groups.
+    /// The core of a query, or null when it runs on its lanes' tables alone: the switch is off, the
+    /// lanes are fewer than <see cref="DefaultLanes"/>, the key does not travel in batches
+    /// (<see cref="GroupKeys.EntryBytes"/>), a state lies apart from the records, the key is sorted, or
+    /// a top keeps a lane's best groups.
     /// </summary>
     internal static GroupCore? Of(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes)
     {
-        if (!plan.Core || !plan.Grouped || sorted || top is not null)
+        if (!plan.Core || !plan.Grouped || sorted || top is not null || lanes < (plan.CoreLanes ?? DefaultLanes))
         {
             return null;
         }
@@ -241,11 +253,19 @@ internal sealed class GroupCore
     /// <summary>The batches of a slab, cut from one array.</summary>
     internal const int SlabBatches = 64;
 
-    /// <summary>A slab of new batches, linked first to last, for a lane to fill: one large array, which the collector neither copies nor clears.</summary>
+    /// <summary>
+    /// A slab of new batches, linked first to last, for a lane to fill: one large array, which the
+    /// collector neither copies nor clears, from the shelf, which takes it back at the end.
+    /// </summary>
     internal PartBatch NewSlab()
     {
         Interlocked.Add(ref _batches, SlabBatches);
-        ulong[] slab = GC.AllocateUninitializedArray<ulong>(SlabBatches * _batchWords);
+        ulong[] slab = _shelf.Take<ulong>(SlabBatches * _batchWords, zeroed: false);
+        lock (_freeGate)
+        {
+            _slabs.Add(slab);
+        }
+
         PartBatch? next = null;
         for (int b = SlabBatches - 1; b >= 0; b--)
         {
@@ -563,12 +583,20 @@ internal sealed class GroupCore
             slots.Add(empty.Slots);
         }
 
-        // The arrays the sub-tables left, and the batches: the result keeps the shelf, not what it held.
-        _shelf.Clear();
+        // The slabs, every batch applied, and the arrays the sub-tables left go to the process's shelf,
+        // for the next query: the result keeps this shelf, not what it held.
         lock (_freeGate)
         {
             _free = null;
+            foreach (ulong[] slab in _slabs)
+            {
+                _shelf.Give(slab);
+            }
+
+            _slabs.Clear();
         }
+
+        _shelf.Clear();
 
         (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined([.. keys], [.. slots], keys.Count);
         return (joined, joinedSlots, bytes);

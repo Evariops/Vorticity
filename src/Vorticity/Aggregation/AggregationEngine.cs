@@ -167,6 +167,13 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool Core { get; set; }
 
+    /// <summary>
+    /// The lanes from which the core holds the groups, or null for the core's own: below, each lane's
+    /// table and the merge cost less (<see cref="GroupCore.Of"/>); 1 in the tests and the bench, which
+    /// run the core at every degree.
+    /// </summary>
+    internal int? CoreLanes { get; set; }
+
     /// <summary>The groups of a lane's cache in the core, or null for the core's own: tiny in the tests, so that every batch copies the cache.</summary>
     internal int? CoreCapacity { get; set; }
 

@@ -133,8 +133,38 @@ public sealed partial class GroupCoreTests
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Dictionary<int, KeyStats> reference = ByKey(await ListAsync(Reference(file)));
-            Vorticity.Aggregation core = Query(file, plan => plan.Core = true);
+            Vorticity.Aggregation core = Query(file, plan =>
+            {
+                plan.Core = true;
+                plan.CoreLanes = 1;
+            });
+
             Assert.Equal(reference, ByKey(await ListAsync(core.As<KeyStats>())));
+            Assert.Null(core.Plan.LastRun!.Core);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task FewLanesKeepTheirTables()
+    {
+        Row[] rows = Rows_(keys: 9_000);
+        string path = await WriteAsync(rows);
+        try
+        {
+            // Four lanes, below the lanes the core holds the groups from: every lane's table, merged.
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation core = Query(file, plan =>
+            {
+                Tiny(plan);
+                plan.CoreLanes = null;
+            });
+
+            Assert.Equal(ByKey(await ListAsync(Reference(file))), ByKey(await ListAsync(core.As<KeyStats>())));
             Assert.Null(core.Plan.LastRun!.Core);
         }
         finally
@@ -222,6 +252,7 @@ public sealed partial class GroupCoreTests
     private static void Tiny(AggregationPlan plan)
     {
         plan.Core = true;
+        plan.CoreLanes = 1;
         plan.CoreCapacity = 96;
         plan.CoreFloor = 16;
         plan.CoreTableGroups = 40;

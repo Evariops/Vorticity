@@ -27,7 +27,7 @@ internal static class Switches
         _ when name.StartsWith("parts:", StringComparison.Ordinal) => Pair(name, "MergeParts", "parts"),
         _ when name.StartsWith("window:", StringComparison.Ordinal) => Pair(name, "FoldWindow", "window"),
         _ when name.StartsWith("probe:", StringComparison.Ordinal) => Pair(name, "ProbeAhead", "probe"),
-        "core" => new Switch("reference", Set("Core", false), "core", Set("Core", true)),
+        "core" => new Switch("reference", Set("Core", false), "core", Core()),
         _ when name.StartsWith("capacity:", StringComparison.Ordinal) => CorePair(name, "CoreCapacity", "capacity"),
         _ when name.StartsWith("alpha:", StringComparison.Ordinal) => CorePair(name, "CoreAlpha", "alpha"),
         _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, capacity:A:B, alpha:A:B."),
@@ -37,8 +37,20 @@ internal static class Switches
     private static Switch CorePair(string name, string property, string label)
     {
         Switch pair = Pair(name, property, label);
-        Action<AggregationPlan> core = Set("Core", true);
+        Action<AggregationPlan> core = Core();
         return pair with { SetA = plan => { core(plan); pair.SetA(plan); }, SetB = plan => { core(plan); pair.SetB(plan); } };
+    }
+
+    /// <summary>The core on, at every degree: the bench measures it where it would not hold the groups by default too.</summary>
+    private static Action<AggregationPlan> Core()
+    {
+        Action<AggregationPlan> on = Set("Core", true);
+        Action<AggregationPlan> lanes = Set("CoreLanes", 1);
+        return plan =>
+        {
+            on(plan);
+            lanes(plan);
+        };
     }
 
     /// <summary><c>name:A:B</c>, the integer switch <paramref name="property"/> at A against B, either of them <c>auto</c> for the engine's own.</summary>
