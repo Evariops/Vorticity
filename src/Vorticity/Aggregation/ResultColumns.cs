@@ -90,9 +90,9 @@ internal sealed class ValueResultColumn<T> : ResultColumn
         }
 
         // Read straight into the array of their keys, which they become where they lie.
-        long[] keys = ValuesOrder.Rent<T>(groups.Length);
+        long[] keys = ValuesOrder.Rent<T>(outcome.Memory, groups.Length);
         Read(outcome, groups, ValuesOrder.Values<T>(keys, groups.Length));
-        return ValuesOrder.Over<T>(keys, groups.Length, descending);
+        return ValuesOrder.Over<T>(keys, groups.Length, descending, outcome.Memory);
     }
 
     /// <summary>The values of <paramref name="groups"/>, from the aggregate's slot or through its reader.</summary>

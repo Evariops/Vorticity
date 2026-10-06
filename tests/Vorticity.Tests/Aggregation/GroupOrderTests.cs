@@ -258,9 +258,9 @@ public sealed partial class GroupOrderTests
         {
             Comparer<T> expected = descending ? Comparer<T>.Create((a, b) => a is null || b is null ? ascending.Compare(a, b) : ascending.Compare(b, a)) : ascending;
             int[] ranked = [.. Enumerable.Range(0, values.Length).OrderBy(i => values[i], expected)];
-            long[] keys = ValuesOrder.Rent<T>(values.Length);
+            long[] keys = ValuesOrder.Rent<T>(memory: null, values.Length);
             values.CopyTo(ValuesOrder.Values<T>(keys, values.Length));
-            ColumnOrder order = ValuesOrder.Over<T>(keys, values.Length, descending);
+            ColumnOrder order = ValuesOrder.Over<T>(keys, values.Length, descending, memory: null);
             try
             {
                 int[] sorted = [.. Enumerable.Range(0, values.Length)];
@@ -269,7 +269,7 @@ public sealed partial class GroupOrderTests
                 for (int keep = 1; keep < values.Length; keep++)
                 {
                     int[] positions = [.. Enumerable.Range(0, values.Length)];
-                    (int before, int tied) = order.TopTied(positions, values.Length, keep, Ct);
+                    (int before, int tied) = order.TopTied(positions, values.Length, keep, memory: null, Ct);
                     T last = values[ranked[keep - 1]];
                     Assert.Equal(values.Count(v => expected.Compare(v, last) < 0), before);
                     Assert.Equal(values.Count(v => expected.Compare(v, last) == 0), tied);

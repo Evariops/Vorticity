@@ -254,7 +254,7 @@ internal sealed class ResultScanSource : ScanSource
                     _positions[i] = i;
                 }
 
-                GroupSort.Sort(_positions, _count, new ChainOrder([order, ColumnOrder.Positions]), long.MaxValue, _cancellationToken);
+                GroupSort.Sort(_positions, _count, new ChainOrder([order, ColumnOrder.Positions]), long.MaxValue, memory: null, _cancellationToken);
             }
 
             if (_next >= _count)

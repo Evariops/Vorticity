@@ -150,7 +150,9 @@ internal sealed class KeyTop
         }
         else if (count > (final ? _keep : _ceiling))
         {
-            int[] groups = ArrayPool<int>.Shared.Rent(count);
+            // The order's scratch under the query's memory, as the lane's tables (PLAN-HIGH-CARDINALITY, H2).
+            QueryMemory? memory = partition.Memory;
+            int[] groups = QueryArrays.Rent<int>(memory, count, "top of a group by");
             try
             {
                 for (int g = 0; g < count; g++)
@@ -158,7 +160,7 @@ internal sealed class KeyTop
                     groups[g] = g;
                 }
 
-                AggregationOutcome outcome = new AggregationOutcome(_query.Plan, partition.Slots, keys, []);
+                AggregationOutcome outcome = new AggregationOutcome(_query.Plan, partition.Slots, keys, []) { Memory = memory };
                 (int[] best, int kept) = GroupSelection.Order(_query, outcome, _order, groups, count, _keep, CancellationToken.None);
 
                 // In the order they were met, as the groups of a lane are numbered; the worst kept,
@@ -167,10 +169,13 @@ internal sealed class KeyTop
                 Array.Sort(best, 0, kept);
                 partition.Keep(best.AsSpan(0, kept));
                 partition.TopFrontier = _narrows && kept == _keep ? Array.BinarySearch(best, 0, kept, worst) : -1;
+
+                // The order the lane kept by is let go, not delivered.
+                memory?.LetGo((long)kept * sizeof(int));
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(groups);
+                QueryArrays.Return(memory, groups);
             }
         }
 

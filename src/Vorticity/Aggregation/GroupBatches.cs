@@ -504,7 +504,8 @@ internal static class GroupSelection
         int width = order.Keys.Length + keys.Length;
         ReadOnlySpan<int> all = groups.AsSpan(0, count);
         ColumnOrder?[] ready = new ColumnOrder?[width];
-        int[] positions = ArrayPool<int>.Shared.Rent(count);
+        QueryMemory? memory = outcome.Memory;
+        int[] positions = QueryArrays.Rent<int>(memory, count, "order of a group by");
         StructStore? store = null;
         CanonicalArena? arena = null;
         try
@@ -577,20 +578,22 @@ internal static class GroupSelection
                 // then, of those tied with it, the first by the key alone.
                 // An order of one column ranks in a loop typed on its values when it holds them.
                 (int before, int tied) = order.Keys.Length == 1
-                    ? orders[0].TopTied(positions, count, (int)keep, cancellationToken)
-                    : GroupSort.TopTied(positions, count, new ChainOrder(orders[..order.Keys.Length]), (int)keep, cancellationToken);
+                    ? orders[0].TopTied(positions, count, (int)keep, memory, cancellationToken)
+                    : GroupSort.TopTied(positions, count, new ChainOrder(orders[..order.Keys.Length]), (int)keep, memory, cancellationToken);
                 positions.AsSpan(0, before).Sort(new ChainOrder(orders));
                 Span<int> ties = positions.AsSpan(before, tied);
                 int need = (int)keep - before;
                 kept = before + (indexed
-                    ? GroupSort.TopK(ties, new IndexOrder(index!, groups, keys.Length), need, cancellationToken)
-                    : GroupSort.TopK(ties, new ChainOrder(orders[order.Keys.Length..]), need, cancellationToken));
+                    ? GroupSort.TopK(ties, new IndexOrder(index!, groups, keys.Length), need, memory, cancellationToken)
+                    : GroupSort.TopK(ties, new ChainOrder(orders[order.Keys.Length..]), need, memory, cancellationToken));
             }
             else
             {
-                kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, cancellationToken);
+                kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, memory, cancellationToken);
             }
 
+            // The groups in their order, the result's until it is delivered.
+            memory?.Hold((long)kept * sizeof(int), "order of a group by");
             int[] ordered = new int[kept];
             for (int i = 0; i < kept; i++)
             {
@@ -607,7 +610,7 @@ internal static class GroupSelection
                 read?.Release();
             }
 
-            ArrayPool<int>.Shared.Return(positions);
+            QueryArrays.Return(memory, positions);
             store?.Release();
             arena?.Reset();
         }

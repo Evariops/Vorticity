@@ -118,6 +118,25 @@ internal static class ChosenFetch
     internal static async ValueTask FetchAsync(
         AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
     {
+        // What the fetch sorts and reads by, an entry a group and choice — its position, its owner,
+        // its row and group, the take's position — reserved under the result's memory while it runs
+        // (PLAN-HIGH-CARDINALITY, H2, decision 13).
+        QueryMemory? memory = outcome.Memory;
+        long scratch = (long)groups.Length * outcome.Plan.ChosenRows.Length * ((3 * sizeof(long)) + (2 * sizeof(int)));
+        memory?.Hold(scratch, "fetch of the chosen rows");
+        try
+        {
+            await FetchRowsAsync(outcome, source, spec, metrics, groups, memory, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            memory?.LetGo(scratch);
+        }
+    }
+
+    private static async ValueTask FetchRowsAsync(
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, QueryMemory? memory, CancellationToken cancellationToken)
+    {
         IChosenColumn[] chosen = outcome.Plan.Chosen;
         (IAggregateNode Row, int[] Columns)[] choices = outcome.Plan.ChosenRows;
         int most = 0;
@@ -166,7 +185,7 @@ internal static class ChosenFetch
         // A take reads its positions in order, each once: the rows sorted, a row two choices share
         // read for both. Each choice lists, in that order, the row of the take it reads and the
         // group it serves.
-        Sort(positions, owners, count);
+        Sort(positions, owners, count, memory);
         for (int r = 0; r < choices.Length; r++)
         {
             ofChoice[r + 1] += ofChoice[r];
@@ -263,7 +282,7 @@ internal static class ChosenFetch
     /// many passes as the largest position has digits. A position is a row of the source, so two
     /// passes order four million rows; a comparison sort of a million would take ten times longer.
     /// </summary>
-    private static void Sort(long[] positions, long[] owners, int count)
+    private static void Sort(long[] positions, long[] owners, int count, QueryMemory? memory)
     {
         if (count < 4_096)
         {
@@ -279,8 +298,8 @@ internal static class ChosenFetch
 
         long[] fromPositions = positions;
         long[] fromOwners = owners;
-        long[] intoPositions = ArrayPool<long>.Shared.Rent(count);
-        long[] intoOwners = ArrayPool<long>.Shared.Rent(count);
+        long[] intoPositions = QueryArrays.Rent<long>(memory, count, "fetch of the chosen rows");
+        long[] intoOwners = QueryArrays.Rent<long>(memory, count, "fetch of the chosen rows");
         int[] starts = new int[1 << DigitBits];
         try
         {
@@ -318,8 +337,8 @@ internal static class ChosenFetch
         finally
         {
             // The rented pair is whichever two the passes did not leave the result in.
-            ArrayPool<long>.Shared.Return(ReferenceEquals(fromPositions, positions) ? intoPositions : fromPositions);
-            ArrayPool<long>.Shared.Return(ReferenceEquals(fromOwners, owners) ? intoOwners : fromOwners);
+            QueryArrays.Return(memory, ReferenceEquals(fromPositions, positions) ? intoPositions : fromPositions);
+            QueryArrays.Return(memory, ReferenceEquals(fromOwners, owners) ? intoOwners : fromOwners);
         }
     }
 }

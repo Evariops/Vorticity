@@ -1,8 +1,59 @@
 using System;
+using System.Buffers;
 using System.Globalization;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Threading;
 
 namespace Vorticity.Aggregating;
+
+/// <summary>
+/// The scratch arrays of the steps that grow with the groups — the order of a result, its top, the
+/// sort of the rows a fetch reads, a lane's top — rented from the shared pool under the query's
+/// memory (PLAN-HIGH-CARDINALITY, H2, decision 13): reserved before they are rented, at the length
+/// the pool hands out, and given back with them. What the pool keeps of them afterwards is the rest
+/// of the process's memory, which the process's budget reads at its next full collection. An array
+/// under a page goes uncounted both ways, as a shelf's.
+/// </summary>
+internal static class QueryArrays
+{
+    /// <summary>The least array counted: a page.</summary>
+    private const long LeastCounted = 4096;
+
+    /// <summary>An array of <paramref name="length"/> elements at least, from the shared pool, reserved first under <paramref name="memory"/> for <paramref name="what"/>.</summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
+    internal static T[] Rent<T>(QueryMemory? memory, int length, string what)
+    {
+        if (memory is not null && Bytes<T>(Pooled(length)) is long bytes and >= LeastCounted)
+        {
+            if (!memory.TryGrow(bytes))
+            {
+                throw memory.Exceeded(what, -1, bytes);
+            }
+
+            memory.Measure(bytes);
+        }
+
+        return ArrayPool<T>.Shared.Rent(length);
+    }
+
+    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the shared pool, its bytes given back to <paramref name="memory"/>.</summary>
+    internal static void Return<T>(QueryMemory? memory, T[] array)
+    {
+        if (memory is not null && Bytes<T>(array.Length) is long bytes and >= LeastCounted)
+        {
+            memory.Shrink(bytes);
+            memory.Measure(-bytes);
+        }
+
+        ArrayPool<T>.Shared.Return(array);
+    }
+
+    /// <summary>The length the shared pool hands out for <paramref name="length"/>: its power of two from sixteen, past a gigabyte of elements the length itself.</summary>
+    private static int Pooled(int length) => length <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 16)) : length;
+
+    private static long Bytes<T>(int length) => (long)length * Unsafe.SizeOf<T>();
+}
 
 /// <summary>
 /// What one query holds of its <see cref="QueryMemoryBudget"/> (PLAN-HIGH-CARDINALITY, H2): reserved at
@@ -51,6 +102,25 @@ internal sealed class QueryMemory : IDisposable
 
         Interlocked.Add(ref _held, bytes);
         return true;
+    }
+
+    /// <summary>Reserves and measures <paramref name="bytes"/> the result holds until it is delivered, for <paramref name="what"/>; past the budget, the query fails.</summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant them.</exception>
+    internal void Hold(long bytes, string what)
+    {
+        if (!TryGrow(bytes))
+        {
+            throw Exceeded(what, -1, bytes);
+        }
+
+        Measure(bytes);
+    }
+
+    /// <summary>Gives back <paramref name="bytes"/> <see cref="Hold"/> took for scratch the query let go: in the heap until a collection takes it.</summary>
+    internal void LetGo(long bytes)
+    {
+        Shrink(bytes);
+        Measure(-bytes);
     }
 
     /// <summary>Gives back <paramref name="bytes"/> the query held.</summary>

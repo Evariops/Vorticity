@@ -71,8 +71,8 @@ internal abstract class ColumnOrder
     /// <see cref="GroupSort.TopTied"/> by this order alone: through <see cref="Compare"/>, or in a
     /// loop typed on its values where it holds them.
     /// </summary>
-    internal virtual (int Before, int Tied) TopTied(int[] positions, int count, int keep, CancellationToken cancellationToken) =>
-        GroupSort.TopTied(positions, count, new ChainOrder([this]), keep, cancellationToken);
+    internal virtual (int Before, int Tied) TopTied(int[] positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
+        GroupSort.TopTied(positions, count, new ChainOrder([this]), keep, memory, cancellationToken);
 
     /// <summary>The order of the positions themselves: the last of a chain, which makes a sort stable.</summary>
     internal static ColumnOrder Positions { get; } = new PositionOrder();
@@ -257,8 +257,9 @@ internal static class ValuesOrder
     internal static bool Orders<T>() =>
         typeof(T) == typeof(long) || typeof(T) == typeof(long?) || typeof(T) == typeof(double) || typeof(T) == typeof(double?);
 
-    /// <summary>An array of the pool that holds <paramref name="count"/> values of <typeparamref name="T"/>, then their keys.</summary>
-    internal static long[] Rent<T>(int count) => ArrayPool<long>.Shared.Rent(Unsafe.SizeOf<T>() / sizeof(long) * count);
+    /// <summary>An array of the pool that holds <paramref name="count"/> values of <typeparamref name="T"/>, then their keys, reserved under the query's <paramref name="memory"/>.</summary>
+    internal static long[] Rent<T>(QueryMemory? memory, int count) =>
+        QueryArrays.Rent<long>(memory, Unsafe.SizeOf<T>() / sizeof(long) * count, "order of a group by");
 
     /// <summary>The first <paramref name="count"/> values of <typeparamref name="T"/> that <paramref name="keys"/> holds before they become keys.</summary>
     internal static Span<T> Values<T>(long[] keys, int count)
@@ -273,7 +274,7 @@ internal static class ValuesOrder
     /// <paramref name="keys"/> holds (<see cref="Values{T}"/>), each made its key where it lies; the
     /// order takes the array.
     /// </summary>
-    internal static ColumnOrder Over<T>(long[] keys, int count, bool descending)
+    internal static ColumnOrder Over<T>(long[] keys, int count, bool descending, QueryMemory? memory)
     {
         if (typeof(T) == typeof(long))
         {
@@ -286,7 +287,7 @@ internal static class ValuesOrder
                 }
             }
 
-            return new Keys(keys, []);
+            return new Keys(keys, [], memory);
         }
 
         if (typeof(T) == typeof(double))
@@ -296,7 +297,7 @@ internal static class ValuesOrder
                 keys[i] = Key(BitConverter.Int64BitsToDouble(keys[i]), descending);
             }
 
-            return new Keys(keys, []);
+            return new Keys(keys, [], memory);
         }
 
         // A nullable value is 16 bytes: the key of the i-th, 8 bytes, is written over values read
@@ -310,7 +311,7 @@ internal static class ValuesOrder
                 keys[i] = floats[i] is double value ? Key(value, descending) : Null;
             }
 
-            return new Keys(keys, []);
+            return new Keys(keys, [], memory);
         }
 
         Span<long?> integers = Values<long?>(keys, count);
@@ -324,7 +325,7 @@ internal static class ValuesOrder
             keys[i] = value is long integer ? (descending ? ~integer : integer) : 0;
         }
 
-        return new Keys(keys, nulls ? present : []);
+        return new Keys(keys, nulls ? present : [], memory);
     }
 
     /// <summary>
@@ -347,19 +348,19 @@ internal static class ValuesOrder
     /// Keys ascending: the direction, and a float's NaN, zeros and null, folded into them; a long's
     /// nulls in the bits of the values present, which put them last.
     /// </summary>
-    private sealed class Keys(long[] keys, ulong[] present) : ColumnOrder(present, descending: false)
+    private sealed class Keys(long[] keys, ulong[] present, QueryMemory? memory) : ColumnOrder(present, descending: false)
     {
         /// <summary>Whether every value is present: the keys alone order them.</summary>
         private readonly bool _whole = present.Length == 0;
 
         protected override int CompareValues(int a, int b) => keys[a].CompareTo(keys[b]);
 
-        internal override (int Before, int Tied) TopTied(int[] positions, int count, int keep, CancellationToken cancellationToken) =>
+        internal override (int Before, int Tied) TopTied(int[] positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
             _whole
-                ? GroupSort.TopTied(positions, count, new KeysOrder(keys), keep, cancellationToken)
-                : base.TopTied(positions, count, keep, cancellationToken);
+                ? GroupSort.TopTied(positions, count, new KeysOrder(keys), keep, memory, cancellationToken)
+                : base.TopTied(positions, count, keep, memory, cancellationToken);
 
-        internal override void Release() => ArrayPool<long>.Shared.Return(keys);
+        internal override void Release() => QueryArrays.Return(memory, keys);
     }
 
     private readonly struct KeysOrder(long[] keys) : IComparer<int>
@@ -416,12 +417,16 @@ internal static class GroupSort
     /// <summary>The positions a part sorts at once, between two checks of the token.</summary>
     private const int Part = 65_536;
 
-    /// <summary>Orders <paramref name="positions"/>, of which the first <paramref name="keep"/> at most are wanted; returns how many it holds in order.</summary>
-    internal static int Sort(int[] positions, int count, ChainOrder order, long keep, CancellationToken cancellationToken)
+    /// <summary>
+    /// Orders <paramref name="positions"/>, of which the first <paramref name="keep"/> at most are
+    /// wanted; returns how many it holds in order. Its scratch is reserved under the query's
+    /// <paramref name="memory"/>, when it has one.
+    /// </summary>
+    internal static int Sort(int[] positions, int count, ChainOrder order, long keep, QueryMemory? memory, CancellationToken cancellationToken)
     {
         if (keep < count)
         {
-            return TopK(positions.AsSpan(0, count), order, (int)keep, cancellationToken);
+            return TopK(positions.AsSpan(0, count), order, (int)keep, memory, cancellationToken);
         }
 
         if (count <= Part)
@@ -436,7 +441,7 @@ internal static class GroupSort
             positions.AsSpan(start, Math.Min(Part, count - start)).Sort(order);
         }
 
-        int[] merged = ArrayPool<int>.Shared.Rent(count);
+        int[] merged = QueryArrays.Rent<int>(memory, count, "order of a group by");
         try
         {
             int[] from = positions;
@@ -463,7 +468,7 @@ internal static class GroupSort
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(merged);
+            QueryArrays.Return(memory, merged);
         }
     }
 
@@ -478,7 +483,7 @@ internal static class GroupSort
     }
 
     /// <summary>The <paramref name="keep"/> first positions in order, in the front of <paramref name="positions"/>: a heap of them, each other position compared with its top.</summary>
-    internal static int TopK<TOrder>(Span<int> positions, TOrder order, int keep, CancellationToken cancellationToken)
+    internal static int TopK<TOrder>(Span<int> positions, TOrder order, int keep, QueryMemory? memory, CancellationToken cancellationToken)
         where TOrder : IComparer<int>
     {
         if (keep <= 0)
@@ -489,7 +494,7 @@ internal static class GroupSort
         // A heap of the kept positions whose top is the last of them in order.
         int size = 0;
         int capacity = Math.Min(keep, positions.Length);
-        int[] heap = ArrayPool<int>.Shared.Rent(capacity);
+        int[] heap = QueryArrays.Rent<int>(memory, capacity, "top of a group by");
         try
         {
             for (int i = 0; i < positions.Length; i++)
@@ -518,7 +523,7 @@ internal static class GroupSort
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(heap);
+            QueryArrays.Return(memory, heap);
         }
     }
 
@@ -528,7 +533,7 @@ internal static class GroupSort
     /// itself included, each part unordered; the size of each. What the order cannot rank is left to
     /// a tie-break, run on the ties alone.
     /// </summary>
-    internal static (int Before, int Tied) TopTied<TOrder>(int[] positions, int count, TOrder order, int keep, CancellationToken cancellationToken)
+    internal static (int Before, int Tied) TopTied<TOrder>(int[] positions, int count, TOrder order, int keep, QueryMemory? memory, CancellationToken cancellationToken)
         where TOrder : IComparer<int>
     {
         // A heap of the kept positions whose top is the last of them, and the positions left out
@@ -536,7 +541,7 @@ internal static class GroupSort
         // and the top that leaves still ties with the new one, it joins them; when the new top is
         // before it, they are all out.
         int size = 0;
-        int[] heap = ArrayPool<int>.Shared.Rent(keep);
+        int[] heap = QueryArrays.Rent<int>(memory, keep, "top of a group by");
         try
         {
             int ties = 0;
@@ -604,7 +609,7 @@ internal static class GroupSort
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(heap);
+            QueryArrays.Return(memory, heap);
         }
     }
 

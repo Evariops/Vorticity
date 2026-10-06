@@ -101,6 +101,42 @@ public sealed partial class QueryMemoryTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
+    public async Task AnOrderATopAndAFetchGiveBackWhatTheyReserve(int degree)
+    {
+        string path = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+
+            // The groups in order, all of them, then their top: the sort's scratch and the order delivered.
+            List<int> ordered = await file.Scan<Row>().GroupBy(r => r.Key).OrderByDescending(g => g.Sum(x => x.Value)).ThenBy(g => g.Key).Select(g => g.Key).ToListAsync(Ct);
+            Assert.Equal(Keys, ordered.Count);
+            Assert.Equal(0, budget.ReservedBytes);
+            List<int> top = await file.Scan<Row>().GroupBy(r => r.Key).OrderByDescending(g => g.Sum(x => x.Value)).ThenBy(g => g.Key).Take(10).Select(g => g.Key).ToListAsync(Ct);
+            Assert.Equal(ordered.Take(10), top);
+            Assert.Equal(0, budget.ReservedBytes);
+
+            // A row each group chose, fetched once the groups are known.
+            List<long> lasts = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Last().Value).ToListAsync(Ct);
+            Assert.Equal(Keys, lasts.Count);
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task AQueryItsBudgetCannotGiveEveryLaneStartsOnFewer()
     {
