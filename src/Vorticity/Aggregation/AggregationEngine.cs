@@ -346,7 +346,8 @@ internal sealed class AggregationPartition
         _nodes = new int[columns.Length];
         _filterOf = plan.Filters.FilterOf;
         _masks = plan.Filters.Filters.Length > 0 ? new FilterMasks(plan.Filters) : null;
-        Slots = NewSlots(plan, settled, source);
+        Slots = NewSlots(plan, settled, source, out GroupRecords? records);
+        Records = records;
         Keys = plan.Grouped ? plan.CreateKeys(sorted, facts) : null;
         if (streaming >= 0 && _keyCount > 1)
         {
@@ -365,6 +366,9 @@ internal sealed class AggregationPartition
 
     internal AggregateSlot[] Slots { get; private set; }
 
+    /// <summary>The records the slots whose states hold no reference share, a record a group; null when no slot has one.</summary>
+    internal GroupRecords? Records { get; private set; }
+
     internal GroupKeys? Keys { get; private set; }
 
     /// <summary>
@@ -379,6 +383,7 @@ internal sealed class AggregationPartition
     {
         Keys = null;
         Slots = [];
+        Records = null;
         _rowGroups = [];
         _narrowed = [];
         _componentOf = [];
@@ -388,12 +393,32 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
-    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source)
+    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source) =>
+        NewSlots(plan, settled, source, out _);
+
+    /// <summary>
+    /// A slot for each aggregate of the plan, the settled one or a new one, the new ones whose states
+    /// hold no reference sharing <paramref name="records"/>, a record a group.
+    /// </summary>
+    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records)
     {
         AggregateSlot[] slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
         {
             slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
+        }
+
+        records = null;
+        if (RecordLayout.Of(slots) is { } layout)
+        {
+            records = new GroupRecords(layout);
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (layout.Offsets[i] >= 0)
+                {
+                    slots[i].Bind(records, layout.Offsets[i]);
+                }
+            }
         }
 
         return slots;
@@ -468,6 +493,7 @@ internal sealed class AggregationPartition
         }
 
         Keys!.Keep(groups);
+        Records?.Keep(groups);
         foreach (AggregateSlot slot in Slots)
         {
             slot.Keep(groups);

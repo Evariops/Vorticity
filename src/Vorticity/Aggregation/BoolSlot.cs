@@ -114,11 +114,9 @@ internal static class BoolFlags
 }
 
 /// <summary>The minimum, the maximum or the distinct count of a boolean column, by population count over the bits.</summary>
-internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
+internal sealed class BoolSlot<TResult> : RecordSlot<byte, TResult>
 {
     private readonly Func<byte, TResult> _finish;
-    private byte[] _flags = [];
-    private int _groups;
     private MaskCache _rows;
     private MaskCache _trues;
     private ulong[] _bits = [];
@@ -129,15 +127,7 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
 
     internal BoolSlot(Func<byte, TResult> finish) => _finish = finish;
 
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _flags.Length)
-        {
-            Array.Resize(ref _flags, Scratch.Capacity(groups, _flags.Length));
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override byte Seed => 0;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
@@ -150,14 +140,15 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
         }
 
         int trues = RowMasks.Count(_trues.And(input, rows, bits), start, end);
+        ref byte flags = ref State(group);
         if (trues > 0)
         {
-            _flags[group] |= BoolFlags.SawTrue;
+            flags |= BoolFlags.SawTrue;
         }
 
         if (all > trues)
         {
-            _flags[group] |= BoolFlags.SawFalse;
+            flags |= BoolFlags.SawFalse;
         }
     }
 
@@ -165,33 +156,24 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
     {
         ReadOnlySpan<ulong> bits = Load(input, out ReadOnlySpan<ulong> valid);
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+        StateView<byte> flags = States;
         while (rows.Next(out int row))
         {
-            _flags[groups[row]] |= ((bits[row >> 6] >> (row & 63)) & 1) != 0 ? BoolFlags.SawTrue : BoolFlags.SawFalse;
+            flags[groups[row]] |= ((bits[row >> 6] >> (row & 63)) & 1) != 0 ? BoolFlags.SawTrue : BoolFlags.SawFalse;
         }
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        BoolSlot<TResult> source = (BoolSlot<TResult>)other;
+        StateView<byte> flags = States;
+        StateView<byte> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            _flags[into[i]] |= source._flags[from[i]];
+            flags[into[i]] |= others[from[i]];
         }
     }
 
-    internal override TResult Result(int group) => _finish(_flags[group]);
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _flags[i] = _flags[groups[i]];
-        }
-
-        _flags.AsSpan(groups.Length, _groups - groups.Length).Clear();
-        _groups = groups.Length;
-    }
+    internal override TResult Result(int group) => _finish(State(group));
 
     /// <summary>The block's values and validity, copied once per batch whatever the number of ranges folded.</summary>
     private ReadOnlySpan<ulong> Load(in BatchInput input, out ReadOnlySpan<ulong> validity)

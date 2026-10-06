@@ -87,6 +87,19 @@ internal abstract class AggregateSlot
     /// <c>i</c>: the groups a streaming group by has not closed. <paramref name="groups"/> ascend.
     /// </summary>
     internal abstract void Keep(ReadOnlySpan<int> groups);
+
+    /// <summary>The bytes of a group's state when it lies in the group's record (<see cref="GroupRecords"/>); 0 for a slot that keeps its states apart.</summary>
+    internal virtual int StateBytes => 0;
+
+    /// <summary>Writes the state a group starts from into <paramref name="state"/>, <see cref="StateBytes"/> long: a record of seeds.</summary>
+    internal virtual void WriteSeed(Span<byte> state)
+    {
+    }
+
+    /// <summary>Keeps the slot's states at byte <paramref name="offset"/> of <paramref name="records"/>, which its partition shares among its slots.</summary>
+    internal virtual void Bind(GroupRecords records, int offset)
+    {
+    }
 }
 
 /// <summary>An aggregate whose answer per group is a <typeparamref name="TResult"/>.</summary>
@@ -297,27 +310,16 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
 }
 
 /// <summary>The rows of each group, nulls included.</summary>
-internal sealed class CountSlot : AggregateSlot<long>
+internal sealed class CountSlot : RecordSlot<long, long>
 {
-    private long[] _counts = [];
-    private int _groups;
-
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _counts.Length)
-        {
-            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override long Seed => 0;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group) =>
-        _counts[group] += RowMasks.Count(input.Selection, start, end);
+        State(group) += RowMasks.Count(input.Selection, start, end);
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
-        long[] counts = _counts;
+        StateView<long> counts = States;
         RowCursor rows = new RowCursor(input.Selection, 0, input.Rows);
         while (rows.Next(out int row))
         {
@@ -330,7 +332,7 @@ internal sealed class CountSlot : AggregateSlot<long>
 
     internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
-        long[] counts = _counts;
+        StateView<long> counts = States;
         ReadOnlySpan<int> starts = ranges.Starts;
         ReadOnlySpan<int> ends = ranges.Ends;
         ReadOnlySpan<int> groups = ranges.Groups;
@@ -353,29 +355,19 @@ internal sealed class CountSlot : AggregateSlot<long>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        long[] counts = ((CountSlot)other)._counts;
+        StateView<long> counts = States;
+        StateView<long> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            _counts[into[i]] += counts[from[i]];
+            counts[into[i]] += others[from[i]];
         }
     }
 
-    internal override long Result(int group) => _counts[group];
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _counts[i] = _counts[groups[i]];
-        }
-
-        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
-        _groups = groups.Length;
-    }
+    internal override long Result(int group) => State(group);
 
     internal override void Results(ReadOnlySpan<int> groups, Span<long> into)
     {
-        long[] counts = _counts;
+        StateView<long> counts = States;
         for (int i = 0; i < groups.Length; i++)
         {
             into[i] = counts[groups[i]];
@@ -387,32 +379,22 @@ internal sealed class CountSlot : AggregateSlot<long>
 /// Whether a group holds a row of those its filter keeps: <c>Any(p)</c> over the rows where
 /// <c>p</c> is true, and <c>All(p)</c>, which is no row where it is not.
 /// </summary>
-internal sealed class ExistsSlot(bool all) : AggregateSlot<bool>
+internal sealed class ExistsSlot(bool all) : RecordSlot<bool, bool>
 {
-    private bool[] _seen = [];
-    private int _groups;
-
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _seen.Length)
-        {
-            Array.Resize(ref _seen, Scratch.Capacity(groups, _seen.Length));
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override bool Seed => false;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
-        if (!_seen[group] && RowMasks.Count(input.Selection, start, end) > 0)
+        ref bool seen = ref State(group);
+        if (!seen && RowMasks.Count(input.Selection, start, end) > 0)
         {
-            _seen[group] = true;
+            seen = true;
         }
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
-        bool[] seen = _seen;
+        StateView<bool> seen = States;
         RowCursor rows = new RowCursor(input.Selection, 0, input.Rows);
         while (rows.Next(out int row))
         {
@@ -422,25 +404,15 @@ internal sealed class ExistsSlot(bool all) : AggregateSlot<bool>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        bool[] seen = ((ExistsSlot)other)._seen;
+        StateView<bool> seen = States;
+        StateView<bool> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            _seen[into[i]] |= seen[from[i]];
+            seen[into[i]] |= others[from[i]];
         }
     }
 
-    internal override bool Result(int group) => _seen[group] != all;
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _seen[i] = _seen[groups[i]];
-        }
-
-        _seen.AsSpan(groups.Length, _groups - groups.Length).Clear();
-        _groups = groups.Length;
-    }
+    internal override bool Result(int group) => State(group) != all;
 }
 
 /// <summary>

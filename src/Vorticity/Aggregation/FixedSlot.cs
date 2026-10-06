@@ -12,15 +12,13 @@ namespace Vorticity.Aggregating;
 /// a constant as one weighted value, a run-end block a weighted value per run, a dictionary block a
 /// weighted value per distinct code, and a canonical block through the dense kernels.
 /// </summary>
-internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TResult>, IMeanSlot
+internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TState, TResult>, IMeanSlot
     where TValue : unmanaged
     where TOp : IValueOp<TValue, TState>
 {
     private readonly StorageKind _kind;
     private readonly Func<TState, TResult> _finish;
     private readonly TState _seed;
-    private TState[] _states = [];
-    private int _groups;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private int[] _counts = [];
@@ -38,24 +36,11 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
         _seed = seed;
     }
 
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _states.Length)
-        {
-            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
-        }
-
-        for (int g = _groups; g < groups; g++)
-        {
-            _states[g] = _seed;
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override TState Seed => _seed;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
-        ref TState state = ref _states[group];
+        ref TState state = ref State(group);
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         switch (FixedReader.EncodingOf(arena, node, _kind))
@@ -156,7 +141,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
-        TState[] states = _states;
+        StateView<TState> states = States;
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         switch (FixedReader.EncodingOf(arena, node, _kind))
@@ -214,7 +199,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
-        TState[] states = _states;
+        StateView<TState> states = States;
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         ReadOnlySpan<int> starts = ranges.Starts;
@@ -307,27 +292,17 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        TState[] states = ((FixedSlot<TValue, TState, TOp, TResult>)other)._states;
+        StateView<TState> states = States;
+        StateView<TState> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            TOp.Merge(ref _states[into[i]], in states[from[i]]);
+            TOp.Merge(ref states[into[i]], in others[from[i]]);
         }
     }
 
-    internal override TResult Result(int group) => _finish(_states[group]);
+    internal override TResult Result(int group) => _finish(State(group));
 
-    public double? Mean(int group) => TOp.Mean(in _states[group]);
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _states[i] = _states[groups[i]];
-        }
-
-        // The groups past them are seeded again when they are made.
-        _groups = groups.Length;
-    }
+    public double? Mean(int group) => TOp.Mean(in State(group));
 
     /// <summary>
     /// Folds the rows of [start, end) the mask holds: a run of words of <see cref="WordFold.Dense"/>
