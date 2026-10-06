@@ -286,6 +286,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        _outcome?.Delivered();
     }
 }
 

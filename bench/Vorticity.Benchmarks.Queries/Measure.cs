@@ -126,11 +126,24 @@ internal static class Measure
     /// What two or eight queries of one process cost each other, which a host serving several users
     /// pays; under <c>DOTNET_GCHeapHardLimit</c>, also where they stop fitting.
     /// </summary>
-    internal static async Task<(double Millis, bool Agree)> ConcurrentAsync(Func<Run, Task<long>> query, int rounds, int copies)
+    /// <remarks>
+    /// A copy its memory budget refuses (PLAN-HIGH-CARDINALITY, H2) counts as refused rather than ending
+    /// the bench: under a capped heap, a query that fails cleanly is what the governor promises. Its
+    /// exception is told by its type's name, which an older commit of the library does not have.
+    /// </remarks>
+    internal static async Task<(double Millis, bool Agree, int Refused)> ConcurrentAsync(Func<Run, Task<long>> query, int rounds, int copies)
     {
-        await query(new Run(Stopwatch.StartNew(), 0, 0)).ConfigureAwait(false);
+        try
+        {
+            await query(new Run(Stopwatch.StartNew(), 0, 0)).ConfigureAwait(false);
+        }
+        catch (Exception failure) when (failure.GetType().Name == "VortexMemoryException")
+        {
+        }
+
         double best = double.MaxValue;
         bool agree = true;
+        int refused = 0;
         Task<long>[] running = new Task<long>[copies];
         for (int i = 0; i < rounds; i++)
         {
@@ -141,15 +154,27 @@ internal static class Measure
             Stopwatch clock = Stopwatch.StartNew();
             for (int c = 0; c < copies; c++)
             {
-                running[c] = Task.Run(() => query(new Run(clock, 0, 0)));
+                running[c] = Task.Run(async () =>
+                {
+                    try
+                    {
+                        return await query(new Run(clock, 0, 0)).ConfigureAwait(false);
+                    }
+                    catch (Exception failure) when (failure.GetType().Name == "VortexMemoryException")
+                    {
+                        return -1L;
+                    }
+                });
             }
 
             long[] results = await Task.WhenAll(running).ConfigureAwait(false);
             best = Math.Min(best, clock.Elapsed.TotalMilliseconds);
-            agree &= Array.TrueForAll(results, result => result == results[0]);
+            long[] answered = Array.FindAll(results, result => result >= 0);
+            agree &= Array.TrueForAll(answered, result => result == answered[0]);
+            refused = Math.Max(refused, results.Length - answered.Length);
         }
 
-        return (best, agree);
+        return (best, agree, refused);
     }
 
     /// <summary>One setting's rounds: the best so far, and what that round allocated, answered first and counted.</summary>

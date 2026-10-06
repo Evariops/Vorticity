@@ -520,6 +520,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 
                 counts[part] = count;
                 memory?.Shrink(bytes);
+                memory?.Discard(bytes);
             },
             degree,
             cancellationToken).ConfigureAwait(false);

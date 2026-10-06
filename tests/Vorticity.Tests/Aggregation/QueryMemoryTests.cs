@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -87,10 +88,42 @@ public sealed partial class QueryMemoryTests
             });
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            System.Collections.Generic.List<long> counts = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct);
+            List<long> counts = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct);
             Assert.Equal(Keys, counts.Count);
             Assert.Equal(Rows, counts.Sum());
             Assert.Equal(Keys, await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AResultHoldsItsMemoryUntilItIsDelivered()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Aggregation<long> counts = file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count());
+            await using (IAsyncEnumerator<long> read = counts.GetAsyncEnumerator(Ct))
+            {
+                // The first group read, the others are still held: the result counts until it is let go.
+                Assert.True(await read.MoveNextAsync());
+                Assert.True(budget.ReservedBytes > 0);
+            }
+
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Equal(Keys, (await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct)).Count);
             Assert.Equal(0, budget.ReservedBytes);
         }
         finally

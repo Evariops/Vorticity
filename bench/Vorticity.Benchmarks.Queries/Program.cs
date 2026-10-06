@@ -143,10 +143,20 @@ if (Option(args, "--concurrent", 0) is int copies and > 0)
 
             string path = await fixtures[fileName]().ConfigureAwait(false);
             await using VortexFile file = await session.OpenAsync(path).ConfigureAwait(false);
-            Measurement alone = await Measure.RunAsync(run => scenario.Query(file, run), rounds, probeEvery: 0).ConfigureAwait(false);
-            (double together, bool agree) = await Measure.ConcurrentAsync(run => scenario.Query(file, run), rounds, copies).ConfigureAwait(false);
+
+            // Under a capped heap, the query alone may be refused its memory too: told, not fatal.
+            double aloneMillis = double.NaN;
+            try
+            {
+                aloneMillis = (await Measure.RunAsync(run => scenario.Query(file, run), rounds, probeEvery: 0).ConfigureAwait(false)).Millis;
+            }
+            catch (Exception failure) when (failure.GetType().Name == "VortexMemoryException")
+            {
+            }
+
+            (double together, bool agree, int refused) = await Measure.ConcurrentAsync(run => scenario.Query(file, run), rounds, copies).ConfigureAwait(false);
             Console.WriteLine(
-                $"{scenario.Name,-62} {degree,6} {alone.Millis,9:F2} {together,10:F2} {together / alone.Millis,7:F2}{(agree ? string.Empty : "  RESULTS DIFFER")}");
+                $"{scenario.Name,-62} {degree,6} {aloneMillis,9:F2} {together,10:F2} {together / aloneMillis,7:F2}{(agree ? string.Empty : "  RESULTS DIFFER")}{(double.IsNaN(aloneMillis) ? "  refused alone" : string.Empty)}{(refused > 0 ? $"  {refused} of {copies} refused their memory" : string.Empty)}");
         }
     }
 

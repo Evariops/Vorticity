@@ -595,6 +595,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
                 counts[part] = count;
                 memory?.Shrink(bytes);
+                memory?.Discard(bytes);
             },
             degree,
             cancellationToken).ConfigureAwait(false);

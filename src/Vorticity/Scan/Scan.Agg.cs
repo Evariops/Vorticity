@@ -19,7 +19,14 @@ public sealed partial class Scan<TRecord>
         ArgumentNullException.ThrowIfNull(aggregate);
         ResultNode<T> node = AggregationPlan.Result(aggregate(new Aggregates<TRecord>(Binding)));
         AggregationOutcome outcome = await Host.RunAsync(new AggregationPlan([node], []), cancellationToken).ConfigureAwait(false);
-        return node.Bind(outcome)(0);
+        try
+        {
+            return node.Bind(outcome)(0);
+        }
+        finally
+        {
+            outcome.Delivered();
+        }
     }
 
     /// <summary>

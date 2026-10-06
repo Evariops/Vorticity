@@ -368,6 +368,12 @@ internal sealed class AggregationOutcome
 
     internal AggregationPlan Plan => _plan;
 
+    /// <summary>What the result holds of its query's memory budget, until it is delivered (PLAN-HIGH-CARDINALITY, H2); null for a result nobody counts.</summary>
+    internal QueryMemory? Memory { get; set; }
+
+    /// <summary>Gives back what the result held of its query's budget: delivered, it is the caller's.</summary>
+    internal void Delivered() => Memory?.Dispose();
+
     internal GroupKeys? Keys { get; }
 
     /// <summary>The groups in delivery order; the one group of a scalar aggregation.</summary>
@@ -502,6 +508,9 @@ internal sealed class AggregationPartition
 
     /// <summary>The bytes the partition reserved in the query's memory.</summary>
     internal long Accounted { get; private set; }
+
+    /// <summary>The bytes its groups held at the last reading, which the query's memory measures.</summary>
+    internal long Measured { get; private set; }
 
     internal GroupKeys? Keys { get; private set; }
 
@@ -706,14 +715,39 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>Gives back what the partition reserved past what its groups hold: the room for a doubling, once its table grows no more.</summary>
+    internal void Trim()
+    {
+        if (Memory is { } memory && Accounted > Footprint)
+        {
+            memory.Shrink(Accounted - Footprint);
+            Accounted = Footprint;
+        }
+    }
+
     /// <summary>
-    /// Reserves what the partition's groups grew to since it last did, a megabyte ahead at least: a
-    /// reading of its arrays' lengths, once a batch. Past the budget, the query fails, its memory given
-    /// back as it unwinds.
+    /// Reserves twice what the partition's groups hold, a megabyte ahead at least: a reading of its
+    /// arrays' lengths, once a batch. Twice, because a table doubles within a batch, before the next
+    /// reading: its new arrays are reserved before they come, the old ones beside them only for the
+    /// copy, a moment no reading sees. What the groups hold is measured too: grown, the arrays they
+    /// replaced stay in the heap until a collection, as much as they grew by when they doubled. Past
+    /// the budget, the query fails, its memory given back as it unwinds.
     /// </summary>
     private void Account(QueryMemory memory)
     {
-        long need = Footprint - Accounted;
+        long footprint = Footprint;
+        if (footprint != Measured)
+        {
+            if (Measured > 0 && footprint > Measured)
+            {
+                memory.Discard(Math.Min(Measured, footprint - Measured));
+            }
+
+            memory.Measure(footprint - Measured);
+            Measured = footprint;
+        }
+
+        long need = (2 * footprint) - Accounted;
         if (need <= 0)
         {
             return;
@@ -1086,7 +1120,15 @@ internal abstract class AggregationHost
                     groups[g] = g;
                 }
 
-                await ChosenFetch.FetchAsync(outcome, Source, spec, Metrics, groups, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await ChosenFetch.FetchAsync(outcome, Source, spec, Metrics, groups, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    outcome.Delivered();
+                    throw;
+                }
             }
 
             return outcome;
@@ -1115,8 +1157,16 @@ internal abstract class AggregationHost
             KeyTop? top = KeyTop.Of(query) ?? KeyTop.FirstOf(query);
             AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
-            (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
-            return (outcome, groups, count);
+            try
+            {
+                (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
+                return (outcome, groups, count);
+            }
+            catch
+            {
+                outcome.Delivered();
+                throw;
+            }
         }
         finally
         {
@@ -1229,73 +1279,96 @@ internal static class AggregationEngine
             facts = GroupCore.CacheFacts(facts);
         }
 
-        // What the lanes' tables and the merge hold, reserved in the session's budget as they grow, and
-        // given back once the groups are merged, or when the query fails (PLAN-HIGH-CARDINALITY, H2).
-        using QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
-        if (ranges is null)
+        // What the lanes' tables and the merge hold, reserved in the session's budget as they grow,
+        // brought down to the result once the groups are merged and given back when it is delivered;
+        // all of it as soon as the query fails (PLAN-HIGH-CARDINALITY, H2).
+        QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        try
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+            if (ranges is null)
             {
-                Top = top,
-                Core = core?.Lane(),
-                Memory = memory,
-            };
-            if (settling is not null)
-            {
-                only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
-            }
-
-            partitions = [only];
-            plan.Watch?.Invoke(partitions);
-            await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            // A worker per lane, each with its partition from one range to the next: the merge
-            // stays in as many parts as lanes, however many ranges the queue holds.
-            partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
-            for (int p = 0; p < partitions.Length; p++)
-            {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+                AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
                 {
-                    Top = top is { FirstMet: true } ? null : top,
+                    Top = top,
                     Core = core?.Lane(),
                     Memory = memory,
                 };
+                if (settling is not null)
+                {
+                    only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
+                }
+
+                partitions = [only];
+                plan.Watch?.Invoke(partitions);
+                await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // A worker per lane, each with its partition from one range to the next: the merge
+                // stays in as many parts as lanes, however many ranges the queue holds.
+                partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
+                for (int p = 0; p < partitions.Length; p++)
+                {
+                    partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+                    {
+                        Top = top is { FirstMet: true } ? null : top,
+                        Core = core?.Lane(),
+                        Memory = memory,
+                    };
+                }
+
+                plan.Watch?.Invoke(partitions);
+                await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
             }
 
-            plan.Watch?.Invoke(partitions);
-            await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
-        }
+            long merging = Stopwatch.GetTimestamp();
+            if (core is { Engaged: true })
+            {
+                // The sub-tables are the result; the lanes' caches die with the pass.
+                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await core.FinishAsync(partitions, degree, cancellationToken).ConfigureAwait(false);
+                plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = core.Run() };
+                foreach (AggregationPartition partition in partitions)
+                {
+                    partition.Release();
+                }
 
-        long merging = Stopwatch.GetTimestamp();
-        if (core is { Engaged: true })
-        {
-            // The sub-tables are the result; the lanes' caches die with the pass.
-            (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await core.FinishAsync(partitions, degree, cancellationToken).ConfigureAwait(false);
-            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = core.Run() };
+                return Counted(new AggregationOutcome(plan, heldSlots, held, held.Order(sorted: false)), memory, heldBytes);
+            }
+
+            (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, memory, cancellationToken).ConfigureAwait(false);
+            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, merged);
+
+            // The lanes' tables die with the merge, but the one a merge in series kept as the result.
+            long result = merged;
             foreach (AggregationPartition partition in partitions)
             {
-                partition.Release();
+                if (ReferenceEquals(partition.Slots, slots))
+                {
+                    result = partition.Footprint;
+                }
+                else
+                {
+                    partition.Release();
+                }
             }
 
-            return new AggregationOutcome(plan, heldSlots, held, held.Order(sorted: false));
+            // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
+            int[] order = keys is null ? [0] : keys.Order(sorted: false);
+            return Counted(new AggregationOutcome(plan, slots, keys, order), memory, result);
         }
-        (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, memory, cancellationToken).ConfigureAwait(false);
-        plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, merged);
-
-        // The lanes' tables die with the merge, but the one a merge in series kept as the result.
-        foreach (AggregationPartition partition in partitions)
+        catch
         {
-            if (!ReferenceEquals(partition.Slots, slots))
-            {
-                partition.Release();
-            }
+            memory.Dispose();
+            throw;
         }
+    }
 
-        // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
-        int[] order = keys is null ? [0] : keys.Order(sorted: false);
-        return new AggregationOutcome(plan, slots, keys, order);
+    /// <summary>The result keeps <paramref name="bytes"/> of its query's memory, what its groups hold, until it is delivered; the rest is given back.</summary>
+    private static AggregationOutcome Counted(AggregationOutcome outcome, QueryMemory memory, long bytes)
+    {
+        memory.Keep(bytes);
+        outcome.Memory = memory;
+        return outcome;
     }
 
     /// <summary>The parts a parallel merge cuts the key space into, at most.</summary>
@@ -1336,6 +1409,17 @@ internal static class AggregationEngine
 
         long serial = entries - (biggest.Keys?.Count ?? 0);
         bool inParts = plan.MergeInParts ?? (parts > 1 && 2 * entries < Math.Min(degree, parts) * serial);
+
+        // The pass done, a lane's table grows no more but by a merge into it: the room it kept for a
+        // doubling goes back to the budget, for the merge's own.
+        for (int p = 0; p < partitions.Length; p++)
+        {
+            if (p != largest)
+            {
+                partitions[p].Trim();
+            }
+        }
+
         if (partitions.Length == 1 || biggest.Keys is null || !inParts)
         {
             // The keys and the states in series, into the largest; a distinct count's pairs, when they
@@ -1372,7 +1456,25 @@ internal static class AggregationEngine
         // What the partitions share is merged once: a composite's indexes of its columns.
         await keysOf[0].RebaseAsync(keysOf, token).ConfigureAwait(false);
 
-        // Each partition's groups by part, a task each: hashed, counted, placed.
+        biggest.Trim();
+        long laneBytes = 0;
+        long laneGroups = 0;
+        foreach (AggregationPartition partition in partitions)
+        {
+            laneBytes += partition.Footprint;
+            laneGroups += partition.Keys!.Count;
+        }
+
+        // Each partition's groups by part, a task each: hashed, counted, placed. The places, an int a
+        // group, and its part, a byte, reserved before.
+        long cut = laneGroups * (sizeof(int) + sizeof(byte));
+        if (!memory.TryGrow(cut))
+        {
+            throw memory.Exceeded("merge of a group by", laneGroups, cut);
+        }
+
+        memory.Measure(cut);
+
         ulong seed = MergeHash.Seed;
         int shift = 64 - BitOperations.Log2((uint)parts);
         int[][] placed = new int[partitions.Length][];
@@ -1388,7 +1490,9 @@ internal static class AggregationEngine
 
         // Each part merged from every partition, the parts taken from a queue. A part's groups are
         // reserved before they come: as many as its largest partition sends while no part is done,
-        // then its entries at the rate of groups to entries the parts done had.
+        // then its entries at the rate of groups to entries the parts done had. What a group costs, the
+        // lanes' tables tell.
+        long perGroup = laneGroups > 0 ? Math.Max(1, laneBytes / laneGroups) : 64;
         GroupKeys[] partKeys = new GroupKeys[parts];
         AggregateSlot[][] partSlots = new AggregateSlot[parts][];
         int taken = -1;
@@ -1424,6 +1528,14 @@ internal static class AggregationEngine
                             }
                         }
 
+                        // The part's table reserved before it is built, twice what its groups cost the
+                        // lanes: a doubling's room, as a lane's table keeps.
+                        long ahead = 2L * reserve * perGroup;
+                        if (!memory.TryGrow(ahead))
+                        {
+                            throw memory.Exceeded("merge of a group by", reserve, ahead);
+                        }
+
                         GroupKeys keys = keysOf[0].ForPart();
                         keys.Reserve(reserve);
                         AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source);
@@ -1455,11 +1567,14 @@ internal static class AggregationEngine
                             }
                         }
 
-                        // The part's table beside the lanes', which live until the merge is done.
-                        long bytes = keys.Footprint + AggregateSlot.FootprintOf(slots);
-                        if (!memory.TryGrow(bytes))
+                        // Twice what the part's table came to, beside the lanes', which live until the
+                        // merge is done.
+                        long built = keys.Footprint + AggregateSlot.FootprintOf(slots);
+                        memory.Measure(built);
+                        long more = (2 * built) - ahead;
+                        if (more > 0 && !memory.TryGrow(more))
                         {
-                            throw memory.Exceeded("merge of a group by", keys.Count, bytes);
+                            throw memory.Exceeded("merge of a group by", keys.Count, more);
                         }
 
                         partKeys[part] = keys;
