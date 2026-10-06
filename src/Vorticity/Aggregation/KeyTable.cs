@@ -4,97 +4,110 @@ using System.Runtime.CompilerServices;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The groups of a fixed-width key by open addressing, in a table the engine owns
-/// (PLAN-HIGH-CARDINALITY, H15): a slot holds a key and its group, a key's slot is its hash modulo a
-/// prime, by the fast modulo the runtime's dictionary takes, and the slots after it in turn. An
-/// integer is its own hash, folded to 32 bits, so that keys in a row land in slots in a row and a
-/// regular stride spreads over the prime; a float its bits, one pattern a value. At most six slots
-/// in ten hold a key: some 2.2 slots a key on average as the table doubles, where a dictionary takes
-/// an entry and a bucket.
+/// The groups of a fixed-width key, in a table the engine owns (PLAN-HIGH-CARDINALITY, H15): a slot
+/// holds a key and its group, a key's home slot is its hash modulo a prime, by the fast modulo the
+/// runtime's dictionary takes. An integer is its own hash, folded to 32 bits, so that keys in a row
+/// land in slots in a row and a regular stride spreads over the prime; a float its bits, one pattern
+/// a value. A key whose home is taken goes to the first free slot of the home's line (64 bytes of
+/// slots), and past a full line to the line's chain, in an array of its own.
 /// </summary>
 /// <remarks>
-/// Keys can be built to share their slot modulo any prime: a key that lands <see cref="MaxProbes"/>
-/// slots past its own makes the table take a seed of its own and place every key again by a mix of
-/// it, which keys built against the identity cannot follow. It runs at every insertion, so a table
-/// presized for a merge sees it too.
+/// <para>
+/// The line bounds the probe: a run of keys in a row fills its lines, and a key that lands in it costs
+/// a link of a chain, where a probe past the line would walk the run. Linear probing over the whole
+/// table, measured on 2026-10-06, read hot keys in a row among keys spread over a range folded on
+/// them (the bench's <c>drift</c>) three times slower than the dictionary, and keys at a stride of
+/// 2²² or a permutation of the integers twice, both after a probe of 256 slots made it take a seed.
+/// </para>
+/// <para>
+/// Keys can still be built to share their home modulo any prime: a chain of <see cref="MaxChain"/>
+/// links makes the table take a seed of its own and place every key again by a mix of it, which keys
+/// built against the identity cannot follow. Before the seed, a table that sends one key in eight to
+/// its chains while it is past three tenths full doubles: two runs folded onto each other modulo a
+/// prime a little smaller than their range lie apart modulo the next.
+/// </para>
 /// </remarks>
 internal struct KeyTable<TValue>
     where TValue : unmanaged, IEquatable<TValue>
 {
-    /// <summary>
-    /// How far past its own slot a key lands before the table takes a seed: at six tenths, the runs of
-    /// keys in no order stay under some 150 slots at ten million keys.
-    /// </summary>
-    private const int MaxProbes = 256;
+    /// <summary>The links of a chain past which the table takes a seed.</summary>
+    private const int MaxChain = 64;
 
     /// <summary>The slots of a table's first growth: a prime.</summary>
     private const int FirstSlots = 31;
 
     private Slot[] _slots;
+    private int[] _chains;
+    private Entry[] _overflow;
+    private int _overflowed;
     private ulong _multiplier;
     private ulong _seed;
     private int _count;
+    private int _growAt;
 
     public KeyTable()
     {
         _slots = [];
+        _chains = [];
+        _overflow = [];
     }
 
     /// <summary>The keys the table holds.</summary>
     internal readonly int Count => _count;
 
-    /// <summary>Whether a key landed far enough from its own slot for the table to take a seed.</summary>
+    /// <summary>Whether a chain grew long enough for the table to take a seed.</summary>
     internal readonly bool Seeded => _seed != 0;
 
-    /// <summary>The bytes of the slots.</summary>
-    internal readonly long Footprint => (long)_slots.Length * Unsafe.SizeOf<Slot>();
+    /// <summary>The bytes of the slots, the chains' heads and their links.</summary>
+    internal readonly long Footprint =>
+        ((long)_slots.Length * Unsafe.SizeOf<Slot>()) + ((long)_chains.Length * sizeof(int)) + ((long)_overflow.Length * Unsafe.SizeOf<Entry>());
+
+    /// <summary>The slots of a line: as many as 64 bytes hold, a power of two.</summary>
+    private static int Width => Unsafe.SizeOf<Slot>() switch
+    {
+        <= 8 => 8,
+        <= 16 => 4,
+        <= 32 => 2,
+        _ => 1,
+    };
+
+    private static int WidthShift => Width switch
+    {
+        8 => 3,
+        4 => 2,
+        2 => 1,
+        _ => 0,
+    };
 
     /// <summary>The group of <paramref name="key"/>; when the key is new, <paramref name="next"/>, which it then holds.</summary>
+    /// <remarks>
+    /// A key whose home is free is in no line and no chain: it would have taken its home, which no
+    /// key leaves. So a free home takes the key at once, and only a taken one searches.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int GetOrAdd(TValue key, int next)
     {
         Slot[] slots = _slots;
-        if (slots.Length == 0)
+        if (slots.Length != 0)
         {
-            Resize(FirstSlots);
-            slots = _slots;
-        }
-
-        uint at = Home(key);
-        int probes = 0;
-        while (true)
-        {
-            ref Slot slot = ref slots[at];
-            if (slot.Group == 0)
+            ref Slot slot = ref slots[Home(key)];
+            if (slot.Group != 0)
             {
-                // A new key: the table grows first if it would hold more than six slots in ten, or
-                // takes a seed if the key lands too far from its own slot.
-                if (10L * (_count + 1) > 6L * slots.Length)
+                if (slot.Key.Equals(key))
                 {
-                    Resize(PrimeAtLeast(2 * slots.Length));
-                    return GetOrAdd(key, next);
+                    return slot.Group - 1;
                 }
-
-                if (probes >= MaxProbes && _seed == 0)
-                {
-                    _seed = (ulong)Random.Shared.NextInt64(1, long.MaxValue) | 1;
-                    Resize(slots.Length);
-                    return GetOrAdd(key, next);
-                }
-
+            }
+            else if (_count < _growAt)
+            {
                 slot.Key = key;
                 slot.Group = next + 1;
                 _count++;
                 return next;
             }
-
-            if (slot.Key.Equals(key))
-            {
-                return slot.Group - 1;
-            }
-
-            at = at + 1 == (uint)slots.Length ? 0 : at + 1;
-            probes++;
         }
+
+        return Search(key, next);
     }
 
     /// <summary>Makes room for <paramref name="keys"/> keys without growing on the way.</summary>
@@ -111,7 +124,81 @@ internal struct KeyTable<TValue>
     internal void Clear()
     {
         Array.Clear(_slots);
+        Array.Clear(_chains);
+        _overflowed = 0;
         _count = 0;
+    }
+
+    /// <summary>A key whose home is taken: the rest of the home's line, then the line's chain.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int Search(TValue key, int next)
+    {
+        if (_slots.Length == 0)
+        {
+            Resize(FirstSlots);
+        }
+
+        Slot[] slots = _slots;
+        uint at = Home(key);
+        uint first = at & ~(uint)(Width - 1);
+        uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
+        uint probe = at;
+        do
+        {
+            ref Slot slot = ref slots[probe];
+            if (slot.Group == 0)
+            {
+                if (_count >= _growAt)
+                {
+                    Resize(PrimeAtLeast(2 * slots.Length));
+                    return Search(key, next);
+                }
+
+                slot.Key = key;
+                slot.Group = next + 1;
+                _count++;
+                return next;
+            }
+
+            if (slot.Key.Equals(key))
+            {
+                return slot.Group - 1;
+            }
+
+            probe = probe + 1 == end ? first : probe + 1;
+        }
+        while (probe != at);
+
+        int links = 0;
+        for (int link = _chains[at >> WidthShift]; link != 0; link = _overflow[link - 1].Next)
+        {
+            ref Entry entry = ref _overflow[link - 1];
+            if (entry.Key.Equals(key))
+            {
+                return entry.Group - 1;
+            }
+
+            links++;
+        }
+
+        // A new key past a full line: the table grows if it is full, or if its chains hold one key in
+        // eight while it is past three tenths full, or takes a seed if the chain is long.
+        if (_count >= _growAt || (8L * _overflowed > _count && 10L * _count > 3L * slots.Length))
+        {
+            Resize(PrimeAtLeast(2 * slots.Length));
+            return Search(key, next);
+        }
+
+        if (links >= MaxChain && _seed == 0)
+        {
+            _seed = (ulong)Random.Shared.NextInt64(1, long.MaxValue) | 1;
+            Resize(slots.Length);
+            return Search(key, next);
+        }
+
+        Chain(key, next + 1, at);
+        _count++;
+        return next;
     }
 
     /// <summary>The slot <paramref name="key"/> starts from: its folded bits, mixed under the seed once there is one, modulo the slots.</summary>
@@ -122,7 +209,7 @@ internal struct KeyTable<TValue>
         uint hash;
         if (_seed != 0)
         {
-            hash = (uint)(MergeHash.Of(low, high, _seed) >> 32);
+            hash = (uint)((Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, _seed) : MergeHash.Of(low, high, _seed)) >> 32);
         }
         else if (Unsafe.SizeOf<TValue>() <= sizeof(uint))
         {
@@ -141,24 +228,64 @@ internal struct KeyTable<TValue>
     private void Resize(int length)
     {
         Slot[] old = _slots;
+        Entry[] overflow = _overflow;
+        int overflowed = _overflowed;
         _slots = new Slot[length];
+        _chains = new int[(length >> WidthShift) + 1];
+        _overflow = new Entry[overflowed];
+        _overflowed = 0;
         _multiplier = (ulong.MaxValue / (uint)length) + 1;
-        Slot[] slots = _slots;
+        _growAt = (int)(6L * length / 10);
         foreach (Slot slot in old)
         {
+            if (slot.Group != 0)
+            {
+                Place(slot.Key, slot.Group);
+            }
+        }
+
+        for (int i = 0; i < overflowed; i++)
+        {
+            Place(overflow[i].Key, overflow[i].Group);
+        }
+    }
+
+    /// <summary>A key of the table placed again: the first free slot of its line from its home, or its line's chain.</summary>
+    private void Place(TValue key, int group)
+    {
+        Slot[] slots = _slots;
+        uint at = Home(key);
+        uint first = at & ~(uint)(Width - 1);
+        uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
+        uint probe = at;
+        do
+        {
+            ref Slot slot = ref slots[probe];
             if (slot.Group == 0)
             {
-                continue;
+                slot.Key = key;
+                slot.Group = group;
+                return;
             }
 
-            uint at = Home(slot.Key);
-            while (slots[at].Group != 0)
-            {
-                at = at + 1 == (uint)slots.Length ? 0 : at + 1;
-            }
-
-            slots[at] = slot;
+            probe = probe + 1 == end ? first : probe + 1;
         }
+        while (probe != at);
+
+        Chain(key, group, at);
+    }
+
+    /// <summary>Links a key at the head of the chain of the line of slot <paramref name="at"/>.</summary>
+    private void Chain(TValue key, int group, uint at)
+    {
+        if (_overflowed == _overflow.Length)
+        {
+            Array.Resize(ref _overflow, Math.Max(16, 2 * _overflow.Length));
+        }
+
+        ref int head = ref _chains[at >> WidthShift];
+        _overflow[_overflowed] = new Entry { Key = key, Group = group, Next = head };
+        head = ++_overflowed;
     }
 
     /// <summary><paramref name="value"/> modulo <paramref name="divisor"/> by a multiplication, as the runtime's dictionary takes it.</summary>
@@ -195,5 +322,13 @@ internal struct KeyTable<TValue>
     {
         public TValue Key;
         public int Group;
+    }
+
+    /// <summary>A key past a full line, its group plus one, and the next link of its line's chain plus one.</summary>
+    private struct Entry
+    {
+        public TValue Key;
+        public int Group;
+        public int Next;
     }
 }

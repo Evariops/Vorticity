@@ -15,7 +15,7 @@ public sealed class GroupHashTests
     private const int CrowdedKeys = 4_096;
 
     // Every value a * (2^32 + 1) folds to the same 32 bits, 0: a column of them would pile into one
-    // slot of the key table and make a group-by quadratic, but past MaxProbes the table takes a seed.
+    // chain of the key table and make a group-by quadratic, but past MaxChain links the table takes a seed.
     [Fact]
     public void FixedKeysCrowdedIntoOneSlotAreRehashedUnderASeed()
     {
@@ -30,6 +30,59 @@ public sealed class GroupHashTests
         {
             Assert.Equal(a, table.GetOrAdd(Crowded(a), -1));
         }
+    }
+
+    // Keys that share their home fill its line, then its chain: every one keeps its group, and a
+    // chain shorter than MaxChain takes no seed.
+    [Fact]
+    public void KeysPastAFullLineKeepTheirGroupsInItsChain()
+    {
+        KeyTable<long> table = new KeyTable<long>();
+        for (int a = 0; a < 40; a++)
+        {
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), a));
+        }
+
+        Assert.False(table.Seeded);
+        for (int a = 0; a < 40; a++)
+        {
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), -1));
+        }
+    }
+
+    // Keys of a structure the identity keeps: a stride of 2^22 (identifiers whose sequence field is
+    // zero), a permutation of the integers, hot keys in a row among a range folded onto them modulo a
+    // prime a little smaller than it. A probe over the whole table walked their runs and took a seed;
+    // a line and its chain take none, and number the keys as they come.
+    [Theory]
+    [InlineData("strided")]
+    [InlineData("permutation")]
+    [InlineData("drift")]
+    public void StructuredKeysTakeNoSeed(string pattern)
+    {
+        const int Rows = 400_000;
+        KeyTable<long> table = new KeyTable<long>();
+        Dictionary<long, int> oracle = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            ulong mix = Mix((ulong)row);
+            long key = pattern switch
+            {
+                "strided" => (long)(mix % 100_000) << 22,
+                "permutation" => unchecked((uint)row * 2_654_435_761u),
+                _ => (mix & 1) == 0 ? (row / (Rows / 16) * 1_000) + (long)((mix >> 1) % 1_000) : 100_000 + (long)((mix >> 32) % 100_000),
+            };
+            if (!oracle.TryGetValue(key, out int expected))
+            {
+                expected = oracle.Count;
+                oracle.Add(key, expected);
+            }
+
+            Assert.Equal(expected, table.GetOrAdd(key, table.Count));
+        }
+
+        Assert.False(table.Seeded);
+        Assert.Equal(oracle.Count, table.Count);
     }
 
     // The index is rehashed while the groups fill: every group keeps its rows through it.
@@ -182,6 +235,15 @@ public sealed class GroupHashTests
 
     /// <summary>Key <paramref name="a"/> of a column whose every key has the default hash 0.</summary>
     private static long Crowded(int a) => a * ((1L << 32) + 1);
+
+    /// <summary>SplitMix64, as the queries bench draws its keys.</summary>
+    private static ulong Mix(ulong x)
+    {
+        x += 0x9E3779B97F4A7C15UL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+        return x ^ (x >> 31);
+    }
 
     /// <summary>A thousand text keys whose unseeded XxHash3 share their low eleven bits.</summary>
     private static List<byte[]> Crowded()
