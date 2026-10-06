@@ -583,7 +583,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         for (int g = 0; g < Count; g++)
         {
             (ulong low, ulong high) = KeyWords.Of(_keys[g]);
-            parts[g] = (byte)(MergeHash.Of(low, high, seed) >> shift);
+            parts[g] = (byte)((Unsafe.SizeOf<TKey>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed)) >> shift);
         }
     }
 

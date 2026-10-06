@@ -256,6 +256,12 @@ internal readonly record struct KeyBounds(long Min, long Max);
 /// </summary>
 internal static class MergeHash
 {
+    /// <summary>
+    /// A key of one word: one round of the mix, a bijection whose every input bit reaches every bit
+    /// of the hash, where the key of two words takes two (PLAN-HIGH-CARDINALITY, H15).
+    /// </summary>
+    internal static ulong Of(ulong word, ulong seed) => Mix(word ^ seed);
+
     /// <summary>A key of two words, every bit of each reaching every bit of the hash.</summary>
     internal static ulong Of(ulong low, ulong high, ulong seed) => Mix(Mix(low ^ seed) ^ high);
 
@@ -719,7 +725,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         for (int g = 0; g < Count; g++)
         {
             (ulong low, ulong high) = KeyWords.Of(_keys[g]);
-            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(low, high, seed) >> shift);
+            ulong hash = Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed);
+            parts[g] = g == _null ? (byte)0 : (byte)(hash >> shift);
         }
     }
 
@@ -1212,7 +1219,7 @@ internal sealed class BoolKeys : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, 0, seed) >> shift);
+            parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, seed) >> shift);
         }
     }
 
