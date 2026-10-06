@@ -1,4 +1,6 @@
 using System;
+using System.Globalization;
+using System.Reflection;
 using Vorticity.Aggregating;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -8,6 +10,11 @@ namespace Vorticity.Benchmarks.Queries;
 /// (<c>--switch name</c>): each query runs under both in turns, and each setting keeps its best
 /// round. A query that does not track its aggregation runs the same under both.
 /// </summary>
+/// <remarks>
+/// A switch is a property of the plan, set by its name: bench/queries-ab.sh builds today's bench
+/// against older commits of the library, which the bench must compile against whatever switches
+/// they have. A switch a commit lacks fails when it is asked for, not when the bench builds.
+/// </remarks>
 internal static class Switches
 {
     /// <summary>A switch: its two settings, each named and set on a plan.</summary>
@@ -16,29 +23,27 @@ internal static class Switches
     internal static Switch? Find(string? name) => name switch
     {
         null => null,
-        "merge" => new Switch("in series", plan => plan.MergeInParts = false, "in parts", plan => plan.MergeInParts = true),
-        _ when name.StartsWith("parts:", StringComparison.Ordinal) => Parts(name),
-        _ when name.StartsWith("window:", StringComparison.Ordinal) => Windows(name),
+        "merge" => new Switch("in series", Set("MergeInParts", false), "in parts", Set("MergeInParts", true)),
+        _ when name.StartsWith("parts:", StringComparison.Ordinal) => Pair(name, "MergeParts", "parts"),
+        _ when name.StartsWith("window:", StringComparison.Ordinal) => Pair(name, "FoldWindow", "window"),
         _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B."),
     };
 
-    /// <summary><c>window:A:B</c>, the slots folding windows of A rows against B, 0 for the whole batch.</summary>
-    private static Switch Windows(string name)
+    /// <summary><c>name:A:B</c>, the integer switch <paramref name="property"/> at A against B, either of them <c>auto</c> for the engine's own.</summary>
+    private static Switch Pair(string name, string property, string label)
     {
-        string[] rows = name.Split(':');
-        return new Switch($"window {rows[1]}", Set(rows[1]), $"window {rows[2]}", Set(rows[2]));
+        string[] values = name.Split(':');
+        return new Switch($"{label} {values[1]}", Of(values[1]), $"{label} {values[2]}", Of(values[2]));
 
-        static Action<AggregationPlan> Set(string rows) =>
-            plan => plan.FoldWindow = int.Parse(rows, System.Globalization.CultureInfo.InvariantCulture);
+        Action<AggregationPlan> Of(string value) =>
+            value == "auto" ? static _ => { } : Set(property, int.Parse(value, CultureInfo.InvariantCulture));
     }
 
-    /// <summary><c>parts:A:B</c>, a merge in A parts against one in B, either of them <c>auto</c> for the merge's own count.</summary>
-    private static Switch Parts(string name)
+    /// <summary>Sets the plan's switch <paramref name="property"/> to <paramref name="value"/>.</summary>
+    private static Action<AggregationPlan> Set(string property, object value)
     {
-        string[] counts = name.Split(':');
-        return new Switch($"{counts[1]} parts", Set(counts[1]), $"{counts[2]} parts", Set(counts[2]));
-
-        static Action<AggregationPlan> Set(string count) =>
-            count == "auto" ? static _ => { } : plan => plan.MergeParts = int.Parse(count, System.Globalization.CultureInfo.InvariantCulture);
+        PropertyInfo setting = typeof(AggregationPlan).GetProperty(property, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            ?? throw new ArgumentException($"This build of the library has no switch {property}.");
+        return plan => setting.SetValue(plan, value);
     }
 }
