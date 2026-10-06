@@ -371,7 +371,7 @@ internal static class Aggregators
 
     internal static Sym<T?> Extreme<T>(ColumnShape shape, bool max)
     {
-        Func<AggregateSlot<T?>> create = shape.Kind switch
+        Func<ScanSource?, AggregateSlot<T?>> create = shape.Kind switch
         {
             StorageKind.Primitive => shape.PType switch
             {
@@ -388,10 +388,10 @@ internal static class Aggregators
                 _ => Extreme<double, T>(shape, max),
             },
             StorageKind.Decimal => Extreme<Int128, T>(shape, max),
-            StorageKind.Decimal256 => OrderedExtreme<Int256, T>(shape, max),
+            StorageKind.Decimal256 => Unsourced(OrderedExtreme<Int256, T>(shape, max)),
             StorageKind.Uuid => Extreme<UInt128, T>(shape, max),
-            StorageKind.Bool => BoolExtreme<T>(shape, max),
-            StorageKind.Bytes => () => new BytesExtremeSlot<T?>(shape, max),
+            StorageKind.Bool => Unsourced(BoolExtreme<T>(shape, max)),
+            StorageKind.Bytes => Unsourced<T?>(() => new BytesExtremeSlot<T?>(shape, max)),
             _ => throw shape.Unsupported(max ? "a maximum" : "a minimum"),
         };
         return new Sym<T?>(new AggregateNode<T?>(max ? AggregateKind.Max : AggregateKind.Min, shape, create, (StatisticsView view, out T? value) => SettleExtreme(shape, max, view, out value)));
@@ -445,16 +445,67 @@ internal static class Aggregators
         }
     }
 
-    private static Func<AggregateSlot<T?>> Extreme<TValue, T>(ColumnShape shape, bool max)
-        where TValue : unmanaged, INumber<TValue>
+    /// <summary>
+    /// The state of an extreme: the value alone, from a seed no row holds, where the column leaves one
+    /// (<see cref="Unreached"/>); the value and whether one was seen otherwise.
+    /// </summary>
+    private static Func<ScanSource?, AggregateSlot<T?>> Extreme<TValue, T>(ColumnShape shape, bool max)
+        where TValue : unmanaged, INumber<TValue>, IMinMaxValue<TValue>
     {
         Func<ExtremeState<TValue>, T?> finish = s => s.Has ? StorageValues.ToClr<TValue, T>(s.Value, shape) : default;
-        if (max)
+        return source =>
         {
-            return () => new FixedSlot<TValue, ExtremeState<TValue>, MaxOp<TValue>, T?>(shape.Kind, finish);
+            if (!Unreached(source, shape, max, out TValue seed))
+            {
+                return max
+                    ? new FixedSlot<TValue, ExtremeState<TValue>, MaxOp<TValue>, T?>(shape.Kind, finish)
+                    : new FixedSlot<TValue, ExtremeState<TValue>, MinOp<TValue>, T?>(shape.Kind, finish);
+            }
+
+            // A group still at the seed, or at NaN, saw no value.
+            Func<TValue, T?> value = s => TValue.IsNaN(s) || s == seed ? default : StorageValues.ToClr<TValue, T>(s, shape);
+            return max
+                ? new FixedSlot<TValue, TValue, SeededMaxOp<TValue>, T?>(shape.Kind, value, seed)
+                : new FixedSlot<TValue, TValue, SeededMinOp<TValue>, T?>(shape.Kind, value, seed);
+        };
+    }
+
+    /// <summary>
+    /// The value an extreme's state starts from, which says that no value was seen, when no row of the
+    /// source can hold it: NaN for a float, which no add keeps; for a decimal of 38 digits or fewer, the
+    /// end of 128 bits, past all of them; for an integer, the end of its range the extreme moves away
+    /// from, where the statistics prove the column stops short of it. A uuid may hold any 128 bits.
+    /// </summary>
+    private static bool Unreached<TValue>(ScanSource? source, ColumnShape shape, bool max, out TValue seed)
+        where TValue : unmanaged, INumber<TValue>, IMinMaxValue<TValue>
+    {
+        if (typeof(TValue) == typeof(double) || typeof(TValue) == typeof(float) || typeof(TValue) == typeof(Half))
+        {
+            seed = TValue.CreateTruncating(double.NaN);
+            return true;
         }
 
-        return () => new FixedSlot<TValue, ExtremeState<TValue>, MinOp<TValue>, T?>(shape.Kind, finish);
+        seed = max ? TValue.MinValue : TValue.MaxValue;
+        if (shape.Kind == StorageKind.Decimal)
+        {
+            return true;
+        }
+
+        if (shape.Kind != StorageKind.Primitive || source is null
+            || !source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral low, out Expressions.FilterLiteral high))
+        {
+            return false;
+        }
+
+        // The column's bound on the seed's side, which must stop short of it.
+        Expressions.FilterLiteral bound = max ? low : high;
+        Int128 end = Int128.CreateTruncating(seed);
+        return bound.Kind switch
+        {
+            Expressions.FilterLiteralKind.Signed => max ? bound.SignedValue > end : bound.SignedValue < end,
+            Expressions.FilterLiteralKind.Unsigned => max ? bound.UnsignedValue > end : bound.UnsignedValue < end,
+            _ => false,
+        };
     }
 
     private static Func<AggregateSlot<T?>> OrderedExtreme<TValue, T>(ColumnShape shape, bool max)

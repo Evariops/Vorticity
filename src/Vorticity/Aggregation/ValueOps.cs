@@ -600,6 +600,89 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
     }
 }
 
+/// <summary>
+/// The smallest value, NaN skipped, in a state that is the value alone: the state starts at a value no
+/// row holds, which says that none was seen (PLAN-HIGH-CARDINALITY, H1, reduction 3). For a float that
+/// is NaN, which no add keeps; for an integer, the top of its range where no row reaches it.
+/// </summary>
+internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
+    where TValue : unmanaged, INumber<TValue>
+{
+    /// <summary>Not read: the slot starts from the seed its column leaves unreached.</summary>
+    public static TValue Seed() => throw new NotSupportedException("A seeded extreme starts from the seed its slot is given.");
+
+    public static void Add(ref TValue state, TValue value)
+    {
+        // A state still at NaN takes any number, which a NaN compares false against.
+        if (!TValue.IsNaN(value) && !(state <= value))
+        {
+            state = value;
+        }
+    }
+
+    public static void AddWeighted(ref TValue state, TValue value, long count) => Add(ref state, value);
+
+    public static void AddSpan(ref TValue state, ReadOnlySpan<TValue> values)
+    {
+        if (ExtremeKernels.TryMin(values, out TValue min))
+        {
+            Add(ref state, min);
+        }
+    }
+
+    /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
+    public static void Merge(ref TValue into, in TValue other) => Add(ref into, other);
+
+    /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
+    [SkipLocalsInit]
+    public static void AddWords(ref TValue state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
+        AddSpan(ref state, selected);
+    }
+}
+
+/// <summary>The largest value, NaN skipped, in a state that is the value alone, as <see cref="SeededMinOp{TValue}"/>: an integer starts at the bottom of its range.</summary>
+internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
+    where TValue : unmanaged, INumber<TValue>
+{
+    /// <summary>Not read: the slot starts from the seed its column leaves unreached.</summary>
+    public static TValue Seed() => throw new NotSupportedException("A seeded extreme starts from the seed its slot is given.");
+
+    public static void Add(ref TValue state, TValue value)
+    {
+        if (!TValue.IsNaN(value) && !(state >= value))
+        {
+            state = value;
+        }
+    }
+
+    public static void AddWeighted(ref TValue state, TValue value, long count) => Add(ref state, value);
+
+    public static void AddSpan(ref TValue state, ReadOnlySpan<TValue> values)
+    {
+        if (ExtremeKernels.TryMax(values, out TValue max))
+        {
+            Add(ref state, max);
+        }
+    }
+
+    /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
+    public static void Merge(ref TValue into, in TValue other) => Add(ref into, other);
+
+    /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
+    [SkipLocalsInit]
+    public static void AddWords(ref TValue state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
+        AddSpan(ref state, selected);
+    }
+}
+
 /// <summary>The rows of a run of mask words, for <see cref="IValueOp{TValue, TState}.AddWords"/>.</summary>
 internal static class WordFold
 {
