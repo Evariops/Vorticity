@@ -1176,7 +1176,7 @@ internal static class AggregationEngine
         await keysOf[0].RebaseAsync(keysOf, token).ConfigureAwait(false);
 
         // Each partition's groups by part, a task each: hashed, counted, placed.
-        ulong seed = ((ulong)Random.Shared.NextInt64() << 1) | 1;
+        ulong seed = MergeHash.Seed;
         int shift = 64 - BitOperations.Log2((uint)parts);
         int[][] placed = new int[partitions.Length][];
         int[][] starts = new int[partitions.Length][];

@@ -1,5 +1,6 @@
 using System;
 using System.IO.Hashing;
+using System.Runtime.CompilerServices;
 
 namespace Vorticity.Aggregating;
 
@@ -9,11 +10,21 @@ namespace Vorticity.Aggregating;
 /// the (group, value) pairs of a distinct count, with no allocation per key.
 /// </summary>
 /// <remarks>
-/// Keys can be built offline to share the low bits of their unseeded hash, and so one run of the
-/// probe sequence: a key that would land <see cref="MaxProbes"/> slots past its own reseeds the hash
-/// with a value of the table's own and rehashes every key, which such keys cannot have been built
-/// against. Until then every key sits closer than that to its own slot, so no lookup probes further:
-/// a growth places the keys again in the order they came, and none lands further than it was.
+/// <para>
+/// A slot holds what a probe compares (PLAN-HIGH-CARDINALITY, H15): the high half of the key's hash,
+/// its number, where its bytes lie and how many. A probe reads its slot, then the bytes of a key whose
+/// half and length match: two lines, where a slot holding the number alone sent the probe on to the
+/// hash, the place and the length of the key, each in an array of its own.
+/// </para>
+/// <para>
+/// A key comes hashed under <see cref="MergeHash.Seed"/>, the hash a merge cuts the parts by, so that
+/// it is hashed once. Keys can be built to share the low bits of that hash, and so one run of the
+/// probe sequence, by whoever learns the seed: a key that would land <see cref="MaxProbes"/> slots
+/// past its own reseeds the hash with a value of the table's own and rehashes every key, which such
+/// keys cannot have been built against. Until then every key sits closer than that to its own slot,
+/// so no lookup probes further: a growth places the keys again in the order they came, and none
+/// lands further than it was.
+/// </para>
 /// </remarks>
 internal sealed class ByteKeyTable
 {
@@ -25,7 +36,7 @@ internal sealed class ByteKeyTable
     private int[] _offsets = new int[16];
     private int[] _lengths = new int[16];
     private ulong[] _hashes = new ulong[16];
-    private int[] _slots = new int[32];
+    private Slot[] _slots = new Slot[32];
     private long _seed;
 
     /// <summary>The number of distinct keys.</summary>
@@ -36,49 +47,59 @@ internal sealed class ByteKeyTable
 
     /// <summary>The bytes the table holds at its capacity: the keys' bytes, where each lies, their hashes and the slots.</summary>
     internal long Footprint =>
-        _bytes.Length + ((long)(_offsets.Length + _lengths.Length + _slots.Length) * sizeof(int)) + ((long)_hashes.Length * sizeof(ulong));
+        _bytes.Length + ((long)(_offsets.Length + _lengths.Length) * sizeof(int)) + ((long)_hashes.Length * sizeof(ulong)) + ((long)_slots.Length * Unsafe.SizeOf<Slot>());
 
     /// <summary>The number of <paramref name="key"/>, which is added when it is new.</summary>
-    internal int GetOrAdd(ReadOnlySpan<byte> key, out bool added)
+    internal int GetOrAdd(ReadOnlySpan<byte> key, out bool added) => GetOrAdd(key, MergeHash.Of(key, MergeHash.Seed), out added);
+
+    /// <summary>The number of <paramref name="key"/>, whose hash under <see cref="MergeHash.Seed"/> is <paramref name="hash"/>; added when it is new.</summary>
+    internal int GetOrAdd(ReadOnlySpan<byte> key, ulong hash, out bool added)
     {
-        ulong hash = XxHash3.HashToUInt64(key, _seed);
+        if (_seed != 0)
+        {
+            hash = XxHash3.HashToUInt64(key, _seed);
+        }
+
+        uint half = (uint)(hash >> 32);
         int mask = _slots.Length - 1;
-        int slot = (int)hash & mask;
+        int at = (int)hash & mask;
         while (true)
         {
-            int entry = _slots[slot];
-            if (entry == 0)
+            ref Slot slot = ref _slots[at];
+            if (slot.Entry == 0)
             {
                 break;
             }
 
-            int index = entry - 1;
-            if (_hashes[index] == hash && _bytes.AsSpan(_offsets[index], _lengths[index]).SequenceEqual(key))
+            if (slot.Half == half && slot.Length == key.Length && _bytes.AsSpan(slot.Offset, slot.Length).SequenceEqual(key))
             {
                 added = false;
-                return index;
+                return slot.Entry - 1;
             }
 
-            slot = (slot + 1) & mask;
+            at = (at + 1) & mask;
         }
 
-        if (((slot - (int)hash) & mask) >= MaxProbes && _seed == 0)
+        if (((at - (int)hash) & mask) >= MaxProbes && _seed == 0)
         {
             Reseed();
-            return GetOrAdd(key, out added);
+            return GetOrAdd(key, hash, out added);
         }
 
         int number = Count;
         Append(key, hash);
-        _slots[slot] = number + 1;
+        _slots[at] = new Slot { Half = half, Entry = number + 1, Offset = _offsets[number], Length = key.Length };
         added = true;
         if (Count * 2 > _slots.Length)
         {
-            Rehash(_slots.Length * 2);
+            Rehash(new Slot[_slots.Length * 2]);
         }
 
         return number;
     }
+
+    /// <summary>The hash key <paramref name="index"/> was placed by: under <see cref="MergeHash.Seed"/> until the table is <see cref="Reseeded"/>.</summary>
+    internal ulong HashOf(int index) => _hashes[index];
 
     /// <summary>
     /// A number no key finds: an entry without bytes that no lookup reaches, for a group with no key,
@@ -132,22 +153,7 @@ internal sealed class ByteKeyTable
         Count = entries.Length;
         _used = used;
         Array.Clear(_slots);
-        int mask = _slots.Length - 1;
-        for (int index = 0; index < Count; index++)
-        {
-            if (_lengths[index] < 0)
-            {
-                continue;
-            }
-
-            int slot = (int)_hashes[index] & mask;
-            while (_slots[slot] != 0)
-            {
-                slot = (slot + 1) & mask;
-            }
-
-            _slots[slot] = index + 1;
-        }
+        Rehash(_slots);
     }
 
     private void Append(ReadOnlySpan<byte> key, ulong hash)
@@ -186,29 +192,40 @@ internal sealed class ByteKeyTable
             }
         }
 
-        Rehash(_slots.Length);
+        Rehash(new Slot[_slots.Length]);
     }
 
-    private void Rehash(int size)
+    /// <summary>Places every key in <paramref name="slots"/>, empty, by the hash it keeps, and makes them the table's.</summary>
+    private void Rehash(Slot[] slots)
     {
-        int[] slots = new int[size];
         int mask = slots.Length - 1;
         for (int index = 0; index < Count; index++)
         {
-            if (_lengths[index] < 0)
+            int length = _lengths[index];
+            if (length < 0)
             {
                 continue;
             }
 
-            int slot = (int)_hashes[index] & mask;
-            while (slots[slot] != 0)
+            ulong hash = _hashes[index];
+            int at = (int)hash & mask;
+            while (slots[at].Entry != 0)
             {
-                slot = (slot + 1) & mask;
+                at = (at + 1) & mask;
             }
 
-            slots[slot] = index + 1;
+            slots[at] = new Slot { Half = (uint)(hash >> 32), Entry = index + 1, Offset = _offsets[index], Length = length };
         }
 
         _slots = slots;
+    }
+
+    /// <summary>What a probe compares: the high half of a key's hash, its number plus one (zero, an empty slot), where its bytes lie and how many.</summary>
+    private struct Slot
+    {
+        public uint Half;
+        public int Entry;
+        public int Offset;
+        public int Length;
     }
 }

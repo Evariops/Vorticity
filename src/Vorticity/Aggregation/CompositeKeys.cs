@@ -141,7 +141,8 @@ internal sealed class CompositeKeys : GroupKeys
         CompositeKeys into = (CompositeKeys)target;
         for (int i = 0; i < groups.Length; i++)
         {
-            map[i] = into.GroupOf(_table.KeyOf(groups[i]));
+            int g = groups[i];
+            map[i] = into.GroupOf(_table.KeyOf(g), HashOf(g));
         }
 
         MergeSeen(target);
@@ -151,9 +152,12 @@ internal sealed class CompositeKeys : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            parts[g] = (byte)(MergeHash.Of(_table.KeyOf(g), seed) >> shift);
+            parts[g] = (byte)((seed == MergeHash.Seed ? HashOf(g) : MergeHash.Of(_table.KeyOf(g), seed)) >> shift);
         }
     }
+
+    /// <summary>The hash of group <paramref name="group"/>'s tuple under <see cref="MergeHash.Seed"/>: the table's, unless it took a seed of its own.</summary>
+    private ulong HashOf(int group) => _table.Reseeded ? MergeHash.Of(_table.KeyOf(group), MergeHash.Seed) : _table.HashOf(group);
 
     internal override int[] Order(bool sorted) => Identity(Count);
 
@@ -371,9 +375,12 @@ internal sealed class CompositeKeys : GroupKeys
         }
     }
 
-    private int GroupOf(ReadOnlySpan<byte> key)
+    private int GroupOf(ReadOnlySpan<byte> key) => GroupOf(key, MergeHash.Of(key, MergeHash.Seed));
+
+    /// <summary>As <see cref="GroupOf(ReadOnlySpan{byte})"/>, the tuple's hash under <see cref="MergeHash.Seed"/> known.</summary>
+    private int GroupOf(ReadOnlySpan<byte> key, ulong hash)
     {
-        int group = _table.GetOrAdd(key, out bool added);
+        int group = _table.GetOrAdd(key, hash, out bool added);
         if (added)
         {
             Count = _table.Count;

@@ -164,8 +164,9 @@ public sealed class GroupHashTests
         Assert.Equal(nan, table.GetOrAdd(BitConverter.UInt64BitsToDouble(0x7FF8_0000_0000_0001), -1));
     }
 
-    // Keys whose unseeded XxHash3 share their low bits all land in one slot of the table's probe
-    // sequence: the cluster grows by one each insert until the table takes a seed.
+    // Keys whose XxHash3 under the process's seed share their low bits, built by whoever learns the
+    // seed, all land in one slot of the table's probe sequence: the cluster grows by one each insert
+    // until the table takes a seed of its own.
     [Fact]
     public void ByteKeysCraftedToShareASlotReseedTheTable()
     {
@@ -222,7 +223,7 @@ public sealed class GroupHashTests
     }
 
     [Fact]
-    public void OrdinaryByteKeysKeepTheUnseededHash()
+    public void OrdinaryByteKeysKeepTheProcessHash()
     {
         ByteKeyTable table = new ByteKeyTable();
         for (int i = 0; i < 100_000; i++)
@@ -231,6 +232,27 @@ public sealed class GroupHashTests
         }
 
         Assert.False(table.Reseeded);
+    }
+
+    // A text key is hashed once: the hash its table keeps is the one a merge cuts the parts by, while
+    // the table has no seed of its own, through growths and a Retain.
+    [Fact]
+    public void AByteKeyKeepsTheHashTheMergeCutsBy()
+    {
+        ByteKeyTable table = new ByteKeyTable();
+        for (int i = 0; i < 5_000; i++)
+        {
+            table.GetOrAdd(Encoding.ASCII.GetBytes("key-" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)), out _);
+        }
+
+        table.Retain([.. Enumerable.Range(0, table.Count).Where(i => i % 3 != 0)]);
+        Assert.False(table.Reseeded);
+        for (int i = 0; i < table.Count; i++)
+        {
+            Assert.Equal(MergeHash.Of(table.KeyOf(i), MergeHash.Seed), table.HashOf(i));
+            Assert.Equal(i, table.GetOrAdd(table.KeyOf(i).ToArray(), out bool added));
+            Assert.False(added);
+        }
     }
 
     /// <summary>Key <paramref name="a"/> of a column whose every key has the default hash 0.</summary>
@@ -245,14 +267,14 @@ public sealed class GroupHashTests
         return x ^ (x >> 31);
     }
 
-    /// <summary>A thousand text keys whose unseeded XxHash3 share their low eleven bits.</summary>
+    /// <summary>A thousand text keys whose XxHash3 under the process's seed share their low eleven bits.</summary>
     private static List<byte[]> Crowded()
     {
         List<byte[]> keys = [];
         for (int i = 0; keys.Count < 1_024; i++)
         {
             byte[] key = Encoding.ASCII.GetBytes("k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if ((XxHash3.HashToUInt64(key) & 0x7FF) == 0)
+            if ((XxHash3.HashToUInt64(key, unchecked((long)MergeHash.Seed)) & 0x7FF) == 0)
             {
                 keys.Add(key);
             }

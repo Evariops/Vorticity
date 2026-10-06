@@ -249,13 +249,20 @@ internal abstract class GroupKeys
 internal readonly record struct KeyBounds(long Min, long Max);
 
 /// <summary>
-/// The hash a parallel merge cuts the keys by: a mix of 64 bits under a seed drawn once a merge, the
-/// same in every partition, apart from each table's own hash, which a table may draw again alone:
-/// a key hashed by its table could fall in two parts. The default hash of an integer is its value,
-/// whose high bits cut nothing.
+/// The hash a parallel merge cuts the keys by: a mix of 64 bits under <see cref="Seed"/>, the same in
+/// every partition, apart from each table's own hash, which a table may draw again alone: a key
+/// hashed by its table could fall in two parts. The default hash of an integer is its value, whose
+/// high bits cut nothing.
 /// </summary>
 internal static class MergeHash
 {
+    /// <summary>
+    /// The seed, drawn once a process (PLAN-HIGH-CARDINALITY, H15): a text key is hashed once, by its
+    /// table under this seed, and the merge cuts by that hash while the table has no seed of its own;
+    /// two runs of a query cut their groups alike.
+    /// </summary>
+    internal static readonly ulong Seed = ((ulong)Random.Shared.NextInt64() << 1) | 1;
+
     /// <summary>
     /// A key of one word: one round of the mix, a bijection whose every input bit reaches every bit
     /// of the hash, where the key of two words takes two (PLAN-HIGH-CARDINALITY, H15).
@@ -1039,7 +1046,7 @@ internal sealed class BytesKeys : GroupKeys
         for (int i = 0; i < groups.Length; i++)
         {
             int g = groups[i];
-            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(g));
+            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(g), HashOf(g));
         }
 
         MergeSeen(target);
@@ -1049,9 +1056,12 @@ internal sealed class BytesKeys : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(_table.KeyOf(g), seed) >> shift);
+            parts[g] = g == _null ? (byte)0 : (byte)((seed == MergeHash.Seed ? HashOf(g) : MergeHash.Of(_table.KeyOf(g), seed)) >> shift);
         }
     }
+
+    /// <summary>The hash of group <paramref name="group"/>'s key under <see cref="MergeHash.Seed"/>: the table's, unless it took a seed of its own.</summary>
+    private ulong HashOf(int group) => _table.Reseeded ? MergeHash.Of(_table.KeyOf(group), MergeHash.Seed) : _table.HashOf(group);
 
     internal override int CompareKeys(GroupKeys other, int a, int b, int component)
     {
@@ -1126,9 +1136,12 @@ internal sealed class BytesKeys : GroupKeys
     }
 
     /// <summary>The group of <paramref name="value"/>, its entry in the table, numbered as it first comes.</summary>
-    private int Lookup(ReadOnlySpan<byte> value)
+    private int Lookup(ReadOnlySpan<byte> value) => Lookup(value, MergeHash.Of(value, MergeHash.Seed));
+
+    /// <summary>As <see cref="Lookup(ReadOnlySpan{byte})"/>, the value's hash under <see cref="MergeHash.Seed"/> known.</summary>
+    private int Lookup(ReadOnlySpan<byte> value, ulong hash)
     {
-        int group = _table.GetOrAdd(value, out bool added);
+        int group = _table.GetOrAdd(value, hash, out bool added);
         if (added)
         {
             Count = _table.Count;
