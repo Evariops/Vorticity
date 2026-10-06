@@ -113,6 +113,44 @@ public sealed partial class DistinctPairsTests
         }
     }
 
+    [Theory]
+    [InlineData(4)]
+    [InlineData(14)]
+    public async Task ACountOverTheScanAndByAFewGroupsMergesItsPairsByParts(int degree)
+    {
+        // A hundred and twenty thousand users over seven days: the lanes' pairs, too many to pour into
+        // one table on one thread, merge by parts of their hash.
+        Visit[] visits = new Visit[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            ulong mix = (ulong)row * 0x9E37_79B9_7F4A_7C15UL;
+            long user = (long)((mix >> 16) % 120_000);
+            visits[row] = new Visit(row % 7, user, $"user-{user % 90_000}");
+        }
+
+        string path = await WriteAsync(visits);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Assert.Equal(visits.Select(v => v.User).Distinct().Count(), await file.Scan<Visit>().CountDistinctAsync(v => v.User, Ct));
+            Assert.Equal(visits.Select(v => v.Name).Distinct(StringComparer.Ordinal).Count(), await file.Scan<Visit>().CountDistinctAsync(v => v.Name, Ct));
+
+            Vorticity.Aggregation byDay = file.Scan<Visit>()
+                .GroupBy(v => v.Day)
+                .Select(g => (g.Key, g.CountDistinct(v => v.User), g.CountDistinct(v => v.Name)));
+            Dictionary<int, KeyCounts> got = (await ListAsync(byDay.As<KeyCounts>())).ToDictionary(c => c.Key);
+            Dictionary<int, KeyCounts> expected = visits.GroupBy(v => v.Day).ToDictionary(
+                g => g.Key,
+                g => new KeyCounts(g.Key, g.Select(v => v.User).Distinct().Count(), g.Select(v => v.Name).Distinct(StringComparer.Ordinal).Count()));
+            Assert.Equal(expected, got);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static Dictionary<int, KeyCounts> Expected(Row[] rows) =>
         rows.GroupBy(r => r.Key).ToDictionary(
             g => g.Key,
@@ -170,14 +208,15 @@ public sealed partial class DistinctPairsTests
         return rows;
     }
 
-    private static async Task<string> WriteAsync(Row[] rows)
+    private static async Task<string> WriteAsync<T>(T[] rows)
+        where T : IVortexRecord<T>
     {
         string directory = Path.Combine(AppContext.BaseDirectory, "distinct-pairs");
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, $"rows-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<T>(path))
         {
-            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.WriteAsync<T>(rows, Ct);
             await writer.CompleteAsync(Ct);
         }
 
@@ -186,6 +225,9 @@ public sealed partial class DistinctPairsTests
 
     [VortexRecord]
     public partial record struct Row(int Key, long Value, string Text);
+
+    [VortexRecord]
+    public partial record struct Visit(int Day, long User, string Name);
 
     [VortexRecord]
     public partial record struct KeyCounts(int Key, long Values, long Texts);

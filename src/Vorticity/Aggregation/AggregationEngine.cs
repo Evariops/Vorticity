@@ -954,7 +954,9 @@ internal sealed class AggregationPartition
     /// <summary>Folds another partition into this one, its groups mapped onto this one's by key.</summary>
     /// <param name="other">The partition folded in.</param>
     /// <param name="numbers">The numbers of the groups of a partition past those every thread shares (<see cref="Numbers"/>), the caller's.</param>
-    internal void MergeFrom(AggregationPartition other, ref int[]? numbers)
+    /// <param name="apart">The slots left to merge apart, by parts of their pairs (<see cref="IPairedSlot"/>); null for none.</param>
+    /// <returns>The map of the other's groups onto this one's.</returns>
+    internal int[] MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart = null)
     {
         int[] map;
         if (Keys is null)
@@ -974,11 +976,13 @@ internal sealed class AggregationPartition
         ReadOnlySpan<int> all = Numbers.Upto(map.Length, ref numbers);
         for (int i = 0; i < Slots.Length; i++)
         {
-            if (_inputs[i] != Settled)
+            if (_inputs[i] != Settled && (apart is null || !apart[i]))
             {
                 Slots[i].MergeFrom(other.Slots[i], all, map);
             }
         }
+
+        return map;
     }
 
     /// <summary>The input of an aggregate settled before the scan, which is never stepped.</summary>
@@ -1277,13 +1281,22 @@ internal static class AggregationEngine
         bool inParts = plan.MergeInParts ?? (parts > 1 && 2 * entries < Math.Min(degree, parts) * serial);
         if (partitions.Length == 1 || biggest.Keys is null || !inParts)
         {
+            // The keys and the states in series, into the largest; a distinct count's pairs, when they
+            // are many, apart, by parts of the pairs taken side by side (PLAN-HIGH-CARDINALITY, H9).
             int[]? numbers = null;
+            bool[]? apart = partitions.Length > 1 && degree > 1 ? Paired(partitions, inputs) : null;
+            int[][] maps = new int[partitions.Length][];
             for (int p = 0; p < partitions.Length; p++)
             {
                 if (p != largest)
                 {
-                    biggest.MergeFrom(partitions[p], ref numbers);
+                    maps[p] = biggest.MergeFrom(partitions[p], ref numbers, apart);
                 }
+            }
+
+            if (apart is not null)
+            {
+                await MergePairedAsync(partitions, largest, maps, apart, degree, cancellationToken).ConfigureAwait(false);
             }
 
             return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0);
@@ -1405,6 +1418,84 @@ internal static class AggregationEngine
 
         (GroupKeys joinedKeys, AggregateSlot[] joinedSlots, int joinedParts) = Joined(partKeys, partSlots, parts);
         return (joinedKeys, joinedSlots, joinedParts, merged);
+    }
+
+    /// <summary>The pairs past which a distinct count's merge in series goes by parts instead: below, handing the parts out costs more than the pairs.</summary>
+    private const long PairedPairs = 1 << 16;
+
+    /// <summary>Which slots of the partitions hold pairs enough to merge apart, by parts of their pairs; null when none does.</summary>
+    private static bool[]? Paired(AggregationPartition[] partitions, int[] inputs)
+    {
+        AggregateSlot[] first = partitions[0].Slots;
+        bool[]? apart = null;
+        for (int s = 0; s < first.Length; s++)
+        {
+            if (inputs[s] == AggregationPartition.Settled || first[s] is not IPairedSlot)
+            {
+                continue;
+            }
+
+            long pairs = 0;
+            foreach (AggregationPartition partition in partitions)
+            {
+                pairs += ((IPairedSlot)partition.Slots[s]).Pairs;
+            }
+
+            if (pairs >= PairedPairs)
+            {
+                apart ??= new bool[first.Length];
+                apart[s] = true;
+            }
+        }
+
+        return apart;
+    }
+
+    /// <summary>
+    /// The slots <paramref name="apart"/> of every partition merged into the largest's, by parts of
+    /// their pairs taken side by side: the largest's own groups as they are, every other partition's
+    /// by its map onto the largest's, its keys merged before.
+    /// </summary>
+    private static async Task MergePairedAsync(AggregationPartition[] partitions, int largest, int[][] maps, bool[] apart, int degree, CancellationToken cancellationToken)
+    {
+        AggregationPartition biggest = partitions[largest];
+        int groups = biggest.Keys?.Count ?? 1;
+        int[] own = new int[groups];
+        for (int g = 0; g < groups; g++)
+        {
+            own[g] = g;
+        }
+
+        // The largest first, whose slot takes the counts.
+        AggregationPartition[] lanes = new AggregationPartition[partitions.Length];
+        int[][] ordered = new int[partitions.Length][];
+        lanes[0] = biggest;
+        ordered[0] = own;
+        for (int p = 0, at = 1; p < partitions.Length; p++)
+        {
+            if (p != largest)
+            {
+                lanes[at] = partitions[p];
+                ordered[at++] = maps[p];
+            }
+        }
+
+        int parts = Math.Max(2, (int)BitOperations.RoundUpToPowerOf2((uint)degree));
+        for (int s = 0; s < apart.Length; s++)
+        {
+            if (!apart[s])
+            {
+                continue;
+            }
+
+            AggregateSlot[] slots = new AggregateSlot[lanes.Length];
+            for (int p = 0; p < lanes.Length; p++)
+            {
+                slots[p] = lanes[p].Slots[s];
+            }
+
+            await ((IPairedSlot)slots[0]).MergeInPartsAsync(slots, ordered, groups, parts, degree, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>The parts a merge cuts its keys into: a power of two, at most twice the degree, and a part of <see cref="PartGroups"/> groups of the largest partition at least.</summary>

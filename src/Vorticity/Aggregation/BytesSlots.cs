@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -393,7 +397,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 }
 
 /// <summary>The distinct non-null text or binary values of each group, keyed by group and value in one table.</summary>
-internal sealed class BytesDistinctSlot : AggregateSlot<long>
+internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 {
     private readonly ByteKeyTable _seen = new ByteKeyTable();
     private long[] _counts = [];
@@ -463,6 +467,97 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    public long Pairs => _seen.Count;
+
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, CancellationToken cancellationToken)
+    {
+        BytesDistinctSlot[] all = new BytesDistinctSlot[slots.Length];
+        for (int p = 0; p < slots.Length; p++)
+        {
+            all[p] = (BytesDistinctSlot)slots[p];
+        }
+
+        // Each lane's pairs placed by part, the hash of the value under its group's target, then each
+        // part's pairs from every lane made distinct.
+        int shift = 64 - BitOperations.Log2((uint)parts);
+        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
+        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        long[][] counts = new long[parts][];
+        await SideBySide.RunAsync(
+            parts,
+            part =>
+            {
+                ByteKeyTable distinct = new ByteKeyTable();
+                byte[] key = new byte[64];
+                long[] count = new long[groups];
+                for (int p = 0; p < all.Length; p++)
+                {
+                    (int[] placed, int[] starts) = cuts[p];
+                    int[] map = maps[p];
+                    ByteKeyTable lane = all[p]._seen;
+                    for (int i = starts[part]; i < starts[part + 1]; i++)
+                    {
+                        ReadOnlySpan<byte> pair = lane.KeyOf(placed[i]);
+                        int group = map[BinaryPrimitives.ReadInt32LittleEndian(pair)];
+                        Scratch.Grow(ref key, pair.Length);
+                        BinaryPrimitives.WriteInt32LittleEndian(key, group);
+                        pair[4..].CopyTo(key.AsSpan(4));
+                        distinct.GetOrAdd(key.AsSpan(0, pair.Length), out bool added);
+                        if (added)
+                        {
+                            count[group]++;
+                        }
+                    }
+                }
+
+                counts[part] = count;
+            },
+            degree,
+            cancellationToken).ConfigureAwait(false);
+
+        EnsureGroups(groups);
+        Array.Clear(_counts);
+        foreach (long[] count in counts)
+        {
+            for (int group = 0; group < groups; group++)
+            {
+                _counts[group] += count[group];
+            }
+        }
+
+        _seen.Clear();
+        Array.Clear(_first);
+    }
+
+    /// <summary>The table's pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its value's hash under its group's target.</summary>
+    private (int[] Placed, int[] Starts) Cut(int[] map, int shift, int parts)
+    {
+        int count = _seen.Count;
+        int[] partOf = GC.AllocateUninitializedArray<int>(count);
+        int[] starts = new int[parts + 1];
+        for (int number = 0; number < count; number++)
+        {
+            ReadOnlySpan<byte> pair = _seen.KeyOf(number);
+            int part = (int)(KeyHash.Pair(KeyHash.Bytes(pair[4..]), 0, map[BinaryPrimitives.ReadInt32LittleEndian(pair)]) >> shift);
+            partOf[number] = part;
+            starts[part + 1]++;
+        }
+
+        for (int part = 0; part < parts; part++)
+        {
+            starts[part + 1] += starts[part];
+        }
+
+        int[] next = starts[..^1];
+        int[] placed = GC.AllocateUninitializedArray<int>(count);
+        for (int number = 0; number < count; number++)
+        {
+            placed[next[partOf[number]]++] = number;
+        }
+
+        return (placed, starts);
+    }
 
     /// <summary>The table of its (group, value) pairs, their chains, and the counts.</summary>
     internal override long Footprint =>

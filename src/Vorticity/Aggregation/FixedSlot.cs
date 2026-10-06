@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Writing;
 
@@ -409,11 +411,11 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 }
 
 /// <summary>The distinct non-null values of each group, one set for every group of the partition.</summary>
-internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
+internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSlot
     where TValue : unmanaged, IEquatable<TValue>
 {
     private readonly StorageKind _kind;
-    private readonly DistinctPairs<TValue> _pairs = new DistinctPairs<TValue>();
+    private DistinctPairs<TValue> _pairs = new DistinctPairs<TValue>();
     private long[] _counts = [];
     private int _groups;
     private ValuesCache<TValue> _values;
@@ -546,6 +548,62 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    public long Pairs => _pairs.Count;
+
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, CancellationToken cancellationToken)
+    {
+        DistinctPairs<TValue>[] all = new DistinctPairs<TValue>[slots.Length];
+        for (int p = 0; p < slots.Length; p++)
+        {
+            all[p] = ((FixedDistinctSlot<TValue>)slots[p])._pairs;
+        }
+
+        // Each lane's pairs placed by part, then each part's pairs from every lane made distinct.
+        int shift = 64 - BitOperations.Log2((uint)parts);
+        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
+        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        long[][] counts = new long[parts][];
+        await SideBySide.RunAsync(
+            parts,
+            part =>
+            {
+                DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
+                distinct.EnsureGroups(groups);
+                long[] count = new long[groups];
+                for (int p = 0; p < all.Length; p++)
+                {
+                    (int[] placed, int[] starts) = cuts[p];
+                    int[] map = maps[p];
+                    DistinctPairs<TValue> lane = all[p];
+                    for (int i = starts[part]; i < starts[part + 1]; i++)
+                    {
+                        int group = map[lane.GroupAt(placed[i])];
+                        if (distinct.Add(group, lane.ValueAt(placed[i])))
+                        {
+                            count[group]++;
+                        }
+                    }
+                }
+
+                counts[part] = count;
+            },
+            degree,
+            cancellationToken).ConfigureAwait(false);
+
+        EnsureGroups(groups);
+        Array.Clear(_counts);
+        foreach (long[] count in counts)
+        {
+            for (int group = 0; group < groups; group++)
+            {
+                _counts[group] += count[group];
+            }
+        }
+
+        _pairs = new DistinctPairs<TValue>();
+        _pairs.EnsureGroups(groups);
+    }
 
     /// <summary>The (group, value) pairs and the counts.</summary>
     internal override long Footprint => _pairs.Footprint + ((long)_counts.Length * sizeof(long));

@@ -119,6 +119,44 @@ internal sealed class DistinctPairs<TValue>
         return added;
     }
 
+    /// <summary>The group of pair <paramref name="number"/>.</summary>
+    internal int GroupAt(int number) => _pairs[number].Group;
+
+    /// <summary>The value of pair <paramref name="number"/>.</summary>
+    internal TValue ValueAt(int number) => _pairs[number].Value;
+
+    /// <summary>
+    /// The pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its
+    /// hash under its group's target <c>map[g]</c>: the same pair in every lane falls in one part.
+    /// </summary>
+    /// <returns>The pairs' numbers, part after part, and where each part's start, then the end.</returns>
+    internal (int[] Placed, int[] Starts) Cut(ReadOnlySpan<int> map, int shift, int parts)
+    {
+        int[] partOf = GC.AllocateUninitializedArray<int>(_count);
+        int[] starts = new int[parts + 1];
+        Pair[] pairs = _pairs;
+        for (int number = 0; number < _count; number++)
+        {
+            int part = (int)(DistinctEntry<TValue>.Hash(map[pairs[number].Group], pairs[number].Value) >> shift);
+            partOf[number] = part;
+            starts[part + 1]++;
+        }
+
+        for (int part = 0; part < parts; part++)
+        {
+            starts[part + 1] += starts[part];
+        }
+
+        int[] next = starts[..^1];
+        int[] placed = GC.AllocateUninitializedArray<int>(_count);
+        for (int number = 0; number < _count; number++)
+        {
+            placed[next[partOf[number]]++] = number;
+        }
+
+        return (placed, starts);
+    }
+
     /// <summary>
     /// Keeps the pairs of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
     /// <c>i</c>: their chains read, and nothing else, into arrays their size.

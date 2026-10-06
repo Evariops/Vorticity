@@ -1,6 +1,8 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
@@ -304,6 +306,56 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into) => throw JoinedParts.Read();
 
     internal override void Keep(ReadOnlySpan<int> groups) => throw JoinedParts.Read();
+}
+
+/// <summary>
+/// A slot whose states are (group, value) pairs, a distinct count's: merged in series, its pairs would
+/// pour every lane's into one table, on one thread, however many lanes read them
+/// (PLAN-HIGH-CARDINALITY, H9). It merges in parts of its pairs instead, side by side.
+/// </summary>
+internal interface IPairedSlot
+{
+    /// <summary>The pairs the slot holds.</summary>
+    long Pairs { get; }
+
+    /// <summary>
+    /// Merges the slots of every lane, this one first, by parts of their pairs taken side by side: a
+    /// pair's part the top bits of its hash under its group's target, so that equal pairs of every
+    /// lane meet in one part, each part's pairs made distinct by a worker, and the counts of every part
+    /// summed by group into this slot. Group <c>g</c> of <c>slots[p]</c> is group <c>maps[p][g]</c>
+    /// here; the pairs, counted, are let go.
+    /// </summary>
+    Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, CancellationToken cancellationToken);
+}
+
+/// <summary>Work items run side by side, a worker taking the next item as it finishes one.</summary>
+internal static class SideBySide
+{
+    /// <summary>Runs <paramref name="work"/> on items 0 to <paramref name="count"/> − 1, on up to <paramref name="degree"/> workers; one failure cancels the others.</summary>
+    internal static async Task RunAsync(int count, Action<int> work, int degree, CancellationToken cancellationToken)
+    {
+        int workers = Math.Clamp(degree, 1, Math.Max(1, count));
+        int[] next = [-1];
+        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken token = failed.Token;
+        Task[] tasks = new Task[workers];
+        for (int w = 0; w < workers; w++)
+        {
+            tasks[w] = Task.Run(
+                () =>
+                {
+                    int item;
+                    while ((item = Interlocked.Increment(ref next[0])) < count)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        work(item);
+                    }
+                },
+                token);
+        }
+
+        await AggregationEngine.GuardedAsync(tasks, failed).ConfigureAwait(false);
+    }
 }
 
 /// <summary>What the slots and keys merged in parts share: which part holds a group.</summary>
