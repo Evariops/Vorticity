@@ -11,6 +11,7 @@
 //   … -- --matrix small                                                                the high-cardinality matrix of every A/B, at degrees 1 and N (HighCardinality.cs)
 //   … -- --matrix full                                                                 the full one, of the milestones, at degrees 1, 4 and N
 //   … -- --latency 20                                                                  every file read as a store would serve it, 20 ms a round trip: requests and dependent steps
+//   … -- --cold --matrix small                                                         each query once in a process of its own: the first query's time and page faults
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
@@ -70,6 +71,53 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["readings-16-deleted"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: true),
 };
 Dictionary<string, string> files = new Dictionary<string, string>(StringComparer.Ordinal);
+(string File, Scenario Scenario)[] scenarios = [.. Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()).Concat(HandKernels.All())];
+
+// --cold-one NAME: that query once, the first of a fresh process, the file opened before it: its time
+// and the pages it touched first, which the warm rounds hide.
+if (Text(args, "--cold-one") is { } coldName)
+{
+    (string coldFile, Scenario cold) = scenarios.First(entry => entry.Scenario.Name == coldName);
+    string coldPath = await fixtures[coldFile]().ConfigureAwait(false);
+    await using VortexSession coldSession = VortexSession.Create(options => options.MaxDegreeOfParallelism = degrees[0]);
+    await using VortexFile coldOpen = await coldSession.OpenAsync(coldPath).ConfigureAwait(false);
+    long before = ProcessCounters.MinorFaults();
+    Stopwatch clock = Stopwatch.StartNew();
+    long coldResult = await cold.Query(coldOpen, new Run(clock, 0, 0)).ConfigureAwait(false);
+    double coldMillis = clock.Elapsed.TotalMilliseconds;
+    Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"cold\t{coldMillis:F3}\t{ProcessCounters.MinorFaults() - before}\t{coldResult}"));
+    return 0;
+}
+
+// --cold: each query selected, at each degree, in a process of its own (--cold-one).
+if (args.Contains("--cold"))
+{
+    Console.WriteLine($"{"query",-62} {"degree",6} {"cold ms",9} {"faults",8} {"result",12}");
+    foreach (int degree in degrees)
+    {
+        foreach ((string fileName, Scenario scenario) in scenarios)
+        {
+            if (!Selected(scenario, matrix, only))
+            {
+                continue;
+            }
+
+            System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { RedirectStandardOutput = true };
+            foreach (string argument in (string[])["--cold-one", scenario.Name, "--degrees", degree.ToString(CultureInfo.InvariantCulture), "--large", large.ToString(CultureInfo.InvariantCulture)])
+            {
+                start.ArgumentList.Add(argument);
+            }
+
+            using System.Diagnostics.Process child = System.Diagnostics.Process.Start(start)!;
+            string output = await child.StandardOutput.ReadToEndAsync().ConfigureAwait(false);
+            await child.WaitForExitAsync().ConfigureAwait(false);
+            string[] cold = output.Split('\n').FirstOrDefault(line => line.StartsWith("cold\t", StringComparison.Ordinal))?.Split('\t') ?? ["cold", "-1", "-1", "-1"];
+            Console.WriteLine($"{scenario.Name,-62} {degree,6} {double.Parse(cold[1], CultureInfo.InvariantCulture),9:F2} {cold[2],8} {cold[3].Trim(),12}");
+        }
+    }
+
+    return 0;
+}
 
 Dictionary<string, Measurement> measured = new Dictionary<string, Measurement>(StringComparer.Ordinal);
 List<(string Key, Measurement Measurement)> engines = [];
@@ -77,7 +125,7 @@ Console.WriteLine($"{"query",-62} {"degree",6} {"ms",9} {"first ms",9} {"alloc M
 foreach (int degree in degrees)
 {
     await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
-    foreach ((string fileName, Scenario scenario) in Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()).Concat(HandKernels.All()))
+    foreach ((string fileName, Scenario scenario) in scenarios)
     {
         if (!Selected(scenario, matrix, only))
         {
