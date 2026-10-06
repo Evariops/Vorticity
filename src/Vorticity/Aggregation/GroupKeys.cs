@@ -287,15 +287,25 @@ internal static class MergeHash
 
 /// <summary>
 /// A key of one fixed-width column: a table of its own from the storage value to its group
-/// (<see cref="KeyTable{TValue}"/>), and a group for null. An integer key the statistics bound to
-/// <see cref="DirectValues"/> values has a table from the value to its group in front of it, so that a
-/// value is looked up once a partition.
+/// (<see cref="KeyTable{TValue}"/>), and a group for null. An integer key the statistics bound to a
+/// span of <see cref="DirectValues"/> values, or of up to <see cref="DirectPerRow"/> values a row of
+/// the source, is numbered by its value less the least instead (PLAN-HIGH-CARDINALITY, H11): a table
+/// from the number to its group, in pages allocated as values meet them, so that no row is hashed and
+/// the memory follows the pages the values touch.
 /// </summary>
 internal sealed class FixedKeys<TValue> : GroupKeys
     where TValue : unmanaged, IEquatable<TValue>, IComparable<TValue>
 {
-    /// <summary>The most values a table of groups covers: 2^16, a quarter of a megabyte.</summary>
+    /// <summary>The span of values a table of groups covers whatever the rows: 2^16, a quarter of a megabyte.</summary>
     internal const long DirectValues = 1 << 16;
+
+    /// <summary>The values a row of the source a table of groups may span past <see cref="DirectValues"/>: four, the budget of a numbering by value.</summary>
+    private const long DirectPerRow = 4;
+
+    /// <summary>The values of a page of the table of groups, as a power of two: 4 096, 16 KiB.</summary>
+    private const int PageBits = 12;
+
+    private const int PageMask = (1 << PageBits) - 1;
 
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
@@ -313,22 +323,32 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private int[] _left = [];
     private int _sink;
 
-    // The group of each value from the statistics' smallest, -1 for a value not met yet: what the
-    // index would answer, read without a hash.
-    private readonly int[]? _direct;
+    // The group of each value by its number, the value less the statistics' smallest, in pages of
+    // 2^PageBits numbers allocated as values meet them, -1 for a value not met yet; a value past the
+    // bounds, which exact statistics never leave, goes to the index alone.
+    private readonly int[]?[]? _pages;
     private readonly long _directMin;
+    private readonly ulong _span;
+    private readonly long _rows;
+    private int _pagesHeld;
 
-    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead)
+    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead, long rows = -1)
     {
         _shape = shape;
         _sorted = sorted;
         _bounds = bounds;
         _probeAhead = probeAhead;
-        if (Integers && bounds is { } known && known.Max >= known.Min && (ulong)(known.Max - known.Min) < DirectValues)
+        _rows = rows;
+        if (Integers && bounds is { } known && known.Max >= known.Min)
         {
-            _direct = new int[(int)(known.Max - known.Min + 1)];
-            _direct.AsSpan().Fill(-1);
-            _directMin = known.Min;
+            // The span counts both ends; a span of every long wraps to none.
+            ulong span = (ulong)(known.Max - known.Min) + 1;
+            if (span != 0 && (span <= DirectValues || (rows > 0 && span <= (ulong)(DirectPerRow * rows))))
+            {
+                _pages = new int[]?[(int)((span + PageMask) >> PageBits)];
+                _directMin = known.Min;
+                _span = span;
+            }
         }
     }
 
@@ -562,7 +582,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return true;
         }
 
-        if (_direct is not null)
+        if (_pages is not null)
         {
             Direct(canonical, validity, rows, selection, rowGroups);
             return false;
@@ -640,14 +660,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     /// <summary>
-    /// Each selected row's group read from the table of groups, a value not met yet looked up in
-    /// the index once; a value past the statistics' bounds, which exact statistics never leave, in
+    /// Each selected row's group read from the table of groups by the value's number, a value not met
+    /// yet numbered there; a value past the statistics' bounds, which exact statistics never leave, in
     /// the index alone.
     /// </summary>
     private void Direct(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups)
     {
-        int[] direct = _direct!;
         long min = _directMin;
+        ulong span = _span;
         RowCursor selected = new RowCursor(selection, 0, rows);
         while (selected.Next(out int row))
         {
@@ -658,21 +678,33 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
 
             TValue value = canonical[row];
-            ulong slot = (ulong)(Integer(value) - min);
-            if (slot >= (ulong)direct.Length)
-            {
-                rowGroups[row] = Lookup(value);
-                continue;
-            }
-
-            int group = direct[(int)slot];
-            if (group < 0)
-            {
-                group = direct[(int)slot] = Lookup(value);
-            }
-
-            rowGroups[row] = group;
+            ulong number = (ulong)(Integer(value) - min);
+            rowGroups[row] = number < span ? Numbered(value, number) : Lookup(value);
         }
+    }
+
+    /// <summary>The group of a value within the bounds, by its number: added when it is new, its page allocated at the first value it holds.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int Numbered(TValue value, ulong number)
+    {
+        int[] page = _pages![(int)(number >> PageBits)] ?? Page((int)(number >> PageBits));
+        ref int group = ref page[(int)number & PageMask];
+        if (group < 0)
+        {
+            group = Add(value);
+        }
+
+        return group;
+    }
+
+    /// <summary>The page of the table of groups at <paramref name="at"/>, allocated: every number in it not met yet.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int[] Page(int at)
+    {
+        int[] page = new int[1 << PageBits];
+        page.AsSpan().Fill(-1);
+        _pagesHeld++;
+        return _pages![at] = page;
     }
 
     /// <summary>An integer value as a long; an unsigned one past the longs as a negative, which no table holds.</summary>
@@ -687,20 +719,30 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         : typeof(TValue) == typeof(uint) ? Unsafe.BitCast<TValue, uint>(value)
         : (long)Unsafe.BitCast<TValue, ulong>(value);
 
-    /// <summary>Where the table of groups holds <paramref name="value"/>'s group; false past its bounds.</summary>
-    private bool DirectSlot(TValue value, out int slot)
+    /// <summary>The number <paramref name="value"/>'s group is held at in the table of groups; false past its bounds, or with no such table.</summary>
+    private bool DirectSlot(TValue value, out ulong number)
     {
-        ulong at = (ulong)(Integer(value) - _directMin);
-        slot = (int)at;
-        return at < (ulong)_direct!.Length;
+        // Only an integer key has the table: no other value is read as a long.
+        if (_pages is null)
+        {
+            number = 0;
+            return false;
+        }
+
+        number = (ulong)(Integer(value) - _directMin);
+        return number < _span;
     }
 
-    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds, _probeAhead);
+    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds, _probeAhead, _rows);
 
-    /// <summary>The index, the keys of the groups, the table of small integers, the values a batch reads and its homes and rows left.</summary>
+    /// <summary>Whether the groups are numbered by value, in the pages of a table of groups, rather than hashed.</summary>
+    internal bool ByValue => _pages is not null;
+
+    /// <summary>The index, the keys of the groups, the pages of the table of groups, the values a batch reads and its homes and rows left.</summary>
     internal override long Footprint =>
         _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
-        + ((long)((_direct?.Length ?? 0) + _homes.Length + _left.Length) * sizeof(int));
+        + (((long)_pagesHeld << PageBits) * sizeof(int)) + ((long)(_pages?.Length ?? 0) * IntPtr.Size)
+        + ((long)(_homes.Length + _left.Length) * sizeof(int));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
     internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
@@ -733,15 +775,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        // The table of groups forgets every group's number, then learns the kept ones' new ones.
-        if (_direct is int[] direct)
+        // The table of groups forgets every group's number, then learns the kept ones' new ones; a
+        // value it holds is in no index.
+        for (int g = 0; g < Count; g++)
         {
-            for (int g = 0; g < Count; g++)
+            if (g != _null && DirectSlot(_keys[g], out ulong number))
             {
-                if (g != _null && DirectSlot(_keys[g], out int slot))
-                {
-                    direct[slot] = -1;
-                }
+                _pages![(int)(number >> PageBits)]![(int)number & PageMask] = -1;
             }
         }
 
@@ -755,13 +795,18 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _index.Clear();
         for (int i = 0; i < groups.Length; i++)
         {
-            if (i != nullGroup)
+            if (i == nullGroup)
+            {
+                continue;
+            }
+
+            if (DirectSlot(_keys[i], out ulong number))
+            {
+                _pages![(int)(number >> PageBits)]![(int)number & PageMask] = i;
+            }
+            else
             {
                 _index.GetOrAdd(_keys[i], i);
-                if (_direct is not null && DirectSlot(_keys[i], out int slot))
-                {
-                    _direct[slot] = i;
-                }
             }
         }
 
@@ -906,6 +951,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     private int Lookup(TValue value)
     {
+        if (DirectSlot(value, out ulong number))
+        {
+            return Numbered(value, number);
+        }
+
         int group = _index.GetOrAdd(value, Count);
         if (group == Count)
         {

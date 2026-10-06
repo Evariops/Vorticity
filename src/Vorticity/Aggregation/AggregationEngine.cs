@@ -218,7 +218,7 @@ internal sealed class AggregationPlan
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
     internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null) => Keys.Length switch
     {
-        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead),
+        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1),
         2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout) : new RawKeys<UInt128>(layout),
         2 => new PackedKeys<ulong>(Keys, facts),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts),
@@ -262,19 +262,19 @@ internal sealed class AggregationPlan
     }
 
     /// <summary>The index of a key of one column.</summary>
-    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead) =>
+    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1) =>
         key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
-                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead),
-                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead),
-                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead),
-                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead),
-                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead),
-                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead),
-                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead),
-                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead),
+                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows),
+                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows),
+                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows),
+                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows),
+                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows),
+                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows),
+                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows),
+                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows),
                 PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead),
                 PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead),
                 _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead),
@@ -1577,7 +1577,7 @@ internal static class AggregationEngine
             bounds[k] = Bounds(source, keys[k]);
         }
 
-        return new KeyFacts(sorted, bounds);
+        return new KeyFacts(sorted, bounds, source.RowBound);
     }
 
     /// <summary>
