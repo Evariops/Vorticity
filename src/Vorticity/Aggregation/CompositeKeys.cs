@@ -126,6 +126,9 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new CompositeKeys(_parts);
 
+    /// <summary>The table of the encoded tuples, the groups' keys.</summary>
+    internal override long Footprint => _table.Footprint;
+
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         // A group is its key's number in the table: the table keeps them, numbered again in order.

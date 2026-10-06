@@ -244,8 +244,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     {
         _drained = true;
         _query.Plan.LastRun = _lanes is null
-            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0)
-            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count);
+            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0, _partition.Footprint)
+            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count, _partition!.Footprint);
         await CloseAsync(all: true).ConfigureAwait(false);
     }
 

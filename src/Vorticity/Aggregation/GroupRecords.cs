@@ -259,6 +259,17 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
         _offset = offset;
     }
 
+    internal sealed override GroupRecords? Bound => _alone ? null : _records;
+
+    /// <summary>
+    /// The array of a state with references, at its size without what they reach, which escapes the
+    /// count; the records of a slot made alone; nothing for records a partition shares.
+    /// </summary>
+    internal sealed override long Footprint =>
+        RuntimeHelpers.IsReferenceOrContainsReferences<TState>() ? (long)_array.Length * Unsafe.SizeOf<TState>()
+        : _alone ? _records!.Footprint
+        : 0;
+
     internal sealed override void EnsureGroups(int groups)
     {
         if (!RuntimeHelpers.IsReferenceOrContainsReferences<TState>())

@@ -214,6 +214,13 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
     /// <summary>The arrays of bytes the slot holds its values in: its pages, whatever its groups.</summary>
     internal int Pages => _pageCount;
 
+    /// <summary>The bytes of its pages, counted as it takes them.</summary>
+    internal long PagedBytes => _paged;
+
+    /// <summary>Its pages, counted as it takes them, and where each group's value lies.</summary>
+    internal override long Footprint =>
+        _paged + ((long)_at.Length * sizeof(long)) + ((long)_lengths.Length * sizeof(int)) + ((long)_pages.Length * IntPtr.Size);
+
     internal override void EnsureGroups(int groups)
     {
         if (groups > _at.Length)
@@ -277,7 +284,8 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         return _pages[(int)(at >> 32)].AsSpan((int)at, _lengths[group]);
     }
 
-    private void Offer(int group, ReadOnlySpan<byte> value)
+    /// <summary>Keeps <paramref name="value"/> for <paramref name="group"/> when it beats the value the group holds.</summary>
+    internal void Offer(int group, ReadOnlySpan<byte> value)
     {
         int length = _lengths[group];
         if (length >= 0)
@@ -435,6 +443,9 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    /// <summary>The table of its (group, value) pairs and the counts.</summary>
+    internal override long Footprint => _seen.Footprint + ((long)_counts.Length * sizeof(long)) + _key.Length;
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {

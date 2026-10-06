@@ -85,6 +85,9 @@ internal abstract class GroupKeys
     /// <summary>An empty index of the same kind, for another partition.</summary>
     internal abstract GroupKeys Fresh();
 
+    /// <summary>The bytes the index holds, its tables and its keys at their capacity (PLAN-HIGH-CARDINALITY, H1).</summary>
+    internal abstract long Footprint { get; }
+
     /// <summary>Adds this partition's keys to <paramref name="target"/>; group <c>g</c> here is <c>map[g]</c> there.</summary>
     internal void MergeInto(GroupKeys target, Span<int> map) => MergeInto(target, Numbers.Upto(Count), map);
 
@@ -627,6 +630,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds);
 
+    /// <summary>The index, the keys of the groups, the table of small integers and the values a batch reads.</summary>
+    internal override long Footprint =>
+        _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>()) + ((long)(_direct?.Length ?? 0) * sizeof(int));
+
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
     internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
 
@@ -1004,6 +1011,8 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new BytesKeys(_shape, _sorted);
 
+    internal override long Footprint => _table.Footprint;
+
     internal override int NullNumber => _null;
 
     internal override bool Orders(int component) => true;
@@ -1164,6 +1173,9 @@ internal sealed class BoolKeys : GroupKeys
     }
 
     internal override GroupKeys Fresh() => new BoolKeys(_shape);
+
+    /// <summary>Three groups at most; the words a batch reads.</summary>
+    internal override long Footprint => (long)(_bits.Length + _validity.Length) * sizeof(ulong);
 
     internal override int NullNumber => _groups[2];
 

@@ -34,6 +34,10 @@ internal sealed class ByteKeyTable
     /// <summary>Whether a key landed far enough from its own slot for the table to take a seed.</summary>
     internal bool Reseeded => _seed != 0;
 
+    /// <summary>The bytes the table holds at its capacity: the keys' bytes, where each lies, their hashes and the slots.</summary>
+    internal long Footprint =>
+        _bytes.Length + ((long)(_offsets.Length + _lengths.Length + _slots.Length) * sizeof(int)) + ((long)_hashes.Length * sizeof(ulong));
+
     /// <summary>The number of <paramref name="key"/>, which is added when it is new.</summary>
     internal int GetOrAdd(ReadOnlySpan<byte> key, out bool added)
     {

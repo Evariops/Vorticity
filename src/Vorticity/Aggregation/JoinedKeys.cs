@@ -87,6 +87,21 @@ internal sealed class JoinedKeys : GroupKeys
 
     internal override GroupKeys Fresh() => throw JoinedParts.Read();
 
+    /// <summary>Its parts' indexes, and the numbers a read of one of them takes.</summary>
+    internal override long Footprint
+    {
+        get
+        {
+            long bytes = (long)_local.Length * sizeof(int);
+            foreach (GroupKeys part in _parts)
+            {
+                bytes += part.Footprint;
+            }
+
+            return bytes;
+        }
+    }
+
     internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map) => throw JoinedParts.Read();
 
     internal override void Parts(ulong seed, int shift, Span<byte> parts) => throw JoinedParts.Read();

@@ -120,6 +120,61 @@ internal abstract class AggregateSlot
     internal virtual void Bind(GroupRecords records, int offset)
     {
     }
+
+    /// <summary>The records the slot's states lie in, which its partition shares among its slots; null for a slot that keeps its states apart.</summary>
+    internal virtual GroupRecords? Bound => null;
+
+    /// <summary>
+    /// The bytes the slot holds apart from the records it shares (<see cref="Bound"/>): its arrays at
+    /// their capacity and, for a state of a variable size, the bytes it counts as it takes them
+    /// (PLAN-HIGH-CARDINALITY, H1). Zero for a slot whose states all lie in records.
+    /// </summary>
+    internal virtual long Footprint => 0;
+
+    /// <summary>The bytes <paramref name="slots"/> hold, the records they share counted once.</summary>
+    internal static long FootprintOf(ReadOnlySpan<AggregateSlot> slots)
+    {
+        long bytes = 0;
+        GroupRecords? counted = null;
+        foreach (AggregateSlot slot in slots)
+        {
+            bytes += slot.Footprint;
+            if (slot.Bound is { } records && !ReferenceEquals(records, counted))
+            {
+                bytes += records.Footprint;
+                counted = records;
+            }
+        }
+
+        return bytes;
+    }
+}
+
+/// <summary>The bytes of the runtime's collections at their capacity: a bucket and an entry an item, the entry laid out field for field as the runtime's.</summary>
+internal static class Footprints
+{
+    /// <summary>A <see cref="System.Collections.Generic.HashSet{T}"/> of <paramref name="capacity"/>.</summary>
+    internal static long Set<T>(int capacity) => (long)capacity * (sizeof(int) + Unsafe.SizeOf<SetEntry<T>>());
+
+    /// <summary>A <see cref="System.Collections.Generic.Dictionary{TKey, TValue}"/> of <paramref name="capacity"/>.</summary>
+    internal static long Map<TKey, TValue>(int capacity) => (long)capacity * (sizeof(int) + Unsafe.SizeOf<MapEntry<TKey, TValue>>());
+
+#pragma warning disable CS0169, IDE0051 // Laid out to be measured, never read.
+    private struct SetEntry<T>
+    {
+        private int _hashCode;
+        private int _next;
+        private T _value;
+    }
+
+    private struct MapEntry<TKey, TValue>
+    {
+        private uint _hashCode;
+        private int _next;
+        private TKey _key;
+        private TValue _value;
+    }
+#pragma warning restore CS0169, IDE0051
 }
 
 /// <summary>An aggregate whose answer per group is a <typeparamref name="TResult"/>.</summary>

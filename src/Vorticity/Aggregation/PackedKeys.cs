@@ -465,6 +465,22 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
     internal override GroupKeys Fresh() => new PackedKeys<TKey>(_shapes, _facts);
 
+    /// <summary>The parts' indexes, the packed keys of the groups, the slots or the table that find them, and the scratch a keep reuses.</summary>
+    internal override long Footprint
+    {
+        get
+        {
+            long bytes = ((long)_keys.Length * Unsafe.SizeOf<TKey>())
+                + ((long)(_hashed.Length + (_table?.Length ?? 0) + _slots.Length + _partIds.Length + _renumbered.Length + _held.Length) * sizeof(int));
+            foreach (GroupKeys part in _parts)
+            {
+                bytes += part.Footprint;
+            }
+
+            return bytes;
+        }
+    }
+
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         // Each part keeps the numbers the kept groups hold, numbered again in their order, so that

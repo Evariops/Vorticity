@@ -40,6 +40,9 @@ internal struct GroupIndex<TValue>
     /// <summary>How many keys there are.</summary>
     internal readonly int Count => _groups.Count;
 
+    /// <summary>The bytes of the dictionary at its capacity.</summary>
+    internal readonly long Footprint => Footprints.Map<TValue, int>(_groups.Capacity);
+
     /// <summary>Forgets every key.</summary>
     internal readonly void Clear() => _groups.Clear();
 

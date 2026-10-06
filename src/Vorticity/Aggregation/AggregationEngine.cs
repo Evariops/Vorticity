@@ -243,7 +243,11 @@ internal sealed class AggregationPlan
 /// <param name="Lanes">Each lane's counts, in the order of its rows.</param>
 /// <param name="MergeTicks">The merge's time, in <see cref="Stopwatch"/> ticks.</param>
 /// <param name="MergeParts">The partitions merged into the first.</param>
-internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts)
+/// <param name="StateBytes">
+/// The bytes the groups held at the end of the merge, every lane's and the merge's own: their peak in
+/// a run that keeps them all until then (<see cref="AggregationPartition.Footprint"/>).
+/// </param>
+internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts, long StateBytes)
 {
     /// <summary>One lane's counts.</summary>
     /// <param name="ActiveTicks">The time its passes took, in <see cref="Stopwatch"/> ticks.</param>
@@ -399,6 +403,12 @@ internal sealed class AggregationPartition
     internal GroupRecords? Records { get; private set; }
 
     internal GroupKeys? Keys { get; private set; }
+
+    /// <summary>
+    /// The bytes the partition's groups hold, at the capacity of their arrays: the keys' index, the
+    /// records, and what each slot holds apart from them (PLAN-HIGH-CARDINALITY, H1).
+    /// </summary>
+    internal long Footprint => (Keys?.Footprint ?? 0) + (_componentKeys?.Footprint ?? 0) + AggregateSlot.FootprintOf(Slots);
 
     /// <summary>
     /// Drops the partition's groups, its keys, states and scratch, once another holds them: a lane's
@@ -1083,8 +1093,8 @@ internal static class AggregationEngine
         }
 
         long merging = Stopwatch.GetTimestamp();
-        (GroupKeys? keys, AggregateSlot[] slots, int parts) = await MergeAsync(partitions, plan, settled, inputs, degree, source, cancellationToken).ConfigureAwait(false);
-        plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts);
+        (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, cancellationToken).ConfigureAwait(false);
+        plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, merged);
 
         // The lanes' tables die with the merge, but the one a merge in series kept as the result.
         foreach (AggregationPartition partition in partitions)
@@ -1114,7 +1124,7 @@ internal static class AggregationEngine
     /// merge's workers take from a queue, and the parts read as one, without a copy.
     /// </summary>
     /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series.</returns>
-    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts)> MergeAsync(
+    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged)> MergeAsync(
         AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, CancellationToken cancellationToken)
     {
         int largest = 0;
@@ -1148,7 +1158,7 @@ internal static class AggregationEngine
                 }
             }
 
-            return (biggest.Keys, biggest.Slots, partitions.Length - 1);
+            return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0);
         }
 
         parts = Math.Max(parts, 2);
@@ -1259,7 +1269,14 @@ internal static class AggregationEngine
         }
 
         await GuardedAsync(workers, failed).ConfigureAwait(false);
-        return Joined(partKeys, partSlots, parts);
+        long merged = 0;
+        for (int part = 0; part < parts; part++)
+        {
+            merged += partKeys[part].Footprint + AggregateSlot.FootprintOf(partSlots[part]);
+        }
+
+        (GroupKeys joinedKeys, AggregateSlot[] joinedSlots, int joinedParts) = Joined(partKeys, partSlots, parts);
+        return (joinedKeys, joinedSlots, joinedParts, merged);
     }
 
     /// <summary>The parts a merge cuts its keys into: a power of two, at most twice the degree, and a part of <see cref="PartGroups"/> groups of the largest partition at least.</summary>
@@ -1719,15 +1736,18 @@ internal static class AggregationEngine
     }
 
     /// <summary>What the partitions did, gathered once they have merged into the first: the plan's last run.</summary>
-    private static AggregationRun Gathered(AggregationPartition[] partitions, long mergeTicks, int mergeParts)
+    /// <summary>The run's counts, gathered once the merge is done: the lanes' groups are all alive then, with the merge's own.</summary>
+    private static AggregationRun Gathered(AggregationPartition[] partitions, long mergeTicks, int mergeParts, long merged)
     {
         AggregationRun.Lane[] lanes = new AggregationRun.Lane[partitions.Length];
+        long state = merged;
         for (int p = 0; p < lanes.Length; p++)
         {
             lanes[p] = new AggregationRun.Lane(partitions[p].ActiveTicks, partitions[p].Ranges, partitions[p].GroupsAtEnd);
+            state += partitions[p].Footprint;
         }
 
-        return new AggregationRun(lanes, mergeTicks, mergeParts);
+        return new AggregationRun(lanes, mergeTicks, mergeParts, state);
     }
 
     /// <summary>

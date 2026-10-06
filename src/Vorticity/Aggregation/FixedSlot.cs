@@ -545,6 +545,9 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
     internal override long Result(int group) => _counts[group];
 
+    /// <summary>The set of its (group, value) pairs and the counts.</summary>
+    internal override long Footprint => Footprints.Set<DistinctEntry<TValue>>(_seen.Capacity) + ((long)_counts.Length * sizeof(long));
+
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         int[] renumbered = new int[_groups];
