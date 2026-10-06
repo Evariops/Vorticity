@@ -234,6 +234,33 @@ public sealed class GroupHashTests
         Assert.False(table.Reseeded);
     }
 
+    // A key's length lies ahead of its bytes in 7-bit groups: one byte below 128, more past it, and
+    // none of it moves a key's bytes through growths and a Retain.
+    [Fact]
+    public void ByteKeysOfEveryLengthKeepTheirBytes()
+    {
+        int[] lengths = [0, 1, 127, 128, 300, 16_383, 16_384, 20_000];
+        ByteKeyTable table = new ByteKeyTable();
+        List<byte[]> keys = [];
+        for (int i = 0; i < 400; i++)
+        {
+            byte[] key = new byte[lengths[i % lengths.Length] + (i / lengths.Length)];
+            new Random(i).NextBytes(key);
+            keys.Add(key);
+            Assert.Equal(i, table.GetOrAdd(key, out bool added));
+            Assert.True(added);
+        }
+
+        table.Retain([.. Enumerable.Range(0, keys.Count).Where(i => i % 2 == 1)]);
+        for (int i = 0; i < table.Count; i++)
+        {
+            byte[] key = keys[(2 * i) + 1];
+            Assert.True(table.KeyOf(i).SequenceEqual(key));
+            Assert.Equal(i, table.GetOrAdd(key, out bool added));
+            Assert.False(added);
+        }
+    }
+
     // A text key is hashed once: the hash its table keeps is the one a merge cuts the parts by, while
     // the table has no seed of its own, through growths and a Retain.
     [Fact]
