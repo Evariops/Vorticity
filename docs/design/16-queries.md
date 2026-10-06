@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅; the core under pressure, the spill, delivery part by part 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅; the spill, delivery part by part 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -729,8 +729,8 @@ its rows straight into batches for the next thirty-two. At the end every part ap
 split ahead, and the sub-tables are the result, read as one. The arrays of its sub-tables and slabs
 come from a shelf of the query and go back to the process's, kept within a budget and swept after
 collections. On the bench it holds two to three times less than the tables of fourteen lanes, but
-costs time at one lane and at some cardinalities: it is to become what the governor turns to under
-pressure (§9.5), and stay an option at eight lanes and more.
+costs time at one lane and at some cardinalities: it is what the governor turns to under pressure
+(§9.5), and an option at eight lanes and more.
 
 ### 9.5 Memory
 
@@ -750,8 +750,9 @@ streams, their window.
 | fourteen lanes, the core | two to three times less than their tables, on the bench's wide keys |
 
 A row of data touches one line of cache of states, whatever its aggregates; a probe of a fixed-width
-key reads its slot, a probe of a text its slot and its bytes. A group is numbered by an `int`: a
-group by holds at most 2³¹ − 1 groups.
+key reads its slot, a probe of a text its slot and its bytes. A group is numbered by an `int`, and the
+tables double: an open table holds 2²⁹ groups at most, a list 2³⁰, a distinct count's pairs alike.
+Past that a group by fails with a `VortexUnsupportedException` that says so.
 
 **The governor.** A query's memory is reserved from a budget: the process's by default, or a
 `QueryMemoryBudget` the host creates and gives the sessions that share it, whose ceiling bounds their
@@ -765,15 +766,32 @@ queries. A query reserves where its memory grows, the moment it does: each array
 before it is allocated, a doubling holding the old arrays beside the new for the copy and no more; the
 parts and the cut of a merge; the scratch a sort, a top or a fetch rents; the groups of its result and
 their order until it is delivered. A lane's working memory besides its tables, a batch's scratch and
-its decoding, is admitted with the query, a megabyte a lane: a query its budget cannot give every lane
-starts on half as many, down to one. What the queries let go stays in the heap until a collection; when
-that, or what the collector keeps committed past its heap, stands between a reservation and the
-ceiling, a collection that gives it back comes first. A query refused fails with a
-`VortexMemoryException` that names the operator, its groups and its bytes, everything it held given
-back.
+its decoding, is admitted with the query, 16 bytes a row of its batches between 64 KiB and a megabyte,
+a megabyte when the scan sets no batch size: a query its budget cannot give every lane starts on half
+as many, down to one. What the queries let go stays in the heap until a collection; when that, or what
+the collector keeps committed past its heap, stands between a reservation and the ceiling, a collection
+that gives it back comes first. A query refused fails with a `VortexMemoryException` that names the
+operator, its groups and its bytes, everything it held given back.
 
-Not yet, and in this order: under pressure a lane's table empties into the core, which holds each
-group once, rather than failing; a comfort budget the host grants, none by default, buys a higher α,
+**Under pressure**, a group by its lanes' tables outgrow ends in the core rather than failing, on a key
+the core can hold, at two lanes or more. A lane whose budget would not let its table double once more
+turns: the first makes the core, lean — α at 1, a part applied from 256 entries pending, a cache a
+quarter of a lane's, batches of a kilobyte. The others follow at their next batch, one at a time,
+those whose table holds more than the core would cost them; a lane waits for its turn on a task,
+folding nothing. A turning lane's groups are counted by part and copied into an array of their own a
+part, exactly their size, which the budget counts past its ceiling and takes back as the part applies
+it; the table is given back, and the lane goes on with a cache. A part's stack whose groups the budget
+cannot take yet waits while a lane still holds a table, and its lane waits for the next table given
+back; meanwhile, and while arrays of their own wait on their stacks, the core takes past its ceiling
+what an application asks more. A lane that runs out of rows without turning merges its table with the
+others that did, in series into the largest, each given back once merged; the last lane to stop empties
+that one into the core. A query whose pass fits and whose merge by parts does not merges its tables
+the same way, in series, each given back once merged, and needs no core. Under 70 % of the memory the
+lanes' tables hold at most, fourteen lanes on 10⁵ keys end exact, their peak within 1.4 % of the
+budget; a key of text, and a composite holding one, stay on the lanes' tables, which spill when spilling
+comes.
+
+Not yet, and in this order: a comfort budget the host grants, none by default, buys a higher α,
 and the query holding more than its share — its budget's ceiling over its sessions' active queries,
 the limit over every active query at the process's threshold — gives up its comfort first, then
 lowers α to its floor, which applies its pending batches, then spills its largest parts: their
@@ -830,7 +848,7 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | arithmetic on results, `g.Sum(…) / g.Count()` | C# computes with results after the sink; filtering or ordering by a ratio is LINQ to objects over the delivered groups, or a query over the result's scan |
 | joins, `let`, a query over a group's rows | one table, no binding per row |
 | a synchronous twin, `ToList()` | async only where there is I/O, and no synchronous twin of an asynchronous call ([03-architecture.md](03-architecture.md) §1) |
-| an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3). Without one, the order is not defined: at one lane, the groups come in the order they were first met; at more, in the merge's: the largest lane's, then the others' as they merged in, or part by part of the key space, the parts cut by a hash seeded once a process, so that two runs of a query in one process cut them alike |
+| an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3). Without one, the order is not defined: at one lane, the groups come in the order they were first met; at more, in the merge's: the largest lane's, then the others' as they merged in, or part by part of the key space, the parts cut by a hash seeded once a process, so that two runs of a query in one process cut them alike. The repository's tests run with an internal switch that shuffles it, the same way for a process, so that none relies on it |
 | the same bits for an aggregator of one's own whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in (§13), its consolidation made of merges alone; a merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, a third more at a million groups, whose 32 bytes a group leave the cache (§13); it is more accurate, and a second semantics would be a second test matrix |
 | approximate distinct counts, quantiles, grouping sets | later, as aggregates and as operators of the same pipeline |
@@ -844,7 +862,8 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | §1's boundary | `tests/MustNotCompile`, with exactly the expected diagnostics |
 | every answer is right | each key form of §9.1 × each aggregate of §5 × degree 1 and the machine's, against LINQ to objects over `ToRecordsAsync`, on the conformance corpus and the type matrix |
 | answers do not depend on the degree or the cut | every answer of §5 but the order-bound ones, float sums included, the same bits at degrees 1 to the machine's, over a file written in two row orders, and over a dataset cut into 1, 2 and 7 objects, before and after compaction; and at every capacity of the lanes' caches, every α the internal switch forces (1, 2, 4, 8), and spilled under a heap ten times too small |
-| no batch is left behind | a holder of a part slowed on purpose while the lanes deposit: every deposited batch applied, the pending bytes counted at the governor |
+| no batch is left behind | a holder of a part slowed on purpose while the lanes deposit: every deposited batch applied, the pending bytes counted at the governor; a pass cancelled in the middle of its bursts gives its budget back to zero |
+| a group by its lanes' tables outgrow ends under its budget | `CorePressureTests`: fourteen lanes on 10⁵ keys under 85, 70 and 50 % of what their tables reserve at most, refused with the core off, exact with it, every reservation given back; twice as many lanes as the pool may run threads, every wait on a task |
 | pending batches are bounded | the entries a part holds pending never above α times its groups, nor the rows its caches missed |
 | the sub-tables are read back little | the bytes of sub-tables a burst reads again, under ≈ 2s/α an entry, s a group's bytes in a sub-table; none on keys met twice at fourteen lanes once the sub-tables are grown |
 | memory is at most the strong reference's | the peak, caches included, at most that of a table on each lane, at the same degree, at degree 1 and at the machine's, on keys met twice, ten times, and once |
