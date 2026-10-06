@@ -323,9 +323,10 @@ internal interface IPairedSlot
     /// pair's part the top bits of its hash under its group's target, so that equal pairs of every
     /// lane meet in one part, each part's pairs made distinct by a worker, and the counts of every part
     /// summed by group into this slot. Group <c>g</c> of <c>slots[p]</c> is group <c>maps[p][g]</c>
-    /// here; the pairs, counted, are let go.
+    /// here; the pairs, counted, are let go. A part's table is reserved in <paramref name="memory"/> for
+    /// as long as it lives.
     /// </summary>
-    Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, CancellationToken cancellationToken);
+    Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken);
 }
 
 /// <summary>Work items run side by side, a worker taking the next item as it finishes one.</summary>

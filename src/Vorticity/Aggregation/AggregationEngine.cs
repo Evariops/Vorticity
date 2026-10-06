@@ -497,6 +497,12 @@ internal sealed class AggregationPartition
     /// <summary>The lane's side of the query's core, which copies the partition into its batches when it fills (PLAN-HIGH-CARDINALITY, H4); null without a core.</summary>
     internal LaneCore? Core { get; init; }
 
+    /// <summary>The query's memory, in which the partition reserves what its groups hold after each batch (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
+    internal QueryMemory? Memory { get; init; }
+
+    /// <summary>The bytes the partition reserved in the query's memory.</summary>
+    internal long Accounted { get; private set; }
+
     internal GroupKeys? Keys { get; private set; }
 
     /// <summary>
@@ -685,6 +691,47 @@ internal sealed class AggregationPartition
         Fold(batch);
         Top?.Trim(this, final: false);
         Core?.Fold(this, batch.SelectedRows, before);
+        if (Memory is { } memory)
+        {
+            Account(memory);
+        }
+    }
+
+    /// <summary>Reserves what the partition's groups grew to through a merge into it.</summary>
+    internal void Recount()
+    {
+        if (Memory is { } memory)
+        {
+            Account(memory);
+        }
+    }
+
+    /// <summary>
+    /// Reserves what the partition's groups grew to since it last did, a megabyte ahead at least: a
+    /// reading of its arrays' lengths, once a batch. Past the budget, the query fails, its memory given
+    /// back as it unwinds.
+    /// </summary>
+    private void Account(QueryMemory memory)
+    {
+        long need = Footprint - Accounted;
+        if (need <= 0)
+        {
+            return;
+        }
+
+        long grow = Math.Max(need, QueryMemory.Chunk);
+        if (!memory.TryGrow(grow))
+        {
+            // The megabyte ahead may be what does not fit: the need alone, before failing.
+            if (grow == need || !memory.TryGrow(need))
+            {
+                throw memory.Exceeded("group by", Keys?.Count ?? 1, need);
+            }
+
+            grow = need;
+        }
+
+        Accounted += grow;
     }
 
     /// <summary>Folds the settled blocks that start before row <paramref name="before"/>, in their order.</summary>
@@ -1182,9 +1229,17 @@ internal static class AggregationEngine
             facts = GroupCore.CacheFacts(facts);
         }
 
+        // What the lanes' tables and the merge hold, reserved in the session's budget as they grow, and
+        // given back once the groups are merged, or when the query fails (PLAN-HIGH-CARDINALITY, H2).
+        using QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         if (ranges is null)
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top, Core = core?.Lane() };
+            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+            {
+                Top = top,
+                Core = core?.Lane(),
+                Memory = memory,
+            };
             if (settling is not null)
             {
                 only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -1205,6 +1260,7 @@ internal static class AggregationEngine
                 {
                     Top = top is { FirstMet: true } ? null : top,
                     Core = core?.Lane(),
+                    Memory = memory,
                 };
             }
 
@@ -1225,7 +1281,7 @@ internal static class AggregationEngine
 
             return new AggregationOutcome(plan, heldSlots, held, held.Order(sorted: false));
         }
-        (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, cancellationToken).ConfigureAwait(false);
+        (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, memory, cancellationToken).ConfigureAwait(false);
         plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, merged);
 
         // The lanes' tables die with the merge, but the one a merge in series kept as the result.
@@ -1257,7 +1313,8 @@ internal static class AggregationEngine
     /// </summary>
     /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series.</returns>
     private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged)> MergeAsync(
-        AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, CancellationToken cancellationToken)
+        AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, QueryMemory memory,
+        CancellationToken cancellationToken)
     {
         int largest = 0;
         for (int p = 1; p < partitions.Length; p++)
@@ -1291,12 +1348,13 @@ internal static class AggregationEngine
                 if (p != largest)
                 {
                     maps[p] = biggest.MergeFrom(partitions[p], ref numbers, apart);
+                    biggest.Recount();
                 }
             }
 
             if (apart is not null)
             {
-                await MergePairedAsync(partitions, largest, maps, apart, degree, cancellationToken).ConfigureAwait(false);
+                await MergePairedAsync(partitions, largest, maps, apart, degree, memory, cancellationToken).ConfigureAwait(false);
             }
 
             return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0);
@@ -1397,6 +1455,13 @@ internal static class AggregationEngine
                             }
                         }
 
+                        // The part's table beside the lanes', which live until the merge is done.
+                        long bytes = keys.Footprint + AggregateSlot.FootprintOf(slots);
+                        if (!memory.TryGrow(bytes))
+                        {
+                            throw memory.Exceeded("merge of a group by", keys.Count, bytes);
+                        }
+
                         partKeys[part] = keys;
                         partSlots[part] = slots;
                         lock (done)
@@ -1456,7 +1521,8 @@ internal static class AggregationEngine
     /// their pairs taken side by side: the largest's own groups as they are, every other partition's
     /// by its map onto the largest's, its keys merged before.
     /// </summary>
-    private static async Task MergePairedAsync(AggregationPartition[] partitions, int largest, int[][] maps, bool[] apart, int degree, CancellationToken cancellationToken)
+    private static async Task MergePairedAsync(
+        AggregationPartition[] partitions, int largest, int[][] maps, bool[] apart, int degree, QueryMemory memory, CancellationToken cancellationToken)
     {
         AggregationPartition biggest = partitions[largest];
         int groups = biggest.Keys?.Count ?? 1;
@@ -1496,7 +1562,7 @@ internal static class AggregationEngine
                 slots[p] = lanes[p].Slots[s];
             }
 
-            await ((IPairedSlot)slots[0]).MergeInPartsAsync(slots, ordered, groups, parts, degree, cancellationToken).ConfigureAwait(false);
+            await ((IPairedSlot)slots[0]).MergeInPartsAsync(slots, ordered, groups, parts, degree, memory, cancellationToken).ConfigureAwait(false);
         }
     }
 

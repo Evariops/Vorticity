@@ -22,6 +22,7 @@ public sealed class VortexSessionOptions
     private long _indexCacheBytes = 64L * 1024 * 1024;
     private int _mappedFileCacheCount = 64;
     private bool _mapFiles = true;
+    private QueryMemoryBudget? _memoryBudget;
     private bool _frozen;
 
     internal VortexSessionOptions()
@@ -154,6 +155,21 @@ public sealed class VortexSessionOptions
     {
         get => _mapFiles;
         set => _mapFiles = Set(value);
+    }
+
+    /// <summary>
+    /// The memory the session's queries share with those of every session given the same budget: the
+    /// tables of their groups and the parts their merges build. Null, the default, shares the process's,
+    /// a margin under the memory the process may use.
+    /// </summary>
+    /// <remarks>
+    /// A query that needs more than its budget grants fails with a <see cref="VortexMemoryException"/>.
+    /// The budget is the host's: disposing the session leaves it to the others.
+    /// </remarks>
+    public QueryMemoryBudget? MemoryBudget
+    {
+        get => _memoryBudget;
+        set => _memoryBudget = Set(value);
     }
 
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>

@@ -1,0 +1,181 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Xunit;
+
+namespace Vorticity.Tests.Aggregation;
+
+/// <summary>
+/// The memory a query holds, under its session's budget (PLAN-HIGH-CARDINALITY, H2): a group by past it
+/// fails with a <see cref="VortexMemoryException"/> that names it, and gives back everything it held,
+/// at one lane and at fourteen; under it, it runs and gives its memory back when its groups are merged;
+/// sessions that share a budget share its ceiling.
+/// </summary>
+public sealed partial class QueryMemoryTests
+{
+    private const int Rows = 400_000;
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
+    public async Task AGroupByPastItsBudgetFailsAndGivesEverythingBack(int degree)
+    {
+        string path = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(2 << 20);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            VortexMemoryException failure = await Assert.ThrowsAsync<VortexMemoryException>(async () =>
+                await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value)).ToListAsync(Ct));
+
+            Assert.Contains("group by", failure.Message, StringComparison.Ordinal);
+            Assert.Contains("2,097,152", failure.Message, StringComparison.Ordinal);
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
+    public async Task ADistinctCountPastItsBudgetFailsAndGivesEverythingBack(int degree)
+    {
+        string path = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1 << 20);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            await Assert.ThrowsAsync<VortexMemoryException>(async () => await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
+    public async Task AGroupByUnderItsBudgetRunsAndGivesItBack(int degree)
+    {
+        string path = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            System.Collections.Generic.List<long> counts = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct);
+            Assert.Equal(Keys, counts.Count);
+            Assert.Equal(Rows, counts.Sum());
+            Assert.Equal(Keys, await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task SessionsThatShareABudgetShareItsCeiling()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            // Two sessions, one budget: their queries side by side, then a query each, sequentially.
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession first = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexSession second = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile a = await first.OpenAsync(path, cancellationToken: Ct);
+            await using VortexFile b = await second.OpenAsync(path, cancellationToken: Ct);
+            long[] counts = await Task.WhenAll(
+                Task.Run(async () => (long)(await a.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct)).Count, Ct),
+                Task.Run(async () => (long)(await b.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct)).Count, Ct));
+            Assert.Equal([Keys, Keys], counts);
+            Assert.Equal(0, budget.ReservedBytes);
+
+            // Too small for either query: each fails apart, and the budget is whole after both.
+            QueryMemoryBudget small = new QueryMemoryBudget(1 << 20);
+            await using VortexSession third = VortexSession.Create(options => options.MemoryBudget = small);
+            await using VortexFile c = await third.OpenAsync(path, cancellationToken: Ct);
+            await Assert.ThrowsAsync<VortexMemoryException>(async () => await c.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct));
+            await Assert.ThrowsAsync<VortexMemoryException>(async () => await c.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct));
+            Assert.Equal(0, small.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ABudgetTakesAPositiveCeiling()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new QueryMemoryBudget(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new QueryMemoryBudget(-1));
+        Assert.Equal(1L << 20, new QueryMemoryBudget(1 << 20).CeilingBytes);
+    }
+
+    /// <summary>The distinct keys of the rows: three hundred thousand, past a megabyte or two of any table.</summary>
+    private const int Keys = 300_000;
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private static async Task<string> WriteAsync()
+    {
+        Row[] rows = new Row[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            // Every key once in the first rows, then keys at random among them.
+            int key = row < Keys ? row : (int)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % Keys);
+            rows[row] = new Row(key, row % 100);
+        }
+
+        string directory = Path.Combine(AppContext.BaseDirectory, "query-memory");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"rows-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        return path;
+    }
+
+    [VortexRecord]
+    public partial record struct Row(int Key, long Value);
+}

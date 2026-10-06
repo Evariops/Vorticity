@@ -1188,6 +1188,10 @@ Vorticity:     property int BlocksPruned { get; init; }
 Vorticity:     property int SegmentsRead { get; init; }
 Vorticity:     property long BytesRead { get; init; }
 Vorticity:     property string Structure { get; init; }
+Vorticity: sealed class Vorticity.QueryMemoryBudget
+Vorticity:     ctor QueryMemoryBudget(long)
+Vorticity:     property long CeilingBytes { get; }
+Vorticity:     property long ReservedBytes { get; }
 Vorticity: sealed class Vorticity.RecordBatch : IDisposable
 Vorticity:     method Columns<TRecord> As<TRecord>()
 Vorticity:     method void Dispose()
@@ -1716,6 +1720,9 @@ Vorticity:     const int MaxMetadataKeyLength = 64
 Vorticity:     const int MaxMetadataSegments = 16
 Vorticity:     const int MaxPostscriptSize = 65527
 Vorticity:     const long DefaultMaxDecompressedSize = 268435456
+Vorticity: sealed class Vorticity.VortexMemoryException : VortexException
+Vorticity:     ctor VortexMemoryException(string)
+Vorticity:     ctor VortexMemoryException(string, Exception)
 Vorticity: sealed class Vorticity.VortexMetadata
 Vorticity:     method ValueTask<ReadOnlyMemory<byte>> ReadAsync(string, CancellationToken = default)
 Vorticity:     property ImmutableArray<string> Keys { get; }
@@ -1800,6 +1807,7 @@ Vorticity:     property VortexSession Default { get; }
 Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
 Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
+Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
 Vorticity:     property bool MapFiles { get; set; }

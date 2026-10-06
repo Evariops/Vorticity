@@ -470,7 +470,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 
     public long Pairs => _seen.Count;
 
-    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, CancellationToken cancellationToken)
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
         BytesDistinctSlot[] all = new BytesDistinctSlot[slots.Length];
         for (int p = 0; p < slots.Length; p++)
@@ -511,7 +511,15 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
                     }
                 }
 
+                // The part's table, held until its pairs are counted.
+                long bytes = distinct.Footprint;
+                if (memory is not null && !memory.TryGrow(bytes))
+                {
+                    throw memory.Exceeded("merge of a distinct count", groups, bytes);
+                }
+
                 counts[part] = count;
+                memory?.Shrink(bytes);
             },
             degree,
             cancellationToken).ConfigureAwait(false);
