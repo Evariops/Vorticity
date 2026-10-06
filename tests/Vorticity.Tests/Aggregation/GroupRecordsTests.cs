@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -73,6 +74,34 @@ public sealed partial class GroupRecordsTests
         Assert.Equal([8, 0, 12], narrow.Offsets);
         Assert.Equal(2, narrow.Stride);
         Assert.Equal(4, RecordLayout.Of([new CountSlot<long>(), Total(), Least()])!.Stride);
+    }
+
+    /// <summary>
+    /// The records start at a line of cache, so that one of 32 bytes never straddles two: at their
+    /// first size on the large object heap, which does not move them, and grown, their states kept,
+    /// their capacity doubled with seven words to spare.
+    /// </summary>
+    [Fact]
+    public unsafe void RecordsStartAtALineOfCache()
+    {
+        AggregateSlot[] slots = [.. Enumerable.Range(0, 4).Select(_ => (AggregateSlot)new CountSlot<long>())];
+        RecordLayout layout = RecordLayout.Of(slots)!;
+        Assert.Equal(4, layout.Stride);
+        GroupRecords records = new GroupRecords(layout);
+        int offset = layout.Offsets[3];
+        foreach ((int groups, int capacity) in (ReadOnlySpan<(int, int)>)[(10_000, 16_384), (20_000, 32_768), (40_000, 65_536)])
+        {
+            records.EnsureGroups(groups);
+            records.View<long>(offset)[groups - 1] = groups;
+            nint first = (nint)Unsafe.AsPointer(ref records.View<long>(offset)[0]);
+            Assert.Equal(0, (first - offset) % GroupRecords.Line);
+            Assert.Equal(((capacity * 4L) + 7) * sizeof(ulong), records.Footprint);
+        }
+
+        Assert.Equal(10_000L, records.View<long>(offset)[9_999]);
+        Assert.Equal(20_000L, records.View<long>(offset)[19_999]);
+        Assert.Equal(40_000L, records.View<long>(offset)[39_999]);
+        Assert.Equal(0L, records.View<long>(offset)[30_000]);
     }
 
     [Fact]

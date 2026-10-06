@@ -12,14 +12,25 @@ namespace Vorticity.Aggregating;
 /// own; the records grow, are seeded and kept once for every slot.
 /// </summary>
 /// <remarks>
-/// Words of eight bytes, so that a record starts at the alignment of the widest state a slot has. A
-/// slot finds its state through a <see cref="StateView{TState}"/>, read once a batch: the records
-/// move when they grow, and only between batches.
+/// Words of eight bytes, so that a record starts at the alignment of the widest state a slot has. The
+/// records start at a line of cache as the array lies when it is made: a record of 16, 32 or 64 bytes
+/// then never straddles two lines. An array of the large object heap stays where it is; a small one
+/// the collector moves may lose the alignment, which costs time, never an answer. A slot finds its
+/// state through a <see cref="StateView{TState}"/>, read once a batch: the records move when they
+/// grow, and only between batches.
 /// </remarks>
 internal sealed class GroupRecords
 {
+    /// <summary>The line of cache the records start at: 64 bytes, a half of the 128 of some cores, which a record within it does not straddle either.</summary>
+    internal const int Line = 64;
+
     private readonly RecordLayout _layout;
     private ulong[] _words = [];
+
+    // The words before the first record, which starts at a line; the records the array holds past
+    // them, which the words left at its end do not count.
+    private int _base;
+    private int _capacity;
     private int _groups;
 
     internal GroupRecords(RecordLayout layout) => _layout = layout;
@@ -41,14 +52,21 @@ internal sealed class GroupRecords
         }
 
         int stride = _layout.Stride;
-        if ((long)groups * stride > _words.Length)
+        if (groups > _capacity)
         {
-            int capacity = Scratch.Capacity(groups, _words.Length / stride);
-            Array.Resize(ref _words, checked(capacity * stride));
+            // Doubled as the records were, the words past them aside: counted, they would round the
+            // next capacity up to four times this one.
+            int capacity = Scratch.Capacity(groups, _capacity);
+            ulong[] grown = GC.AllocateUninitializedArray<ulong>(checked((capacity * stride) + (Line / sizeof(ulong)) - 1));
+            int start = LineStart(grown);
+            _words.AsSpan(_base, _groups * stride).CopyTo(grown.AsSpan(start));
+            _words = grown;
+            _base = start;
+            _capacity = capacity;
         }
 
         ReadOnlySpan<ulong> seed = _layout.Seed;
-        Span<ulong> words = _words;
+        Span<ulong> words = _words.AsSpan(_base);
         for (int g = _groups; g < groups; g++)
         {
             seed.CopyTo(words.Slice(g * stride, stride));
@@ -61,7 +79,7 @@ internal sealed class GroupRecords
     internal void Keep(ReadOnlySpan<int> groups)
     {
         int stride = _layout.Stride;
-        Span<ulong> words = _words;
+        Span<ulong> words = _words.AsSpan(_base);
         for (int i = 0; i < groups.Length; i++)
         {
             if (groups[i] != i)
@@ -75,7 +93,14 @@ internal sealed class GroupRecords
     }
 
     /// <summary>The states at byte <paramref name="offset"/> of the records, until they next grow.</summary>
-    internal StateView<TState> View<TState>(int offset) => new StateView<TState>(_words, _layout.Stride, offset);
+    internal StateView<TState> View<TState>(int offset) => new StateView<TState>(_words.AsSpan(_base), _layout.Stride, offset);
+
+    /// <summary>The words of <paramref name="words"/> before the first that starts a line, where the array lies now.</summary>
+    private static unsafe int LineStart(ulong[] words)
+    {
+        nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(words));
+        return (int)((-address & (Line - 1)) / sizeof(ulong));
+    }
 }
 
 /// <summary>Where each slot's state lies in a record: its offset, the record's stride, and a record of seeds.</summary>
