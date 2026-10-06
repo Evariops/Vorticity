@@ -116,15 +116,16 @@ awk -F '\t' '
             spread[k] = (NF >= 14 && $13 + 0 > 0) ? sprintf("%.2f", $12 / $13) : "-"
             busiest[k] = (NF >= 14) ? sprintf("%.2f", $12) : "-"
             merge[k] = (NF >= 14) ? sprintf("%.2f", $14) : "-"
+            state[k] = (NF >= 16 && $16 + 0 >= 0) ? sprintf("%.1f", $16) : "-"
         }
         if (key in result && result[key] != $7) differs[key] = 1
         result[key] = $7
     }
     END {
-        printf "%-72s %9s %9s %7s %17s %17s %17s %11s %13s %11s %13s\n", "query (degree)", "before", "after", "ratio", "first ms b/a", "alloc MiB b/a", "live MiB b/a", "gen2 b/a", "lane ms b/a", "max/mean", "merge ms b/a"
+        printf "%-72s %9s %9s %7s %17s %17s %17s %11s %13s %11s %13s %17s\n", "query (degree)", "before", "after", "ratio", "first ms b/a", "alloc MiB b/a", "live MiB b/a", "gen2 b/a", "lane ms b/a", "max/mean", "merge ms b/a", "state MiB b/a"
         for (i = 1; i <= n; i++) {
             key = order[i]; b = "b" SUBSEP key; a = "a" SUBSEP key
             if (!(b in ms) || !(a in ms)) continue
-            printf "%-72s %9.2f %9.2f %7.3f %8.2f/%-8.2f %8.1f/%-8.1f %8.1f/%-8.1f %5.1f/%-5.1f %6s/%-6s %5s/%-5s %6s/%-6s%s\n", key, ms[b], ms[a], ms[a] / ms[b], first[b], first[a], alloc[b], alloc[a], live[b], live[a], gen2[b], gen2[a], busiest[b], busiest[a], spread[b], spread[a], merge[b], merge[a], (key in differs) ? "  RESULT DIFFERS" : ""
+            printf "%-72s %9.2f %9.2f %7.3f %8.2f/%-8.2f %8.1f/%-8.1f %8.1f/%-8.1f %5.1f/%-5.1f %6s/%-6s %5s/%-5s %6s/%-6s %8s/%-8s%s\n", key, ms[b], ms[a], ms[a] / ms[b], first[b], first[a], alloc[b], alloc[a], live[b], live[a], gen2[b], gen2[a], busiest[b], busiest[a], spread[b], spread[a], merge[b], merge[a], state[b], state[a], (key in differs) ? "  RESULT DIFFERS" : ""
         }
     }' "$out/before.tsv" "$out/after.tsv"

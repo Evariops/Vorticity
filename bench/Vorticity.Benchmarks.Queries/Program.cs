@@ -232,7 +232,7 @@ if (engines.Count > 0)
 {
     // What each lane did in the best round: the busiest against the mean, and the merge's share.
     Console.WriteLine();
-    Console.WriteLine($"{"engine",-74} {"lanes",5} {"ranges",6} {"max ms",8} {"mean ms",8} {"max/mean",8} {"merge ms",9} {"merge %",8} {"parts",5} {"groups",9}");
+    Console.WriteLine($"{"engine",-74} {"lanes",5} {"ranges",6} {"max ms",8} {"mean ms",8} {"max/mean",8} {"merge ms",9} {"merge %",8} {"parts",5} {"groups",9} {"state MiB",9}");
     foreach ((string key, Measurement m) in engines)
     {
         AggregationRun run = m.Engine!;
@@ -241,7 +241,7 @@ if (engines.Count > 0)
         double merge = run.MergeTicks * 1_000.0 / Stopwatch.Frequency;
         long groups = run.Lanes.Sum(lane => (long)lane.Groups);
         Console.WriteLine(
-            $"{key,-74} {run.Lanes.Length,5} {run.Lanes.Sum(lane => lane.Ranges),6} {max,8:F2} {mean,8:F2} {(mean > 0 ? max / mean : 0),8:F2} {merge,9:F2} {100 * merge / m.Millis,8:F1} {run.MergeParts,5} {groups,9}");
+            $"{key,-74} {run.Lanes.Length,5} {run.Lanes.Sum(lane => lane.Ranges),6} {max,8:F2} {mean,8:F2} {(mean > 0 ? max / mean : 0),8:F2} {merge,9:F2} {100 * merge / m.Millis,8:F1} {run.MergeParts,5} {groups,9} {StateMiB(run),9:F1}");
     }
 }
 
@@ -298,7 +298,7 @@ static string? Text(string[] args, string name)
 
 // A measure as one line of tab-separated fields, appended: the query, its degree, its times, bytes and
 // result, then its lanes when it tracks its aggregation (their count, the busiest, the mean, the merge
-// and its parts), or nothing.
+// and its parts, the state's bytes at the merge's end), or nothing.
 static void Record(string? path, string name, int degree, Measurement m)
 {
     if (path is null)
@@ -312,13 +312,20 @@ static void Record(string? path, string name, int degree, Measurement m)
         double max = run.Lanes.Max(lane => lane.ActiveTicks) * 1_000.0 / Stopwatch.Frequency;
         double mean = run.Lanes.Average(lane => lane.ActiveTicks) * 1_000.0 / Stopwatch.Frequency;
         double merge = run.MergeTicks * 1_000.0 / Stopwatch.Frequency;
-        engine = string.Create(CultureInfo.InvariantCulture, $"\t{run.Lanes.Length}\t{max:F3}\t{mean:F3}\t{merge:F3}\t{run.MergeParts}");
+        engine = string.Create(CultureInfo.InvariantCulture, $"\t{run.Lanes.Length}\t{max:F3}\t{mean:F3}\t{merge:F3}\t{run.MergeParts}\t{StateMiB(run):F2}");
     }
 
     System.IO.File.AppendAllText(path, string.Create(
         CultureInfo.InvariantCulture,
         $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}\t{m.Gen2:F2}\t{m.Faults}\t{m.LargeBytes / 1048576.0:F2}{engine}\n"));
 }
+
+// The bytes the run's groups held at the merge's end (PLAN-HIGH-CARDINALITY.md, H1), read by name so
+// that an older commit, which did not count them, still builds today's bench: -1 there.
+static double StateMiB(AggregationRun run) =>
+    run.GetType().GetProperty("StateBytes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(run) is long bytes
+        ? bytes / 1048576.0
+        : -1;
 
 static int[] Degrees(string[] args, string? matrix)
 {
