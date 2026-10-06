@@ -214,7 +214,6 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         BytesWalk.Range(ref sink, input, start, end, group, ref _rows, ref _distinct);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         Sink sink = new Sink(this);
@@ -307,7 +306,6 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
         BytesWalk.Range(ref sink, input, start, end, group, ref _rows, ref _distinct);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         Sink sink = new Sink(this);

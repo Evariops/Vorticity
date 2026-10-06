@@ -1,5 +1,4 @@
 using System;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 
@@ -153,7 +152,6 @@ internal sealed class BoolSlot<TResult> : RecordSlot<byte, TResult>
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<ulong> bits = Load(input, out ReadOnlySpan<ulong> valid);

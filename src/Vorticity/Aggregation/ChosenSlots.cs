@@ -1,6 +1,5 @@
 using System;
 using System.Numerics;
-using System.Runtime.CompilerServices;
 
 namespace Vorticity.Aggregating;
 
@@ -22,7 +21,6 @@ internal sealed class RowSlot(bool last) : RecordSlot<long, long>
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<long> rows = States;
@@ -113,7 +111,6 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : RecordS
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, kind, out ReadOnlySpan<ulong> valid);

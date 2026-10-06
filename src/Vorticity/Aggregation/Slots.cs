@@ -337,7 +337,6 @@ internal sealed class CountSlot : RecordSlot<long, long>
     internal override void StepRange(in BatchInput input, int start, int end, int group) =>
         State(group) += RowMasks.Count(input.Selection, start, end);
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<long> counts = States;
@@ -413,7 +412,6 @@ internal sealed class ExistsSlot(bool all) : RecordSlot<bool, bool>
         }
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<bool> seen = States;

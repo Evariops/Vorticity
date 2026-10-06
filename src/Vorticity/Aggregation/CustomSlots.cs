@@ -1,5 +1,4 @@
 using System;
-using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
@@ -36,7 +35,6 @@ internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TS
         RowMasks.Unclip(_clip, start, end);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<T> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
@@ -166,7 +164,6 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TSt
         RowMasks.Unclip(_clip, start, end);
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         CanonicalArena arena = input.Arena;
