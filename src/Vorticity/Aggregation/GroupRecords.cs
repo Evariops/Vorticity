@@ -66,11 +66,21 @@ internal sealed class GroupRecords
             Reserve(Scratch.Capacity(groups, _capacity));
         }
 
+        // The seed once, then the records seeded copied onto the next as many, doubling: a call a
+        // record cost more than its words when a lane makes a group a row (PLAN-HIGH-CARDINALITY, H4).
         ReadOnlySpan<ulong> seed = _layout.Seed;
-        Span<ulong> words = _words.AsSpan(_base);
-        for (int g = _groups; g < groups; g++)
+        Span<ulong> made = _words.AsSpan(_base + (_groups * stride), (groups - _groups) * stride);
+        if (stride == 1)
         {
-            seed.CopyTo(words.Slice(g * stride, stride));
+            made.Fill(seed[0]);
+        }
+        else
+        {
+            seed.CopyTo(made);
+            for (int filled = stride; filled < made.Length; filled *= 2)
+            {
+                made[..Math.Min(filled, made.Length - filled)].CopyTo(made[filled..]);
+            }
         }
 
         _groups = groups;
@@ -129,15 +139,15 @@ internal sealed class GroupRecords
     internal ReadOnlySpan<ulong> Made => _words.AsSpan(_base, _groups * _layout.Stride);
 
     /// <summary>
-    /// Reads the first <paramref name="groups"/> records of <paramref name="words"/>, from its first
-    /// word, at the layout's stride: the entries of a part's batch, a record each, which the slots
-    /// that merge them view this way (PLAN-HIGH-CARDINALITY, H4). Records read so are never grown,
-    /// seeded nor kept.
+    /// Reads <paramref name="groups"/> records of <paramref name="words"/>, from word
+    /// <paramref name="start"/>, at the layout's stride: the entries of a part's batch, a record each,
+    /// which the slots that merge them view this way (PLAN-HIGH-CARDINALITY, H4). Records read so are
+    /// never grown, seeded nor kept.
     /// </summary>
-    internal void Over(ulong[] words, int groups)
+    internal void Over(ulong[] words, int start, int groups)
     {
         _words = words;
-        _base = 0;
+        _base = start;
         _capacity = groups;
         _groups = groups;
     }

@@ -146,8 +146,15 @@ internal abstract class GroupKeys
     /// <summary>The sub-table of each entry of <paramref name="batch"/> in its part's directory: the bits of its key's hash from <paramref name="shift"/> up, under <paramref name="mask"/>.</summary>
     internal virtual void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) => throw NotEntries();
 
-    /// <summary>The group here of the key of each entry of <paramref name="batch"/> that <paramref name="entries"/> names, added when it is new.</summary>
-    internal virtual void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups) => throw NotEntries();
+    /// <summary>
+    /// The group here of the key of each entry of <paramref name="batch"/> that <paramref name="entries"/>
+    /// names, added when it is new, new keys numbered in the entries' order; <paramref name="scratch"/>
+    /// the caller's, of <see cref="EntryScratch"/> words.
+    /// </summary>
+    internal virtual void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, Span<ulong> scratch) => throw NotEntries();
+
+    /// <summary>The words of scratch <see cref="GroupsOf"/> takes for <paramref name="entries"/> entries.</summary>
+    internal static int EntryScratch(int entries, int keyBytes) => entries * (((keyBytes + sizeof(ulong) - 1) / sizeof(ulong)) + 1);
 
     /// <summary>The hash of the key of entry <paramref name="entry"/> of <paramref name="batch"/> under <see cref="MergeHash.Seed"/>, as <see cref="Parts"/> takes it.</summary>
     internal virtual ulong HashAt(PartBatch batch, EntryShape shape, int entry) => throw NotEntries();
@@ -920,11 +927,40 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override ulong HashAt(PartBatch batch, EntryShape shape, int entry) => EntryKeys.Hash(EntryKeys.KeyAt<TValue>(batch, shape, entry), MergeHash.Seed);
 
-    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups)
+    /// <summary>
+    /// The keys gathered first, then found in two passes as a batch's rows are (<see cref="TwoPasses"/>):
+    /// each key in its home slot with no branch on the keys, then the rest in their order, which
+    /// numbers a new key as it first comes.
+    /// </summary>
+    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, Span<ulong> scratch)
     {
-        for (int i = 0; i < entries.Length; i++)
+        int count = entries.Length;
+        if (_pages is not null || _appending)
         {
-            groups[i] = Lookup(EntryKeys.KeyAt<TValue>(batch, shape, entries[i]));
+            for (int i = 0; i < count; i++)
+            {
+                groups[i] = Lookup(EntryKeys.KeyAt<TValue>(batch, shape, entries[i]));
+            }
+
+            return;
+        }
+
+        int keyWords = (Unsafe.SizeOf<TValue>() + sizeof(ulong) - 1) / sizeof(ulong);
+        Span<TValue> keys = MemoryMarshal.Cast<ulong, TValue>(scratch[..(count * keyWords)])[..count];
+        Span<uint> homes = MemoryMarshal.Cast<ulong, uint>(scratch.Slice(count * keyWords, count))[..count];
+        for (int i = 0; i < count; i++)
+        {
+            keys[i] = EntryKeys.KeyAt<TValue>(batch, shape, entries[i]);
+        }
+
+        groups = groups[..count];
+        _sink ^= _index.FindAtHome(keys, groups, homes, 0);
+        for (int i = 0; i < count; i++)
+        {
+            if (groups[i] < 0)
+            {
+                groups[i] = Lookup(keys[i]);
+            }
         }
     }
 

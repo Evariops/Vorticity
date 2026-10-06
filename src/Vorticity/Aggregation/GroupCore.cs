@@ -81,6 +81,13 @@ internal sealed class GroupCore
     private readonly ScanSource? _source;
     private readonly CorePart[] _parts = new CorePart[PartCount];
     private readonly ArrayShelf _shelf = new ArrayShelf();
+
+    // The batches applied that their lanes did not keep, for any lane to fill again: a lane that never
+    // holds a part takes back those others applied, so that the batches made follow the entries in
+    // flight, not the deposits. Chains go in and out whole, a lock a slab's worth.
+    private readonly Lock _freeGate = new Lock();
+    private PartBatch? _free;
+    private int _freeCount;
     private readonly int _batchWords;
     private readonly int _batchEntries;
     private readonly long _tableGroups;
@@ -95,6 +102,11 @@ internal sealed class GroupCore
     private long _reloaded;
     private long _batches;
     private int _splits;
+
+    // The entries applied and the groups they made, over the query so far: the share of an entry that
+    // makes a group, which sizes a part's sub-tables ahead of a large application.
+    private long _applied;
+    private long _made;
 
     private GroupCore(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource? source, GroupKeys kind, RecordLayout? layout, int lanes)
@@ -226,11 +238,45 @@ internal sealed class GroupCore
     /// <summary>Counts the bytes of a sub-table a burst reads again.</summary>
     internal void Reloaded(long bytes) => Interlocked.Add(ref _reloaded, bytes);
 
-    /// <summary>A batch for a lane to fill.</summary>
-    internal PartBatch NewBatch()
+    /// <summary>The batches of a slab, cut from one array.</summary>
+    internal const int SlabBatches = 64;
+
+    /// <summary>A slab of new batches, linked first to last, for a lane to fill: one large array, which the collector neither copies nor clears.</summary>
+    internal PartBatch NewSlab()
     {
-        Interlocked.Increment(ref _batches);
-        return new PartBatch(_batchWords, _batchEntries);
+        Interlocked.Add(ref _batches, SlabBatches);
+        ulong[] slab = GC.AllocateUninitializedArray<ulong>(SlabBatches * _batchWords);
+        PartBatch? next = null;
+        for (int b = SlabBatches - 1; b >= 0; b--)
+        {
+            next = new PartBatch(slab, b * _batchWords, _batchEntries) { Next = next };
+        }
+
+        return next!;
+    }
+
+    /// <summary>Every batch lanes gave back for any lane, linked, and their count; null when there is none.</summary>
+    internal PartBatch? TakeShared(out int count)
+    {
+        lock (_freeGate)
+        {
+            PartBatch? first = _free;
+            count = _freeCount;
+            _free = null;
+            _freeCount = 0;
+            return first;
+        }
+    }
+
+    /// <summary>Gives <paramref name="count"/> batches, <paramref name="first"/> to <paramref name="last"/> linked, to any lane.</summary>
+    internal void GiveShared(PartBatch first, PartBatch last, int count)
+    {
+        lock (_freeGate)
+        {
+            last.Next = _free;
+            _free = first;
+            _freeCount += count;
+        }
     }
 
     /// <summary>A sub-table of a part, empty, holding the groups whose hashes share <paramref name="depth"/> bits past the part's.</summary>
@@ -265,8 +311,14 @@ internal sealed class GroupCore
         }
 
         long pending = Interlocked.Add(ref part.Pending.Value, batch.Count);
-        Pend(batch.Count);
-        if (lane is not null && pending > Threshold(part))
+        if (lane is null)
+        {
+            Pend(batch.Count);
+            return;
+        }
+
+        lane.Deposited(batch.Count);
+        if (pending > Threshold(part))
         {
             Burst(part, lane.Applier);
         }
@@ -300,7 +352,7 @@ internal sealed class GroupCore
         }
     }
 
-    /// <summary>Counts entries deposited, or applied when negative, and the most pending at once.</summary>
+    /// <summary>Counts entries deposited, or applied when negative, and the most pending at once: a lane's deposits come a few batches at a time, which leaves the peak a few batches a lane short.</summary>
     internal void Pend(int entries)
     {
         long now = Interlocked.Add(ref _pending, entries);
@@ -314,6 +366,41 @@ internal sealed class GroupCore
             }
 
             peak = seen;
+        }
+    }
+
+    /// <summary>Counts entries applied and the groups they made.</summary>
+    internal void Applied(int entries, int groups)
+    {
+        Interlocked.Add(ref _applied, entries);
+        Interlocked.Add(ref _made, groups);
+    }
+
+    /// <summary>
+    /// Before the end applies <paramref name="entries"/> entries to a part: its sub-tables split down to
+    /// the depth the groups they will make need, at the share of an entry that made a group over the
+    /// pass (every one when none was applied), each to three quarters of its bound. A group then goes
+    /// once to its sub-table, rather than through every split on its way: keys met once went through
+    /// three or four.
+    /// </summary>
+    internal void Presplit(CorePart part, int entries, CoreApplier applier)
+    {
+        long applied = Interlocked.Read(ref _applied);
+        double share = applied > 0 ? (double)Interlocked.Read(ref _made) / applied : 1;
+        long expected = part.Groups + (long)(entries * share);
+        long target = Math.Max(1, _tableGroups * 3 / 4);
+        if (expected <= part.Tables.Count * target)
+        {
+            return;
+        }
+
+        int depth = Math.Min(MostDepth, (int)Math.Ceiling(Math.Log2((double)expected / target)));
+        for (int t = 0; t < part.Tables.Count; t++)
+        {
+            while (part.Tables[t].Depth < depth)
+            {
+                Split(part, t, applier);
+            }
         }
     }
 
@@ -446,7 +533,7 @@ internal sealed class GroupCore
 
         // A lane's cache, and the partition it bypasses it with, keep their null group, which no batch
         // carries: they meet in the first part's first sub-table, where the parts cut the null to.
-        long bytes = Interlocked.Read(ref _batches) * BatchBytes;
+        long bytes = Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong);
         foreach (AggregationPartition lane in lanes)
         {
             MergeNull(lane);
@@ -474,6 +561,13 @@ internal sealed class GroupCore
             SubTable empty = NewTable(0);
             keys.Add(empty.Keys);
             slots.Add(empty.Slots);
+        }
+
+        // The arrays the sub-tables left, and the batches: the result keeps the shelf, not what it held.
+        _shelf.Clear();
+        lock (_freeGate)
+        {
+            _free = null;
         }
 
         (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined([.. keys], [.. slots], keys.Count);
@@ -536,7 +630,7 @@ internal sealed class GroupCore
             Interlocked.Read(ref _reloaded),
             tables,
             Volatile.Read(ref _splits),
-            Interlocked.Read(ref _batches) * BatchBytes);
+            Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong));
     }
 }
 
@@ -579,19 +673,23 @@ internal readonly record struct EntryShape(int RecordWords, int Words, int KeyOf
 /// <summary>
 /// A lane's entries for one part (PLAN-HIGH-CARDINALITY, H4): a group of its cache each, its record then
 /// its key; deposited on the part's stack once full, linked there through <see cref="Next"/>, and taken
-/// whole by the lane that applies the stack, which fills it again.
+/// whole by the lane that applies the stack, which fills it again. Batches are cut from slabs, a lane's
+/// at a time: a large array, which the collector neither copies nor clears.
 /// </summary>
 internal sealed class PartBatch
 {
-    internal PartBatch(int words, int capacity)
+    internal PartBatch(ulong[] slab, int start, int capacity)
     {
-        // On the pinned heap: a batch lives the whole pass, filled again and again, and the collector never copies it.
-        Words = GC.AllocateUninitializedArray<ulong>(words, pinned: true);
+        Words = slab;
+        Start = start;
         Capacity = capacity;
     }
 
-    /// <summary>The entries, at <see cref="EntryShape.Words"/> words each.</summary>
+    /// <summary>The slab the entries lie in, at <see cref="EntryShape.Words"/> words each from <see cref="Start"/>.</summary>
     internal ulong[] Words { get; }
+
+    /// <summary>The slab's word the batch's first entry starts at.</summary>
+    internal int Start { get; }
 
     /// <summary>The entries the batch holds at most.</summary>
     internal int Capacity { get; }
@@ -698,11 +796,19 @@ internal sealed class LaneCore
     /// <summary>The rows a lane bypasses its cache for before it measures it again, in capacities: keys that change as the rows go find it useful again.</summary>
     private const int BypassedCaches = 32;
 
+    /// <summary>The entries a lane deposits before it adds them to the query's count of pending ones.</summary>
+    private const int PendingReport = 16 * 1024;
+
     private readonly GroupCore _core;
     private readonly PartBatch?[] _open = new PartBatch?[GroupCore.PartCount];
     private readonly int _entryWords;
-    private PartBatch? _free;
     private CoreApplier? _applier;
+
+    // The batches the lane fills next, linked, and their count; the entries it deposited since it last
+    // added them to the query's count.
+    private PartBatch? _free;
+    private int _freeCount;
+    private int _deposited;
 
     // The cache's hit rate over MeasuredCaches capacities of rows, judged once it has filled: the rows
     // it folded and the groups they added; the rows left to bypass it for.
@@ -793,7 +899,58 @@ internal sealed class LaneCore
             _open[p] = null;
         }
 
+        _core.Pend(_deposited);
+        _deposited = 0;
         _free = null;
+        _freeCount = 0;
+    }
+
+    /// <summary>Counts entries the lane deposited, added to the query's count of pending ones a few batches at a time.</summary>
+    internal void Deposited(int entries)
+    {
+        _deposited += entries;
+        if (_deposited >= PendingReport)
+        {
+            _core.Pend(_deposited);
+            _deposited = 0;
+        }
+    }
+
+    /// <summary>
+    /// Takes back the <paramref name="count"/> batches of a stack the lane applied, <paramref name="first"/>
+    /// to <paramref name="last"/> linked; past two slabs' worth, they go to any lane instead.
+    /// </summary>
+    internal void Free(PartBatch first, PartBatch last, int count)
+    {
+        if (_freeCount + count > 2 * GroupCore.SlabBatches)
+        {
+            _core.GiveShared(first, last, count);
+            return;
+        }
+
+        last.Next = _free;
+        _free = first;
+        _freeCount += count;
+    }
+
+    /// <summary>A batch to fill: the lane's own, those other lanes gave back, or a new slab's.</summary>
+    private PartBatch Take()
+    {
+        PartBatch? batch = _free;
+        if (batch is null)
+        {
+            batch = _core.TakeShared(out _freeCount) ?? _core.NewSlab();
+            if (_freeCount == 0)
+            {
+                _freeCount = GroupCore.SlabBatches;
+            }
+        }
+
+        _free = batch.Next;
+        _freeCount--;
+        batch.Next = null;
+        batch.Count = 0;
+        return batch;
     }
 
     /// <summary>The cache's groups copied into the open batches, its null group aside, which it keeps alone.</summary>
@@ -824,7 +981,7 @@ internal sealed class LaneCore
             batch = Turn(part);
         }
 
-        return ref batch.Words[batch.Count++ * _entryWords];
+        return ref batch.Words[batch.Start + (batch.Count++ * _entryWords)];
     }
 
     /// <summary>Deposits the part's full batch, if any, and opens another.</summary>
@@ -837,28 +994,9 @@ internal sealed class LaneCore
             _core.Deposit(part, full, this);
         }
 
-        PartBatch? fresh = _free;
-        if (fresh is null)
-        {
-            fresh = _core.NewBatch();
-        }
-        else
-        {
-            _free = fresh.Next;
-        }
-
-        fresh.Next = null;
-        fresh.Count = 0;
+        PartBatch fresh = Take();
         _open[part] = fresh;
         return fresh;
-    }
-
-    /// <summary>Takes back a batch applied, to fill again.</summary>
-    internal void Free(PartBatch batch)
-    {
-        batch.Count = 0;
-        batch.Next = _free;
-        _free = batch;
     }
 }
 
@@ -873,8 +1011,10 @@ internal sealed class CoreApplier
     private readonly LaneCore? _lane;
     private readonly AggregateSlot[] _entries;
     private readonly GroupRecords? _view;
+    private readonly int _keyBytes;
     private PartBatch[] _taken = new PartBatch[16];
     private int[] _map = [];
+    private ulong[] _keys = [];
     private int[] _tableOf = [];
     private int[] _starts = [];
     private int[] _next = [];
@@ -890,6 +1030,7 @@ internal sealed class CoreApplier
     {
         _core = core;
         _lane = lane;
+        _keyBytes = core.Kind.EntryBytes;
         _entries = AggregationPartition.NewSlots(core.Plan, core.Settled, core.Source, out GroupRecords? records);
         if (records is not null)
         {
@@ -928,12 +1069,24 @@ internal sealed class CoreApplier
 
         if (entries > 0)
         {
+            // A part's first sub-table made at once for the groups its first entries may hold: it
+            // would otherwise double some ten times, rehashing, through its first bursts.
             if (part.Tables.Count == 0)
             {
-                part.Tables.Add(_core.NewTable(0));
+                SubTable first = _core.NewTable(0);
+                first.Reserve((int)Math.Min(entries, _core.TableGroups));
+                part.Tables.Add(first);
             }
 
-            // A split appends its upper half: the sub-tables cut here are the first ones.
+            // A split appends its upper half: the sub-tables cut here are the first ones. Only the end
+            // splits ahead: early in the pass nearly every entry makes a group, which no later burst
+            // follows, and the parts would split for groups that never come.
+            int before = part.Groups;
+            if (!burst)
+            {
+                _core.Presplit(part, entries, this);
+            }
+
             int tables = part.Tables.Count;
             Cut(part, count, entries);
             for (int t = 0; t < tables; t++)
@@ -952,11 +1105,14 @@ internal sealed class CoreApplier
 
             Volatile.Write(ref part.Groups, groups);
             _core.Pend(-entries);
+            _core.Applied(entries, groups - before);
         }
 
-        for (int i = 0; i < count; i++)
+        // The batches applied, still linked as the stack held them, for the lane to fill again; at the
+        // end, nobody fills them.
+        if (count > 0)
         {
-            _lane?.Free(_taken[i]);
+            _lane?.Free(_taken[0], _taken[count - 1], count);
         }
 
         Array.Clear(_taken, 0, count);
@@ -1115,8 +1271,9 @@ internal sealed class CoreApplier
     private void Apply(SubTable table, PartBatch batch, ReadOnlySpan<int> entries)
     {
         Span<int> map = Map(entries.Length);
-        table.Keys.GroupsOf(batch, _core.Shape, entries, map);
-        _view?.Over(batch.Words, batch.Count);
+        Scratch.Grow(ref _keys, GroupKeys.EntryScratch(entries.Length, _keyBytes));
+        table.Keys.GroupsOf(batch, _core.Shape, entries, map, _keys);
+        _view?.Over(batch.Words, batch.Start, batch.Count);
         _core.Merge(_entries, entries, table, map);
     }
 
@@ -1227,7 +1384,7 @@ internal static class EntryKeys
             throw new ArgumentOutOfRangeException(nameof(entry));
         }
 
-        ref byte first = ref Unsafe.As<ulong, byte>(ref MemoryMarshal.GetArrayDataReference(batch.Words));
+        ref byte first = ref Unsafe.As<ulong, byte>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(batch.Words), (nint)batch.Start));
         return Unsafe.ReadUnaligned<TKey>(ref Unsafe.AddByteOffset(ref first, ((nint)entry * shape.Words * sizeof(ulong)) + shape.KeyOffset));
     }
 }

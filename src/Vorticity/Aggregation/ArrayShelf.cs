@@ -46,6 +46,15 @@ internal sealed class ArrayShelf
         return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
     }
 
+    /// <summary>Drops every array the shelf holds: the pass is over, and its sub-tables, which keep the shelf, are the result.</summary>
+    internal void Clear()
+    {
+        lock (_gate)
+        {
+            _arrays.Clear();
+        }
+    }
+
     /// <summary>Puts an array no table holds any more back on the shelf.</summary>
     internal void Give<T>(T[] array)
     {

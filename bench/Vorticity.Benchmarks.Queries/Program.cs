@@ -249,6 +249,15 @@ if (engines.Count > 0)
         Console.WriteLine(
             $"{key,-74} {run.Lanes.Length,5} {run.Lanes.Sum(lane => lane.Ranges),6} {max,8:F2} {mean,8:F2} {(mean > 0 ? max / mean : 0),8:F2} {merge,9:F2} {100 * merge / m.Millis,8:F1} {run.MergeParts,5} {groups,9} {StateMiB(run),9:F1}");
     }
+
+    // What the core did, when it held the groups (PLAN-HIGH-CARDINALITY, H4, R5a): its merge is its end.
+    foreach ((string key, Measurement m) in engines)
+    {
+        if (CoreOf(m.Engine!) is { } core)
+        {
+            Console.WriteLine($"{key,-74} {core}");
+        }
+    }
 }
 
 Console.WriteLine();
@@ -332,6 +341,10 @@ static double StateMiB(AggregationRun run) =>
     run.GetType().GetProperty("StateBytes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(run) is long bytes
         ? bytes / 1048576.0
         : -1;
+
+// What the core did (PLAN-HIGH-CARDINALITY, H4), read by name as the state's bytes are: null without one.
+static object? CoreOf(AggregationRun run) =>
+    run.GetType().GetProperty("Core", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(run);
 
 static int[] Degrees(string[] args, string? matrix)
 {

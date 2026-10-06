@@ -253,7 +253,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     internal override ulong HashAt(PartBatch batch, EntryShape shape, int entry) => EntryKeys.Hash(EntryKeys.KeyAt<TWord>(batch, shape, entry), MergeHash.Seed);
 
-    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups)
+    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, Span<ulong> scratch)
     {
         for (int i = 0; i < entries.Length; i++)
         {
