@@ -115,31 +115,21 @@ public sealed class QueryMemoryBudget
         _process?.Leave();
     }
 
-    /// <summary>
-    /// Reserves <paramref name="bytes"/> under this budget and the process's for a query that holds
-    /// <paramref name="held"/>; false, and nothing reserved, when either would pass its ceiling, or its
-    /// threshold for a query past its share (<see cref="Fair"/>).
-    /// </summary>
-    internal bool TryReserve(long bytes, long held = 0)
+    /// <summary>Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved, when either would pass its ceiling.</summary>
+    internal bool TryReserve(long bytes)
     {
         if (_process is null)
         {
             Observe();
-            long available = Available();
-            if (!Fair(bytes, held, available))
-            {
-                return false;
-            }
-
-            return TryAdd(ref _reserved, bytes, available) || (Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after));
+            return TryAdd(ref _reserved, bytes, Available()) || (Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after));
         }
 
-        if (!Fair(bytes, held, _ceiling) || !TryAdd(ref _reserved, bytes, _ceiling))
+        if (!TryAdd(ref _reserved, bytes, _ceiling))
         {
             return false;
         }
 
-        if (!_process.TryReserve(bytes, held))
+        if (!_process.TryReserve(bytes))
         {
             Interlocked.Add(ref _reserved, -bytes);
             return false;
@@ -150,11 +140,12 @@ public sealed class QueryMemoryBudget
 
     /// <summary>
     /// Whether a query holding <paramref name="held"/> may take <paramref name="bytes"/> more of a
-    /// ceiling of <paramref name="ceiling"/> (PLAN-HIGH-CARDINALITY, H2, the fair share). Past the
-    /// threshold, seven eighths of the ceiling, a query that would hold more than its share, the ceiling
-    /// over the queries active under the budget, is refused: under pressure its lanes turn to the core
-    /// first, and the last eighth stays for the queries within their share. Alone, a query's share is
-    /// the whole ceiling.
+    /// ceiling of <paramref name="ceiling"/> without being governed first (PLAN-HIGH-CARDINALITY, H2, the
+    /// fair share). Past the threshold, seven eighths of the ceiling, a query that would hold more than
+    /// its share, the ceiling over the queries active under the budget, is told no: its lanes turn to
+    /// the core first, and the last eighth stays for the queries within their share. A reservation is
+    /// never refused for it: without a way to give memory back, a refusal fails a query that would have
+    /// fit. Alone, a query's share is the whole ceiling.
     /// </summary>
     private bool Fair(long bytes, long held, long ceiling)
     {
@@ -165,14 +156,33 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
-    /// Reserves <paramref name="bytes"/> past the ceilings, this budget's and the process's: what a lane
-    /// takes in the middle of a batch when the budget refuses it, counted all the same, before it turns
-    /// to the core at the next batch and gives back its table (PLAN-HIGH-CARDINALITY, H4, milestone 2).
+    /// Reserves <paramref name="bytes"/> past this budget's ceiling: what a lane takes in the middle of a
+    /// batch when the budget refuses it, or emptying its table into the core, counted all the same,
+    /// before it gives back its table (PLAN-HIGH-CARDINALITY, H4, milestone 2). The process's ceiling it
+    /// passes by a sixteenth of the limit at most, half the margin the collector keeps: past that, the
+    /// heap itself would run out, and nothing is reserved.
     /// </summary>
-    internal void Force(long bytes)
+    /// <returns>Whether it was reserved.</returns>
+    internal bool Force(long bytes)
     {
+        if (_process is null)
+        {
+            Observe();
+            if (!TryAdd(ref _reserved, bytes, Available() + (_ceiling / 16)))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        if (!_process.Force(bytes))
+        {
+            return false;
+        }
+
         Raise(Interlocked.Add(ref _reserved, bytes));
-        _process?.Force(bytes);
+        return true;
     }
 
     /// <summary>Whether this budget and the process's would grant <paramref name="bytes"/> more now to a query that holds <paramref name="held"/>, without reserving them.</summary>

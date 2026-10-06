@@ -105,17 +105,18 @@ public sealed partial class QueryMemoryTests
     public void ASmallQueryBesideABigOneKeepsItsShare()
     {
         // Two queries under 64 MiB, a share of 32 each once the budget is seven eighths full (56 MiB):
-        // the big one takes past its share below that threshold, not past it; the small one takes what
-        // its share leaves it.
+        // the big one may grow past its share below that threshold, not past it, where its lanes turn to
+        // the core first; the small one may grow within its share. A reservation itself is never refused
+        // for the share: without a way to give memory back, the refusal would fail a query that fits.
         const long MiB = 1 << 20;
         QueryMemoryBudget budget = new QueryMemoryBudget(64 * MiB);
         QueryMemory big = new QueryMemory(budget);
         QueryMemory small = new QueryMemory(budget);
         Assert.Equal(2, budget.ActiveQueries);
         Assert.True(big.TryGrow(40 * MiB));
+        Assert.True(big.CanGrow(10 * MiB));
         Assert.True(big.TryGrow(10 * MiB));
         Assert.False(big.CanGrow(8 * MiB));
-        Assert.False(big.TryGrow(8 * MiB));
         Assert.True(small.CanGrow(8 * MiB));
         Assert.True(small.TryGrow(8 * MiB));
         Assert.Equal(58 * MiB, budget.ReservedBytes);
@@ -123,7 +124,8 @@ public sealed partial class QueryMemoryTests
         // Alone again, the big one's share is the whole ceiling.
         small.Dispose();
         Assert.Equal(1, budget.ActiveQueries);
-        Assert.True(big.TryGrow(12 * MiB));
+        Assert.True(big.CanGrow(6 * MiB));
+        Assert.True(big.TryGrow(6 * MiB));
         big.Dispose();
         Assert.Equal(0, budget.ReservedBytes);
         Assert.Equal(0, budget.ActiveQueries);

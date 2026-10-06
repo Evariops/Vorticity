@@ -93,10 +93,7 @@ internal sealed class QueryMemory : IDisposable
     /// <summary>The bytes its tables hold, as last measured: at most what it holds of its budget, which keeps room for their growth.</summary>
     internal long Measured => Volatile.Read(ref _measured);
 
-    /// <summary>
-    /// Reserves <paramref name="bytes"/> more; false, and nothing reserved, past the budget's ceiling or
-    /// the process's, or past its threshold when the query holds more than its share.
-    /// </summary>
+    /// <summary>Reserves <paramref name="bytes"/> more; false, and nothing reserved, past the budget's ceiling or the process's.</summary>
     internal bool TryGrow(long bytes)
     {
         if (bytes <= 0)
@@ -104,7 +101,7 @@ internal sealed class QueryMemory : IDisposable
             return true;
         }
 
-        if (!_budget.TryReserve(bytes, Held))
+        if (!_budget.TryReserve(bytes))
         {
             return false;
         }
@@ -115,7 +112,8 @@ internal sealed class QueryMemory : IDisposable
 
     /// <summary>
     /// Whether the budget would grant <paramref name="bytes"/> more now, without reserving them: a lane
-    /// asks it before a batch, to turn to the core while its table can still be emptied into it.
+    /// asks it before a batch, to turn to the core while its table can still be emptied into it. Past
+    /// the budget's threshold, a query over its share is told no first.
     /// </summary>
     internal bool CanGrow(long bytes) => _budget.CanReserve(bytes, Held);
 
@@ -138,10 +136,18 @@ internal sealed class QueryMemory : IDisposable
         Measure(-bytes);
     }
 
-    /// <summary>Reserves <paramref name="bytes"/> past its budget's ceiling, a lane's overdraft before it turns to the core (H4, milestone 2).</summary>
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> past its budget's ceiling, a lane's overdraft before it turns to
+    /// the core (H4, milestone 2); past what the process may hold, the query fails instead.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The process cannot take the overdraft.</exception>
     internal void Force(long bytes)
     {
-        _budget.Force(bytes);
+        if (!_budget.Force(bytes))
+        {
+            throw Exceeded("group by", -1, bytes);
+        }
+
         Interlocked.Add(ref _held, bytes);
     }
 
