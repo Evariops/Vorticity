@@ -477,14 +477,14 @@ internal struct IndexedSum
 internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
     where TValue : unmanaged, INumberBase<TValue>
 {
-    public static IndexedSum Seed() => default;
+    public IndexedSum Seed() => default;
 
-    public static void Add(ref IndexedSum state, TValue value) => state.Add(double.CreateTruncating(value));
+    public void Add(ref IndexedSum state, TValue value) => state.Add(double.CreateTruncating(value));
 
-    public static void AddWeighted(ref IndexedSum state, TValue value, long count) => state.AddWeighted(double.CreateTruncating(value), count);
+    public void AddWeighted(ref IndexedSum state, TValue value, long count) => state.AddWeighted(double.CreateTruncating(value), count);
 
     [SkipLocalsInit]
-    public static void AddSpan(ref IndexedSum state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref IndexedSum state, ReadOnlySpan<TValue> values)
     {
         if (typeof(TValue) == typeof(double))
         {
@@ -506,13 +506,13 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
         }
     }
 
-    public static void Merge(ref IndexedSum into, in IndexedSum other) => into.Merge(in other);
+    public void Merge(ref IndexedSum into, in IndexedSum other) => into.Merge(in other);
 
-    public static double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
+    public double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
 
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]
-    public static void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];

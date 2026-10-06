@@ -75,12 +75,12 @@ public sealed class SumKernelsTests
             }
 
             IndexedSum fromSingles = default;
-            IndexedFloatSum<float>.AddSpan(ref fromSingles, singles);
+            default(IndexedFloatSum<float>).AddSpan(ref fromSingles, singles);
             Assert.Equal(numbers, fromSingles.Count);
             Assert.Equal(BitConverter.DoubleToInt64Bits(singlesOneByOne.Value), BitConverter.DoubleToInt64Bits(fromSingles.Value));
 
             IndexedSum fromDoubles = default;
-            IndexedFloatSum<double>.AddSpan(ref fromDoubles, doubles);
+            default(IndexedFloatSum<double>).AddSpan(ref fromDoubles, doubles);
             Assert.Equal(numbers, fromDoubles.Count);
             Assert.Equal(BitConverter.DoubleToInt64Bits(doublesOneByOne.Value), BitConverter.DoubleToInt64Bits(fromDoubles.Value));
         }
@@ -105,7 +105,7 @@ public sealed class SumKernelsTests
     public void InfinitiesAreNumbersAndOpposedOnesMakeNaN()
     {
         IndexedSum rising = default;
-        IndexedFloatSum<double>.AddSpan(ref rising, Enumerable.Repeat(double.PositiveInfinity, 40).ToArray());
+        default(IndexedFloatSum<double>).AddSpan(ref rising, Enumerable.Repeat(double.PositiveInfinity, 40).ToArray());
         Assert.Equal(double.PositiveInfinity, rising.Value);
         Assert.Equal(40, rising.Count);
 
@@ -114,7 +114,7 @@ public sealed class SumKernelsTests
         opposed[40] = float.NegativeInfinity;
         opposed[50] = float.NaN;
         IndexedSum sum = default;
-        IndexedFloatSum<float>.AddSpan(ref sum, opposed);
+        default(IndexedFloatSum<float>).AddSpan(ref sum, opposed);
         Assert.True(double.IsNaN(sum.Value));
         Assert.Equal(69, sum.Count);
     }

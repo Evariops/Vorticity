@@ -328,20 +328,19 @@ internal static class Aggregators
         {
             StorageKind.Primitive => shape.PType switch
             {
-                PType.I8 => source => new FixedSlot<sbyte, VarianceState, VarianceOp<sbyte>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.I16 => source => new FixedSlot<short, VarianceState, VarianceOp<short>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.I32 => source => new FixedSlot<int, VarianceState, VarianceOp<int>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.I64 => source => new FixedSlot<long, VarianceState, VarianceOp<long>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U8 => source => new FixedSlot<byte, VarianceState, VarianceOp<byte>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U16 => source => new FixedSlot<ushort, VarianceState, VarianceOp<ushort>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U32 => source => new FixedSlot<uint, VarianceState, VarianceOp<uint>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U64 => source => new FixedSlot<ulong, VarianceState, VarianceOp<ulong>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.F16 => source => new FixedSlot<Half, VarianceState, VarianceOp<Half>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.F32 => source => new FixedSlot<float, VarianceState, VarianceOp<float>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                _ => source => new FixedSlot<double, VarianceState, VarianceOp<double>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.I8 => source => VarianceSlot<sbyte>(source, shape, 1, finish),
+                PType.I16 => source => VarianceSlot<short>(source, shape, 1, finish),
+                PType.I32 => source => VarianceSlot<int>(source, shape, 1, finish),
+                PType.I64 => source => VarianceSlot<long>(source, shape, 1, finish),
+                PType.U8 => source => VarianceSlot<byte>(source, shape, 1, finish),
+                PType.U16 => source => VarianceSlot<ushort>(source, shape, 1, finish),
+                PType.U32 => source => VarianceSlot<uint>(source, shape, 1, finish),
+                PType.U64 => source => VarianceSlot<ulong>(source, shape, 1, finish),
+                PType.F16 => source => VarianceSlot<Half>(source, shape, 1, finish),
+                PType.F32 => source => VarianceSlot<float>(source, shape, 1, finish),
+                _ => source => VarianceSlot<double>(source, shape, 1, finish),
             },
-            StorageKind.Decimal => source =>
-                new FixedSlot<Int128, VarianceState, VarianceOp<Int128>, double?>(StorageKind.Decimal, finish, Centered(source, shape, Math.Pow(10, -shape.Type.Scale))),
+            StorageKind.Decimal => source => VarianceSlot<Int128>(source, shape, Math.Pow(10, -shape.Type.Scale), finish),
             _ => throw shape.Unsupported(deviation ? "a standard deviation" : "a variance"),
         };
 
@@ -349,11 +348,13 @@ internal static class Aggregators
     }
 
     /// <summary>
-    /// A variance's first state: its center, the middle of the column's bounds over the whole
+    /// A variance's slot, whose op holds its center: the middle of the column's bounds over the whole
     /// source where its statistics hold them, zero where they do not; the same for every group and
-    /// every partition of the run.
+    /// every partition of the run, and so held once rather than in each group's state.
     /// </summary>
-    private static VarianceState Centered(ScanSource? source, ColumnShape shape, double unit)
+    private static FixedSlot<TValue, VarianceState, VarianceOp<TValue>, double?> VarianceSlot<TValue>(
+        ScanSource? source, ColumnShape shape, double unit, Func<VarianceState, double?> finish)
+        where TValue : unmanaged, INumberBase<TValue>
     {
         double center = 0;
         if (source is not null && source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max))
@@ -362,7 +363,7 @@ internal static class Aggregators
             center = double.IsFinite(middle) ? middle : 0;
         }
 
-        return new VarianceState { Center = center, Unit = unit };
+        return new FixedSlot<TValue, VarianceState, VarianceOp<TValue>, double?>(shape.Kind, finish, new VarianceOp<TValue>(center, unit));
     }
 
     private static double Number(Expressions.FilterLiteral bound, double unit) => bound.Kind switch

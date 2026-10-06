@@ -14,32 +14,46 @@ namespace Vorticity.Aggregating;
 /// </summary>
 internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TState, TResult>, IMeanSlot
     where TValue : unmanaged
-    where TOp : IValueOp<TValue, TState>
+    where TOp : struct, IValueOp<TValue, TState>
 {
     private readonly StorageKind _kind;
     private readonly Func<TState, TResult> _finish;
     private readonly TState _seed;
+    private readonly TOp _op;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private int[] _counts = [];
 
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish)
-        : this(kind, finish, TOp.Seed())
+        : this(kind, finish, default(TOp))
     {
     }
 
-    /// <summary>A slot whose groups start from <paramref name="seed"/>: a state that carries what its run fixed, as a variance its center.</summary>
+    /// <summary>A slot whose op holds what the run fixed for every group, as a variance its center.</summary>
+    internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TOp op)
+        : this(kind, finish, op.Seed(), op)
+    {
+    }
+
+    /// <summary>A slot whose groups start from <paramref name="seed"/>: a value no row holds, for an extreme that keeps no flag.</summary>
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed)
+        : this(kind, finish, seed, default)
+    {
+    }
+
+    private FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed, TOp op)
     {
         _kind = kind;
         _finish = finish;
         _seed = seed;
+        _op = op;
     }
 
     internal override TState Seed => _seed;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
+        TOp op = _op;
         ref TState state = ref State(group);
         CanonicalArena arena = input.Arena;
         int node = input.Node;
@@ -50,7 +64,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 int count = RowMasks.Count(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 if (count > 0)
                 {
-                    TOp.AddWeighted(ref state, FixedReader.Constant<TValue>(arena, node, _kind), count);
+                    op.AddWeighted(ref state, FixedReader.Constant<TValue>(arena, node, _kind), count);
                 }
 
                 return;
@@ -71,7 +85,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                         int count = RowMasks.Count(rows, Math.Max(runStart, start), Math.Min(runEnd, end));
                         if (count > 0)
                         {
-                            TOp.AddWeighted(ref state, values[r], count);
+                            op.AddWeighted(ref state, values[r], count);
                         }
                     }
 
@@ -85,14 +99,14 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-                FoldCodes(ref state, codes, dictionary, valid, _rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
+                FoldCodes(in op, ref state, codes, dictionary, valid, _rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 return;
             }
 
             default:
             {
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
-                Accumulate(ref state, values, _rows.And(input, input.Selection, valid), start, end);
+                Accumulate(in op, ref state, values, _rows.And(input, input.Selection, valid), start, end);
                 return;
             }
         }
@@ -103,7 +117,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     /// range has fewer rows than the dictionary has values, a weighted value per code met otherwise.
     /// </summary>
     private void FoldCodes(
-        ref TState state, ReadOnlySpan<uint> codes, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid, ReadOnlySpan<ulong> rows, int start, int end)
+        in TOp op, ref TState state, ReadOnlySpan<uint> codes, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid, ReadOnlySpan<ulong> rows, int start, int end)
     {
         if (end - start < dictionary.Length)
         {
@@ -114,7 +128,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 int code = (int)codes[row];
                 if (StorageValues.IsValid(valid, code))
                 {
-                    TOp.Add(ref state, dictionary[code]);
+                    op.Add(ref state, dictionary[code]);
                 }
             }
 
@@ -134,13 +148,14 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         {
             if (counts[code] > 0 && StorageValues.IsValid(valid, code))
             {
-                TOp.AddWeighted(ref state, dictionary[code], counts[code]);
+                op.AddWeighted(ref state, dictionary[code], counts[code]);
             }
         }
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
+        TOp op = _op;
         StateView<TState> states = States;
         CanonicalArena arena = input.Arena;
         int node = input.Node;
@@ -152,7 +167,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
-                    TOp.Add(ref states[groups[row]], value);
+                    op.Add(ref states[groups[row]], value);
                 }
 
                 return;
@@ -168,7 +183,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                     int code = (int)codes[row];
                     if (StorageValues.IsValid(valid, code))
                     {
-                        TOp.Add(ref states[groups[row]], dictionary[code]);
+                        op.Add(ref states[groups[row]], dictionary[code]);
                     }
                 }
 
@@ -181,7 +196,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
-                    TOp.Add(ref states[groups[row]], values[row]);
+                    op.Add(ref states[groups[row]], values[row]);
                 }
 
                 return;
@@ -199,6 +214,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
     internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
+        TOp op = _op;
         StateView<TState> states = States;
         CanonicalArena arena = input.Arena;
         int node = input.Node;
@@ -216,7 +232,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                     int count = RowMasks.Count(rows, starts[r], ends[r]);
                     if (count > 0)
                     {
-                        TOp.AddWeighted(ref states[groups[r]], value, count);
+                        op.AddWeighted(ref states[groups[r]], value, count);
                     }
                 }
 
@@ -252,7 +268,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                             int count = RowMasks.Count(rows, Math.Max(atStart, start), Math.Min(atEnd, end));
                             if (count > 0)
                             {
-                                TOp.AddWeighted(ref state, values[at], count);
+                                op.AddWeighted(ref state, values[at], count);
                             }
                         }
 
@@ -270,7 +286,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 for (int r = 0; r < starts.Length; r++)
                 {
-                    FoldCodes(ref states[groups[r]], codes, dictionary, valid, rows, starts[r], ends[r]);
+                    FoldCodes(in op, ref states[groups[r]], codes, dictionary, valid, rows, starts[r], ends[r]);
                 }
 
                 return;
@@ -282,7 +298,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, valid);
                 for (int r = 0; r < starts.Length; r++)
                 {
-                    Accumulate(ref states[groups[r]], values, rows, starts[r], ends[r]);
+                    Accumulate(in op, ref states[groups[r]], values, rows, starts[r], ends[r]);
                 }
 
                 return;
@@ -292,17 +308,18 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
+        TOp op = _op;
         StateView<TState> states = States;
         StateView<TState> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            TOp.Merge(ref states[into[i]], in others[from[i]]);
+            op.Merge(ref states[into[i]], in others[from[i]]);
         }
     }
 
     internal override TResult Result(int group) => _finish(State(group));
 
-    public double? Mean(int group) => TOp.Mean(in State(group));
+    public double? Mean(int group) => _op.Mean(in State(group));
 
     /// <summary>
     /// Folds the rows of [start, end) the mask holds: a run of words of <see cref="WordFold.Dense"/>
@@ -310,7 +327,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     /// value at a time elsewhere.
     /// </summary>
     [SkipLocalsInit]
-    internal static void Accumulate(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)
+    internal static void Accumulate(in TOp op, ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)
     {
         if (end <= start)
         {
@@ -319,7 +336,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
         if (rows.IsEmpty)
         {
-            TOp.AddSpan(ref state, values[start..end]);
+            op.AddSpan(ref state, values[start..end]);
             return;
         }
 
@@ -348,7 +365,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 full &= word == ulong.MaxValue;
                 if (count == WordFold.Run)
                 {
-                    Fold(ref state, values, run, w + 1 - count, full);
+                    Fold(in op, ref state, values, run, w + 1 - count, full);
                     count = 0;
                     full = true;
                 }
@@ -358,35 +375,35 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
             if (count > 0)
             {
-                Fold(ref state, values, run[..count], w - count, full);
+                Fold(in op, ref state, values, run[..count], w - count, full);
                 count = 0;
                 full = true;
             }
 
             while (word != 0)
             {
-                TOp.Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
+                op.Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
                 word &= word - 1;
             }
         }
 
         if (count > 0)
         {
-            Fold(ref state, values, run[..count], last + 1 - count, full);
+            Fold(in op, ref state, values, run[..count], last + 1 - count, full);
         }
     }
 
     /// <summary>The rows a run of words from word <paramref name="from"/> holds.</summary>
-    private static void Fold(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> run, int from, bool full)
+    private static void Fold(in TOp op, ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> run, int from, bool full)
     {
         ReadOnlySpan<TValue> block = values.Slice(from << 6, run.Length << 6);
         if (full)
         {
-            TOp.AddSpan(ref state, block);
+            op.AddSpan(ref state, block);
         }
         else
         {
-            TOp.AddWords(ref state, block, run);
+            op.AddWords(ref state, block, run);
         }
     }
 }
