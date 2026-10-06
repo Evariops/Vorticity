@@ -219,10 +219,47 @@ internal sealed class AggregationPlan
     internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null) => Keys.Length switch
     {
         1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead),
+        2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout) : new RawKeys<UInt128>(layout),
         2 => new PackedKeys<ulong>(Keys, facts),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts),
         _ => new CompositeKeys(Keys),
     };
+
+    /// <summary>
+    /// The layout of the key as the tuple of its values in one word (PLAN-HIGH-CARDINALITY, H11),
+    /// unless the statistics say a column is sorted, which hands its rows by range, or bound the
+    /// columns' values to a product a table of groups holds: both <see cref="PackedKeys{TKey}"/>'s.
+    /// </summary>
+    private RawLayout? Raw(KeyFacts? facts)
+    {
+        if (RawLayout.Of(Keys) is not { } layout)
+        {
+            return null;
+        }
+
+        if (facts is not { } known)
+        {
+            return layout;
+        }
+
+        long product = 1;
+        for (int p = 0; p < Keys.Length; p++)
+        {
+            if (known.Sorted[p])
+            {
+                return null;
+            }
+
+            if (product <= FixedKeys<int>.DirectValues)
+            {
+                product = known.Bounds[p] is { } bounds && bounds.Max >= bounds.Min && (ulong)(bounds.Max - bounds.Min) < (ulong)FixedKeys<int>.DirectValues
+                    ? product * (bounds.Max - bounds.Min + 1)
+                    : long.MaxValue;
+            }
+        }
+
+        return product <= FixedKeys<int>.DirectValues ? null : layout;
+    }
 
     /// <summary>The index of a key of one column.</summary>
     internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead) =>
