@@ -279,9 +279,10 @@ internal static class MergeHash
 }
 
 /// <summary>
-/// A key of one fixed-width column: a hash map from the storage value to its group, and a group for
-/// null. An integer key the statistics bound to <see cref="DirectValues"/> values has a table from
-/// the value to its group in front of the map, so that a value is hashed once a partition.
+/// A key of one fixed-width column: a table of its own from the storage value to its group
+/// (<see cref="KeyTable{TValue}"/>), and a group for null. An integer key the statistics bound to
+/// <see cref="DirectValues"/> values has a table from the value to its group in front of it, so that a
+/// value is looked up once a partition.
 /// </summary>
 internal sealed class FixedKeys<TValue> : GroupKeys
     where TValue : unmanaged, IEquatable<TValue>, IComparable<TValue>
@@ -292,7 +293,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
     private readonly KeyBounds? _bounds;
-    private GroupIndex<TValue> _index = new GroupIndex<TValue>();
+    private KeyTable<TValue> _index = new KeyTable<TValue>();
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
@@ -695,7 +696,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             if (i != nullGroup)
             {
-                _index.Slot(_keys[i], out _) = i;
+                _index.GetOrAdd(_keys[i], i);
                 if (_direct is not null && DirectSlot(_keys[i], out int slot))
                 {
                     _direct[slot] = i;
@@ -844,12 +845,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     private int Lookup(TValue value)
     {
-        ref int group = ref _index.Slot(value, out bool exists);
-        if (!exists)
+        int group = _index.GetOrAdd(value, Count);
+        if (group == Count)
         {
-            // Filled before the key is stored: storing it may double the keys and move the index to
-            // another dictionary, which copies the slot; the one read below keeps the number too.
-            group = Count;
             Add(value);
         }
 
@@ -871,7 +869,6 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         if (Count == _keys.Length)
         {
             Array.Resize(ref _keys, Count * 2);
-            _index.Doubled();
         }
 
         _keys[Count] = value;

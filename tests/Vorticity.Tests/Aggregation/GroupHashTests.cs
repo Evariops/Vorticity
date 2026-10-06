@@ -14,21 +14,21 @@ public sealed class GroupHashTests
 {
     private const int CrowdedKeys = 4_096;
 
-    // Every value a * (2^32 + 1) has the same 64-bit hash, 0: a column of them would pile into one
-    // bucket and make a group-by quadratic.
+    // Every value a * (2^32 + 1) folds to the same 32 bits, 0: a column of them would pile into one
+    // slot of the key table and make a group-by quadratic, but past MaxProbes the table takes a seed.
     [Fact]
-    public void FixedKeysCrowdedIntoOneBucketAreRehashedUnderASeed()
+    public void FixedKeysCrowdedIntoOneSlotAreRehashedUnderASeed()
     {
-        GroupIndex<long> index = new GroupIndex<long>();
+        KeyTable<long> table = new KeyTable<long>();
         for (int a = 0; a < CrowdedKeys; a++)
         {
-            Assert.Equal(a, Group(ref index, Crowded(a), a));
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), a));
         }
 
-        Assert.True(index.Hardened);
+        Assert.True(table.Seeded);
         for (int a = 0; a < CrowdedKeys; a++)
         {
-            Assert.Equal(a, Group(ref index, Crowded(a), -1));
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), -1));
         }
     }
 
@@ -73,33 +73,42 @@ public sealed class GroupHashTests
         }
     }
 
-    [Fact]
-    public void SpreadFixedKeysKeepTheDefaultHash()
+    // Keys in no order, in a row and at a regular stride keep the identity: a row of keys lands in a
+    // row of slots, a stride spreads over the prime.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(1_024)]
+    public void SpreadFixedKeysKeepTheIdentity(long stride)
     {
-        GroupIndex<long> index = new GroupIndex<long>();
+        KeyTable<long> table = new KeyTable<long>();
         Random random = new Random(18);
-        for (int i = 0; i < 100_000; i++)
+        long[] keys = new long[100_000];
+        for (int i = 0; i < keys.Length; i++)
         {
-            Group(ref index, random.NextInt64(), index.Count);
+            keys[i] = stride == 0 ? random.NextInt64() : i * stride;
+            Assert.Equal(i, table.GetOrAdd(keys[i], i));
         }
 
-        Assert.False(index.Hardened);
+        Assert.False(table.Seeded);
+        Assert.Equal(keys.Length, table.Count);
+        Assert.Equal(77, table.GetOrAdd(keys[77], -1));
     }
 
     [Fact]
-    public void AHardenedIndexStillGroupsEqualFloatsTogether()
+    public void ASeededTableStillGroupsEqualFloatsTogether()
     {
-        GroupIndex<double> index = new GroupIndex<double>();
+        KeyTable<double> table = new KeyTable<double>();
         for (int a = 1; a <= 4_096; a++)
         {
-            Group(ref index, BitConverter.UInt64BitsToDouble((ulong)a * ((1UL << 32) + 1)), index.Count);
+            table.GetOrAdd(BitConverter.UInt64BitsToDouble((ulong)a * ((1UL << 32) + 1)), table.Count);
         }
 
-        Assert.True(index.Hardened);
-        int zero = Group(ref index, 0.0, index.Count);
-        Assert.Equal(zero, Group(ref index, -0.0, -1));
-        int nan = Group(ref index, double.NaN, index.Count);
-        Assert.Equal(nan, Group(ref index, BitConverter.UInt64BitsToDouble(0x7FF8_0000_0000_0001), -1));
+        Assert.True(table.Seeded);
+        int zero = table.GetOrAdd(0.0, table.Count);
+        Assert.Equal(zero, table.GetOrAdd(-0.0, -1));
+        int nan = table.GetOrAdd(double.NaN, table.Count);
+        Assert.Equal(nan, table.GetOrAdd(BitConverter.UInt64BitsToDouble(0x7FF8_0000_0000_0001), -1));
     }
 
     // Keys whose unseeded XxHash3 share their low bits all land in one slot of the table's probe
@@ -188,29 +197,6 @@ public sealed class GroupHashTests
         }
 
         return keys;
-    }
-
-    /// <summary>
-    /// The group of <paramref name="value"/>, numbered <paramref name="next"/> when it is new; the
-    /// index is told when its keys double, as its owner tells it.
-    /// </summary>
-    private static int Group<TValue>(ref GroupIndex<TValue> index, TValue value, int next)
-        where TValue : unmanaged, IEquatable<TValue>
-    {
-        ref int group = ref index.Slot(value, out bool exists);
-        if (exists)
-        {
-            return group;
-        }
-
-        group = next;
-        int count = index.Count;
-        if ((count & (count - 1)) == 0)
-        {
-            index.Doubled();
-        }
-
-        return next;
     }
 
     /// <summary>One row: a key, written by hand as the generator would.</summary>
