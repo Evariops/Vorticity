@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -92,6 +93,45 @@ public sealed partial class QueryMemoryTests
             Assert.Equal(Keys, counts.Count);
             Assert.Equal(Rows, counts.Sum());
             Assert.Equal(Keys, await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ATableReservesWhatItHoldsNotTwice()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            // What the groups hold, under a budget that grants it all.
+            long state;
+            await using (VortexSession wide = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 1;
+                options.MemoryBudget = new QueryMemoryBudget(1L << 30);
+            }))
+            {
+                await using VortexFile file = await wide.OpenAsync(path, cancellationToken: Ct);
+                Aggregation<long> sums = file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value));
+                Assert.Equal(Keys, (await sums.ToListAsync(Ct)).Count);
+                state = ((AggregationQuery)sums.Query).Plan.LastRun!.StateBytes;
+            }
+
+            // Its arrays reserved as they come, the old ones beside the new only for the copy: under the
+            // twice its groups hold that a reading after each batch reserved.
+            QueryMemoryBudget budget = new QueryMemoryBudget((state * 7 / 4) + (2 << 20));
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 1;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile again = await session.OpenAsync(path, cancellationToken: Ct);
+            Assert.Equal(Keys, (await again.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value)).ToListAsync(Ct)).Count);
             Assert.Equal(0, budget.ReservedBytes);
         }
         finally

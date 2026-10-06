@@ -115,12 +115,19 @@ internal sealed class QueryMemory : IDisposable
         }
     }
 
-    /// <summary>The exception a query fails with when <paramref name="what"/>, holding <paramref name="groups"/> groups, asks for <paramref name="asking"/> bytes its budget does not grant.</summary>
+    /// <summary>
+    /// The exception a query fails with when <paramref name="what"/>, holding <paramref name="groups"/>
+    /// groups (-1 when a table that grows does not tell), asks for <paramref name="asking"/> bytes its
+    /// budget does not grant.
+    /// </summary>
     internal VortexMemoryException Exceeded(string what, long groups, long asking)
     {
         QueryMemoryBudget process = QueryMemoryBudget.Process;
+        string holds = groups >= 0
+            ? string.Create(CultureInfo.InvariantCulture, $"holds {groups:N0} groups in {Held:N0} bytes")
+            : string.Create(CultureInfo.InvariantCulture, $"holds {Held:N0} bytes");
         return new VortexMemoryException(string.Create(
             CultureInfo.InvariantCulture,
-            $"The {what} holds {groups:N0} groups in {Held:N0} bytes and asks for {asking:N0} more, past its memory budget of {_budget.CeilingBytes:N0} bytes, {_budget.ReservedBytes:N0} of which every query under it holds; the process leaves its queries {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. Give its session a larger QueryMemoryBudget, group by fewer keys at once, or lower the degree of parallelism: each lane holds a table of the groups it meets."));
+            $"The {what} {holds} and asks for {asking:N0} more, past its memory budget of {_budget.CeilingBytes:N0} bytes, {_budget.ReservedBytes:N0} of which every query under it holds; the process leaves its queries {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. Give its session a larger QueryMemoryBudget, group by fewer keys at once, or lower the degree of parallelism: each lane holds a table of the groups it meets."));
     }
 }

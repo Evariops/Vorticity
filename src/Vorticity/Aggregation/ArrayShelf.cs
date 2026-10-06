@@ -22,6 +22,13 @@ namespace Vorticity.Aggregating;
 /// </remarks>
 internal sealed class ArrayShelf : ISweptAfterCollections
 {
+    /// <summary>
+    /// The least array a lane's shelf counts in its query's memory, a page: a table's first arrays, which
+    /// every table makes outside a shelf and gives to it when it grows, are smaller, and go uncounted
+    /// both ways.
+    /// </summary>
+    private const long LeastCounted = 4096;
+
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<(Type Type, int Length), Pile> _piles = [];
     private readonly ArrayShelf? _parent;
@@ -29,11 +36,29 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private long _held;
     private bool _used;
 
+    // A lane's shelf: its query's memory; the bytes of the arrays it handed out that its tables hold,
+    // and what it reserved ahead of the next ones.
+    private readonly QueryMemory? _memory;
+    private long _out;
+    private long _credit;
+
     /// <summary>A query's shelf, which takes from the process's when it holds nothing of a length, and hands it what it holds at the end.</summary>
     internal ArrayShelf()
         : this(Retained, long.MaxValue)
     {
     }
+
+    /// <summary>
+    /// A lane's shelf under its query's memory (PLAN-HIGH-CARDINALITY, H2, decision 13): an array it
+    /// hands out is reserved before it is allocated, and given back when its table lets it go, which
+    /// leaves it to the next collection; it keeps none. A table that doubles reserves its new arrays
+    /// while it still holds the old ones: what the copy holds, no more. It reserves a megabyte ahead,
+    /// and keeps up to two of what its tables give back, so that the pages of a key numbered by value,
+    /// sixteen kilobytes each, meet the budget's count once a megabyte; one lane uses it at a time,
+    /// and it takes no lock.
+    /// </summary>
+    internal ArrayShelf(QueryMemory memory)
+        : this(parent: null, budget: 0) => _memory = memory;
 
     private ArrayShelf(ArrayShelf? parent, long budget)
     {
@@ -68,9 +93,26 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
     }
 
-    /// <summary>An array of <paramref name="length"/> elements, from the shelf, the process's, or new; zeroed when <paramref name="zeroed"/>.</summary>
+    /// <summary>The bytes of the arrays a lane's shelf handed out that its tables hold: what its query's memory counts of them.</summary>
+    internal long Out => _out;
+
+    /// <summary>
+    /// An array of <paramref name="length"/> elements, from the shelf, the process's, or new; zeroed
+    /// when <paramref name="zeroed"/>. Under a query's memory, reserved first, then new.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
     internal T[] Take<T>(int length, bool zeroed)
     {
+        if (_memory is { } memory)
+        {
+            if ((long)length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+            {
+                Reserve(memory, bytes);
+            }
+
+            return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
+        }
+
         Array? found = null;
         lock (_gate)
         {
@@ -97,8 +139,61 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             : GC.AllocateUninitializedArray<T>(length);
     }
 
-    /// <summary>Puts an array nothing holds any more back on the shelf; past the shelf's budget, lets it go.</summary>
-    internal void Give<T>(T[] array) => Give(typeof(T), array, Unsafe.SizeOf<T>());
+    /// <summary>
+    /// Puts an array nothing holds any more back on the shelf; past the shelf's budget, lets it go.
+    /// Under a query's memory, its bytes given back, and left to the next collection.
+    /// </summary>
+    internal void Give<T>(T[] array)
+    {
+        if (_memory is { } memory)
+        {
+            if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+            {
+                Unreserve(memory, bytes);
+            }
+
+            return;
+        }
+
+        Give(typeof(T), array, Unsafe.SizeOf<T>());
+    }
+
+    /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else a megabyte more.</summary>
+    private void Reserve(QueryMemory memory, long bytes)
+    {
+        if (_credit < bytes)
+        {
+            long more = Math.Max(bytes - _credit, QueryMemory.Chunk);
+            if (!memory.TryGrow(more))
+            {
+                // The megabyte ahead may be what does not fit: the array alone, before failing.
+                more = bytes - _credit;
+                if (!memory.TryGrow(more))
+                {
+                    throw memory.Exceeded("group by", -1, bytes);
+                }
+            }
+
+            _credit += more;
+        }
+
+        _credit -= bytes;
+        _out += bytes;
+        memory.Measure(bytes);
+    }
+
+    /// <summary>The bytes of an array a lane's table let go: kept ahead up to two megabytes, the rest given back; the array, left to the next collection.</summary>
+    private void Unreserve(QueryMemory memory, long bytes)
+    {
+        _out -= bytes;
+        _credit += bytes;
+        memory.Measure(-bytes);
+        if (_credit > 2 * QueryMemory.Chunk)
+        {
+            memory.Shrink(_credit - QueryMemory.Chunk);
+            _credit = QueryMemory.Chunk;
+        }
+    }
 
     /// <summary>
     /// Hands every array the shelf holds to the process's, as far as its budget takes them: the pass is

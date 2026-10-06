@@ -24,9 +24,6 @@ namespace Vorticity;
 /// </remarks>
 public sealed class QueryMemoryBudget
 {
-    /// <summary>The least time between two collections the process's budget asks for, in milliseconds.</summary>
-    private const long CollectEveryMs = 20;
-
     // The process's budget, which this one reserves in too; null for the process's own.
     private readonly QueryMemoryBudget? _process;
 
@@ -36,12 +33,13 @@ public sealed class QueryMemoryBudget
 
     // The process's own: the bytes the queries' tables hold, as last measured; the rest of the
     // process, read after the last full collection; what the queries let go since, still in the heap;
-    // when it last asked for a collection, and whether one is being asked for.
+    // whether a collection is being asked for, and the full collection after which the last one asked
+    // for left the collector holding what it held.
     private long _measured;
     private Rest _rest = new Rest(-1, 0, 0);
     private long _pending;
-    private long _collected = -CollectEveryMs;
     private int _collecting;
+    private int _futile = -1;
 
     /// <summary>A budget under which the queries of its sessions hold <paramref name="ceilingBytes"/> at most, together.</summary>
     /// <param name="ceilingBytes">The bytes they may hold at once.</param>
@@ -95,7 +93,7 @@ public sealed class QueryMemoryBudget
         if (_process is null)
         {
             Observe();
-            return TryAdd(ref _reserved, bytes, Available()) || (Collect(bytes) && TryAdd(ref _reserved, bytes, Available()));
+            return TryAdd(ref _reserved, bytes, Available()) || (Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after));
         }
 
         if (!TryAdd(ref _reserved, bytes, _ceiling))
@@ -173,35 +171,43 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// The collection that gives back what the collector keeps committed past its heap and takes what
     /// the queries let go, when that is what stands between the reservations and <paramref name="bytes"/>
-    /// more; then the rest read again. Once in <see cref="CollectEveryMs"/> at most, by one thread: a
-    /// process whose memory stays full refuses the reservation rather than collect without end.
+    /// more, and is worth a sixteenth of the ceiling at least: the ceiling to reserve against after it,
+    /// or null when no collection would help. Each such collection gives back that much, which the
+    /// queries must let go again before the next: a refusal fails a whole query, a collection does not.
+    /// One whose collector kept what it held is not asked for again before the collector runs a full
+    /// collection of its own. A thread that finds one under way reserves against what it will leave,
+    /// the ceiling past what the heap holds live: it allocates once the collection is done, which
+    /// every thread waits for anyway.
     /// </summary>
-    private bool Collect(long bytes)
+    private long? Collect(long bytes)
     {
         Rest rest = Volatile.Read(ref _rest);
-        if (rest.Reclaimable + Volatile.Read(ref _pending) == 0 || ReservedBytes + bytes > _ceiling - rest.Live)
+        long reclaimable = rest.Reclaimable + Volatile.Read(ref _pending);
+        if (reclaimable < Math.Max(bytes, _ceiling / 16) || ReservedBytes + bytes > _ceiling - rest.Live || GC.CollectionCount(2) == Volatile.Read(ref _futile))
         {
-            return false;
+            return null;
         }
 
-        long now = Environment.TickCount64;
-        if (now - Volatile.Read(ref _collected) < CollectEveryMs || Interlocked.Exchange(ref _collecting, 1) != 0)
+        if (Interlocked.Exchange(ref _collecting, 1) != 0)
         {
-            return false;
+            return _ceiling - rest.Live;
         }
 
         try
         {
-            Volatile.Write(ref _collected, now);
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            Observe();
+            if (Volatile.Read(ref _rest).Reclaimable >= _ceiling / 16)
+            {
+                Volatile.Write(ref _futile, GC.CollectionCount(2));
+            }
         }
         finally
         {
             Volatile.Write(ref _collecting, 0);
         }
 
-        Observe();
-        return true;
+        return Available();
     }
 
     private static bool TryAdd(ref long reserved, long bytes, long ceiling)

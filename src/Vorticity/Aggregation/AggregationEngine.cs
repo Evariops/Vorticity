@@ -248,9 +248,10 @@ internal sealed class AggregationPlan
     /// </summary>
     /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
-    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null) => Keys.Length switch
+    /// <param name="shelf">The lane's shelf under its query's memory, which a key of one fixed column grows from; null for a table nothing counts.</param>
+    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null) => Keys.Length switch
     {
-        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1),
+        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf),
         2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout) : new RawKeys<UInt128>(layout),
         2 => new PackedKeys<ulong>(Keys, facts),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts),
@@ -294,26 +295,26 @@ internal sealed class AggregationPlan
     }
 
     /// <summary>The index of a key of one column.</summary>
-    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1) =>
+    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1, ArrayShelf? shelf = null) =>
         key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
-                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows),
-                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows),
-                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows),
-                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows),
-                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows),
-                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows),
-                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows),
-                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows),
-                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead),
-                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead),
-                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead),
+                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
+                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead, shelf: shelf),
             },
-            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead),
-            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead),
-            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead),
+            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
             StorageKind.Bool => new BoolKeys(key),
             StorageKind.Bytes => new BytesKeys(key, sorted),
             _ => throw key.Unsupported("a group key"),
@@ -466,8 +467,10 @@ internal sealed class AggregationPartition
 
     internal AggregationPartition(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyFacts? facts = null,
-        GroupKeys? keys = null)
+        GroupKeys? keys = null, QueryMemory? memory = null)
     {
+        Memory = memory;
+        _arrays = memory is null ? null : new ArrayShelf(memory);
         _columns = columns;
         _inputs = inputs;
         _keyCount = plan.Keys.Length;
@@ -475,11 +478,14 @@ internal sealed class AggregationPartition
         _filterOf = plan.Filters.FilterOf;
         _masks = plan.Filters.Filters.Length > 0 ? new FilterMasks(plan.Filters) : null;
         _window = plan.FoldWindow is int window and > 0 ? window : int.MaxValue;
-        Slots = NewSlots(plan, settled, source, out GroupRecords? records);
+
+        // Under the query's memory, the records and a key of one fixed column grow from the lane's
+        // shelf, which reserves each array before it comes (PLAN-HIGH-CARDINALITY, H2, decision 13).
+        Slots = NewSlots(plan, settled, source, out GroupRecords? records, _arrays);
         Records = records;
 
         // The plan's index of the groups, unless the caller brings another: a core's lane bypassing its cache.
-        Keys = keys ?? (plan.Grouped ? plan.CreateKeys(sorted, facts) : null);
+        Keys = keys ?? (plan.Grouped ? plan.CreateKeys(sorted, facts, _arrays) : null);
         if (streaming >= 0 && _keyCount > 1)
         {
             _streaming = streaming;
@@ -503,14 +509,21 @@ internal sealed class AggregationPartition
     /// <summary>The lane's side of the query's core, which copies the partition into its batches when it fills (PLAN-HIGH-CARDINALITY, H4); null without a core.</summary>
     internal LaneCore? Core { get; init; }
 
-    /// <summary>The query's memory, in which the partition reserves what its groups hold after each batch (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
-    internal QueryMemory? Memory { get; init; }
+    /// <summary>The query's memory, in which the partition reserves what its groups hold (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
+    internal QueryMemory? Memory { get; }
 
-    /// <summary>The bytes the partition reserved in the query's memory.</summary>
+    // The lane's shelf under the query's memory, which the arrays of its records and of a key of one
+    // fixed column come from, each reserved before it is allocated; null without the query's memory.
+    private readonly ArrayShelf? _arrays;
+
+    /// <summary>The bytes the partition reserved in the query's memory for the arrays its shelf does not hand out, read once a batch.</summary>
     internal long Accounted { get; private set; }
 
-    /// <summary>The bytes its groups held at the last reading, which the query's memory measures.</summary>
+    /// <summary>The bytes of those arrays at the last reading, which the query's memory measures.</summary>
     internal long Measured { get; private set; }
+
+    /// <summary>What the partition's groups hold past the arrays its shelf handed out and counted as they came.</summary>
+    private long Unshelved => Math.Max(0, Footprint - (_arrays?.Out ?? 0));
 
     internal GroupKeys? Keys { get; private set; }
 
@@ -718,16 +731,19 @@ internal sealed class AggregationPartition
     /// <summary>Gives back what the partition reserved past what its groups hold: the room for a doubling, once its table grows no more.</summary>
     internal void Trim()
     {
-        if (Memory is { } memory && Accounted > Footprint)
+        long unshelved = Unshelved;
+        if (Memory is { } memory && Accounted > unshelved)
         {
-            memory.Shrink(Accounted - Footprint);
-            Accounted = Footprint;
+            memory.Shrink(Accounted - unshelved);
+            Accounted = unshelved;
         }
     }
 
     /// <summary>
-    /// Reserves twice what the partition's groups hold, a megabyte ahead at least: a reading of its
-    /// arrays' lengths, once a batch. Twice, because a table doubles within a batch, before the next
+    /// Reserves twice what the partition's groups hold past the arrays its shelf hands out, a megabyte
+    /// ahead at least: a reading of their lengths, once a batch. Those the shelf hands out, it reserves
+    /// as they come (PLAN-HIGH-CARDINALITY, H2, decision 13); the others are read here, until every
+    /// table grows from a shelf. Twice, because a table doubles within a batch, before the next
     /// reading: its new arrays are reserved before they come, the old ones beside them only for the
     /// copy, a moment no reading sees. What the groups hold is measured too: grown, the arrays they
     /// replaced stay in the heap until a collection, as much as they grew by when they doubled. Past
@@ -735,7 +751,7 @@ internal sealed class AggregationPartition
     /// </summary>
     private void Account(QueryMemory memory)
     {
-        long footprint = Footprint;
+        long footprint = Unshelved;
         if (footprint != Measured)
         {
             if (Measured > 0 && footprint > Measured)
@@ -1287,11 +1303,10 @@ internal static class AggregationEngine
         {
             if (ranges is null)
             {
-                AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+                AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
                 {
                     Top = top,
                     Core = core?.Lane(),
-                    Memory = memory,
                 };
                 if (settling is not null)
                 {
@@ -1309,11 +1324,10 @@ internal static class AggregationEngine
                 partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
                 for (int p = 0; p < partitions.Length; p++)
                 {
-                    partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+                    partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
                     {
                         Top = top is { FirstMet: true } ? null : top,
                         Core = core?.Lane(),
-                        Memory = memory,
                     };
                 }
 

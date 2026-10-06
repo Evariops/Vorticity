@@ -761,7 +761,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int[] Page(int at)
     {
-        int[] page = new int[1 << PageBits];
+        int[] page = _shelf is null ? new int[1 << PageBits] : _shelf.Take<int>(1 << PageBits, zeroed: false);
         page.AsSpan().Fill(-1);
         _pagesHeld++;
         return _pages![at] = page;
