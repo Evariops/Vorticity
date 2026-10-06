@@ -69,6 +69,44 @@ public sealed partial class GroupCoreTests
     [Theory]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(14)]
+    public async Task ALaneThatTurnsToTheCoreMidPassLosesNoGroup(int degree)
+    {
+        // Every lane folds two batches into its own table, then turns to the core, as under pressure
+        // (PLAN-HIGH-CARDINALITY, H4, milestone 2): its table, null group included, emptied into the
+        // core's batches, the rest of its rows into a cache. Batches small enough for every lane to
+        // fold several, however the queue hands the ranges out.
+        Row[] rows = Rows_(keys: 9_000, count: 4 * Rows);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, KeyStats> reference = ByKey(await ListAsync(Reference(file)));
+            Vorticity.Aggregation turned = Query(
+                file,
+                plan =>
+                {
+                    Tiny(plan);
+                    plan.Core = false;
+                    plan.CoreUnderPressure = true;
+                    plan.CoreTurnAt = 2;
+                },
+                batchRows: 2_048);
+
+            Assert.Equal(reference, ByKey(await ListAsync(turned.As<KeyStats>())));
+            CoreRun run = turned.Plan.LastRun!.Core!;
+            Assert.True(run.Flushes > 0 && run.Bursts > 0, run.ToString());
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
     [InlineData(4)]
     [InlineData(8)]
     public async Task EveryAlphaComesOutTheSame(int alpha)
@@ -262,9 +300,10 @@ public sealed partial class GroupCoreTests
     /// <summary>The groups' answers as the reference gives them: the lanes' tables, merged.</summary>
     private static Scan<KeyStats> Reference(VortexFile file) => Query(file, static _ => { }).As<KeyStats>();
 
-    private static Vorticity.Aggregation Query(VortexFile file, Action<AggregationPlan> set)
+    private static Vorticity.Aggregation Query(VortexFile file, Action<AggregationPlan> set, int batchRows = 0)
     {
         Vorticity.Aggregation query = file.Scan<Row>()
+            .With(new ScanOptions { BatchRows = batchRows })
             .GroupBy(r => r.Key)
             .Select(g => (
                 g.Key, g.Count(), g.Sum(x => x.Value), g.Average(x => x.Real), g.Variance(x => x.Real), g.Any(x => x.Value > 90),

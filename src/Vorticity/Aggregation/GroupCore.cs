@@ -90,7 +90,8 @@ internal sealed class GroupCore
     private readonly int[] _inputs;
     private readonly ScanSource? _source;
     private readonly CorePart[] _parts = new CorePart[PartCount];
-    private readonly ArrayShelf _shelf = new ArrayShelf();
+    private readonly ArrayShelf _shelf;
+    private readonly KeyFacts? _facts;
 
     // The batches applied that their lanes did not keep, for any lane to fill again: a lane that never
     // holds a part takes back those others applied, so that the batches made follow the entries in
@@ -120,13 +121,19 @@ internal sealed class GroupCore
     private long _made;
 
     private GroupCore(
-        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource? source, GroupKeys kind, RecordLayout? layout, int lanes)
+        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource? source, KeyFacts? facts, GroupKeys kind, RecordLayout? layout, int lanes,
+        QueryMemory? memory)
     {
         _plan = plan;
         _settled = settled;
         _columns = columns;
         _inputs = inputs;
         _source = source;
+        _facts = facts;
+
+        // Its sub-tables and slabs under the query's memory, when it counts it (H2): an array counted as
+        // it enters the query, given back as it leaves; those on the shelf's piles stay counted.
+        _shelf = memory is null ? new ArrayShelf() : new ArrayShelf(memory, pooled: true);
         Kind = kind;
         int keyBytes = kind.EntryBytes;
         Shape = EntryShape.Of(layout, keyBytes);
@@ -140,6 +147,7 @@ internal sealed class GroupCore
         _tableGroups = plan.CoreTableGroups ?? Math.Max(64, TableBytes / groupBytes);
         _batchEntries = plan.CoreBatchEntries ?? Math.Max(1, BatchBytes / entryBytes);
         _batchWords = _batchEntries * Shape.Words;
+        LaneBytes = ((long)PartCount * _batchWords * sizeof(ulong)) + (Capacity * groupBytes);
         for (int p = 0; p < PartCount; p++)
         {
             _parts[p] = new CorePart();
@@ -161,6 +169,13 @@ internal sealed class GroupCore
     /// <summary>The groups of a lane's cache.</summary>
     internal int Capacity { get; }
 
+    /// <summary>
+    /// What a lane holds in the core whatever its rows: a batch open for every part and its cache. A lane
+    /// turns to the core under pressure only when its own table holds more (milestone 2): one that
+    /// holds less would hold more once it turned.
+    /// </summary>
+    internal long LaneBytes { get; }
+
     /// <summary>The groups a lane's cache holds when it is copied into its batches: two thirds of its capacity.</summary>
     internal int FlushAt { get; }
 
@@ -178,14 +193,23 @@ internal sealed class GroupCore
 
     /// <summary>
     /// The core of a query, or null when it runs on its lanes' tables alone: the switch is off, the
-    /// lanes are fewer than <see cref="DefaultLanes"/>, the key does not travel in batches
-    /// (<see cref="GroupKeys.EntryBytes"/>), a state lies apart from the records, the key is sorted, or
-    /// a top keeps a lane's best groups.
+    /// lanes are fewer than <see cref="DefaultLanes"/>, or the core cannot hold its groups (<see cref="Holding"/>).
     /// </summary>
     internal static GroupCore? Of(
-        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes)
+        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
+        QueryMemory? memory = null) =>
+        plan.Core && lanes >= (plan.CoreLanes ?? DefaultLanes) ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory) : null;
+
+    /// <summary>
+    /// A core that holds the query's groups, or null when it cannot: the key does not travel in
+    /// batches (<see cref="GroupKeys.EntryBytes"/>), a state lies apart from the records, the key is
+    /// sorted, or a top keeps a lane's best groups. Its arrays reserved under <paramref name="memory"/>.
+    /// </summary>
+    internal static GroupCore? Holding(
+        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
+        QueryMemory? memory)
     {
-        if (!plan.Core || !plan.Grouped || sorted || top is not null || lanes < (plan.CoreLanes ?? DefaultLanes))
+        if (!plan.Grouped || sorted || top is not null)
         {
             return null;
         }
@@ -205,8 +229,15 @@ internal sealed class GroupCore
             }
         }
 
-        return new GroupCore(plan, settled, columns, inputs, source, kind.ForPart(), records?.Layout, lanes);
+        return new GroupCore(plan, settled, columns, inputs, source, CacheFacts(facts), kind.ForPart(), records?.Layout, lanes, memory);
     }
+
+    /// <summary>
+    /// A lane's cache, under the query's <paramref name="memory"/>: the small table a lane goes on with
+    /// once its own has emptied into the core (PLAN-HIGH-CARDINALITY, H4, milestone 2).
+    /// </summary>
+    internal AggregationPartition Cache(QueryMemory? memory) =>
+        new AggregationPartition(_plan, _settled, _columns, _inputs, sorted: false, source: _source, facts: _facts, memory: memory);
 
     /// <summary>A partition that folds each row of a batch into a group of its own, which a lane bypassing its cache flushes after each batch.</summary>
     internal AggregationPartition RowPartition() =>
@@ -254,13 +285,14 @@ internal sealed class GroupCore
     internal const int SlabBatches = 64;
 
     /// <summary>
-    /// A slab of new batches, linked first to last, for a lane to fill: one large array, which the
-    /// collector neither copies nor clears, from the shelf, which takes it back at the end.
+    /// A slab of new batches, linked first to last, for <paramref name="lane"/> to fill: one large
+    /// array, which the collector neither copies nor clears, from the shelf, which takes it back at the
+    /// end; past the query's budget for a lane that turned to the core under pressure (milestone 2).
     /// </summary>
-    internal PartBatch NewSlab()
+    internal PartBatch NewSlab(LaneCore lane)
     {
         Interlocked.Add(ref _batches, SlabBatches);
-        ulong[] slab = _shelf.Take<ulong>(SlabBatches * _batchWords, zeroed: false);
+        ulong[] slab = _shelf.Take<ulong>(SlabBatches * _batchWords, zeroed: false, overdraw: lane.Pressed);
         lock (_freeGate)
         {
             _slabs.Add(slab);
@@ -338,7 +370,10 @@ internal sealed class GroupCore
         }
 
         lane.Deposited(batch.Count);
-        if (pending > Threshold(part))
+
+        // A lane turning to the core deposits its table and bursts nothing: the sub-tables would grow
+        // before the table they replace is given back (milestone 2). The next lane's deposit applies them.
+        if (pending > Threshold(part) && !lane.Turning)
         {
             Burst(part, lane.Applier);
         }
@@ -357,6 +392,13 @@ internal sealed class GroupCore
                 int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: true);
                 Interlocked.Add(ref part.Pending.Value, -applied);
                 Interlocked.Increment(ref _bursts);
+
+                // A burst that found the stack empty makes no progress: a lane that failed while it
+                // applied took the stack and left its count, and the next would spin on the lock forever.
+                if (applied == 0)
+                {
+                    return;
+                }
             }
             finally
             {
@@ -796,6 +838,68 @@ internal sealed class CorePart
     }
 }
 
+/// <summary>
+/// The core a query turns to under pressure (PLAN-HIGH-CARDINALITY, H4, milestone 2, decision 12): made
+/// by the first lane whose table its budget cannot let grow, never before, so that a query its budget
+/// holds allocates nothing for it; null for a query the core cannot hold.
+/// </summary>
+internal sealed class CorePressure(Func<GroupCore?> make)
+{
+    private readonly Lock _gate = new Lock();
+    private GroupCore? _core;
+    private bool _made;
+    private bool _turned;
+
+    /// <summary>The core, made at the first call; null when it cannot hold the query's groups.</summary>
+    internal GroupCore? Core
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (!_made)
+                {
+                    _core = make();
+                    _made = true;
+                    Volatile.Write(ref _turned, _core is not null);
+                }
+
+                return _core;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether a lane turned to the core: the others turn at their next batch, rather than each when its
+    /// own table can no longer grow, which would turn them all at once, each emptying its table while
+    /// the budget is full. A read, no lock.
+    /// </summary>
+    internal bool Turned => Volatile.Read(ref _turned);
+
+    private int _turning;
+
+    /// <summary>
+    /// Whether the lane may turn now: one lane turns at a time, the memory its table takes to empty into
+    /// the core given back with the table before the next turns; another keeps its table a batch more.
+    /// </summary>
+    internal bool TryTurn() => Interlocked.CompareExchange(ref _turning, 1, 0) == 0;
+
+    /// <summary>The end of a lane's turn: the next may turn.</summary>
+    internal void EndTurn() => Volatile.Write(ref _turning, 0);
+
+    /// <summary>The core a lane made, or null when none needed it.</summary>
+    internal GroupCore? Made
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _core;
+            }
+        }
+    }
+}
+
 /// <summary>The head of a part's stack, alone on its line.</summary>
 [StructLayout(LayoutKind.Explicit, Size = 128)]
 internal struct HeadLine
@@ -853,6 +957,19 @@ internal sealed class LaneCore
     }
 
     internal EntryShape Shape { get; }
+
+    /// <summary>
+    /// Whether the lane is turning to the core, its own table emptying into its batches (milestone 2):
+    /// its deposits burst nothing until its table is given back.
+    /// </summary>
+    internal bool Turning { get; set; }
+
+    /// <summary>
+    /// Whether the lane turned to the core under pressure (milestone 2): its slabs come past the
+    /// query's budget when they must, as its cache, bounded by α times the groups pending; the
+    /// sub-tables, which hold the groups themselves, are what its budget refuses.
+    /// </summary>
+    internal bool Pressed { get; set; }
 
     /// <summary>What the lane applies a part's stack with: made at its first burst.</summary>
     internal CoreApplier Applier => _applier ??= new CoreApplier(_core, this);
@@ -967,7 +1084,7 @@ internal sealed class LaneCore
         PartBatch? batch = _free;
         if (batch is null)
         {
-            batch = _core.TakeShared(out _freeCount) ?? _core.NewSlab();
+            batch = _core.TakeShared(out _freeCount) ?? _core.NewSlab(this);
             if (_freeCount == 0)
             {
                 _freeCount = GroupCore.SlabBatches;
@@ -980,6 +1097,12 @@ internal sealed class LaneCore
         batch.Count = 0;
         return batch;
     }
+
+    /// <summary>
+    /// A lane's own table emptied into the open batches, its null group aside, which it keeps alone: the
+    /// lane turning to the core when its budget cannot let the table grow (milestone 2).
+    /// </summary>
+    internal void Empty(AggregationPartition table) => Flush(table);
 
     /// <summary>The cache's groups copied into the open batches, its null group aside, which it keeps alone.</summary>
     private void Flush(AggregationPartition cache)

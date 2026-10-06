@@ -104,6 +104,12 @@ internal sealed class QueryMemory : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Whether the budget would grant <paramref name="bytes"/> more now, without reserving them: a lane
+    /// asks it before a batch, to turn to the core while its table can still be emptied into it.
+    /// </summary>
+    internal bool CanGrow(long bytes) => _budget.CanReserve(bytes);
+
     /// <summary>Reserves and measures <paramref name="bytes"/> the result holds until it is delivered, for <paramref name="what"/>; past the budget, the query fails.</summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant them.</exception>
     internal void Hold(long bytes, string what)
@@ -121,6 +127,13 @@ internal sealed class QueryMemory : IDisposable
     {
         Shrink(bytes);
         Measure(-bytes);
+    }
+
+    /// <summary>Reserves <paramref name="bytes"/> past its budget's ceiling, a lane's overdraft before it turns to the core (H4, milestone 2).</summary>
+    internal void Force(long bytes)
+    {
+        _budget.Force(bytes);
+        Interlocked.Add(ref _held, bytes);
     }
 
     /// <summary>Gives back <paramref name="bytes"/> the query held.</summary>

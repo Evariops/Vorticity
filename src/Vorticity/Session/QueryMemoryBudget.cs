@@ -27,9 +27,11 @@ public sealed class QueryMemoryBudget
     // The process's budget, which this one reserves in too; null for the process's own.
     private readonly QueryMemoryBudget? _process;
 
-    // The host's ceiling; the process's limit, less a margin, for the process's own.
+    // The host's ceiling; the process's limit, less a margin, for the process's own. What its queries
+    // hold, and the most they held at once.
     private readonly long _ceiling;
     private long _reserved;
+    private long _peak;
 
     // The process's own: the bytes the queries' tables hold, as last measured; the rest of the
     // process, read after the last full collection; what the queries let go since, still in the heap;
@@ -64,6 +66,9 @@ public sealed class QueryMemoryBudget
 
     /// <summary>The bytes they hold now.</summary>
     public long ReservedBytes => Volatile.Read(ref _reserved);
+
+    /// <summary>The most bytes they held at once, since the budget was made.</summary>
+    internal long PeakBytes => Volatile.Read(ref _peak);
 
     /// <summary>
     /// The process's budget, which every session shares unless given another. Its limit is the memory
@@ -108,6 +113,29 @@ public sealed class QueryMemoryBudget
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> past the ceilings, this budget's and the process's: what a lane
+    /// takes in the middle of a batch when the budget refuses it, counted all the same, before it turns
+    /// to the core at the next batch and gives back its table (PLAN-HIGH-CARDINALITY, H4, milestone 2).
+    /// </summary>
+    internal void Force(long bytes)
+    {
+        Raise(Interlocked.Add(ref _reserved, bytes));
+        _process?.Force(bytes);
+    }
+
+    /// <summary>Whether this budget and the process's would grant <paramref name="bytes"/> more now, without reserving them.</summary>
+    internal bool CanReserve(long bytes)
+    {
+        if (_process is null)
+        {
+            Observe();
+            return ReservedBytes + bytes <= Available();
+        }
+
+        return ReservedBytes + bytes <= _ceiling && _process.CanReserve(bytes);
     }
 
     /// <summary>Gives back <paramref name="bytes"/> reserved, to this budget and the process's.</summary>
@@ -210,7 +238,7 @@ public sealed class QueryMemoryBudget
         return Available();
     }
 
-    private static bool TryAdd(ref long reserved, long bytes, long ceiling)
+    private bool TryAdd(ref long reserved, long bytes, long ceiling)
     {
         long now = Volatile.Read(ref reserved);
         while (true)
@@ -223,10 +251,27 @@ public sealed class QueryMemoryBudget
             long seen = Interlocked.CompareExchange(ref reserved, now + bytes, now);
             if (seen == now)
             {
+                Raise(now + bytes);
                 return true;
             }
 
             now = seen;
+        }
+    }
+
+    /// <summary>The most bytes held at once, raised to <paramref name="held"/> when it passes it.</summary>
+    private void Raise(long held)
+    {
+        long peak = Volatile.Read(ref _peak);
+        while (held > peak)
+        {
+            long seen = Interlocked.CompareExchange(ref _peak, held, peak);
+            if (seen == peak)
+            {
+                return;
+            }
+
+            peak = seen;
         }
     }
 

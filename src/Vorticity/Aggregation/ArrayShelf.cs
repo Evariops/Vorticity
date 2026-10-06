@@ -36,8 +36,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private long _held;
     private bool _used;
 
-    // A lane's shelf: its query's memory; the bytes of the arrays it handed out that its tables hold,
-    // and what it reserved ahead of the next ones.
+    // A shelf under a query's memory; for a lane's, the bytes of the arrays it handed out that its
+    // tables hold, and what it reserved ahead of the next ones.
     private readonly QueryMemory? _memory;
     private long _out;
     private long _credit;
@@ -47,6 +47,15 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         : this(Retained, long.MaxValue)
     {
     }
+
+    /// <summary>
+    /// A query's shelf under its memory, the core's (PLAN-HIGH-CARDINALITY, H4, milestone 2): an array
+    /// enters the query's count when the shelf takes it new or from the process's, and leaves it when it
+    /// is let go or handed back to the process's; one on its piles stays counted. Its reservations are
+    /// exact, each taken under no lock of its own: the lanes that apply bursts meet on it.
+    /// </summary>
+    internal ArrayShelf(QueryMemory memory, bool pooled)
+        : this(Retained, pooled ? long.MaxValue : 0) => _memory = memory;
 
     /// <summary>
     /// A lane's shelf under its query's memory (PLAN-HIGH-CARDINALITY, H2, decision 13): an array it
@@ -59,6 +68,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     internal ArrayShelf(QueryMemory memory)
         : this(parent: null, budget: 0) => _memory = memory;
+
+    /// <summary>Whether the shelf is a lane's: under a query's memory, with no pile and no process's shelf behind it.</summary>
+    private bool Lane => _memory is not null && _parent is null;
 
     private ArrayShelf(ArrayShelf? parent, long budget)
     {
@@ -97,6 +109,15 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal long Out => _out;
 
     /// <summary>
+    /// Whether a lane's shelf takes an array its budget refuses all the same, counted past the ceiling:
+    /// a lane that can turn to the core, which it does at the next batch (H4, milestone 2).
+    /// </summary>
+    internal bool Overdraws { get; set; }
+
+    /// <summary>Whether the shelf took an array past its budget, which turns its lane to the core at the next batch.</summary>
+    internal bool Overdrawn { get; private set; }
+
+    /// <summary>
     /// <paramref name="array"/> grown to <paramref name="length"/>, its elements copied and the new
     /// ones zeroed, as <see cref="Array.Resize{T}"/> does: its new array from <paramref name="shelf"/>
     /// and its old one given back to it, when there is one.
@@ -118,16 +139,18 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>
     /// An array of <paramref name="length"/> elements, from the shelf, the process's, or new; zeroed
-    /// when <paramref name="zeroed"/>. Under a query's memory, reserved first, then new.
+    /// when <paramref name="zeroed"/>. Under a query's memory, reserved first, then new; past the budget
+    /// when <paramref name="overdraw"/>, for a lane emptying its table into the core, whose table is
+    /// given back right after (H4, milestone 2).
     /// </summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
-    internal T[] Take<T>(int length, bool zeroed)
+    internal T[] Take<T>(int length, bool zeroed, bool overdraw = false)
     {
-        if (_memory is { } memory)
+        if (Lane)
         {
             if ((long)length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
-                Reserve(memory, bytes);
+                Reserve(_memory!, bytes);
             }
 
             return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
@@ -154,6 +177,22 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return array;
         }
 
+        // An array the query did not hold enters its count, exactly, before it comes.
+        if (_memory is { } memory && (long)length * Unsafe.SizeOf<T>() is long counted and >= LeastCounted)
+        {
+            if (!memory.TryGrow(counted))
+            {
+                if (!overdraw)
+                {
+                    throw memory.Exceeded("group by", -1, counted);
+                }
+
+                memory.Force(counted);
+            }
+
+            memory.Measure(counted);
+        }
+
         return _parent is not null ? _parent.Take<T>(length, zeroed)
             : zeroed ? new T[length]
             : GC.AllocateUninitializedArray<T>(length);
@@ -165,17 +204,31 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     internal void Give<T>(T[] array)
     {
-        if (_memory is { } memory)
+        if (Lane)
         {
             if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
-                Unreserve(memory, bytes);
+                Unreserve(_memory!, bytes);
             }
 
             return;
         }
 
-        Give(typeof(T), array, Unsafe.SizeOf<T>());
+        // Let go past the shelf's budget: it leaves the query's count.
+        if (!Give(typeof(T), array, Unsafe.SizeOf<T>()))
+        {
+            Leave(array.Length * (long)Unsafe.SizeOf<T>());
+        }
+    }
+
+    /// <summary>The bytes of an array that leaves a query's shelf under its memory, let go or handed to the process's: given back, left to the next collection.</summary>
+    private void Leave(long bytes)
+    {
+        if (_memory is { } memory && bytes >= LeastCounted)
+        {
+            memory.Shrink(bytes);
+            memory.Measure(-bytes);
+        }
     }
 
     /// <summary>
@@ -201,11 +254,18 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             long more = Math.Max(bytes - _credit, QueryMemory.Chunk);
             if (!memory.TryGrow(more))
             {
-                // The megabyte ahead may be what does not fit: the array alone, before failing.
+                // The megabyte ahead may be what does not fit: the array alone, before failing, or before
+                // taking it past the budget when the lane turns to the core at the next batch.
                 more = bytes - _credit;
                 if (!memory.TryGrow(more))
                 {
-                    throw memory.Exceeded("group by", -1, bytes);
+                    if (!Overdraws)
+                    {
+                        throw memory.Exceeded("group by", -1, bytes);
+                    }
+
+                    memory.Force(more);
+                    Overdrawn = true;
                 }
             }
 
@@ -253,22 +313,24 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return;
         }
 
+        // Each leaves the query's count, kept by the process's shelf or let go.
         foreach ((Type type, Pile pile) in piles)
         {
             foreach (Array array in pile.Arrays)
             {
                 _parent.Give(type, array, pile.ElementBytes);
+                Leave((long)array.Length * pile.ElementBytes);
             }
         }
     }
 
-    /// <summary>An array of elements of <paramref name="type"/>, <paramref name="elementBytes"/> each, on the shelf, within its budget.</summary>
-    private void Give(Type type, Array array, int elementBytes)
+    /// <summary>An array of elements of <paramref name="type"/>, <paramref name="elementBytes"/> each, on the shelf, within its budget: whether it kept it.</summary>
+    private bool Give(Type type, Array array, int elementBytes)
     {
         int length = array.Length;
         if (length == 0)
         {
-            return;
+            return true;
         }
 
         long bytes = (long)length * elementBytes;
@@ -276,7 +338,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         {
             if (_held + bytes > _budget)
             {
-                return;
+                return false;
             }
 
             if (!_piles.TryGetValue((type, length), out Pile? pile))
@@ -287,6 +349,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
             pile.Arrays.Push(array);
             _held += bytes;
+            return true;
         }
     }
 

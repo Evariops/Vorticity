@@ -168,6 +168,21 @@ internal sealed class AggregationPlan
     internal bool Core { get; set; }
 
     /// <summary>
+    /// Whether a lane whose budget cannot let its table grow turns to the core rather than failing,
+    /// where the core can hold the query's groups (PLAN-HIGH-CARDINALITY, H4, milestone 2). Off until the
+    /// core ends exact under every budget its lanes' tables outgrow: its batches open a part at 16 KiB a
+    /// lane, its α stays derived under pressure, and a merge the pass did not foresee is refused.
+    /// </summary>
+    internal bool CoreUnderPressure { get; set; }
+
+    /// <summary>
+    /// The batches a lane folds into its own table before it turns to the core, as if its budget could
+    /// not let the table grow, or null to turn under pressure alone: the tests' way to turn every lane
+    /// at a chosen point of the pass.
+    /// </summary>
+    internal int? CoreTurnAt { get; set; }
+
+    /// <summary>
     /// The lanes from which the core holds the groups, or null for the core's own: below, each lane's
     /// table and the merge cost less (<see cref="GroupCore.Of"/>); 1 in the tests and the bench, which
     /// run the core at every degree.
@@ -471,6 +486,7 @@ internal sealed class AggregationPartition
     {
         Memory = memory;
         _arrays = memory is null ? null : new ArrayShelf(memory);
+        _turnAt = plan.CoreTurnAt;
         _columns = columns;
         _inputs = inputs;
         _keyCount = plan.Keys.Length;
@@ -506,15 +522,49 @@ internal sealed class AggregationPartition
     /// <summary>The records the slots whose states hold no reference share, a record a group; null when no slot has one.</summary>
     internal GroupRecords? Records { get; private set; }
 
-    /// <summary>The lane's side of the query's core, which copies the partition into its batches when it fills (PLAN-HIGH-CARDINALITY, H4); null without a core.</summary>
-    internal LaneCore? Core { get; init; }
+    /// <summary>
+    /// The lane's side of the query's core, which copies the partition into its batches when it fills
+    /// (PLAN-HIGH-CARDINALITY, H4); null without a core, or until the lane turns to it under pressure.
+    /// </summary>
+    internal LaneCore? Core
+    {
+        get => _core;
+        init => _core = value;
+    }
+
+    /// <summary>
+    /// The core the query turns to when its budget cannot let a lane's table grow (H4, milestone 2);
+    /// null for a partition that never turns to one.
+    /// </summary>
+    internal CorePressure? Pressure
+    {
+        get => _pressure;
+        init
+        {
+            // A lane that can turn to the core takes past its budget in the middle of a batch, and turns at the next.
+            _pressure = value;
+            if (_arrays is not null)
+            {
+                _arrays.Overdraws = value is not null;
+            }
+        }
+    }
+
+    private readonly CorePressure? _pressure;
 
     /// <summary>The query's memory, in which the partition reserves what its groups hold (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
     internal QueryMemory? Memory { get; }
 
-    // The lane's shelf under the query's memory, which the arrays of its records and of a key of one
-    // fixed column come from, each reserved before it is allocated; null without the query's memory.
-    private readonly ArrayShelf? _arrays;
+    private LaneCore? _core;
+
+    // The plan's batch to turn to the core at, in the tests, and the batches folded so far.
+    private readonly int? _turnAt;
+    private int _folded;
+
+    // The lane's shelf under the query's memory, which the arrays of its tables come from, each
+    // reserved before it is allocated; null without the query's memory. A lane turning to the core
+    // takes its cache's.
+    private ArrayShelf? _arrays;
 
     /// <summary>The bytes the partition reserved in the query's memory for the arrays its shelf does not hand out, read once a batch.</summary>
     internal long Accounted { get; private set; }
@@ -561,6 +611,13 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void LetGo()
     {
+        GiveBack();
+        Release();
+    }
+
+    /// <summary>What the partition's tables held of its query's memory given back, the tables themselves left to the next collection.</summary>
+    private void GiveBack()
+    {
         if (Memory is { } memory)
         {
             memory.Shrink(Accounted);
@@ -569,8 +626,56 @@ internal sealed class AggregationPartition
             Accounted = 0;
             Measured = 0;
         }
+    }
 
-        Release();
+    /// <summary>
+    /// The lane turning to <paramref name="core"/> (PLAN-HIGH-CARDINALITY, H4, milestone 2): its table,
+    /// which its budget could not let grow once more, emptied into the core's batches, then let go with
+    /// what it held; the lane goes on with a cache of the core's size, which takes the null group, the
+    /// one group no batch carries.
+    /// </summary>
+    private void TurnTo(GroupCore core)
+    {
+        // Emptying the table takes memory before the table can be given back: the lane's batches take it
+        // past the budget meanwhile, and the lane's deposits burst nothing. Its cache takes what it needs
+        // past the budget too, whenever it must: bounded by the core's capacity, it is the least the
+        // query holds once it turned.
+        LaneCore lane = core.Lane();
+        _core = lane;
+        lane.Pressed = true;
+        lane.Turning = true;
+        lane.Empty(this);
+        AggregationPartition cache = core.Cache(Memory);
+        cache._arrays?.Overdraws = true;
+        int[]? numbers = null;
+        cache.MergeFrom(this, ref numbers, apart: null);
+        GiveBack();
+        lane.Turning = false;
+        Keys = cache.Keys;
+        Slots = cache.Slots;
+        Records = cache.Records;
+        _arrays = cache._arrays;
+        Accounted = cache.Accounted;
+        Measured = cache.Measured;
+    }
+
+    /// <summary>A lane that never turned to the core, given its side of it at the end, which empties its table into the core's batches as a cache's.</summary>
+    internal void Join(GroupCore core) => _core ??= core.Lane();
+
+    /// <summary>
+    /// Whether the lane's budget could not let its table grow once more: its arrays doubled and a
+    /// megabyte past them, asked without reserving, or an array it took past the budget in the batch
+    /// before; or the plan's batch to turn at, in the tests. The table keeps everything its budget lets
+    /// it hold: the lanes' tables stay the way the query runs while they fit.
+    /// </summary>
+    private bool Pressed()
+    {
+        if (_turnAt is int turnAt)
+        {
+            return _folded++ >= turnAt;
+        }
+
+        return _arrays is { Overdrawn: true } || (Memory is { } memory && !memory.CanGrow(_arrays!.Out + QueryMemory.Chunk));
     }
 
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
@@ -728,6 +833,36 @@ internal sealed class AggregationPartition
             if (_settledNext < _settledEnd && _settling.Start(_settledNext) < batch.StartRow + batch.RowCount)
             {
                 throw new InvalidOperationException("A block the zone maps settled lies in a batch the scan read.");
+            }
+        }
+
+        // A lane whose table its budget could not let grow once more turns to the core, and the others
+        // after it, a batch boundary each, those whose table holds more than the core would cost them
+        // (H4, milestone 2). One that took past its budget and cannot turn fails here, between two batches.
+        if (_core is null && Pressure is { } pressure && (pressure.Turned || Pressed()))
+        {
+            if (pressure.Core is { } turned && (_turnAt is not null || _arrays!.Out >= turned.LaneBytes))
+            {
+                // One lane at a time, when its table takes memory to empty: another keeps its table a batch more.
+                if (_arrays!.Out < QueryMemory.Chunk)
+                {
+                    TurnTo(turned);
+                }
+                else if (pressure.TryTurn())
+                {
+                    try
+                    {
+                        TurnTo(turned);
+                    }
+                    finally
+                    {
+                        pressure.EndTurn();
+                    }
+                }
+            }
+            else if (_arrays is { Overdrawn: true })
+            {
+                throw Memory!.Exceeded("group by", Keys?.Count ?? 1, _arrays.Out);
             }
         }
 
@@ -1328,11 +1463,19 @@ internal static class AggregationEngine
 
             // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
-            GroupCore? core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes);
+            GroupCore? core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
             if (core is not null)
             {
                 facts = GroupCore.CacheFacts(facts);
             }
+
+            // Without it, the core a lane turns to when its budget cannot let its table grow: made then,
+            // never before, for a query it can hold, on two lanes or more, where the lanes' tables hold a
+            // group once each and the core once (H4, milestone 2, decision 12).
+            KeyFacts? tableFacts = facts;
+            CorePressure? pressure = core is null && plan.CoreUnderPressure && plan.Grouped && !sorted && top is null && (lanes > 1 || plan.CoreTurnAt is not null)
+                ? new CorePressure(() => GroupCore.Holding(plan, settled, columns, inputs, source, tableFacts, sorted, top: null, lanes, memory))
+                : null;
 
             if (ranges is null)
             {
@@ -1340,6 +1483,7 @@ internal static class AggregationEngine
                 {
                     Top = top,
                     Core = core?.Lane(),
+                    Pressure = pressure,
                 };
                 if (settling is not null)
                 {
@@ -1361,6 +1505,7 @@ internal static class AggregationEngine
                     {
                         Top = top is { FirstMet: true } ? null : top,
                         Core = core?.Lane(),
+                        Pressure = pressure,
                     };
                 }
 
@@ -1369,11 +1514,17 @@ internal static class AggregationEngine
             }
 
             long merging = Stopwatch.GetTimestamp();
-            if (core is { Engaged: true })
+            if ((core ?? pressure?.Made) is { Engaged: true } engaged)
             {
-                // The sub-tables are the result; the lanes' caches die with the pass.
-                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await core.FinishAsync(partitions, lanes, cancellationToken).ConfigureAwait(false);
-                plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = core.Run() };
+                // The sub-tables are the result; the lanes' caches die with the pass. A lane that never
+                // turned to the core under pressure empties its table into it as a cache.
+                foreach (AggregationPartition partition in partitions)
+                {
+                    partition.Join(engaged);
+                }
+
+                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await engaged.FinishAsync(partitions, lanes, cancellationToken).ConfigureAwait(false);
+                plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
                 foreach (AggregationPartition partition in partitions)
                 {
                     partition.Release();
