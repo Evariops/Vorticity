@@ -116,14 +116,22 @@ public sealed class ResultBatchTests
             Assert.Equal(all.Skip(3).Take(5).Skip(2), await file.Scan<Sale>().GroupBy(r => r.Units).Select(g => g.Key).Skip(3).Take(5).Skip(2).ToListAsync(Ct));
             Assert.Empty(await file.Scan<Sale>().GroupBy(r => r.Units).Select(g => g.Key).Take(0).ToListAsync(Ct));
 
+            // The records of a window, two groups of the whole result: which two, without OrderBy, is the
+            // engine's to choose, the order of its groups shuffled in these tests.
             List<ShopTotal> shops = [];
             await foreach (ShopTotal shop in file.Scan<Sale>().GroupBy(r => r.Shop).Select(g => (g.Key, g.Sum(r => r.Units))).Skip(1).Take(2).As<ShopTotal>().ToRecordsAsync(Ct))
             {
                 shops.Add(shop);
             }
 
-            List<string> names = await file.Scan<Sale>().GroupBy(r => r.Shop).Select(g => g.Key).ToListAsync(Ct);
-            Assert.Equal(names.Skip(1).Take(2), shops.Select(s => s.Shop));
+            List<ShopTotal> every = [];
+            await foreach (ShopTotal shop in file.Scan<Sale>().GroupBy(r => r.Shop).Select(g => (g.Key, g.Sum(r => r.Units))).As<ShopTotal>().ToRecordsAsync(Ct))
+            {
+                every.Add(shop);
+            }
+
+            Assert.Equal(2, shops.Distinct().Count());
+            Assert.All(shops, shop => Assert.Contains(shop, every));
         }
         finally
         {

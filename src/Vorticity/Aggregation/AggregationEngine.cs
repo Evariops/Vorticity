@@ -169,11 +169,17 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// Whether a lane whose budget cannot let its table grow turns to the core rather than failing,
-    /// where the core can hold the query's groups, and whether a merge its budget cannot hold ends in the
-    /// core (PLAN-HIGH-CARDINALITY, H4, milestone 2): on by default, off to measure or test the lanes'
-    /// tables alone under a budget.
+    /// where the core can hold the query's groups (PLAN-HIGH-CARDINALITY, H4, milestone 2): on by
+    /// default, off to measure or test the lanes' tables alone under a budget.
     /// </summary>
     internal bool CoreUnderPressure { get; set; } = true;
+
+    /// <summary>
+    /// Whether the groups of a query come in an order shuffled the same way for a process (decision
+    /// 11): on in the repository's tests, so that none relies on the order the engine happens to give
+    /// groups no <c>OrderBy</c> sorts.
+    /// </summary>
+    internal static bool ShuffledOrder { get; set; }
 
     /// <summary>
     /// The batches a lane folds into its own table before it turns to the core, as if its budget could
@@ -1683,7 +1689,7 @@ internal static class AggregationEngine
                     partition.Release();
                 }
 
-                return Counted(new AggregationOutcome(plan, heldSlots, held, held.Order(sorted: false)), memory, heldBytes);
+                return Counted(new AggregationOutcome(plan, heldSlots, held, Shuffled(held.Order(sorted: false))), memory, heldBytes);
             }
 
             (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes) = await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, cancellationToken).ConfigureAwait(false);
@@ -1704,7 +1710,7 @@ internal static class AggregationEngine
             }
 
             // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
-            int[] order = keys is null ? [0] : keys.Order(sorted: false);
+            int[] order = keys is null ? [0] : Shuffled(keys.Order(sorted: false));
             return Counted(new AggregationOutcome(plan, slots, keys, order), memory, result);
         }
         catch
@@ -1712,6 +1718,23 @@ internal static class AggregationEngine
             memory.Dispose();
             throw;
         }
+    }
+
+    /// <summary>
+    /// The groups' order as the merge gives it, or, under <see cref="AggregationPlan.ShuffledOrder"/>, a
+    /// copy shuffled by a draw the process's seed and the groups' count make: the same for two identical
+    /// queries of a process, and unlike the merge's.
+    /// </summary>
+    private static int[] Shuffled(int[] order)
+    {
+        if (!AggregationPlan.ShuffledOrder || order.Length < 2)
+        {
+            return order;
+        }
+
+        int[] shuffled = [.. order];
+        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)order.Length))).Shuffle(shuffled);
+        return shuffled;
     }
 
     /// <summary>
