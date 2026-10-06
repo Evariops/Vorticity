@@ -286,6 +286,83 @@ public sealed partial class GroupCoreTests
         }
     }
 
+    [Fact]
+    public async Task ASlowedHolderLeavesNoBatchBehind()
+    {
+        // Every burst waits once it holds its part: the lanes deposit past it, on stacks the holder took
+        // or not, and every batch is applied once, by a burst or at the end.
+        Row[] rows = Rows_(20_000);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 14);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, KeyStats> reference = ByKey(await ListAsync(Reference(file)));
+            Vorticity.Aggregation slowed = Query(
+                file,
+                static plan =>
+                {
+                    Tiny(plan);
+                    plan.CoreBurstSpin = 20_000;
+                },
+                batchRows: 1_024);
+            Assert.Equal(reference, ByKey(await ListAsync(slowed.As<KeyStats>())));
+            Assert.True(slowed.Plan.LastRun?.Core?.Bursts > 0);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task ACancelledPassInTheMiddleOfItsBurstsGivesEverythingBack()
+    {
+        Row[] rows = Rows_(20_000);
+        string path = await WriteAsync(rows);
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 14;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation slowed = Query(
+                file,
+                static plan =>
+                {
+                    Tiny(plan);
+                    plan.CoreBurstSpin = 200_000;
+                },
+                batchRows: 1_024);
+            using CancellationTokenSource cancel = CancellationTokenSource.CreateLinkedTokenSource(Ct);
+            cancel.CancelAfter(TimeSpan.FromMilliseconds(20));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            {
+                await foreach (KeyStats _ in slowed.As<KeyStats>().ToRecordsAsync(cancel.Token))
+                {
+                }
+            });
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void ATableThatCannotDoubleSaysSo()
+    {
+        // Groups are numbered by 32-bit integers: an array of 2^30 elements cannot double.
+        Assert.Equal(1 << 30, GroupKeys.Doubled(1 << 29));
+        VortexUnsupportedException refused = Assert.Throws<VortexUnsupportedException>(() => GroupKeys.Doubled(1 << 30));
+        Assert.Contains("536,870,912", refused.Message, StringComparison.Ordinal);
+    }
+
     /// <summary>The core at sizes that make every batch of rows copy a cache, every deposit burst, every burst split.</summary>
     private static void Tiny(AggregationPlan plan)
     {

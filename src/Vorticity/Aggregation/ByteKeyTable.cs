@@ -109,7 +109,7 @@ internal sealed class ByteKeyTable
         added = true;
         if (Count * 2 > _slots.Length)
         {
-            Rehash(NewSlots(_slots.Length * 2));
+            Rehash(NewSlots(GroupKeys.Doubled(_slots.Length)));
         }
 
         return number;
@@ -249,7 +249,7 @@ internal sealed class ByteKeyTable
     {
         if (count > _offsets.Length)
         {
-            int grown = Math.Max(count, _offsets.Length * 2);
+            int grown = Math.Max(count, GroupKeys.Doubled(_offsets.Length));
             ArrayShelf.Resize(_shelf, ref _offsets, grown);
             ArrayShelf.Resize(_shelf, ref _hashes, grown);
         }

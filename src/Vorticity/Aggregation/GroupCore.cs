@@ -126,6 +126,7 @@ internal sealed class GroupCore
     private long _reloaded;
     private long _batches;
     private int _splits;
+    private long _alone;
 
     // The entries applied and the groups they made, over the query so far: the share of an entry that
     // makes a group, which sizes a part's sub-tables ahead of a large application.
@@ -344,11 +345,22 @@ internal sealed class GroupCore
     /// share of a lane's table emptied into the core under pressure (milestone 2), which its part gives
     /// back once applied (<see cref="Drop"/>).
     /// </summary>
-    internal PartBatch NewAlone(int entries) =>
-        new PartBatch(_shelf.Take<ulong>(entries * Shape.Words, zeroed: false, overdraw: true), 0, entries) { Alone = true };
+    internal PartBatch NewAlone(int entries)
+    {
+        ulong[] words = _shelf.Take<ulong>(entries * Shape.Words, zeroed: false, overdraw: true);
+        Interlocked.Add(ref _alone, words.Length * sizeof(ulong));
+        return new PartBatch(words, 0, entries) { Alone = true };
+    }
 
     /// <summary>A batch of its own applied: its array leaves the query's count, to the next collection.</summary>
-    internal void Drop(PartBatch batch) => _shelf.Drop(batch.Words);
+    internal void Drop(PartBatch batch)
+    {
+        _shelf.Drop(batch.Words);
+        Interlocked.Add(ref _alone, -batch.Words.Length * sizeof(ulong));
+    }
+
+    /// <summary>The bytes of the batches of their own not applied yet: memory that comes back as their parts apply them.</summary>
+    internal long AloneBytes => Interlocked.Read(ref _alone);
 
     /// <summary>Every batch lanes gave back for any lane, linked, and their count; null when there is none.</summary>
     internal PartBatch? TakeShared(out int count)
@@ -447,6 +459,11 @@ internal sealed class GroupCore
         {
             try
             {
+                if (_plan.CoreBurstSpin is int spin)
+                {
+                    Thread.SpinWait(spin);
+                }
+
                 int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: true);
                 Interlocked.Add(ref part.Pending.Value, -applied);
                 Interlocked.Increment(ref _bursts);
@@ -998,6 +1015,13 @@ internal sealed class CorePressure(Func<GroupCore?> make, int lanes)
     /// a part's stack whose groups the budget cannot take waits for it.
     /// </summary>
     internal bool Holding => Volatile.Read(ref _holding) > 0;
+
+    /// <summary>
+    /// Whether memory is still to come back: a lane's table, or the batches of their own a table emptied
+    /// into, which come back as their parts apply them. Meanwhile the core's shelf takes past the budget
+    /// what a stack asks more.
+    /// </summary>
+    internal bool Owed => Holding || (_core is { } core && core.AloneBytes > 0);
 
     /// <summary>The lanes that still run with a table they may give back.</summary>
     internal int Running => Volatile.Read(ref _running);

@@ -37,29 +37,15 @@ public sealed partial class CorePressureTests
         // of what they reserve at most, their pass fits and their merge in parts does not: they merge in
         // series, each let go once merged. At 70 %, the pass does not fit either, near its end: a lane or
         // two turn to the core, the others merge in series, the largest last. At 50 %, most turn.
-        const int rows = 1_200_000;
-        Row[] data = new Row[rows];
-        for (int row = 0; row < rows; row++)
-        {
-            data[row] = new Row((int)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % 100_000), row % 100);
-        }
-
-        string path = Path.Combine(AppContext.BaseDirectory, "core-pressure", $"pressed-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
-        {
-            await writer.WriteAsync<Row>(data, Ct);
-            await writer.CompleteAsync(Ct);
-        }
-
+        string path = await WriteAsync();
         try
         {
-            (List<long> expected, long tables, _) = await SumsAsync(path, new QueryMemoryBudget(1L << 30), turn: false);
+            (List<long> expected, long tables, _) = await SumsAsync(path, new QueryMemoryBudget(1L << 30), turn: false, degree: 14);
             QueryMemoryBudget under = new QueryMemoryBudget(tables / 100 * percent);
-            await Assert.ThrowsAsync<VortexMemoryException>(async () => await SumsAsync(path, under, turn: false));
+            await Assert.ThrowsAsync<VortexMemoryException>(async () => await SumsAsync(path, under, turn: false, degree: 14));
             Assert.Equal(0, under.ReservedBytes);
 
-            (List<long> pressed, _, CoreRun? core) = await SumsAsync(path, under, turn: true);
+            (List<long> pressed, _, CoreRun? core) = await SumsAsync(path, under, turn: true, degree: 14);
             Assert.Equal(expected, pressed);
             if (percent >= 85)
             {
@@ -76,21 +62,62 @@ public sealed partial class CorePressureTests
         {
             System.IO.File.Delete(path);
         }
+    }
 
-        static async Task<(List<long> Sums, long Peak, CoreRun? Core)> SumsAsync(string path, QueryMemoryBudget budget, bool turn)
+    [Fact]
+    public async Task ItsLanesWaitOnTasksWhenThePoolHasNoThreadToSpare()
+    {
+        // Twice as many lanes as the pool may run threads, under a budget their tables outgrow: a lane
+        // that waited for its turn, or for room, on a thread would hold it from the lane it waits for.
+        string path = await WriteAsync();
+        int threads = Environment.ProcessorCount;
+        ThreadPool.GetMaxThreads(out int workers, out int ports);
+        try
         {
-            await using VortexSession session = VortexSession.Create(options =>
-            {
-                options.MaxDegreeOfParallelism = 14;
-                options.MemoryBudget = budget;
-            });
-
-            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            Aggregation<long> sums = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key).OrderBy(g => g.Key).Select(g => g.Sum(x => x.Value));
-            AggregationPlan plan = ((AggregationQuery)sums.Query).Plan;
-            plan.CoreUnderPressure = turn;
-            return (await sums.ToListAsync(Ct), budget.PeakBytes, plan.LastRun?.Core);
+            (List<long> expected, long tables, _) = await SumsAsync(path, new QueryMemoryBudget(1L << 30), turn: false, degree: 2 * threads);
+            QueryMemoryBudget under = new QueryMemoryBudget(tables / 2);
+            Assert.True(ThreadPool.SetMaxThreads(threads, ports));
+            (List<long> pressed, _, _) = await SumsAsync(path, under, turn: true, degree: 2 * threads).WaitAsync(TimeSpan.FromMinutes(2), Ct);
+            Assert.Equal(expected, pressed);
+            Assert.Equal(0, under.ReservedBytes);
         }
+        finally
+        {
+            ThreadPool.SetMaxThreads(workers, ports);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    private static async Task<string> WriteAsync()
+    {
+        const int rows = 1_200_000;
+        Row[] data = new Row[rows];
+        for (int row = 0; row < rows; row++)
+        {
+            data[row] = new Row((int)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % 100_000), row % 100);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "core-pressure", $"pressed-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path);
+        await writer.WriteAsync<Row>(data, Ct);
+        await writer.CompleteAsync(Ct);
+        return path;
+    }
+
+    private static async Task<(List<long> Sums, long Peak, CoreRun? Core)> SumsAsync(string path, QueryMemoryBudget budget, bool turn, int degree)
+    {
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.MaxDegreeOfParallelism = degree;
+            options.MemoryBudget = budget;
+        });
+
+        await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+        Aggregation<long> sums = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key).OrderBy(g => g.Key).Select(g => g.Sum(x => x.Value));
+        AggregationPlan plan = ((AggregationQuery)sums.Query).Plan;
+        plan.CoreUnderPressure = turn;
+        return (await sums.ToListAsync(Ct), budget.PeakBytes, plan.LastRun?.Core);
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

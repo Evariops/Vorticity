@@ -65,12 +65,30 @@ internal sealed class GroupRanges
 /// </summary>
 internal abstract class GroupKeys
 {
+    /// <summary>The longest array a table of groups doubles from: twice as long, an int no longer counts it.</summary>
+    private const int MostDoubled = 1 << 30;
+
     private long _dictionaryBlocks;
     private long _otherBlocks;
     private int[] _codeGroups = [];
     private CanonicalOrigin _codeOrigin;
 
     internal int Count { get; private protected set; }
+
+    /// <summary>
+    /// The length an array of a table of groups, or of a distinct count's pairs, doubles to
+    /// (PLAN-HIGH-CARDINALITY, the cap). Groups and pairs are numbered by 32-bit integers, and their
+    /// tables double: an open table, twice its entries long, holds 2^29 of them at most, a list 2^30.
+    /// Past that, the query fails with a typed exception that says so, never an overflow.
+    /// </summary>
+    /// <exception cref="VortexUnsupportedException">The array cannot double.</exception>
+    internal static int Doubled(int length) => length < MostDoubled ? length * 2 : throw TooMany();
+
+    private static VortexUnsupportedException TooMany() => new VortexUnsupportedException(
+        "group by of more than 2^29 groups",
+        ComponentKind.Feature,
+        "A group by numbers its groups, and a distinct count its pairs, by 32-bit integers, and its tables double: an open table holds "
+        + "536,870,912 of them at most, a list 1,073,741,824. Group by fewer keys at once, or filter the rows first.");
 
     /// <summary>Whether every key block was dictionary-encoded, which makes the key source ordered.</summary>
     internal bool OnlyDictionaries => _dictionaryBlocks > 0 && _otherBlocks == 0;
@@ -1116,7 +1134,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         if (Count == _keys.Length)
         {
-            Grow(Count * 2);
+            Grow(Doubled(Count));
         }
 
         _keys[Count] = value;

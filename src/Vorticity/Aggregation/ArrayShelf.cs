@@ -124,9 +124,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal bool Overdrawn { get; private set; }
 
     /// <summary>
-    /// The pressure the core whose shelf this is was made under (H4, milestone 2): while a lane still
-    /// holds a table it gives back, the shelf takes past the budget what a stack judged to fit asks
-    /// more, lanes having met on the room left.
+    /// The pressure the core whose shelf this is was made under (H4, milestone 2): while memory is still
+    /// to come back, a lane's table or the batches it emptied into, the shelf takes past the budget what
+    /// a stack asks more, lanes having met on the room left.
     /// </summary>
     internal CorePressure? Pressure { get; set; }
 
@@ -202,7 +202,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         {
             if (!memory.TryGrow(counted))
             {
-                if (!overdraw && Pressure is not { Holding: true })
+                if (!overdraw && Pressure is not { Owed: true })
                 {
                     throw memory.Exceeded("group by", -1, counted);
                 }

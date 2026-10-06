@@ -741,7 +741,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (Count == _keys.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _keys, Count * 2);
+            ArrayShelf.Resize(_shelf, ref _keys, Doubled(Count));
         }
 
         int added = Count++;
@@ -749,7 +749,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         hashed[slot] = added;
         if (Count * 2 > hashed.Length)
         {
-            Rehash(hashed.Length * 2);
+            Rehash(Doubled(hashed.Length));
         }
 
         return added;

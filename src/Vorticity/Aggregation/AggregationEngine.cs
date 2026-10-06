@@ -210,6 +210,9 @@ internal sealed class AggregationPlan
     /// <summary>The entries of a part's batch, or null for the core's own.</summary>
     internal int? CoreBatchEntries { get; set; }
 
+    /// <summary>The spins a burst waits once it holds its part, or null: the tests' slowed holder, which the lanes deposit past.</summary>
+    internal int? CoreBurstSpin { get; set; }
+
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
 

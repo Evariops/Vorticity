@@ -212,7 +212,7 @@ internal struct KeyTable<TValue>
             {
                 if (_count >= _growAt)
                 {
-                    Resize(PrimeAtLeast(2 * slots.Length));
+                    Resize(PrimeAtLeast(GroupKeys.Doubled(slots.Length)));
                     return Search(key, next);
                 }
 
@@ -247,7 +247,7 @@ internal struct KeyTable<TValue>
         // eight while it is past three tenths full, or takes a seed if the chain is long.
         if (_count >= _growAt || (8L * _overflowed > _count && 10L * _count > 3L * slots.Length))
         {
-            Resize(PrimeAtLeast(2 * slots.Length));
+            Resize(PrimeAtLeast(GroupKeys.Doubled(slots.Length)));
             return Search(key, next);
         }
 

@@ -316,7 +316,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
         {
             if (Count == _keys.Length)
             {
-                Grow(Count * 2);
+                Grow(Doubled(Count));
             }
 
             _keys[Count] = word;
@@ -344,7 +344,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
         if (Count == _keys.Length)
         {
-            Grow(Count * 2);
+            Grow(Doubled(Count));
         }
 
         int added = Count++;
@@ -352,7 +352,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
         hashed[slot] = added;
         if (Count * 2 > hashed.Length)
         {
-            Rehash(hashed.Length * 2);
+            Rehash(Doubled(hashed.Length));
         }
 
         return added;

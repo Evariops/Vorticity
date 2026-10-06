@@ -89,7 +89,7 @@ internal sealed class DistinctPairs<TValue>
 
         if (_count == pairs.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _pairs, _count * 2);
+            ArrayShelf.Resize(_shelf, ref _pairs, GroupKeys.Doubled(_count));
             pairs = _pairs;
         }
 
@@ -98,7 +98,7 @@ internal sealed class DistinctPairs<TValue>
         slots[at] = _count;
         if (_count * 2 > slots.Length)
         {
-            Rehash(slots.Length * 2);
+            Rehash(GroupKeys.Doubled(slots.Length));
         }
 
         return true;
