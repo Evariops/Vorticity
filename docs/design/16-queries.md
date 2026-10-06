@@ -22,7 +22,8 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
-> | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §6, §9 |
+> | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
+> | 7, the high-cardinality core 🚧 | a group's states in a record, the engine's own key tables, a bounded cache a lane, 256 parts of sub-tables applied by bursts, the governor and its spill, delivery part by part | §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -705,11 +706,43 @@ their chunks end, and the ranges then find them open. No object settles (§9.3)
 
 ### 9.5 Memory
 
-A blocking group by holds one state per group (§9.4 keeps it so at any degree), each of the width
-§5.1 lets the engine choose, its keys once, and its output a batch at a time; a streaming one holds
-its open groups; a top-k on the key one and a half times `k` a lane, and a batch's (§6); one on an
-aggregate every group, as a blocking group by; a projection and a `Distinct` on a column that
-streams, their window. Nothing is held per row read.
+A blocking group by holds each group once: its states in a record, each of the width §5.1 lets the
+engine choose, beside its key, in the sub-tables of the part its key's hash falls in (§9.4). Beside
+them, each lane holds a cache of bounded capacity its rows fold into, a batch open for each part, and
+its batches deposited and not yet applied, which never exceed the rows its cache missed nor α times
+the groups of their part. A group by never holds more than a table on each lane would at the same
+degree, the strong reference the core replaced, and nothing per row read. Its output comes a batch at
+a time. A streaming group by holds its open groups; a top-k on the key one and a half times `k` a
+lane, and a batch's (§6); one on an aggregate every group, as a blocking group by; a projection and a
+`Distinct` on a column that streams, their window.
+
+| an `int` key, `Count` and a sum of an `int` | bytes a group |
+|---|---|
+| one lane | ≈ 56: the sub-tables, and at most as many entries pending (α = 1) |
+| fourteen lanes | ≈ 168 (α = 8) |
+| a table on each lane, each lane meeting every key | ≈ 40 at one lane, ≈ 560 at fourteen |
+
+A row of data touches one line of cache of states, whatever its aggregates; a probe of a fixed-width
+key reads its slot, a probe of a text its slot and its bytes. A group is numbered by an `int`: a
+group by holds at most 2³¹ − 1 groups.
+
+**The governor.** The memory a query needs — its sub-tables, its caches, its open batches, and its
+pending ones under α times the groups — is reserved, at the rare points where it grows, from a budget:
+the process's by default, or one the host creates and gives the sessions that share it, whose ceiling
+bounds their queries (`QueryMemoryBudget`, a provisional name). The process keeps two limits under
+every budget: the managed heap's, `GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, and in a
+container the container's, which counts the engine's native memory too; a query stays under its
+budget's ceiling and a margin under both. Memory past the need, a higher α that reads the sub-tables
+less, comes only from a comfort budget the host grants, none by default. A query is admitted with its
+minimum reserved, at a lower degree when it does not fit. Under pressure the query holding more than
+its share — its budget's ceiling over its sessions' active queries, the limit over every active query
+at the process's threshold — gives up its comfort first, then lowers α to its floor, which applies
+its pending batches, then spills its largest parts: their sub-tables, sorted by hash, written as runs
+to a local scratch file of the query, never to the object store nor a `tmpfs`, the process's runs
+within 90 % of the scratch's free space; a spilled part merges its runs as a stream when it is
+delivered. Every state spills as bytes, a custom state without references with its record; a custom
+aggregator whose state holds references, which no bytes stand for, fails the query instead, with an
+exception that names the operator, its groups and its bytes.
 
 ## 10. Plan and statistics
 
@@ -758,7 +791,8 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | arithmetic on results, `g.Sum(…) / g.Count()` | C# computes with results after the sink; filtering or ordering by a ratio is LINQ to objects over the delivered groups, or a query over the result's scan |
 | joins, `let`, a query over a group's rows | one table, no binding per row |
 | a synchronous twin, `ToList()` | async only where there is I/O, and no synchronous twin of an asynchronous call ([03-architecture.md](03-architecture.md) §1) |
-| an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3) |
+| an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3). Without one, the order is not defined: at one lane, the groups come in the order they were first met while they fit its cache; at more, part by part of the key space, the parts cut by a hash seeded once a process, so that two runs of a query in one process cut them alike |
+| the same bits for an aggregator of one's own whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in (§13), its consolidation made of merges alone; a merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, a third more at a million groups, whose 32 bytes a group leave the cache (§13); it is more accurate, and a second semantics would be a second test matrix |
 | approximate distinct counts, quantiles, grouping sets | later, as aggregates and as operators of the same pipeline |
 | aggregates on the tool path | a later surface, over the same engine |
@@ -770,10 +804,16 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | the two syntaxes build one plan | the queries of the guide, written both ways, compared plan for plan |
 | §1's boundary | `tests/MustNotCompile`, with exactly the expected diagnostics |
 | every answer is right | each key form of §9.1 × each aggregate of §5 × degree 1 and the machine's, against LINQ to objects over `ToRecordsAsync`, on the conformance corpus and the type matrix |
-| answers do not depend on the degree or the cut | every answer of §5 but the order-bound ones, float sums included, the same bits at degrees 1 to the machine's, over a file written in two row orders, and over a dataset cut into 1, 2 and 7 objects, before and after compaction |
+| answers do not depend on the degree or the cut | every answer of §5 but the order-bound ones, float sums included, the same bits at degrees 1 to the machine's, over a file written in two row orders, and over a dataset cut into 1, 2 and 7 objects, before and after compaction; and at every capacity of the lanes' caches, every α the internal switch forces (1, 2, 4, 8), and spilled under a heap ten times too small |
+| no batch is left behind | a holder of a part slowed on purpose while the lanes deposit: every deposited batch applied, the pending bytes counted at the governor |
+| pending batches are bounded | the entries a part holds pending never above α times its groups, nor the rows its caches missed |
+| the sub-tables are read back little | the bytes of sub-tables a burst reads again, under ≈ 2s/α an entry, s a group's bytes in a sub-table; none on keys met twice at fourteen lanes once the sub-tables are grown |
+| memory is at most the strong reference's | the peak, caches included, at most that of a table on each lane, at the same degree, at degree 1 and at the machine's, on keys met twice, ten times, and once |
+| the round trips stay | the requests and the dependent steps of a group by over a source with latency, ratchets of `GroupRoundTripTests` |
+| queries share fairly | two to eight queries at once under one budget: none holds more than its share once the threshold is met, the one past it governed first |
 | a `Where` on keys prunes as a filter | `LiveBlocks` equal to the equivalent `Where` on rows |
 | the first batch waits for the first split | the time to first batch of a scan, a projection, a `Distinct` and a group by that streams, on two files sixteen times apart in size, locally and over the HTTP source with latency (`tests/Vorticity.Tests/IO/HttpRangeSegmentSource.cs`) |
-| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's at most the groups', not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4 |
+| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's following its groups, not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4 |
 | a `Take` reads what it uses | `Requests` and `BlocksDecoded` of a `Take(n)` bounded by the splits that hold `n` results and the window |
 | nothing is allocated per batch, nor per group as batches | `ScanAllocationTests` extended to the result stream, `As` and the projection |
 | a short range costs its rows | a complexity probe whose time per row stays flat as runs shorten |

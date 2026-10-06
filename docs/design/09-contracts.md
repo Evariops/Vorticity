@@ -39,10 +39,11 @@ fanning out. So:
   keeps up to three a lane decoded ahead of its consumer, so the lanes that finish first do not
   wait for the slowest; its degree still bounds how many decode at once. **A query** that streams
   runs on that ordered stream of batches, its decode parallel; a blocking aggregation keeps a state
-  per group per range of rows and merges them part by part, as tasks it awaits, or, when keys
-  rarely repeat, partitions its rows by key among its lanes so that every group has one state
-  ([16-queries.md](16-queries.md) §9.4). Its answers are the same bits at every degree, float sums
-  included. **A dataset** opens its objects ahead of the one being read and reads them side by
+  per group on each lane and merges the lanes' states part by part of the key space, as tasks it
+  awaits, never a thread blocked on another. The target, [16-queries.md](16-queries.md) §9.4 and
+  §9.5, folds each lane's rows into a cache of bounded capacity and holds every group once, in the
+  sub-tables of 256 parts. Its answers are the same bits at every degree, float sums included, and
+  stay so at every capacity of the caches and every order the states merge in. **A dataset** opens its objects ahead of the one being read and reads them side by
   side. **A writer** summarizes its columns and compresses a
   column's zstd frames on its threads, and chooses and writes the encodings on the calling one; the
   file is the same bytes at any degree.
