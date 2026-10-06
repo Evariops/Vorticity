@@ -158,6 +158,10 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     private bool _begun;
     private bool _ended;
 
+    // What the index of the values met holds, reserved in the session's budget as it grows; given
+    // back when the stream ends (PLAN-HIGH-CARDINALITY, H2).
+    private QueryMemory? _memory;
+
     internal DistinctBatches(DistinctQuery query, CancellationToken cancellationToken)
     {
         _query = query;
@@ -193,7 +197,9 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             }
 
             (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, []);
-            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming);
+            _memory = new QueryMemory(projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+            AggregationEngine.Admit(_memory, 1);
+            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming, memory: _memory);
             _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
             _inner = projection.Host.Source.BatchesAsync(spec, projection.Metrics).GetAsyncEnumerator(_cancellationToken);
         }
@@ -316,6 +322,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        _memory?.Dispose();
         if (_begun && !_ended)
         {
             _ended = true;

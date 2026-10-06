@@ -554,6 +554,25 @@ internal sealed class AggregationPartition
         _followComponents = [];
     }
 
+    /// <summary>
+    /// Lets the partition's tables go and gives back what it held of its query's memory, the arrays
+    /// left to the next collection (PLAN-HIGH-CARDINALITY, H2): a range a stream followed into the
+    /// partition before it, whose groups now live there.
+    /// </summary>
+    internal void LetGo()
+    {
+        if (Memory is { } memory)
+        {
+            memory.Shrink(Accounted);
+            memory.Measure(-Measured);
+            _arrays?.LetGo();
+            Accounted = 0;
+            Measured = 0;
+        }
+
+        Release();
+    }
+
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
     internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source) =>
         NewSlots(plan, settled, source, out _);
@@ -1420,7 +1439,7 @@ internal static class AggregationEngine
     /// The lanes a query starts on: each lane's working memory reserved, <paramref name="lanes"/> of
     /// them if its budget grants it, else half as many, down to one, before it fails (H2, the admission).
     /// </summary>
-    private static int Admit(QueryMemory memory, int lanes)
+    internal static int Admit(QueryMemory memory, int lanes)
     {
         while (!memory.TryGrow(lanes * LaneBytes))
         {

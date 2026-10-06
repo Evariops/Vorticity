@@ -178,6 +178,21 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         Give(typeof(T), array, Unsafe.SizeOf<T>());
     }
 
+    /// <summary>
+    /// What a lane's shelf holds of its query's memory given back, its tables let go with their
+    /// partition: the arrays they hold, left to the next collection, and what it reserved ahead.
+    /// </summary>
+    internal void LetGo()
+    {
+        if (_memory is { } memory)
+        {
+            memory.Shrink(_out + _credit);
+            memory.Measure(-_out);
+            _out = 0;
+            _credit = 0;
+        }
+    }
+
     /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else a megabyte more.</summary>
     private void Reserve(QueryMemory memory, long bytes)
     {

@@ -104,6 +104,64 @@ public sealed partial class QueryMemoryTests
     [Theory]
     [InlineData(1)]
     [InlineData(14)]
+    public async Task AStreamAndADistinctGiveBackWhatTheyReserve(int degree)
+    {
+        // A key the statistics say is sorted: its group by streams, by ranges side by side on several lanes.
+        Row[] sorted = new Row[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            sorted[row] = new Row(row / 2, row % 100);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "query-memory", $"sorted-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(sorted, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        string random = await WriteAsync();
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<long> sums = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value)).ToListAsync(Ct);
+            Assert.Equal(Rows / 2, sums.Count);
+            Assert.Equal(0, budget.ReservedBytes);
+
+            await using VortexFile shuffled = await session.OpenAsync(random, cancellationToken: Ct);
+            Assert.Equal(Keys, (await shuffled.Scan<Row>().Select(r => r.Key).Distinct().ToListAsync(Ct)).Count);
+            Assert.Equal(0, budget.ReservedBytes);
+
+            // Past a budget too small for its index, the distinct fails and gives everything back.
+            QueryMemoryBudget small = new QueryMemoryBudget(2 << 20);
+            await using VortexSession tight = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = small;
+            });
+
+            await using VortexFile again = await tight.OpenAsync(random, cancellationToken: Ct);
+            await Assert.ThrowsAsync<VortexMemoryException>(async () => await again.Scan<Row>().Select(r => r.Key).Distinct().ToListAsync(Ct));
+            Assert.Equal(0, small.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+            System.IO.File.Delete(random);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
     public async Task EveryTableAShelfGrowsGivesBackWhatItReserved(int degree)
     {
         const int rows = 200_000;
