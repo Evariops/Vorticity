@@ -72,6 +72,41 @@ public sealed partial class GroupRoundTripTests
         }
     }
 
+    // The first batch of a filtered scan over a store: the structures its filter consults are read
+    // before the rows they let through, each read a step the query waits on (PLAN-HIGH-CARDINALITY,
+    // R6). A RATCHET set at the counts, as the ceilings above: measured on 2026-10-06, two requests
+    // in one step, neither waiting on the other.
+    private const int FirstFilteredRequests = 2;
+    private const int FirstFilteredSteps = 1;
+
+    [Fact]
+    public async Task AFilteredScansFirstBatchStaysWithinItsRoundTrips()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            CountingSource source = new CountingSource(MemoryMappedSegmentSource.Open(path));
+            await using (VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions { LeaveSourceOpen = true }, Ct))
+            {
+                source.Reset();
+                await foreach (Row row in file.Scan<Row>().Where(r => r.Key < 10).ToRecordsAsync(Ct))
+                {
+                    Assert.True(row.Key < 10);
+                    break;
+                }
+            }
+
+            await source.DisposeAsync();
+            string counts = $"the first filtered batch: {source.Requests} requests (ceiling {FirstFilteredRequests}), {source.Steps} steps (ceiling {FirstFilteredSteps})";
+            Console.Out.WriteLine(counts);
+            Assert.True(source.Requests <= FirstFilteredRequests && source.Steps <= FirstFilteredSteps, counts);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     // An aggregation's lane decodes on its own flow, nothing ahead, and reads ahead of its decode over
     // a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6): two splits in flight, so that
     // its reads pair up into half as many steps as a read at a time takes, for the same rows and the
