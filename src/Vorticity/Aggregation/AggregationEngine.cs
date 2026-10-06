@@ -248,14 +248,14 @@ internal sealed class AggregationPlan
     /// </summary>
     /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
-    /// <param name="shelf">The lane's shelf under its query's memory, which a key of one fixed column grows from; null for a table nothing counts.</param>
+    /// <param name="shelf">The lane's shelf under its query's memory, which the key's tables grow from; null for tables nothing counts.</param>
     internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null) => Keys.Length switch
     {
         1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf),
-        2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout) : new RawKeys<UInt128>(layout),
-        2 => new PackedKeys<ulong>(Keys, facts),
-        3 or 4 => new PackedKeys<UInt128>(Keys, facts),
-        _ => new CompositeKeys(Keys),
+        2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout, shelf: shelf) : new RawKeys<UInt128>(layout, shelf: shelf),
+        2 => new PackedKeys<ulong>(Keys, facts, shelf: shelf),
+        3 or 4 => new PackedKeys<UInt128>(Keys, facts, shelf: shelf),
+        _ => new CompositeKeys(Keys, shelf),
     };
 
     /// <summary>
@@ -316,7 +316,7 @@ internal sealed class AggregationPlan
             StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf),
             StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
             StorageKind.Bool => new BoolKeys(key),
-            StorageKind.Bytes => new BytesKeys(key, sorted),
+            StorageKind.Bytes => new BytesKeys(key, sorted, shelf),
             _ => throw key.Unsupported("a group key"),
         };
 }
@@ -567,7 +567,17 @@ internal sealed class AggregationPartition
         AggregateSlot[] slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
         {
-            slots[i] = settled[i] ?? plan.Aggregates[i].Create(source, plan.MeanRead[i]);
+            if (settled[i] is { } answer)
+            {
+                slots[i] = answer;
+                continue;
+            }
+
+            slots[i] = plan.Aggregates[i].Create(source, plan.MeanRead[i]);
+            if (shelf is not null)
+            {
+                slots[i].Govern(shelf);
+            }
         }
 
         records = null;

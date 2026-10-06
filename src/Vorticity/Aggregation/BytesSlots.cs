@@ -209,6 +209,11 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
     private MaskCache _rows;
     private CodeSet _distinct;
 
+    // The shelf the slot's arrays and pages grow from, under the query's memory.
+    private ArrayShelf? _shelf;
+
+    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
+
     internal BytesExtremeSlot(ColumnShape shape, bool max)
     {
         _shape = shape;
@@ -230,8 +235,8 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         if (groups > _at.Length)
         {
             int grown = Scratch.Capacity(groups, _at.Length);
-            Array.Resize(ref _at, grown);
-            Array.Resize(ref _lengths, grown);
+            ArrayShelf.Resize(_shelf, ref _at, grown);
+            ArrayShelf.Resize(_shelf, ref _lengths, grown);
         }
 
         _lengths.AsSpan(_groups, Math.Max(0, groups - _groups)).Fill(-1);
@@ -355,6 +360,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
     private void Compact()
     {
         byte[][] pages = _pages;
+        int held = _pageCount;
         _pages = [];
         _pageCount = 0;
         _fill = -1;
@@ -369,16 +375,24 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
                 _at[g] = Place(pages[(int)(at >> 32)].AsSpan((int)at, length));
             }
         }
+
+        // The old pages, and the array that listed them, go back to the shelf.
+        for (int p = 0; p < held; p++)
+        {
+            _shelf?.Give(pages[p]);
+        }
+
+        _shelf?.Give(pages);
     }
 
     private int AddPage(int bytes)
     {
         if (_pageCount == _pages.Length)
         {
-            Array.Resize(ref _pages, Math.Max(4, _pageCount * 2));
+            ArrayShelf.Resize(_shelf, ref _pages, Math.Max(4, _pageCount * 2));
         }
 
-        _pages[_pageCount] = GC.AllocateUninitializedArray<byte>(bytes);
+        _pages[_pageCount] = _shelf is null ? GC.AllocateUninitializedArray<byte>(bytes) : _shelf.Take<byte>(bytes, zeroed: false);
         _paged += bytes;
         return _pageCount++;
     }
@@ -399,7 +413,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 /// <summary>The distinct non-null text or binary values of each group, keyed by group and value in one table.</summary>
 internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 {
-    private readonly ByteKeyTable _seen = new ByteKeyTable();
+    private ByteKeyTable _seen = new ByteKeyTable();
     private long[] _counts = [];
     private int _groups;
     private byte[] _key = new byte[64];
@@ -411,16 +425,26 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     private int[] _next = [];
     private int[] _first = [];
 
+    // The shelf the table, the counts and the chains grow from, under the query's memory.
+    private ArrayShelf? _shelf;
+
+    /// <summary>The shelf the slot grows from, set as it is made, before any pair: its table made again on it.</summary>
+    internal override void Govern(ArrayShelf shelf)
+    {
+        _shelf = shelf;
+        _seen = new ByteKeyTable(shelf);
+    }
+
     internal override void EnsureGroups(int groups)
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
+            ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         if (groups > _first.Length)
         {
-            Array.Resize(ref _first, Scratch.Capacity(groups, _first.Length));
+            ArrayShelf.Resize(_shelf, ref _first, Scratch.Capacity(groups, _first.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -633,7 +657,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         {
             if (number >= _next.Length)
             {
-                Array.Resize(ref _next, Scratch.Capacity(number + 1, _next.Length));
+                ArrayShelf.Resize(_shelf, ref _next, Scratch.Capacity(number + 1, _next.Length));
             }
 
             _next[number] = _first[group];

@@ -26,7 +26,7 @@ internal sealed class CompositeKeys : GroupKeys
     private const int Window = 4_096;
 
     private readonly ColumnShape[] _parts;
-    private readonly ByteKeyTable _table = new ByteKeyTable();
+    private readonly ByteKeyTable _table;
     private readonly Int128[][] _decimals;
     private readonly Int256[][] _wides;
     private readonly ulong[][] _bits;
@@ -42,9 +42,12 @@ internal sealed class CompositeKeys : GroupKeys
     private int[] _offsets = [];
     private int[] _cursors = [];
 
-    internal CompositeKeys(ColumnShape[] parts)
+    /// <param name="parts">The key's columns.</param>
+    /// <param name="shelf">The lane's shelf the table grows from, under its query's memory; null for a table nothing counts.</param>
+    internal CompositeKeys(ColumnShape[] parts, ArrayShelf? shelf = null)
     {
         _parts = parts;
+        _table = new ByteKeyTable(shelf);
         _decimals = new Int128[parts.Length][];
         _wides = new Int256[parts.Length][];
         _bits = new ulong[parts.Length][];

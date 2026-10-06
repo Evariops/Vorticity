@@ -30,6 +30,24 @@ internal sealed class DistinctPairs<TValue>
 
     private int _count;
 
+    // The shelf its arrays grow from, under the query's memory; null for pairs nothing counts.
+    private ArrayShelf? _shelf;
+
+    /// <summary>The shelf the pairs' arrays grow from from now on (PLAN-HIGH-CARDINALITY, H2, decision 13).</summary>
+    internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
+
+    /// <summary>Gives the pairs' arrays back to their shelf: the pairs are let go, and read no more.</summary>
+    internal void Release()
+    {
+        _shelf?.Give(_pairs);
+        _shelf?.Give(_slots);
+        _shelf?.Give(_first);
+        _pairs = [];
+        _slots = [];
+        _first = [];
+        _count = 0;
+    }
+
     /// <summary>The pairs held.</summary>
     internal int Count => _count;
 
@@ -41,7 +59,7 @@ internal sealed class DistinctPairs<TValue>
     {
         if (groups > _first.Length)
         {
-            Array.Resize(ref _first, Scratch.Capacity(groups, _first.Length));
+            ArrayShelf.Resize(_shelf, ref _first, Scratch.Capacity(groups, _first.Length));
         }
     }
 
@@ -71,7 +89,7 @@ internal sealed class DistinctPairs<TValue>
 
         if (_count == pairs.Length)
         {
-            Array.Resize(ref _pairs, _count * 2);
+            ArrayShelf.Resize(_shelf, ref _pairs, _count * 2);
             pairs = _pairs;
         }
 
@@ -174,9 +192,10 @@ internal sealed class DistinctPairs<TValue>
             }
         }
 
-        _pairs = new Pair[Math.Max(16, kept)];
-        _slots = new int[(int)Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1)))];
-        _first = new int[Math.Max(16, groups.Length)];
+        int[] slots = _slots;
+        _pairs = NewArray<Pair>(Math.Max(16, kept));
+        _slots = NewArray<int>((int)Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1))));
+        _first = NewArray<int>(Math.Max(16, groups.Length));
         _count = 0;
         for (int i = 0; i < groups.Length; i++)
         {
@@ -185,12 +204,20 @@ internal sealed class DistinctPairs<TValue>
                 Add(i, pairs[number - 1].Value);
             }
         }
+
+        _shelf?.Give(pairs);
+        _shelf?.Give(slots);
+        _shelf?.Give(first);
     }
+
+    /// <summary>A zeroed array, from the shelf when the pairs have one.</summary>
+    private T[] NewArray<T>(int length) => _shelf is null ? new T[length] : _shelf.Take<T>(length, zeroed: true);
 
     /// <summary>The slots at <paramref name="length"/>, a power of two, every pair placed again.</summary>
     private void Rehash(int length)
     {
-        int[] slots = new int[length];
+        int[] old = _slots;
+        int[] slots = NewArray<int>(length);
         int mask = length - 1;
         Pair[] pairs = _pairs;
         for (int number = 0; number < _count; number++)
@@ -205,6 +232,7 @@ internal sealed class DistinctPairs<TValue>
         }
 
         _slots = slots;
+        _shelf?.Give(old);
     }
 
     /// <summary>A value, the group that saw it, and the number plus one of that group's pair before it.</summary>

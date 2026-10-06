@@ -1126,13 +1126,17 @@ internal sealed class BytesKeys : GroupKeys
     private readonly bool _sorted;
 
     // A group is the table's entry of its key; the null group an entry no key finds.
-    private readonly ByteKeyTable _table = new ByteKeyTable();
+    private readonly ByteKeyTable _table;
     private int _null = -1;
 
-    internal BytesKeys(ColumnShape shape, bool sorted)
+    /// <param name="shape">The key's column.</param>
+    /// <param name="sorted">Whether the statistics say the column is sorted.</param>
+    /// <param name="shelf">The lane's shelf the table grows from, under its query's memory; null for a table nothing counts.</param>
+    internal BytesKeys(ColumnShape shape, bool sorted, ArrayShelf? shelf = null)
     {
         _shape = shape;
         _sorted = sorted;
+        _table = new ByteKeyTable(shelf);
     }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)

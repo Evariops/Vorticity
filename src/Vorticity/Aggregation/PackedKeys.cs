@@ -79,13 +79,18 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private int[] _renumbered = [];
     private int[] _held = [];
 
+    // The lane's shelf its tables grow from, under the query's memory; null for tables nothing counts.
+    private readonly ArrayShelf? _shelf;
+
     /// <param name="shapes">The key's columns.</param>
     /// <param name="facts">What the statistics say of them.</param>
     /// <param name="shared">The indexes of the columns, shared by the parts of a parallel merge; fresh ones when null.</param>
-    internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts, GroupKeys[]? shared = null)
+    /// <param name="shelf">The lane's shelf its tables and its columns' indexes grow from (PLAN-HIGH-CARDINALITY, H2); null for tables nothing counts.</param>
+    internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts, GroupKeys[]? shared = null, ArrayShelf? shelf = null)
     {
         _shapes = shapes;
         _facts = facts;
+        _shelf = shelf;
         _parts = new GroupKeys[shapes.Length];
         _ids = new int[shapes.Length][];
         _partRanges = new GroupRanges[shapes.Length];
@@ -94,7 +99,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         _shifts = new int[shapes.Length];
         for (int p = 0; p < shapes.Length; p++)
         {
-            _parts[p] = shared?[p] ?? AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p]);
+            _parts[p] = shared?[p] ?? AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p], shelf: shelf);
             _ids[p] = [];
             _partRanges[p] = new GroupRanges();
             _bits[p] = 2;
@@ -390,7 +395,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (total > TableBits)
         {
-            _table = null;
+            DropTable();
             return;
         }
 
@@ -398,6 +403,17 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         {
             Rebuild();
         }
+    }
+
+    /// <summary>The table of groups let go, its array given back: the parts outgrew it.</summary>
+    private void DropTable()
+    {
+        if (_table is { } held)
+        {
+            _shelf?.Give(held);
+        }
+
+        _table = null;
     }
 
     /// <summary>The table at the parts' bits, filled with every group's slot.</summary>
@@ -412,11 +428,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (shift > TableBits)
         {
-            _table = null;
+            DropTable();
             return;
         }
 
-        int[] table = _table is { } held && held.Length == 1 << shift ? held : new int[1 << shift];
+        int[] table = _table is { } held && held.Length == 1 << shift ? held : NewTable(1 << shift);
         table.AsSpan().Fill(-1);
         Span<int> ids = stackalloc int[_parts.Length];
         for (int g = 0; g < Count; g++)
@@ -429,8 +445,16 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             table[SlotAt(ids, shift)] = g;
         }
 
+        if (!ReferenceEquals(table, _table))
+        {
+            DropTable();
+        }
+
         _table = table;
     }
+
+    /// <summary>A table of groups of <paramref name="length"/> slots, from the shelf when the keys have one.</summary>
+    private int[] NewTable(int length) => _shelf is null ? new int[length] : _shelf.Take<int>(length, zeroed: false);
 
     private int SlotAt(ReadOnlySpan<int> ids, int bits)
     {
@@ -666,7 +690,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         // Its own slots and table no longer find the words; a rebased index is read, not assigned.
         parts.CopyTo(_parts, 0);
-        _table = null;
+        DropTable();
     }
 
     internal override int[] Order(bool sorted) => Identity(Count);
@@ -717,7 +741,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (Count == _keys.Length)
         {
-            Array.Resize(ref _keys, Count * 2);
+            ArrayShelf.Resize(_shelf, ref _keys, Count * 2);
         }
 
         int added = Count++;
@@ -734,10 +758,15 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// <summary>The slots at <paramref name="length"/>, every group placed again from its word.</summary>
     private void Rehash(int length)
     {
-        int[] hashed = _hashed.Length == length ? _hashed : NewSlots(length);
-        if (ReferenceEquals(hashed, _hashed))
+        int[] old = _hashed;
+        int[] hashed = old.Length == length ? old : NewSlots(length, _shelf);
+        if (ReferenceEquals(hashed, old))
         {
             hashed.AsSpan().Fill(-1);
+        }
+        else
+        {
+            _shelf?.Give(old);
         }
 
         int mask = length - 1;
@@ -769,9 +798,9 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         return (int)(((((ulong)wide * Odd) ^ (ulong)(wide >> 64)) * Odd) >> shift);
     }
 
-    private static int[] NewSlots(int length)
+    private static int[] NewSlots(int length, ArrayShelf? shelf = null)
     {
-        int[] slots = new int[length];
+        int[] slots = shelf is null ? new int[length] : shelf.Take<int>(length, zeroed: false);
         slots.AsSpan().Fill(-1);
         return slots;
     }

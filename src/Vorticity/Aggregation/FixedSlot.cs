@@ -422,13 +422,22 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     private MaskCache _rows;
     private CodeSet _distinct;
 
+    // The shelf the pairs and the counts grow from, under the query's memory.
+    private ArrayShelf? _shelf;
+
     internal FixedDistinctSlot(StorageKind kind) => _kind = kind;
+
+    internal override void Govern(ArrayShelf shelf)
+    {
+        _shelf = shelf;
+        _pairs.Govern(shelf);
+    }
 
     internal override void EnsureGroups(int groups)
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
+            ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         _pairs.EnsureGroups(groups);
@@ -610,7 +619,10 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             }
         }
 
+        // The pairs are counted: let go, their arrays given back.
+        _pairs.Release();
         _pairs = new DistinctPairs<TValue>();
+        _pairs.Govern(_shelf);
         _pairs.EnsureGroups(groups);
     }
 

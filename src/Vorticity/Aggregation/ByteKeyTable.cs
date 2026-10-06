@@ -45,6 +45,12 @@ internal sealed class ByteKeyTable
     private Slot[] _slots = new Slot[32];
     private long _seed;
 
+    // The lane's shelf its arrays grow from, under the query's memory; null for a table nothing counts.
+    private readonly ArrayShelf? _shelf;
+
+    /// <summary>A table whose arrays grow from <paramref name="shelf"/>, which reserves each before it comes (PLAN-HIGH-CARDINALITY, H2); new ones when null.</summary>
+    internal ByteKeyTable(ArrayShelf? shelf = null) => _shelf = shelf;
+
     /// <summary>The number of distinct keys.</summary>
     internal int Count { get; private set; }
 
@@ -103,7 +109,7 @@ internal sealed class ByteKeyTable
         added = true;
         if (Count * 2 > _slots.Length)
         {
-            Rehash(new Slot[_slots.Length * 2]);
+            Rehash(NewSlots(_slots.Length * 2));
         }
 
         return number;
@@ -217,7 +223,7 @@ internal sealed class ByteKeyTable
         Grow(index + 1);
         if (_used + MostAhead + key.Length > _bytes.Length)
         {
-            Array.Resize(ref _bytes, Scratch.Capacity(_used + MostAhead + key.Length, _bytes.Length));
+            ArrayShelf.Resize(_shelf, ref _bytes, Scratch.Capacity(_used + MostAhead + key.Length, _bytes.Length));
         }
 
         int at = _used;
@@ -244,8 +250,8 @@ internal sealed class ByteKeyTable
         if (count > _offsets.Length)
         {
             int grown = Math.Max(count, _offsets.Length * 2);
-            Array.Resize(ref _offsets, grown);
-            Array.Resize(ref _hashes, grown);
+            ArrayShelf.Resize(_shelf, ref _offsets, grown);
+            ArrayShelf.Resize(_shelf, ref _hashes, grown);
         }
     }
 
@@ -261,12 +267,16 @@ internal sealed class ByteKeyTable
             }
         }
 
-        Rehash(new Slot[_slots.Length]);
+        Rehash(NewSlots(_slots.Length));
     }
 
-    /// <summary>Places every key in <paramref name="slots"/>, empty, by the hash it keeps, and makes them the table's.</summary>
+    /// <summary>Empty slots, from the shelf when the table has one.</summary>
+    private Slot[] NewSlots(int length) => _shelf is null ? new Slot[length] : _shelf.Take<Slot>(length, zeroed: true);
+
+    /// <summary>Places every key in <paramref name="slots"/>, empty, by the hash it keeps, and makes them the table's; the slots it held given back.</summary>
     private void Rehash(Slot[] slots)
     {
+        Slot[] old = _slots;
         int mask = slots.Length - 1;
         for (int index = 0; index < Count; index++)
         {
@@ -287,6 +297,10 @@ internal sealed class ByteKeyTable
         }
 
         _slots = slots;
+        if (!ReferenceEquals(old, slots))
+        {
+            _shelf?.Give(old);
+        }
     }
 
     /// <summary>What a probe reads first: the high half of a key's hash, and where its number lies plus one (zero, an empty slot).</summary>

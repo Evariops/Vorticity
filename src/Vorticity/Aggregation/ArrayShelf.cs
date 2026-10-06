@@ -97,6 +97,26 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal long Out => _out;
 
     /// <summary>
+    /// <paramref name="array"/> grown to <paramref name="length"/>, its elements copied and the new
+    /// ones zeroed, as <see cref="Array.Resize{T}"/> does: its new array from <paramref name="shelf"/>
+    /// and its old one given back to it, when there is one.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the new array.</exception>
+    internal static void Resize<T>(ArrayShelf? shelf, ref T[] array, int length)
+    {
+        if (shelf is null)
+        {
+            Array.Resize(ref array, length);
+            return;
+        }
+
+        T[] grown = shelf.Take<T>(length, zeroed: true);
+        array.AsSpan(0, Math.Min(array.Length, length)).CopyTo(grown);
+        shelf.Give(array);
+        array = grown;
+    }
+
+    /// <summary>
     /// An array of <paramref name="length"/> elements, from the shelf, the process's, or new; zeroed
     /// when <paramref name="zeroed"/>. Under a query's memory, reserved first, then new.
     /// </summary>

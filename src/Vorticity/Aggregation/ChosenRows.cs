@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
@@ -12,8 +13,12 @@ namespace Vorticity.Aggregating;
 /// <summary>The values of one column of the chosen rows, by group: fetched after the pass, read as results.</summary>
 internal abstract class ChosenValues
 {
-    /// <summary>Makes room for groups up to <paramref name="groups"/>.</summary>
-    internal abstract void EnsureGroups(int groups);
+    /// <summary>
+    /// Makes room for groups up to <paramref name="groups"/>, its arrays held under the result's
+    /// <paramref name="memory"/> until it is delivered (PLAN-HIGH-CARDINALITY, H2), the ones they
+    /// replace let go.
+    /// </summary>
+    internal abstract void EnsureGroups(int groups, QueryMemory? memory);
 
     /// <summary>Leaves <paramref name="group"/> without a row: its value null, or a value type's default.</summary>
     internal abstract void Clear(int group);
@@ -38,11 +43,14 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
     /// <summary>Whether <paramref name="group"/> has no chosen row: no candidate, or no row its filter keeps.</summary>
     internal bool Missing(int group) => _missing[group];
 
-    internal override void EnsureGroups(int groups)
+    internal override void EnsureGroups(int groups, QueryMemory? memory)
     {
         if (groups > _values.Length)
         {
             int length = Scratch.Capacity(groups, _values.Length);
+            long element = Unsafe.SizeOf<T>() + sizeof(bool);
+            memory?.Hold(length * element, "fetch of the chosen rows");
+            memory?.LetGo(_values.Length * element);
             Array.Resize(ref _values, length);
             Array.Resize(ref _missing, length);
         }
@@ -147,7 +155,7 @@ internal static class ChosenFetch
 
         for (int c = 0; c < chosen.Length; c++)
         {
-            outcome.ChosenOf(chosen[c]).EnsureGroups(most);
+            outcome.ChosenOf(chosen[c]).EnsureGroups(most, memory);
         }
 
         // Each row a group chose, with the choice and the group it serves; a group without a row

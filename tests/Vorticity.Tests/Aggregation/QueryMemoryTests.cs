@@ -104,6 +104,64 @@ public sealed partial class QueryMemoryTests
     [Theory]
     [InlineData(1)]
     [InlineData(14)]
+    public async Task EveryTableAShelfGrowsGivesBackWhatItReserved(int degree)
+    {
+        const int rows = 200_000;
+        Wide[] data = new Wide[rows];
+        for (int row = 0; row < rows; row++)
+        {
+            data[row] = new Wide(row % 50_000, row % 7, row % 100, $"n{row % 50_000}", row % 3);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "query-memory", $"wide-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Wide>(path))
+        {
+            await writer.WriteAsync<Wide>(data, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+
+            // A text key; a key of two columns; one of five, encoded into bytes.
+            Assert.Equal(50_000, (await file.Scan<Wide>().GroupBy(r => r.Name).Select(g => g.Count()).ToListAsync(Ct)).Count);
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Equal(data.Select(r => (r.Key, r.Other)).Distinct().Count(), (await file.Scan<Wide>().GroupBy(r => (r.Key, r.Other)).Select(g => g.Count()).ToListAsync(Ct)).Count);
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Equal(
+                data.Select(r => (r.Key, r.Other, r.Value, r.Name, r.Extra)).Distinct().Count(),
+                (await file.Scan<Wide>().GroupBy(r => (r.Key, r.Other, r.Value, r.Name, r.Extra)).Select(g => g.Count()).ToListAsync(Ct)).Count);
+            Assert.Equal(0, budget.ReservedBytes);
+
+            // A text's extreme, and distinct counts of a text and of an integer.
+            List<string?> largest = await file.Scan<Wide>().GroupBy(r => r.Other).OrderBy(g => g.Key).Select(g => g.Max(x => x.Name)).ToListAsync(Ct);
+            Assert.Equal(data.GroupBy(r => r.Other).OrderBy(g => g.Key).Select(g => g.Select(x => x.Name).Max(StringComparer.Ordinal)), largest);
+            Assert.Equal(0, budget.ReservedBytes);
+            List<long> names = await file.Scan<Wide>().GroupBy(r => r.Other).OrderBy(g => g.Key).Select(g => g.CountDistinct(x => x.Name)).ToListAsync(Ct);
+            Assert.Equal(data.GroupBy(r => r.Other).OrderBy(g => g.Key).Select(g => (long)g.Select(x => x.Name).Distinct().Count()), names);
+            Assert.Equal(0, budget.ReservedBytes);
+            List<long> keys = await file.Scan<Wide>().GroupBy(r => r.Other).OrderBy(g => g.Key).Select(g => g.CountDistinct(x => x.Key)).ToListAsync(Ct);
+            Assert.Equal(data.GroupBy(r => r.Other).OrderBy(g => g.Key).Select(g => (long)g.Select(x => x.Key).Distinct().Count()), keys);
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
     public async Task AnOrderATopAndAFetchGiveBackWhatTheyReserve(int degree)
     {
         string path = await WriteAsync();
@@ -317,4 +375,7 @@ public sealed partial class QueryMemoryTests
 
     [VortexRecord]
     public partial record struct Row(int Key, long Value);
+
+    [VortexRecord]
+    public partial record struct Wide(int Key, int Other, long Value, string Name, int Extra);
 }

@@ -127,6 +127,15 @@ internal abstract class AggregateSlot
     internal virtual GroupRecords? Bound => null;
 
     /// <summary>
+    /// The shelf the slot's own arrays grow from from now on: a lane's, under its query's memory
+    /// (PLAN-HIGH-CARDINALITY, H2, decision 13), or a core's. Called once, as its partition makes the
+    /// slot. Nothing for a slot whose states all lie in records its partition shares.
+    /// </summary>
+    internal virtual void Govern(ArrayShelf shelf)
+    {
+    }
+
+    /// <summary>
     /// The bytes the slot holds apart from the records it shares (<see cref="Bound"/>): its arrays at
     /// their capacity and, for a state of a variable size, the bytes it counts as it takes them
     /// (PLAN-HIGH-CARDINALITY, H1). Zero for a slot whose states all lie in records.

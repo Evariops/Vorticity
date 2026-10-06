@@ -308,8 +308,13 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
     private TState[] _array = [];
     private int _groups;
 
+    // The shelf the slot's array and its records of its own grow from, under its query's memory.
+    private ArrayShelf? _shelf;
+
     /// <summary>The state a group starts from.</summary>
     internal abstract TState Seed { get; }
+
+    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
 
     internal sealed override int StateBytes => RuntimeHelpers.IsReferenceOrContainsReferences<TState>() ? 0 : Unsafe.SizeOf<TState>();
 
@@ -349,7 +354,7 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
 
         if (groups > _array.Length)
         {
-            Array.Resize(ref _array, Scratch.Capacity(groups, _array.Length));
+            ArrayShelf.Resize(_shelf, ref _array, Scratch.Capacity(groups, _array.Length));
         }
 
         for (int g = _groups; g < groups; g++)
@@ -398,7 +403,7 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
     private GroupRecords Alone()
     {
         RecordLayout layout = RecordLayout.Of([this])!;
-        _records = new GroupRecords(layout);
+        _records = new GroupRecords(layout, _shelf);
         _offset = layout.Offsets[0];
         _alone = true;
         return _records;
