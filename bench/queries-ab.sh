@@ -32,7 +32,9 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$after_commit" ]; then
-    after_commit="$(git -C "$root" stash create "queries-ab working tree")"
+    # A tree git cannot stash (a file added with -N, for one) must not run as HEAD against HEAD.
+    after_commit="$(git -C "$root" stash create "queries-ab working tree")" \
+        || { echo "git stash create failed: commit the change, or pass --after <commit>" >&2; exit 2; }
     [ -n "$after_commit" ] || after_commit="HEAD"
 fi
 
