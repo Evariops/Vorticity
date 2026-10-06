@@ -108,10 +108,51 @@ internal abstract class GroupKeys
     /// <summary>An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what the partitions were rebased on.</summary>
     internal virtual GroupKeys ForPart() => Fresh();
 
+    /// <summary>An empty index a sub-table of the core holds its groups in (PLAN-HIGH-CARDINALITY, H4), its arrays taken from and given back to <paramref name="shelf"/>.</summary>
+    internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
+
+    /// <summary>Gives the index's arrays back to its shelf, if it has one: a sub-table split, whose groups another holds. The index is empty after.</summary>
+    internal virtual void Release()
+    {
+    }
+
     /// <summary>Makes room for <paramref name="groups"/> groups at once, where the index can: the part of a merge, whose keys the partitions count.</summary>
     internal virtual void Reserve(int groups)
     {
     }
+
+    /// <summary>
+    /// The bytes a key takes beside its group's record in an entry of a part's batch
+    /// (PLAN-HIGH-CARDINALITY, H4), a power of two; 0 for a key that does not travel in batches, whose
+    /// query keeps a table on each lane and merges them at the end.
+    /// </summary>
+    internal virtual int EntryBytes => 0;
+
+    /// <summary>
+    /// An index of the same kind that looks no key up: each row's key a group of its own, but a row
+    /// whose key is the row before's, a run's or a code's; the null group one. What a lane folds its
+    /// rows into when its cache finds too few of its keys (PLAN-HIGH-CARDINALITY, H4, the bypass).
+    /// Null for a key that does not travel in batches.
+    /// </summary>
+    internal virtual GroupKeys? Appending() => null;
+
+    /// <summary>
+    /// Copies every group but the null one into an entry of the lane's batch of the part its key falls
+    /// in, the top bits of its hash under <see cref="MergeHash.Seed"/> as <see cref="Parts"/> cuts: the
+    /// group's record, read from <paramref name="records"/>, then its key.
+    /// </summary>
+    internal virtual void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => throw NotEntries();
+
+    /// <summary>The sub-table of each entry of <paramref name="batch"/> in its part's directory: the bits of its key's hash from <paramref name="shift"/> up, under <paramref name="mask"/>.</summary>
+    internal virtual void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) => throw NotEntries();
+
+    /// <summary>The group here of the key of each entry of <paramref name="batch"/> that <paramref name="entries"/> names, added when it is new.</summary>
+    internal virtual void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups) => throw NotEntries();
+
+    /// <summary>The hash of the key of entry <paramref name="entry"/> of <paramref name="batch"/> under <see cref="MergeHash.Seed"/>, as <see cref="Parts"/> takes it.</summary>
+    internal virtual ulong HashAt(PartBatch batch, EntryShape shape, int entry) => throw NotEntries();
+
+    private static NotSupportedException NotEntries() => new NotSupportedException("These keys do not travel in a part's batches.");
 
     /// <summary>
     /// Readies the indexes of a parallel merge's partitions, this one the first of them, for their
@@ -332,13 +373,25 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private readonly long _rows;
     private int _pagesHeld;
 
-    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead, long rows = -1)
+    // Every key a group of its own, no table looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
+    private readonly bool _appending;
+    private readonly ArrayShelf? _shelf;
+
+    internal FixedKeys(
+        ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead, long rows = -1, bool appending = false,
+        ArrayShelf? shelf = null)
     {
         _shape = shape;
         _sorted = sorted;
         _bounds = bounds;
         _probeAhead = probeAhead;
         _rows = rows;
+        _appending = appending;
+        _shelf = shelf;
+        if (shelf is not null)
+        {
+            _index = new KeyTable<TValue>(shelf);
+        }
         if (Integers && bounds is { } known && known.Max >= known.Min)
         {
             // The span counts both ends; a span of every long wraps to none.
@@ -588,7 +641,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return false;
         }
 
-        if (_probeAhead >= 0 && selection.IsEmpty)
+        if (_probeAhead >= 0 && selection.IsEmpty && !_appending)
         {
             TwoPasses(canonical, validity, rows, rowGroups);
             return false;
@@ -752,8 +805,29 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _index.Reserve(groups);
         if (_keys.Length < groups)
         {
-            Array.Resize(ref _keys, groups);
+            Grow(groups);
         }
+    }
+
+    /// <summary>The keys' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>
+    private void Grow(int length)
+    {
+        TValue[] grown = _shelf is null ? new TValue[length] : _shelf.Take<TValue>(length, zeroed: false);
+        _keys.AsSpan(0, Count).CopyTo(grown);
+        _shelf?.Give(_keys);
+        _keys = grown;
+    }
+
+    /// <summary>A sub-table of the core: the keys hashed, never by value, their arrays from the query's shelf (PLAN-HIGH-CARDINALITY, H4).</summary>
+    internal override GroupKeys ForTable(ArrayShelf shelf) => new FixedKeys<TValue>(_shape, sorted: false, shelf: shelf);
+
+    internal override void Release()
+    {
+        _index.Release();
+        _shelf?.Give(_keys);
+        _keys = [];
+        Count = 0;
+        _null = -1;
     }
 
     internal override int NullNumber => _null;
@@ -831,9 +905,26 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            (ulong low, ulong high) = KeyWords.Of(_keys[g]);
-            ulong hash = Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed);
-            parts[g] = g == _null ? (byte)0 : (byte)(hash >> shift);
+            parts[g] = g == _null ? (byte)0 : (byte)(EntryKeys.Hash(_keys[g], seed) >> shift);
+        }
+    }
+
+    internal override int EntryBytes => Unsafe.SizeOf<TValue>();
+
+    internal override GroupKeys? Appending() => new FixedKeys<TValue>(_shape, sorted: false, appending: true);
+
+    internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
+
+    internal override void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) =>
+        EntryKeys.TablesOf<TValue>(batch, shape, shift, mask, tables);
+
+    internal override ulong HashAt(PartBatch batch, EntryShape shape, int entry) => EntryKeys.Hash(EntryKeys.KeyAt<TValue>(batch, shape, entry), MergeHash.Seed);
+
+    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups)
+    {
+        for (int i = 0; i < entries.Length; i++)
+        {
+            groups[i] = Lookup(EntryKeys.KeyAt<TValue>(batch, shape, entries[i]));
         }
     }
 
@@ -951,6 +1042,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     private int Lookup(TValue value)
     {
+        if (_appending)
+        {
+            return Add(value);
+        }
+
         if (DirectSlot(value, out ulong number))
         {
             return Numbered(value, number);
@@ -979,7 +1075,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         if (Count == _keys.Length)
         {
-            Array.Resize(ref _keys, Count * 2);
+            Grow(Count * 2);
         }
 
         _keys[Count] = value;

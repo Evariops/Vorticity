@@ -27,8 +27,19 @@ internal static class Switches
         _ when name.StartsWith("parts:", StringComparison.Ordinal) => Pair(name, "MergeParts", "parts"),
         _ when name.StartsWith("window:", StringComparison.Ordinal) => Pair(name, "FoldWindow", "window"),
         _ when name.StartsWith("probe:", StringComparison.Ordinal) => Pair(name, "ProbeAhead", "probe"),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B."),
+        "core" => new Switch("reference", Set("Core", false), "core", Set("Core", true)),
+        _ when name.StartsWith("capacity:", StringComparison.Ordinal) => CorePair(name, "CoreCapacity", "capacity"),
+        _ when name.StartsWith("alpha:", StringComparison.Ordinal) => CorePair(name, "CoreAlpha", "alpha"),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, capacity:A:B, alpha:A:B."),
     };
+
+    /// <summary>As <see cref="Pair"/>, under the core (PLAN-HIGH-CARDINALITY, H4): its cache's capacity or its α at A against B.</summary>
+    private static Switch CorePair(string name, string property, string label)
+    {
+        Switch pair = Pair(name, property, label);
+        Action<AggregationPlan> core = Set("Core", true);
+        return pair with { SetA = plan => { core(plan); pair.SetA(plan); }, SetB = plan => { core(plan); pair.SetB(plan); } };
+    }
 
     /// <summary><c>name:A:B</c>, the integer switch <paramref name="property"/> at A against B, either of them <c>auto</c> for the engine's own.</summary>
     private static Switch Pair(string name, string property, string label)

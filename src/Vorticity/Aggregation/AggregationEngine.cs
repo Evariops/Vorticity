@@ -160,6 +160,31 @@ internal sealed class AggregationPlan
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
+    /// <summary>
+    /// Whether a blocking group by holds its groups once, in the parts of <see cref="GroupCore"/>,
+    /// where its key travels in batches and its states lie in records (PLAN-HIGH-CARDINALITY, H4): the
+    /// switch the core is measured and tested by, off until its first milestone passes.
+    /// </summary>
+    internal bool Core { get; set; }
+
+    /// <summary>The groups of a lane's cache in the core, or null for the core's own: tiny in the tests, so that every batch copies the cache.</summary>
+    internal int? CoreCapacity { get; set; }
+
+    /// <summary>The core's α forced (1, 2, 4, 8), or null for the one it derives from the lanes.</summary>
+    internal int? CoreAlpha { get; set; }
+
+    /// <summary>The entries a part holds pending at least before a burst, or null for the core's own.</summary>
+    internal int? CoreFloor { get; set; }
+
+    /// <summary>The groups past which a sub-table splits, or null for the core's own bound.</summary>
+    internal int? CoreTableGroups { get; set; }
+
+    /// <summary>The entries of a part's batch, or null for the core's own.</summary>
+    internal int? CoreBatchEntries { get; set; }
+
+    /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
+    internal double? CoreBypass { get; set; }
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
@@ -298,9 +323,11 @@ internal sealed class AggregationPlan
 /// <param name="MergeParts">The partitions merged into the first.</param>
 /// <param name="StateBytes">
 /// The bytes the groups held at the end of the merge, every lane's and the merge's own: their peak in
-/// a run that keeps them all until then (<see cref="AggregationPartition.Footprint"/>).
+/// a run that keeps them all until then (<see cref="AggregationPartition.Footprint"/>). Under the core,
+/// its sub-tables, the lanes' caches and every batch it made.
 /// </param>
-internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts, long StateBytes)
+/// <param name="Core">What the core did, when it held the groups (PLAN-HIGH-CARDINALITY, H4); null otherwise.</param>
+internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts, long StateBytes, CoreRun? Core = null)
 {
     /// <summary>One lane's counts.</summary>
     /// <param name="ActiveTicks">The time its passes took, in <see cref="Stopwatch"/> ticks.</param>
@@ -425,7 +452,8 @@ internal sealed class AggregationPartition
     private ZoneSettling.Scratch? _settledScratch;
 
     internal AggregationPartition(
-        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyFacts? facts = null)
+        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyFacts? facts = null,
+        GroupKeys? keys = null)
     {
         _columns = columns;
         _inputs = inputs;
@@ -436,7 +464,9 @@ internal sealed class AggregationPartition
         _window = plan.FoldWindow is int window and > 0 ? window : int.MaxValue;
         Slots = NewSlots(plan, settled, source, out GroupRecords? records);
         Records = records;
-        Keys = plan.Grouped ? plan.CreateKeys(sorted, facts) : null;
+
+        // The plan's index of the groups, unless the caller brings another: a core's lane bypassing its cache.
+        Keys = keys ?? (plan.Grouped ? plan.CreateKeys(sorted, facts) : null);
         if (streaming >= 0 && _keyCount > 1)
         {
             _streaming = streaming;
@@ -456,6 +486,9 @@ internal sealed class AggregationPartition
 
     /// <summary>The records the slots whose states hold no reference share, a record a group; null when no slot has one.</summary>
     internal GroupRecords? Records { get; private set; }
+
+    /// <summary>The lane's side of the query's core, which copies the partition into its batches when it fills (PLAN-HIGH-CARDINALITY, H4); null without a core.</summary>
+    internal LaneCore? Core { get; init; }
 
     internal GroupKeys? Keys { get; private set; }
 
@@ -494,7 +527,7 @@ internal sealed class AggregationPartition
     /// A slot for each aggregate of the plan, the settled one or a new one, the new ones whose states
     /// hold no reference sharing <paramref name="records"/>, a record a group.
     /// </summary>
-    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records)
+    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records, ArrayShelf? shelf = null)
     {
         AggregateSlot[] slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
@@ -505,7 +538,7 @@ internal sealed class AggregationPartition
         records = null;
         if (RecordLayout.Of(slots) is { } layout)
         {
-            records = new GroupRecords(layout);
+            records = new GroupRecords(layout, shelf);
             for (int i = 0; i < slots.Length; i++)
             {
                 if (layout.Offsets[i] >= 0)
@@ -634,8 +667,17 @@ internal sealed class AggregationPartition
             }
         }
 
+        // Under the core, a lane whose cache finds too few of its keys folds its rows apart, a group
+        // each (PLAN-HIGH-CARDINALITY, H4).
+        if (Core is { } core && core.Bypasses(batch))
+        {
+            return;
+        }
+
+        int before = Keys?.Count ?? 0;
         Fold(batch);
         Top?.Trim(this, final: false);
+        Core?.Fold(this, batch.SelectedRows, before);
     }
 
     /// <summary>Folds the settled blocks that start before row <paramref name="before"/>, in their order.</summary>
@@ -1121,9 +1163,17 @@ internal static class AggregationEngine
             ?? (degree > 1 && pass.Take is null && !pass.MatchesNothing && source is not FileScanSource
                 ? await source.PiecesAsync(pass, degree, cancellationToken).ConfigureAwait(false)
                 : null);
+        // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
+        // partition is then its cache, which no table of groups sized on the source's rows fills.
+        GroupCore? core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, ranges is null ? 1 : Math.Min(degree, ranges.Length));
+        if (core is not null)
+        {
+            facts = GroupCore.CacheFacts(facts);
+        }
+
         if (ranges is null)
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top };
+            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top, Core = core?.Lane() };
             if (settling is not null)
             {
                 only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -1140,7 +1190,11 @@ internal static class AggregationEngine
             partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
             for (int p = 0; p < partitions.Length; p++)
             {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top is { FirstMet: true } ? null : top };
+                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts)
+                {
+                    Top = top is { FirstMet: true } ? null : top,
+                    Core = core?.Lane(),
+                };
             }
 
             plan.Watch?.Invoke(partitions);
@@ -1148,6 +1202,18 @@ internal static class AggregationEngine
         }
 
         long merging = Stopwatch.GetTimestamp();
+        if (core is { Engaged: true })
+        {
+            // The sub-tables are the result; the lanes' caches die with the pass.
+            (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await core.FinishAsync(partitions, degree, cancellationToken).ConfigureAwait(false);
+            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = core.Run() };
+            foreach (AggregationPartition partition in partitions)
+            {
+                partition.Release();
+            }
+
+            return new AggregationOutcome(plan, heldSlots, held, held.Order(sorted: false));
+        }
         (GroupKeys? keys, AggregateSlot[] slots, int parts, long merged) = await MergeAsync(partitions, plan, settled, inputs, degree, source, cancellationToken).ConfigureAwait(false);
         plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, merged);
 
@@ -1382,7 +1448,7 @@ internal static class AggregationEngine
     }
 
     /// <summary>The parts read as one, the empty ones left out.</summary>
-    private static (GroupKeys Keys, AggregateSlot[] Slots, int Parts) Joined(GroupKeys[] partKeys, AggregateSlot[][] partSlots, int parts)
+    internal static (GroupKeys Keys, AggregateSlot[] Slots, int Parts) Joined(GroupKeys[] partKeys, AggregateSlot[][] partSlots, int parts)
     {
         List<int> kept = [];
         for (int part = 0; part < parts; part++)
@@ -1424,7 +1490,7 @@ internal static class AggregationEngine
     }
 
     /// <summary>Awaits <paramref name="tasks"/>, cancelling the others through <paramref name="failed"/> once one fails.</summary>
-    private static async Task GuardedAsync(Task[] tasks, CancellationTokenSource failed)
+    internal static async Task GuardedAsync(Task[] tasks, CancellationTokenSource failed)
     {
         try
         {

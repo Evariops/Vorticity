@@ -33,7 +33,14 @@ internal sealed class GroupRecords
     private int _capacity;
     private int _groups;
 
-    internal GroupRecords(RecordLayout layout) => _layout = layout;
+    // The query's shelf a sub-table of the core takes its words from and gives them back to.
+    private readonly ArrayShelf? _shelf;
+
+    internal GroupRecords(RecordLayout layout, ArrayShelf? shelf = null)
+    {
+        _layout = layout;
+        _shelf = shelf;
+    }
 
     internal RecordLayout Layout => _layout;
 
@@ -56,13 +63,7 @@ internal sealed class GroupRecords
         {
             // Doubled as the records were, the words past them aside: counted, they would round the
             // next capacity up to four times this one.
-            int capacity = Scratch.Capacity(groups, _capacity);
-            ulong[] grown = GC.AllocateUninitializedArray<ulong>(checked((capacity * stride) + (Line / sizeof(ulong)) - 1));
-            int start = LineStart(grown);
-            _words.AsSpan(_base, _groups * stride).CopyTo(grown.AsSpan(start));
-            _words = grown;
-            _base = start;
-            _capacity = capacity;
+            Reserve(Scratch.Capacity(groups, _capacity));
         }
 
         ReadOnlySpan<ulong> seed = _layout.Seed;
@@ -73,6 +74,35 @@ internal sealed class GroupRecords
         }
 
         _groups = groups;
+    }
+
+    /// <summary>Room for <paramref name="capacity"/> records, those made kept: a sub-table of the core made at its bound, which then never grows.</summary>
+    internal void Reserve(int capacity)
+    {
+        if (capacity <= _capacity)
+        {
+            return;
+        }
+
+        int stride = _layout.Stride;
+        int words = checked((capacity * stride) + (Line / sizeof(ulong)) - 1);
+        ulong[] grown = _shelf is null ? GC.AllocateUninitializedArray<ulong>(words) : _shelf.Take<ulong>(words, zeroed: false);
+        int start = LineStart(grown);
+        _words.AsSpan(_base, _groups * stride).CopyTo(grown.AsSpan(start));
+        _shelf?.Give(_words);
+        _words = grown;
+        _base = start;
+        _capacity = capacity;
+    }
+
+    /// <summary>Gives the words back to the shelf: a sub-table split, whose groups another holds.</summary>
+    internal void Release()
+    {
+        _shelf?.Give(_words);
+        _words = [];
+        _base = 0;
+        _capacity = 0;
+        _groups = 0;
     }
 
     /// <summary>Keeps the records of <paramref name="groups"/> alone, ascending, record <c>groups[i]</c> becoming <c>i</c>.</summary>
@@ -95,6 +125,23 @@ internal sealed class GroupRecords
     /// <summary>The states at byte <paramref name="offset"/> of the records, until they next grow.</summary>
     internal StateView<TState> View<TState>(int offset) => new StateView<TState>(_words.AsSpan(_base), _layout.Stride, offset);
 
+    /// <summary>The words of the records made, the first group's first: what a lane's cache copies into its batches (PLAN-HIGH-CARDINALITY, H4).</summary>
+    internal ReadOnlySpan<ulong> Made => _words.AsSpan(_base, _groups * _layout.Stride);
+
+    /// <summary>
+    /// Reads the first <paramref name="groups"/> records of <paramref name="words"/>, from its first
+    /// word, at the layout's stride: the entries of a part's batch, a record each, which the slots
+    /// that merge them view this way (PLAN-HIGH-CARDINALITY, H4). Records read so are never grown,
+    /// seeded nor kept.
+    /// </summary>
+    internal void Over(ulong[] words, int groups)
+    {
+        _words = words;
+        _base = 0;
+        _capacity = groups;
+        _groups = groups;
+    }
+
     /// <summary>The words of <paramref name="words"/> before the first that starts a line, where the array lies now.</summary>
     private static unsafe int LineStart(ulong[] words)
     {
@@ -106,15 +153,27 @@ internal sealed class GroupRecords
 /// <summary>Where each slot's state lies in a record: its offset, the record's stride, and a record of seeds.</summary>
 internal sealed class RecordLayout
 {
-    private RecordLayout(int stride, ulong[] seed, int[] offsets)
+    private RecordLayout(int stride, ulong[] seed, int[] offsets, int width)
     {
         Stride = stride;
         Seed = seed;
         Offsets = offsets;
+        Width = width;
     }
 
     /// <summary>The words of a record.</summary>
     internal int Stride { get; }
+
+    /// <summary>The bytes the states take from a record's first: past them, its words are padding.</summary>
+    internal int Width { get; }
+
+    /// <summary>The same states at a stride of <paramref name="words"/>, at least the record's: the entries of a part's batch, a record and a key each (PLAN-HIGH-CARDINALITY, H4).</summary>
+    internal RecordLayout Widened(int words)
+    {
+        ulong[] seed = new ulong[words];
+        Seed.CopyTo(seed, 0);
+        return new RecordLayout(words, seed, Offsets, Width);
+    }
 
     /// <summary>A record each of whose states is its slot's seed: what a group starts as.</summary>
     internal ulong[] Seed { get; }
@@ -182,7 +241,7 @@ internal sealed class RecordLayout
             slots[s].WriteSeed(record.Slice(offsets[s], slots[s].StateBytes));
         }
 
-        return new RecordLayout(stride / sizeof(ulong), seed, offsets);
+        return new RecordLayout(stride / sizeof(ulong), seed, offsets, at);
     }
 }
 

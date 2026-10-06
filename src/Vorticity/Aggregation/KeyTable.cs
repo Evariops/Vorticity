@@ -45,6 +45,7 @@ internal struct KeyTable<TValue>
     private ulong _seed;
     private int _count;
     private int _growAt;
+    private readonly ArrayShelf? _shelf;
 
     public KeyTable()
     {
@@ -52,6 +53,10 @@ internal struct KeyTable<TValue>
         _chains = [];
         _overflow = [];
     }
+
+    /// <summary>A table that takes its arrays from a query's shelf and gives them back as it grows: a sub-table of the core (PLAN-HIGH-CARDINALITY, H4).</summary>
+    internal KeyTable(ArrayShelf shelf)
+        : this() => _shelf = shelf;
 
     /// <summary>The keys the table holds.</summary>
     internal readonly int Count => _count;
@@ -289,11 +294,12 @@ internal struct KeyTable<TValue>
     private void Resize(int length)
     {
         Slot[] old = _slots;
+        int[] chains = _chains;
         Entry[] overflow = _overflow;
         int overflowed = _overflowed;
-        _slots = new Slot[length];
-        _chains = new int[(length >> WidthShift) + 1];
-        _overflow = new Entry[overflowed];
+        _slots = NewArray<Slot>(length);
+        _chains = NewArray<int>((length >> WidthShift) + 1);
+        _overflow = NewArray<Entry>(overflowed);
         _overflowed = 0;
         _multiplier = (ulong.MaxValue / (uint)length) + 1;
         _growAt = (int)(6L * length / 10);
@@ -309,6 +315,24 @@ internal struct KeyTable<TValue>
         {
             Place(overflow[i].Key, overflow[i].Group);
         }
+
+        _shelf?.Give(old);
+        _shelf?.Give(chains);
+        _shelf?.Give(overflow);
+    }
+
+    /// <summary>Gives the table's arrays back to its shelf: a sub-table split, whose groups another holds.</summary>
+    internal void Release()
+    {
+        _shelf?.Give(_slots);
+        _shelf?.Give(_chains);
+        _shelf?.Give(_overflow);
+        _slots = [];
+        _chains = [];
+        _overflow = [];
+        _overflowed = 0;
+        _count = 0;
+        _growAt = 0;
     }
 
     /// <summary>A key of the table placed again: the first free slot of its line from its home, or its line's chain.</summary>
@@ -341,13 +365,19 @@ internal struct KeyTable<TValue>
     {
         if (_overflowed == _overflow.Length)
         {
-            Array.Resize(ref _overflow, Math.Max(16, 2 * _overflow.Length));
+            Entry[] grown = NewArray<Entry>(Math.Max(16, 2 * _overflow.Length));
+            _overflow.CopyTo(grown, 0);
+            _shelf?.Give(_overflow);
+            _overflow = grown;
         }
 
         ref int head = ref _chains[at >> WidthShift];
         _overflow[_overflowed] = new Entry { Key = key, Group = group, Next = head };
         head = ++_overflowed;
     }
+
+    /// <summary>An array of the table's, zeroed: from its shelf when it has one.</summary>
+    private readonly T[] NewArray<T>(int length) => _shelf is null ? new T[length] : _shelf.Take<T>(length, zeroed: true);
 
     /// <summary><paramref name="value"/> modulo <paramref name="divisor"/> by a multiplication, as the runtime's dictionary takes it.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

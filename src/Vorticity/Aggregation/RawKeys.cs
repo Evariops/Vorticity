@@ -134,7 +134,16 @@ internal sealed class RawKeys<TWord> : GroupKeys
     private ulong[] _high = [];
     private TWord[] _words = [];
 
-    internal RawKeys(RawLayout layout) => _layout = layout;
+    // Every word a group of its own, no slot looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
+    private readonly bool _appending;
+    private readonly ArrayShelf? _shelf;
+
+    internal RawKeys(RawLayout layout, bool appending = false, ArrayShelf? shelf = null)
+    {
+        _layout = layout;
+        _appending = appending;
+        _shelf = shelf;
+    }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
     {
@@ -171,7 +180,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
     {
         if (_keys.Length < groups)
         {
-            Array.Resize(ref _keys, groups);
+            Grow(groups);
         }
 
         int slots = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(32, groups * 2));
@@ -179,6 +188,27 @@ internal sealed class RawKeys<TWord> : GroupKeys
         {
             Rehash(slots);
         }
+    }
+
+    /// <summary>A sub-table of the core: its arrays from the query's shelf (PLAN-HIGH-CARDINALITY, H4).</summary>
+    internal override GroupKeys ForTable(ArrayShelf shelf) => new RawKeys<TWord>(_layout, shelf: shelf);
+
+    internal override void Release()
+    {
+        _shelf?.Give(_keys);
+        _shelf?.Give(_hashed);
+        _keys = [];
+        _hashed = NewSlots(32);
+        Count = 0;
+    }
+
+    /// <summary>The words' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>
+    private void Grow(int length)
+    {
+        TWord[] grown = _shelf is null ? new TWord[length] : _shelf.Take<TWord>(length, zeroed: false);
+        _keys.AsSpan(0, Count).CopyTo(grown);
+        _shelf?.Give(_keys);
+        _keys = grown;
     }
 
     internal override void Keep(ReadOnlySpan<int> groups)
@@ -207,8 +237,27 @@ internal sealed class RawKeys<TWord> : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            (ulong low, ulong high) = KeyWords.Of(_keys[g]);
-            parts[g] = (byte)((Unsafe.SizeOf<TWord>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed)) >> shift);
+            parts[g] = (byte)(EntryKeys.Hash(_keys[g], seed) >> shift);
+        }
+    }
+
+    /// <summary>The word: a tuple's nulls are bits of it, so no group is apart from the others.</summary>
+    internal override int EntryBytes => Unsafe.SizeOf<TWord>();
+
+    internal override GroupKeys? Appending() => new RawKeys<TWord>(_layout, appending: true);
+
+    internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TWord>(_keys.AsSpan(0, Count), -1, records, lane);
+
+    internal override void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) =>
+        EntryKeys.TablesOf<TWord>(batch, shape, shift, mask, tables);
+
+    internal override ulong HashAt(PartBatch batch, EntryShape shape, int entry) => EntryKeys.Hash(EntryKeys.KeyAt<TWord>(batch, shape, entry), MergeHash.Seed);
+
+    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups)
+    {
+        for (int i = 0; i < entries.Length; i++)
+        {
+            groups[i] = Lookup(EntryKeys.KeyAt<TWord>(batch, shape, entries[i]));
         }
     }
 
@@ -261,6 +310,17 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The group of a word, added when it is new.</summary>
     private int Lookup(TWord word)
     {
+        if (_appending)
+        {
+            if (Count == _keys.Length)
+            {
+                Grow(Count * 2);
+            }
+
+            _keys[Count] = word;
+            return Count++;
+        }
+
         int[] hashed = _hashed;
         int mask = hashed.Length - 1;
         int slot = Home(word, hashed.Length);
@@ -282,7 +342,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
         if (Count == _keys.Length)
         {
-            Array.Resize(ref _keys, Count * 2);
+            Grow(Count * 2);
         }
 
         int added = Count++;
@@ -299,10 +359,14 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The slots at <paramref name="length"/>, every group placed again from its word.</summary>
     private void Rehash(int length)
     {
-        int[] hashed = _hashed.Length == length ? _hashed : NewSlots(length);
+        int[] hashed = _hashed.Length == length ? _hashed : NewSlots(length, _shelf);
         if (ReferenceEquals(hashed, _hashed))
         {
             hashed.AsSpan().Fill(-1);
+        }
+        else
+        {
+            _shelf?.Give(_hashed);
         }
 
         int mask = length - 1;
@@ -334,9 +398,9 @@ internal sealed class RawKeys<TWord> : GroupKeys
         return (int)(((((ulong)wide * MergeHash.Seed) ^ (ulong)(wide >> 64)) * MergeHash.Seed) >> shift);
     }
 
-    private static int[] NewSlots(int length)
+    private static int[] NewSlots(int length, ArrayShelf? shelf = null)
     {
-        int[] slots = new int[length];
+        int[] slots = shelf is null ? GC.AllocateUninitializedArray<int>(length) : shelf.Take<int>(length, zeroed: false);
         slots.AsSpan().Fill(-1);
         return slots;
     }
