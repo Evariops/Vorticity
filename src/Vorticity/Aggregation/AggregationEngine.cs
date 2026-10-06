@@ -1058,8 +1058,9 @@ internal static class AggregationEngine
                 only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
             }
 
-            await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
             partitions = [only];
+            plan.Watch?.Invoke(partitions);
+            await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
         }
         else
         {

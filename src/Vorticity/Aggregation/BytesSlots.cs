@@ -173,14 +173,35 @@ internal static class BytesWalk
     }
 }
 
-/// <summary>The smallest or largest text or binary value of each group, in byte order.</summary>
+/// <summary>
+/// The smallest or largest text or binary value of each group, in byte order: the values' bytes in
+/// pages the slot shares among its groups, no object per group nor an allocation per value as values
+/// come and go (PLAN-HIGH-CARDINALITY, H1, reduction 5). A value longer than the room of the one it
+/// replaces moves to the end of the last page and leaves that room behind; the pages are compacted
+/// when what they leave behind outgrows what they hold.
+/// </summary>
 internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 {
+    /// <summary>The bytes of a page; a value longer than a quarter of one takes a page of its own.</summary>
+    internal const int PageBytes = 1 << 16;
+
     private readonly bool _max;
     private readonly ColumnShape _shape;
-    private byte[][] _best = [];
+
+    // Each group's value: the page and the offset its bytes start at, and its length, -1 for none.
+    private long[] _at = [];
     private int[] _lengths = [];
     private int _groups;
+
+    private byte[][] _pages = [];
+    private int _pageCount;
+    private int _fill = -1;
+    private int _used;
+
+    // The bytes of the pages, and the rooms of the values they hold.
+    private long _paged;
+    private long _held;
+
     private MaskCache _rows;
     private CodeSet _distinct;
 
@@ -190,21 +211,19 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         _max = max;
     }
 
+    /// <summary>The arrays of bytes the slot holds its values in: its pages, whatever its groups.</summary>
+    internal int Pages => _pageCount;
+
     internal override void EnsureGroups(int groups)
     {
-        if (groups > _best.Length)
+        if (groups > _at.Length)
         {
-            int grown = Scratch.Capacity(groups, _best.Length);
-            Array.Resize(ref _best, grown);
+            int grown = Scratch.Capacity(groups, _at.Length);
+            Array.Resize(ref _at, grown);
             Array.Resize(ref _lengths, grown);
         }
 
-        for (int g = _groups; g < groups; g++)
-        {
-            _best[g] = [];
-            _lengths[g] = -1;
-        }
-
+        _lengths.AsSpan(_groups, Math.Max(0, groups - _groups)).Fill(-1);
         _groups = Math.Max(_groups, groups);
     }
 
@@ -228,47 +247,132 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
             int g = from[i];
             if (source._lengths[g] >= 0)
             {
-                Offer(into[i], source._best[g].AsSpan(0, source._lengths[g]));
+                Offer(into[i], source.ValueOf(g));
             }
         }
     }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
+        // The values of the groups left out stay in the pages until the next compaction.
+        long held = 0;
         for (int i = 0; i < groups.Length; i++)
         {
-            _best[i] = _best[groups[i]];
-            _lengths[i] = _lengths[groups[i]];
+            _at[i] = _at[groups[i]];
+            int length = _lengths[i] = _lengths[groups[i]];
+            held += length < 0 ? 0 : Room(length);
         }
 
         // The groups past them are emptied again when they are made.
         _groups = groups.Length;
+        _held = held;
     }
 
     internal override TResult Result(int group) =>
-        _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(_best[group].AsSpan(0, _lengths[group]), _shape);
+        _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(ValueOf(group), _shape);
+
+    private ReadOnlySpan<byte> ValueOf(int group)
+    {
+        long at = _at[group];
+        return _pages[(int)(at >> 32)].AsSpan((int)at, _lengths[group]);
+    }
 
     private void Offer(int group, ReadOnlySpan<byte> value)
     {
         int length = _lengths[group];
         if (length >= 0)
         {
-            int order = value.SequenceCompareTo(_best[group].AsSpan(0, length));
+            int order = value.SequenceCompareTo(ValueOf(group));
             if (_max ? order <= 0 : order >= 0)
             {
                 return;
             }
+
+            // In the room of the value it replaces when it fits; that room left behind otherwise.
+            if (value.Length <= Room(length))
+            {
+                long at = _at[group];
+                value.CopyTo(_pages[(int)(at >> 32)].AsSpan((int)at));
+                _held += Room(value.Length) - Room(length);
+                _lengths[group] = value.Length;
+                return;
+            }
+
+            _held -= Room(length);
+            _lengths[group] = -1;
         }
 
-        byte[] buffer = _best[group];
-        if (buffer.Length < value.Length)
-        {
-            _best[group] = buffer = new byte[Math.Max(value.Length, 16)];
-        }
-
-        value.CopyTo(buffer);
+        _at[group] = Place(value);
         _lengths[group] = value.Length;
+        _held += Room(value.Length);
     }
+
+    /// <summary>Copies <paramref name="value"/> to the end of the last page, or to a page of its own when it is long.</summary>
+    private long Place(ReadOnlySpan<byte> value)
+    {
+        int room = Room(value.Length);
+        if (room > PageBytes / 4)
+        {
+            int own = AddPage(room);
+            value.CopyTo(_pages[own]);
+            return (long)own << 32;
+        }
+
+        if (_fill < 0 || _used + room > PageBytes)
+        {
+            // A page more, unless the pages leave behind more than they hold: they are compacted first.
+            if (_paged - _held > _held + PageBytes)
+            {
+                Compact();
+            }
+
+            if (_fill < 0 || _used + room > PageBytes)
+            {
+                _fill = AddPage(PageBytes);
+                _used = 0;
+            }
+        }
+
+        long at = ((long)_fill << 32) | (uint)_used;
+        value.CopyTo(_pages[_fill].AsSpan(_used));
+        _used += room;
+        return at;
+    }
+
+    /// <summary>Copies every value held into new pages, in the order of the groups, and drops the old ones.</summary>
+    private void Compact()
+    {
+        byte[][] pages = _pages;
+        _pages = [];
+        _pageCount = 0;
+        _fill = -1;
+        _used = 0;
+        _paged = 0;
+        for (int g = 0; g < _groups; g++)
+        {
+            int length = _lengths[g];
+            if (length >= 0)
+            {
+                long at = _at[g];
+                _at[g] = Place(pages[(int)(at >> 32)].AsSpan((int)at, length));
+            }
+        }
+    }
+
+    private int AddPage(int bytes)
+    {
+        if (_pageCount == _pages.Length)
+        {
+            Array.Resize(ref _pages, Math.Max(4, _pageCount * 2));
+        }
+
+        _pages[_pageCount] = GC.AllocateUninitializedArray<byte>(bytes);
+        _paged += bytes;
+        return _pageCount++;
+    }
+
+    /// <summary>The bytes a value of <paramref name="length"/> takes in a page: whole words, so that a value a little longer still fits.</summary>
+    private static int Room(int length) => (length + 7) & ~7;
 
     private readonly struct Sink : IBytesSink
     {
