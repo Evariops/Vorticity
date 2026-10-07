@@ -400,11 +400,17 @@ internal static class RatioCheck
     /// key-order axis was given the positions of its rows; and every axis held it to its default
     /// split, which on the million-row table decoded the one chunk ten times. Each was a cost on
     /// Rust's side alone. The table was set with `--recalibrate 5 --rebase` under the corrected
-    /// harness, and each note says what the line was on the old one: `projected scan, 1 of 50
-    /// columns` rose from 0.071 to 0.757 and `full scan, 1M table` from 0.037 to 0.331, which is
-    /// what the old harness was worth on them, the second through the split the reference was held
-    /// to (`RustReader.FasterSplit`). Five passes, not three: two axes read in two modes, and three
-    /// passes had seen only the lower one.
+    /// harness: `projected scan, 1 of 50 columns` rose from 0.071 to 0.757 and `full scan, 1M table`
+    /// from 0.037 to 0.331, which is what the old harness was worth on them, the second through the
+    /// split the reference was held to (`RustReader.FasterSplit`). Five passes, not three: two axes
+    /// read in two modes, and three passes had seen only the lower one.
+    /// </para>
+    /// <para>
+    /// REBASED AGAIN ON 2026-10-07, under a rebuilt reference binary: the one the table was set
+    /// under had been built over, and with no copy of it `--rebase-from` could not carry the lines,
+    /// so `--recalibrate 3 --rebase` measured them anew. `full scan, 1M table` rose from 0.331 to
+    /// 0.400 and `projected scan, upstream lazy` from 0.542 to 0.597; four more rose by 4 % at most,
+    /// and the twenty others came down.
     /// </para>
     /// <para>
     /// A line is replaced only when its ceiling does not rise. `--recalibrate` never raises a
@@ -424,32 +430,32 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.318, 2, 0.047),   // 5 passes, spread 0.304-0.319; was 0.312 on the old harness, +1.9%; held at a three-pass calibration of this binary, the five peaking at 0.319
-        ["full scan, upstream lazy"] = new(0.477, 3, 0.017),   // 5 passes, spread 0.469-0.477; was 0.438 on the old harness, +8.9%
-        ["projected scan, 1 of 5 columns"] = new(0.509, 11, 0.127),   // 5 passes, spread 0.444-0.509; was 0.409 on the old harness, +24.4%
-        ["projected scan, upstream lazy"] = new(0.542, 12, 0.022),   // 5 passes, spread 0.531-0.542; was 0.457 on the old harness, +18.6%
-        ["open to first batch"] = new(0.071, 10, 0.052),   // 5 passes, spread 0.068-0.072; was 0.084 on the old harness, -15.5%; held at a three-pass calibration of this binary, the five peaking at 0.072
-        ["open, footer only"] = new(0.632, 33, 0.029),   // 5 passes, spread 0.614-0.632; was 0.622 on the old harness, +1.6%
-        ["read and write back"] = new(0.341, 1, 0.046),   // 5 passes, spread 0.326-0.341; was 0.321 on the old harness, +6.2%
-        ["filtered scan, 1% band"] = new(0.309, 11, 0.196),   // 5 passes, spread 0.248-0.309; was 0.211 on the old harness, +46.4%
-        ["filtered scan, half the rows"] = new(0.300, 7, 0.060),   // 5 passes, spread 0.282-0.300; was 0.259 on the old harness, +15.8%
-        ["scattered take, 64 of 64 splits"] = new(0.227, 4, 0.020),   // 5 passes, spread 0.223-0.227; was 0.205 on the old harness, +10.7%
-        ["rewritten zoned, reference's"] = new(0.319, 2, 0.016),   // 5 passes, spread 0.316-0.321; was 0.313 on the old harness, +1.9%; held at a three-pass calibration of this binary, the five peaking at 0.321
-        ["rewritten zoned, ours"] = new(0.676, 2, 0.015),   // 3 passes, spread 0.666-0.676; was 0.924, -26.8%: its zstd column decompressed by Vorticity.Zstd rather than the runtime's libzstd
-        ["rewritten high card, reference's"] = new(0.959, 27, 0.025),   // 5 passes, spread 0.936-0.959; was 0.762 on the old harness, +25.9%
-        ["rewritten high card, ours"] = new(0.994, 23, 0.027),   // 5 passes, spread 0.968-0.994; was 0.842 on the old harness, +18.1%
-        ["key order, sorted column, 1% band"] = new(0.795, 12, 0.025),   // 5 passes, spread 0.775-0.795; was 0.718 on the old harness, +10.7%
-        ["key order, uncorrelated, 64 rows"] = new(0.880, 6, 0.072),   // 5 passes, spread 0.850-0.914; was 1.125 on the old harness, -21.8%; held at a three-pass calibration of this binary, the five peaking at 0.914
-        ["count, exact cover, 1% band"] = new(0.965, 9, 0.141),   // 5 passes, spread 0.828-0.965; was 0.627 on the old harness, +53.9%
-        ["key order, uncorrelated, against a take"] = new(1.381, 9, 0.133),   // 5 passes, spread 1.197-1.381; new
-        ["filtered scan, string equality, fsst"] = new(0.745, 4, 0.187),   // 5 passes, spread 0.605-0.745; was 0.852 on the old harness, -12.6%
-        ["filtered scan, string prefix, fsst"] = new(1.078, 2, 0.015),   // 5 passes, spread 1.138-1.153; was 1.237 on the old harness, -12.9%; held at a three-pass calibration of this binary, the five peaking at 1.153
-        ["filtered scan, string equality, dict"] = new(0.943, 11, 0.059),   // 5 passes, spread 0.888-0.943; was 1.908 on the old harness, -50.6%
-        ["filtered scan, string prefix, dict"] = new(0.943, 9, 0.030),   // 5 passes, spread 0.915-0.943; was 1.365 on the old harness, -30.9%
-        ["filtered scan, band, runend"] = new(1.017, 14, 0.021),   // 5 passes, spread 0.996-1.017; was 0.968 on the old harness, +5.1%
-        ["filtered scan, band, bitpacked"] = new(1.074, 13, 0.079),   // 5 passes, spread 0.989-1.074; was 0.924 on the old harness, +16.2%
-        ["full scan, 1M table"] = new(0.331, 1, 0.081),   // 5 passes, spread 0.304-0.331; was 0.037 on the old harness, +794.6%
-        ["projected scan, 1 of 50 columns"] = new(0.757, 20, 0.061),   // 5 passes, spread 0.710-0.757; was 0.071 on the old harness, +966.2%
+        ["full scan"] = new(0.313, 2, 0.029),   // 3 passes, spread 0.304-0.313; was 0.318, -1.5%
+        ["full scan, upstream lazy"] = new(0.474, 2, 0.032),   // 3 passes, spread 0.459-0.474; was 0.477, -0.6%
+        ["projected scan, 1 of 5 columns"] = new(0.513, 9, 0.044),   // 3 passes, spread 0.491-0.513; REBASED UP from 0.509 (k 11->9): +0.9%
+        ["projected scan, upstream lazy"] = new(0.597, 11, 0.125),   // 3 passes, spread 0.522-0.597; REBASED UP from 0.542 (k 12->11): +10.2%
+        ["open to first batch"] = new(0.066, 10, 0.139),   // 3 passes, spread 0.057-0.066; was 0.071, -6.8%
+        ["open, footer only"] = new(0.589, 30, 0.016),   // 3 passes, spread 0.580-0.589; was 0.632, -6.8%
+        ["read and write back"] = new(0.324, 1, 0.040),   // 3 passes, spread 0.311-0.324; was 0.341, -4.9%
+        ["filtered scan, 1% band"] = new(0.311, 10, 0.146),   // 3 passes, spread 0.265-0.311; REBASED UP from 0.309 (k 11->10): +0.6%
+        ["filtered scan, half the rows"] = new(0.287, 6, 0.040),   // 3 passes, spread 0.276-0.287; was 0.300, -4.2%
+        ["scattered take, 64 of 64 splits"] = new(0.223, 3, 0.025),   // 3 passes, spread 0.218-0.223; was 0.227, -1.6%
+        ["rewritten zoned, reference's"] = new(0.308, 2, 0.015),   // 3 passes, spread 0.304-0.308; was 0.319, -3.4%
+        ["rewritten zoned, ours"] = new(0.672, 2, 0.017),   // 3 passes, spread 0.661-0.672; was 0.676, -0.5%
+        ["rewritten high card, reference's"] = new(0.872, 28, 0.015),   // 3 passes, spread 0.859-0.872; was 0.959, -9.0%
+        ["rewritten high card, ours"] = new(0.929, 22, 0.030),   // 3 passes, spread 0.902-0.929; was 0.994, -6.5%
+        ["key order, sorted column, 1% band"] = new(0.774, 12, 0.027),   // 3 passes, spread 0.754-0.774; was 0.795, -2.6%
+        ["key order, uncorrelated, 64 rows"] = new(0.912, 6, 0.044),   // 3 passes, spread 0.873-0.912; REBASED UP from 0.880 (a new reference binary): +3.7%
+        ["count, exact cover, 1% band"] = new(0.887, 10, 0.039),   // 3 passes, spread 0.852-0.887; was 0.965, -8.1%
+        ["key order, uncorrelated, against a take"] = new(1.259, 7, 0.039),   // 3 passes, spread 1.210-1.259; was 1.381, -8.9%
+        ["filtered scan, string equality, fsst"] = new(0.679, 4, 0.139),   // 3 passes, spread 0.585-0.679; was 0.745, -8.9%
+        ["filtered scan, string prefix, fsst"] = new(1.087, 2, 0.067),   // 3 passes, spread 1.014-1.087; REBASED UP from 1.078 (a new reference binary): +0.8%
+        ["filtered scan, string equality, dict"] = new(0.832, 11, 0.024),   // 3 passes, spread 0.812-0.832; was 0.943, -11.7%
+        ["filtered scan, string prefix, dict"] = new(0.820, 9, 0.062),   // 3 passes, spread 0.769-0.820; was 0.943, -13.0%
+        ["filtered scan, band, runend"] = new(0.815, 13, 0.054),   // 3 passes, spread 0.771-0.815; was 1.017, -19.8%
+        ["filtered scan, band, bitpacked"] = new(0.974, 13, 0.030),   // 3 passes, spread 0.944-0.974; was 1.074, -9.4%
+        ["full scan, 1M table"] = new(0.400, 1, 0.021),   // 3 passes, spread 0.391-0.400; REBASED UP from 0.331 (a new reference binary): +20.8%
+        ["projected scan, 1 of 50 columns"] = new(0.716, 21, 0.042),   // 3 passes, spread 0.686-0.716; was 0.757, -5.4%
     };
 
     /// <summary>
@@ -460,8 +466,12 @@ internal static class RatioCheck
     /// A ratio measured through another binary is a number about the rebuild, so the check refuses
     /// to gate on one; and a recalibration under another binary may raise a reference with
     /// <c>--rebase</c>, because the denominator changed, as a new k changes it.
+    ///
+    /// Before rebuilding the binary, keep a copy of the one named here, as
+    /// <c>~/.cache/vorticity/vxbench/&lt;fingerprint&gt;/libvxbench.dylib</c>: <c>--rebase-from</c>
+    /// carries the tables across a rebuild from that copy alone, our code held still.
     /// </remarks>
-    private static readonly string? CalibratedShim = "49dacfd9920c";
+    private static readonly string? CalibratedShim = "1be9345d4816";
 
     /// <summary>
     /// How far under its reference a ratio may sit before it is called stale.
