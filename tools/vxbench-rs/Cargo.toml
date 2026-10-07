@@ -20,7 +20,7 @@ path = "src/main.rs"
 # `tokio` for the runtime upstream's benchmarks run on: `with_tokio` over a multi-threaded runtime,
 # which is how the reference uses every core. `memmap2` for `ByteBuffer: From<Mmap>`, which is how the
 # reference reads a mapped file where it lies, as our reader reads every file it opens from a path.
-vortex = { version = "=0.86.1", features = ["tokio", "memmap2"] }
+vortex = { version = "=0.87.0", features = ["tokio", "memmap2"] }
 memmap2 = "0.9.5"
 tokio = { version = "1.53", features = ["rt-multi-thread"] }
 # The allocator upstream's benchmarks all run with, "for consistency" (vortex-bench), and the one
