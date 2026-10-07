@@ -71,6 +71,7 @@ internal static class GroupScenarios
                 "url" => path => UrlsAsync(path, configure),
                 "uuid" => path => IdsAsync(path, configure),
                 "texts" => path => TextExtremesAsync(path, configure),
+                "urlsmall" => path => UrlSmallsAsync(path, configure),
                 _ => null,
             };
         }
@@ -341,6 +342,21 @@ internal static class GroupScenarios
         return rows;
     }
 
+    private static async Task<long> UrlSmallsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<UrlSmallCount> groups in Configured(file.Scan<Page>()
+            .GroupBy(p => (p.Url, p.Small))
+            .Select(g => (g.Key.Item1, g.Key.Item2, g.Count())), configure)
+            .As<UrlSmallCount>())
+        {
+            rows += Sum(groups.Column<long>(2).Values);
+        }
+
+        return rows;
+    }
+
     private static async Task<long> TextExtremesAsync(string path, Action<AggregationPlan>? configure)
     {
         await using VortexFile file = await ScenarioSet.OpenAsync(path);
@@ -476,3 +492,7 @@ public partial record struct IdCount(Guid Id, long Count);
 /// <summary>An integer key's least and greatest text.</summary>
 [VortexRecord]
 public partial record struct KeyTexts(int Key, string? Least, string? Greatest);
+
+/// <summary>A text and a small integer, the pair's rows.</summary>
+[VortexRecord]
+public partial record struct UrlSmallCount(string Url, int Small, long Count);
