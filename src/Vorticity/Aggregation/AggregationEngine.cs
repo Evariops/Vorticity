@@ -597,6 +597,16 @@ internal sealed class AggregationPartition
     /// </summary>
     private const long WindowedBytes = 1024 * 1024;
 
+    /// <summary>
+    /// The bytes of records past which a state of more than 16 bytes no longer carries the count in its
+    /// pass: the count then folds first, alone, and the heavy pass finds its records in cache. Carried,
+    /// the heavy pass reaches each record first, a miss to memory at the head of a long chain, and holds
+    /// few rows in flight. Measured on 2026-10-07, 2e7 rows at one lane: a count and a float's mean ×0.78
+    /// at 10⁶ groups (records of 40 MB) and ×0.84 at 10⁷, a count and its deviation ×0.68 at 10⁶; but
+    /// ×1.07 to ×1.09 to 10⁵ (4 to 7 MB of records), which a large last level of cache holds.
+    /// </summary>
+    private const long CarriedBytes = 16L * 1024 * 1024;
+
     // The source's row the current batch starts at, which a chosen row keeps.
     private long _startRow;
 
@@ -1386,19 +1396,28 @@ internal sealed class AggregationPartition
             // Records that all fit a private cache stay there whatever the slot, and the batch is
             // folded whole: a window would cost its calls for nothing.
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
-            int window = Records is { } records && (long)groups * records.Layout.Stride * sizeof(ulong) > WindowedBytes ? _window : rows;
-            (int count, int carrier) = CountCarrier();
+            long recordBytes = Records is { } records ? (long)groups * records.Layout.Stride * sizeof(ulong) : 0;
+            int window = recordBytes > WindowedBytes ? _window : rows;
+            (int count, int carrier) = CountCarrier(recordBytes > CarriedBytes);
             for (int start = 0; start < rows; start += window)
             {
                 int end = Math.Min(rows, start + window);
 
                 // The count rides on a fixed slot's pass when both fold the window's every row into one
-                // record (PLAN-HIGH-CARDINALITY, H14): a row's record reached once for both.
-                bool carried = count >= 0 && Folds(count)
+                // record (PLAN-HIGH-CARDINALITY, H14): a row's record reached once for both. With no slot
+                // to carry it, it folds first, alone: past the cache, its short pass brings the window's
+                // records in, many rows in flight, for the heavy passes after it.
+                bool carried = carrier >= 0 && Folds(count)
                     && Slots[carrier].StepRowsCounted(Input(number, arena, carrier, rows, selection).Window(start, end), rowGroups, Slots[count]);
+                int first = carrier < 0 && count >= 0 && Folds(count) ? count : -1;
+                if (first >= 0)
+                {
+                    Slots[first].StepRows(Input(number, arena, first, rows, selection).Window(start, end), rowGroups);
+                }
+
                 for (int i = 0; i < Slots.Length; i++)
                 {
-                    if (Folds(i) && !(carried && (i == count || i == carrier)))
+                    if (i != first && Folds(i) && !(carried && (i == count || i == carrier)))
                     {
                         Slots[i].StepRows(Input(number, arena, i, rows, selection).Window(start, end), rowGroups);
                     }
@@ -1618,10 +1637,12 @@ internal sealed class AggregationPartition
     private bool Folds(int slot) => _filterOf[slot] < 0 || !_masks!.KeepsNone(_filterOf[slot]);
 
     /// <summary>
-    /// The slot of a count of rows and the fixed slot that can carry it in its own pass: both unfiltered,
-    /// their states in one record; (-1, -1) when there is none.
+    /// The slot of a count of rows in the records, unfiltered, and the fixed slot that can carry it in its
+    /// own pass: unfiltered too, its state in the same record, and when <paramref name="large"/> records
+    /// pass the cache, a state of 16 bytes at most (<see cref="CarriedBytes"/>). The carrier is -1 when no
+    /// slot can; both are when there is no such count.
     /// </summary>
-    private (int Count, int Carrier) CountCarrier()
+    private (int Count, int Carrier) CountCarrier(bool large)
     {
         int count = Array.FindIndex(Slots, slot => slot is CountSlot<uint> or CountSlot<long>);
         if (count < 0 || _filterOf[count] >= 0 || Slots[count].Bound is not { } records)
@@ -1631,13 +1652,14 @@ internal sealed class AggregationPartition
 
         for (int i = 0; i < Slots.Length; i++)
         {
-            if (i != count && _filterOf[i] < 0 && Slots[i].CarriesCount && ReferenceEquals(Slots[i].Bound, records))
+            if (i != count && _filterOf[i] < 0 && Slots[i].CarriesCount && ReferenceEquals(Slots[i].Bound, records)
+                && (!large || Slots[i].StateBytes <= 16))
             {
                 return (count, i);
             }
         }
 
-        return (-1, -1);
+        return (count, -1);
     }
 }
 
