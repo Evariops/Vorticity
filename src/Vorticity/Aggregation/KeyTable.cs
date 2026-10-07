@@ -14,6 +14,15 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// <para>
+/// A key of eight bytes at most loses, before its fold, the low bits that every key the table held when
+/// it was last placed had zero: keys at a stride of a power of two are then numbers in a row. Folded
+/// whole, keys at a stride of 2²² past 2³² made runs of ten homes in a row, which a prime laid over
+/// each other or apart by chance: 12 % of 10⁴ keys away from home under 17 929 slots, 73 % under 17 989,
+/// none under 17 959 (PLAN-HIGH-CARDINALITY, profiling).
+/// </para>
+/// </remarks>
+/// <remarks>
+/// <para>
 /// The line bounds the probe: a run of keys in a row fills its lines, and a key that lands in it costs
 /// a link of a chain, where a probe past the line would walk the run. Linear probing over the whole
 /// table, measured on 2026-10-06, read hot keys in a row among keys spread over a range folded on
@@ -48,6 +57,9 @@ internal struct KeyTable<TValue>
     private int _overflowed;
     private ulong _multiplier;
     private ulong _seed;
+
+    // The low bits no key had set when the table was last placed, which its homes leave out.
+    private int _shift;
     private int _count;
     private int _growAt;
     private readonly ArrayShelf? _shelf;
@@ -165,6 +177,7 @@ internal struct KeyTable<TValue>
         ulong seed = _seed;
         ulong multiplier = _multiplier;
         uint length = (uint)slots.Length;
+        int shift = _shift;
 
         // Every home is below the slots' length, by the fast modulo: no bound to check. A match is a
         // bit, and the group its mask over the slot's group plus one, less one: the JIT branched on
@@ -173,14 +186,29 @@ internal struct KeyTable<TValue>
         int any = 0;
         if (ahead <= 0)
         {
-            // No read ahead: each home probed as it is computed, none stored to be read back.
-            for (int i = 0; i < keys.Length; i++)
+            // No read ahead: each home probed as it is computed, none stored to be read back; with no
+            // bit left out, a loop without the shift, a cycle a row.
+            if (shift == 0)
             {
-                ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, multiplier, length));
-                int match = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
-                int group = (home.Group & -match) - 1;
-                groups[i] = group;
-                any |= group;
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, multiplier, length, 0));
+                    int match = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
+                    int group = (home.Group & -match) - 1;
+                    groups[i] = group;
+                    any |= group;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, multiplier, length, shift));
+                    int match = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
+                    int group = (home.Group & -match) - 1;
+                    groups[i] = group;
+                    any |= group;
+                }
             }
 
             missed = any < 0;
@@ -190,7 +218,7 @@ internal struct KeyTable<TValue>
         homes = homes[..keys.Length];
         for (int i = 0; i < keys.Length; i++)
         {
-            homes[i] = HomeOf(keys[i], seed, multiplier, length);
+            homes[i] = HomeOf(keys[i], seed, multiplier, length, shift);
         }
 
         int sink = 0;
@@ -309,13 +337,46 @@ internal struct KeyTable<TValue>
         return next;
     }
 
+    /// <summary>
+    /// The low bits no key of a sample of <paramref name="slots"/> and of <paramref name="overflow"/>
+    /// sets, which the homes leave out; the sample ends at its first key with its lowest bit set. A key
+    /// past the sample that sets one shares its home with its neighbour, which costs it a probe and no
+    /// more: the shift only places keys. Counted at each key it came, an OR into the table made each
+    /// insertion of 2×10⁷ unique keys wait on the one before, 1.06 times as long a group by; every
+    /// key read at each growth, keys at a stride of 2²² that sat at home already took 1.02 times as long.
+    /// </summary>
+    private readonly int Shift(ReadOnlySpan<Slot> slots, ReadOnlySpan<Entry> overflow)
+    {
+        if (_seed != 0 || Unsafe.SizeOf<TValue>() > sizeof(ulong))
+        {
+            return 0;
+        }
+
+        ulong bits = 0;
+        int step = Math.Max(1, slots.Length / SampledSlots);
+        for (int at = 0; at < slots.Length && (bits & 1) == 0; at += step)
+        {
+            bits |= slots[at].Group != 0 ? KeyWords.Of(slots[at].Key).Low : 0;
+        }
+
+        foreach (Entry entry in overflow)
+        {
+            bits |= KeyWords.Of(entry.Key).Low;
+        }
+
+        return bits == 0 ? 0 : System.Numerics.BitOperations.TrailingZeroCount(bits);
+    }
+
+    /// <summary>The slots <see cref="Shift"/> samples, spread over the table: every slot of a smaller one.</summary>
+    private const int SampledSlots = 2_048;
+
     /// <summary>The slot <paramref name="key"/> starts from: its folded bits, mixed under the seed once there is one, modulo the slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private readonly uint Home(TValue key) => HomeOf(key, _seed, _multiplier, (uint)_length);
+    private readonly uint Home(TValue key) => HomeOf(key, _seed, _multiplier, (uint)_length, _shift);
 
-    /// <summary>As <see cref="Home"/>, the table's seed, multiplier and length given.</summary>
+    /// <summary>As <see cref="Home"/>, the table's seed, multiplier, length and shift given.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint HomeOf(TValue key, ulong seed, ulong multiplier, uint length)
+    private static uint HomeOf(TValue key, ulong seed, ulong multiplier, uint length, int shift)
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         uint hash;
@@ -325,11 +386,11 @@ internal struct KeyTable<TValue>
         }
         else if (Unsafe.SizeOf<TValue>() <= sizeof(uint))
         {
-            hash = (uint)low;
+            hash = (uint)(low >> shift);
         }
         else
         {
-            ulong folded = low ^ high;
+            ulong folded = (low >> shift) ^ high;
             hash = (uint)(folded ^ (folded >> 32));
         }
 
@@ -354,6 +415,9 @@ internal struct KeyTable<TValue>
         _overflowed = 0;
         _multiplier = (ulong.MaxValue / (uint)length) + 1;
         _growAt = (int)(6L * length / 10);
+
+        // The low bits no key has set, left out of the homes; under a seed, every bit goes to the mix.
+        _shift = Shift(old, overflow.AsSpan(0, overflowed));
         foreach (Slot slot in old)
         {
             if (slot.Group != 0)
@@ -393,6 +457,7 @@ internal struct KeyTable<TValue>
         _overflowed = 0;
         _count = 0;
         _growAt = 0;
+        _shift = 0;
     }
 
     /// <summary>A key of the table placed again: the first free slot of its line from its home, or its line's chain.</summary>

@@ -88,6 +88,34 @@ public sealed partial class TwoPassProbeTests
         Assert.InRange(found, 400, 501);
     }
 
+    // Keys at a stride of 2^22 past 2^32 folded into runs of ten homes in a row, which the prime of
+    // 17 929 slots laid over each other: 12 % of 10^4 keys away from home, each row of them through the
+    // second pass. Their shared low zeros left out, they are numbers in a row, each at home.
+    [Theory]
+    [InlineData(22, 10_000)]
+    [InlineData(20, 10_000)]
+    [InlineData(22, 100_000)]
+    public void KeysAtAStrideOfAPowerOfTwoAllSitInTheirHomes(int stride, int count)
+    {
+        long[] keys = new long[count];
+        for (int i = 0; i < count; i++)
+        {
+            keys[i] = (long)i << stride;
+        }
+
+        new Random(7).Shuffle(keys);
+        Vorticity.Aggregating.KeyTable<long> table = new Vorticity.Aggregating.KeyTable<long>();
+        for (int i = 0; i < keys.Length; i++)
+        {
+            Assert.Equal(i, table.GetOrAdd(keys[i], i));
+        }
+
+        int[] groups = new int[keys.Length];
+        table.FindAtHome(keys, groups, new uint[keys.Length], 0, out bool missed);
+        Assert.False(missed, $"{groups.Count(g => g < 0)} of {count} keys away from home");
+        Assert.Equal(Enumerable.Range(0, count), groups);
+    }
+
     /// <summary>The groups as they come, in the order of their first rows on one lane; by key on more, whose merge orders them its own way.</summary>
     private static async Task<List<Total>> RunAsync(VortexFile file, bool filtered, int probe, bool ordered)
     {
