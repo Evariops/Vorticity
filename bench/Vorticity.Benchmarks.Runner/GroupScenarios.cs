@@ -23,7 +23,8 @@ namespace Vorticity.Bench.Runner;
 /// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); <c>strided</c>, a count and a sum over the strided
 /// file's long keys; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
 /// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000); <c>pages</c>, a count by a text of the pages
-/// file (<c>url</c>) or by its UUID (<c>uuid</c>), a million groups each; and <c>names-name</c>, a
+/// file (<c>url</c>) or by its UUID (<c>uuid</c>), a million groups each, or the least and greatest
+/// URL by its integer key (<c>texts</c>); and <c>names-name</c>, a
 /// count by the name of a names file (a million names, or a thousand in <c>names-1e3-4000000</c>).
 /// </para>
 /// <para>
@@ -69,6 +70,7 @@ internal static class GroupScenarios
             {
                 "url" => path => UrlsAsync(path, configure),
                 "uuid" => path => IdsAsync(path, configure),
+                "texts" => path => TextExtremesAsync(path, configure),
                 _ => null,
             };
         }
@@ -339,6 +341,21 @@ internal static class GroupScenarios
         return rows;
     }
 
+    private static async Task<long> TextExtremesAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<KeyTexts> batch in Configured(file.Scan<Page>()
+            .GroupBy(p => p.Key)
+            .Select(g => (g.Key, g.Min(p => p.Url), g.Max(p => p.Url))), configure)
+            .As<KeyTexts>())
+        {
+            groups += batch.RowCount;
+        }
+
+        return groups;
+    }
+
     private static async Task<long> IdsAsync(string path, Action<AggregationPlan>? configure)
     {
         await using VortexFile file = await ScenarioSet.OpenAsync(path);
@@ -455,3 +472,7 @@ public partial record struct Named(string Name, long Value);
 /// <summary>A UUID key's rows.</summary>
 [VortexRecord]
 public partial record struct IdCount(Guid Id, long Count);
+
+/// <summary>An integer key's least and greatest text.</summary>
+[VortexRecord]
+public partial record struct KeyTexts(int Key, string? Least, string? Greatest);
