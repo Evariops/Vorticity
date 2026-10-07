@@ -17,7 +17,7 @@ description = "Generates the golden Vortex corpus and expected-value sidecars fo
 vortex = "=0.87.0"
 # Only needed to name individual compression schemes: `SchemeId` is opaque outside this crate,
 # and the `vortex` facade re-exports the compressor types but not `vortex_btrblocks::schemes`.
-vortex-btrblocks = "=0.86.1"
+vortex-btrblocks = "=0.87.0"
 # `vortex.onpair` is the one encoding whose array crate the `vortex` facade does not re-export
 # (see `vortex-0.86.1/src/lib.rs`'s `pub mod encodings`), and forcing it needs `onpair_compress`.
 vortex-onpair = "=0.86.1"
