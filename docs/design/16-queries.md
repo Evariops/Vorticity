@@ -611,7 +611,8 @@ by code.
 
 On one lane, under a window, on a component that streams, or on a key the statistics bound to two
 million values or fewer whose index fits half its budget, the values are taken on the reader's
-thread, as they are met. Otherwise, on a key the core holds, they are many lanes' work: the pass runs
+thread, as they are met, the key numbered as a group by numbers it: by its value, in pages, within
+the statistics' bounds. Otherwise, on a key the core holds, they are many lanes' work: the pass runs
 on its own task, on a lane fewer than the degree, the reader counting in it, through the lean core —
 α at 1, a part applied from 256 entries, batches of a kilobyte — and each value is told as it enters
 its part's set, under the part's lock: once, as the rows come. Under its budget the core spills; a part
@@ -670,10 +671,10 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | dictionary | by code: a table from code to group, kept while blocks view the same values | one per distinct code met |
 | sorted by the statistics, canonical | runs detected | one per run |
 | canonical, an integer whose statistics bound it within 2¹⁶ values, or within four times the rows | the value less the least numbers its group, in pages of 4 096 numbers allocated as values meet them, in front of the index; the pages carved from slabs of one, two, four, up to sixteen pages; a batch's rows found 4 096 at a time in two passes, each row's page read with no branch on the keys, then the rows left (values met for the first time) in their order, a chunk of new values sending the next through the lookup alone | one per distinct value met |
-| canonical, any other | per row, a row equal to the one before reusing its group; a fixed-width key hashed in two passes, each row's home slot probed as its hash is computed, the rows left looked up in their order; a text key 256 rows at a time, their hashes, then every row's home slot, then every candidate's bytes, no row waiting on another, the rows left looked up in their order | one per row |
+| canonical, any other | per row, a row equal to the one before reusing its group; a fixed-width key hashed in two passes, each row's home slot probed as its hash is computed, the rows left looked up in their order, the slots from the start of a line of cache, so that a line of slots is one; a text key 256 rows at a time, their hashes, then every row's home slot, then every candidate's bytes, no row waiting on another, the rows left looked up in their order | one per row |
 | composite of two to four parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
-| composite of two to four fixed-width parts whose values and nulls fit 64 or 128 bits, none sorted, their spans' product past 2¹⁶ | the parts' values themselves packed into one word, hashed | one per row |
-| composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶ | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
+| composite of two to four fixed-width parts whose values and nulls fit 64 or 128 bits, none sorted, their spans' product past 2¹⁶ | the parts' values themselves packed into one word, hashed into a table of group numbers, each beside a byte of seven bits of the hash read first, so that a new tuple finds its free slot without reading a word; the parts written to the result a chunk at a time | one per row |
+| composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶, hashed past it as the raw words are, behind the same bytes | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
 | composite of five parts or more | the tuple encoded into bytes, one hash | one per row |
 
 A function of a column (§3) groups as the column does, evaluated per code, per run or per value.
@@ -698,7 +699,10 @@ filter's mask, evaluated once per batch and per distinct filter, as its selectio
 its position and the value it is chosen by (§5.3).
 
 Rows grouped one by one, every row selected and none null, fold in plain loops, and a count rides on
-the pass of the first fixed aggregate that shares its record, the record reached once for both. An
+the pass of the first fixed aggregate that shares its record, the record reached once for both. Past
+16 MiB of records, an aggregate whose state passes 16 bytes, an exact float sum or a variance, does
+not carry it: its pass, reaching each record first, would hold few rows in flight behind each miss,
+so the count folds first, alone, its short pass bringing the records in for the heavy one. An
 integer's minimum or maximum stores its choice as a select while the groups have seen fewer than 32
 rows each on the mean, a new extreme then as likely as not, and branches after, the branch then
 predicting. A text's minimum or maximum compares a chunk of rows against their groups' values before it
