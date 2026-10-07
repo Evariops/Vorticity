@@ -254,6 +254,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _query.Plan.LastRun = _lanes is null
             ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0, _partition.Footprint)
             : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count, _partition!.Footprint);
+        _query.Plan.LastKeyBlocks = _partition.Keys!.Blocks;
+        _query.Plan.LastPeakBytes = _memory?.Peak ?? 0;
         await CloseAsync(all: true).ConfigureAwait(false);
     }
 
@@ -282,6 +284,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _memory = new QueryMemory(host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         _started = Stopwatch.GetTimestamp();
         _query.PeakGroups = 0;
+        _query.Plan.LastGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
@@ -432,6 +435,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private async ValueTask CloseAsync(bool all)
     {
         Close(all);
+        _query.Plan.LastGroups += _closedCount;
         if (_closedCount == 0)
         {
             return;
@@ -535,6 +539,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     private void Emit()
     {
+        if (_current is null)
+        {
+            _query.Plan.LastFirstBatchTicks = Stopwatch.GetTimestamp() - _started;
+        }
+
         int count = Math.Min(_batchRows, _closedCount - _closedNext);
         ReadOnlySpan<int> groups = _closed.AsSpan(_closedNext, count);
         StructStore store = Store();

@@ -37,6 +37,9 @@ public sealed record ScanPlan(
     long Rows, int Blocks, int LiveBlocks, int Segments, long BytesToRead, bool MayMatch,
     ImmutableArray<PruningStep> Pruning, CountPlan Count, OrderPlan? Order)
 {
+    /// <summary>What a group by will do with the rows; null without a group by.</summary>
+    public GroupPlan? Grouping { get; init; }
+
     /// <summary>The engine's own explanation, with its splits, for the tests that hold the plan to the execution.</summary>
     internal ScanExplanation? Detail { get; init; }
 
@@ -88,6 +91,9 @@ public sealed record OrderPlan(string Source, int Runs, long? Entries, bool Desc
 public readonly record struct ScanStatistics(
     long Rows, long Batches, long Requests, long BytesRequested, long BlocksDecoded, long BlocksPruned, long CacheHits)
 {
+    /// <summary>What a group by did with the rows; null without a group by, or before it ran.</summary>
+    public GroupStatistics? Grouping { get; init; }
+
     internal static ScanStatistics From(ScanMetrics metrics) => new ScanStatistics(
         metrics.Rows, metrics.Batches, metrics.SegmentRequests, metrics.BytesRequested, metrics.BlocksDecoded, metrics.BlocksPruned, metrics.CacheHits);
 }

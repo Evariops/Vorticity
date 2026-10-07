@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -149,7 +150,13 @@ internal sealed class AggregationQuery : ResultQuery
         : ZoneFinality.Candidate(this) ? new ZoneDecidedGroups(this, cancellationToken)
         : new GroupBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken, RowFilter);
+    internal override GroupStatistics? Grouping => Plan.Grouped ? Plan.Statistics() : null;
+
+    internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
+    {
+        ScanPlan scan = await Host.ExplainAsync(Plan, cancellationToken, RowFilter).ConfigureAwait(false);
+        return Plan.Grouped ? scan with { Grouping = GroupPlans.Of(this) } : scan;
+    }
 
     /// <summary>Each element's column of its own type, named <c>Item1</c> and on as a tuple's elements are.</summary>
     private static ResultColumn[] Natural(IResultNode[] nodes, ColumnShape[] keys)
@@ -225,8 +232,11 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> RunAsync()
     {
+        long started = Stopwatch.GetTimestamp();
         (_outcome, _groups, _count) = await _query.Host.RunAsync(_query, _cancellationToken).ConfigureAwait(false);
-        return Next();
+        bool first = Next();
+        _query.Plan.LastFirstBatchTicks = Stopwatch.GetTimestamp() - started;
+        return first;
     }
 
     private bool Next()

@@ -118,6 +118,49 @@ internal sealed class AggregationPlan
     /// <summary>What the plan's last run did, lane by lane, and its merge; null before one.</summary>
     internal AggregationRun? LastRun { get; set; }
 
+    /// <summary>The groups the plan's last run found, before any operator on them.</summary>
+    internal long LastGroups { get; set; }
+
+    /// <summary>The most bytes the plan's last run held of its memory budget at once.</summary>
+    internal long LastPeakBytes { get; set; }
+
+    /// <summary>The key blocks the plan's last run grouped, by how.</summary>
+    internal (long ByRange, long ByCode, long Hashed) LastKeyBlocks { get; set; }
+
+    /// <summary>The time from the first move of the plan's last result to its first batch, in <see cref="Stopwatch"/> ticks.</summary>
+    internal long LastFirstBatchTicks { get; set; }
+
+    /// <summary>What the plan's last run did, as the query's statistics say it (docs/design/16-queries.md §10); null before one.</summary>
+    internal GroupStatistics? Statistics()
+    {
+        if (LastRun is not { } run)
+        {
+            return null;
+        }
+
+        CoreRun? core = run.Core;
+        return new GroupStatistics(
+            LastGroups,
+            PeakGroups,
+            LastPeakBytes,
+            run.Lanes.Length,
+            run.MergeParts,
+            core is not null,
+            core?.Flushes ?? 0,
+            core?.BypassedRows ?? 0,
+            core?.Bursts ?? 0,
+            core?.PendingPeakBytes ?? 0,
+            core?.ReloadedBytes ?? 0,
+            core?.Tables ?? 0,
+            core?.Splits ?? 0,
+            0,
+            0,
+            LastKeyBlocks.ByRange,
+            LastKeyBlocks.ByCode,
+            LastKeyBlocks.Hashed,
+            Stopwatch.GetElapsedTime(0, LastFirstBatchTicks));
+    }
+
     /// <summary>Called with the lanes' partitions once made, before the pass: what a test watches their tables by. Null but in tests.</summary>
     internal Action<AggregationPartition[]>? Watch { get; set; }
 
@@ -1653,6 +1696,7 @@ internal static class AggregationEngine
             }
 
             long merging = Stopwatch.GetTimestamp();
+            plan.LastKeyBlocks = KeyBlocks(partitions);
 
             // Under pressure (H4, milestone 2): a lane turned during the pass, or the merge of the lanes'
             // tables in parts would not fit. The lanes that did not turn merge in series into the largest
@@ -1748,7 +1792,27 @@ internal static class AggregationEngine
     {
         memory.Keep(bytes + ((long)outcome.Order.Length * sizeof(int)));
         outcome.Memory = memory;
+        outcome.Plan.LastGroups = outcome.Order.Length;
+        outcome.Plan.LastPeakBytes = memory.Peak;
         return outcome;
+    }
+
+    /// <summary>The key blocks the lanes grouped, by how, summed over their tables and caches.</summary>
+    private static (long ByRange, long ByCode, long Hashed) KeyBlocks(AggregationPartition[] partitions)
+    {
+        (long range, long code, long hashed) = (0, 0, 0);
+        foreach (AggregationPartition partition in partitions)
+        {
+            if (partition.Keys is { } keys)
+            {
+                (long byRange, long byCode, long byHash) = keys.Blocks;
+                range += byRange;
+                code += byCode;
+                hashed += byHash;
+            }
+        }
+
+        return (range, code, hashed);
     }
 
     /// <summary>

@@ -77,6 +77,7 @@ internal sealed class QueryMemory : IDisposable
 
     private readonly QueryMemoryBudget _budget;
     private long _held;
+    private long _peak;
     private long _measured;
     private int _left;
 
@@ -89,6 +90,9 @@ internal sealed class QueryMemory : IDisposable
 
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);
+
+    /// <summary>The most bytes the query held of its budget at once.</summary>
+    internal long Peak => Volatile.Read(ref _peak);
 
     /// <summary>The bytes its tables hold, as last measured: at most what it holds of its budget, which keeps room for their growth.</summary>
     internal long Measured => Volatile.Read(ref _measured);
@@ -106,8 +110,24 @@ internal sealed class QueryMemory : IDisposable
             return false;
         }
 
-        Interlocked.Add(ref _held, bytes);
+        Raise(Interlocked.Add(ref _held, bytes));
         return true;
+    }
+
+    /// <summary>The most bytes held at once, raised to <paramref name="held"/> when it passes it.</summary>
+    private void Raise(long held)
+    {
+        long peak = Volatile.Read(ref _peak);
+        while (held > peak)
+        {
+            long seen = Interlocked.CompareExchange(ref _peak, held, peak);
+            if (seen == peak)
+            {
+                return;
+            }
+
+            peak = seen;
+        }
     }
 
     /// <summary>
@@ -148,7 +168,7 @@ internal sealed class QueryMemory : IDisposable
             throw Exceeded("group by", -1, bytes);
         }
 
-        Interlocked.Add(ref _held, bytes);
+        Raise(Interlocked.Add(ref _held, bytes));
     }
 
     /// <summary>Gives back <paramref name="bytes"/> the query held.</summary>

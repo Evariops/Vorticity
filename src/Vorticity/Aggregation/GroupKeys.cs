@@ -68,8 +68,10 @@ internal abstract class GroupKeys
     /// <summary>The longest array a table of groups doubles from: twice as long, an int no longer counts it.</summary>
     private const int MostDoubled = 1 << 30;
 
+    // The key blocks grouped by their runs, by their dictionary's codes, and row by row.
+    private long _rangeBlocks;
     private long _dictionaryBlocks;
-    private long _otherBlocks;
+    private long _hashedBlocks;
     private int[] _codeGroups = [];
     private CanonicalOrigin _codeOrigin;
 
@@ -91,7 +93,10 @@ internal abstract class GroupKeys
         + "536,870,912 of them at most, a list 1,073,741,824. Group by fewer keys at once, or filter the rows first.");
 
     /// <summary>Whether every key block was dictionary-encoded, which makes the key source ordered.</summary>
-    internal bool OnlyDictionaries => _dictionaryBlocks > 0 && _otherBlocks == 0;
+    internal bool OnlyDictionaries => _dictionaryBlocks > 0 && _rangeBlocks == 0 && _hashedBlocks == 0;
+
+    /// <summary>The key blocks the index grouped, by how: by their runs, constant or run-end; by their dictionary's codes; row by row.</summary>
+    internal (long ByRange, long ByCode, long Hashed) Blocks => (_rangeBlocks, _dictionaryBlocks, _hashedBlocks);
 
     /// <summary>
     /// Maps the selected rows of a batch to groups, creating the groups of keys not seen before: as
@@ -265,20 +270,25 @@ internal abstract class GroupKeys
 
     private protected void Saw(ColumnEncoding encoding)
     {
-        if (encoding == ColumnEncoding.Dictionary)
+        switch (encoding)
         {
-            _dictionaryBlocks++;
-        }
-        else
-        {
-            _otherBlocks++;
+            case ColumnEncoding.Dictionary:
+                _dictionaryBlocks++;
+                break;
+            case ColumnEncoding.Constant or ColumnEncoding.RunEnd:
+                _rangeBlocks++;
+                break;
+            default:
+                _hashedBlocks++;
+                break;
         }
     }
 
     private protected void MergeSeen(GroupKeys target)
     {
+        target._rangeBlocks += _rangeBlocks;
         target._dictionaryBlocks += _dictionaryBlocks;
-        target._otherBlocks += _otherBlocks;
+        target._hashedBlocks += _hashedBlocks;
     }
 
     /// <summary>

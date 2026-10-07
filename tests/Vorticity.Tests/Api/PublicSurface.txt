@@ -908,6 +908,77 @@ Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte>>)
 Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint>>)
 Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort>>)
 Vorticity:     property TKey Key { get; }
+Vorticity: sealed class Vorticity.GroupKeyPlan : IEquatable<GroupKeyPlan>
+Vorticity:     ctor GroupKeyPlan(string, bool, Nullable<long>)
+Vorticity:     method GroupKeyPlan <Clone>$()
+Vorticity:     method bool Equals(GroupKeyPlan)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(GroupKeyPlan, GroupKeyPlan)
+Vorticity:     method bool op_Inequality(GroupKeyPlan, GroupKeyPlan)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out string, out bool, out Nullable<long>)
+Vorticity:     property Nullable<long> Values { get; init; }
+Vorticity:     property bool Sorted { get; init; }
+Vorticity:     property string Column { get; init; }
+Vorticity: enum Vorticity.GroupOrdering
+Vorticity:     const GroupOrdering None = 0
+Vorticity:     const GroupOrdering Sort = 3
+Vorticity:     const GroupOrdering Streamed = 1
+Vorticity:     const GroupOrdering Top = 2
+Vorticity:     field int value__
+Vorticity: sealed class Vorticity.GroupPlan : IEquatable<GroupPlan>
+Vorticity:     ctor GroupPlan(ImmutableArray<GroupKeyPlan>, Nullable<int>, string, int, string, GroupOrdering, Nullable<long>, int, int, bool, int, int, Nullable<long>)
+Vorticity:     method GroupPlan <Clone>$()
+Vorticity:     method bool Equals(GroupPlan)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(GroupPlan, GroupPlan)
+Vorticity:     method bool op_Inequality(GroupPlan, GroupPlan)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out ImmutableArray<GroupKeyPlan>, out Nullable<int>, out string, out int, out string, out GroupOrdering, out Nullable<long>, out int, out int, out bool, out int, out int, out Nullable<long>)
+Vorticity:     property GroupOrdering Order { get; init; }
+Vorticity:     property ImmutableArray<GroupKeyPlan> Keys { get; init; }
+Vorticity:     property Nullable<int> Streaming { get; init; }
+Vorticity:     property Nullable<long> Kept { get; init; }
+Vorticity:     property Nullable<long> MostGroups { get; init; }
+Vorticity:     property bool Core { get; init; }
+Vorticity:     property int Aggregates { get; init; }
+Vorticity:     property int Alpha { get; init; }
+Vorticity:     property int CacheCapacity { get; init; }
+Vorticity:     property int ChosenRows { get; init; }
+Vorticity:     property int Degree { get; init; }
+Vorticity:     property string NotStreaming { get; init; }
+Vorticity:     property string RowFilter { get; init; }
+Vorticity: sealed class Vorticity.GroupStatistics : IEquatable<GroupStatistics>
+Vorticity:     ctor GroupStatistics(long, long, long, int, int, bool, long, long, long, long, long, int, int, int, long, long, long, long, TimeSpan)
+Vorticity:     method GroupStatistics <Clone>$()
+Vorticity:     method bool Equals(GroupStatistics)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(GroupStatistics, GroupStatistics)
+Vorticity:     method bool op_Inequality(GroupStatistics, GroupStatistics)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out long, out long, out long, out int, out int, out bool, out long, out long, out long, out long, out long, out int, out int, out int, out long, out long, out long, out long, out TimeSpan)
+Vorticity:     property TimeSpan TimeToFirstBatch { get; init; }
+Vorticity:     property bool Core { get; init; }
+Vorticity:     property int Lanes { get; init; }
+Vorticity:     property int MergeParts { get; init; }
+Vorticity:     property int SpilledParts { get; init; }
+Vorticity:     property int TableSplits { get; init; }
+Vorticity:     property int Tables { get; init; }
+Vorticity:     property long Bursts { get; init; }
+Vorticity:     property long BypassedRows { get; init; }
+Vorticity:     property long CacheEvictions { get; init; }
+Vorticity:     property long Groups { get; init; }
+Vorticity:     property long KeyBlocksByCode { get; init; }
+Vorticity:     property long KeyBlocksByRange { get; init; }
+Vorticity:     property long KeyBlocksHashed { get; init; }
+Vorticity:     property long PeakBytes { get; init; }
+Vorticity:     property long PeakGroups { get; init; }
+Vorticity:     property long PendingBytes { get; init; }
+Vorticity:     property long ReloadedBytes { get; init; }
+Vorticity:     property long SpilledBytes { get; init; }
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
 Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
 Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)
@@ -1313,6 +1384,7 @@ Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out long, out int, out int, out int, out long, out bool, out ImmutableArray<PruningStep>, out CountPlan, out OrderPlan)
 Vorticity:     property CountPlan Count { get; init; }
+Vorticity:     property GroupPlan Grouping { get; init; }
 Vorticity:     property ImmutableArray<PruningStep> Pruning { get; init; }
 Vorticity:     property OrderPlan Order { get; init; }
 Vorticity:     property bool MayMatch { get; init; }
@@ -1330,6 +1402,7 @@ Vorticity:     method bool op_Inequality(ScanStatistics, ScanStatistics)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out long, out long, out long, out long, out long, out long, out long)
+Vorticity:     property GroupStatistics Grouping { get; init; }
 Vorticity:     property long Batches { get; init; }
 Vorticity:     property long BlocksDecoded { get; init; }
 Vorticity:     property long BlocksPruned { get; init; }

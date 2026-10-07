@@ -48,6 +48,12 @@ internal abstract class ResultQuery
     /// <summary>How the values of column <paramref name="column"/> are records: a custom aggregate's state; null for a column of values.</summary>
     internal virtual IVortexRecord? RecordOf(int column) => null;
 
+    /// <summary>What the query's group by did, once it ran; null without a group by.</summary>
+    internal virtual GroupStatistics? Grouping => null;
+
+    /// <summary>The scan's statistics, with what its group by did.</summary>
+    internal ScanStatistics Statistics() => ScanStatistics.From(Metrics) with { Grouping = Grouping };
+
     /// <summary>The window [<paramref name="skip"/>, <paramref name="skip"/> + <paramref name="take"/>) of a window [<paramref name="skipped"/>, <paramref name="skipped"/> + <paramref name="taken"/>): the operators in the order written.</summary>
     internal static (long Skip, long Take) Within(long skipped, long taken, long skip, long take)
     {
