@@ -19,7 +19,8 @@ namespace Vorticity.Bench.Runner;
 /// <c>vortex-queries --matrix small</c> writes): <c>total</c> (a count and a sum), <c>four</c>,
 /// <c>range</c> (a count, the least and the largest of a value), <c>deviation</c>, <c>top</c> (ordered
 /// by the count, the first hundred), <c>most</c> (ordered by the largest value, the first hundred),
-/// <c>countdistinct</c>, <c>distinct</c> (the key's distinct values) over an integer key (<c>k3</c>
+/// <c>first</c> (the hundred smallest keys and their counts), <c>countdistinct</c>, <c>distinct</c>
+/// (the key's distinct values) over an integer key (<c>k3</c>
 /// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); <c>strided</c>, a count and a sum over the strided
 /// file's long keys; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
 /// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000); <c>pages</c>, a count by a text of the pages
@@ -104,6 +105,7 @@ internal static class GroupScenarios
             "deviation" => path => DeviationAsync(path, key, configure),
             "top" => path => TopAsync(path, key, configure),
             "most" => path => MostAsync(path, key, configure),
+            "first" => path => FirstAsync(path, key, configure),
             "countdistinct" => path => CountDistinctAsync(path, key, configure),
             "distinct" => path => DistinctAsync(path, key, configure),
             _ => null,
@@ -256,6 +258,24 @@ internal static class GroupScenarios
         await foreach (Columns<KeyCount> groups in Configured(file.Scan<Spread>()
             .GroupBy(key)
             .OrderByDescending(g => g.Count())
+            .Take(100)
+            .Select(g => (g.Key, g.Count())), configure)
+            .As<KeyCount>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>The hundred smallest keys and their counts: a top on the key, whose frontier drops the rows of the keys past it.</summary>
+    private static async Task<long> FirstAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyCount> groups in Configured(file.Scan<Spread>()
+            .GroupBy(key)
+            .OrderBy(g => g.Key)
             .Take(100)
             .Select(g => (g.Key, g.Count())), configure)
             .As<KeyCount>())
