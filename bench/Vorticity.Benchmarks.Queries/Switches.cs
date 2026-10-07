@@ -25,6 +25,7 @@ internal static class Switches
         null => null,
         "merge" => new Switch("in series", Set("MergeInParts", false), "in parts", Set("MergeInParts", true)),
         "bymerge" => new Switch("hashed parts", Set("MergeByValue", false), "parts by value", Set("MergeByValue", true)),
+        "mergeparted" => new Switch("merged whole", Set("CoreParted", false), "merged part by part", Set("CoreParted", true)),
         _ when name.StartsWith("parts:", StringComparison.Ordinal) => Pair(name, "MergeParts", "parts"),
         _ when name.StartsWith("window:", StringComparison.Ordinal) => Pair(name, "FoldWindow", "window"),
         _ when name.StartsWith("probe:", StringComparison.Ordinal) => Pair(name, "ProbeAhead", "probe"),
@@ -40,7 +41,7 @@ internal static class Switches
         _ when name.StartsWith("batch:", StringComparison.Ordinal) => CorePair(name, "CoreBatchEntries", "batch"),
         _ when name.StartsWith("bypass:", StringComparison.Ordinal) => CorePair(name, "CoreBypass", "bypass", percent: true),
         _ when name.StartsWith("period:", StringComparison.Ordinal) => CorePair(name, "CoreBypassPeriod", "period"),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, bymerge, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, extremes, coredistinct, capacity:A:B, alpha:A:B, floor:A:B, table:A:B, batch:A:B, bypass:A:B (percent), period:A:B."),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, bymerge, mergeparted, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, extremes, coredistinct, capacity:A:B, alpha:A:B, floor:A:B, table:A:B, batch:A:B, bypass:A:B (percent), period:A:B."),
     };
 
     /// <summary>Both settings, <paramref name="first"/> then <paramref name="then"/>: the core on, and one of its own switches.</summary>

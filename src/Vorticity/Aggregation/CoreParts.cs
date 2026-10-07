@@ -16,7 +16,7 @@ namespace Vorticity.Aggregating;
 /// part comes back. A consumer that stops early stops the workers, and waits for them before the
 /// query's memory is given back: no worker reserves past it.
 /// </remarks>
-internal sealed class CoreParts
+internal sealed class CoreParts : ResultParts
 {
     private readonly GroupCore _core;
     private readonly AggregationPlan _plan;
@@ -63,10 +63,10 @@ internal sealed class CoreParts
     }
 
     /// <summary>The parts spilled, once known: none before the workers are done.</summary>
-    internal int Count => _spilled?.Length ?? 0;
+    internal override int Count => _spilled?.Length ?? 0;
 
     /// <summary>The batches of the next part, built, the part let go; null past the last.</summary>
-    internal async ValueTask<PartResult?> NextAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<PartResult?> NextAsync(CancellationToken cancellationToken)
     {
         if (_built is { } built)
         {
@@ -152,7 +152,7 @@ internal sealed class CoreParts
     private PartBuilder Builder => _builder ?? throw new InvalidOperationException("The parts of a result are built by its reader's builder.");
 
     /// <summary>The workers stopped and awaited, a consumer leaving early: none touches the core once its query's memory is given back.</summary>
-    internal async ValueTask StopAsync()
+    internal override async ValueTask StopAsync()
     {
         if (_built is not { } built || _stopping is null)
         {
@@ -180,7 +180,7 @@ internal sealed class CoreParts
     }
 
     /// <summary>Every part done with, delivered or not: the scratch closed, its file gone, the core's shelf handed on.</summary>
-    internal void Close()
+    internal override void Close()
     {
         if (_closed)
         {

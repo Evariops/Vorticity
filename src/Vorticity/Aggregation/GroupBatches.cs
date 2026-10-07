@@ -219,7 +219,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     // their batches; the part in hand and its next batch; the batch delivered, whose store goes back to
     // the builder once the next is; the groups of the result passed so far, in the window or not; and
     // the arena a batch cut to the window is cut into.
-    private CoreParts? _parts;
+    private ResultParts? _parts;
     private PartBuilder? _builder;
     private PartResult? _part;
     private int _slate;

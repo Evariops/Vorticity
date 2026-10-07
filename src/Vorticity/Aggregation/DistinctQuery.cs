@@ -353,7 +353,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             AggregationOutcome outcome = await AggregationEngine.RunAsync(projection.Host.Source, spec, projection.Metrics, plan, cancellationToken).ConfigureAwait(false);
             try
             {
-                if (outcome.Parts is { } parts)
+                if (outcome.Parts is CoreParts parts)
                 {
                     await parts.EmitSpilledAsync(cancellationToken).ConfigureAwait(false);
                 }

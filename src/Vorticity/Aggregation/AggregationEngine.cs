@@ -268,9 +268,9 @@ internal sealed class AggregationPlan
     internal bool CoreSpills { get; set; } = true;
 
     /// <summary>
-    /// Whether a core with no order nor window over its groups delivers them part by part, its first
-    /// batch once its first part is applied (PLAN-HIGH-CARDINALITY, H7): on by default, off for the
-    /// bench to weigh it against the delivery whole.
+    /// Whether a core, or a merge in parts, with no order nor window over its groups delivers them part
+    /// by part, its first batch once its first part is applied or merged (PLAN-HIGH-CARDINALITY, H7,
+    /// H14): on by default, off for the bench to weigh it against the delivery whole.
     /// </summary>
     internal bool CoreParted { get; set; } = true;
 
@@ -510,10 +510,11 @@ internal sealed class AggregationOutcome
     }
 
     /// <summary>
-    /// The parts of the result its core delivers after these groups, one at a time (PLAN-HIGH-CARDINALITY,
-    /// H6, H7): applied in the background, or written to the scratch; null when the result is whole.
+    /// The parts of the result delivered after these groups, one at a time (PLAN-HIGH-CARDINALITY, H6,
+    /// H7, H14): a core's, applied in the background or written to the scratch, or a merge's in parts;
+    /// null when the result is whole.
     /// </summary>
-    internal CoreParts? Parts { get; set; }
+    internal ResultParts? Parts { get; set; }
 
     internal GroupKeys? Keys { get; }
 
@@ -1929,7 +1930,19 @@ internal static class AggregationEngine
                 return Counted(outcome, memory, memory.Held);
             }
 
-            (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes) = await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, cancellationToken).ConfigureAwait(false);
+            (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes, MergedParts? delivery) =
+                await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, parted ? builder : null, merging, cancellationToken).ConfigureAwait(false);
+            if (delivery is not null)
+            {
+                // Part by part (H14): the result starts with no group, the parts come as they are merged
+                // and built, the lanes' tables let go once the last is merged. What the lanes held to
+                // fold their batches is given back now.
+                plan.LastGroups = 0;
+                memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
+                AggregationOutcome first = new AggregationOutcome(plan, slots, keys, []) { Parts = delivery };
+                return Counted(first, memory, memory.Held);
+            }
+
             plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes);
 
             // The lanes' tables die with the merge, but the one a merge in series kept as the result.
@@ -2150,12 +2163,14 @@ internal static class AggregationEngine
     /// that holds the most, whose cells stay where they are. With many, the key space cut into parts
     /// by the top bits of a hash of the keys seeded for the merge, a power of two of them, at most
     /// twice the degree (<see cref="Parts"/>): each part merged from every partition by a task the
-    /// merge's workers take from a queue, and the parts read as one, without a copy.
+    /// merge's workers take from a queue, and the parts read as one, without a copy. With
+    /// <paramref name="builder"/>, the parts delivered one at a time instead, each built into its
+    /// batches by whoever merged it (<see cref="MergedParts"/>).
     /// </summary>
-    /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series.</returns>
-    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged)> MergeAsync(
+    /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series; or, part by part, no group and the parts to come.</returns>
+    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged, MergedParts? Delivery)> MergeAsync(
         AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, QueryMemory memory,
-        CancellationToken cancellationToken)
+        PartBuilder? builder, long started, CancellationToken cancellationToken)
     {
         int largest = 0;
         for (int p = 1; p < partitions.Length; p++)
@@ -2209,7 +2224,7 @@ internal static class AggregationEngine
                 await MergePairedAsync(partitions, largest, maps, apart, degree, memory, cancellationToken).ConfigureAwait(false);
             }
 
-            return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0);
+            return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0, null);
         }
 
         parts = Math.Max(parts, 2);
@@ -2266,101 +2281,33 @@ internal static class AggregationEngine
         await GuardedAsync(cutting, failed).ConfigureAwait(false);
 
         // Each part merged from every partition, the parts taken from a queue. A part's groups are
-        // reserved before they come: as many as its largest partition sends while no part is done,
-        // then its entries at the rate of groups to entries the parts done had. What a group costs, the
-        // lanes' tables tell.
+        // reserved before they come (PartMerge.Merge); what a group costs, the lanes' tables tell.
         long perGroup = laneGroups > 0 ? Math.Max(1, laneBytes / laneGroups) : 64;
+        PartMerge merge = new PartMerge(partitions, keysOf, placed, starts, parts, plan, settled, inputs, source, memory, byValue, perGroup);
+        if (builder is not null)
+        {
+            // Part by part (PLAN-HIGH-CARDINALITY, H14): each part built into its batches by the worker
+            // that merged it, or by the reader, which merges the next rather than wait; the lanes'
+            // tables and the places of their groups go once the last part is merged.
+            (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
+            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - started, parts, 0);
+            MergedParts delivery = new MergedParts(merge, builder, Math.Clamp(degree - 1, 1, parts), plan, memory, cut, started, cancellationToken);
+            return (none, noSlots, parts, 0, delivery);
+        }
+
         GroupKeys[] partKeys = new GroupKeys[parts];
         AggregateSlot[][] partSlots = new AggregateSlot[parts][];
-        int taken = -1;
-        long doneGroups = 0;
-        long doneEntries = 0;
-        object done = new object();
         Task[] workers = new Task[Math.Min(degree, parts)];
         for (int w = 0; w < workers.Length; w++)
         {
             workers[w] = Task.Run(
                 () =>
                 {
-                    int[] map = [];
                     int part;
-                    while ((part = Interlocked.Increment(ref taken)) < parts)
+                    while ((part = merge.Take()) < parts)
                     {
                         token.ThrowIfCancellationRequested();
-                        int entries = 0;
-                        int most = 0;
-                        for (int p = 0; p < partitions.Length; p++)
-                        {
-                            int sent = starts[p][part + 1] - starts[p][part];
-                            entries += sent;
-                            most = Math.Max(most, sent);
-                        }
-
-                        int reserve = most;
-                        lock (done)
-                        {
-                            if (doneEntries > 0)
-                            {
-                                reserve = (int)Math.Clamp(entries * 1.1 * doneGroups / doneEntries, most, entries);
-                            }
-                        }
-
-                        // The part's table reserved before it is built, twice what its groups cost the
-                        // lanes: a doubling's room, as a lane's table keeps.
-                        long ahead = 2L * reserve * perGroup;
-                        if (!memory.TryGrow(ahead))
-                        {
-                            throw memory.Exceeded("merge of a group by", reserve, ahead);
-                        }
-
-                        GroupKeys keys = byValue ? keysOf[0].ForValuePart(part, 64 - shift) : keysOf[0].ForPart();
-                        keys.Reserve(reserve);
-                        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source);
-                        foreach (AggregateSlot slot in slots)
-                        {
-                            slot.EnsureGroups(reserve);
-                        }
-
-                        for (int p = 0; p < partitions.Length; p++)
-                        {
-                            int from = starts[p][part];
-                            int count = starts[p][part + 1] - from;
-                            if (count == 0)
-                            {
-                                continue;
-                            }
-
-                            ReadOnlySpan<int> groups = placed[p].AsSpan(from, count);
-                            Scratch.Grow(ref map, count);
-                            Span<int> into = map.AsSpan(0, count);
-                            keysOf[p].MergeInto(keys, groups, into);
-                            for (int s = 0; s < slots.Length; s++)
-                            {
-                                slots[s].EnsureGroups(keys.Count);
-                                if (inputs[s] != AggregationPartition.Settled)
-                                {
-                                    slots[s].MergeFrom(partitions[p].Slots[s], groups, into);
-                                }
-                            }
-                        }
-
-                        // Twice what the part's table came to, beside the lanes', which live until the
-                        // merge is done.
-                        long built = keys.Footprint + AggregateSlot.FootprintOf(slots);
-                        memory.Measure(built);
-                        long more = (2 * built) - ahead;
-                        if (more > 0 && !memory.TryGrow(more))
-                        {
-                            throw memory.Exceeded("merge of a group by", keys.Count, more);
-                        }
-
-                        partKeys[part] = keys;
-                        partSlots[part] = slots;
-                        lock (done)
-                        {
-                            doneGroups += keys.Count;
-                            doneEntries += entries;
-                        }
+                        (partKeys[part], partSlots[part], _, _) = merge.Merge(part);
                     }
                 },
                 token);
@@ -2374,7 +2321,7 @@ internal static class AggregationEngine
         }
 
         (GroupKeys joinedKeys, AggregateSlot[] joinedSlots, int joinedParts) = Joined(partKeys, partSlots, parts);
-        return (joinedKeys, joinedSlots, joinedParts, merged);
+        return (joinedKeys, joinedSlots, joinedParts, merged, null);
     }
 
     /// <summary>The pairs past which a distinct count's merge in series goes by parts instead: below, handing the parts out costs more than the pairs.</summary>

@@ -12,8 +12,9 @@ namespace Vorticity.Tests.Aggregation;
 /// <summary>
 /// The lanes' tables die with the merge. A blocking group by goes out in continuations of the lane or
 /// the merge worker that finished last, on its stack, where the frames of the pass still hold the
-/// lanes' partitions: at the first batch, a collection finds no lane's keys or states alive, but the
-/// ones a merge in series kept as the result.
+/// lanes' partitions: at the first batch, a collection finds no lane's keys or states alive but the
+/// ones a merge in series kept as the result; a merge in parts delivers its parts as they are merged
+/// (PLAN-HIGH-CARDINALITY, H14), and once the last is, a collection finds none alive.
 /// </summary>
 public sealed partial class LaneRetentionTests
 {
@@ -51,18 +52,20 @@ public sealed partial class LaneRetentionTests
             long rows = 0;
             await foreach (Columns<KeyTotal> batch in byKey.As<KeyTotal>().WithCancellation(Ct))
             {
-                if (alive < 0)
+                if (alive < 0 && !inParts)
                 {
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
-                    alive = tables.Count(table => table.IsAlive);
+                    alive = Alive(tables);
                 }
 
                 foreach (long count in batch.Column<long>(1).Values)
                 {
                     rows += count;
                 }
+            }
+
+            if (inParts)
+            {
+                alive = Alive(tables);
             }
 
             Assert.Equal(Rows, rows);
@@ -80,6 +83,15 @@ public sealed partial class LaneRetentionTests
         {
             System.IO.File.Delete(path);
         }
+    }
+
+    /// <summary>The tables a full collection leaves alive.</summary>
+    private static int Alive(List<WeakReference> tables)
+    {
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        return tables.Count(table => table.IsAlive);
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
