@@ -172,6 +172,7 @@ internal sealed partial class GroupCore
         _inputs = inputs;
         _source = source;
         _facts = facts;
+        Lean = lean;
 
         // Its sub-tables and slabs under the query's memory, when it counts it (H2): an array counted as
         // it enters the query, given back as it leaves; those on the shelf's piles stay counted.
@@ -253,6 +254,9 @@ internal sealed partial class GroupCore
 
     /// <summary>The share of its rows a lane's cache finds, once it has filled, below which the lane bypasses it, ε.</summary>
     internal double Bypass { get; }
+
+    /// <summary>Whether the core holds as little past the groups as it can (milestone 2): the governor's, or a <c>Distinct</c>'s.</summary>
+    internal bool Lean { get; }
 
     /// <summary>The rows over which a lane measures its cache's hit rate against ε, in capacities of the cache: ε's period.</summary>
     internal int BypassPeriod { get; }

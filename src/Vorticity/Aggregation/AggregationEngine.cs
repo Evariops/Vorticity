@@ -768,6 +768,22 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
+    /// The cache of a lane of a lean core, from its first batch: its arrays reserved each alone, nothing
+    /// ahead, and taken past the budget when they must, as a lane turned to the core reserves its cache
+    /// (milestone 2). Bounded by the core's capacity, the caches are the least the query holds; a quarter
+    /// of a megabyte ahead on every lane outweighed the budget of a small <c>Distinct</c>, which failed
+    /// where its core would spill.
+    /// </summary>
+    internal void ReserveExactly()
+    {
+        if (_arrays is { } arrays)
+        {
+            arrays.Overdraws = true;
+            arrays.Exact = true;
+        }
+    }
+
+    /// <summary>
     /// The lane turning to <paramref name="core"/> (PLAN-HIGH-CARDINALITY, H4, milestone 2): its table,
     /// which its budget could not let grow once more, emptied into the core's batches, then let go with
     /// what it held; the lane goes on with a cache of the core's size, which takes the null group, the
@@ -1846,6 +1862,11 @@ internal static class AggregationEngine
                     Core = core?.Lane(),
                     Pressure = pressure,
                 };
+                if (core is { Lean: true })
+                {
+                    only.ReserveExactly();
+                }
+
                 if (settling is not null)
                 {
                     only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -1868,6 +1889,10 @@ internal static class AggregationEngine
                         Core = core?.Lane(),
                         Pressure = pressure,
                     };
+                    if (core is { Lean: true })
+                    {
+                        partitions[p].ReserveExactly();
+                    }
                 }
 
                 if (pressure is not null)
