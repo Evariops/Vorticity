@@ -670,7 +670,7 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | dictionary | by code: a table from code to group, kept while blocks view the same values | one per distinct code met |
 | sorted by the statistics, canonical | runs detected | one per run |
 | canonical, an integer whose statistics bound it within 2¹⁶ values, or within four times the rows | the value less the least numbers its group, in pages of 4 096 numbers allocated as values meet them, in front of the index; the pages carved from slabs of one, two, four, up to sixteen pages; a batch's rows found 4 096 at a time in two passes, each row's page read with no branch on the keys, then the rows left (values met for the first time) in their order, a chunk of new values sending the next through the lookup alone | one per distinct value met |
-| canonical, any other | per row, a row equal to the one before reusing its group | one per row |
+| canonical, any other | per row, a row equal to the one before reusing its group; a fixed-width key hashed in two passes, each row's home slot probed as its hash is computed, the rows left looked up in their order; a text key 256 rows at a time, their hashes, then every row's home slot, then every candidate's bytes, no row waiting on another, the rows left looked up in their order | one per row |
 | composite of two to four parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
 | composite of two to four fixed-width parts whose values and nulls fit 64 or 128 bits, none sorted, their spans' product past 2¹⁶ | the parts' values themselves packed into one word, hashed | one per row |
 | composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶ | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
@@ -696,6 +696,14 @@ A float sum takes its parts (§5.1) in the same kernels, a weighted value's incl
 count is still a multiple of its unit, exact within the bounds. A filtered aggregate takes the
 filter's mask, evaluated once per batch and per distinct filter, as its selection. A chosen row keeps
 its position and the value it is chosen by (§5.3).
+
+Rows grouped one by one, every row selected and none null, fold in plain loops, and a count rides on
+the pass of the first fixed aggregate that shares its record, the record reached once for both. An
+integer's minimum or maximum stores its choice as a select while the groups have seen fewer than 32
+rows each on the mean, a new extreme then as likely as not, and branches after, the branch then
+predicting. A text's minimum or maximum compares a chunk of rows against their groups' values before it
+offers any, and writes its values' bytes into the result's column as they lie, a page of 128 KiB
+holding them; the answers of a batch of groups are read under one view of the records.
 
 ### 9.3 Statistics and zone maps
 
