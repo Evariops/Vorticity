@@ -669,7 +669,7 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | run-end | one range per run | one per run |
 | dictionary | by code: a table from code to group, kept while blocks view the same values | one per distinct code met |
 | sorted by the statistics, canonical | runs detected | one per run |
-| canonical, an integer whose statistics bound it within 2¹⁶ values, or within four times the rows | the value less the least numbers its group, in pages of 4 096 numbers allocated as values meet them, in front of the index | one per distinct value met |
+| canonical, an integer whose statistics bound it within 2¹⁶ values, or within four times the rows | the value less the least numbers its group, in pages of 4 096 numbers allocated as values meet them, in front of the index; the pages carved from slabs of one, two, four, up to sixteen pages; a batch's rows found 4 096 at a time in two passes, each row's page read with no branch on the keys, then the rows left (values met for the first time) in their order, a chunk of new values sending the next through the lookup alone | one per distinct value met |
 | canonical, any other | per row, a row equal to the one before reusing its group | one per row |
 | composite of two to four parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
 | composite of two to four fixed-width parts whose values and nulls fit 64 or 128 bits, none sorted, their spans' product past 2¹⁶ | the parts' values themselves packed into one word, hashed | one per row |
@@ -730,10 +730,15 @@ The lanes' groups merge at the end. When twice their entries are not fewer than 
 entries a merge in series moves — few groups, or too few lanes — they merge in series into the lane
 holding the most, whose states stay where they are. Otherwise the key space is cut by the top bits of
 a hash of the keys, seeded once a process apart from the tables' own: a power of two of parts, at most
-twice the degree and 256, each with 512 of the largest lane's groups at least. Each part is merged
+twice the degree and 256, each with 512 of the largest lane's groups at least. Lanes that number one
+span of values by value (§9.1) cut it by value instead, into runs of a power of two numbers, each
+part numbered by value over its run: no hash, no probe, no table that grows. Each part is merged
 from every lane into a table of its own, sized from the entries the parts done had per group, by a
 task the query's workers take from a queue, never a thread blocked on another; the parts are read as
-one, without a copy. A composite's indexes of its columns merge once, first. The pairs of a distinct
+one, without a copy. With no order nor window over the groups, the parts are delivered as a core's
+are (§9.5): each built into its batches by the worker that merged it, its table let go once built,
+the reader merging and building the next part rather than wait; the lanes' tables go once the last
+part is merged. A composite's indexes of its columns merge once, first. The pairs of a distinct
 count, chained by group, merge apart: past 65 536, the largest lane's taken as they are and the
 others' cut into parts by the hash of their group and value, four parts a worker, side by side. A
 chosen row and a tie keep the earlier range's.
@@ -756,9 +761,9 @@ words (§9.1) whose states all lie in records. The key space is cut into 256 par
 the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
 kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
 falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
-of a bounded size, which split on the next bit of the hash as they fill: by bursts, under the part's
-lock taken only when free, once its pending batches pass α times its groups, α derived from the degree
-between 1 and 8. A lane whose cache misses more than half its rows over four capacities of them sends
+of 512 KiB at most, which split on the next bit of the hash as they fill: by bursts, under the part's
+lock taken only when free, once its pending batches pass α times its groups and 16 384 entries, α
+derived from the degree between 1 and 8. A lane whose cache misses more than half its rows over four capacities of them sends
 its rows straight into batches for the next thirty-two. At the end every part applies what is pending, its sub-tables
 split ahead, and the sub-tables are the result, read as one. The arrays of its sub-tables and slabs
 come from a shelf of the query and go back to the process's, kept within a budget and swept after
@@ -867,7 +872,11 @@ the next part itself when none waits. The null groups follow as a part of their 
 spilled. The first batch leaves once the first part is applied, and the result's window is cut across
 the parts' batches, a batch holding a part's groups at most. On 10⁷ keys, the first batch comes a
 quarter sooner at one lane and a third at fourteen, where the whole result takes 0.58 of the time, its
-batches built on every lane.
+batches built on every lane. The lanes' tables merged in parts (§9.4) are delivered the same way, each
+part built by whoever merged it; a part keeps what its table held of the query's memory until the
+reader is done with its batches, which the session's pool holds outside any query's count. At
+fourteen lanes, its batches no longer built on the reader's thread alone once the merge is done, a
+million keys took 0.83 of the time and four aggregates 0.68.
 
 Not yet: a comfort budget the host grants, none by default, buying a higher α; a key cursor over a
 result larger than its budget, which a merge of runs cannot seek in; text keys and distinct counts in
