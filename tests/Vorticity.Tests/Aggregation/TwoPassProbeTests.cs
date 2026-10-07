@@ -67,7 +67,8 @@ public sealed partial class TwoPassProbeTests
 
         long[] probes = [.. keys, -5, 1L << 40, 3_501];
         int[] groups = new int[probes.Length];
-        table.FindAtHome(probes, groups, new uint[probes.Length], ahead);
+        table.FindAtHome(probes, groups, new uint[probes.Length], ahead, out bool missed);
+        Assert.True(missed, "the absent keys found no group");
         int found = 0;
         for (int i = 0; i < probes.Length; i++)
         {

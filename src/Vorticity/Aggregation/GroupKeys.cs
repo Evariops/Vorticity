@@ -776,11 +776,21 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// </summary>
     private void TwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
     {
-        Scratch.Grow(ref _homes, rows);
-        Scratch.Grow(ref _left, rows);
-        Span<int> groups = rowGroups.AsSpan(0, rows);
-        _sink ^= _index.FindAtHome(canonical[..rows], groups, _homes, _probeAhead);
+        if (_probeAhead > 0)
+        {
+            Scratch.Grow(ref _homes, rows);
+        }
 
+        Span<int> groups = rowGroups.AsSpan(0, rows);
+        _sink ^= _index.FindAtHome(canonical[..rows], groups, _homes, _probeAhead, out bool missed);
+
+        // Every row found its group, none null: the usual batch once the keys are known.
+        if (!missed && validity.IsEmpty)
+        {
+            return;
+        }
+
+        Scratch.Grow(ref _left, rows);
         int[] left = _left;
         int count = 0;
         if (validity.IsEmpty)
@@ -1215,7 +1225,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         groups = groups[..count];
-        _sink ^= _index.FindAtHome(keys, groups, homes, 0);
+        _sink ^= _index.FindAtHome(keys, groups, homes, 0, out bool missed);
+        if (!missed)
+        {
+            return;
+        }
+
         for (int i = 0; i < count; i++)
         {
             if (groups[i] < 0)

@@ -125,50 +125,75 @@ internal struct KeyTable<TValue>
     /// </summary>
     /// <param name="keys">The keys of the batch.</param>
     /// <param name="groups">Each key's group, or -1.</param>
-    /// <param name="homes">Room for each key's home slot, as many as the keys.</param>
+    /// <param name="homes">Room for each key's home slot, as many as the keys, when <paramref name="ahead"/> reads ahead.</param>
     /// <param name="ahead">How many rows on a slot is read before its row compares; 0 for none.</param>
-    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead)
+    /// <param name="missed">Whether a key found no group: the rows left to the lookup, none when false.</param>
+    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead, out bool missed)
     {
         Slot[] slots = _slots;
         if (slots.Length == 0)
         {
             groups[..keys.Length].Fill(-1);
+            missed = keys.Length > 0;
             return 0;
         }
 
-        homes = homes[..keys.Length];
         groups = groups[..keys.Length];
 
         // The table's fields in locals: a store to the homes could alias them for all the JIT knows.
         ulong seed = _seed;
         ulong multiplier = _multiplier;
         uint length = (uint)slots.Length;
-        for (int i = 0; i < keys.Length; i++)
-        {
-            homes[i] = HomeOf(keys[i], seed, multiplier, length);
-        }
 
         // Every home is below the slots' length, by the fast modulo: no bound to check. A match is a
         // bit, and the group its mask over the slot's group plus one, less one: the JIT branched on
         // the choice of the group or -1, even with both at hand.
         ref Slot first = ref MemoryMarshal.GetArrayDataReference(slots);
+        int any = 0;
+        if (ahead <= 0)
+        {
+            // No read ahead: each home probed as it is computed, none stored to be read back.
+            for (int i = 0; i < keys.Length; i++)
+            {
+                ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, multiplier, length));
+                int match = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
+                int group = (home.Group & -match) - 1;
+                groups[i] = group;
+                any |= group;
+            }
+
+            missed = any < 0;
+            return 0;
+        }
+
+        homes = homes[..keys.Length];
+        for (int i = 0; i < keys.Length; i++)
+        {
+            homes[i] = HomeOf(keys[i], seed, multiplier, length);
+        }
+
         int sink = 0;
         int row = 0;
-        for (int touched = ahead > 0 ? keys.Length - ahead : 0; row < touched; row++)
+        for (int touched = keys.Length - ahead; row < touched; row++)
         {
             sink ^= Unsafe.Add(ref first, (nint)homes[row + ahead]).Group;
             ref Slot slot = ref Unsafe.Add(ref first, (nint)homes[row]);
             int match = Unsafe.BitCast<bool, byte>(slot.Key.Equals(keys[row]));
-            groups[row] = (slot.Group & -match) - 1;
+            int group = (slot.Group & -match) - 1;
+            groups[row] = group;
+            any |= group;
         }
 
         for (; row < keys.Length; row++)
         {
             ref Slot slot = ref Unsafe.Add(ref first, (nint)homes[row]);
             int match = Unsafe.BitCast<bool, byte>(slot.Key.Equals(keys[row]));
-            groups[row] = (slot.Group & -match) - 1;
+            int group = (slot.Group & -match) - 1;
+            groups[row] = group;
+            any |= group;
         }
 
+        missed = any < 0;
         return sink;
     }
 
