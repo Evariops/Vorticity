@@ -766,9 +766,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "row-vectors"
 version = "0.1.0"
 dependencies = [
- "vortex-array 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-array",
+ "vortex-buffer",
+ "vortex-error",
  "vortex-row",
 ]
 
@@ -970,75 +970,21 @@ dependencies = [
  "static_assertions",
  "tracing",
  "uuid",
- "vortex-array-macros 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-compute 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-array-macros",
+ "vortex-buffer",
+ "vortex-compute",
+ "vortex-error",
  "vortex-flatbuffers",
- "vortex-mask 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-mask",
  "vortex-proto",
- "vortex-session 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-utils 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
-]
-
-[[package]]
-name = "vortex-array"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
-dependencies = [
- "arc-swap",
- "arcref",
- "arrow-buffer",
- "async-lock",
- "bytes",
- "cfg-if",
- "enum-iterator",
- "flatbuffers",
- "futures",
- "half",
- "humansize",
- "inventory",
- "itertools",
- "jiff",
- "memchr",
- "num-traits",
- "num_enum",
- "parking_lot",
- "paste",
- "pin-project-lite",
- "prost",
- "prost-types",
- "rand",
- "regex",
- "regex-syntax",
- "rustc-hash",
- "simdutf8",
- "smallvec",
- "static_assertions",
- "tracing",
- "vortex-array-macros 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-compute 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-mask 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-session 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-utils 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-session",
+ "vortex-utils",
 ]
 
 [[package]]
 name = "vortex-array-macros"
 version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.5",
-]
-
-[[package]]
-name = "vortex-array-macros"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1056,21 +1002,7 @@ dependencies = [
  "bytes",
  "itertools",
  "simdutf8",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
-]
-
-[[package]]
-name = "vortex-buffer"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
-dependencies = [
- "allocator-api2",
- "arrow-buffer",
- "bitvec",
- "bytes",
- "itertools",
- "simdutf8",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-error",
 ]
 
 [[package]]
@@ -1078,32 +1010,13 @@ name = "vortex-compute"
 version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
-]
-
-[[package]]
-name = "vortex-compute"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
-dependencies = [
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-buffer",
 ]
 
 [[package]]
 name = "vortex-error"
 version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
-dependencies = [
- "arrow-schema",
- "flatbuffers",
- "jiff",
- "prost",
-]
-
-[[package]]
-name = "vortex-error"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
 dependencies = [
  "arrow-schema",
  "flatbuffers",
@@ -1117,8 +1030,8 @@ version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
  "flatbuffers",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-buffer",
+ "vortex-error",
 ]
 
 [[package]]
@@ -1127,18 +1040,8 @@ version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
  "itertools",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
-]
-
-[[package]]
-name = "vortex-mask"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
-dependencies = [
- "itertools",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-buffer",
+ "vortex-error",
 ]
 
 [[package]]
@@ -1153,15 +1056,14 @@ dependencies = [
 [[package]]
 name = "vortex-row"
 version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
+source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
- "num-traits",
  "smallvec",
- "vortex-array 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-mask 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-session 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-array",
+ "vortex-buffer",
+ "vortex-error",
+ "vortex-mask",
+ "vortex-session",
 ]
 
 [[package]]
@@ -1172,34 +1074,14 @@ dependencies = [
  "arc-swap",
  "lasso",
  "parking_lot",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
- "vortex-utils 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
-]
-
-[[package]]
-name = "vortex-session"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
-dependencies = [
- "arc-swap",
- "lasso",
- "parking_lot",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-utils 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-error",
+ "vortex-utils",
 ]
 
 [[package]]
 name = "vortex-utils"
 version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
-dependencies = [
- "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "vortex-utils"
-version = "0.1.0"
-source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
 dependencies = [
  "hashbrown 0.17.1",
 ]
