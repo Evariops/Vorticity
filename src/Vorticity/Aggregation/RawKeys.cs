@@ -106,13 +106,13 @@ internal sealed class RawLayout
 /// bits zero beside its null bit: equal tuples, equal words.
 /// </para>
 /// <para>
-/// The groups are found as <see cref="PackedKeys{TKey}"/> finds its tuples: by open addressing, a
-/// slot from the top bits of the word times an odd number drawn once a process
-/// (<see cref="MergeHash.Seed"/>), in a table of group numbers at most half full, each beside a byte
-/// of seven bits of the hash read first; the words are kept once, by group. A slot of four bytes
-/// rather than one holding the word: measured on 2026-10-06, a pair of ints at 1.8M groups, nine rows
-/// in ten a new one, ran 1.75 times as long in the engine's own table, whose slot of sixteen bytes
-/// made the table 74 MB where this one takes 16.
+/// The groups are found by open addressing, a slot from the top bits of the word times an odd number
+/// drawn once a process (<see cref="MergeHash.Seed"/>), in a table at most half full whose slot of
+/// four bytes holds a group number plus one in its low bits, as many as the slots', and the hash's
+/// bits below the home's in the rest; the words are kept once, by group. A slot of four bytes rather
+/// than one holding the word: measured on 2026-10-06, a pair of ints at 1.8M groups, nine rows in ten
+/// a new one, ran 1.75 times as long in the engine's own table, whose slot of sixteen bytes made the
+/// table 74 MB where this one takes 16.
 /// </para>
 /// <para>
 /// A key a statistics prove sorted, which hands its rows by range, and a product of bounded columns
@@ -126,11 +126,13 @@ internal sealed class RawKeys<TWord> : GroupKeys
     private readonly RawLayout _layout;
     private TWord[] _keys = new TWord[16];
 
-    // The groups by open addressing, the slots a power of two at most half full: a slot's tag, zero for
-    // none, its top bit set and seven bits of the word's hash below those of its home; and its group
-    // number, read only where the tags agree.
-    private byte[] _tags = new byte[32];
-    private int[] _hashed = new int[32];
+    // The groups by open addressing, the slots a power of two at most half full, zero for none: a
+    // group's number plus one in the low bits, as many as the slots' (a table at most half full numbers
+    // fewer groups), under the bits of the word's hash below those of its home, compared before the
+    // group's word is read. One array: a new word reads and writes one line of it, where a byte of tag
+    // and a group number in two arrays made two lines, the numbers written at random chasing the tags
+    // out of the cache (PLAN-HIGH-CARDINALITY, H11).
+    private uint[] _slots = new uint[32];
 
     // A batch's words, built a column at a time in two halves.
     private ulong[] _low = [];
@@ -151,32 +153,75 @@ internal sealed class RawKeys<TWord> : GroupKeys
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
     {
         ReadOnlySpan<TWord> words = Words(arena, nodes, rows);
-        RowCursor selected = new RowCursor(selection, 0, rows);
         bool hasLast = false;
         TWord last = default;
         int lastGroup = -1;
-        while (selected.Next(out int row))
+        for (int start = 0; start < rows; start += Window)
         {
-            // A row whose tuple is the row before's is a comparison of words.
-            TWord word = words[row];
-            if (!hasLast || !word.Equals(last))
+            int end = Math.Min(rows, start + Window);
+            if (!_appending)
             {
-                last = word;
-                lastGroup = Lookup(word);
-                hasLast = true;
+                Touch(words[start..end]);
             }
 
-            rowGroups[row] = lastGroup;
+            RowCursor selected = new RowCursor(selection, start, end);
+            while (selected.Next(out int row))
+            {
+                // A row whose tuple is the row before's is a comparison of words.
+                TWord word = words[row];
+                if (!hasLast || !word.Equals(last))
+                {
+                    last = word;
+                    lastGroup = Lookup(word);
+                    hasLast = true;
+                }
+
+                rowGroups[row] = lastGroup;
+            }
         }
 
         return false;
+    }
+
+    /// <summary>The rows whose home slots a window reads at once before their lookups.</summary>
+    private const int Window = 256;
+
+    // What the reads ahead found, kept so that they stay.
+    private uint _sink;
+
+    /// <summary>
+    /// Reads the home slot of each word of a window, with no branch on what it holds: the reads go out
+    /// together, and the lookups that follow find their slots' lines in cache, where each waited on its
+    /// own, its branch on the slot unknown until the line came.
+    /// </summary>
+    private void Touch(ReadOnlySpan<TWord> words)
+    {
+        uint[] slots = _slots;
+        int bits = System.Numerics.BitOperations.Log2((uint)slots.Length);
+        uint mask = (uint)slots.Length - 1;
+        ref uint first = ref MemoryMarshal.GetArrayDataReference(slots);
+        ref TWord keys = ref MemoryMarshal.GetArrayDataReference(_keys);
+        uint sink = 0;
+        foreach (TWord word in words)
+        {
+            // The slot at home, and when its bits agree, the word of its group: a word met before is
+            // compared without waiting on its group's word either.
+            uint top = (uint)(Hash(word) >> 32);
+            uint seen = Unsafe.Add(ref first, (nint)(top >> (32 - bits)));
+            uint agrees = (uint)-Unsafe.BitCast<bool, byte>((seen & ~mask) == (top << bits));
+            uint number = seen & mask & agrees;
+            uint group = number - Unsafe.BitCast<bool, byte>(number != 0);
+            sink ^= Unsafe.As<TWord, uint>(ref Unsafe.Add(ref keys, (nint)group));
+        }
+
+        _sink ^= sink;
     }
 
     internal override GroupKeys Fresh() => new RawKeys<TWord>(_layout);
 
     /// <summary>The words of the groups, the slots that find them, and a batch's words.</summary>
     internal override long Footprint =>
-        ((long)(_keys.Length + _words.Length) * Unsafe.SizeOf<TWord>()) + ((long)_hashed.Length * (sizeof(int) + sizeof(byte)))
+        ((long)(_keys.Length + _words.Length) * Unsafe.SizeOf<TWord>()) + ((long)_slots.Length * sizeof(uint))
         + ((long)(_low.Length + _high.Length) * sizeof(ulong));
 
     internal override void Reserve(int groups)
@@ -187,7 +232,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
 
         int slots = (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(32, groups * 2));
-        if (_hashed.Length < slots)
+        if (_slots.Length < slots)
         {
             Rehash(slots);
         }
@@ -199,11 +244,9 @@ internal sealed class RawKeys<TWord> : GroupKeys
     internal override void Release()
     {
         _shelf?.Give(_keys);
-        _shelf?.Give(_hashed);
-        _shelf?.Give(_tags);
+        _shelf?.Give(_slots);
         _keys = [];
-        _tags = new byte[32];
-        _hashed = new int[32];
+        _slots = new uint[32];
         Count = 0;
     }
 
@@ -224,7 +267,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
 
         Count = groups.Length;
-        Rehash(_hashed.Length);
+        Rehash(_slots.Length);
     }
 
     internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map)
@@ -331,33 +374,32 @@ internal sealed class RawKeys<TWord> : GroupKeys
             return Count++;
         }
 
-        // The tags first, a byte a slot, a fifth of the slots' bytes: a new word, nine rows in ten of
-        // 1.8M pairs, finds its free slot without reading a group number or a word, where it read the
-        // word of each group its chain passed (PLAN-HIGH-CARDINALITY, H11).
-        byte[] tags = _tags;
-        int mask = tags.Length - 1;
-        int shift = Shift(tags.Length);
-        ulong hash = Hash(word);
-        int slot = (int)(hash >> shift);
-        byte tag = Tag(hash, shift);
+        // A slot's hash bits first: a new word, nine rows in ten of 1.8M pairs, finds its free slot
+        // without reading a word, where it read the word of each group its chain passed.
+        uint[] slots = _slots;
+        int bits = System.Numerics.BitOperations.Log2((uint)slots.Length);
+        uint mask = (uint)slots.Length - 1;
+        uint top = (uint)(Hash(word) >> 32);
+        uint at = top >> (32 - bits);
+        uint tagged = top << bits;
         while (true)
         {
-            byte seen = tags[slot];
+            uint seen = slots[at];
             if (seen == 0)
             {
                 break;
             }
 
-            if (seen == tag)
+            if ((seen & ~mask) == tagged)
             {
-                int group = _hashed[slot];
+                int group = (int)(seen & mask) - 1;
                 if (_keys[group].Equals(word))
                 {
                     return group;
                 }
             }
 
-            slot = (slot + 1) & mask;
+            at = (at + 1) & mask;
         }
 
         if (Count == _keys.Length)
@@ -367,11 +409,10 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
         int added = Count++;
         _keys[added] = word;
-        tags[slot] = tag;
-        _hashed[slot] = added;
-        if (Count * 2 > tags.Length)
+        slots[at] = tagged | (uint)Count;
+        if (Count * 2 > slots.Length)
         {
-            Rehash(Doubled(tags.Length));
+            Rehash(Doubled(slots.Length));
         }
 
         return added;
@@ -380,37 +421,32 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The slots at <paramref name="length"/>, every group placed again from its word.</summary>
     private void Rehash(int length)
     {
-        byte[] tags = _tags;
-        int[] hashed = _hashed;
-        if (tags.Length == length)
+        uint[] slots = _slots;
+        if (slots.Length == length)
         {
-            tags.AsSpan().Clear();
+            slots.AsSpan().Clear();
         }
         else
         {
-            tags = _shelf is null ? new byte[length] : _shelf.Take<byte>(length, zeroed: true);
-            hashed = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
-            _shelf?.Give(_tags);
-            _shelf?.Give(_hashed);
+            slots = _shelf is null ? new uint[length] : _shelf.Take<uint>(length, zeroed: true);
+            _shelf?.Give(_slots);
         }
 
-        int mask = length - 1;
-        int shift = Shift(length);
+        int bits = System.Numerics.BitOperations.Log2((uint)length);
+        uint mask = (uint)length - 1;
         for (int g = 0; g < Count; g++)
         {
-            ulong hash = Hash(_keys[g]);
-            int slot = (int)(hash >> shift);
-            while (tags[slot] != 0)
+            uint top = (uint)(Hash(_keys[g]) >> 32);
+            uint at = top >> (32 - bits);
+            while (slots[at] != 0)
             {
-                slot = (slot + 1) & mask;
+                at = (at + 1) & mask;
             }
 
-            tags[slot] = Tag(hash, shift);
-            hashed[slot] = g;
+            slots[at] = (top << bits) | (uint)(g + 1);
         }
 
-        _tags = tags;
-        _hashed = hashed;
+        _slots = slots;
     }
 
     /// <summary>A word's hash, whose top bits are its home slot: the word times the process's odd number, the halves of a wide one mixed first.</summary>
@@ -425,14 +461,6 @@ internal sealed class RawKeys<TWord> : GroupKeys
         UInt128 wide = Unsafe.BitCast<TWord, UInt128>(word);
         return (((ulong)wide * MergeHash.Seed) ^ (ulong)(wide >> 64)) * MergeHash.Seed;
     }
-
-    /// <summary>The shift that leaves a hash's home among <paramref name="length"/> slots, a power of two.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Shift(int length) => 64 - System.Numerics.BitOperations.Log2((uint)length);
-
-    /// <summary>A slot's tag: its top bit, so that none is zero, over the seven bits of the hash below the home's.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static byte Tag(ulong hash, int shift) => (byte)(0x80 | (hash >> (shift - 7)));
 
     /// <summary>The words of a batch's rows: each column's bits shifted into their place, a half of the word at a time, and its nulls.</summary>
     private ReadOnlySpan<TWord> Words(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows)
