@@ -55,11 +55,26 @@ internal sealed partial class GroupCore
     /// <summary>The entries a part of the core the governor turns to holds pending at least before it is applied.</summary>
     private const int LeanFloor = 256;
 
-    /// <summary>The entries a part holds pending at least before it is applied: its first bursts fall on sub-tables still small, in cache.</summary>
-    private const int DefaultFloor = 4_096;
+    /// <summary>
+    /// The entries a part holds pending at least before it is applied. A burst early in the pass falls on
+    /// a part whose groups are still to come: its sub-tables grow and split under the bursts after it,
+    /// where the end splits a part once to the depth of all its groups. Measured on the Mac on 2026-10-07
+    /// (H14), at fourteen lanes on 20M rows, 16 384 against 4 096 took ×0.71 to ×0.94 off every
+    /// cardinality from 10⁵ up, nothing at 10³ and 10⁴; 65 536, more off 10⁵ and 10⁶, but ×1.17 at 10⁷
+    /// and ×1.29 on a key a row, its entries waiting past what their groups would hold. At most 64 MiB
+    /// pending past α times the groups, on entries of 16 bytes.
+    /// </summary>
+    private const int DefaultFloor = 16_384;
 
-    /// <summary>The bytes of a sub-table past which it splits, S: within the private cache of any current core.</summary>
-    private const long TableBytes = 256 * 1024;
+    /// <summary>
+    /// The bytes of a sub-table past which it splits, S: within the private cache of any current core,
+    /// half a megabyte where the smallest hold one. Measured on the Mac on 2026-10-07 (H14), at fourteen
+    /// lanes on 20M rows, sub-tables of 16 000 groups against 7 900 (a count and a sum, 528 KB against
+    /// 256 KiB) took ×0.91 to ×0.95 off 10⁷, the stride, ten rows a key and a key a row, nothing below,
+    /// and ×0.83 off four aggregates at ≈ 900 KB; 32 000 groups more off 10⁷ (×0.81), but a megabyte
+    /// fills the whole private cache of a core of a current x64.
+    /// </summary>
+    private const long TableBytes = 512 * 1024;
 
     /// <summary>The most α: past it, reading the sub-tables back weighs a few percent of the batches' bytes, and only the memory grows.</summary>
     private const int MostAlpha = 8;
@@ -94,6 +109,9 @@ internal sealed partial class GroupCore
     /// that finds fewer than about half its rows costs more than it saves. To be measured (H14).
     /// </summary>
     private const double DefaultBypass = 0.5;
+
+    /// <summary>The rows over which a lane measures its cache's hit rate, in capacities of the cache.</summary>
+    private const int DefaultBypassPeriod = 4;
 
     private readonly AggregationPlan _plan;
     private readonly AggregateSlot?[] _settled;
@@ -196,6 +214,7 @@ internal sealed partial class GroupCore
         Capacity = plan.CoreCapacity ?? (int)Math.Max(64, cacheBytes / groupBytes);
         FlushAt = Math.Max(1, (int)(2L * Capacity / 3));
         Bypass = plan.CoreBypass ?? DefaultBypass;
+        BypassPeriod = plan.CoreBypassPeriod ?? DefaultBypassPeriod;
         _tableGroups = plan.CoreTableGroups ?? Math.Max(64, tableBytes / groupBytes);
         _tableBytes = _tableGroups * groupBytes;
         _batchEntries = plan.CoreBatchEntries ?? (int)Math.Max(1, batchBytes / entryBytes);
@@ -234,6 +253,9 @@ internal sealed partial class GroupCore
 
     /// <summary>The share of its rows a lane's cache finds, once it has filled, below which the lane bypasses it, ε.</summary>
     internal double Bypass { get; }
+
+    /// <summary>The rows over which a lane measures its cache's hit rate against ε, in capacities of the cache: ε's period.</summary>
+    internal int BypassPeriod { get; }
 
     /// <summary>Whether a lane's cache has filled, which makes the core the query's state.</summary>
     internal bool Engaged => Volatile.Read(ref _engaged) != 0;
@@ -1513,9 +1535,6 @@ internal struct CountLine
 /// </summary>
 internal sealed class LaneCore
 {
-    /// <summary>The rows over which a lane measures its cache's hit rate, in capacities of the cache.</summary>
-    private const int MeasuredCaches = 4;
-
     /// <summary>The rows a lane bypasses its cache for before it measures it again, in capacities: keys that change as the rows go find it useful again.</summary>
     private const int BypassedCaches = 32;
 
@@ -1533,7 +1552,7 @@ internal sealed class LaneCore
     private int _freeCount;
     private int _deposited;
 
-    // The cache's hit rate over MeasuredCaches capacities of rows, judged once it has filled: the rows
+    // The cache's hit rate over the core's BypassPeriod capacities of rows, judged once it has filled: the rows
     // it folded and the groups they added; the rows left to bypass it for.
     private bool _filled;
     private long _measured;
@@ -1610,7 +1629,7 @@ internal sealed class LaneCore
         }
 
         // Only a cache that has filled is judged: under its capacity, every key stays in it.
-        if (_filled && _measured >= (long)MeasuredCaches * _core.Capacity)
+        if (_filled && _measured >= (long)_core.BypassPeriod * _core.Capacity)
         {
             if (_added > (1 - _core.Bypass) * _measured)
             {

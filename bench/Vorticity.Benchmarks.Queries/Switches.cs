@@ -38,7 +38,8 @@ internal static class Switches
         _ when name.StartsWith("table:", StringComparison.Ordinal) => CorePair(name, "CoreTableGroups", "table"),
         _ when name.StartsWith("batch:", StringComparison.Ordinal) => CorePair(name, "CoreBatchEntries", "batch"),
         _ when name.StartsWith("bypass:", StringComparison.Ordinal) => CorePair(name, "CoreBypass", "bypass", percent: true),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, extremes, coredistinct, capacity:A:B, alpha:A:B, floor:A:B, table:A:B, batch:A:B, bypass:A:B (percent)."),
+        _ when name.StartsWith("period:", StringComparison.Ordinal) => CorePair(name, "CoreBypassPeriod", "period"),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, extremes, coredistinct, capacity:A:B, alpha:A:B, floor:A:B, table:A:B, batch:A:B, bypass:A:B (percent), period:A:B."),
     };
 
     /// <summary>Both settings, <paramref name="first"/> then <paramref name="then"/>: the core on, and one of its own switches.</summary>

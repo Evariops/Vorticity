@@ -308,6 +308,9 @@ internal sealed class AggregationPlan
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
 
+    /// <summary>The rows a lane's cache is judged over against ε, in capacities of the cache, or null for the core's own: ε's period (H14).</summary>
+    internal int? CoreBypassPeriod { get; set; }
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
