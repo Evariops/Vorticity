@@ -1379,12 +1379,25 @@ internal sealed class CorePart
 /// without folding a row, and a lane whose rows the core cannot take yet waits for the next table given
 /// back. Both wait on tasks, never on a thread.
 /// </remarks>
-internal sealed class CorePressure(Func<GroupCore?> make, int lanes)
+internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
 {
     private readonly Lock _gate = new Lock();
     private GroupCore? _core;
     private bool _made;
     private bool _turned;
+
+    // Whether the first lane turned on what its rows showed rather than on its budget: the core is
+    // then the one a query takes for its speed, not the lean one that holds memory down.
+    private bool _outgrown;
+
+    /// <summary>
+    /// A lane turns because its rows showed a key the lanes' tables cannot hold well (decision 14): the
+    /// core, if not made yet, is made for speed rather than lean.
+    /// </summary>
+    internal void Outgrew() => Volatile.Write(ref _outgrown, true);
+
+    /// <summary>Whether a lane turned on what its rows showed: every lane then turns, whatever its table holds.</summary>
+    internal bool Outgrown => Volatile.Read(ref _outgrown);
 
     // The turn, made with the core: a query its budget holds allocates neither.
     private SemaphoreSlim? _turn;
@@ -1409,7 +1422,7 @@ internal sealed class CorePressure(Func<GroupCore?> make, int lanes)
             {
                 if (!_made)
                 {
-                    _core = make();
+                    _core = make(!Volatile.Read(ref _outgrown));
                     if (_core is not null)
                     {
                         _core.Pressure = this;

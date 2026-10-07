@@ -462,6 +462,40 @@ public sealed partial class GroupCoreTests
         }
     }
 
+    // A hashed key, which nothing bounds before the pass, takes the core once a lane's first rows were
+    // nearly all new groups, a key of a million values or more, its answers the lanes' tables'; one of
+    // ten thousand values, spread too wide to be numbered by value, keeps the tables (decision 14). Two
+    // lanes of the core's, 225 000 rows each, the rows a lane must have to judge.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AHashedKeyWhoseFirstRowsAreAllNewTakesTheCore(bool wide)
+    {
+        const int Count = 450_000;
+        Row[] rows = new Row[Count];
+        for (int row = 0; row < Count; row++)
+        {
+            ulong mix = (ulong)row * 0x9E37_79B9_7F4A_7C15UL;
+            int key = wide ? (int)(mix >> 33) : (int)((mix >> 20) % 10_000) * 100_003;
+            rows[row] = new Row(key, $"name-{(mix >> 40) % 2_000:D4}", row % 7, (long)((mix >> 8) % 100), ((double)((mix >> 12) % 100_000) / 3) - 9_000);
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 2);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, KeyStats> reference = ByKey(await ListAsync(Query(file, static plan => plan.CoreOnNew = false).As<KeyStats>()));
+            Vorticity.Aggregation chosen = Query(file, static plan => plan.CoreLanes = 2);
+            Assert.Equal(reference, ByKey(await ListAsync(chosen.As<KeyStats>())));
+            Assert.Equal(wide, chosen.Plan.LastRun!.Core is not null);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static void Tiny(AggregationPlan plan)
     {
         plan.Core = true;

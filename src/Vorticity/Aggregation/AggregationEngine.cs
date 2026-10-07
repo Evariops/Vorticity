@@ -245,6 +245,14 @@ internal sealed class AggregationPlan
     internal bool CoreScattered { get; set; } = true;
 
     /// <summary>
+    /// Whether a hashed key, which nothing bounds before the pass, takes the core on its lanes once a
+    /// lane's first <see cref="AggregationPartition.JudgedRows"/> rows were nearly all new groups
+    /// (decision 14): a key of a million values or more, which the lanes' tables would each hold. False
+    /// to leave the core to <see cref="Core"/>, the zones and pressure.
+    /// </summary>
+    internal bool CoreOnNew { get; set; } = true;
+
+    /// <summary>
     /// The span of values from which a key the zones say scattered takes the core: measured on
     /// 2026-10-07 at fourteen lanes, the core ×0.72 at 10⁶ random keys and ×0.52 at 10⁷, ×2.47 at 10⁵.
     /// </summary>
@@ -723,6 +731,63 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>
+    /// Whether the lane, one of the core's lanes on a hashed key, turns to the core when the groups its
+    /// first <see cref="JudgedRows"/> rows made say a key of <see cref="TurnValues"/> values or more
+    /// (decision 14).
+    /// </summary>
+    internal bool TurnOnNew { get; init; }
+
+    /// <summary>The rows after which a lane judges its key by the groups they made: a batch of the scan's at least.</summary>
+    internal const long JudgedRows = 65_536;
+
+    /// <summary>
+    /// The rows a lane must have in hand, the source's shared among the lanes, for its key to be judged:
+    /// with fewer, its table stays small and its merge cheap, which the core's fixed costs do not repay.
+    /// Measured on 2026-10-07 at fourteen lanes: 286 000 rows a lane of a million uuids took the core
+    /// 0.55 times the lanes' tables, 143 000 of 1.8M pairs of integers 2.97 times.
+    /// </summary>
+    internal const long LaneRows = 200_000;
+
+    /// <summary>
+    /// The values of a key from which a lane turns: between 10⁵, where the core took 2.5 times the
+    /// lanes' tables at fourteen lanes, and 10⁶, where it took 0.42 to 0.72 of them.
+    /// </summary>
+    internal const double TurnValues = 500_000;
+
+    /// <summary>
+    /// The values of a uniform key whose <paramref name="rows"/> draws made <paramref name="groups"/>
+    /// distinct ones: the <c>K</c> of <c>groups = K (1 − e^(−rows / K))</c>, found by halving its range;
+    /// infinite when every row made a group. A key whose rows favour some values reads as fewer.
+    /// </summary>
+    internal static double EstimatedValues(long rows, long groups)
+    {
+        if (groups >= rows)
+        {
+            return double.PositiveInfinity;
+        }
+
+        double low = groups;
+        double high = (double)rows * rows;
+        for (int step = 0; step < 64 && high - low > 1; step++)
+        {
+            double middle = Math.Sqrt(low * high);
+            if (middle * -double.ExpM1(-rows / middle) < groups)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low;
+    }
+
+    // Whether the lane judged its first rows (TurnOnNew).
+    private bool _judged;
+
     private readonly CorePressure? _pressure;
 
     /// <summary>The query's memory, in which the partition reserves what its groups hold (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
@@ -885,9 +950,10 @@ internal sealed class AggregationPartition
     internal async ValueTask TurnAsync(CancellationToken cancellationToken)
     {
         // A lane whose table holds less than the core would cost it keeps its table, but for one already
-        // past its budget when the core spills, which a lane's table cannot.
+        // past its budget when the core spills, which a lane's table cannot; and but when a lane turned
+        // on what its rows showed (decision 14), where every lane turns while its table is small.
         CorePressure pressure = Pressure!;
-        if (pressure.Core is not { } core || (_turnAt is null && _arrays!.Out < core.LaneBytes && !(core.Spills && _arrays.Overdrawn)))
+        if (pressure.Core is not { } core || (_turnAt is null && !pressure.Outgrown && _arrays!.Out < core.LaneBytes && !(core.Spills && _arrays.Overdrawn)))
         {
             if (_arrays is { Overdrawn: true })
             {
@@ -1031,6 +1097,19 @@ internal sealed class AggregationPartition
         if (_turnAt is int turnAt)
         {
             return _folded++ >= turnAt;
+        }
+
+        // Nearly every one of its first rows a new group, a hashed key of a million values or more
+        // (decision 14): the lane turns to the core while its table is a batch's, which emptying costs
+        // little, where turning once the table outgrew the cache paid for it twice.
+        if (TurnOnNew && !_judged && _rowsFolded >= JudgedRows)
+        {
+            _judged = true;
+            if (Keys is { NumberedByValue: false } keys && EstimatedValues(_rowsFolded, keys.Count) >= TurnValues)
+            {
+                Pressure!.Outgrew();
+                return true;
+            }
         }
 
         // A doubling and the entries its table empties into, on every lane that still grows one: the
@@ -1910,7 +1989,7 @@ internal static class AggregationEngine
             // spills its parts to the scratch, which a lane's table cannot (H6).
             KeyFacts? tableFacts = facts;
             pressure = core is null && plan.CoreUnderPressure && plan.Grouped && !sorted && top is null && (lanes > 1 || plan.CoreSpills || plan.CoreTurnAt is not null)
-                ? new CorePressure(() => GroupCore.Holding(plan, settled, columns, inputs, source, tableFacts, sorted, top: null, lanes, memory, lean: true), lanes)
+                ? new CorePressure(lean => GroupCore.Holding(plan, settled, columns, inputs, source, tableFacts, sorted, top: null, lanes, memory, lean), lanes)
                 : null;
 
             if (ranges is null)
@@ -1947,6 +2026,8 @@ internal static class AggregationEngine
                         Top = top is { FirstMet: true } ? null : top,
                         Core = core?.Lane(),
                         Pressure = pressure,
+                        TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
+                            && facts?.Rows is long sourceRows && sourceRows >= lanes * AggregationPartition.LaneRows,
                     };
                     if (core is { Lean: true })
                     {

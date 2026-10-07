@@ -258,6 +258,13 @@ internal abstract class GroupKeys
         CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int frontier, bool descending, Span<ulong> narrowed) => false;
 
     /// <summary>
+    /// Whether the groups are numbered by the key's value, in a table the statistics bound: such a key
+    /// takes the core from what its zones say, before the pass, and a hashed one from what its first
+    /// rows show (decision 14).
+    /// </summary>
+    internal virtual bool NumberedByValue => false;
+
+    /// <summary>
     /// Whether group <paramref name="group"/>'s key, an integer, lies below <paramref name="bound"/>:
     /// the groups a floor the zones give proves final. False for the null group, and for keys these
     /// do not read as integers.
@@ -1133,6 +1140,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>Whether the groups are numbered by value, in the pages of a table of groups, rather than hashed.</summary>
     internal bool ByValue => _pages is not null;
+
+    internal override bool NumberedByValue => ByValue;
 
     /// <summary>The index, the keys of the groups, the pages of the table of groups, the values a batch reads and its homes and rows left.</summary>
     internal override long Footprint =>
