@@ -108,10 +108,11 @@ internal sealed class RawLayout
 /// <para>
 /// The groups are found as <see cref="PackedKeys{TKey}"/> finds its tuples: by open addressing, a
 /// slot from the top bits of the word times an odd number drawn once a process
-/// (<see cref="MergeHash.Seed"/>), in a table of group numbers at most half full; the words are kept
-/// once, by group. A slot of four bytes rather than one holding the word: measured on 2026-10-06, a
-/// pair of ints at 1.8M groups, nine rows in ten a new one, ran 1.75 times as long in the engine's
-/// own table, whose slot of sixteen bytes made the table 74 MB where this one takes 16.
+/// (<see cref="MergeHash.Seed"/>), in a table of group numbers at most half full, each beside a byte
+/// of seven bits of the hash read first; the words are kept once, by group. A slot of four bytes
+/// rather than one holding the word: measured on 2026-10-06, a pair of ints at 1.8M groups, nine rows
+/// in ten a new one, ran 1.75 times as long in the engine's own table, whose slot of sixteen bytes
+/// made the table 74 MB where this one takes 16.
 /// </para>
 /// <para>
 /// A key a statistics prove sorted, which hands its rows by range, and a product of bounded columns
@@ -125,9 +126,11 @@ internal sealed class RawKeys<TWord> : GroupKeys
     private readonly RawLayout _layout;
     private TWord[] _keys = new TWord[16];
 
-    // The groups by open addressing: a group number a slot, -1 for none, the slots a power of two at
-    // most half full.
-    private int[] _hashed = NewSlots(32);
+    // The groups by open addressing, the slots a power of two at most half full: a slot's tag, zero for
+    // none, its top bit set and seven bits of the word's hash below those of its home; and its group
+    // number, read only where the tags agree.
+    private byte[] _tags = new byte[32];
+    private int[] _hashed = new int[32];
 
     // A batch's words, built a column at a time in two halves.
     private ulong[] _low = [];
@@ -173,7 +176,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     /// <summary>The words of the groups, the slots that find them, and a batch's words.</summary>
     internal override long Footprint =>
-        ((long)(_keys.Length + _words.Length) * Unsafe.SizeOf<TWord>()) + ((long)_hashed.Length * sizeof(int))
+        ((long)(_keys.Length + _words.Length) * Unsafe.SizeOf<TWord>()) + ((long)_hashed.Length * (sizeof(int) + sizeof(byte)))
         + ((long)(_low.Length + _high.Length) * sizeof(ulong));
 
     internal override void Reserve(int groups)
@@ -197,8 +200,10 @@ internal sealed class RawKeys<TWord> : GroupKeys
     {
         _shelf?.Give(_keys);
         _shelf?.Give(_hashed);
+        _shelf?.Give(_tags);
         _keys = [];
-        _hashed = NewSlots(32);
+        _tags = new byte[32];
+        _hashed = new int[32];
         Count = 0;
     }
 
@@ -326,20 +331,30 @@ internal sealed class RawKeys<TWord> : GroupKeys
             return Count++;
         }
 
-        int[] hashed = _hashed;
-        int mask = hashed.Length - 1;
-        int slot = Home(word, hashed.Length);
+        // The tags first, a byte a slot, a fifth of the slots' bytes: a new word, nine rows in ten of
+        // 1.8M pairs, finds its free slot without reading a group number or a word, where it read the
+        // word of each group its chain passed (PLAN-HIGH-CARDINALITY, H11).
+        byte[] tags = _tags;
+        int mask = tags.Length - 1;
+        int shift = Shift(tags.Length);
+        ulong hash = Hash(word);
+        int slot = (int)(hash >> shift);
+        byte tag = Tag(hash, shift);
         while (true)
         {
-            int group = hashed[slot];
-            if (group < 0)
+            byte seen = tags[slot];
+            if (seen == 0)
             {
                 break;
             }
 
-            if (_keys[group].Equals(word))
+            if (seen == tag)
             {
-                return group;
+                int group = _hashed[slot];
+                if (_keys[group].Equals(word))
+                {
+                    return group;
+                }
             }
 
             slot = (slot + 1) & mask;
@@ -352,10 +367,11 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
         int added = Count++;
         _keys[added] = word;
-        hashed[slot] = added;
-        if (Count * 2 > hashed.Length)
+        tags[slot] = tag;
+        _hashed[slot] = added;
+        if (Count * 2 > tags.Length)
         {
-            Rehash(Doubled(hashed.Length));
+            Rehash(Doubled(tags.Length));
         }
 
         return added;
@@ -364,51 +380,59 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The slots at <paramref name="length"/>, every group placed again from its word.</summary>
     private void Rehash(int length)
     {
-        int[] hashed = _hashed.Length == length ? _hashed : NewSlots(length, _shelf);
-        if (ReferenceEquals(hashed, _hashed))
+        byte[] tags = _tags;
+        int[] hashed = _hashed;
+        if (tags.Length == length)
         {
-            hashed.AsSpan().Fill(-1);
+            tags.AsSpan().Clear();
         }
         else
         {
+            tags = _shelf is null ? new byte[length] : _shelf.Take<byte>(length, zeroed: true);
+            hashed = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
+            _shelf?.Give(_tags);
             _shelf?.Give(_hashed);
         }
 
         int mask = length - 1;
+        int shift = Shift(length);
         for (int g = 0; g < Count; g++)
         {
-            int slot = Home(_keys[g], length);
-            while (hashed[slot] >= 0)
+            ulong hash = Hash(_keys[g]);
+            int slot = (int)(hash >> shift);
+            while (tags[slot] != 0)
             {
                 slot = (slot + 1) & mask;
             }
 
+            tags[slot] = Tag(hash, shift);
             hashed[slot] = g;
         }
 
+        _tags = tags;
         _hashed = hashed;
     }
 
-    /// <summary>A word's first slot among <paramref name="length"/>, a power of two: the top bits of the word times the process's odd number, the halves of a wide one mixed first.</summary>
+    /// <summary>A word's hash, whose top bits are its home slot: the word times the process's odd number, the halves of a wide one mixed first.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Home(TWord word, int length)
+    private static ulong Hash(TWord word)
     {
-        int shift = 64 - System.Numerics.BitOperations.Log2((uint)length);
         if (typeof(TWord) == typeof(ulong))
         {
-            return (int)((Unsafe.BitCast<TWord, ulong>(word) * MergeHash.Seed) >> shift);
+            return Unsafe.BitCast<TWord, ulong>(word) * MergeHash.Seed;
         }
 
         UInt128 wide = Unsafe.BitCast<TWord, UInt128>(word);
-        return (int)(((((ulong)wide * MergeHash.Seed) ^ (ulong)(wide >> 64)) * MergeHash.Seed) >> shift);
+        return (((ulong)wide * MergeHash.Seed) ^ (ulong)(wide >> 64)) * MergeHash.Seed;
     }
 
-    private static int[] NewSlots(int length, ArrayShelf? shelf = null)
-    {
-        int[] slots = shelf is null ? GC.AllocateUninitializedArray<int>(length) : shelf.Take<int>(length, zeroed: false);
-        slots.AsSpan().Fill(-1);
-        return slots;
-    }
+    /// <summary>The shift that leaves a hash's home among <paramref name="length"/> slots, a power of two.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Shift(int length) => 64 - System.Numerics.BitOperations.Log2((uint)length);
+
+    /// <summary>A slot's tag: its top bit, so that none is zero, over the seven bits of the hash below the home's.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte Tag(ulong hash, int shift) => (byte)(0x80 | (hash >> (shift - 7)));
 
     /// <summary>The words of a batch's rows: each column's bits shifted into their place, a half of the word at a time, and its nulls.</summary>
     private ReadOnlySpan<TWord> Words(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows)
@@ -519,6 +543,12 @@ internal sealed class RawKeys<TWord> : GroupKeys
         where TValue : unmanaged
     {
         StorageKind kind = _layout.Shapes[component].Kind;
+        if (kind == StorageKind.Primitive && store.Leaf is FixedStore leaf && leaf.Width == Unsafe.SizeOf<TValue>())
+        {
+            AppendValues<TValue>(component, store.IsNullable, leaf, groups);
+            return;
+        }
+
         foreach (int group in groups)
         {
             (bool isNull, ulong bits) = Component(_keys[group], component);
@@ -533,7 +563,56 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
     }
 
+    /// <summary>
+    /// Component <paramref name="component"/> of each group's word written to <paramref name="leaf"/> a chunk at
+    /// a time, with its nulls when the column takes them: one value a call took a sixth of a group by of 1.8M
+    /// pairs (PLAN-HIGH-CARDINALITY, H11). A null's bits are zero, the default a column without nulls takes.
+    /// </summary>
+    private void AppendValues<TValue>(int component, bool nullable, FixedStore leaf, ReadOnlySpan<int> groups)
+        where TValue : unmanaged
+    {
+        TWord[] keys = _keys;
+        int shift = _layout.Shifts[component];
+        int nullBit = nullable ? _layout.NullBits[component] : -1;
+        if (nullBit < 0)
+        {
+            Span<TValue> values = MemoryMarshal.Cast<byte, TValue>(leaf.Reserve(groups.Length));
+            for (int i = 0; i < groups.Length; i++)
+            {
+                values[i] = Value<TValue>(Bits(keys[groups[i]], shift));
+            }
+
+            return;
+        }
+
+        const int Chunk = 256;
+        Span<TValue> chunk = stackalloc TValue[Chunk];
+        Span<ulong> validity = stackalloc ulong[Chunk / 64];
+        for (int from = 0; from < groups.Length; from += Chunk)
+        {
+            int count = Math.Min(Chunk, groups.Length - from);
+            validity.Clear();
+            for (int i = 0; i < count; i++)
+            {
+                TWord word = keys[groups[from + i]];
+                chunk[i] = Value<TValue>(Bits(word, shift));
+                validity[i >> 6] |= (~Bits(word, nullBit) & 1) << (i & 63);
+            }
+
+            leaf.Append<TValue>(chunk[..count], validity);
+        }
+    }
+
+    /// <summary>A word's bits from <paramref name="shift"/> up, in the low ones of the result.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Bits(TWord word, int shift)
+    {
+        (ulong low, ulong high) = KeyWords.Of(word);
+        return (shift < 64 ? low : high) >> (shift & 63);
+    }
+
     /// <summary>A value back from its bits, the low ones of <paramref name="bits"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static TValue Value<TValue>(ulong bits)
         where TValue : unmanaged => Unsafe.SizeOf<TValue>() switch
         {
