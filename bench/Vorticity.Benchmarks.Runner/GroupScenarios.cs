@@ -17,9 +17,10 @@ namespace Vorticity.Bench.Runner;
 /// A name is <c>group-&lt;aggregates&gt;-&lt;key&gt;</c>, run over one of the bench's spread files
 /// (<c>~/.cache/vorticity/queries/spread-random-4000000.vortex</c> and its siblings, which
 /// <c>vortex-queries --matrix small</c> writes): <c>total</c> (a count and a sum), <c>four</c>,
-/// <c>deviation</c>, <c>top</c> (ordered by the count, the first hundred), <c>most</c> (ordered by
-/// the largest value, the first hundred), <c>countdistinct</c>, <c>distinct</c> (the key's distinct
-/// values) over an integer key (<c>k3</c> to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); and
+/// <c>range</c> (a count, the least and the largest of a value), <c>deviation</c>, <c>top</c> (ordered
+/// by the count, the first hundred), <c>most</c> (ordered by the largest value, the first hundred),
+/// <c>countdistinct</c>, <c>distinct</c> (the key's distinct values) over an integer key (<c>k3</c>
+/// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); and
 /// <c>strided</c>, a count and a sum over the strided file's long keys.
 /// </para>
 /// <para>
@@ -68,6 +69,7 @@ internal static class GroupScenarios
         {
             "total" => path => TotalAsync(path, key, configure),
             "four" => path => FourAsync(path, key, configure),
+            "range" => path => RangeAsync(path, key, configure),
             "deviation" => path => DeviationAsync(path, key, configure),
             "top" => path => TopAsync(path, key, configure),
             "most" => path => MostAsync(path, key, configure),
@@ -179,6 +181,21 @@ internal static class GroupScenarios
             .GroupBy(key)
             .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value), g.Average(s => s.Real), g.Max(s => s.Value))), configure)
             .As<KeyFour>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> RangeAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyRange> groups in Configured(file.Scan<Spread>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.Min(s => s.Value), g.Max(s => s.Value))), configure)
+            .As<KeyRange>())
         {
             rows += Sum(groups.Column<long>(1).Values);
         }
@@ -314,6 +331,10 @@ public partial record struct KeyFour(int Key, long Count, long Total, double? Me
 /// <summary>An integer key's rows and the standard deviation of a float.</summary>
 [VortexRecord]
 public partial record struct KeyDeviation(int Key, long Count, double? Deviation);
+
+/// <summary>An integer key's rows and the smallest and largest of a value.</summary>
+[VortexRecord]
+public partial record struct KeyRange(int Key, long Count, long? Least, long? Most);
 
 /// <summary>A group's key and its largest value.</summary>
 [VortexRecord]
