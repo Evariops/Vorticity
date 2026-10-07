@@ -52,6 +52,12 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         _op = op;
     }
 
+    /// <summary>
+    /// Whether the answer is the state converted with an overflow check, <c>TResult.CreateChecked</c>: the
+    /// state itself when it is the answer's type, which the results then copy with no call a group.
+    /// </summary>
+    internal bool Checked { get; init; }
+
     internal override TState Seed => _seed;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
@@ -406,6 +412,18 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
     {
         StateView<TState> states = States;
+        if (typeof(TState) == typeof(TResult) && Checked)
+        {
+            // A total of the answer's type: the state as it is, where the delegate cost a call a group.
+            for (int i = 0; i < groups.Length; i++)
+            {
+                TState state = states[groups[i]];
+                into[i] = Unsafe.As<TState, TResult>(ref state);
+            }
+
+            return;
+        }
+
         Func<TState, TResult> finish = _finish;
         for (int i = 0; i < groups.Length; i++)
         {

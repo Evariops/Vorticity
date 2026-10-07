@@ -198,16 +198,16 @@ internal static class Aggregators
         where TValue : unmanaged, IBinaryInteger<TValue>
         where TResult : INumber<TResult> =>
         source => Proven(source, shape, (UInt128)long.MaxValue)
-            ? new FixedSlot<TValue, long, NarrowSignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s))
-            : new FixedSlot<TValue, Int128, SignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s));
+            ? new FixedSlot<TValue, long, NarrowSignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true }
+            : new FixedSlot<TValue, Int128, SignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true };
 
     /// <summary>The state of a sum of unsigned integers that no mean reads: its total alone.</summary>
     private static Func<ScanSource?, AggregateSlot<TResult>> UnsignedAlone<TValue, TResult>(ColumnShape shape)
         where TValue : unmanaged, IBinaryInteger<TValue>
         where TResult : INumber<TResult> =>
         source => Proven(source, shape, ulong.MaxValue)
-            ? new FixedSlot<TValue, ulong, NarrowUnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s))
-            : new FixedSlot<TValue, UInt128, UnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s));
+            ? new FixedSlot<TValue, ulong, NarrowUnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true }
+            : new FixedSlot<TValue, UInt128, UnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true };
 
     /// <summary>Whether the source's rows times the column's largest magnitude, from its statistics, stay at or below <paramref name="limit"/>.</summary>
     private static bool Proven(ScanSource? source, ColumnShape shape, UInt128 limit)
