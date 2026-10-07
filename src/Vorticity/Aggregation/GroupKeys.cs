@@ -696,6 +696,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 word &= validity[w];
             }
 
+            if (word == ulong.MaxValue)
+            {
+                narrowed[w] = Reached(values.Slice(w << 6, 64), edge, descending);
+                continue;
+            }
+
             ulong kept = 0;
             while (word != 0)
             {
@@ -709,6 +715,32 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
+    /// edge, compared with no branch, as <see cref="ValueFrontier"/> compares its values: from the
+    /// word's bits a row at a time, each row waited on the one before it.
+    /// </summary>
+    private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending)
+    {
+        ulong reached = 0;
+        if (descending)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                reached |= (values[i].CompareTo(edge) >= 0 ? 1UL : 0UL) << i;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                reached |= (values[i].CompareTo(edge) <= 0 ? 1UL : 0UL) << i;
+            }
+        }
+
+        return reached;
     }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
