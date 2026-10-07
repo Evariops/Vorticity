@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅; delivery part by part without a spill, the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅; the top-k by parts, the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -812,6 +812,17 @@ fourteen lanes on 10⁶ keys end exact within 6 % of the budget. An order or a w
 spilled needs every group at once, and fails saying so until the external sort. A key of text, a
 composite holding one and a distinct count do not enter the core, and are refused past their budget.
 
+**Part by part.** A core's result with no order nor window over its groups is delivered part by part.
+Once the lanes have deposited their caches, a worker a lane but one takes the parts in turn: it applies
+one, applies the operators on groups to its groups — a filter on them, the fetch of chosen rows, sized
+to the part — writes them into stores of the result's columns while they are in its cache, lets the
+part go, and hands its batches to the reader, a part a worker at most ahead of it; the reader applies
+the next part itself when none waits. The null groups follow as a part of their own, then the parts
+spilled. The first batch leaves once the first part is applied, and the result's window is cut across
+the parts' batches, a batch holding a part's groups at most. On 10⁷ keys, the first batch comes a
+quarter sooner at one lane and a third at fourteen, where the whole result takes 0.58 of the time, its
+batches built on every lane.
+
 Not yet: a comfort budget the host grants, none by default, buying a higher α; an order over spilled
 groups by an external sort of the result; text keys and distinct counts in the spill. Every state
 will spill as bytes, a custom state without references with its record; a custom aggregator whose
@@ -838,7 +849,8 @@ the statistics alone:
 A key's form is known only once its block is read, so the plan says what is possible and the
 statistics what happened. Once the result is read, its `ScanStatistics` carry `Grouping`, a
 `GroupStatistics`: `Groups`, the groups the pass found before any operator on them; `PeakGroups`, the
-most held at once, which a streaming group by keeps small; `PeakBytes`, the most it held of its memory
+most held at once, which a streaming group by keeps small, and a core delivering part by part to the
+parts applied and not yet built; `PeakBytes`, the most it held of its memory
 budget; `Lanes` and `MergeParts`; what the core did, `Core`, `CacheEvictions`, `BypassedRows`,
 `Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts` and
 `SpilledBytes`, zero until spilling comes; the key blocks by how they were grouped,
