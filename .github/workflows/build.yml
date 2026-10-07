@@ -29,8 +29,95 @@ env:
 # library's one OS-specific path, the file identity behind the mapping cache, answers that it
 # cannot tell where it has no binding.
 jobs:
+  # Which of the jobs below a change can affect, from the paths it touches: a pull request that
+  # edits only documentation, or a Rust tool CI never builds, runs none of them. The trigger itself
+  # filters no path, because the branch rule requires the checks job and a workflow that does not
+  # start never reports it: the pull request would wait for it forever. A path the table does not
+  # name runs everything, and so does any run other than a push or a pull request.
+  changes:
+    name: choose the jobs the change needs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      test: ${{ steps.paths.outputs.test }}
+      package: ${{ steps.paths.outputs.package }}
+      crosscheck: ${{ steps.paths.outputs.crosscheck }}
+    steps:
+      # Two commits and their trees, no file contents: a pull request's merge commit has the base
+      # it merges into as its first parent, so the two give exactly what the pull request changes.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          filter: blob:none
+          sparse-checkout: .github
+
+      - name: Sort the changed paths
+        id: paths
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          run_all() {
+            echo "$1: every job runs"
+            printf '%s=true\n' test package crosscheck >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base=HEAD^1 ;;
+            # A push to main can carry several commits; the one it moved the branch from has to be
+            # fetched, the repository being public.
+            push)
+              [[ "$BEFORE" =~ ^0+$ ]] && run_all "a new branch, nothing to compare with"
+              git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$BEFORE" ||
+                run_all "$BEFORE could not be fetched"
+              base=$BEFORE
+              ;;
+            *) run_all "a $GITHUB_EVENT_NAME run" ;;
+          esac
+          # Renames as a deletion and an addition, so the old path counts as much as the new one.
+          paths=$(git diff --name-only --no-renames "$base" HEAD) || run_all "the diff failed"
+
+          test=false package=false crosscheck=false
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            case "$path" in
+              # Read by no build and no test: the documentation, the repository's own settings, and
+              # the Rust tools CI never builds (tools/row-vectors and tools/vxbench-rs are run by
+              # hand, their output committed).
+              docs/* | LICENSE | .gitignore | renovate.json | .github/ISSUE_TEMPLATE/* | \
+                .github/release-drafter.yml | .github/workflows/release-drafter.yml | \
+                tools/row-vectors/* | tools/vxbench-rs/* | tools/pmu/* | tools/disasm.sh) ;;
+              # Every job builds the library. Its markdown is code too: a package's readme, the
+              # analyzer release notes the generators read.
+              src/*) test=true package=true crosscheck=true ;;
+              # Packed into every package, and read by nothing else.
+              README.md | NOTICE) package=true ;;
+              # No test reads a markdown file.
+              *.md) ;;
+              # The reference's crates, and the upstream schemas the drift report compares.
+              tools/conformance-gen/* | spec/*) crosscheck=true ;;
+              # In the solution the package job builds, and referenced by no test project.
+              bench/* | samples/* | tools/vxdump/* | tools/testimpact/*) package=true ;;
+              # The script that writes Vorticity.Zstd's test data.
+              tools/native-ref/*) test=true ;;
+              # The tests, the build's configuration, this workflow, and any path added later.
+              *) test=true package=true crosscheck=true ;;
+            esac
+          done <<< "$paths"
+
+          echo "$paths"
+          echo "test=$test package=$package crosscheck=$crosscheck"
+          {
+            echo "test=$test"
+            echo "package=$package"
+            echo "crosscheck=$crosscheck"
+          } >> "$GITHUB_OUTPUT"
+
   test:
     name: test ${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.test == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -92,6 +179,8 @@ jobs:
 
   package:
     name: pack, publish vxdump as Native AOT, fuzz the parser
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -242,6 +331,8 @@ jobs:
 
   crosscheck:
     name: cross-check with the reference
+    needs: changes
+    if: needs.changes.outputs.crosscheck == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -310,25 +401,36 @@ jobs:
           fi
 
   # The check the branch rule requires, by the name the rule gives it: it passes when every job
-  # above it passed, so the rule names one check however the jobs are split. It runs whatever they
-  # end as, since a required check that is skipped counts as passed.
+  # above it the change needs passed, so the rule names one check however the jobs are split. It
+  # runs whatever they end as, since a required check that is skipped counts as passed. A job may be
+  # skipped only because the changes job ran and said the change does not need it.
   checks:
     name: build, test and cross-check
-    needs: [test, package, crosscheck]
+    needs: [changes, test, package, crosscheck]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Every job passed
+      - name: Every job the change needs passed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          CHANGES: ${{ needs.changes.result }}
+          TEST: ${{ needs.test.result }}/${{ needs.changes.outputs.test }}
+          PACKAGE: ${{ needs.package.result }}/${{ needs.changes.outputs.package }}
+          CROSSCHECK: ${{ needs.crosscheck.result }}/${{ needs.changes.outputs.crosscheck }}
         run: |
-          for result in $RESULTS; do
-            if [ "$result" != success ]; then
-              echo "a job ended $result: $RESULTS"
-              exit 1
-            fi
+          if [ "$CHANGES" != success ]; then
+            echo "choosing the jobs ended $CHANGES"
+            exit 1
+          fi
+          status=0
+          for job in "test $TEST" "package $PACKAGE" "crosscheck $CROSSCHECK"; do
+            case "${job#* }" in
+              success/true) echo "$job: passed" ;;
+              skipped/false) echo "$job: not needed" ;;
+              *) echo "$job: the job ended ${job#* }"; status=1 ;;
+            esac
           done
+          exit $status
 
   # A published release's packages go to nuget.org, under the Evariops account. Trusted Publishing trades
   # the job's GitHub OIDC token for an API key that lives an hour, so no key is stored here; the
