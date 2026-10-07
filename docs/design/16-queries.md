@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅; datasets, `Distinct` by parts 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅, the core over a dataset's objects, its integer keys bounded by their summaries ✅; `Distinct` by parts 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -731,7 +731,13 @@ On a dataset, a range is an object, and one of two shares of the rows or more is
 chunks, as a file's rows are, so that no chunk is read by two ranges; the objects cut are opened side
 by side to learn where their chunks end, and the ranges then find them open. No object settles (§9.3)
 ([13-dataset.md](13-dataset.md)). A group by that streams runs as §2.5 says, its ranges grouped side
-by side and followed in the order of the rows; a top-k on the key, as §6 says.
+by side and followed in the order of the rows; a top-k on the key, as §6 says. An integer key's
+groups are numbered by value as over a file: the summaries of the version's roots bound its values
+over every object, the roots read before the pass as its walk reads them first, and the rows of every
+object, deleted ones counted, bound what the table may span. The core holds one set of parts for every
+object of the query, and asks the store for nothing the lanes' tables would not: over 1, 2 and 7
+objects with rows deleted, before and after compaction, at one lane and four, asked for or turned to,
+its answers are the lanes' tables' bits.
 
 **The core.** A second engine holds each group once, built and measured but not the default: off
 unless a plan asks for it, then at eight lanes and more, on a key of one fixed-width column or of raw
