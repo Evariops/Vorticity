@@ -262,6 +262,13 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool CoreSpills { get; set; } = true;
 
+    /// <summary>
+    /// Whether a core with no order nor window over its groups delivers them part by part, its first
+    /// batch once its first part is applied (PLAN-HIGH-CARDINALITY, H7): on by default, off for the
+    /// bench to weigh it against the delivery whole.
+    /// </summary>
+    internal bool CoreParted { get; set; } = true;
+
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
 
@@ -448,12 +455,19 @@ internal sealed class AggregationOutcome
     /// <summary>Gives back what the result held of its query's budget: delivered, it is the caller's.</summary>
     internal void Delivered()
     {
-        Spilled?.Close();
-        Memory?.Dispose();
+        Parts?.Close();
+        if (Memory is { } memory)
+        {
+            _plan.LastPeakBytes = Math.Max(_plan.LastPeakBytes, memory.Peak);
+            memory.Dispose();
+        }
     }
 
-    /// <summary>The parts of the result written to the scratch (PLAN-HIGH-CARDINALITY, H6), delivered after these groups, one at a time; null when none was.</summary>
-    internal SpilledParts? Spilled { get; set; }
+    /// <summary>
+    /// The parts of the result its core delivers after these groups, one at a time (PLAN-HIGH-CARDINALITY,
+    /// H6, H7): applied in the background, or written to the scratch; null when the result is whole.
+    /// </summary>
+    internal CoreParts? Parts { get; set; }
 
     internal GroupKeys? Keys { get; }
 
@@ -478,6 +492,18 @@ internal sealed class AggregationOutcome
         }
 
         throw new InvalidOperationException($"'{node}' belongs to another aggregation.");
+    }
+
+    /// <summary>
+    /// The values of the chosen rows let go, and what they held of the query's memory: a part of a result
+    /// delivered part by part, once its batches are built (PLAN-HIGH-CARDINALITY, H7).
+    /// </summary>
+    internal void LetChosen()
+    {
+        foreach (ChosenValues chosen in _chosen)
+        {
+            chosen.Release(Memory);
+        }
     }
 
     /// <summary>The values of a column of chosen rows, as the last fetch left them.</summary>
@@ -1540,8 +1566,11 @@ internal abstract class AggregationHost
     /// rows fetched for the groups the first operator that reads one is given, or else for the
     /// groups delivered (<see cref="GroupSelection.ApplyAsync"/>).
     /// </summary>
+    /// <param name="query">The query.</param>
+    /// <param name="builder">What builds the batches of the parts a core delivers one at a time (H6, H7).</param>
+    /// <param name="cancellationToken">Cancels the run.</param>
     /// <returns>The merged states and keys, and the groups delivered, in order, before the result's window.</returns>
-    internal async ValueTask<(AggregationOutcome Outcome, int[] Groups, int Count)> RunAsync(AggregationQuery query, CancellationToken cancellationToken)
+    internal async ValueTask<(AggregationOutcome Outcome, int[] Groups, int Count)> RunAsync(AggregationQuery query, PartBuilder builder, CancellationToken cancellationToken)
     {
         Begin();
         try
@@ -1551,7 +1580,10 @@ internal abstract class AggregationHost
             // The first groups of an order on the key: each lane keeps the best it has met alone; with
             // no order, one lane keeps the first it met.
             KeyTop? top = KeyTop.Of(query) ?? KeyTop.FirstOf(query);
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top).ConfigureAwait(false);
+
+            // With no order nor window over the groups, a core delivers them part by part (H7).
+            bool parted = query.Plan.CoreParted && top is null && !Array.Exists(query.Operators, op => op is GroupOrder or GroupWindow);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             try
             {
@@ -1593,7 +1625,8 @@ internal abstract class AggregationHost
 internal static class AggregationEngine
 {
     internal static async ValueTask<AggregationOutcome> RunAsync(
-        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null)
+        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null, bool parted = false,
+        PartBuilder? builder = null)
     {
         IAggregateNode[] aggregates = plan.Aggregates;
         AggregateSlot?[] settled = new AggregateSlot?[aggregates.Length];
@@ -1774,6 +1807,25 @@ internal static class AggregationEngine
                     partition.Join(engaged);
                 }
 
+                if (parted && builder is not null)
+                {
+                    // Part by part (H7): each part's batches built as it is applied, while the others apply,
+                    // the part let go then; the first batch once the first part is; the result starts with no
+                    // group. What the lanes held is given back, the core's shelf counting the rest exactly.
+                    CoreParts applying = await engaged.FinishPartedAsync(joined, lanes, plan, builder, cancellationToken).ConfigureAwait(false);
+                    plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, 0) with { Core = engaged.Run() };
+                    plan.LastGroups = 0;
+                    foreach (AggregationPartition partition in partitions)
+                    {
+                        partition.LetGo();
+                    }
+
+                    memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
+                    (GroupKeys none, AggregateSlot[] noSlots) = engaged.Empty();
+                    AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, []) { Parts = applying };
+                    return Counted(first, memory, memory.Held);
+                }
+
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
                 AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, Shuffled(held.Order(sorted: false)));
@@ -1796,7 +1848,7 @@ internal static class AggregationEngine
                 }
 
                 memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
-                outcome.Spilled = new SpilledParts(engaged, spilled, plan);
+                outcome.Parts = new CoreParts(engaged, spilled, plan, builder ?? throw new InvalidOperationException("A group by whose core spills delivers its parts through a builder."));
                 return Counted(outcome, memory, memory.Held);
             }
 

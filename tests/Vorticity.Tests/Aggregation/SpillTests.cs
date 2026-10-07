@@ -20,13 +20,17 @@ public sealed partial class SpillTests
     private const int Keys = 200_000;
 
     [Theory]
-    [InlineData(1, 20)]
-    [InlineData(1, 10)]
-    [InlineData(4, 20)]
-    [InlineData(14, 20)]
-    [InlineData(14, 10)]
-    public async Task AGroupByItsBudgetCannotHoldSpillsAndEndsExact(int degree, int percent)
+    [InlineData(1, 20, true)]
+    [InlineData(1, 10, true)]
+    [InlineData(4, 20, true)]
+    [InlineData(14, 20, true)]
+    [InlineData(14, 10, true)]
+    [InlineData(1, 20, false)]
+    [InlineData(14, 10, false)]
+    public async Task AGroupByItsBudgetCannotHoldSpillsAndEndsExact(int degree, int percent, bool parted)
     {
+        // Part by part (H7), the parts held in memory come out as the workers apply them; whole, they come
+        // out together, then the parts spilled one at a time.
         (string path, long[] expected) = await WriteAsync();
         string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
         try
@@ -42,6 +46,7 @@ public sealed partial class SpillTests
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Vorticity.Aggregation sums = Sums(file);
+            sums.Plan.CoreParted = parted;
             int read = 0;
             await foreach (KeySum sum in sums.As<KeySum>().ToRecordsAsync(Ct))
             {
@@ -139,6 +144,51 @@ public sealed partial class SpillTests
                 {
                 }
 
+                Assert.Equal(0, budget.ReservedBytes);
+                Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+            }
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
+    public async Task AConsumerThatStopsAtItsFirstGroupGivesEverythingBack(int degree)
+    {
+        // Part by part (H7), the workers still apply the other parts when the consumer leaves: they stop,
+        // and the query's memory and scratch are given back once they are done. Under a tenth of its
+        // peak, the lanes turn to the core, which spills; under a large budget, the core asked for.
+        (string path, _) = await WriteAsync();
+        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        try
+        {
+            long peak = await PeakAsync(path, degree);
+            foreach ((long ceiling, bool asked) in ((long, bool)[])[(peak / 10, false), (1L << 30, true)])
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(ceiling);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                    options.ScratchDirectory = scratch;
+                });
+
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Vorticity.Aggregation sums = Sums(file);
+                sums.Plan.Core = asked;
+                sums.Plan.CoreLanes = 1;
+                sums.Plan.CoreCapacity = asked ? 4_096 : null;
+                await foreach (KeySum _ in sums.As<KeySum>().ToRecordsAsync(Ct))
+                {
+                    break;
+                }
+
+                Assert.NotNull(sums.Plan.LastRun?.Core);
                 Assert.Equal(0, budget.ReservedBytes);
                 Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
             }

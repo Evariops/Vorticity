@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Expressions;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -23,19 +24,24 @@ internal sealed class AggregationQuery : ResultQuery
 {
     private VortexSchema? _schema;
 
+    // The record the result's columns are named and typed by, if any.
+    private readonly (VortexSchema Record, Type Type)? _typed;
+
     internal AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, VortexExpr? rows = null, GroupOperator[]? operators = null)
-        : this(host, plan, nodes, keys, Natural(nodes, keys), 0, long.MaxValue, rows, operators ?? [])
+        : this(host, plan, nodes, keys, null, 0, long.MaxValue, rows, operators ?? [])
     {
     }
 
     private AggregationQuery(
-        AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, ResultColumn[] columns, long skip, long take, VortexExpr? rows, GroupOperator[] operators)
+        AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, (VortexSchema Record, Type Type)? typed, long skip, long take, VortexExpr? rows,
+        GroupOperator[] operators)
     {
         Host = host;
         Plan = plan;
         Nodes = nodes;
         Keys = keys;
-        Columns = columns;
+        _typed = typed;
+        Columns = NewColumns();
         Skip = skip;
         Take = take;
         RowFilter = rows;
@@ -114,7 +120,7 @@ internal sealed class AggregationQuery : ResultQuery
     internal override ResultQuery Limit(long skip, long take)
     {
         (long from, long count) = Within(Skip, Take, skip, take);
-        return new AggregationQuery(Host, Plan, Nodes, Keys, Columns, from, count, RowFilter, Operators);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, _typed, from, count, RowFilter, Operators);
     }
 
     internal override IVortexRecord? RecordOf(int column) => Columns[column].Record;
@@ -128,13 +134,27 @@ internal sealed class AggregationQuery : ResultQuery
                 $"{type.Name} has {record.Count} members and the selection {Nodes.Length} elements: a record takes the elements in order, one member each.");
         }
 
+        return new AggregationQuery(Host, Plan, Nodes, Keys, (record, type), Skip, Take, RowFilter, Operators);
+    }
+
+    /// <summary>
+    /// The result's columns, made anew: each keeps what it reads a batch of groups with, and a worker that
+    /// builds the batches of a part (PLAN-HIGH-CARDINALITY, H7) builds with a set of its own.
+    /// </summary>
+    internal ResultColumn[] NewColumns()
+    {
+        if (_typed is not { } typed)
+        {
+            return Natural(Nodes, Keys);
+        }
+
         ResultColumn[] columns = new ResultColumn[Nodes.Length];
         for (int i = 0; i < columns.Length; i++)
         {
-            columns[i] = Nodes[i].Column(record[i], Keys, i, type);
+            columns[i] = Nodes[i].Column(typed.Record[i], Keys, i, typed.Type);
         }
 
-        return new AggregationQuery(Host, Plan, Nodes, Keys, columns, Skip, Take, RowFilter, Operators);
+        return columns;
     }
 
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
@@ -194,12 +214,18 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private RecordBatch? _current;
     private bool _done;
 
-    // A result whose core spilled (PLAN-HIGH-CARDINALITY, H6): the outcome of the groups held in memory,
-    // which holds the query's memory until the end, the parts left to bring back, and the groups the
-    // parts before the current one passed, their operators applied.
-    private AggregationOutcome? _held;
-    private SpilledParts? _spilled;
-    private long _seen;
+    // A result its core delivers part by part (PLAN-HIGH-CARDINALITY, H6, H7), after the groups the
+    // first outcome holds, which holds the query's memory until the end: the parts left; what builds
+    // their batches; the part in hand and its next batch; the batch delivered, whose store goes back to
+    // the builder once the next is; the groups of the result passed so far, in the window or not; and
+    // the arena a batch cut to the window is cut into.
+    private CoreParts? _parts;
+    private PartBuilder? _builder;
+    private PartResult? _part;
+    private int _slate;
+    private PartSlate? _given;
+    private long _position;
+    private CanonicalArena? _cut;
 
     internal GroupBatches(AggregationQuery query, CancellationToken cancellationToken)
     {
@@ -232,81 +258,140 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
             return RunAsync();
         }
 
-        if (Next())
+        if (_part is null && Next())
         {
             return new ValueTask<bool>(true);
         }
 
-        return _spilled is null ? new ValueTask<bool>(End()) : NextPartAsync();
+        return _parts is null ? new ValueTask<bool>(End()) : NextPartAsync();
     }
 
-    public ValueTask DisposeAsync()
+    /// <summary>The result let go: the core's workers, when it delivers part by part, stopped and awaited first.</summary>
+    public async ValueTask DisposeAsync()
     {
+        if (_parts is not null && !_done)
+        {
+            await _parts.StopAsync().ConfigureAwait(false);
+        }
+
         Release();
-        return ValueTask.CompletedTask;
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> RunAsync()
     {
         long started = Stopwatch.GetTimestamp();
-        (_outcome, _groups, _count) = await _query.Host.RunAsync(_query, _cancellationToken).ConfigureAwait(false);
-        _held = _outcome;
-        _spilled = _outcome.Spilled;
-        if (_spilled is not null && Array.Exists(_query.Operators, op => op is GroupOrder or GroupWindow))
+        _builder = new PartBuilder(_query, _batchRows);
+        (_outcome, _groups, _count) = await _query.Host.RunAsync(_query, _builder, _cancellationToken).ConfigureAwait(false);
+        _parts = _outcome.Parts;
+        _position = _count;
+        if (_parts is not null && Array.Exists(_query.Operators, op => op is GroupOrder or GroupWindow))
         {
-            int parts = _spilled.Count;
+            int parts = _parts.Count;
             Release();
             throw new VortexMemoryException(
                 $"The group by spilled {parts} parts of its groups to its scratch, its memory budget holding no more, and an order or a window over groups needs every group at once: an order over groups the budget cannot hold waits for the external sort. Give its session a larger QueryMemoryBudget, or filter the rows first.");
         }
 
-        bool first = Next() || (_spilled is not null ? await NextPartAsync().ConfigureAwait(false) : End());
+        bool first = Next() || (_parts is not null ? await NextPartAsync().ConfigureAwait(false) : End());
         _query.Plan.LastFirstBatchTicks = Stopwatch.GetTimestamp() - started;
         return first;
     }
 
     /// <summary>
-    /// The next part of a result whose core spilled brought back and its operators applied, until one
-    /// has groups the result's window keeps: the parts held in memory came first.
+    /// The next batch of the parts of a result its core delivers part by part, within the result's
+    /// window: those the workers built as they applied them, as they come, those the core spilled built
+    /// once brought back, after (PLAN-HIGH-CARDINALITY, H7).
     /// </summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> NextPartAsync()
     {
         while (true)
         {
-            _seen += _count;
-            if (_query.Take != long.MaxValue && _seen >= _query.Skip + _query.Take)
+            if (_part is { } part && _slate < part.Slates.Count)
+            {
+                if (Deliver(part.Slates[_slate++]))
+                {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (_query.Take != long.MaxValue && _position >= _query.Skip + _query.Take)
+            {
+                // The window is full: the workers left are stopped before the memory goes.
+                await _parts!.StopAsync().ConfigureAwait(false);
+                return End();
+            }
+
+            if (await _parts!.NextAsync(_cancellationToken).ConfigureAwait(false) is not { } next)
             {
                 return End();
             }
 
-            if (await _spilled!.NextAsync(_cancellationToken).ConfigureAwait(false) is not { } part)
-            {
-                return End();
-            }
-
-            _outcome = part;
-            _next = 0;
-            (_groups, _count) = await GroupSelection.ApplyAsync(_query, part, _query.Host.Spec(_query.RowFilter), _cancellationToken).ConfigureAwait(false);
-            if (Next())
-            {
-                return true;
-            }
+            _part = next;
+            _slate = 0;
+            _query.Plan.LastGroups += next.Groups;
         }
     }
 
-    /// <summary>The next batch of the current part's groups, within the result's window; false once the part has none left.</summary>
+    /// <summary>
+    /// The batch of <paramref name="slate"/>, cut to the result's window, as the current one, the store of
+    /// the one before given back; false, the store given back, when the window keeps none of it.
+    /// </summary>
+    private bool Deliver(PartSlate slate)
+    {
+        long first = _position;
+        _position += slate.Rows;
+        int from = (int)Math.Clamp(_query.Skip - first, 0, slate.Rows);
+        int until = _query.Take == long.MaxValue ? slate.Rows : (int)Math.Clamp(_query.Skip + _query.Take - first, from, slate.Rows);
+        if (from == until)
+        {
+            _builder!.Give(slate);
+            return false;
+        }
+
+        _cancellationToken.ThrowIfCancellationRequested();
+        _current?.Dispose();
+        GiveBack();
+        _given = slate;
+        long start = first + from - _query.Skip;
+        if (from == 0 && until == slate.Rows)
+        {
+            _current = RecordBatch.Over(slate.Arena, slate.Root, start, _current);
+            return true;
+        }
+
+        // A batch the window cuts: its records cut into an arena of the result's, over the store's buffers.
+        CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+        cut.ResetKeepingBlocks();
+        int root = CanonicalSlice.SliceAcross(slate.Arena, cut, slate.Root, from, until - from);
+        _current = RecordBatch.Over(cut, root, start, _current);
+        return true;
+    }
+
+    /// <summary>The store of the batch delivered back to the builder, its batch disposed.</summary>
+    private void GiveBack()
+    {
+        if (_given is { } given)
+        {
+            _given = null;
+            _builder!.Give(given);
+        }
+    }
+
+    /// <summary>The next batch of the groups the first outcome holds, within the result's window; false once it has none left.</summary>
     private bool Next()
     {
         AggregationOutcome outcome = _outcome!;
         int[] order = _groups;
-        if (_next == 0 && _query.Skip > _seen)
+        if (_next == 0 && _query.Skip > 0)
         {
-            _next = (int)Math.Min(_query.Skip - _seen, _count);
+            _next = (int)Math.Min(_query.Skip, _count);
         }
 
-        long end = _query.Take == long.MaxValue ? _count : Math.Clamp(_query.Skip + _query.Take - _seen, 0, _count);
+        long end = _query.Take == long.MaxValue ? _count : Math.Clamp(_query.Skip + _query.Take, 0, _count);
         if (_next >= end)
         {
             return false;
@@ -327,7 +412,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         CanonicalArena arena = _arena!;
         arena.ResetKeepingBlocks();
         int root = store.Build(arena, count);
-        _current = RecordBatch.Over(arena, root, _seen + _next - _query.Skip, _current);
+        _current = RecordBatch.Over(arena, root, _next - _query.Skip, _current);
         _next += count;
         return true;
     }
@@ -358,11 +443,24 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     {
         _done = true;
         _current?.Dispose();
+        GiveBack();
+        if (_part is { } part)
+        {
+            _part = null;
+            for (int s = _slate; s < part.Slates.Count; s++)
+            {
+                _builder!.Give(part.Slates[s]);
+            }
+        }
+
         _store?.Release();
         _arena?.Reset();
+        _cut?.Reset();
 
-        // The outcome held in memory holds the query's memory and its spilled parts: given back last.
-        (_held ?? _outcome)?.Delivered();
+        // The outcome held in memory holds the query's memory and its spilled parts: given back last,
+        // then the parts' stores.
+        _outcome?.Delivered();
+        _builder?.Release();
     }
 }
 
@@ -493,8 +591,12 @@ internal static class GroupSelection
     /// <param name="outcome">The pass's groups and states, where the chosen rows' columns go.</param>
     /// <param name="spec">The pass's scan, which the fetch takes the rows from.</param>
     /// <param name="cancellationToken">Cancels the operators and the fetch.</param>
+    /// <param name="windowed">
+    /// Whether the result's window falls on these groups: not on a part of a result delivered part by
+    /// part, whose reader cuts the window over every part (PLAN-HIGH-CARDINALITY, H7).
+    /// </param>
     internal static async ValueTask<(int[] Groups, int Count)> ApplyAsync(
-        AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken)
+        AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true)
     {
         int operators = query.Operators.Length;
         bool chosen = query.Plan.Chosen.Length > 0;
@@ -512,8 +614,8 @@ internal static class GroupSelection
         }
 
         // No operator reads them: the result's window alone is read.
-        int from = (int)Math.Min(query.Skip, count);
-        int until = (int)Math.Min(count, Saturated(query.Skip, query.Take));
+        int from = windowed ? (int)Math.Min(query.Skip, count) : 0;
+        int until = windowed ? (int)Math.Min(count, Saturated(query.Skip, query.Take)) : count;
         await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(from, until - from), cancellationToken).ConfigureAwait(false);
         return (groups, count);
     }

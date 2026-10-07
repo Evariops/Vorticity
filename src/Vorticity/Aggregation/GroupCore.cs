@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace Vorticity.Aggregating;
@@ -135,6 +136,13 @@ internal sealed partial class GroupCore
     // makes a group, which sizes a part's sub-tables ahead of a large application.
     private long _applied;
     private long _made;
+
+    // Delivered part by part (H7): the groups of the parts applied and not let go yet, the most at once,
+    // the sub-tables of the parts let go, and whether every part is applied.
+    private long _heldGroups;
+    private long _peakGroups;
+    private int _tablesLet;
+    private bool _allApplied;
 
     private GroupCore(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource? source, KeyFacts? facts, GroupKeys kind, RecordLayout? layout, int lanes,
@@ -667,21 +675,7 @@ internal sealed partial class GroupCore
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
-        if (lanes.Length == 1)
-        {
-            lanes[0].Core!.Close(lanes[0]);
-        }
-        else
-        {
-            Task[] closing = new Task[lanes.Length];
-            for (int l = 0; l < lanes.Length; l++)
-            {
-                AggregationPartition lane = lanes[l];
-                closing[l] = Task.Run(() => lane.Core!.Close(lane), token);
-            }
-
-            await AggregationEngine.GuardedAsync(closing, failed).ConfigureAwait(false);
-        }
+        await CloseAsync(lanes, failed).ConfigureAwait(false);
 
         int[] queue = [-1];
         int workers = Math.Clamp(degree, 1, PartCount);
@@ -700,19 +694,7 @@ internal sealed partial class GroupCore
             await AggregationEngine.GuardedAsync(applying, failed).ConfigureAwait(false);
         }
 
-        // A lane's cache, and the partition it bypasses it with, keep their null group, which no batch
-        // carries: they meet in the first part's first sub-table, where the parts cut the null to.
-        long bytes = Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong);
-        foreach (AggregationPartition lane in lanes)
-        {
-            MergeNull(lane);
-            if (lane.Core!.Rows is { } apart)
-            {
-                MergeNull(apart);
-                bytes += apart.Footprint;
-            }
-        }
-
+        long bytes = (Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong)) + MergeNulls(lanes);
         List<GroupKeys> keys = [];
         List<AggregateSlot[]> slots = [];
         List<CorePart> spilled = [];
@@ -743,17 +725,7 @@ internal sealed partial class GroupCore
         // for the next query: the result keeps this shelf, not what it held. A core with parts spilled
         // keeps its shelf for the parts it brings back, each exact under its budget, and hands it on
         // once the last is delivered.
-        lock (_freeGate)
-        {
-            _free = null;
-            foreach (ulong[] slab in _slabs)
-            {
-                _shelf.Give(slab);
-            }
-
-            _slabs.Clear();
-        }
-
+        LetSlabs();
         if (spilled.Count == 0)
         {
             _shelf.Clear();
@@ -766,6 +738,223 @@ internal sealed partial class GroupCore
         (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined([.. keys], [.. slots], keys.Count);
         return (joined, joinedSlots, bytes, [.. spilled]);
     }
+
+    /// <summary>The slabs of the batches given to the shelf, every batch applied or spilled: no lane fills one again.</summary>
+    private void LetSlabs()
+    {
+        lock (_freeGate)
+        {
+            _free = null;
+            foreach (ulong[] slab in _slabs)
+            {
+                _shelf.Give(slab);
+            }
+
+            _slabs.Clear();
+        }
+    }
+
+    /// <summary>
+    /// The groups of a part applied, or let go when negative, delivered part by part (H7): the most the
+    /// parts held at once is the result's peak.
+    /// </summary>
+    internal void Held(long groups)
+    {
+        long held = Interlocked.Add(ref _heldGroups, groups);
+        long peak;
+        while (held > (peak = Volatile.Read(ref _peakGroups)) && Interlocked.CompareExchange(ref _peakGroups, held, peak) != peak)
+        {
+        }
+    }
+
+    /// <summary>The most groups the parts applied and not let go held at once, delivered part by part (H7).</summary>
+    internal long PeakGroups => Volatile.Read(ref _peakGroups);
+
+    /// <summary>Every lane's cache and open batches deposited, the lanes side by side, for the end to apply.</summary>
+    private static async ValueTask CloseAsync(AggregationPartition[] lanes, CancellationTokenSource failed)
+    {
+        if (lanes.Length == 1)
+        {
+            lanes[0].Core!.Close(lanes[0]);
+            return;
+        }
+
+        Task[] closing = new Task[lanes.Length];
+        for (int l = 0; l < lanes.Length; l++)
+        {
+            AggregationPartition lane = lanes[l];
+            closing[l] = Task.Run(() => lane.Core!.Close(lane), failed.Token);
+        }
+
+        await AggregationEngine.GuardedAsync(closing, failed).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A lane's cache, and the partition it bypasses it with, keep their null group, which no batch
+    /// carries: they meet in the first part's first sub-table, where the parts cut the null to.
+    /// </summary>
+    /// <returns>The bytes of the partitions the lanes bypassed their caches with.</returns>
+    private long MergeNulls(AggregationPartition[] lanes)
+    {
+        long bytes = 0;
+        foreach (AggregationPartition lane in lanes)
+        {
+            MergeNull(lane);
+            if (lane.Core!.Rows is { } apart)
+            {
+                MergeNull(apart);
+                bytes += apart.Footprint;
+            }
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// The end of the pass delivered part by part (PLAN-HIGH-CARDINALITY, H7), when no order needs every
+    /// group at once: every lane's cache and open batches deposited, then the parts applied by up to
+    /// <paramref name="degree"/> less one workers in the background, each built into its batches by
+    /// <paramref name="builder"/> and let go by the worker that applied it, its batches handed to the
+    /// result; and by the result's reader, which applies and builds the next part no worker took rather
+    /// than wait for one; the null groups in a part of their own, and the parts spilled after.
+    /// </summary>
+    internal async ValueTask<CoreParts> FinishPartedAsync(
+        AggregationPartition[] lanes, int degree, AggregationPlan plan, PartBuilder builder, CancellationToken cancellationToken)
+    {
+        CancellationTokenSource stopping = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try
+        {
+            await CloseAsync(lanes, stopping).ConfigureAwait(false);
+        }
+        catch
+        {
+            stopping.Dispose();
+            throw;
+        }
+
+        // The null groups join a part of their own now, while the lanes' partitions still hold them. Each
+        // part delivered gives its arrays to the shelf, which the parts still applied take again.
+        CorePart? nulls = NullPart(lanes);
+
+        // The parts built ahead of the reader, a worker's each at most, then the workers wait for it.
+        int workers = Math.Clamp(degree - 1, 0, PartCount);
+        Channel<PartResult> built = Channel.CreateBounded<PartResult>(new BoundedChannelOptions(Math.Max(1, workers)) { SingleReader = true });
+        int[] queue = [-1];
+        CancellationToken token = stopping.Token;
+        Task[] applying = new Task[workers];
+        for (int w = 0; w < workers; w++)
+        {
+            applying[w] = Task.Run(() => PublishPartsAsync(queue, built.Writer, builder, token).AsTask(), token);
+        }
+
+        _ = CompleteAsync(applying, built.Writer, stopping);
+        return new CoreParts(this, built.Reader, queue, stopping, plan, builder, nulls);
+    }
+
+    /// <summary>
+    /// The workers awaited, the result's channel completed, with their failure if any, which its reader
+    /// then throws. It never throws itself.
+    /// </summary>
+    private static async Task CompleteAsync(Task[] workers, ChannelWriter<PartResult> writer, CancellationTokenSource stopping)
+    {
+        try
+        {
+            await AggregationEngine.GuardedAsync(workers, stopping).ConfigureAwait(false);
+            writer.Complete();
+        }
+        catch (Exception failure)
+        {
+            writer.Complete(failure);
+        }
+    }
+
+    /// <summary>
+    /// The next part no worker took, applied by the result's reader rather than wait for a worker (H7):
+    /// whether there was one to take, and the part when it holds groups in memory, null when it spilled.
+    /// </summary>
+    internal async ValueTask<(bool Taken, CorePart? Part)> ApplyNextAsync(int[] queue, CoreApplier applier, CancellationToken cancellationToken)
+    {
+        int index = Interlocked.Increment(ref queue[0]);
+        if (index >= PartCount)
+        {
+            return (false, null);
+        }
+
+        CorePart part = _parts[index];
+        await ApplyPartAsync(part, applier, cancellationToken).ConfigureAwait(false);
+        return (true, part.Runs is null && part.Tables.Count > 0 ? part : null);
+    }
+
+    /// <summary>
+    /// Every part applied, by the workers and the reader (H7): no batch is read again, and the slabs and
+    /// what the shelf kept of the pass leave the query's count, the parts delivered from now on with
+    /// them, and the parts spilled brought back under the budget alone.
+    /// </summary>
+    internal void AppliedAll()
+    {
+        LetSlabs();
+        _shelf.Clear();
+        _shelf.Overdraws = false;
+        Volatile.Write(ref _allApplied, true);
+    }
+
+    /// <summary>
+    /// A worker's parts applied, as <see cref="ApplyPartsAsync"/> does, each built into its batches, let
+    /// go, and its batches handed to the result, unless it spilled.
+    /// </summary>
+    private async ValueTask PublishPartsAsync(int[] queue, ChannelWriter<PartResult> writer, PartBuilder builder, CancellationToken cancellationToken)
+    {
+        CoreApplier applier = new CoreApplier(this, lane: null);
+        int index;
+        while ((index = Interlocked.Increment(ref queue[0])) < PartCount)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CorePart part = _parts[index];
+            await ApplyPartAsync(part, applier, cancellationToken).ConfigureAwait(false);
+            if (part.Runs is not null || part.Tables.Count == 0)
+            {
+                continue;
+            }
+
+            PartResult result = await BuildAsync(part, builder, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await writer.WriteAsync(result, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                builder.Give(result);
+                throw;
+            }
+
+            // The result's reader goes on in the pool's queue, behind the workers, which hold every
+            // thread of it: each worker queues itself behind it after each part.
+            await Task.Yield();
+        }
+    }
+
+    /// <summary>
+    /// A part in memory built into its batches by <paramref name="builder"/>, its operators applied, then
+    /// let go (H7): its groups held until then.
+    /// </summary>
+    internal async ValueTask<PartResult> BuildAsync(CorePart part, PartBuilder builder, CancellationToken cancellationToken)
+    {
+        (GroupKeys keys, AggregateSlot[] slots) = Joined(part);
+        Held(keys.Count);
+        try
+        {
+            AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(keys.Order(sorted: false))) { Memory = _memory };
+            return await builder.BuildAsync(outcome, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Held(-keys.Count);
+            Let(part);
+        }
+    }
+
+    /// <summary>The parts written to the scratch, to bring back after those held in memory.</summary>
+    internal CorePart[] SpilledList() => Array.FindAll(_parts, part => part.Runs is not null);
 
     /// <summary>A part's sub-tables read as one, once it is back in memory (H6): its keys and its slots.</summary>
     internal (GroupKeys Keys, AggregateSlot[] Slots) Joined(CorePart part)
@@ -792,8 +981,7 @@ internal sealed partial class GroupCore
     /// <summary>The null group of a lane's partition, if it has one, merged into the first part's first sub-table.</summary>
     private void MergeNull(AggregationPartition partition)
     {
-        int nullGroup = partition.Keys!.NullNumber;
-        if (nullGroup < 0)
+        if (partition.Keys!.NullNumber < 0)
         {
             return;
         }
@@ -804,11 +992,50 @@ internal sealed partial class GroupCore
             first.Tables.Add(NewTable(0));
         }
 
-        SubTable home = first.Tables[first.Directory[0]];
+        MergeNull(partition, first.Tables[first.Directory[0]]);
+    }
+
+    /// <summary>The null group of a lane's partition, if it has one, merged into <paramref name="home"/>.</summary>
+    private void MergeNull(AggregationPartition partition, SubTable home)
+    {
+        int nullGroup = partition.Keys!.NullNumber;
+        if (nullGroup < 0)
+        {
+            return;
+        }
+
         ReadOnlySpan<int> groups = [nullGroup];
         Span<int> map = stackalloc int[1];
         partition.Keys.MergeInto(home.Keys, groups, map);
         Merge(partition.Slots, groups, home, map);
+    }
+
+    /// <summary>
+    /// The lanes' null groups, and those of the partitions they bypassed their caches with, merged into a
+    /// part of their own, apart from the parts the workers apply and spill: delivered as one more part;
+    /// null when no lane met a null key.
+    /// </summary>
+    private CorePart? NullPart(AggregationPartition[] lanes)
+    {
+        CorePart? nulls = null;
+        foreach (AggregationPartition lane in lanes)
+        {
+            foreach (AggregationPartition? partition in (AggregationPartition?[])[lane, lane.Core!.Rows])
+            {
+                if (partition?.Keys is { NullNumber: >= 0 })
+                {
+                    nulls ??= new CorePart();
+                    if (nulls.Tables.Count == 0)
+                    {
+                        nulls.Tables.Add(NewTable(0));
+                    }
+
+                    MergeNull(partition, nulls.Tables[0]);
+                }
+            }
+        }
+
+        return nulls;
     }
 
     /// <summary>
@@ -851,30 +1078,35 @@ internal sealed partial class GroupCore
         while ((index = Interlocked.Increment(ref queue[0])) < PartCount)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            CorePart part = _parts[index];
-            if (Spills && (part.Runs is not null || !Affords(Volatile.Read(ref part.Pending.Value))))
+            await ApplyPartAsync(_parts[index], applier, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>A part's whole stack applied; a part spilled, or one whose budget cannot take its stack's groups once it spills, writes the stack to the scratch instead (H6).</summary>
+    private async ValueTask ApplyPartAsync(CorePart part, CoreApplier applier, CancellationToken cancellationToken)
+    {
+        if (Spills && (part.Runs is not null || !Affords(Volatile.Read(ref part.Pending.Value))))
+        {
+            await _spilling.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
             {
-                await _spilling.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try
+                if (part.Runs is null && part.Tables.Count > 0)
                 {
-                    if (part.Runs is null && part.Tables.Count > 0)
-                    {
-                        await EvictAsync(part, cancellationToken).ConfigureAwait(false);
-                    }
-
-                    await WritePendingAsync(part, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    _spilling.Release();
+                    await EvictAsync(part, cancellationToken).ConfigureAwait(false);
                 }
 
-                continue;
+                await WritePendingAsync(part, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _spilling.Release();
             }
 
-            int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: false);
-            Interlocked.Add(ref part.Pending.Value, -applied);
+            return;
         }
+
+        int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: false);
+        Interlocked.Add(ref part.Pending.Value, -applied);
     }
 
     /// <summary>Whether the budget could take the groups of <paramref name="pending"/> entries applied at once (<see cref="Growth"/>).</summary>
@@ -883,7 +1115,7 @@ internal sealed partial class GroupCore
     /// <summary>What the core did, for the plan's last run (PLAN-HIGH-CARDINALITY, R5a).</summary>
     internal CoreRun Run()
     {
-        int tables = 0;
+        int tables = Volatile.Read(ref _tablesLet);
         foreach (CorePart part in _parts)
         {
             tables += part.Tables.Count;

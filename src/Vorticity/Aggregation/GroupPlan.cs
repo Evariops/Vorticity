@@ -56,7 +56,7 @@ public enum GroupOrdering
 
 /// <summary>What a group by did, counted as it ran (docs/design/16-queries.md §10).</summary>
 /// <param name="Groups">The groups the pass found, before any filter, order or window on them.</param>
-/// <param name="PeakGroups">The most groups held at once: every group of a pass that waits for its end, the open ones and a batch's closed ones of one that streams.</param>
+/// <param name="PeakGroups">The most groups held at once: every group of a pass that waits for its end, the open ones and a batch's closed ones of one that streams, the parts applied and not yet built of one delivered part by part.</param>
 /// <param name="PeakBytes">The most bytes the query held of its memory budget at once.</param>
 /// <param name="Lanes">The lanes the pass ran on.</param>
 /// <param name="MergeParts">The parts of the key space the lanes' groups were merged in, side by side; none when they merged in series.</param>

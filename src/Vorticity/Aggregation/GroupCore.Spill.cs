@@ -295,6 +295,9 @@ internal sealed partial class GroupCore
             return;
         }
 
+        // Each part brought back gives its arrays back once delivered: they leave the query's count, the
+        // next part under its budget alone.
+        _shelf.Drops = true;
         CoreApplier applier = new CoreApplier(this, lane: null);
         int entryBytes = Shape.Words * sizeof(ulong);
         int perPage = Page().Length / entryBytes;
@@ -326,10 +329,14 @@ internal sealed partial class GroupCore
         part.Runs = null;
     }
 
-    /// <summary>The part's sub-tables let go once delivered, their arrays leaving the query's count.</summary>
+    /// <summary>
+    /// The part's sub-tables let go once delivered: their arrays on the shelf, where the parts still
+    /// applied take them again (H7); once every part is applied, handed to the process's shelf, for the
+    /// next query, and leaving the query's count; let go, past the first part brought back from the scratch.
+    /// </summary>
     internal void Let(CorePart part)
     {
-        _shelf.Drops = true;
+        Interlocked.Add(ref _tablesLet, part.Tables.Count);
         foreach (SubTable table in part.Tables)
         {
             table.Release();
@@ -339,6 +346,10 @@ internal sealed partial class GroupCore
         part.Directory = [0];
         part.Depth = 0;
         Volatile.Write(ref part.Groups, 0);
+        if (!_shelf.Drops && Volatile.Read(ref _allApplied))
+        {
+            _shelf.Clear();
+        }
     }
 
     /// <summary>The spill's scratch closed and its file gone, the shelf handed to the process's: the query is done with its parts.</summary>
@@ -353,6 +364,13 @@ internal sealed partial class GroupCore
 
         _shelf.Drops = false;
         _shelf.Clear();
+    }
+
+    /// <summary>An empty sub-table's keys and slots: the result of a core delivered part by part, before its first part.</summary>
+    internal (GroupKeys Keys, AggregateSlot[] Slots) Empty()
+    {
+        SubTable empty = NewTable(0);
+        return (empty.Keys, empty.Slots);
     }
 
     /// <summary>The bytes free where <paramref name="directory"/> lies, or null when the system does not tell.</summary>

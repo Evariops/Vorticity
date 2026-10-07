@@ -28,9 +28,17 @@ internal static class Switches
         _ when name.StartsWith("window:", StringComparison.Ordinal) => Pair(name, "FoldWindow", "window"),
         _ when name.StartsWith("probe:", StringComparison.Ordinal) => Pair(name, "ProbeAhead", "probe"),
         "core" => new Switch("reference", Set("Core", false), "core", Core()),
+        "parted" => new Switch("whole", Under(Core(), Set("CoreParted", false)), "parted", Under(Core(), Set("CoreParted", true))),
         _ when name.StartsWith("capacity:", StringComparison.Ordinal) => CorePair(name, "CoreCapacity", "capacity"),
         _ when name.StartsWith("alpha:", StringComparison.Ordinal) => CorePair(name, "CoreAlpha", "alpha"),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, capacity:A:B, alpha:A:B."),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, capacity:A:B, alpha:A:B."),
+    };
+
+    /// <summary>Both settings, <paramref name="first"/> then <paramref name="then"/>: the core on, and one of its own switches.</summary>
+    private static Action<AggregationPlan> Under(Action<AggregationPlan> first, Action<AggregationPlan> then) => plan =>
+    {
+        first(plan);
+        then(plan);
     };
 
     /// <summary>As <see cref="Pair"/>, under the core (PLAN-HIGH-CARDINALITY, H4): its cache's capacity or its α at A against B.</summary>

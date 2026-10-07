@@ -50,6 +50,19 @@ public sealed partial class GroupCoreTests
             Assert.True(run.Flushes > 0 && run.Bursts > 0 && run.Splits > 0, run.ToString());
             Assert.True(bypass > 0 ? run.BypassedRows > 0 || degree > 2 : run.BypassedRows == 0, run.ToString());
 
+            // Delivered part by part (H7), every group once, a part let go before the next; and whole, as
+            // an order over the groups asks it, the same again.
+            Assert.Equal(held.Count, core.Statistics.Grouping!.Groups);
+            Assert.InRange(core.Statistics.Grouping.PeakGroups, 1, held.Count);
+            Vorticity.Aggregation whole = Query(file, plan =>
+            {
+                Tiny(plan);
+                plan.CoreBypass = bypass;
+                plan.CoreParted = false;
+            });
+
+            Assert.Equal(reference, ByKey(await ListAsync(whole.As<KeyStats>())));
+
             // And what .NET says of a few of them.
             foreach (IGrouping<int?, Row> group in rows.GroupBy(r => r.Key).Take(50))
             {
@@ -284,6 +297,57 @@ public sealed partial class GroupCoreTests
         {
             System.IO.File.Delete(path);
         }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(14)]
+    public async Task AFilterAndAWindowApplyPartByPart(int degree)
+    {
+        // Delivered part by part (H7), each worker filters its part's groups, and the reader cuts the
+        // window across the parts' batches: the same groups as the lanes' tables keep, the window as many.
+        Row[] rows = Rows_(keys: 9_000, count: 4 * Rows);
+        string path = await WriteAsync(rows);
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, KeyStats> reference = ByKey(await ListAsync(Reference(file))).Where(p => p.Value.Count > 26).ToDictionary();
+            Vorticity.Aggregation filtered = Filtered(file);
+            Tiny(filtered.Plan);
+            filtered.Plan.CoreBatchEntries = 64;
+            Dictionary<int, KeyStats> held = ByKey(await ListAsync(filtered.As<KeyStats>()));
+            Assert.Equal(reference, held);
+            Assert.True(filtered.Plan.LastRun?.Core?.Tables > 1);
+
+            // A window of 700 groups from the 1 000th, over batches of 256 groups.
+            Vorticity.Aggregation windowed = Filtered(file, batchRows: 256).Skip(1_000).Take(700);
+            Tiny(windowed.Plan);
+            windowed.Plan.CoreBatchEntries = 64;
+            List<KeyStats> window = await ListAsync(windowed.As<KeyStats>());
+            Assert.Equal(700, window.Count);
+            Assert.Equal(700, window.Select(s => s.Key).Distinct().Count());
+            Assert.All(window, s => Assert.Equal(reference[s.Key ?? int.MinValue], s));
+            Assert.Equal(0, budget.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+
+        static Vorticity.Aggregation Filtered(VortexFile file, int batchRows = 0) => file.Scan<Row>()
+            .With(new ScanOptions { BatchRows = batchRows })
+            .GroupBy(r => r.Key)
+            .Where(g => g.Count() > 26L)
+            .Select(g => (
+                g.Key, g.Count(), g.Sum(x => x.Value), g.Average(x => x.Real), g.Variance(x => x.Real), g.Any(x => x.Value > 90),
+                g.Max(x => x.Value), g.Min(x => x.Real), g.First().Small, g.Last().Value));
     }
 
     [Fact]

@@ -20,6 +20,9 @@ internal abstract class ChosenValues
     /// </summary>
     internal abstract void EnsureGroups(int groups, QueryMemory? memory);
 
+    /// <summary>Lets the arrays go, and what they held of <paramref name="memory"/>.</summary>
+    internal abstract void Release(QueryMemory? memory);
+
     /// <summary>Leaves <paramref name="group"/> without a row: its value null, or a value type's default.</summary>
     internal abstract void Clear(int group);
 
@@ -54,6 +57,14 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
             Array.Resize(ref _values, length);
             Array.Resize(ref _missing, length);
         }
+    }
+
+    internal override void Release(QueryMemory? memory)
+    {
+        memory?.LetGo(_values.Length * (long)(Unsafe.SizeOf<T>() + sizeof(bool)));
+        _values = [];
+        _missing = [];
+        _scratch = [];
     }
 
     internal override void Clear(int group)
