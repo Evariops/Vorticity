@@ -230,28 +230,45 @@ public sealed partial class SpillTests
         }
     }
 
-    [Fact]
-    public async Task AnOrderOverASpilledGroupBySaysItWaitsForTheExternalSort()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task AnOrderOverASpilledGroupBySortsItsGroupsInRuns(int degree)
     {
-        (string path, _) = await WriteAsync();
+        // The groups held in memory, then each part spilled, through the filter before the order, into
+        // the rows of a sort written in runs (PLAN-HIGH-CARDINALITY, H10): the sums, then the key that
+        // breaks their ties, as one sort of every group would order them; a window after the order cut
+        // across the sorted rows.
+        (string path, long[] expected) = await WriteAsync();
+        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
         try
         {
-            long peak = await PeakAsync(path, 4);
+            long peak = await PeakAsync(path, degree);
             QueryMemoryBudget budget = new QueryMemoryBudget(peak / 5);
             await using VortexSession session = VortexSession.Create(options =>
             {
-                options.MaxDegreeOfParallelism = 4;
+                options.MaxDegreeOfParallelism = degree;
                 options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
             });
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            VortexMemoryException refused = await Assert.ThrowsAsync<VortexMemoryException>(async () =>
-                await file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key).OrderBy(g => g.Sum(x => x.Value)).Select(g => g.Key).ToListAsync(Ct));
-            Assert.Contains("external sort", refused.Message, StringComparison.Ordinal);
+            List<int> bySum = [.. Enumerable.Range(0, Keys).OrderBy(k => expected[k]).ThenBy(k => k)];
+            Aggregation<int> ordered = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key).OrderBy(g => g.Sum(x => x.Value)).Select(g => g.Key);
+            Assert.Equal(bySum, await ordered.ToListAsync(Ct));
+            Assert.True(ordered.Statistics.Grouping!.SpilledParts > 0);
+
+            List<int> filtered = [.. bySum.Where(k => expected[k] > 300).Reverse().Skip(1_000).Take(50_000)];
+            Assert.Equal(
+                [.. Enumerable.Range(0, Keys).Where(k => expected[k] > 300).OrderByDescending(k => expected[k]).ThenBy(k => k).Skip(1_000).Take(50_000)],
+                await file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key)
+                    .Where(g => g.Sum(x => x.Value) > 300L).OrderByDescending(g => g.Sum(x => x.Value)).Skip(1_000).Take(50_000).Select(g => g.Key).ToListAsync(Ct));
             Assert.Equal(0, budget.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
         }
         finally
         {
+            Directory.Delete(scratch, recursive: true);
             System.IO.File.Delete(path);
         }
     }

@@ -33,11 +33,33 @@ internal sealed class PartBuilder
     private DType _dtype;
     private bool _released;
 
+    // A result sorted in runs (PLAN-HIGH-CARDINALITY, H10): the operators before its order alone, and
+    // the sort's columns, whose rows each part is built into.
+    private int? _until;
+    private Func<ResultColumn[]>? _sortColumns;
+
     internal PartBuilder(AggregationQuery query, int batchRows)
     {
         _query = query;
         _batchRows = batchRows;
         _spec = query.Host.Spec(query.RowFilter);
+    }
+
+    /// <summary>
+    /// Each part built into the rows of a sort of the result (PLAN-HIGH-CARDINALITY, H10), of
+    /// <paramref name="schema"/>, by <paramref name="columns"/>, after the operators before
+    /// <paramref name="order"/>, the order's own, alone. Asked before any part is built.
+    /// </summary>
+    internal void SortRows(int order, VortexSchema schema, Func<ResultColumn[]> columns)
+    {
+        lock (_gate)
+        {
+            _until = order;
+            _sortColumns = columns;
+            _dtype = VortexTypes.ToDType(schema, new DTypeArena());
+        }
+
+        _columns.Clear();
     }
 
     /// <summary>
@@ -48,11 +70,11 @@ internal sealed class PartBuilder
     {
         // The result's window is the reader's, over every part: each part's chosen rows are read for
         // every group its operators keep.
-        (int[] groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false).ConfigureAwait(false);
+        (int[] groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false, until: _until).ConfigureAwait(false);
         PartResult result = new PartResult(outcome.Keys?.Count ?? 0);
         if (!_columns.TryTake(out ResultColumn[]? columns))
         {
-            columns = _query.NewColumns();
+            columns = _sortColumns is { } sort ? sort() : _query.NewColumns();
         }
 
         try

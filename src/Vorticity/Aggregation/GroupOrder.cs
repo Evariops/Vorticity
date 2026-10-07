@@ -60,7 +60,30 @@ internal abstract class ColumnOrder
         return _descending ? -order : order;
     }
 
+    /// <summary>
+    /// The order of position <paramref name="a"/> against position <paramref name="b"/> of
+    /// <paramref name="other"/>, an order of the same column over another batch of it, as
+    /// <see cref="For"/> made both: the merge of sorted runs (PLAN-HIGH-CARDINALITY, H10) ranks rows
+    /// of two batches as one sort of their rows would.
+    /// </summary>
+    internal int CompareAcross(int a, ColumnOrder other, int b)
+    {
+        bool left = Present(a);
+        bool right = other.Present(b);
+        if (!left || !right)
+        {
+            return left == right ? 0 : left ? -1 : 1;
+        }
+
+        int order = CompareValuesAcross(a, other, b);
+        return _descending ? -order : order;
+    }
+
     protected abstract int CompareValues(int a, int b);
+
+    /// <summary>The values of <paramref name="a"/> and of <paramref name="other"/>'s <paramref name="b"/>, both present, compared ascending.</summary>
+    protected virtual int CompareValuesAcross(int a, ColumnOrder other, int b) =>
+        throw new NotSupportedException($"An order of {GetType().Name} does not compare across batches.");
 
     /// <summary>Gives back what the order holds of the pool, once the sort is done.</summary>
     internal virtual void Release()
@@ -149,21 +172,24 @@ internal abstract class ColumnOrder
     private sealed class IntegerOrder<T>(Buffers.VortexBuffer values, ulong[] validity, bool descending) : ColumnOrder(validity, descending)
         where T : unmanaged, IComparable<T>
     {
-        protected override int CompareValues(int a, int b)
-        {
-            ReadOnlySpan<T> span = MemoryMarshal.Cast<byte, T>(values.Span);
-            return span[a].CompareTo(span[b]);
-        }
+        protected override int CompareValues(int a, int b) => Value(a).CompareTo(Value(b));
+
+        protected override int CompareValuesAcross(int a, ColumnOrder other, int b) => Value(a).CompareTo(((IntegerOrder<T>)other).Value(b));
+
+        private T Value(int position) => MemoryMarshal.Cast<byte, T>(values.Span)[position];
     }
 
     private sealed class FloatOrder<T>(Buffers.VortexBuffer values, ulong[] validity, bool descending) : ColumnOrder(validity, descending)
         where T : unmanaged, IFloatingPointIeee754<T>
     {
-        protected override int CompareValues(int a, int b)
+        protected override int CompareValues(int a, int b) => Compare(Value(a), Value(b));
+
+        protected override int CompareValuesAcross(int a, ColumnOrder other, int b) => Compare(Value(a), ((FloatOrder<T>)other).Value(b));
+
+        private T Value(int position) => MemoryMarshal.Cast<byte, T>(values.Span)[position];
+
+        private static int Compare(T left, T right)
         {
-            ReadOnlySpan<T> span = MemoryMarshal.Cast<byte, T>(values.Span);
-            T left = span[a];
-            T right = span[b];
             if (left == right)
             {
                 // Both zeros, whatever their signs.
@@ -189,6 +215,15 @@ internal abstract class ColumnOrder
                 : Int256.FromLittleEndianBytes(span.Slice(a * width, width)).CompareTo(Int256.FromLittleEndianBytes(span.Slice(b * width, width)));
         }
 
+        /// <summary>Two batches of one decimal column may store it at two widths: both read in 256 bits.</summary>
+        protected override int CompareValuesAcross(int a, ColumnOrder other, int b) => Wide(a).CompareTo(((DecimalOrder)other).Wide(b));
+
+        private Int256 Wide(int position)
+        {
+            ReadOnlySpan<byte> value = values.Span.Slice(position * width, width);
+            return width <= 16 ? new Int256(Narrow(value)) : Int256.FromLittleEndianBytes(value);
+        }
+
         private static Int128 Narrow(ReadOnlySpan<byte> value) => value.Length switch
         {
             1 => (sbyte)value[0],
@@ -203,6 +238,8 @@ internal abstract class ColumnOrder
     {
         protected override int CompareValues(int a, int b) => Bit(a).CompareTo(Bit(b));
 
+        protected override int CompareValuesAcross(int a, ColumnOrder other, int b) => Bit(a).CompareTo(((BoolOrder)other).Bit(b));
+
         private bool Bit(int row)
         {
             int bit = offset + row;
@@ -212,8 +249,11 @@ internal abstract class ColumnOrder
 
     private sealed class FixedBytesOrder(Buffers.VortexBuffer values, int size, ulong[] validity, bool descending) : ColumnOrder(validity, descending)
     {
-        protected override int CompareValues(int a, int b) =>
-            values.Span.Slice(a * size, size).SequenceCompareTo(values.Span.Slice(b * size, size));
+        protected override int CompareValues(int a, int b) => Value(a).SequenceCompareTo(Value(b));
+
+        protected override int CompareValuesAcross(int a, ColumnOrder other, int b) => Value(a).SequenceCompareTo(((FixedBytesOrder)other).Value(b));
+
+        private ReadOnlySpan<byte> Value(int position) => values.Span.Slice(position * size, size);
     }
 
     /// <summary>Text and binary bytewise, the block resolved once: its views and its data buffers, read at each comparison.</summary>
@@ -238,9 +278,13 @@ internal abstract class ColumnOrder
 
         protected override int CompareValues(int a, int b)
         {
-            BytesBlock block = BytesBlock.Over(_arena, _views.Span, _dataStart, _dataCount, _length);
+            BytesBlock block = Block();
             return block[a].SequenceCompareTo(block[b]);
         }
+
+        protected override int CompareValuesAcross(int a, ColumnOrder other, int b) => Block()[a].SequenceCompareTo(((BytesOrder)other).Block()[b]);
+
+        private BytesBlock Block() => BytesBlock.Over(_arena, _views.Span, _dataStart, _dataCount, _length);
     }
 }
 

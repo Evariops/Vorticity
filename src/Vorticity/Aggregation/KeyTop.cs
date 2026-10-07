@@ -165,7 +165,7 @@ internal sealed class KeyTop
     }
 
     /// <summary>A window of <paramref name="skip"/> and <paramref name="take"/> over the groups from <paramref name="start"/> on, of which those before <paramref name="reach"/> are left.</summary>
-    private static (long Start, long Reach) Narrowed(long start, long reach, long skip, long take)
+    internal static (long Start, long Reach) Narrowed(long start, long reach, long skip, long take)
     {
         long from = skip > long.MaxValue - start ? long.MaxValue : start + skip;
         long to = take == long.MaxValue || take > long.MaxValue - from ? long.MaxValue : from + take;

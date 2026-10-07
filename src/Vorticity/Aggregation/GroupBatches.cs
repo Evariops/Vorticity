@@ -227,6 +227,14 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private long _position;
     private CanonicalArena? _cut;
 
+    // A result whose groups spilled, under an order (PLAN-HIGH-CARDINALITY, H10): the sort its parts'
+    // rows go through, its rows in order, and the window over them, the windows after the order and the
+    // result's own.
+    private ExternalSort? _sort;
+    private IAsyncEnumerator<RecordBatch>? _sorted;
+    private long _sortSkip;
+    private long _sortReach;
+
     internal GroupBatches(AggregationQuery query, CancellationToken cancellationToken)
     {
         _query = query;
@@ -258,6 +266,11 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
             return RunAsync();
         }
 
+        if (_sorted is not null)
+        {
+            return NextSortedAsync();
+        }
+
         if (_part is null && Next())
         {
             return new ValueTask<bool>(true);
@@ -266,9 +279,21 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         return _parts is null ? new ValueTask<bool>(End()) : NextPartAsync();
     }
 
-    /// <summary>The result let go: the core's workers, when it delivers part by part, stopped and awaited first.</summary>
+    /// <summary>The result let go: its sort's runs deleted, the core's workers, when it delivers part by part, stopped and awaited first.</summary>
     public async ValueTask DisposeAsync()
     {
+        if (_sorted is not null)
+        {
+            await _sorted.DisposeAsync().ConfigureAwait(false);
+            _sorted = null;
+        }
+
+        if (_sort is not null)
+        {
+            await _sort.DisposeAsync().ConfigureAwait(false);
+            _sort = null;
+        }
+
         if (_parts is not null && !_done)
         {
             await _parts.StopAsync().ConfigureAwait(false);
@@ -285,17 +310,194 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         (_outcome, _groups, _count) = await _query.Host.RunAsync(_query, _builder, _cancellationToken).ConfigureAwait(false);
         _parts = _outcome.Parts;
         _position = _count;
+        bool first;
         if (_parts is not null && Array.Exists(_query.Operators, op => op is GroupOrder or GroupWindow))
         {
-            int parts = _parts.Count;
-            Release();
-            throw new VortexMemoryException(
-                $"The group by spilled {parts} parts of its groups to its scratch, its memory budget holding no more, and an order or a window over groups needs every group at once: an order over groups the budget cannot hold waits for the external sort. Give its session a larger QueryMemoryBudget, or filter the rows first.");
+            if (SortedWindow() is not { } sorted)
+            {
+                int parts = _parts.Count;
+                Release();
+                throw new VortexMemoryException(
+                    $"The group by spilled {parts} parts of its groups to its scratch, its memory budget holding no more: an order over them sorts in runs with filters alone before it and windows alone after it, and a window without an order needs every group at once. Give its session a larger QueryMemoryBudget, or filter the rows first.");
+            }
+
+            first = await SortPartsAsync(sorted.Order, sorted.Skip, sorted.Reach).ConfigureAwait(false);
+        }
+        else
+        {
+            first = Next() || (_parts is not null ? await NextPartAsync().ConfigureAwait(false) : End());
         }
 
-        bool first = Next() || (_parts is not null ? await NextPartAsync().ConfigureAwait(false) : End());
         _query.Plan.LastFirstBatchTicks = Stopwatch.GetTimestamp() - started;
         return first;
+    }
+
+    /// <summary>
+    /// The order of the query's operators, with filters alone before it and windows alone after it, and
+    /// the groups of the order those windows and the result's own keep, from its <c>Skip</c>-th to its
+    /// reach; null for any other.
+    /// </summary>
+    private (int Order, long Skip, long Reach)? SortedWindow()
+    {
+        GroupOperator[] operators = _query.Operators;
+        int order = Array.FindIndex(operators, op => op is GroupOrder);
+        if (order < 0 || Array.FindIndex(operators, 0, order, op => op is not GroupFilter) >= 0)
+        {
+            return null;
+        }
+
+        long start = 0;
+        long reach = long.MaxValue;
+        for (int o = order + 1; o < operators.Length; o++)
+        {
+            if (operators[o] is not GroupWindow window)
+            {
+                return null;
+            }
+
+            (start, reach) = KeyTop.Narrowed(start, reach, window.Skip, window.Take);
+        }
+
+        (start, reach) = KeyTop.Narrowed(start, reach, _query.Skip, _query.Take);
+        return (order, start, reach);
+    }
+
+    /// <summary>
+    /// The groups of a result that spilled sorted in runs under its order (PLAN-HIGH-CARDINALITY, H10):
+    /// the groups held in memory, then each part spilled, through the operators before the order, built
+    /// into the sort's rows — the order's results, the key's components that break their ties, then the
+    /// result's columns — and the first batch of their order.
+    /// </summary>
+    private async ValueTask<bool> SortPartsAsync(int order, long skip, long reach)
+    {
+        GroupOrder ordered = (GroupOrder)_query.Operators[order];
+        ColumnShape[] keys = _query.Keys;
+        ResultColumn[] results = _query.Columns;
+        List<VortexField> fields = [];
+        List<SortKey> chain = [];
+        for (int i = 0; i < ordered.Keys.Length; i++)
+        {
+            VortexType type = ordered.Keys[i].Field.Column(keys).Type;
+            fields.Add(new VortexField($"$order{i}", type));
+            chain.Add(new SortKey(new FieldExpr($"$order{i}"), type, ordered.Keys[i].Descending));
+        }
+
+        for (int k = 0; k < keys.Length; k++)
+        {
+            fields.Add(new VortexField($"$tie{k}", keys[k].Type));
+            chain.Add(new SortKey(new FieldExpr($"$tie{k}"), keys[k].Type, Descending: false));
+        }
+
+        int[] delivered = new int[results.Length];
+        for (int c = 0; c < results.Length; c++)
+        {
+            delivered[c] = fields.Count;
+            fields.Add(new VortexField(results[c].Name, results[c].Type));
+        }
+
+        VortexSchema schema = VortexSchema.Create([.. fields]);
+        _builder!.SortRows(order, schema, () => SortColumns(ordered, keys));
+        _sort = new ExternalSort(_query.Session, schema, [.. chain], delivered, _outcome!.Memory, _batchRows);
+        _sortSkip = skip;
+        _sortReach = reach;
+        _position = 0;
+        await SortAsync(await _builder.BuildAsync(_outcome, _cancellationToken).ConfigureAwait(false)).ConfigureAwait(false);
+        while (await _parts!.NextAsync(_cancellationToken).ConfigureAwait(false) is { } part)
+        {
+            _query.Plan.LastGroups += part.Groups;
+            await SortAsync(part).ConfigureAwait(false);
+        }
+
+        _sorted = await _sort.SortedAsync(_cancellationToken).ConfigureAwait(false);
+        return await NextSortedAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>The columns of the sort's rows: the order's results, the key's components, then the result's own, made anew.</summary>
+    private ResultColumn[] SortColumns(GroupOrder order, ColumnShape[] keys)
+    {
+        ResultColumn[] results = _query.NewColumns();
+        ResultColumn[] columns = new ResultColumn[order.Keys.Length + keys.Length + results.Length];
+        int c = 0;
+        foreach (OrderKey key in order.Keys)
+        {
+            columns[c++] = key.Field.Column(keys);
+        }
+
+        for (int k = 0; k < keys.Length; k++)
+        {
+            columns[c++] = new KeyResultColumn($"$tie{k}", keys[k].Type, k);
+        }
+
+        results.CopyTo(columns, c);
+        return columns;
+    }
+
+    /// <summary>A part's rows, built as the sort's, added to it, the stores they were built in given back.</summary>
+    private async ValueTask SortAsync(PartResult result)
+    {
+        RecordBatch? batch = null;
+        try
+        {
+            foreach (PartSlate slate in result.Slates)
+            {
+                batch?.Dispose();
+                batch = RecordBatch.Over(slate.Arena, slate.Root, 0, batch);
+                await _sort!.AddAsync(batch, _cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            batch?.Dispose();
+            _builder!.Give(result);
+        }
+    }
+
+    /// <summary>The next batch of the sorted rows within the window, cut where the window cuts it.</summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<bool> NextSortedAsync()
+    {
+        while (true)
+        {
+            if (_position >= _sortReach || !await _sorted!.MoveNextAsync().ConfigureAwait(false))
+            {
+                await DisposeSortAsync().ConfigureAwait(false);
+                return End();
+            }
+
+            RecordBatch batch = _sorted.Current;
+            long first = _position;
+            _position += batch.RowCount;
+            int from = (int)Math.Clamp(_sortSkip - first, 0, batch.RowCount);
+            int until = (int)Math.Clamp(_sortReach - first, from, batch.RowCount);
+            if (from == until)
+            {
+                continue;
+            }
+
+            _cancellationToken.ThrowIfCancellationRequested();
+            _current?.Dispose();
+            CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+            cut.ResetKeepingBlocks();
+            int root = CanonicalSlice.SliceAcross(batch.Arena, cut, batch.RootIndex, from, until - from);
+            _current = RecordBatch.Over(cut, root, first + from - _sortSkip, _current);
+            return true;
+        }
+    }
+
+    /// <summary>The sorted rows' stream and the sort let go, its runs deleted.</summary>
+    private async ValueTask DisposeSortAsync()
+    {
+        if (_sorted is { } sorted)
+        {
+            _sorted = null;
+            await sorted.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (_sort is { } sort)
+        {
+            _sort = null;
+            await sort.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -595,12 +797,16 @@ internal static class GroupSelection
     /// Whether the result's window falls on these groups: not on a part of a result delivered part by
     /// part, whose reader cuts the window over every part (PLAN-HIGH-CARDINALITY, H7).
     /// </param>
+    /// <param name="until">
+    /// The operators applied, the first ones; every one by default. A part of a result sorted in runs
+    /// (H10) applies those before the order alone.
+    /// </param>
     internal static async ValueTask<(int[] Groups, int Count)> ApplyAsync(
-        AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true)
+        AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true, int? until = null)
     {
-        int operators = query.Operators.Length;
+        int operators = until ?? query.Operators.Length;
         bool chosen = query.Plan.Chosen.Length > 0;
-        int reader = chosen ? query.ChosenReader : operators;
+        int reader = chosen ? Math.Min(query.ChosenReader, operators) : operators;
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : query.Session.Options.MaxDegreeOfParallelism;
         (int[] groups, int count) = await OperatorsAsync(query, outcome, 0, reader, outcome.Order, outcome.Order.Length, degree, cancellationToken).ConfigureAwait(false);
         if (!chosen)
@@ -616,8 +822,8 @@ internal static class GroupSelection
 
         // No operator reads them: the result's window alone is read.
         int from = windowed ? (int)Math.Min(query.Skip, count) : 0;
-        int until = windowed ? (int)Math.Min(count, Saturated(query.Skip, query.Take)) : count;
-        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(from, until - from), cancellationToken).ConfigureAwait(false);
+        int to = windowed ? (int)Math.Min(count, Saturated(query.Skip, query.Take)) : count;
+        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(from, to - from), cancellationToken).ConfigureAwait(false);
         return (groups, count);
     }
 

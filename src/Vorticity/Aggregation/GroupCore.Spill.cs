@@ -374,7 +374,7 @@ internal sealed partial class GroupCore
     }
 
     /// <summary>The bytes free where <paramref name="directory"/> lies, or null when the system does not tell.</summary>
-    private static long? Free(string directory)
+    internal static long? Free(string directory)
     {
         try
         {

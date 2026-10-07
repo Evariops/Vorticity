@@ -1625,6 +1625,13 @@ internal abstract class AggregationHost
             bool parted = query.Plan.CoreParted && top is null && !Array.Exists(query.Operators, op => op is GroupOrder or GroupWindow);
             AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
+            if (outcome.Parts is not null && Array.Exists(query.Operators, op => op is GroupOrder))
+            {
+                // Groups spilled under an order: the reader sorts them in runs, each part through the
+                // operators before the order as it comes (H10).
+                return (outcome, [], 0);
+            }
+
             try
             {
                 (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
