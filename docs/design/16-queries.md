@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅; the top-k by parts, the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅; the top-k by `Max` or `Min` in one pass, the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -510,8 +510,15 @@ some groups. Written before or after the `select`, the result is the same. Under
 are ranked in a heap of `Skip + Take` on the order's results alone: the others are compared and never
 delivered, a cost of `G log k` and a memory of `k` groups. The groups that tie with the last one kept
 are then ranked by their key, read from the groups' index where it orders as the key's column would:
-a top-k on a count that a million text keys share copies none of them. Under no order, or an order a
-streaming group by already delivers, a `Take` stops the read once it is served (§2.4).
+a top-k on a count that a million text keys share copies none of them. Many groups for a few kept
+are ranked in chunks at once, as many as the degree, each of 65 536 groups and sixteen times `k` at
+least: each chunk's first `k` on a task of its own, the results it orders by read into arrays the
+chunk's size, then those candidates once. Every group of the first `k` is among the first `k` of its
+chunk, ties broken by the key in both, so the groups and their order are one ranking's; on a million
+text keys, fourteen chunks rank in 0.68 ms against 2.6. A ranking that would build a column rather than
+read its results into arrays — a text result, a key its index does not order — ranks at once. Under no
+order, or an order a streaming group by already delivers, a `Take` stops the read once it is served
+(§2.4).
 
 Under no order, on a key that does not stream, the windows that open the operators reach `Skip + Take`
 groups, which ones not promised: one lane keeps the first it meets alone, the others dropped once
