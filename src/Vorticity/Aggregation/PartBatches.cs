@@ -193,15 +193,34 @@ internal sealed class PartSlate(StructStore store, CanonicalArena arena)
     /// <summary>The values of <paramref name="groups"/> of <paramref name="outcome"/> written in the store, its batch built over them.</summary>
     internal void Build(ResultColumn[] columns, AggregationOutcome outcome, ReadOnlySpan<int> groups)
     {
+        Begin();
+        Append(columns, outcome, groups);
+        Seal();
+    }
+
+    /// <summary>The store emptied for a batch written a few groups at a time (<see cref="Append"/>, then <see cref="Seal"/>).</summary>
+    internal void Begin()
+    {
         Store.Truncate(0);
+        Rows = 0;
+    }
+
+    /// <summary>The values of <paramref name="groups"/> of <paramref name="outcome"/> written after those before.</summary>
+    internal void Append(ResultColumn[] columns, AggregationOutcome outcome, ReadOnlySpan<int> groups)
+    {
         for (int c = 0; c < columns.Length; c++)
         {
             columns[c].Append(outcome, Store.Children[c], groups);
         }
 
+        Rows += groups.Length;
+    }
+
+    /// <summary>The batch built over the values written.</summary>
+    internal void Seal()
+    {
         Arena.ResetKeepingBlocks();
-        Root = Store.Build(Arena, groups.Length);
-        Rows = groups.Length;
+        Root = Store.Build(Arena, Rows);
     }
 
     internal void Release()

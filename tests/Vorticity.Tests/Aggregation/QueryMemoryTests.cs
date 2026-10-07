@@ -253,7 +253,9 @@ public sealed partial class QueryMemoryTests
             Assert.Equal(Keys, (await shuffled.Scan<Row>().Select(r => r.Key).Distinct().ToListAsync(Ct)).Count);
             Assert.Equal(0, budget.ReservedBytes);
 
-            // Past a budget too small for its index, the distinct fails and gives everything back.
+            // Past a budget too small for its index, the distinct on the reader's thread fails and gives
+            // everything back; on several lanes, the core spills its parts and ends exact
+            // (PLAN-HIGH-CARDINALITY, H13).
             QueryMemoryBudget small = new QueryMemoryBudget(2 << 20);
             await using VortexSession tight = VortexSession.Create(options =>
             {
@@ -262,7 +264,15 @@ public sealed partial class QueryMemoryTests
             });
 
             await using VortexFile again = await tight.OpenAsync(random, cancellationToken: Ct);
-            await Assert.ThrowsAsync<VortexMemoryException>(async () => await again.Scan<Row>().Select(r => r.Key).Distinct().ToListAsync(Ct));
+            if (degree == 1)
+            {
+                await Assert.ThrowsAsync<VortexMemoryException>(async () => await again.Scan<Row>().Select(r => r.Key).Distinct().ToListAsync(Ct));
+            }
+            else
+            {
+                Assert.Equal(Keys, (await again.Scan<Row>().Select(r => r.Key).Distinct().ToListAsync(Ct)).Count);
+            }
+
             Assert.Equal(0, small.ReservedBytes);
         }
         finally

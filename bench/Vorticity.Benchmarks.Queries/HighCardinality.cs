@@ -81,6 +81,24 @@ internal static class HighCardinality
         yield return ($"spread-random-{FullRows}", new Scenario("hc random tenfold, where count > 10", HavingAsync, 1, Matrix.Full));
         yield return ("pages", new Scenario("hc text key 1e6 (urls), order by count take 100", TopUrlsAsync, 16, Matrix.Full));
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, order by max take 100", TopMostAsync, 1, Matrix.Full));
+
+        // The distinct values of a column, a million and ten million of them (PLAN-HIGH-CARDINALITY, H13).
+        yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, distinct", (file, run) => DistinctAsync(file, run, s => s.K6), 16, Matrix.Full));
+        yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e7, distinct", (file, run) => DistinctAsync(file, run, s => s.K7), 16, Matrix.Full));
+    }
+
+    private static async Task<long> DistinctAsync(VortexFile file, Run run, Func<Probe<Spread>, Sym<int>> key)
+    {
+        long values = 0;
+        await foreach (int value in run.TrackDistinct(file.Scan<Spread>().Select(key).Distinct()))
+        {
+            if (values++ == 0)
+            {
+                run.Answer();
+            }
+        }
+
+        return values;
     }
 
     /// <summary>A group by of the matrix: its distribution's file, a key column, a set of aggregates.</summary>

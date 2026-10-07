@@ -47,6 +47,13 @@ internal sealed class Run
         return aggregation;
     }
 
+    /// <summary>A <c>Distinct</c>'s switches set as the run asks: its plan says how it takes its values (PLAN-HIGH-CARDINALITY, H13).</summary>
+    internal Aggregation<T> TrackDistinct<T>(Aggregation<T> distinct)
+    {
+        _configure?.Invoke(((DistinctQuery)distinct.Query).Plan);
+        return distinct;
+    }
+
     /// <summary>Called for every answer the query hands out: a batch, a group, a row.</summary>
     internal void Answer()
     {

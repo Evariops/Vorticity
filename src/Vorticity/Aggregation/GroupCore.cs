@@ -262,7 +262,7 @@ internal sealed partial class GroupCore
     internal static GroupCore? Of(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory = null) =>
-        plan.Core && lanes >= (plan.CoreLanes ?? DefaultLanes) ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory, lean: false) : null;
+        plan.Core && lanes >= (plan.CoreLanes ?? DefaultLanes) ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory, lean: plan.CoreLean) : null;
 
     /// <summary>
     /// A core that holds the query's groups, or null when it cannot: the key does not travel in
@@ -995,7 +995,7 @@ internal sealed partial class GroupCore
         MergeNull(partition, first.Tables[first.Directory[0]]);
     }
 
-    /// <summary>The null group of a lane's partition, if it has one, merged into <paramref name="home"/>.</summary>
+    /// <summary>The null group of a lane's partition, if it has one, merged into <paramref name="home"/>; told to the emitter the first time (H13).</summary>
     private void MergeNull(AggregationPartition partition, SubTable home)
     {
         int nullGroup = partition.Keys!.NullNumber;
@@ -1004,11 +1004,19 @@ internal sealed partial class GroupCore
             return;
         }
 
+        int before = home.Keys.Count;
         ReadOnlySpan<int> groups = [nullGroup];
         Span<int> map = stackalloc int[1];
         partition.Keys.MergeInto(home.Keys, groups, map);
         Merge(partition.Slots, groups, home, map);
+        if (Emitter is { } emitter && home.Keys.Count > before)
+        {
+            emitter.EmitAlone(home.Keys, before, home.Keys.Count);
+        }
     }
+
+    /// <summary>What the core tells of each group it makes, a <c>Distinct</c>'s reader (H13); null for none.</summary>
+    internal CoreEmitter? Emitter => _plan.Emitter;
 
     /// <summary>
     /// The lanes' null groups, and those of the partitions they bypassed their caches with, merged into a
@@ -1253,7 +1261,32 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
 }
 
 /// <summary>A part's groups written to the query's scratch as it was spilled (H6): their entries, one after the other, from <paramref name="Offset"/>.</summary>
-internal readonly record struct PartRun(long Offset, long Entries);
+/// <param name="Offset">Where its entries start in the scratch.</param>
+/// <param name="Entries">Its entries.</param>
+/// <param name="Emitted">
+/// Whether its keys were told to the core's emitter as their groups were made (H13): the part's
+/// sub-tables, evicted; not its pending entries, written as they came.
+/// </param>
+internal readonly record struct PartRun(long Offset, long Entries, bool Emitted = false);
+
+/// <summary>
+/// What hears of the groups a core makes as it makes them (PLAN-HIGH-CARDINALITY, H13): the reader of a
+/// <c>Distinct</c>, each value delivered once it enters its part's set, once, as the rows come.
+/// </summary>
+internal abstract class CoreEmitter
+{
+    /// <summary>
+    /// The groups [<paramref name="from"/>, <paramref name="to"/>) of <paramref name="keys"/>, a sub-table's,
+    /// new to it, copied out for <paramref name="applier"/>'s next flush; told under the part's lock.
+    /// </summary>
+    internal abstract void Emit(CoreApplier applier, GroupKeys keys, int from, int to);
+
+    /// <summary>What <paramref name="applier"/> copied out since its last flush, handed on.</summary>
+    internal abstract void Flush(CoreApplier applier);
+
+    /// <summary>The groups [<paramref name="from"/>, <paramref name="to"/>) of <paramref name="keys"/> copied out and handed on at once: the null group, which no batch carries.</summary>
+    internal abstract void EmitAlone(GroupKeys keys, int from, int to);
+}
 
 /// <summary>
 /// One of the parts of the key space (PLAN-HIGH-CARDINALITY, H4): the lock a lane applies it under, the
@@ -1286,6 +1319,13 @@ internal sealed class CorePart
     /// part never spilled. Written by the eviction alone, which one task runs at a time.
     /// </summary>
     internal List<PartRun>? Runs;
+
+    /// <summary>
+    /// Whether the groups the part makes are told to the core's emitter (PLAN-HIGH-CARDINALITY, H13)
+    /// no longer: once evicted, a key new to its sub-tables may be one it wrote to the scratch, and
+    /// waits for the end, where the runs it wrote come back first.
+    /// </summary>
+    internal bool Silent;
 
     /// <summary>Doubles the directory: one more bit of the hash, each sub-table at both places its old one gave.</summary>
     internal void Grow()
@@ -1763,6 +1803,12 @@ internal sealed class CoreApplier
     private int[] _setEntries = [];
     private int[] _setBatches = [];
 
+    // Whether the part applied tells its new groups to the core's emitter (H13).
+    private bool _emitting;
+
+    /// <summary>What the core's emitter keeps of this applier between two flushes (H13): the batch of values it copies them into.</summary>
+    internal object? Emission { get; set; }
+
     internal CoreApplier(GroupCore core, LaneCore? lane)
     {
         _core = core;
@@ -1826,12 +1872,18 @@ internal sealed class CoreApplier
 
             int tables = part.Tables.Count;
             Cut(part, count, entries);
+            _emitting = _core.Emitter is not null && !part.Silent;
             for (int t = 0; t < tables; t++)
             {
                 if (_starts[t] < _starts[t + 1])
                 {
                     Share(part, t, _starts[t], _starts[t + 1], burst);
                 }
+            }
+
+            if (_emitting)
+            {
+                _core.Emitter!.Flush(this);
             }
 
             int groups = 0;
@@ -2025,11 +2077,18 @@ internal sealed class CoreApplier
     /// <summary>The entries <paramref name="entries"/> of a batch into a sub-table: their keys found or added, their records merged.</summary>
     private void Apply(SubTable table, PartBatch batch, ReadOnlySpan<int> entries)
     {
+        int before = table.Keys.Count;
         Span<int> map = Map(entries.Length);
         Scratch.Grow(ref _keys, GroupKeys.EntryScratch(entries.Length, _keyBytes));
         table.Keys.GroupsOf(batch, _core.Shape, entries, map, _keys);
         _view?.Over(batch.Words, batch.Start, batch.Count);
         _core.Merge(_entries, entries, table, map);
+
+        // The keys new to the part's set, before a split moves them (H13).
+        if (_emitting && table.Keys.Count > before)
+        {
+            _core.Emitter!.Emit(this, table.Keys, before, table.Keys.Count);
+        }
     }
 
     /// <summary>Room for <paramref name="length"/> groups, the applier's own.</summary>

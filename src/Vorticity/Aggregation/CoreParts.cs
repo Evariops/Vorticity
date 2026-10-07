@@ -20,7 +20,7 @@ internal sealed class CoreParts
 {
     private readonly GroupCore _core;
     private readonly AggregationPlan _plan;
-    private readonly PartBuilder _builder;
+    private readonly PartBuilder? _builder;
     private ChannelReader<PartResult>? _built;
     private readonly CancellationTokenSource? _stopping;
 
@@ -35,8 +35,8 @@ internal sealed class CoreParts
     private bool _held;
     private bool _closed;
 
-    /// <summary>The parts a result delivered whole spilled, after the groups it holds.</summary>
-    internal CoreParts(GroupCore core, CorePart[] spilled, AggregationPlan plan, PartBuilder builder)
+    /// <summary>The parts a result delivered whole spilled, after the groups it holds; built by <paramref name="builder"/>, or brought back for the core's emitter alone (H13).</summary>
+    internal CoreParts(GroupCore core, CorePart[] spilled, AggregationPlan plan, PartBuilder? builder)
     {
         _core = core;
         _plan = plan;
@@ -83,7 +83,7 @@ internal sealed class CoreParts
                 (bool taken, CorePart? own) = await _core.ApplyNextAsync(_queue!, _applier ??= new CoreApplier(_core, lane: null), cancellationToken).ConfigureAwait(false);
                 if (own is not null)
                 {
-                    return Delivered(await _core.BuildAsync(own, _builder, cancellationToken).ConfigureAwait(false));
+                    return Delivered(await _core.BuildAsync(own, Builder, cancellationToken).ConfigureAwait(false));
                 }
 
                 if (!taken && !await built.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
@@ -107,7 +107,7 @@ internal sealed class CoreParts
         if (_nulls is { } nulls)
         {
             _nulls = null;
-            return Delivered(await _core.BuildAsync(nulls, _builder, cancellationToken).ConfigureAwait(false));
+            return Delivered(await _core.BuildAsync(nulls, Builder, cancellationToken).ConfigureAwait(false));
         }
 
         if (_held)
@@ -123,8 +123,33 @@ internal sealed class CoreParts
 
         CorePart spilled = _spilled[_next++];
         await _core.MaterializeAsync(spilled, cancellationToken).ConfigureAwait(false);
-        return Delivered(await _core.BuildAsync(spilled, _builder, cancellationToken).ConfigureAwait(false));
+        return Delivered(await _core.BuildAsync(spilled, Builder, cancellationToken).ConfigureAwait(false));
     }
+
+    /// <summary>
+    /// The parts spilled brought back one after the other, their values told to the core's emitter as
+    /// they enter their sets, those written as told coming back first, then let go (PLAN-HIGH-CARDINALITY,
+    /// H13): the end of a <c>Distinct</c> that spilled.
+    /// </summary>
+    internal async ValueTask EmitSpilledAsync(CancellationToken cancellationToken)
+    {
+        if (_held)
+        {
+            _held = false;
+            _core.LetHeld();
+        }
+
+        foreach (CorePart spilled in _spilled ?? [])
+        {
+            await _core.MaterializeAsync(spilled, cancellationToken).ConfigureAwait(false);
+            _core.Let(spilled);
+        }
+
+        _spilled = [];
+    }
+
+    /// <summary>What builds the parts' batches: a result's reader always has one.</summary>
+    private PartBuilder Builder => _builder ?? throw new InvalidOperationException("The parts of a result are built by its reader's builder.");
 
     /// <summary>The workers stopped and awaited, a consumer leaving early: none touches the core once its query's memory is given back.</summary>
     internal async ValueTask StopAsync()
@@ -143,7 +168,7 @@ internal sealed class CoreParts
             {
                 while (built.TryRead(out PartResult? result))
                 {
-                    _builder.Give(result);
+                    Builder.Give(result);
                 }
             }
         }

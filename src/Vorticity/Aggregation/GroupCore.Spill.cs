@@ -108,6 +108,7 @@ internal sealed partial class GroupCore
         }
 
         SubTable[] taken;
+        bool emitted;
         try
         {
             taken = [.. part.Tables];
@@ -115,6 +116,11 @@ internal sealed partial class GroupCore
             part.Directory = [0];
             part.Depth = 0;
             Volatile.Write(ref part.Groups, 0);
+
+            // Its keys written, a key new to its sub-tables may be one of them (H13); and those it made
+            // since a first eviction were told to no one.
+            emitted = !part.Silent;
+            part.Silent = true;
         }
         finally
         {
@@ -151,7 +157,7 @@ internal sealed partial class GroupCore
             }
         }
 
-        Ran(part, start, entries);
+        Ran(part, start, entries, emitted);
     }
 
     /// <summary>
@@ -160,6 +166,8 @@ internal sealed partial class GroupCore
     /// </summary>
     private async ValueTask WritePendingAsync(CorePart part, CancellationToken cancellationToken)
     {
+        // Entries written as they came: none told to the emitter, nor any the part makes after (H13).
+        part.Silent = true;
         PartBatch? stack = Interlocked.Exchange(ref part.Head.Value, null);
         long start = -1;
         long entries = 0;
@@ -207,19 +215,19 @@ internal sealed partial class GroupCore
 
         if (entries > 0)
         {
-            Ran(part, start, entries);
+            Ran(part, start, entries, emitted: false);
         }
     }
 
-    /// <summary>A run of <paramref name="entries"/> entries from <paramref name="start"/> recorded on its part.</summary>
-    private void Ran(CorePart part, long start, long entries)
+    /// <summary>A run of <paramref name="entries"/> entries from <paramref name="start"/> recorded on its part, their keys <paramref name="emitted"/> or not (H13).</summary>
+    private void Ran(CorePart part, long start, long entries, bool emitted)
     {
         if (entries == 0)
         {
             return;
         }
 
-        (part.Runs ??= []).Add(new PartRun(start, entries));
+        (part.Runs ??= []).Add(new PartRun(start, entries, emitted));
         if (part.Runs.Count == 1)
         {
             Interlocked.Increment(ref _spilledParts);
@@ -307,25 +315,37 @@ internal sealed partial class GroupCore
             _words = new ulong[Page().Length / sizeof(ulong)];
         }
 
-        foreach (PartRun run in runs)
+        // The runs whose keys the emitter was told come back first, silently; then the others, whose
+        // keys not among them are told as they enter the part's set (H13).
+        foreach (bool emitted in (bool[])[true, false])
         {
-            long offset = run.Offset;
-            long left = run.Entries;
-            while (left > 0)
+            part.Silent = emitted;
+            foreach (PartRun run in runs)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                int entries = (int)Math.Min(perPage, left);
-                int bytes = entries * entryBytes;
-                await _scratch!.ReadAsync(offset, Page().AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
-                Buffer.BlockCopy(_page!, 0, _words, 0, bytes);
-                PartBatch batch = new PartBatch(_words, 0, entries) { Count = entries };
-                Pend(entries);
-                applier.Apply(part, batch, burst: false);
-                offset += bytes;
-                left -= entries;
+                if (run.Emitted != emitted)
+                {
+                    continue;
+                }
+
+                long offset = run.Offset;
+                long left = run.Entries;
+                while (left > 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int entries = (int)Math.Min(perPage, left);
+                    int bytes = entries * entryBytes;
+                    await _scratch!.ReadAsync(offset, Page().AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
+                    Buffer.BlockCopy(_page!, 0, _words, 0, bytes);
+                    PartBatch batch = new PartBatch(_words, 0, entries) { Count = entries };
+                    Pend(entries);
+                    applier.Apply(part, batch, burst: false);
+                    offset += bytes;
+                    left -= entries;
+                }
             }
         }
 
+        part.Silent = false;
         part.Runs = null;
     }
 

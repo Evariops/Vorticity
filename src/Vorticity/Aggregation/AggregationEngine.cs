@@ -285,6 +285,24 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool TopOnExtremes { get; set; } = true;
 
+    /// <summary>What the core tells of each group it makes as it makes it, a <c>Distinct</c>'s reader (PLAN-HIGH-CARDINALITY, H13); null for none.</summary>
+    internal CoreEmitter? Emitter { get; set; }
+
+    /// <summary>
+    /// Whether a <c>Distinct</c> of this plan, on several lanes, takes the core's path, each value told
+    /// as it enters its part's set (PLAN-HIGH-CARDINALITY, H13): on by default, off for the tests and the
+    /// bench to weigh it against the values taken on the reader's thread.
+    /// </summary>
+    internal bool CoreDistinct { get; set; } = true;
+
+    /// <summary>
+    /// Whether the core asked for (<see cref="Core"/>) is the lean one lanes turn to under pressure: α at 1,
+    /// a part applied from 256 entries, batches of a kilobyte, its caches and batches sized on the budget
+    /// (PLAN-HIGH-CARDINALITY, H4, milestone 2): a <c>Distinct</c>'s, which tells its values as they enter
+    /// their sets and spills under its budget (H13).
+    /// </summary>
+    internal bool CoreLean { get; set; }
+
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
 
@@ -1895,7 +1913,7 @@ internal static class AggregationEngine
                 }
 
                 memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
-                outcome.Parts = new CoreParts(engaged, spilled, plan, builder ?? throw new InvalidOperationException("A group by whose core spills delivers its parts through a builder."));
+                outcome.Parts = new CoreParts(engaged, spilled, plan, builder ?? (plan.Emitter is not null ? null : throw new InvalidOperationException("A group by whose core spills delivers its parts through a builder.")));
                 return Counted(outcome, memory, memory.Held);
             }
 
