@@ -96,9 +96,75 @@ internal struct IndexedSum
                 return 0;
             }
 
-            Int128 total = ((Int128)M0 << (2 * Width)) + ((Int128)M1 << Width) + M2;
-            return Round(total, (Width * (top - 2)) + Lowest);
+            // The bins' total in two words, each bin sign-extended and shifted into place, added with
+            // their carries: the shifts of an Int128 were calls to its operators (PLAN-HIGH-CARDINALITY,
+            // profiling).
+            ulong low = (ulong)M0 << (2 * Width);
+            ulong high = (ulong)(M0 >> (64 - (2 * Width)));
+            Add(ref high, ref low, (ulong)(M1 >> (64 - Width)), (ulong)M1 << Width);
+            Add(ref high, ref low, (ulong)(M2 >> 63), (ulong)M2);
+            return Round(high, low, (Width * (top - 2)) + Lowest);
         }
+    }
+
+    /// <summary>Adds the word pair (<paramref name="addHigh"/>, <paramref name="addLow"/>) to (<paramref name="high"/>, <paramref name="low"/>), the low word's carry into the high.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Add(ref ulong high, ref ulong low, ulong addHigh, ulong addLow)
+    {
+        ulong sum = low + addLow;
+        high += addHigh + (sum < low ? 1UL : 0UL);
+        low = sum;
+    }
+
+    /// <summary>
+    /// The value of the two's complement total (<paramref name="high"/>, <paramref name="low"/>) units of
+    /// <c>2^exponent</c>, rounded to the nearest double, ties to even, as <see cref="Round(Int128, int)"/>:
+    /// in words while fewer than 64 bits are dropped, the round bit and the bits below it read off the
+    /// low word; through the 128-bit rounding past them.
+    /// </summary>
+    internal static double Round(ulong high, ulong low, int exponent)
+    {
+        if ((high | low) == 0)
+        {
+            return 0;
+        }
+
+        bool negative = (long)high < 0;
+        if (negative)
+        {
+            low = ~low + 1;
+            high = ~high + (low == 0 ? 1UL : 0UL);
+        }
+
+        int length = high != 0 ? 128 - BitOperations.LeadingZeroCount(high) : 64 - BitOperations.LeadingZeroCount(low);
+        int leading = length - 1 + exponent;
+        int drop = Math.Max(leading - 52, Lowest) - exponent;
+        ulong kept;
+        if (drop <= 0)
+        {
+            // At most 53 bits: the low word holds them all, exact as a double.
+            kept = low;
+        }
+        else if (drop < 64)
+        {
+            kept = (low >> drop) | (high << (64 - drop));
+            ulong round = (low >> (drop - 1)) & 1;
+            ulong below = low & ((1UL << (drop - 1)) - 1);
+            if (round != 0 && (below != 0 || (kept & 1) != 0))
+            {
+                kept++;
+            }
+
+            exponent += drop;
+        }
+        else
+        {
+            double wide = Round(new Int128(high, low), exponent);
+            return negative ? -wide : wide;
+        }
+
+        double result = Math.ScaleB((double)kept, exponent);
+        return negative ? -result : result;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
