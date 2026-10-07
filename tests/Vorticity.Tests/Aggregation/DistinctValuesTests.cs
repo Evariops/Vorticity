@@ -2,9 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
+using Vorticity.Types;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -66,6 +70,59 @@ public sealed partial class DistinctValuesTests
         Assert.False(values.Add(new UInt128(31, 1)));
         Assert.True(values.Add(new UInt128(1, 31)));
         Assert.Equal(5_001, values.Count);
+    }
+
+    [Fact]
+    public void AReservedSetKeepsItsValuesAndGrowsNoMore()
+    {
+        DistinctValues<long> values = new DistinctValues<long>();
+        for (long i = 0; i < 1_000; i++)
+        {
+            values.Add(i * 7_919);
+        }
+
+        values.Reserve(100_000);
+        long reserved = values.Footprint;
+        Assert.Equal(DistinctValues<long>.FootprintOf(100_000), reserved);
+        for (long i = 0; i < 100_000; i++)
+        {
+            Assert.Equal(i >= 1_000, values.Add(i * 7_919));
+        }
+
+        Assert.Equal(100_000, values.Count);
+        Assert.Equal(reserved, values.Footprint);
+    }
+
+    [Fact]
+    public void ASlotOfOneGroupReservesTheValuesItsFirstRowsForetell()
+    {
+        // 65 536 rows of a column of a million values: about 63 500 distinct, which foretell 865 000
+        // over two million rows. The set takes them at once, and grows no more.
+        long[] column = new long[2_000_000];
+        for (int row = 0; row < column.Length; row++)
+        {
+            column[row] = (long)((((ulong)row * 0x9E37_79B9_7F4A_7C15UL) >> 20) % 1_000_000);
+        }
+
+        CanonicalArena arena = new CanonicalArena();
+        try
+        {
+            FixedDistinctSlot<long> slot = new FixedDistinctSlot<long>(StorageKind.Primitive);
+            slot.Ungrouped();
+            slot.EnsureGroups(1);
+            slot.StepRange(Input(arena, column.AsSpan(0, 65_536), 1), 0, 65_536, 0);
+            slot.Foretell(65_536, column.Length, memory: null);
+            long reserved = slot.Footprint;
+            Assert.True(reserved >= DistinctValues<long>.FootprintOf(800_000), $"{reserved} bytes reserved");
+
+            slot.StepRange(Input(arena, column.AsSpan(65_536), 2), 0, column.Length - 65_536, 0);
+            Assert.Equal(column.Distinct().Count(), slot.Result(0));
+            Assert.Equal(reserved, slot.Footprint);
+        }
+        finally
+        {
+            arena.Reset();
+        }
     }
 
     [Theory]
@@ -155,6 +212,16 @@ public sealed partial class DistinctValuesTests
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    /// <summary>A batch of one column of <c>long</c>s, laid in <paramref name="arena"/> as a scan lays it.</summary>
+    private static BatchInput Input(CanonicalArena arena, ReadOnlySpan<long> column, long batch)
+    {
+        DType dtype = new DTypeArena().Primitive(PType.I64, Nullability.NonNullable);
+        VortexBuffer buffer = arena.Allocate(column.Length * sizeof(long), 8, out Span<byte> values);
+        MemoryMarshal.AsBytes(column).CopyTo(values);
+        int node = arena.AddPrimitive(dtype, column.Length, Validity.NonNullable, PType.I64, buffer);
+        return new BatchInput(batch, arena, node, column.Length, default);
+    }
 
     [VortexRecord]
     public partial record struct Sample(int Number, double Real);

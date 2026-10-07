@@ -564,6 +564,36 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set.Govern(_shelf);
     }
 
+    /// <summary>
+    /// The values a uniform column of <see cref="AggregationPartition.EstimatedValues"/> values makes
+    /// from <paramref name="expected"/> rows, reserved in the set: grown by doubling, it placed every value
+    /// again at each step, and took new memory each time, a fifth of the distinct users of a scan of 20M
+    /// visits at one lane, more than a quarter at fourteen.
+    /// </summary>
+    internal override void Foretell(long rows, long expected, QueryMemory? memory)
+    {
+        if (_set is not { Count: > 0 } set)
+        {
+            return;
+        }
+
+        double values = AggregationPartition.EstimatedValues(rows, set.Count);
+        double foretold = double.IsPositiveInfinity(values) ? expected : values * -double.ExpM1(-expected / values);
+        long count = (long)Math.Min(foretold, expected);
+        if (count < 2 * set.Count || count > int.MaxValue / 4)
+        {
+            return;
+        }
+
+        // Past what the budget grants, the set grows as before.
+        if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count)))
+        {
+            return;
+        }
+
+        set.Reserve((int)count);
+    }
+
     internal override void EnsureGroups(int groups)
     {
         if (groups > _counts.Length)

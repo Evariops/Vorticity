@@ -803,11 +803,25 @@ internal sealed class AggregationPartition
     /// Once <see cref="JudgedRows"/> rows are folded, a table of a hashed key reserves the groups its first
     /// rows foretell for the rows the partition expects: those a uniform key of <see cref="EstimatedValues"/>
     /// values makes from them, as its budget lets it. Grown by doubling, the table placed every group again
-    /// at each step, a sixth of a group by of 1.8M pairs of integers (PLAN-HIGH-CARDINALITY, H11).
+    /// at each step, a sixth of a group by of 1.8M pairs of integers (PLAN-HIGH-CARDINALITY, H11). With no
+    /// key, each slot foretells its own (<see cref="AggregateSlot.Foretell"/>).
     /// </summary>
     private void Foretell()
     {
         _foretold = true;
+        if (Keys is null && ExpectedRows > _rowsFolded)
+        {
+            for (int i = 0; i < Slots.Length; i++)
+            {
+                if (_inputs[i] != Settled)
+                {
+                    Slots[i].Foretell(_rowsFolded, ExpectedRows, Memory);
+                }
+            }
+
+            return;
+        }
+
         if (Keys is not { NumberedByValue: false } keys || keys.Count == 0 || ExpectedRows <= _rowsFolded)
         {
             return;
@@ -1501,6 +1515,12 @@ internal sealed class AggregationPartition
                 }
             }
 
+            _rowsFolded += rows;
+            if (!_foretold && _rowsFolded >= JudgedRows)
+            {
+                Foretell();
+            }
+
             return;
         }
 
@@ -1531,6 +1551,7 @@ internal sealed class AggregationPartition
         {
             Foretell();
         }
+
         for (int i = 0; i < Slots.Length; i++)
         {
             Slots[i].EnsureGroups(groups);
@@ -2053,7 +2074,7 @@ internal static class AggregationEngine
                     Top = top,
                     Core = core?.Lane(),
                     Pressure = pressure,
-                    ExpectedRows = core is null && top is null && facts?.Rows is long rows ? rows : -1,
+                    ExpectedRows = core is null && top is null ? source.RowBound : -1,
                 };
                 if (core is { Lean: true })
                 {
@@ -2083,7 +2104,7 @@ internal static class AggregationEngine
                         Pressure = pressure,
                         TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
                             && facts?.Rows is long sourceRows && sourceRows >= lanes * AggregationPartition.LaneRows,
-                        ExpectedRows = core is null && top is null && facts?.Rows is long laneRows ? laneRows / lanes : -1,
+                        ExpectedRows = core is null && top is null && source.RowBound >= 0 ? source.RowBound / lanes : -1,
                     };
                     if (core is { Lean: true })
                     {

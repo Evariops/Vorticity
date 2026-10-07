@@ -164,6 +164,16 @@ internal abstract class AggregateSlot
     }
 
     /// <summary>
+    /// Reserves, for a slot of group 0 alone (<see cref="Ungrouped"/>), what its first
+    /// <paramref name="rows"/> rows foretell for the <paramref name="expected"/> rows its partition
+    /// expects, as <paramref name="memory"/> grants it (PLAN-HIGH-CARDINALITY, profiling). Nothing for a
+    /// slot whose state does not grow with the values it meets.
+    /// </summary>
+    internal virtual void Foretell(long rows, long expected, QueryMemory? memory)
+    {
+    }
+
+    /// <summary>
     /// The bytes the slot holds apart from the records it shares (<see cref="Bound"/>): its arrays at
     /// their capacity and, for a state of a variable size, the bytes it counts as it takes them
     /// (PLAN-HIGH-CARDINALITY, H1). Zero for a slot whose states all lie in records.

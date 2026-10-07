@@ -46,8 +46,20 @@ internal sealed class DistinctValues<TValue>
     /// </summary>
     internal DistinctValues(int capacity = 0, int skip = 0)
     {
-        _slots = new TValue[Math.Max(32, (int)BitOperations.RoundUpToPowerOf2((uint)(2 * capacity)))];
+        _slots = new TValue[Length(capacity)];
         _skip = skip;
+    }
+
+    /// <summary>The bytes of the slots that take <paramref name="capacity"/> values before they double.</summary>
+    internal static long FootprintOf(int capacity) => (long)Length(capacity) * Unsafe.SizeOf<TValue>();
+
+    /// <summary>Makes the slots take <paramref name="capacity"/> values before they double, the values held placed again.</summary>
+    internal void Reserve(int capacity)
+    {
+        if (Length(capacity) > _slots.Length)
+        {
+            Rehash(Length(capacity));
+        }
     }
 
     /// <summary>The shelf the slots grow from from now on (PLAN-HIGH-CARDINALITY, H2, decision 13).</summary>
@@ -227,6 +239,9 @@ internal sealed class DistinctValues<TValue>
     /// <summary>The home of a value of hash <paramref name="hash"/> under <paramref name="shift"/>: the top bits past those it shares with every value.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int Home(ulong hash, int shift) => (int)((hash << _skip) >> shift);
+
+    /// <summary>The slots that take <paramref name="capacity"/> values at most half full: a power of two, 32 at least.</summary>
+    private static int Length(int capacity) => Math.Max(32, (int)BitOperations.RoundUpToPowerOf2((uint)(2 * capacity)));
 
     /// <summary>The shift that leaves a hash's home among <paramref name="length"/> slots, a power of two: its top bits.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
