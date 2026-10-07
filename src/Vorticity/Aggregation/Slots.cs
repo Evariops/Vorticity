@@ -315,6 +315,35 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         return ((IMeanSlot)parts[part]).Mean(group - offsets[part]);
     }
 
+    /// <summary>The means a run at a time of one part, as <see cref="Results"/> reads the answers.</summary>
+    public void Means(ReadOnlySpan<int> groups, Span<double?> into)
+    {
+        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        try
+        {
+            int start = 0;
+            while (start < groups.Length)
+            {
+                int part = JoinedParts.PartOf(offsets, groups[start]);
+                int low = offsets[part];
+                int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
+                int end = start;
+                while (end < groups.Length && groups[end] >= low && groups[end] < high)
+                {
+                    local[end] = groups[end] - low;
+                    end++;
+                }
+
+                ((IMeanSlot)parts[part]).Means(local.AsSpan(start, end - start), into[start..end]);
+                start = end;
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(local);
+        }
+    }
+
     internal override void EnsureGroups(int groups) => throw JoinedParts.Read();
 
     internal override void StepRange(in BatchInput input, int start, int end, int group) => throw JoinedParts.Read();
@@ -411,6 +440,9 @@ internal interface IMeanSlot
 {
     /// <summary>The mean of <paramref name="group"/>: its total over its count, null with no value.</summary>
     double? Mean(int group);
+
+    /// <summary>The means of <paramref name="groups"/>, in order: a batch of a result column.</summary>
+    void Means(ReadOnlySpan<int> groups, Span<double?> into);
 }
 
 /// <summary>
@@ -440,6 +472,8 @@ internal sealed class MeanView(IMeanSlot sum) : AggregateSlot<double?>
     }
 
     internal override double? Result(int group) => sum.Mean(group);
+
+    internal override void Results(ReadOnlySpan<int> groups, Span<double?> into) => sum.Means(groups, into);
 }
 
 /// <summary>An aggregate answered before the scan, from the file statistics or a count: nothing to step.</summary>

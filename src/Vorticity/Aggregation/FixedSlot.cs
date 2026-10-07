@@ -321,7 +321,28 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
 
     internal override TResult Result(int group) => _finish(State(group));
 
+    /// <summary>The answers of <paramref name="groups"/> under one view of the records: a group at a time, each made its view, cost the reader a third of building a million of them.</summary>
+    internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
+    {
+        StateView<TState> states = States;
+        Func<TState, TResult> finish = _finish;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = finish(states[groups[i]]);
+        }
+    }
+
     public double? Mean(int group) => _op.Mean(in State(group));
+
+    public void Means(ReadOnlySpan<int> groups, Span<double?> into)
+    {
+        StateView<TState> states = States;
+        TOp op = _op;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = op.Mean(in states[groups[i]]);
+        }
+    }
 
     /// <summary>
     /// Folds the rows of [start, end) the mask holds: a run of words of <see cref="WordFold.Dense"/>
