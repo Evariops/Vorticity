@@ -80,6 +80,7 @@ internal static class HighCardinality
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, order by count take 100", TopCountsAsync, 1, Matrix.Full));
         yield return ($"spread-random-{FullRows}", new Scenario("hc random tenfold, where count > 10", HavingAsync, 1, Matrix.Full));
         yield return ("pages", new Scenario("hc text key 1e6 (urls), order by count take 100", TopUrlsAsync, 16, Matrix.Full));
+        yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, order by max take 100", TopMostAsync, 1, Matrix.Full));
     }
 
     /// <summary>A group by of the matrix: its distribution's file, a key column, a set of aggregates.</summary>
@@ -342,6 +343,23 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> TopMostAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<KeyMost> groups in run.Track(file.Scan<Spread>()
+            .GroupBy(s => s.K6)
+            .OrderByDescending(g => g.Max(s => s.Value))
+            .Take(100)
+            .Select(g => (g.Key, g.Max(s => s.Value))))
+            .As<KeyMost>())
+        {
+            run.Answer();
+            rows += groups.RowCount;
         }
 
         return rows;

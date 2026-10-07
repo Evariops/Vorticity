@@ -67,6 +67,12 @@ internal abstract class ColumnOrder
     {
     }
 
+    /// <summary>The key of 64 bits the order ranks <paramref name="position"/> by, the direction folded in; null when it holds none, or the value is null.</summary>
+    internal virtual long? KeyAt(int position) => null;
+
+    /// <summary>Whether <paramref name="position"/>'s value is present: not a null the validity marks.</summary>
+    protected bool Present(int position) => _validity.Length == 0 || ((_validity[position >> 6] >> (position & 63)) & 1) != 0;
+
     /// <summary>
     /// <see cref="GroupSort.TopTied"/> by this order alone: through <see cref="Compare"/>, or in a
     /// loop typed on its values where it holds them.
@@ -354,6 +360,8 @@ internal static class ValuesOrder
         private readonly bool _whole = present.Length == 0;
 
         protected override int CompareValues(int a, int b) => keys[a].CompareTo(keys[b]);
+
+        internal override long? KeyAt(int position) => Present(position) ? keys[position] : null;
 
         internal override (int Before, int Tied) TopTied(int[] positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
             _whole

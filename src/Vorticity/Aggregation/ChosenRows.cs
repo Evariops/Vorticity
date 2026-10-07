@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,11 +15,13 @@ namespace Vorticity.Aggregating;
 internal abstract class ChosenValues
 {
     /// <summary>
-    /// Makes room for groups up to <paramref name="groups"/>, its arrays held under the result's
-    /// <paramref name="memory"/> until it is delivered (PLAN-HIGH-CARDINALITY, H2), the ones they
-    /// replace let go.
+    /// Makes room for the values of <paramref name="groups"/>, the groups a fetch reads, each below
+    /// <paramref name="most"/>: arrays their number when they are a few of many, a top-k's or a window's,
+    /// found through a map of their numbers (PLAN-HIGH-CARDINALITY, H7); arrays indexed by the group
+    /// otherwise. The arrays are held under the result's <paramref name="memory"/> until it is delivered
+    /// (H2), the ones they replace let go. A fetch's values are the ones read until the next fetch.
     /// </summary>
-    internal abstract void EnsureGroups(int groups, QueryMemory? memory);
+    internal abstract void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory);
 
     /// <summary>Lets the arrays go, and what they held of <paramref name="memory"/>.</summary>
     internal abstract void Release(QueryMemory? memory);
@@ -36,26 +39,52 @@ internal abstract class ChosenValues
 /// <summary>The values of a column of chosen rows as <typeparamref name="T"/>, and the groups that have no row.</summary>
 internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
 {
+    /// <summary>The groups below which a fetch of some is a few of many: its values at a place of their own.</summary>
+    private const int Sparse = 8;
+
     private T[] _values = [];
     private bool[] _missing = [];
     private T[] _scratch = [];
 
+    // The place of each group fetched, when they are a few of many; null when the group is its place.
+    private Dictionary<int, int>? _places;
+
     /// <summary>The value of <paramref name="group"/>'s chosen row; the default when it has none.</summary>
-    internal T At(int group) => _values[group];
+    internal T At(int group) => _values[Place(group)];
 
     /// <summary>Whether <paramref name="group"/> has no chosen row: no candidate, or no row its filter keeps.</summary>
-    internal bool Missing(int group) => _missing[group];
+    internal bool Missing(int group) => _missing[Place(group)];
 
-    internal override void EnsureGroups(int groups, QueryMemory? memory)
+    private int Place(int group) => _places is null ? group : _places[group];
+
+    internal override void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory)
     {
-        if (groups > _values.Length)
+        int length = most;
+        if ((long)groups.Length * Sparse < most)
         {
-            int length = Scratch.Capacity(groups, _values.Length);
+            _places ??= [];
+            _places.Clear();
+            foreach (int group in groups)
+            {
+                _places.TryAdd(group, _places.Count);
+            }
+
+            length = _places.Count;
+        }
+        else
+        {
+            _places = null;
+        }
+
+        if (length > _values.Length)
+        {
+            // Each value a fetch reads is written, or its group cleared: the arrays come new.
+            int capacity = Scratch.Capacity(length, _values.Length);
             long element = Unsafe.SizeOf<T>() + sizeof(bool);
-            memory?.Hold(length * element, "fetch of the chosen rows");
+            memory?.Hold(capacity * element, "fetch of the chosen rows");
             memory?.LetGo(_values.Length * element);
-            Array.Resize(ref _values, length);
-            Array.Resize(ref _missing, length);
+            _values = new T[capacity];
+            _missing = new bool[capacity];
         }
     }
 
@@ -65,12 +94,14 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
         _values = [];
         _missing = [];
         _scratch = [];
+        _places = null;
     }
 
     internal override void Clear(int group)
     {
-        _values[group] = default!;
-        _missing[group] = true;
+        int place = Place(group);
+        _values[place] = default!;
+        _missing[place] = true;
     }
 
     internal override void Read(RecordBatch batch, int node, int first, ReadOnlySpan<int> rows, ReadOnlySpan<int> groups)
@@ -79,8 +110,9 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
         ResultValues.Copy(batch, batch.Arena, node, column.Read.Type, column.Read.Extensions, _scratch, null);
         for (int i = 0; i < groups.Length; i++)
         {
-            _values[groups[i]] = _scratch[rows[i] - first];
-            _missing[groups[i]] = false;
+            int place = Place(groups[i]);
+            _values[place] = _scratch[rows[i] - first];
+            _missing[place] = false;
         }
     }
 }
@@ -166,7 +198,7 @@ internal static class ChosenFetch
 
         for (int c = 0; c < chosen.Length; c++)
         {
-            outcome.ChosenOf(chosen[c]).EnsureGroups(most, memory);
+            outcome.ChosenOf(chosen[c]).EnsureGroups(groups.Span, most, memory);
         }
 
         // Each row a group chose, with the choice and the group it serves; a group without a row

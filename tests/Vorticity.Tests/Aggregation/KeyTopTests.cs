@@ -112,6 +112,48 @@ public sealed partial class KeyTopTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(14)]
+    public async Task TheFirstGroupsOfAnOrderOnAnExtremeAreKeptAloneOnEachLane(int degree)
+    {
+        // An integer column's largest value from the largest, its smallest from the smallest
+        // (PLAN-HIGH-CARDINALITY, H7): a thousand values among sixty thousand keys, each shared by
+        // sixty of them, so that the k-th ties with dozens, which the key ranks. Each lane keeps its
+        // best groups alone, and drops the rows short of the worst it keeps.
+        (Row[] rows, string path) = await WriteAsync();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            foreach (int keep in (int[])[10, 100])
+            {
+                List<KeyValue> most = [.. rows.GroupBy(r => r.Key).Select(g => new KeyValue(g.Key, g.Max(r => r.Value)))
+                    .OrderByDescending(g => g.Value).ThenBy(g => g.Key).Take(keep)];
+                Vorticity.Aggregation largest = Scan(file).GroupBy(r => r.Key).OrderByDescending(g => g.Max(x => x.Value)).Take(keep).Select(g => (g.Key, g.Max(x => x.Value)));
+                Assert.NotNull(KeyTop.Of((AggregationQuery)largest.Query));
+                Assert.Equal(most, await ListAsync(largest.As<KeyValue>()));
+                AggregationQuery query = (AggregationQuery)largest.Query;
+                Assert.True(query.PeakGroups <= degree * (keep + (keep / 2) + 1 + BatchRows), $"{query.PeakGroups} groups held for {keep} of {Keys}");
+
+                List<KeyValue> least = [.. rows.GroupBy(r => r.Key).Select(g => new KeyValue(g.Key, g.Min(r => r.Value)))
+                    .OrderBy(g => g.Value).ThenBy(g => g.Key).Take(keep)];
+                Vorticity.Aggregation smallest = Scan(file).GroupBy(r => r.Key).OrderBy(g => g.Min(x => x.Value)).Take(keep).Select(g => (g.Key, g.Min(x => x.Value)));
+                Assert.Equal(least, await ListAsync(smallest.As<KeyValue>()));
+            }
+
+            // The smallest from the largest, another aggregate read, a float's extreme: every group, as before.
+            Assert.Null(KeyTop.Of((AggregationQuery)Scan(file).GroupBy(r => r.Key).OrderByDescending(g => g.Min(x => x.Value)).Take(10).Select(g => (g.Key, g.Min(x => x.Value))).Query));
+            Assert.Null(KeyTop.Of((AggregationQuery)Scan(file).GroupBy(r => r.Key).OrderByDescending(g => g.Max(x => x.Value)).Take(10).Select(g => (g.Key, g.Count())).Query));
+            Assert.Null(KeyTop.Of((AggregationQuery)Scan(file).GroupBy(r => r.Key).OrderByDescending(g => g.Max(x => x.Level)).Take(10).Select(g => (g.Key, g.Max(x => x.Level))).Query));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static Scan<Row> Scan(VortexFile file) => file.Scan<Row>().With(new ScanOptions { BatchRows = BatchRows });
@@ -178,6 +220,9 @@ public sealed partial class KeyTopTests
 
     [VortexRecord]
     public partial record struct LevelCount(double? Level, long Count);
+
+    [VortexRecord]
+    public partial record struct KeyValue(int Key, long? Value);
 
     [VortexRecord]
     public partial record struct PairCount(int Group, string Name, long Count);

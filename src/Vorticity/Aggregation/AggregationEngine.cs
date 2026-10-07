@@ -278,6 +278,13 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool TopInChunks { get; set; } = true;
 
+    /// <summary>
+    /// Whether a top-k on a column's largest or smallest value of each group keeps the lanes' best
+    /// groups alone, dropping the rows past their frontier (PLAN-HIGH-CARDINALITY, H7): on by default,
+    /// off for the bench to weigh it against the group by of every group.
+    /// </summary>
+    internal bool TopOnExtremes { get; set; } = true;
+
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
 
@@ -1088,6 +1095,12 @@ internal sealed class AggregationPartition
     /// <summary>The worst of the groups the top kept at its last trim, which no row past it joins; -1 before.</summary>
     internal int TopFrontier { get; set; } = -1;
 
+    /// <summary>
+    /// The key of the worst value a top on a column's extreme kept at its last trim, which a row's value
+    /// must reach to join it (PLAN-HIGH-CARDINALITY, H7, <see cref="ValueFrontier"/>); null before.
+    /// </summary>
+    internal long? TopEdge { get; set; }
+
     // The batch's selection less the rows past the top's frontier.
     private ulong[] _narrowed = [];
 
@@ -1241,6 +1254,23 @@ internal sealed class AggregationPartition
             int words = (rows + 63) >> 6;
             Scratch.Grow(ref _narrowed, words);
             if (Keys!.Narrow(arena, _nodes.AsSpan(0, _keyCount), rows, selection, TopFrontier, Top!.Descending, _narrowed))
+            {
+                selection = _narrowed.AsSpan(0, words);
+                if (selection.IndexOfAnyExcept(0UL) < 0)
+                {
+                    return;
+                }
+            }
+        }
+
+        // On a column's extreme, a row whose value falls short of the worst the top kept changes none
+        // of its groups, nor makes one (H7): the extreme is the query's one aggregate.
+        if (TopEdge is long edge)
+        {
+            int words = (rows + 63) >> 6;
+            Scratch.Grow(ref _narrowed, words);
+            int input = _inputs[0];
+            if (ValueFrontier.Narrow(arena, _nodes[input], _columns[input], rows, selection, edge, Top!.Descending, _narrowed))
             {
                 selection = _narrowed.AsSpan(0, words);
                 if (selection.IndexOfAnyExcept(0UL) < 0)
