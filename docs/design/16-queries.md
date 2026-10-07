@@ -803,27 +803,33 @@ stand for, fails the query instead.
 
 ## 10. Plan and statistics
 
-`ExplainAsync` on an aggregation, a projection or a result's scan returns the scan's
-`ScanPlan` with `Grouping`, null without a group by. It says what costs, so that the shape of LINQ
-does not hide it:
+`ExplainAsync` on an aggregation returns the scan's `ScanPlan` with `Grouping`, a `GroupPlan`, null
+without a group by. It says what costs, so that the shape of LINQ does not hide it, from the query and
+the statistics alone:
 
 | member | says |
 |---|---|
-| `GroupPlan.Keys` | per component: its column, its function, whether the statistics say it is sorted, whether they bound it for a direct index |
-| `GroupPlan.Streaming` | the component the groups stream on, or why none does (§2.3) |
-| `GroupPlan.Aggregates` | the aggregates once deduplicated, those the statistics settle, the filters of filtered groups and the columns they add to the pass |
-| `GroupPlan.RowFilter` | the conjuncts of a `Where` on keys moved to the rows (§6.2) |
-| `GroupPlan.Order` | none, streamed, a heap of `k`, or a sort of every group |
-| `GroupPlan.ChosenRows` | the chosen rows, and the operator before which they are fetched, in one take, for the groups left: the first that reads one, or the result's window |
-| `GroupPlan.Ranges`, `Partitioned` | how many ranges aggregate concurrently, and whether they partition by key |
-| `GroupPlan.Memory` | the memory the statistics bound, when they bound the groups: a direct-index key's range, a streaming key's open groups |
+| `Keys` | per component, a `GroupKeyPlan`: its column, whether the statistics say it is sorted, and the values they bound an integer column to, which a table of its groups indexes directly |
+| `Streaming`, `NotStreaming` | the component the groups stream on, or why none does (§2.3) |
+| `Aggregates` | the aggregates the pass computes, once the selection's duplicates are merged |
+| `RowFilter` | the conjuncts of a `Where` on keys moved to the rows (§6.2) |
+| `Order`, `Kept` | `GroupOrdering.None`, `Streamed` on the key the groups close in, `Top` with the groups a heap keeps for a window, or a `Sort` of every group |
+| `ChosenRows` | the columns of chosen rows the result reads |
+| `Degree` | the lanes the pass may run on at most |
+| `Core`, `CacheCapacity`, `Alpha` | whether the core holds the groups, the plan having asked for it at that degree; its caches' capacity and α (§9.4) |
+| `MostGroups` | the most groups the statistics allow, when they bound every component |
 
 A key's form is known only once its block is read, so the plan says what is possible and the
-statistics what happened. `Statistics` gains `Groups`, `PeakGroups` — the most groups held at once,
-which a streaming group by keeps small — the key blocks by how they were grouped,
-`KeyBlocksByRange` (constant, run-end, sorted), `KeyBlocksByCode`, `KeyBlocksHashed` and
-`KeyBlocksSettled` (§9.3), and `TimeToFirstBatch`, the time from the first `MoveNextAsync` to the
-first batch delivered.
+statistics what happened. Once the result is read, its `ScanStatistics` carry `Grouping`, a
+`GroupStatistics`: `Groups`, the groups the pass found before any operator on them; `PeakGroups`, the
+most held at once, which a streaming group by keeps small; `PeakBytes`, the most it held of its memory
+budget; `Lanes` and `MergeParts`; what the core did, `Core`, `CacheEvictions`, `BypassedRows`,
+`Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts` and
+`SpilledBytes`, zero until spilling comes; the key blocks by how they were grouped,
+`KeyBlocksByRange` (constant, run-end), `KeyBlocksByCode` and `KeyBlocksHashed`; and
+`TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch. Both are properties
+outside the records' constructors. Nothing of them goes through the scan's own counters, which every
+batch touches.
 
 ## 11. Errors, cancellation, disposal
 
