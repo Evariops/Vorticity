@@ -315,33 +315,71 @@ internal sealed partial class GroupCore
             _words = new ulong[Page().Length / sizeof(ulong)];
         }
 
+        // The sub-tables the part made in memory since it first spilled were made in silence: their keys
+        // wait with the runs the emitter was not told of, set aside until the others are back (H13).
+        SubTable[] silent = [];
+        if (Emitter is not null && part.Tables.Count > 0)
+        {
+            silent = [.. part.Tables];
+            part.Tables.Clear();
+            part.Directory = [0];
+            part.Depth = 0;
+            Volatile.Write(ref part.Groups, 0);
+        }
+
         // The runs whose keys the emitter was told come back first, silently; then the others, whose
         // keys not among them are told as they enter the part's set (H13).
-        foreach (bool emitted in (bool[])[true, false])
+        try
         {
-            part.Silent = emitted;
-            foreach (PartRun run in runs)
+            foreach (bool emitted in (bool[])[true, false])
             {
-                if (run.Emitted != emitted)
+                part.Silent = emitted;
+                foreach (PartRun run in runs)
                 {
-                    continue;
-                }
+                    if (run.Emitted != emitted)
+                    {
+                        continue;
+                    }
 
-                long offset = run.Offset;
-                long left = run.Entries;
-                while (left > 0)
+                    long offset = run.Offset;
+                    long left = run.Entries;
+                    while (left > 0)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        int entries = (int)Math.Min(perPage, left);
+                        int bytes = entries * entryBytes;
+                        await _scratch!.ReadAsync(offset, Page().AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
+                        Buffer.BlockCopy(_page!, 0, _words, 0, bytes);
+                        PartBatch batch = new PartBatch(_words, 0, entries) { Count = entries };
+                        Pend(entries);
+                        applier.Apply(part, batch, burst: false);
+                        offset += bytes;
+                        left -= entries;
+                    }
+                }
+            }
+
+            foreach (SubTable table in silent)
+            {
+                int from = 0;
+                while (from < table.Keys.Count)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    int entries = (int)Math.Min(perPage, left);
-                    int bytes = entries * entryBytes;
-                    await _scratch!.ReadAsync(offset, Page().AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
-                    Buffer.BlockCopy(_page!, 0, _words, 0, bytes);
-                    PartBatch batch = new PartBatch(_words, 0, entries) { Count = entries };
-                    Pend(entries);
-                    applier.Apply(part, batch, burst: false);
-                    offset += bytes;
-                    left -= entries;
+                    from = table.CopyEntries(Shape, from, _words, out int copied);
+                    if (copied > 0)
+                    {
+                        PartBatch batch = new PartBatch(_words, 0, copied) { Count = copied };
+                        Pend(copied);
+                        applier.Apply(part, batch, burst: false);
+                    }
                 }
+            }
+        }
+        finally
+        {
+            foreach (SubTable table in silent)
+            {
+                table.Release();
             }
         }
 

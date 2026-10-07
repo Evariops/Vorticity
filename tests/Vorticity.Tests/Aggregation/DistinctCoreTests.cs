@@ -93,6 +93,60 @@ public sealed partial class DistinctCoreTests
         }
     }
 
+    // Half the values in the first half of the rows, the other half met for the first time after: a part
+    // spilled in the first half makes the second's new values in memory, in silence, and they are told
+    // once it comes back. Three passes, the spills falling where the lanes' timing puts them.
+    [Theory]
+    [InlineData(4)]
+    [InlineData(14)]
+    public async Task ValuesMetAfterTheirPartSpilledAreToldOnce(int degree)
+    {
+        Row[] rows = new Row[4 * Values];
+        for (int row = 0; row < rows.Length; row++)
+        {
+            long value = (long)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % (Values / 2));
+            rows[row] = new Row((row < rows.Length / 2 ? value : value + (Values / 2)) * 1_000_003L, row % 7);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "distinct-core", $"halves-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        string scratch = Directory.CreateTempSubdirectory("vorticity-distinct-").FullName;
+        try
+        {
+            long peak = await PeakAsync(path, degree);
+            HashSet<long?> expected = [.. rows.Select(r => r.Key)];
+            for (int pass = 0; pass < 3; pass++)
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(peak / 5);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                    options.ScratchDirectory = scratch;
+                });
+
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Aggregation<long?> keys = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).Select(r => r.Key).Distinct();
+                List<long?> read = await keys.ToListAsync(Ct);
+                Assert.Equal(expected.Count, read.Count);
+                Assert.True(expected.SetEquals(read));
+                Assert.True(((DistinctQuery)keys.Query).LastCore?.SpilledParts > 0, $"no part spilled under {budget.CeilingBytes:N0} bytes of {peak:N0}");
+                Assert.Equal(0, budget.ReservedBytes);
+            }
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task AReaderThatStopsStopsThePass()
     {
