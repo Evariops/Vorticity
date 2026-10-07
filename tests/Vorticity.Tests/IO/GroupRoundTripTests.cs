@@ -3,8 +3,8 @@
 // query waited on before it could ask for more. On a store at 50 ms a round trip, a query's steps
 // times 50 ms is most of its time; on a local file both are invisible to a timer.
 //
-// RATCHETS, like RoundTripCountTests, set at the counts: a step of PLAN-HIGH-CARDINALITY.md that
-// adds a request or a step says which, and why, in its commit.
+// RATCHETS, like RoundTripCountTests, set at the counts: a change that adds a request or a step says
+// which, and why, in its commit.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -25,7 +25,7 @@ public sealed partial class GroupRoundTripTests
 
     /// <summary>A query, its degree, and the requests and steps it may cost; steps are held at one lane alone.</summary>
     /// <remarks>
-    /// Measured on 2026-10-06 (PLAN-HIGH-CARDINALITY.md, H0b): 25 chunks read in 22 requests, the
+    /// Measured on 2026-10-06: 25 chunks read in 22 requests, the
     /// reader joining neighbours, at any degree. The steps are not exact: the scan reads ahead, and
     /// whether a read joins the step of the one before or opens the next depends on which timer of
     /// the source fires first. Measured 8 to 11 at one lane, at 20 ms a request as at 50; the
@@ -73,8 +73,7 @@ public sealed partial class GroupRoundTripTests
     }
 
     // The first batch of a filtered scan over a store: the structures its filter consults are read
-    // before the rows they let through, each read a step the query waits on (PLAN-HIGH-CARDINALITY,
-    // R6). A RATCHET set at the counts, as the ceilings above: measured on 2026-10-06, two requests
+    // before the rows they let through, each read a step the query waits on. A RATCHET set at the counts, as the ceilings above: measured on 2026-10-06, two requests
     // in one step, neither waiting on the other.
     private const int FirstFilteredRequests = 2;
     private const int FirstFilteredSteps = 1;
@@ -108,7 +107,7 @@ public sealed partial class GroupRoundTripTests
     }
 
     // An aggregation's lane decodes on its own flow, nothing ahead, and reads ahead of its decode over
-    // a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6): two splits in flight, so that
+    // a source whose read is a round trip: two splits in flight, so that
     // its reads pair up into half as many steps as a read at a time takes, for the same rows and the
     // same requests.
     [Fact]

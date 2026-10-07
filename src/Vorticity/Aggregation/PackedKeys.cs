@@ -12,7 +12,7 @@ namespace Vorticity.Aggregating;
 /// <param name="Sorted">Whether each column is sorted, in the key's order.</param>
 /// <param name="Bounds">The values each integer column holds, when the statistics hold them exactly.</param>
 /// <param name="Rows">The rows of the source, which bound what a table of groups by value may span; -1 when unknown.</param>
-/// <param name="Scattered">Whether the key, numbered by value over a wide span, lies scattered over it, as its zones say: what takes the core from the start (decision 14).</param>
+/// <param name="Scattered">Whether the key, numbered by value over a wide span, lies scattered over it, as its zones say: what takes the core from the start.</param>
 internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1, bool Scattered = false);
 
 /// <summary>
@@ -88,7 +88,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// <param name="shapes">The key's columns.</param>
     /// <param name="facts">What the statistics say of them.</param>
     /// <param name="shared">The indexes of the columns, shared by the parts of a parallel merge; fresh ones when null.</param>
-    /// <param name="shelf">The lane's shelf its tables and its columns' indexes grow from (PLAN-HIGH-CARDINALITY, H2); null for tables nothing counts.</param>
+    /// <param name="shelf">The lane's shelf its tables and its columns' indexes grow from; null for tables nothing counts.</param>
     internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts, GroupKeys[]? shared = null, ArrayShelf? shelf = null)
     {
         _shapes = shapes;
@@ -724,7 +724,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private int Lookup(TKey key)
     {
         // The tags first, as RawKeys: a new tuple finds its free slot without reading a group number
-        // or a word, where it read the word of each group its chain passed (PLAN-HIGH-CARDINALITY, H11).
+        // or a word, where it read the word of each group its chain passed.
         byte[] tags = _tags;
         int mask = tags.Length - 1;
         int shift = Shift(tags.Length);

@@ -97,8 +97,7 @@ internal struct IndexedSum
             }
 
             // The bins' total in two words, each bin sign-extended and shifted into place, added with
-            // their carries: the shifts of an Int128 were calls to its operators (PLAN-HIGH-CARDINALITY,
-            // profiling).
+            // their carries: the shifts of an Int128 were calls to its operators.
             ulong low = (ulong)M0 << (2 * Width);
             ulong high = (ulong)(M0 >> (64 - (2 * Width)));
             Add(ref high, ref low, (ulong)(M1 >> (64 - Width)), (ulong)M1 << Width);

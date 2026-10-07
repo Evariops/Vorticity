@@ -259,7 +259,7 @@ public sealed class PathAllocationTests
         // with no file object, view and owner of its own: 312 bytes less on every axis that scans.
         //
         // A scan of one lane reads its next splits while it decodes one, over a source whose read
-        // is a round trip (PLAN-HIGH-CARDINALITY, R6): what it holds for that is behind one
+        // is a round trip: what it holds for that is behind one
         // reference of the enumerator, null over a mapping, 8 bytes on every axis that scans.
         ("open, first batch", File, 43_536, FirstBatch),
         // A scan binds each batch into the object its previous batch was rather than allocating

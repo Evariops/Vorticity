@@ -11,7 +11,7 @@ namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
 /// The numbers of a whole partition's groups, which a merge takes them all by, are shared by every
-/// thread up to a bound, and past it the merge's own (PLAN-HIGH-CARDINALITY.md, H1, reduction 7): a
+/// thread up to a bound, and past it the merge's own: a
 /// merge of lanes of more groups than that gives the rows' answers, keys in no order merged in series
 /// and keys in order followed range after range, and leaves the shared numbers within their bound.
 /// </summary>

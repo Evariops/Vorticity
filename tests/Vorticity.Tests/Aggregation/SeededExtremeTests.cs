@@ -11,7 +11,7 @@ namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
 /// An extreme keeps the value alone where its column leaves a value no row holds, which its state
-/// starts from (PLAN-HIGH-CARDINALITY.md, H1, reduction 3): NaN for a float, the end of 128 bits for a
+/// starts from: NaN for a float, the end of 128 bits for a
 /// decimal, for an integer the end of its range the statistics prove no row reaches. Where they prove
 /// nothing the state keeps a flag beside the value; the answers are the same either way, a group with
 /// no value, or only NaN, included.

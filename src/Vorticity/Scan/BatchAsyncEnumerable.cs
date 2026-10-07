@@ -138,8 +138,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
     /// <summary>
     /// The <see cref="Prefetch"/> of a scan of one lane that decodes nothing ahead and reads its next
-    /// splits while it decodes one, over a source whose read is a round trip (PLAN-HIGH-CARDINALITY,
-    /// R6): an aggregation's lanes.
+    /// splits while it decodes one, over a source whose read is a round trip: an aggregation's lanes.
     /// </summary>
     internal const int ReadsAhead = -1;
 
@@ -306,7 +305,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private bool _disposed;
 
     // A scan of one lane over a source that fetches its bytes reads splits ahead of the one it
-    // decodes (PLAN-HIGH-CARDINALITY, R6); null for every other scan, which pays one reference for it:
+    // decodes; null for every other scan, which pays one reference for it:
     // these paths are held to a ceiling in bytes.
     private readonly AheadReads? _ahead;
 
@@ -360,7 +359,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _cursor = plan.CreateCursor(reverse);
 
         // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
-        // reads ahead over a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6). Over a
+        // reads ahead over a source whose read is a round trip. Over a
         // mapping a read is a view, and there is nothing to overlap; the file the scan reads through
         // may be the one the open read whole, which is asked of its source.
         _ahead = readAhead && window == 1 && !file.Source.ReadsInPlace ? new AheadReads(ReadAheadSplits) : null;

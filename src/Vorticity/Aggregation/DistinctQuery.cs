@@ -44,7 +44,7 @@ internal sealed class DistinctQuery : ResultQuery
 
     /// <summary>
     /// The result's columns made anew: each keeps what it reads a batch of values with, and each applier
-    /// of the core that delivers them (PLAN-HIGH-CARDINALITY, H13) writes with a set of its own.
+    /// of the core that delivers them writes with a set of its own.
     /// </summary>
     internal ResultColumn[] NewColumns()
     {
@@ -79,7 +79,7 @@ internal sealed class DistinctQuery : ResultQuery
     /// <summary>The most values the last run held at once: every one met, or a batch's on a column that streams.</summary>
     internal long PeakValues { get; set; }
 
-    /// <summary>What the core did on the last run's path through it (PLAN-HIGH-CARDINALITY, H13); null when the run took the values on the reader's thread, or no lane's cache filled.</summary>
+    /// <summary>What the core did on the last run's path through it; null when the run took the values on the reader's thread, or no lane's cache filled.</summary>
     internal CoreRun? LastCore { get; set; }
 
     internal override VortexSchema Schema
@@ -182,10 +182,10 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     private bool _ended;
 
     // What the index of the values met holds, reserved in the session's budget as it grows; given
-    // back when the stream ends (PLAN-HIGH-CARDINALITY, H2).
+    // back when the stream ends.
     private QueryMemory? _memory;
 
-    // The core's path (PLAN-HIGH-CARDINALITY, H13): the pass on its own task, on several lanes, each
+    // The core's path: the pass on its own task, on several lanes, each
     // value told as it enters its part's set; the batch delivered, whose store goes back once the next
     // is; the values passed, in the window or not; the arena a batch the window cuts is cut into.
     private DistinctEmitter? _emitter;
@@ -245,7 +245,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 
             // The statistics' bounds, as a group by takes them: an integer they bound is numbered by its
             // value, in pages, where without them it was hashed, twice as long at a million values
-            // (PLAN-HIGH-CARDINALITY, profiling). A sorted column keeps the index that forgets.
+            // A sorted column keeps the index that forgets.
             KeyFacts? facts = _streaming < 0 ? await AggregationEngine.FactsAsync(projection.Host.Source, plan.Keys, _cancellationToken).ConfigureAwait(false) : null;
             _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming, facts: facts, memory: _memory);
             plan.Watch?.Invoke([_partition]);
@@ -277,8 +277,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// The core's path, when the values are many lanes' work and need no early stop
-    /// (PLAN-HIGH-CARDINALITY, H13): a key the core holds, no component the statistics say is sorted,
+    /// The core's path, when the values are many lanes' work and need no early stop: a key the core
+    /// holds, no component the statistics say is sorted,
     /// no window but a skip, several lanes. The pass runs on its own task, on the lean core: α at 1, a
     /// part's floor at 256 entries and its batches at a kilobyte, so that a part takes its values in as
     /// soon as it has a few (at the floor of 4 096 and batches of their default size, a part of 150 000
@@ -567,8 +567,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 }
 
 /// <summary>
-/// The values of a <c>Distinct</c> its core tells as they enter their parts' sets
-/// (PLAN-HIGH-CARDINALITY, H13): each applier copies them into a batch of the result's columns of its
+/// The values of a <c>Distinct</c> its core tells as they enter their parts' sets: each applier copies
+/// them into a batch of the result's columns of its
 /// own, handed to the reader once full or once its part is applied, the reader delivering them as they
 /// come. The batches are pooled: one delivered goes back for the next.
 /// </summary>

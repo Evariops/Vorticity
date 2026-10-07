@@ -10,7 +10,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The core of PLAN-HIGH-CARDINALITY, H4 (milestone 1), against the lanes' tables it replaces: the same
+/// The core, against the lanes' tables it replaces: the same
 /// answers, float sums to the bit, at one lane, two and fourteen, with caches, floors, sub-tables and
 /// batches so small that every batch of rows copies a cache, every deposit bursts and every burst
 /// splits; at every α; for a key of one column, null included, and a tuple of two.
@@ -50,7 +50,7 @@ public sealed partial class GroupCoreTests
             Assert.True(run.Flushes > 0 && run.Bursts > 0 && run.Splits > 0, run.ToString());
             Assert.True(bypass > 0 ? run.BypassedRows > 0 || degree > 2 : run.BypassedRows == 0, run.ToString());
 
-            // Delivered part by part (H7), every group once, a part let go before the next; and whole, as
+            // Delivered part by part, every group once, a part let go before the next; and whole, as
             // an order over the groups asks it, the same again.
             Assert.Equal(held.Count, core.Statistics.Grouping!.Groups);
             Assert.InRange(core.Statistics.Grouping.PeakGroups, 1, held.Count);
@@ -85,8 +85,8 @@ public sealed partial class GroupCoreTests
     [InlineData(14)]
     public async Task ALaneThatTurnsToTheCoreMidPassLosesNoGroup(int degree)
     {
-        // Every lane folds two batches into its own table, then turns to the core, as under pressure
-        // (PLAN-HIGH-CARDINALITY, H4, milestone 2): its table, null group included, emptied into the
+        // Every lane folds two batches into its own table, then turns to the core, as under pressure: its
+        // table, null group included, emptied into the
         // core's batches, the rest of its rows into a cache. Batches small enough for every lane to
         // fold several, however the queue hands the ranges out.
         Row[] rows = Rows_(keys: 9_000, count: 4 * Rows);
@@ -304,7 +304,7 @@ public sealed partial class GroupCoreTests
     [InlineData(14)]
     public async Task AFilterAndAWindowApplyPartByPart(int degree)
     {
-        // Delivered part by part (H7), each worker filters its part's groups, and the reader cuts the
+        // Delivered part by part, each worker filters its part's groups, and the reader cuts the
         // window across the parts' batches: the same groups as the lanes' tables keep, the window as many.
         Row[] rows = Rows_(keys: 9_000, count: 4 * Rows);
         string path = await WriteAsync(rows);
@@ -430,7 +430,7 @@ public sealed partial class GroupCoreTests
     /// <summary>The core at sizes that make every batch of rows copy a cache, every deposit burst, every burst split.</summary>
     // A key its zones say scattered over a span of a million values or more takes the core from the start
     // on the core's lanes, its answers the lanes' tables'; the same span in the order of the rows, whose
-    // zones each cover a few values, keeps the lanes' tables (PLAN-HIGH-CARDINALITY, decision 14). The
+    // zones each cover a few values, keeps the lanes' tables. The
     // core's lanes brought down to two, so that four lanes take the rule on a file of 300 000 rows.
     [Theory]
     [InlineData(true)]
@@ -464,7 +464,7 @@ public sealed partial class GroupCoreTests
 
     // A hashed key, which nothing bounds before the pass, takes the core once a lane's first rows were
     // nearly all new groups, a key of a million values or more, its answers the lanes' tables'; one of
-    // ten thousand values, spread too wide to be numbered by value, keeps the tables (decision 14). Two
+    // ten thousand values, spread too wide to be numbered by value, keeps the tables. Two
     // lanes of the core's, 225 000 rows each, the rows a lane must have to judge.
     [Theory]
     [InlineData(true)]

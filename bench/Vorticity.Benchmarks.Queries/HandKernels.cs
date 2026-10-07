@@ -5,10 +5,10 @@ using System.Threading.Tasks;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// The yardstick of the in-cache path (PLAN-HIGH-CARDINALITY.md, H0b): the loop a caller would write
+/// The yardstick of the in-cache path: the loop a caller would write
 /// by hand over the decoded columns, an open-addressing table holding each key with its count and
 /// sum inline, the same work as the operator's count and sum. The operator against it, in the same
-/// process, at 10³ groups, is the ratio H15 is judged on.
+/// process, at 10³ groups, is the ratio the in-cache path is judged on.
 /// </summary>
 internal static class HandKernels
 {

@@ -8,7 +8,7 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// The arrays the core's sub-tables leave as they grow and split, and its slabs of batches, taken again
-/// by the next that needs one of the same type and length (PLAN-HIGH-CARDINALITY, H4): the core's pool.
+/// by the next that needs one of the same type and length: the core's pool.
 /// A doubling and a split make the same few lengths over and over, so that past its first sub-tables a
 /// query allocates little more than the memory it holds. A query's shelf hands what it holds at the end
 /// to the process's (<see cref="Retained"/>), which keeps it under a budget for the next query and lets
@@ -56,7 +56,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     }
 
     /// <summary>
-    /// A query's shelf under its memory, the core's (PLAN-HIGH-CARDINALITY, H4, milestone 2): an array
+    /// A query's shelf under its memory, the core's: an array
     /// enters the query's count when the shelf takes it new or from the process's, and leaves it when it
     /// is let go or handed back to the process's; one on its piles stays counted. Its reservations are
     /// exact, each taken under no lock of its own: the lanes that apply bursts meet on it.
@@ -65,7 +65,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         : this(Retained, pooled ? long.MaxValue : 0) => _memory = memory;
 
     /// <summary>
-    /// A lane's shelf under its query's memory (PLAN-HIGH-CARDINALITY, H2, decision 13): an array it
+    /// A lane's shelf under its query's memory: an array it
     /// hands out is reserved before it is allocated, and given back when its table lets it go, which
     /// leaves it to the next collection; it keeps none. A table that doubles reserves its new arrays
     /// while it still holds the old ones: what the copy holds, no more. It reserves <see cref="Ahead"/>
@@ -119,7 +119,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>
     /// Whether a lane's shelf takes an array its budget refuses all the same, counted past the ceiling:
-    /// a lane that can turn to the core, which it does at the next batch (H4, milestone 2).
+    /// a lane that can turn to the core, which it does at the next batch.
     /// </summary>
     internal bool Overdraws { get; set; }
 
@@ -127,7 +127,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal bool Overdrawn { get; private set; }
 
     /// <summary>
-    /// The pressure the core whose shelf this is was made under (H4, milestone 2): while memory is still
+    /// The pressure the core whose shelf this is was made under: while memory is still
     /// to come back, a lane's table or the batches it emptied into, the shelf takes past the budget what
     /// a stack asks more, lanes having met on the room left.
     /// </summary>
@@ -135,7 +135,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>
     /// Whether a lane's shelf reserves each array alone, nothing ahead: the cache of a lane turned to the
-    /// core under pressure (H4, milestone 2), which a quarter of a megabyte ahead on every lane would
+    /// core under pressure, which a quarter of a megabyte ahead on every lane would
     /// outweigh.
     /// </summary>
     internal bool Exact { get; set; }
@@ -164,7 +164,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// An array of <paramref name="length"/> elements, from the shelf, the process's, or new; zeroed
     /// when <paramref name="zeroed"/>. Under a query's memory, reserved first, then new; past the budget
     /// when <paramref name="overdraw"/>, for a lane emptying its table into the core, whose table is
-    /// given back right after (H4, milestone 2).
+    /// given back right after.
     /// </summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
     internal T[] Take<T>(int length, bool zeroed, bool overdraw = false)
@@ -246,7 +246,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>
     /// Whether a query's shelf lets go of what it is given rather than keep it for the next to ask:
-    /// the core delivering its parts one after the other once it spilled (H6), each given back once
+    /// the core delivering its parts one after the other once it spilled, each given back once
     /// delivered.
     /// </summary>
     internal bool Drops { get; set; }

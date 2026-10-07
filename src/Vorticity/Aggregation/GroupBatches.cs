@@ -139,7 +139,7 @@ internal sealed class AggregationQuery : ResultQuery
 
     /// <summary>
     /// The result's columns, made anew: each keeps what it reads a batch of groups with, and a worker that
-    /// builds the batches of a part (PLAN-HIGH-CARDINALITY, H7) builds with a set of its own.
+    /// builds the batches of a part builds with a set of its own.
     /// </summary>
     internal ResultColumn[] NewColumns()
     {
@@ -214,7 +214,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private RecordBatch? _current;
     private bool _done;
 
-    // A result its core delivers part by part (PLAN-HIGH-CARDINALITY, H6, H7), after the groups the
+    // A result its core delivers part by part, after the groups the
     // first outcome holds, which holds the query's memory until the end: the parts left; what builds
     // their batches; the part in hand and its next batch; the batch delivered, whose store goes back to
     // the builder once the next is; the groups of the result passed so far, in the window or not; and
@@ -227,7 +227,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private long _position;
     private CanonicalArena? _cut;
 
-    // A result whose groups spilled, under an order (PLAN-HIGH-CARDINALITY, H10): the sort its parts'
+    // A result whose groups spilled, under an order: the sort its parts'
     // rows go through, its rows in order, and the window over them, the windows after the order and the
     // result's own.
     private ExternalSort? _sort;
@@ -363,7 +363,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// The groups of a result that spilled sorted in runs under its order (PLAN-HIGH-CARDINALITY, H10):
+    /// The groups of a result that spilled sorted in runs under its order:
     /// the groups held in memory, then each part spilled, through the operators before the order, built
     /// into the sort's rows — the order's results, the key's components that break their ties, then the
     /// result's columns — and the first batch of their order.
@@ -503,7 +503,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>
     /// The next batch of the parts of a result its core delivers part by part, within the result's
     /// window: those the workers built as they applied them, as they come, those the core spilled built
-    /// once brought back, after (PLAN-HIGH-CARDINALITY, H7).
+    /// once brought back, after.
     /// </summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> NextPartAsync()
@@ -795,11 +795,11 @@ internal static class GroupSelection
     /// <param name="cancellationToken">Cancels the operators and the fetch.</param>
     /// <param name="windowed">
     /// Whether the result's window falls on these groups: not on a part of a result delivered part by
-    /// part, whose reader cuts the window over every part (PLAN-HIGH-CARDINALITY, H7).
+    /// part, whose reader cuts the window over every part.
     /// </param>
     /// <param name="until">
     /// The operators applied, the first ones; every one by default. A part of a result sorted in runs
-    /// (H10) applies those before the order alone.
+    /// applies those before the order alone.
     /// </param>
     internal static async ValueTask<(int[] Groups, int Count)> ApplyAsync(
         AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true, int? until = null)
@@ -921,7 +921,7 @@ internal static class GroupSelection
     }
 
     /// <summary>
-    /// The first <paramref name="keep"/> of many groups in the order's order (PLAN-HIGH-CARDINALITY, H7):
+    /// The first <paramref name="keep"/> of many groups in the order's order:
     /// the groups cut into <paramref name="chunks"/>, each chunk's first <paramref name="keep"/> ranked on
     /// a task of its own, the results it orders by read into arrays the chunk's size, then those
     /// candidates ranked once. Every group of the first k is among the first k of its chunk, ties broken

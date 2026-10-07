@@ -22,8 +22,8 @@ namespace Vorticity.Aggregating;
 /// lanes' groups merged hold the whole top.
 /// </para>
 /// <para>
-/// On a column's largest value, from the largest, or its smallest, from the smallest
-/// (PLAN-HIGH-CARDINALITY, H7), a group dropped held a value past the <c>k</c>-th best: made again, it
+/// On a column's largest value, from the largest, or its smallest, from the smallest, a group dropped
+/// held a value past the <c>k</c>-th best: made again, it
 /// enters the top only with a better value than every one it held, so the rows it lost change nothing
 /// of it; the query reads nothing else of its groups. Once a lane holds <c>k</c> groups, a row whose
 /// value lies past the <c>k</c>-th best changes none of them, nor makes one: the lane drops it before
@@ -115,7 +115,7 @@ internal sealed class KeyTop
     /// <summary>
     /// Whether <paramref name="order"/> is an integer column's largest value of each group alone, from
     /// the largest, or its smallest, from the smallest, and the query reads nothing else of its groups —
-    /// no other aggregate, no chosen row — but their key (PLAN-HIGH-CARDINALITY, H7). A group's extreme
+    /// no other aggregate, no chosen row — but their key. A group's extreme
     /// then only gets better as its rows come, a null last whichever the direction; a float's would not,
     /// its NaN first from the largest and passed over once a number comes.
     /// </summary>
@@ -192,7 +192,7 @@ internal sealed class KeyTop
         }
         else if (count > (final ? _keep : _ceiling))
         {
-            // The order's scratch under the query's memory, as the lane's tables (PLAN-HIGH-CARDINALITY, H2).
+            // The order's scratch under the query's memory, as the lane's tables.
             QueryMemory? memory = partition.Memory;
             int[] groups = QueryArrays.Rent<int>(memory, count, "top of a group by");
             try
@@ -257,7 +257,7 @@ internal sealed class KeyTop
 
 /// <summary>
 /// The rows of a batch that can still join a top on a column's largest value, from the largest, or its
-/// smallest, from the smallest (PLAN-HIGH-CARDINALITY, H7): those whose value reaches the edge, the key
+/// smallest, from the smallest: those whose value reaches the edge, the key
 /// of the <c>k</c>-th best a lane holds, keys of 64 bits as the order's (<see cref="ValuesOrder"/>), a
 /// value's complement from the largest. A null joins no top a lane holds <c>k</c> values of.
 /// </summary>
@@ -324,7 +324,7 @@ internal static class ValueFrontier
     /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
     /// edge, compared with no branch: taken from its bits a row at a time, each row waited on the one
     /// before it to clear its bit, and the frontier took three quarters of a top by a column's largest
-    /// value (PLAN-HIGH-CARDINALITY, profiling).
+    /// value.
     /// </summary>
     private static ulong Reached<T>(ReadOnlySpan<T> values, long edge, bool descending)
         where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>

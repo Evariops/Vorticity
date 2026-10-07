@@ -72,7 +72,7 @@ public sealed partial class DatasetGroupTests
     [Fact]
     public async Task TheCoreOnADatasetIsTheSameBitsWhateverItsObjectsDegreeAndCompaction()
     {
-        // Thirty thousand keys over the objects' pieces (PLAN-HIGH-CARDINALITY, H12): the core asked
+        // Thirty thousand keys over the objects' pieces: the core asked
         // for, at sizes that make every batch burst and split, and turned to under a budget a fifth of
         // what the lanes' tables hold, against the lanes' tables; one set of 256 parts for every object
         // of the query, the same bits whatever the objects, the degree, the rows deleted and the

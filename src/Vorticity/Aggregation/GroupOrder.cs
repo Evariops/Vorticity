@@ -63,7 +63,7 @@ internal abstract class ColumnOrder
     /// <summary>
     /// The order of position <paramref name="a"/> against position <paramref name="b"/> of
     /// <paramref name="other"/>, an order of the same column over another batch of it, as
-    /// <see cref="For"/> made both: the merge of sorted runs (PLAN-HIGH-CARDINALITY, H10) ranks rows
+    /// <see cref="For"/> made both: the merge of sorted runs ranks rows
     /// of two batches as one sort of their rows would.
     /// </summary>
     internal int CompareAcross(int a, ColumnOrder other, int b)

@@ -12,7 +12,7 @@ namespace Vorticity.Tests.Aggregation;
 /// <summary>
 /// An integer key the statistics bound to a span past 2^16, within four values a row of the source,
 /// is numbered by its value less the least, in pages of a table of groups allocated as values meet
-/// them (PLAN-HIGH-CARDINALITY.md, H11): it groups as a hashed key would, with nulls, on one lane and
+/// them: it groups as a hashed key would, with nulls, on one lane and
 /// four, under a filter; a span past the budget is hashed.
 /// </summary>
 public sealed partial class DirectPagesTests
@@ -52,8 +52,7 @@ public sealed partial class DirectPagesTests
     }
 
     // Keys in the order of the rows, each met first in a run of new values, then three times more: a
-    // chunk of new values sends the next through the lookup alone, and the repeats back to two passes
-    // (PLAN-HIGH-CARDINALITY, H14).
+    // chunk of new values sends the next through the lookup alone, and the repeats back to two passes.
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
@@ -84,7 +83,7 @@ public sealed partial class DirectPagesTests
 
     // A distinct on one lane takes the statistics' bounds as a group by does, and numbers the key by its
     // value: its values come in the order the rows first meet them, as they did hashed, a window of them
-    // included (PLAN-HIGH-CARDINALITY, profiling).
+    // included.
     [Fact]
     public async Task ADistinctOfABoundedKeyNumbersItByValueInTheOrderMet()
     {
@@ -111,7 +110,7 @@ public sealed partial class DirectPagesTests
     }
 
     // Lanes that number one span by value merge in parts cut by value, each part numbered by value over
-    // its run of the span (PLAN-HIGH-CARDINALITY, H14): the same groups as hashed parts, the null group
+    // its run of the span: the same groups as hashed parts, the null group
     // among them, whatever the parts.
     [Theory]
     [InlineData(2)]

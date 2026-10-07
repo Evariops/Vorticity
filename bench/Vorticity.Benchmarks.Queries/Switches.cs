@@ -51,7 +51,7 @@ internal static class Switches
         then(plan);
     };
 
-    /// <summary>As <see cref="Pair"/>, under the core (PLAN-HIGH-CARDINALITY, H4): its cache's capacity or its α at A against B.</summary>
+    /// <summary>As <see cref="Pair"/>, under the core: its cache's capacity or its α at A against B.</summary>
     private static Switch CorePair(string name, string property, string label, bool percent = false)
     {
         Switch pair = Pair(name, property, label, percent);

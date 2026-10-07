@@ -10,7 +10,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The spill (PLAN-HIGH-CARDINALITY, H6): a group by whose budget cannot hold its groups even once each
+/// The spill: a group by whose budget cannot hold its groups even once each
 /// writes the largest parts of its core to the scratch, and delivers them one at a time after the parts
 /// it held, exact, every reservation and every file given back.
 /// </summary>
@@ -29,7 +29,7 @@ public sealed partial class SpillTests
     [InlineData(14, 10, false)]
     public async Task AGroupByItsBudgetCannotHoldSpillsAndEndsExact(int degree, int percent, bool parted)
     {
-        // Part by part (H7), the parts held in memory come out as the workers apply them; whole, they come
+        // Part by part, the parts held in memory come out as the workers apply them; whole, they come
         // out together, then the parts spilled one at a time.
         (string path, long[] expected) = await WriteAsync();
         string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
@@ -160,7 +160,7 @@ public sealed partial class SpillTests
     [InlineData(14)]
     public async Task AConsumerThatStopsAtItsFirstGroupGivesEverythingBack(int degree)
     {
-        // Part by part (H7), the workers still apply the other parts when the consumer leaves: they stop,
+        // Part by part, the workers still apply the other parts when the consumer leaves: they stop,
         // and the query's memory and scratch are given back once they are done. Under a tenth of its
         // peak, the lanes turn to the core, which spills; under a large budget, the core asked for.
         (string path, _) = await WriteAsync();
@@ -236,7 +236,7 @@ public sealed partial class SpillTests
     public async Task AnOrderOverASpilledGroupBySortsItsGroupsInRuns(int degree)
     {
         // The groups held in memory, then each part spilled, through the filter before the order, into
-        // the rows of a sort written in runs (PLAN-HIGH-CARDINALITY, H10): the sums, then the key that
+        // the rows of a sort written in runs: the sums, then the key that
         // breaks their ties, as one sort of every group would order them; a window after the order cut
         // across the sorted rows.
         (string path, long[] expected) = await WriteAsync();

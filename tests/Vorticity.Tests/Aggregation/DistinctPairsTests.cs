@@ -10,7 +10,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The pairs of a distinct count chained by group (PLAN-HIGH-CARDINALITY, H9): a merge of some groups
+/// The pairs of a distinct count chained by group: a merge of some groups
 /// takes their pairs alone, keeping some groups keeps theirs alone, and a group by counts each value
 /// once a group whether its lanes merge in series, in many parts, or as it streams.
 /// </summary>

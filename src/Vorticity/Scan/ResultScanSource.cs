@@ -221,7 +221,7 @@ internal sealed class ResultScanSource : ScanSource
     /// <summary>
     /// The rows a spec keeps of a result, in the order of one of its columns, nulls last, ties in the
     /// result's order: sorted under the session's memory budget, in memory while it holds them, by runs
-    /// written to the scratch and merged back otherwise (PLAN-HIGH-CARDINALITY, H10); delivered a batch
+    /// written to the scratch and merged back otherwise; delivered a batch
     /// at a time. A blocking stage.
     /// </summary>
     private sealed class SortedEnumerator : IAsyncEnumerator<RecordBatch>

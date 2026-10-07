@@ -11,7 +11,7 @@ namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
 /// The budgets a host shares among sessions, the process's beneath them, and the pools left after a
-/// query (PLAN-HIGH-CARDINALITY, H2). They reserve against the process's own budget and read its shelf,
+/// query. They reserve against the process's own budget and read its shelf,
 /// which every query of the process shares: they run alone.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
@@ -64,7 +64,7 @@ public sealed partial class SharedBudgetTests
 
             // A query of the staying session in flight, its groups held, while the other is disposed:
             // delivered whole, its reservation stays as it is while its reader waits, where parts merged
-            // and built in the background would change it (PLAN-HIGH-CARDINALITY, H14).
+            // and built in the background would change it.
             Aggregation<long> sums = kept.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value));
             sums.Plan.CoreParted = false;
             await using IAsyncEnumerator<long> reading = sums.GetAsyncEnumerator(Ct);

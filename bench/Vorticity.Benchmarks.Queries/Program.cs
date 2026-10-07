@@ -9,7 +9,7 @@
 //   … -- --parallel                                                                    every query at degree 1 and at one lane per processor
 //   … -- --degrees 1,2,4,8                                                             every query at each of these degrees
 //   … -- --matrix small                                                                the high-cardinality matrix of every A/B, at degrees 1 and N (HighCardinality.cs)
-//   … -- --matrix full                                                                 the full one, of the milestones, at degrees 1, 4 and N
+//   … -- --matrix full                                                                 the full one, at degrees 1, 4 and N
 //   … -- --latency 20                                                                  every file read as a store would serve it, 20 ms a round trip: requests and dependent steps
 //   … -- --cold --matrix small                                                         each query once in a process of its own: the first query's time and page faults
 //   … -- --concurrent 8 --matrix small                                                 each query alone, then eight copies at once; with DOTNET_GCHeapHardLimit, under a capped heap
@@ -262,7 +262,7 @@ if (engines.Count > 0)
             $"{key,-74} {run.Lanes.Length,5} {run.Lanes.Sum(lane => lane.Ranges),6} {max,8:F2} {mean,8:F2} {(mean > 0 ? max / mean : 0),8:F2} {merge,9:F2} {100 * merge / m.Millis,8:F1} {run.MergeParts,5} {groups,9} {StateMiB(run),9:F1}");
     }
 
-    // What the core did, when it held the groups (PLAN-HIGH-CARDINALITY, H4, R5a): its merge is its end.
+    // What the core did, when it held the groups: its merge is its end.
     foreach ((string key, Measurement m) in engines)
     {
         if (CoreOf(m.Engine!) is { } core)
@@ -347,14 +347,14 @@ static void Record(string? path, string name, int degree, Measurement m)
         $"{name}\t{degree}\t{m.Millis:F3}\t{m.FirstMillis:F3}\t{m.Allocated / 1048576.0:F2}\t{m.Live / 1048576.0:F2}\t{m.Result}\t{m.Gen2:F2}\t{m.Faults}\t{m.LargeBytes / 1048576.0:F2}{engine}\n"));
 }
 
-// The bytes the run's groups held at the merge's end (PLAN-HIGH-CARDINALITY.md, H1), read by name so
+// The bytes the run's groups held at the merge's end, read by name so
 // that an older commit, which did not count them, still builds today's bench: -1 there.
 static double StateMiB(AggregationRun run) =>
     run.GetType().GetProperty("StateBytes", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(run) is long bytes
         ? bytes / 1048576.0
         : -1;
 
-// What the core did (PLAN-HIGH-CARDINALITY, H4), read by name as the state's bytes are: null without one.
+// What the core did, read by name as the state's bytes are: null without one.
 static object? CoreOf(AggregationRun run) =>
     run.GetType().GetProperty("Core", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic)?.GetValue(run);
 

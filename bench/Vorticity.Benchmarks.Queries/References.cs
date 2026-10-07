@@ -68,8 +68,7 @@ internal static class References
         ("first batch of a dataset, 16 objects against 1", "dataset first batch, full scan, 16 objects", "dataset first batch, full scan, 1 object", 1.000),
 
         // The in-cache path against the loop a caller would write by hand, an open-addressing table
-        // with the states inline (PLAN-HIGH-CARDINALITY.md, H0b and H15): H15 brings it under 2. A
-        // thousand integer keys the statistics bound go through a table of groups; a thousand at a
+        // with the states inline, under 2. A thousand integer keys the statistics bound go through a table of groups; a thousand at a
         // stride through the hashed index.
         ("in-cache path against the hand kernel, 10^3 keys", "hc random 1e3 small, count sum", "hand kernel random 1e3 small, count sum", null),
         ("in-cache path against the hand kernel, 10^3 keys at a stride", "hc strided 1e3 small, count sum", "hand kernel strided 1e3 small, count sum", null),

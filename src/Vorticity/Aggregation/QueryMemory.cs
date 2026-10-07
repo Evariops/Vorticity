@@ -10,7 +10,7 @@ namespace Vorticity.Aggregating;
 /// <summary>
 /// The scratch arrays of the steps that grow with the groups — the order of a result, its top, the
 /// sort of the rows a fetch reads, a lane's top — rented from the shared pool under the query's
-/// memory (PLAN-HIGH-CARDINALITY, H2, decision 13): reserved before they are rented, at the length
+/// memory: reserved before they are rented, at the length
 /// the pool hands out, and given back with them. What the pool keeps of them afterwards is the rest
 /// of the process's memory, which the process's budget reads at its next full collection. An array
 /// under a page goes uncounted both ways, as a shelf's.
@@ -56,7 +56,7 @@ internal static class QueryArrays
 }
 
 /// <summary>
-/// What one query holds of its <see cref="QueryMemoryBudget"/> (PLAN-HIGH-CARDINALITY, H2): reserved at
+/// What one query holds of its <see cref="QueryMemoryBudget"/>: reserved at
 /// the rare points where its memory grows, a lane's table after a batch, a part of a merge once built;
 /// brought down to its result once its groups are merged, and given back when the result is delivered,
 /// or when the query fails. Beside what it reserves, what its tables hold, as measured at the same
@@ -161,7 +161,7 @@ internal sealed class QueryMemory : IDisposable
 
     /// <summary>
     /// Reserves <paramref name="bytes"/> past its budget's ceiling, a lane's overdraft before it turns to
-    /// the core (H4, milestone 2); past what the process may hold, the query fails instead.
+    /// the core; past what the process may hold, the query fails instead.
     /// </summary>
     /// <exception cref="VortexMemoryException">The process cannot take the overdraft.</exception>
     internal void Force(long bytes)

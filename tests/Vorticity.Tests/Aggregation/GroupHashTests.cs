@@ -208,7 +208,7 @@ public sealed class GroupHashTests
         }
     }
 
-    // The null of a text key is an entry no key finds (PLAN-HIGH-CARDINALITY.md, H1, reduction 6):
+    // The null of a text key is an entry no key finds:
     // numbered with the keys, kept by Retain, passed over when the table rehashes or takes a seed;
     // the empty key is a key of its own.
     [Fact]

@@ -9,7 +9,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The sort of a result (PLAN-HIGH-CARDINALITY, H10): under a budget a tenth of its rows, written to
+/// The sort of a result: under a budget a tenth of its rows, written to
 /// the scratch in sorted runs and merged back, exact, ties in the result's order, a null last and
 /// NaN after +∞, its peak within the budget, every run's file gone once it is read.
 /// </summary>

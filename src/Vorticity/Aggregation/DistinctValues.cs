@@ -7,7 +7,7 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// The distinct values of a distinct count of one group -- a count over the whole scan, which has no
-/// key -- each once, in the slots of an open-addressing table (PLAN-HIGH-CARDINALITY, profiling). A
+/// key -- each once, in the slots of an open-addressing table. A
 /// value lies in its slot: one seen before is found at the first read, where a pair of
 /// <see cref="DistinctPairs{TValue}"/> was found behind a tag and a slot's number, three reads, each a
 /// miss to memory once the table outgrew the caches; and a value takes its slot alone, where a pair
@@ -62,7 +62,7 @@ internal sealed class DistinctValues<TValue>
         }
     }
 
-    /// <summary>The shelf the slots grow from from now on (PLAN-HIGH-CARDINALITY, H2, decision 13).</summary>
+    /// <summary>The shelf the slots grow from from now on.</summary>
     internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
 
     /// <summary>The values held.</summary>

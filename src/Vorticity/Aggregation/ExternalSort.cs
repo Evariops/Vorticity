@@ -18,7 +18,7 @@ namespace Vorticity.Aggregating;
 internal readonly record struct SortKey(FieldExpr Field, VortexType Type, bool Descending);
 
 /// <summary>
-/// Rows sorted by a chain of their columns under a query's memory (PLAN-HIGH-CARDINALITY, H10):
+/// Rows sorted by a chain of their columns under a query's memory:
 /// gathered into a store while the memory holds them, and sorted there when they all fit. Past that,
 /// each store's worth is sorted and written to the scratch as a run, a Vortex file of its own in the
 /// session's scratch directory, and the runs are merged back a batch at a time, a contiguous stretch

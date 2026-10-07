@@ -11,8 +11,8 @@ using Vorticity.Writing;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The batches of the parts of a core's result, each built where its part is applied
-/// (PLAN-HIGH-CARDINALITY, H7): the operators on its groups applied, its chosen rows fetched, its
+/// The batches of the parts of a core's result, each built where its part is applied: the operators on
+/// its groups applied, its chosen rows fetched, its
 /// groups written into stores of the result's columns while they are in the cache of the core that
 /// applied them, then the part let go. The result's reader hands the batches out, in the order the
 /// parts come, and gives each store back once its batch is done with.
@@ -33,7 +33,7 @@ internal sealed class PartBuilder
     private DType _dtype;
     private bool _released;
 
-    // A result sorted in runs (PLAN-HIGH-CARDINALITY, H10): the operators before its order alone, and
+    // A result sorted in runs: the operators before its order alone, and
     // the sort's columns, whose rows each part is built into.
     private int? _until;
     private Func<ResultColumn[]>? _sortColumns;
@@ -46,7 +46,7 @@ internal sealed class PartBuilder
     }
 
     /// <summary>
-    /// Each part built into the rows of a sort of the result (PLAN-HIGH-CARDINALITY, H10), of
+    /// Each part built into the rows of a sort of the result, of
     /// <paramref name="schema"/>, by <paramref name="columns"/>, after the operators before
     /// <paramref name="order"/>, the order's own, alone. Asked before any part is built.
     /// </summary>
@@ -168,7 +168,7 @@ internal sealed class PartBuilder
     }
 }
 
-/// <summary>A part's batches, built (PLAN-HIGH-CARDINALITY, H7), and the groups the part found before its operators.</summary>
+/// <summary>A part's batches, built, and the groups the part found before its operators.</summary>
 internal sealed class PartResult(long groups)
 {
     /// <summary>The part's batches, in order.</summary>

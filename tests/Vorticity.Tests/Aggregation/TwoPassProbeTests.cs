@@ -9,7 +9,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// A key of one fixed-width column finds its groups in two passes (PLAN-HIGH-CARDINALITY.md, H15):
+/// A key of one fixed-width column finds its groups in two passes:
 /// each row's home slot with no branch on the keys, then the rows left in their order. Every distance
 /// read ahead gives the groups of the row-at-a-time path, numbered as they first come, with nulls in
 /// the key, keys spread or crowded into one chain, under a filter, on one lane and four.

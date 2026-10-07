@@ -12,7 +12,7 @@ namespace Vorticity.Aggregating;
 /// A built-in aggregate over values of a fixed width: what one value, one value repeated, and a
 /// dense span of valid values each do to the state. The drivers call it monomorphised, on the value
 /// of the op their slot holds: empty for most, what the run fixed for every group for a variance,
-/// which its groups' states then leave out (PLAN-HIGH-CARDINALITY, H1, reduction 4).
+/// which its groups' states then leave out.
 /// </summary>
 /// <typeparam name="TValue">The storage value.</typeparam>
 /// <typeparam name="TState">The state of one group.</typeparam>
@@ -25,7 +25,7 @@ internal interface IValueOp<TValue, TState>
 
     /// <summary>
     /// As <see cref="Add"/>, with no branch on the value where the op can tell: an extreme of integers
-    /// stores its choice whatever it is (PLAN-HIGH-CARDINALITY, H14). The slot folds with it while its
+    /// stores its choice whatever it is. The slot folds with it while its
     /// groups have seen few rows, their extremes moving at random; past that, the branch predicts.
     /// </summary>
     void AddSelected(ref TState state, TValue value);
@@ -566,7 +566,7 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
-    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select (H14).</remarks>
+    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select.</remarks>
     public void AddSelected(ref ExtremeState<TValue> state, TValue value)
     {
         if (ExtremeOps.Integral<TValue>())
@@ -629,7 +629,7 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
-    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select (H14).</remarks>
+    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select.</remarks>
     public void AddSelected(ref ExtremeState<TValue> state, TValue value)
     {
         if (ExtremeOps.Integral<TValue>())
@@ -674,7 +674,7 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
 
 /// <summary>
 /// The smallest value, NaN skipped, in a state that is the value alone: the state starts at a value no
-/// row holds, which says that none was seen (PLAN-HIGH-CARDINALITY, H1, reduction 3). For a float that
+/// row holds, which says that none was seen. For a float that
 /// is NaN, which no add keeps; for an integer, the top of its range where no row reaches it.
 /// </summary>
 internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
@@ -693,7 +693,7 @@ internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
     }
 
     /// <remarks>
-    /// An integer, no NaN: the smaller of the two stored whatever it is, the choice a select (H14). A
+    /// An integer, no NaN: the smaller of the two stored whatever it is, the choice a select. A
     /// branch on it missed as often as a group met a new minimum, while its groups had seen few rows.
     /// </remarks>
     public void AddSelected(ref TValue state, TValue value)
@@ -747,7 +747,7 @@ internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
         }
     }
 
-    /// <remarks>An integer, no NaN: the larger of the two stored whatever it is, the choice a select (H14).</remarks>
+    /// <remarks>An integer, no NaN: the larger of the two stored whatever it is, the choice a select.</remarks>
     public void AddSelected(ref TValue state, TValue value)
     {
         if (ExtremeOps.Integral<TValue>())

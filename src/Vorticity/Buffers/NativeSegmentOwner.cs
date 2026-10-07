@@ -118,7 +118,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
 
     /// <summary>
     /// The bytes of the native blocks the process holds, rented, parked in a pool or owned alone: memory
-    /// a container's limit counts, and the collector's does not (PLAN-HIGH-CARDINALITY, H2).
+    /// a container's limit counts, and the collector's does not.
     /// </summary>
     internal static long NativeBytes => Interlocked.Read(ref s_nativeBytes);
 

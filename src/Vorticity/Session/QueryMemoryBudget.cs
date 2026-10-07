@@ -140,8 +140,8 @@ public sealed class QueryMemoryBudget
 
     /// <summary>
     /// Whether a query holding <paramref name="held"/> may take <paramref name="bytes"/> more of a
-    /// ceiling of <paramref name="ceiling"/> without being governed first (PLAN-HIGH-CARDINALITY, H2, the
-    /// fair share). Past the threshold, seven eighths of the ceiling, a query that would hold more than
+    /// ceiling of <paramref name="ceiling"/> without being governed first, its fair share. Past the
+    /// threshold, seven eighths of the ceiling, a query that would hold more than
     /// its share, the ceiling over the queries active under the budget, is told no: its lanes turn to
     /// the core first, and the last eighth stays for the queries within their share. A reservation is
     /// never refused for it: without a way to give memory back, a refusal fails a query that would have
@@ -158,7 +158,7 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// Reserves <paramref name="bytes"/> past this budget's ceiling: what a lane takes in the middle of a
     /// batch when the budget refuses it, or emptying its table into the core, counted all the same,
-    /// before it gives back its table (PLAN-HIGH-CARDINALITY, H4, milestone 2). The process's ceiling it
+    /// before it gives back its table. The process's ceiling it
     /// passes by a sixteenth of the limit at most, half the margin the collector keeps: past that, the
     /// heap itself would run out, and nothing is reserved.
     /// </summary>
@@ -244,8 +244,7 @@ public sealed class QueryMemoryBudget
     /// held past the queries' tables: the host's memory, the runtime's, the scans' buffers, what a
     /// caller still holds of a result. What the collector kept committed past its heap: the regions
     /// it freed and keeps for what comes next, which a collection that gives them back returns
-    /// (PLAN-HIGH-CARDINALITY, H2: 300 MiB of them after eight queries at once under 512 MiB, 85 MiB
-    /// live). What the queries let go before the collection, it took; what they let go since counts
+    /// (300 MiB of them after eight queries at once under 512 MiB, 85 MiB live). What the queries let go before the collection, it took; what they let go since counts
     /// with the rest until the next.
     /// </summary>
     /// <remarks>

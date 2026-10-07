@@ -10,7 +10,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The memory a query holds, under its session's budget (PLAN-HIGH-CARDINALITY, H2): a group by past it
+/// The memory a query holds, under its session's budget: a group by past it
 /// fails with a <see cref="VortexMemoryException"/> that names it, and gives back everything it held,
 /// at one lane and at fourteen; under it, it runs and gives its memory back when its groups are merged;
 /// sessions that share a budget share its ceiling.
@@ -254,8 +254,7 @@ public sealed partial class QueryMemoryTests
             Assert.Equal(0, budget.ReservedBytes);
 
             // Past a budget too small for its index, the distinct on the reader's thread fails and gives
-            // everything back; on several lanes, the core spills its parts and ends exact
-            // (PLAN-HIGH-CARDINALITY, H13).
+            // everything back; on several lanes, the core spills its parts and ends exact.
             QueryMemoryBudget small = new QueryMemoryBudget(2 << 20);
             await using VortexSession tight = VortexSession.Create(options =>
             {

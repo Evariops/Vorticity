@@ -193,7 +193,7 @@ public sealed partial class GroupOrderTests
     public async Task ATopKOfManyGroupsRanksItsChunksAtOnceTiesIncluded(int degree)
     {
         // 300 000 names seen one to four times: past two chunks of 65 536 groups, each chunk's first k
-        // ranked on a task of its own, then theirs (PLAN-HIGH-CARDINALITY, H7). The k-th group ties
+        // ranked on a task of its own, then theirs. The k-th group ties
         // with tens of thousands, which the key ranks: the same groups, in the same order, as one
         // ranking of them all.
         Draw[] rows = Draws(300_000);

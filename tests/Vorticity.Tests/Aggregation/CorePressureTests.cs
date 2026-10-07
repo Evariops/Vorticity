@@ -19,7 +19,7 @@ public sealed class CorePressureCollection
 }
 
 /// <summary>
-/// The core under pressure (PLAN-HIGH-CARDINALITY, H4, milestone 2): a query whose lanes' tables its
+/// The core under pressure: a query whose lanes' tables its
 /// budget cannot hold, during the pass or for their merge, turns to the core, which holds each group
 /// once, and ends exact under that budget, giving everything back.
 /// </summary>

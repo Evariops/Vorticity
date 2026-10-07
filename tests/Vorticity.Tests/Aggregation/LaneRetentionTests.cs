@@ -13,8 +13,8 @@ namespace Vorticity.Tests.Aggregation;
 /// The lanes' tables die with the merge. A blocking group by goes out in continuations of the lane or
 /// the merge worker that finished last, on its stack, where the frames of the pass still hold the
 /// lanes' partitions: at the first batch, a collection finds no lane's keys or states alive but the
-/// ones a merge in series kept as the result; a merge in parts delivers its parts as they are merged
-/// (PLAN-HIGH-CARDINALITY, H14), and once the last is, a collection finds none alive.
+/// ones a merge in series kept as the result; a merge in parts delivers its parts as they are merged,
+/// and once the last is, a collection finds none alive.
 /// </summary>
 public sealed partial class LaneRetentionTests
 {

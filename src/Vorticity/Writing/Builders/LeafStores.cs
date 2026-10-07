@@ -418,7 +418,7 @@ internal sealed unsafe class VarBinStore : ColumnStore
     /// <summary>
     /// As <see cref="Append(ReadOnlySpan{byte})"/>, for bytes a reader already checked: a text column's,
     /// which its decoder validated as it read it, kept as a group's key or extreme. Checking them again
-    /// took a tenth of a group by of a million texts (PLAN-HIGH-CARDINALITY, H14).
+    /// took a tenth of a group by of a million texts.
     /// </summary>
     internal void AppendValidated(ReadOnlySpan<byte> value)
     {

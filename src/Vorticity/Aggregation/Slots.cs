@@ -32,7 +32,7 @@ internal readonly ref struct BatchInput
 
     /// <summary>
     /// Whether the partition's groups have each seen many rows, their extremes moved rarely: a slot then
-    /// folds with a branch on the value, which predicts, rather than <see cref="IValueOp{TValue,TState}.AddSelected"/> (H14).
+    /// folds with a branch on the value, which predicts, rather than <see cref="IValueOp{TValue,TState}.AddSelected"/>.
     /// </summary>
     internal bool Settled { get; }
 
@@ -83,7 +83,7 @@ internal abstract class AggregateSlot
 
     /// <summary>
     /// As <see cref="StepRows"/>, the rows counted into <paramref name="count"/>'s groups in the same
-    /// pass, the record of a row's group reached once for both (PLAN-HIGH-CARDINALITY, H14): when every
+    /// pass, the record of a row's group reached once for both: when every
     /// row of the window is selected and none is null. False when it cannot, nothing folded nor counted.
     /// </summary>
     internal virtual bool StepRowsCounted(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot count) => false;
@@ -146,8 +146,8 @@ internal abstract class AggregateSlot
     internal virtual GroupRecords? Bound => null;
 
     /// <summary>
-    /// The shelf the slot's own arrays grow from from now on: a lane's, under its query's memory
-    /// (PLAN-HIGH-CARDINALITY, H2, decision 13), or a core's. Called once, as its partition makes the
+    /// The shelf the slot's own arrays grow from from now on: a lane's, under its query's memory, or a
+    /// core's. Called once, as its partition makes the
     /// slot. Nothing for a slot whose states all lie in records its partition shares.
     /// </summary>
     internal virtual void Govern(ArrayShelf shelf)
@@ -166,7 +166,7 @@ internal abstract class AggregateSlot
     /// <summary>
     /// Reserves, for a slot of group 0 alone (<see cref="Ungrouped"/>), what its first
     /// <paramref name="rows"/> rows foretell for the <paramref name="expected"/> rows its partition
-    /// expects, as <paramref name="memory"/> grants it (PLAN-HIGH-CARDINALITY, profiling). Nothing for a
+    /// expects, as <paramref name="memory"/> grants it. Nothing for a
     /// slot whose state does not grow with the values it meets.
     /// </summary>
     internal virtual void Foretell(long rows, long expected, QueryMemory? memory)
@@ -175,8 +175,8 @@ internal abstract class AggregateSlot
 
     /// <summary>
     /// The bytes the slot holds apart from the records it shares (<see cref="Bound"/>): its arrays at
-    /// their capacity and, for a state of a variable size, the bytes it counts as it takes them
-    /// (PLAN-HIGH-CARDINALITY, H1). Zero for a slot whose states all lie in records.
+    /// their capacity and, for a state of a variable size, the bytes it counts as it takes them. Zero for
+    /// a slot whose states all lie in records.
     /// </summary>
     internal virtual long Footprint => 0;
 
@@ -246,7 +246,7 @@ internal abstract class AggregateSlot<TResult> : AggregateSlot
 /// <summary>
 /// The numbers 0, 1, 2 and on: the groups of a whole partition, for a merge that takes them all. The
 /// numbers every thread shares stop at <see cref="Shared"/>; past them a merge numbers an array of its
-/// own, which goes with it (PLAN-HIGH-CARDINALITY, H1, reduction 7): no array the size of the largest
+/// own, which goes with it: no array the size of the largest
 /// merge a process ever ran stays for its life.
 /// </summary>
 internal static class Numbers
@@ -424,8 +424,8 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
 
 /// <summary>
 /// A slot whose states are (group, value) pairs, a distinct count's: merged in series, its pairs would
-/// pour every lane's into one table, on one thread, however many lanes read them
-/// (PLAN-HIGH-CARDINALITY, H9). It merges in parts of its pairs instead, side by side.
+/// pour every lane's into one table, on one thread, however many lanes read them. It merges in parts of
+/// its pairs instead, side by side.
 /// </summary>
 internal interface IPairedSlot
 {
@@ -575,8 +575,7 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
 
 /// <summary>
 /// The rows of each group, nulls included, counted in <typeparamref name="TCount"/>: 32 bits where the
-/// source's rows stay below 2^32, which no group's count can then pass (PLAN-HIGH-CARDINALITY, H1,
-/// reduction 2), 64 where they are not known.
+/// source's rows stay below 2^32, which no group's count can then pass, 64 where they are not known.
 /// </summary>
 internal sealed class CountSlot<TCount> : RecordSlot<TCount, long>
     where TCount : unmanaged, IBinaryInteger<TCount>

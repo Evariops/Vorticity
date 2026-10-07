@@ -31,8 +31,7 @@ internal static class DatasetScenarios
             yield return (dataset, new DatasetScenario($"dataset first batch, full scan, {label}", FirstBatchAsync));
         }
 
-        // A million groups over sixteen objects, against `hc random 1e6 small, count sum` over their file
-        // (PLAN-HIGH-CARDINALITY, H12).
+        // A million groups over sixteen objects, against `hc random 1e6 small, count sum` over their file.
         yield return ($"spread-random-{HighCardinality.SmallRows}-16", new DatasetScenario("dataset hc random 1e6 small, count sum, 16 objects", SpreadTotalsAsync, 16));
     }
 

@@ -17,9 +17,8 @@ internal abstract class ChosenValues
     /// <summary>
     /// Makes room for the values of <paramref name="groups"/>, the groups a fetch reads, each below
     /// <paramref name="most"/>: arrays their number when they are a few of many, a top-k's or a window's,
-    /// found through a map of their numbers (PLAN-HIGH-CARDINALITY, H7); arrays indexed by the group
-    /// otherwise. The arrays are held under the result's <paramref name="memory"/> until it is delivered
-    /// (H2), the ones they replace let go. A fetch's values are the ones read until the next fetch.
+    /// found through a map of their numbers; arrays indexed by the group otherwise. The arrays are held
+    /// under the result's <paramref name="memory"/> until it is delivered, the ones they replace let go. A fetch's values are the ones read until the next fetch.
     /// </summary>
     internal abstract void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory);
 
@@ -170,8 +169,7 @@ internal static class ChosenFetch
         AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
     {
         // What the fetch sorts and reads by, an entry a group and choice — its position, its owner,
-        // its row and group, the take's position — reserved under the result's memory while it runs
-        // (PLAN-HIGH-CARDINALITY, H2, decision 13).
+        // its row and group, the take's position — reserved under the result's memory while it runs.
         QueryMemory? memory = outcome.Memory;
         long scratch = (long)groups.Length * outcome.Plan.ChosenRows.Length * ((3 * sizeof(long)) + (2 * sizeof(int)));
         memory?.Hold(scratch, "fetch of the chosen rows");

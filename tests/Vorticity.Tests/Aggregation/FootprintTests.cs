@@ -8,8 +8,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// What the groups of a run hold, gathered as its merge ends (PLAN-HIGH-CARDINALITY.md, H1, the
-/// footprint): an int key, a count and a sum of a long take some tens of bytes a group, the index,
+/// What the groups of a run hold, gathered as its merge ends, its footprint: an int key, a count and a sum of a long take some tens of bytes a group, the index,
 /// the keys and the records at their capacity; four lanes hold more, each its groups and the merge
 /// its own.
 /// </summary>

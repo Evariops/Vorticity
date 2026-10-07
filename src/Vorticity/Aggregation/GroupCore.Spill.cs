@@ -9,7 +9,7 @@ using Vorticity.Writing;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The spill of the core (PLAN-HIGH-CARDINALITY, H6): when the governor has nothing left to give back,
+/// The spill of the core: when the governor has nothing left to give back,
 /// the part holding the most groups is taken out under its lock, the part starting again empty, and its
 /// groups are written to the query's scratch as a run, a record and a key each, the entries of its
 /// batches. At the end a spilled part's batches pending go to the scratch as one more run, and the
@@ -50,7 +50,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// The parts holding the most, their groups and their entries pending, written to the scratch, their
-    /// sub-tables and batches given back (H6), the largest first, until the query holds three quarters
+    /// sub-tables and batches given back, the largest first, until the query holds three quarters
     /// of its budget's ceiling at most: the lanes' deposits go on into the parts, empty again. One spill
     /// at a time.
     /// </summary>
@@ -117,7 +117,7 @@ internal sealed partial class GroupCore
             part.Depth = 0;
             Volatile.Write(ref part.Groups, 0);
 
-            // Its keys written, a key new to its sub-tables may be one of them (H13); and those it made
+            // Its keys written, a key new to its sub-tables may be one of them; and those it made
             // since a first eviction were told to no one.
             emitted = !part.Silent;
             part.Silent = true;
@@ -166,7 +166,7 @@ internal sealed partial class GroupCore
     /// </summary>
     private async ValueTask WritePendingAsync(CorePart part, CancellationToken cancellationToken)
     {
-        // Entries written as they came: none told to the emitter, nor any the part makes after (H13).
+        // Entries written as they came: none told to the emitter, nor any the part makes after.
         part.Silent = true;
         PartBatch? stack = Interlocked.Exchange(ref part.Head.Value, null);
         long start = -1;
@@ -219,7 +219,7 @@ internal sealed partial class GroupCore
         }
     }
 
-    /// <summary>A run of <paramref name="entries"/> entries from <paramref name="start"/> recorded on its part, their keys <paramref name="emitted"/> or not (H13).</summary>
+    /// <summary>A run of <paramref name="entries"/> entries from <paramref name="start"/> recorded on its part, their keys <paramref name="emitted"/> or not.</summary>
     private void Ran(CorePart part, long start, long entries, bool emitted)
     {
         if (entries == 0)
@@ -293,7 +293,7 @@ internal sealed partial class GroupCore
     private int PageBytes() => (int)Math.Clamp((_memory?.Ceiling ?? RunScratch.PageBytes) / 16, 64 * 1024, RunScratch.PageBytes);
 
     /// <summary>
-    /// A spilled part's groups in memory again (H6): every run read back a page at a time and applied into
+    /// A spilled part's groups in memory again: every run read back a page at a time and applied into
     /// the part's sub-tables, which merges the groups the runs share; the runs dropped.
     /// </summary>
     internal async ValueTask MaterializeAsync(CorePart part, CancellationToken cancellationToken)
@@ -316,7 +316,7 @@ internal sealed partial class GroupCore
         }
 
         // The sub-tables the part made in memory since it first spilled were made in silence: their keys
-        // wait with the runs the emitter was not told of, set aside until the others are back (H13).
+        // wait with the runs the emitter was not told of, set aside until the others are back.
         SubTable[] silent = [];
         if (Emitter is not null && part.Tables.Count > 0)
         {
@@ -328,7 +328,7 @@ internal sealed partial class GroupCore
         }
 
         // The runs whose keys the emitter was told come back first, silently; then the others, whose
-        // keys not among them are told as they enter the part's set (H13).
+        // keys not among them are told as they enter the part's set.
         try
         {
             foreach (bool emitted in (bool[])[true, false])
@@ -389,7 +389,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// The part's sub-tables let go once delivered: their arrays on the shelf, where the parts still
-    /// applied take them again (H7); once every part is applied, handed to the process's shelf, for the
+    /// applied take them again; once every part is applied, handed to the process's shelf, for the
     /// next query, and leaving the query's count; let go, past the first part brought back from the scratch.
     /// </summary>
     internal void Let(CorePart part)

@@ -12,8 +12,8 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The states of fixed size of a partition's groups in a record a group (PLAN-HIGH-CARDINALITY.md,
-/// H1): the layout of a record against its slots, the records grown, seeded and kept, and a caller's
+/// The states of fixed size of a partition's groups in a record a group: the layout of a record against
+/// its slots, the records grown, seeded and kept, and a caller's
 /// state that holds a reference, which keeps an array of its own beside them.
 /// </summary>
 public sealed partial class GroupRecordsTests

@@ -182,8 +182,7 @@ internal abstract class MemoryKeySource : KeySource
 
     /// <summary>
     /// Makes <paramref name="array"/> hold <paramref name="length"/> elements, its content kept; the new
-    /// array reserved under the query's memory first, the old one given back once replaced
-    /// (PLAN-HIGH-CARDINALITY, H2, H10).
+    /// array reserved under the query's memory first, the old one given back once replaced.
     /// </summary>
     /// <exception cref="VortexMemoryException">The budget does not grant the array.</exception>
     private protected void Grow<T>(ref T[] array, long length)

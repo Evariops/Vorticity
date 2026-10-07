@@ -47,7 +47,7 @@ internal sealed class Run
         return aggregation;
     }
 
-    /// <summary>A <c>Distinct</c>'s switches set as the run asks: its plan says how it takes its values (PLAN-HIGH-CARDINALITY, H13).</summary>
+    /// <summary>A <c>Distinct</c>'s switches set as the run asks: its plan says how it takes its values.</summary>
     internal Aggregation<T> TrackDistinct<T>(Aggregation<T> distinct)
     {
         _configure?.Invoke(((DistinctQuery)distinct.Query).Plan);
@@ -134,7 +134,7 @@ internal static class Measure
     /// pays; under <c>DOTNET_GCHeapHardLimit</c>, also where they stop fitting.
     /// </summary>
     /// <remarks>
-    /// A copy its memory budget refuses (PLAN-HIGH-CARDINALITY, H2) counts as refused rather than ending
+    /// A copy its memory budget refuses counts as refused rather than ending
     /// the bench: under a capped heap, a query that fails cleanly is what the governor promises. Its
     /// exception is told by its type's name, which an older commit of the library does not have.
     /// </remarks>

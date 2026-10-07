@@ -9,8 +9,7 @@ using System.Threading.Tasks;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The groups of a query held once, whatever its degree (PLAN-HIGH-CARDINALITY, H4, milestone 1): the
-/// key space cut into <see cref="PartCount"/> parts by the top bits of a hash of the keys under
+/// The groups of a query held once, whatever its degree: the key space cut into <see cref="PartCount"/> parts by the top bits of a hash of the keys under
 /// <see cref="MergeHash.Seed"/>, each part holding its groups in sub-tables of bounded size. Each lane
 /// folds its rows into its own partition, a cache of bounded capacity; at two thirds of it the cache's
 /// groups are copied, a record and a key each, into the lane's open batches, one a part, and the cache
@@ -22,9 +21,10 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A query whose caches never fill runs as before, its lanes' partitions merged at the end. The core
-/// has no governor yet (milestone 2): α is derived from the lanes and the bytes of a group and of an
-/// entry, never lowered nor raised, and nothing spills.
+/// A query whose caches never fill runs as before, its lanes' partitions merged at the end. α is derived
+/// from the lanes and the bytes of a group and of an entry. The core a query turns to under pressure
+/// holds as little past its groups as it can, α at 1 and a part applied from 256 entries pending, and
+/// spills to the query's scratch the part its budget cannot hold.
 /// </para>
 /// <para>
 /// A burst: the lane that deposits pushes its batch, adds its entries to the part's count, and past the
@@ -46,7 +46,7 @@ internal sealed partial class GroupCore
     private const int BatchBytes = 16 * 1024;
 
     /// <summary>
-    /// The bytes of a batch of the core the governor turns to under pressure (milestone 2): a lane opens
+    /// The bytes of a batch of the core the governor turns to under pressure: a lane opens
     /// one on every part, 256 kilobytes a lane where sixteen made four megabytes, more than the tables
     /// of many a lane.
     /// </summary>
@@ -59,7 +59,7 @@ internal sealed partial class GroupCore
     /// The entries a part holds pending at least before it is applied. A burst early in the pass falls on
     /// a part whose groups are still to come: its sub-tables grow and split under the bursts after it,
     /// where the end splits a part once to the depth of all its groups. Measured on the Mac on 2026-10-07
-    /// (H14), at fourteen lanes on 20M rows, 16 384 against 4 096 took ×0.71 to ×0.94 off every
+    /// at fourteen lanes on 20M rows, 16 384 against 4 096 took ×0.71 to ×0.94 off every
     /// cardinality from 10⁵ up, nothing at 10³ and 10⁴; 65 536, more off 10⁵ and 10⁶, but ×1.17 at 10⁷
     /// and ×1.29 on a key a row, its entries waiting past what their groups would hold. At most 64 MiB
     /// pending past α times the groups, on entries of 16 bytes.
@@ -68,7 +68,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// The bytes of a sub-table past which it splits, S: within the private cache of any current core,
-    /// half a megabyte where the smallest hold one. Measured on the Mac on 2026-10-07 (H14), at fourteen
+    /// half a megabyte where the smallest hold one. Measured on the Mac on 2026-10-07 at fourteen
     /// lanes on 20M rows, sub-tables of 16 000 groups against 7 900 (a count and a sum, 528 KB against
     /// 256 KiB) took ×0.91 to ×0.95 off 10⁷, the stride, ten rows a key and a key a row, nothing below,
     /// and ×0.83 off four aggregates at ≈ 900 KB; 32 000 groups more off 10⁷ (×0.81), but a megabyte
@@ -85,7 +85,7 @@ internal sealed partial class GroupCore
     /// its application, which a lane's table repays only when many lanes each build a table of every
     /// key and the merge rehashes them all: at one lane two to three times slower, at two 1.3 to 1.9,
     /// at four about even, at eight and fourteen faster by a sixth to a half. Below, the lanes' tables;
-    /// to measure again with the governor, which bounds memory at every degree (H2), and on x64 (X1).
+    /// to measure again with the governor, which bounds memory at every degree, and on x64.
     /// </summary>
     internal const int DefaultLanes = 8;
 
@@ -95,8 +95,7 @@ internal sealed partial class GroupCore
     /// <summary>
     /// The bytes of a lane's cache at more than one lane: its share of the private cache of the
     /// smallest core it may run on, a megabyte on current ones, less its open batches' lines and a
-    /// window of rows (PLAN-HIGH-CARDINALITY, principle 14). A fixed default until the topology is read
-    /// (H14).
+    /// window of rows. A fixed default until the topology is read.
     /// </summary>
     private const long LaneCacheBytes = 768 * 1024;
 
@@ -106,7 +105,7 @@ internal sealed partial class GroupCore
     /// <summary>
     /// The share of its rows a cache finds below which its lane bypasses it, ε: a row the cache misses
     /// costs an insertion, then an entry, where a row bypassed costs its entry alone, so that a cache
-    /// that finds fewer than about half its rows costs more than it saves. To be measured (H14).
+    /// that finds fewer than about half its rows costs more than it saves. To be measured.
     /// </summary>
     private const double DefaultBypass = 0.5;
 
@@ -155,7 +154,7 @@ internal sealed partial class GroupCore
     private long _applied;
     private long _made;
 
-    // Delivered part by part (H7): the groups of the parts applied and not let go yet, the most at once,
+    // Delivered part by part: the groups of the parts applied and not let go yet, the most at once,
     // the sub-tables of the parts let go, and whether every part is applied.
     private long _heldGroups;
     private long _peakGroups;
@@ -174,13 +173,13 @@ internal sealed partial class GroupCore
         _facts = facts;
         Lean = lean;
 
-        // Its sub-tables and slabs under the query's memory, when it counts it (H2): an array counted as
+        // Its sub-tables and slabs under the query's memory, when it counts it: an array counted as
         // it enters the query, given back as it leaves; those on the shelf's piles stay counted.
         _memory = memory;
         _shelf = memory is null ? new ArrayShelf() : new ArrayShelf(memory, pooled: true);
 
         // A core that spills takes past its budget what a stack asks more, and its lane spills the
-        // largest part before its next batch (H6).
+        // largest part before its next batch.
         _shelf.Overdraws = memory is not null && plan.CoreSpills;
         Kind = kind;
         int keyBytes = kind.EntryBytes;
@@ -189,7 +188,7 @@ internal sealed partial class GroupCore
         _groupBytes = groupBytes;
         int entryBytes = Shape.Words * sizeof(ulong);
 
-        // Under pressure (milestone 2), the core holds its groups once and as little else as it can: α at
+        // Under pressure, the core holds its groups once and as little else as it can: α at
         // its floor, and a part applied from 256 entries pending, a megabyte over the 256 parts where the
         // floor of 4 096 let sixteen wait; a cache a quarter of a lane's; batches of a kilobyte, which
         // open on every part of every lane. Bursts read the sub-tables more often: memory comes first.
@@ -244,7 +243,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// What a lane holds in the core whatever its rows: a batch open for every part and its cache. A lane
-    /// turns to the core under pressure only when its own table holds more (milestone 2): one that
+    /// turns to the core under pressure only when its own table holds more: one that
     /// holds less would hold more once it turned.
     /// </summary>
     internal long LaneBytes { get; }
@@ -255,7 +254,7 @@ internal sealed partial class GroupCore
     /// <summary>The share of its rows a lane's cache finds, once it has filled, below which the lane bypasses it, ε.</summary>
     internal double Bypass { get; }
 
-    /// <summary>Whether the core holds as little past the groups as it can (milestone 2): the governor's, or a <c>Distinct</c>'s.</summary>
+    /// <summary>Whether the core holds as little past the groups as it can: the governor's, or a <c>Distinct</c>'s.</summary>
     internal bool Lean { get; }
 
     /// <summary>The rows over which a lane measures its cache's hit rate against ε, in capacities of the cache: ε's period.</summary>
@@ -265,7 +264,7 @@ internal sealed partial class GroupCore
     internal bool Engaged => Volatile.Read(ref _engaged) != 0;
 
     /// <summary>
-    /// The pressure the core was made under, by the governor (milestone 2); null for a core the plan
+    /// The pressure the core was made under, by the governor; null for a core the plan
     /// chose. Its shelf then takes past the budget what a stack it judged room for asks more, while a
     /// lane still holds a table it gives back.
     /// </summary>
@@ -327,7 +326,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// A lane's cache, under the query's <paramref name="memory"/>: the small table a lane goes on with
-    /// once its own has emptied into the core (PLAN-HIGH-CARDINALITY, H4, milestone 2).
+    /// once its own has emptied into the core.
     /// </summary>
     internal AggregationPartition Cache(QueryMemory? memory) =>
         new AggregationPartition(_plan, _settled, _columns, _inputs, sorted: false, source: _source, facts: _facts, memory: memory);
@@ -380,7 +379,7 @@ internal sealed partial class GroupCore
     /// <summary>
     /// A slab of new batches, linked first to last, for <paramref name="lane"/> to fill: one large
     /// array, which the collector neither copies nor clears, from the shelf, which takes it back at the
-    /// end; past the query's budget for a lane that turned to the core under pressure (milestone 2).
+    /// end; past the query's budget for a lane that turned to the core under pressure.
     /// </summary>
     internal PartBatch NewSlab(LaneCore lane)
     {
@@ -402,7 +401,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// A batch of <paramref name="entries"/> entries in an array of its own, past the budget: a part's
-    /// share of a lane's table emptied into the core under pressure (milestone 2), which its part gives
+    /// share of a lane's table emptied into the core under pressure, which its part gives
     /// back once applied (<see cref="Drop"/>).
     /// </summary>
     internal PartBatch NewAlone(int entries)
@@ -487,7 +486,7 @@ internal sealed partial class GroupCore
         lane.Deposited(batch.Count);
 
         // A lane turning to the core deposits its table and bursts nothing: the sub-tables would grow
-        // before the table they replace is given back (milestone 2). The next lane's deposit applies them.
+        // before the table they replace is given back. The next lane's deposit applies them.
         if (pending > Threshold(part) && !lane.Turning)
         {
             if (Waits(pending))
@@ -692,7 +691,7 @@ internal sealed partial class GroupCore
     /// the parts taken from a queue by up to <paramref name="degree"/> workers, the lanes' null groups
     /// merged into the first part, and the sub-tables read as one. A part spilled, or one its budget
     /// cannot apply its stack into, writes its stack to the scratch instead, and comes back when it is
-    /// delivered, after the parts held in memory (H6).
+    /// delivered, after the parts held in memory.
     /// </summary>
     /// <returns>
     /// The groups' keys and slots of the parts held in memory, the bytes the core held at the end past
@@ -783,7 +782,7 @@ internal sealed partial class GroupCore
     }
 
     /// <summary>
-    /// The groups of a part applied, or let go when negative, delivered part by part (H7): the most the
+    /// The groups of a part applied, or let go when negative, delivered part by part: the most the
     /// parts held at once is the result's peak.
     /// </summary>
     internal void Held(long groups)
@@ -795,7 +794,7 @@ internal sealed partial class GroupCore
         }
     }
 
-    /// <summary>The most groups the parts applied and not let go held at once, delivered part by part (H7).</summary>
+    /// <summary>The most groups the parts applied and not let go held at once, delivered part by part.</summary>
     internal long PeakGroups => Volatile.Read(ref _peakGroups);
 
     /// <summary>Every lane's cache and open batches deposited, the lanes side by side, for the end to apply.</summary>
@@ -839,7 +838,7 @@ internal sealed partial class GroupCore
     }
 
     /// <summary>
-    /// The end of the pass delivered part by part (PLAN-HIGH-CARDINALITY, H7), when no order needs every
+    /// The end of the pass delivered part by part, when no order needs every
     /// group at once: every lane's cache and open batches deposited, then the parts applied by up to
     /// <paramref name="degree"/> less one workers in the background, each built into its batches by
     /// <paramref name="builder"/> and let go by the worker that applied it, its batches handed to the
@@ -897,7 +896,7 @@ internal sealed partial class GroupCore
     }
 
     /// <summary>
-    /// The next part no worker took, applied by the result's reader rather than wait for a worker (H7):
+    /// The next part no worker took, applied by the result's reader rather than wait for a worker:
     /// whether there was one to take, and the part when it holds groups in memory, null when it spilled.
     /// </summary>
     internal async ValueTask<(bool Taken, CorePart? Part)> ApplyNextAsync(int[] queue, CoreApplier applier, CancellationToken cancellationToken)
@@ -914,7 +913,7 @@ internal sealed partial class GroupCore
     }
 
     /// <summary>
-    /// Every part applied, by the workers and the reader (H7): no batch is read again, and the slabs and
+    /// Every part applied, by the workers and the reader: no batch is read again, and the slabs and
     /// what the shelf kept of the pass leave the query's count, the parts delivered from now on with
     /// them, and the parts spilled brought back under the budget alone.
     /// </summary>
@@ -963,7 +962,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// A part in memory built into its batches by <paramref name="builder"/>, its operators applied, then
-    /// let go (H7): its groups held until then.
+    /// let go: its groups held until then.
     /// </summary>
     internal async ValueTask<PartResult> BuildAsync(CorePart part, PartBuilder builder, CancellationToken cancellationToken)
     {
@@ -984,7 +983,7 @@ internal sealed partial class GroupCore
     /// <summary>The parts written to the scratch, to bring back after those held in memory.</summary>
     internal CorePart[] SpilledList() => Array.FindAll(_parts, part => part.Runs is not null);
 
-    /// <summary>A part's sub-tables read as one, once it is back in memory (H6): its keys and its slots.</summary>
+    /// <summary>A part's sub-tables read as one, once it is back in memory: its keys and its slots.</summary>
     internal (GroupKeys Keys, AggregateSlot[] Slots) Joined(CorePart part)
     {
         List<GroupKeys> keys = [];
@@ -1023,7 +1022,7 @@ internal sealed partial class GroupCore
         MergeNull(partition, first.Tables[first.Directory[0]]);
     }
 
-    /// <summary>The null group of a lane's partition, if it has one, merged into <paramref name="home"/>; told to the emitter the first time (H13).</summary>
+    /// <summary>The null group of a lane's partition, if it has one, merged into <paramref name="home"/>; told to the emitter the first time.</summary>
     private void MergeNull(AggregationPartition partition, SubTable home)
     {
         int nullGroup = partition.Keys!.NullNumber;
@@ -1043,7 +1042,7 @@ internal sealed partial class GroupCore
         }
     }
 
-    /// <summary>What the core tells of each group it makes, a <c>Distinct</c>'s reader (H13); null for none.</summary>
+    /// <summary>What the core tells of each group it makes, a <c>Distinct</c>'s reader; null for none.</summary>
     internal CoreEmitter? Emitter => _plan.Emitter;
 
     /// <summary>
@@ -1076,7 +1075,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// Applies every part's stack now, with <paramref name="lane"/>'s applier: a lane turned at the end of
-    /// the pass under pressure (milestone 2), whose entries become groups while the memory its table gave
+    /// the pass under pressure, whose entries become groups while the memory its table gave
     /// back is free, and whose batches the next lane fills again.
     /// </summary>
     internal void ApplyAll(LaneCore lane)
@@ -1105,7 +1104,7 @@ internal sealed partial class GroupCore
     /// <summary>
     /// Applies the parts a worker takes from the queue, the last taken in <paramref name="queue"/>'s one
     /// element, each its whole stack. A part spilled writes its stack to the scratch; one whose budget
-    /// cannot take its stack's groups is spilled first (H6).
+    /// cannot take its stack's groups is spilled first.
     /// </summary>
     private async ValueTask ApplyPartsAsync(int[] queue, CancellationToken cancellationToken)
     {
@@ -1118,7 +1117,7 @@ internal sealed partial class GroupCore
         }
     }
 
-    /// <summary>A part's whole stack applied; a part spilled, or one whose budget cannot take its stack's groups once it spills, writes the stack to the scratch instead (H6).</summary>
+    /// <summary>A part's whole stack applied; a part spilled, or one whose budget cannot take its stack's groups once it spills, writes the stack to the scratch instead.</summary>
     private async ValueTask ApplyPartAsync(CorePart part, CoreApplier applier, CancellationToken cancellationToken)
     {
         if (Spills && (part.Runs is not null || !Affords(Volatile.Read(ref part.Pending.Value))))
@@ -1148,7 +1147,7 @@ internal sealed partial class GroupCore
     /// <summary>Whether the budget could take the groups of <paramref name="pending"/> entries applied at once (<see cref="Growth"/>).</summary>
     private bool Affords(long pending) => _memory is null || _memory.CanGrow(Growth(pending));
 
-    /// <summary>What the core did, for the plan's last run (PLAN-HIGH-CARDINALITY, R5a).</summary>
+    /// <summary>What the core did, for the plan's last run.</summary>
     internal CoreRun Run()
     {
         int tables = Volatile.Read(ref _tablesLet);
@@ -1177,7 +1176,7 @@ internal sealed partial class GroupCore
 }
 
 /// <summary>
-/// What the core of a run did (PLAN-HIGH-CARDINALITY, R5a): what the plan chose, then what the pass
+/// What the core of a run did: what the plan chose, then what the pass
 /// counted, read by the tests and the bench.
 /// </summary>
 /// <param name="Alpha">The multiple of a part's groups its pending entries passed before a burst.</param>
@@ -1195,14 +1194,14 @@ internal sealed record CoreRun(
     int Alpha, int Capacity, long Flushes, long FlushedGroups, long BypassedRows, long Bursts, long PendingPeakBytes, long ReloadedBytes, int Tables, int Splits,
     long BatchBytes)
 {
-    /// <summary>The parts the core wrote to its scratch (H6).</summary>
+    /// <summary>The parts the core wrote to its scratch.</summary>
     internal int SpilledParts { get; init; }
 
     /// <summary>The bytes it wrote there.</summary>
     internal long SpilledBytes { get; init; }
 }
 
-/// <summary>Where a group's record and its key lie in an entry of a part's batch (PLAN-HIGH-CARDINALITY, H4).</summary>
+/// <summary>Where a group's record and its key lie in an entry of a part's batch.</summary>
 /// <param name="RecordWords">The words of a record, copied whole from a lane's cache.</param>
 /// <param name="Words">The words of an entry.</param>
 /// <param name="KeyOffset">The byte of an entry its key starts at: in the record's padding when it fits there, past the record otherwise.</param>
@@ -1220,7 +1219,7 @@ internal readonly record struct EntryShape(int RecordWords, int Words, int KeyOf
 }
 
 /// <summary>
-/// A lane's entries for one part (PLAN-HIGH-CARDINALITY, H4): a group of its cache each, its record then
+/// A lane's entries for one part: a group of its cache each, its record then
 /// its key; deposited on the part's stack once full, linked there through <see cref="Next"/>, and taken
 /// whole by the lane that applies the stack, which fills it again. Batches are cut from slabs, a lane's
 /// at a time: a large array, which the collector neither copies nor clears.
@@ -1251,12 +1250,12 @@ internal sealed class PartBatch
 
     /// <summary>
     /// Whether the batch is an array of its own, a part's share of a lane's table emptied into the core
-    /// under pressure (milestone 2): given back to the budget once applied, never filled again.
+    /// under pressure: given back to the budget once applied, never filled again.
     /// </summary>
     internal bool Alone { get; init; }
 }
 
-/// <summary>A part's groups whose hashes share the bits of its places in the part's directory: their keys and their records, final (PLAN-HIGH-CARDINALITY, H4).</summary>
+/// <summary>A part's groups whose hashes share the bits of its places in the part's directory: their keys and their records, final.</summary>
 internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecords? records, int depth)
 {
     internal GroupKeys Keys { get; } = keys;
@@ -1282,23 +1281,23 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
         records?.Release();
     }
 
-    /// <summary>The groups from <paramref name="from"/> on copied into entries of <paramref name="shape"/>, as many as <paramref name="entries"/> holds (H6).</summary>
+    /// <summary>The groups from <paramref name="from"/> on copied into entries of <paramref name="shape"/>, as many as <paramref name="entries"/> holds.</summary>
     /// <returns>The group to copy next.</returns>
     internal int CopyEntries(EntryShape shape, int from, Span<ulong> entries, out int written) =>
         Keys.CopyEntries(records is null ? default : records.Made, shape, from, entries, out written);
 }
 
-/// <summary>A part's groups written to the query's scratch as it was spilled (H6): their entries, one after the other, from <paramref name="Offset"/>.</summary>
+/// <summary>A part's groups written to the query's scratch as it was spilled: their entries, one after the other, from <paramref name="Offset"/>.</summary>
 /// <param name="Offset">Where its entries start in the scratch.</param>
 /// <param name="Entries">Its entries.</param>
 /// <param name="Emitted">
-/// Whether its keys were told to the core's emitter as their groups were made (H13): the part's
+/// Whether its keys were told to the core's emitter as their groups were made: the part's
 /// sub-tables, evicted; not its pending entries, written as they came.
 /// </param>
 internal readonly record struct PartRun(long Offset, long Entries, bool Emitted = false);
 
 /// <summary>
-/// What hears of the groups a core makes as it makes them (PLAN-HIGH-CARDINALITY, H13): the reader of a
+/// What hears of the groups a core makes as it makes them: the reader of a
 /// <c>Distinct</c>, each value delivered once it enters its part's set, once, as the rows come.
 /// </summary>
 internal abstract class CoreEmitter
@@ -1317,7 +1316,7 @@ internal abstract class CoreEmitter
 }
 
 /// <summary>
-/// One of the parts of the key space (PLAN-HIGH-CARDINALITY, H4): the lock a lane applies it under, the
+/// One of the parts of the key space: the lock a lane applies it under, the
 /// stack of batches the lanes deposited, the count of their entries, and the directory of its
 /// sub-tables, indexed by the bits of the hash past the part's. The lanes write the stack's head and the
 /// count, each on a line of 128 bytes of its own; the holder alone writes the rest.
@@ -1343,14 +1342,13 @@ internal sealed class CorePart
     internal int Groups;
 
     /// <summary>
-    /// The part's groups written to the scratch, one run each time it was spilled (H6); null for a
+    /// The part's groups written to the scratch, one run each time it was spilled; null for a
     /// part never spilled. Written by the eviction alone, which one task runs at a time.
     /// </summary>
     internal List<PartRun>? Runs;
 
     /// <summary>
-    /// Whether the groups the part makes are told to the core's emitter (PLAN-HIGH-CARDINALITY, H13)
-    /// no longer: once evicted, a key new to its sub-tables may be one it wrote to the scratch, and
+    /// Whether the groups the part makes are told to the core's emitter no longer: once evicted, a key new to its sub-tables may be one it wrote to the scratch, and
     /// waits for the end, where the runs it wrote come back first.
     /// </summary>
     internal bool Silent;
@@ -1370,7 +1368,7 @@ internal sealed class CorePart
 }
 
 /// <summary>
-/// The core a query turns to under pressure (PLAN-HIGH-CARDINALITY, H4, milestone 2, decision 12): made
+/// The core a query turns to under pressure: made
 /// by the first lane whose table its budget cannot let grow, never before, so that a query its budget
 /// holds allocates nothing for it; null for a query the core cannot hold.
 /// </summary>
@@ -1391,7 +1389,7 @@ internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
     private bool _outgrown;
 
     /// <summary>
-    /// A lane turns because its rows showed a key the lanes' tables cannot hold well (decision 14): the
+    /// A lane turns because its rows showed a key the lanes' tables cannot hold well: the
     /// core, if not made yet, is made for speed rather than lean.
     /// </summary>
     internal void Outgrew() => Volatile.Write(ref _outgrown, true);
@@ -1549,7 +1547,7 @@ internal struct CountLine
 }
 
 /// <summary>
-/// A lane's side of the core (PLAN-HIGH-CARDINALITY, H4): its open batch of each part, the batches it
+/// A lane's side of the core: its open batch of each part, the batches it
 /// fills again, and what it applies a part's stack with when it takes one.
 /// </summary>
 internal sealed class LaneCore
@@ -1591,13 +1589,13 @@ internal sealed class LaneCore
     internal EntryShape Shape { get; }
 
     /// <summary>
-    /// Whether the lane is turning to the core, its own table emptying into its batches (milestone 2):
+    /// Whether the lane is turning to the core, its own table emptying into its batches:
     /// its deposits burst nothing until its table is given back.
     /// </summary>
     internal bool Turning { get; set; }
 
     /// <summary>
-    /// Whether the lane turned to the core under pressure (milestone 2): its slabs come past the
+    /// Whether the lane turned to the core under pressure: its slabs come past the
     /// query's budget when they must, as its cache, bounded by α times the groups pending; the
     /// sub-tables, which hold the groups themselves, are what its budget refuses.
     /// </summary>
@@ -1735,7 +1733,7 @@ internal sealed class LaneCore
 
     /// <summary>
     /// A lane's own table emptied into the core, its null group aside, which it keeps alone: the lane
-    /// turning to the core when its budget cannot let the table grow (milestone 2). Its groups counted
+    /// turning to the core when its budget cannot let the table grow. Its groups counted
     /// by part first, each part's share goes into a batch of its own, exactly its size, deposited whole:
     /// given back as its part applies it, where batches the lanes fill again would stay held to the end.
     /// </summary>
@@ -1816,7 +1814,7 @@ internal sealed class LaneCore
 }
 
 /// <summary>
-/// What applies a part's batches (PLAN-HIGH-CARDINALITY, H4): a lane's, for its bursts, or a worker's at
+/// What applies a part's batches: a lane's, for its bursts, or a worker's at
 /// the end. Its slots read a batch's entries as records, at the entry's stride; its scratch cuts the
 /// entries by sub-table.
 /// </summary>
@@ -1841,10 +1839,10 @@ internal sealed class CoreApplier
     private int[] _setEntries = [];
     private int[] _setBatches = [];
 
-    // Whether the part applied tells its new groups to the core's emitter (H13).
+    // Whether the part applied tells its new groups to the core's emitter.
     private bool _emitting;
 
-    /// <summary>What the core's emitter keeps of this applier between two flushes (H13): the batch of values it copies them into.</summary>
+    /// <summary>What the core's emitter keeps of this applier between two flushes: the batch of values it copies them into.</summary>
     internal object? Emission { get; set; }
 
     internal CoreApplier(GroupCore core, LaneCore? lane)
@@ -2122,7 +2120,7 @@ internal sealed class CoreApplier
         _view?.Over(batch.Words, batch.Start, batch.Count);
         _core.Merge(_entries, entries, table, map);
 
-        // The keys new to the part's set, before a split moves them (H13).
+        // The keys new to the part's set, before a split moves them.
         if (_emitting && table.Keys.Count > before)
         {
             _core.Emitter!.Emit(this, table.Keys, before, table.Keys.Count);
@@ -2164,7 +2162,7 @@ internal sealed class CoreApplier
     }
 }
 
-/// <summary>What the keys of one fixed width do on entries (PLAN-HIGH-CARDINALITY, H4): a fixed-width column's value, or the word of a tuple.</summary>
+/// <summary>What the keys of one fixed width do on entries: a fixed-width column's value, or the word of a tuple.</summary>
 internal static class EntryKeys
 {
     /// <summary>A key's hash under <paramref name="seed"/>: a mix of one word, or of two for a wider key.</summary>
@@ -2217,7 +2215,7 @@ internal static class EntryKeys
     /// <summary>
     /// The groups from <paramref name="from"/> on, but group <paramref name="skip"/>, copied into entries
     /// of <paramref name="shape"/> one after the other, as many as <paramref name="entries"/> holds: a
-    /// sub-table written to the scratch as a part is spilled (H6).
+    /// sub-table written to the scratch as a part is spilled.
     /// </summary>
     /// <returns>The group to copy next.</returns>
     internal static int Copy<TKey>(ReadOnlySpan<TKey> keys, int skip, ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written)

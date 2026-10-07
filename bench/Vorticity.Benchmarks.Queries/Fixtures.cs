@@ -287,7 +287,7 @@ internal static class Fixtures
     /// <summary>
     /// The rows of the spread file in no order of <paramref name="rows"/> rows as a dataset of
     /// <paramref name="objects"/> objects of equal rows, every column canonical as the file's, written on
-    /// first use in a directory (PLAN-HIGH-CARDINALITY, H12).
+    /// first use in a directory.
     /// </summary>
     internal static async ValueTask<string> SpreadDatasetAsync(int rows, int objects)
     {

@@ -130,7 +130,7 @@ internal sealed class AggregationPlan
     /// <summary>The time from the first move of the plan's last result to its first batch, in <see cref="Stopwatch"/> ticks.</summary>
     internal long LastFirstBatchTicks { get; set; }
 
-    /// <summary>The chunks the last run's top-k ranked on tasks of their own (PLAN-HIGH-CARDINALITY, H7); one when it ranked its groups at once.</summary>
+    /// <summary>The chunks the last run's top-k ranked on tasks of their own; one when it ranked its groups at once.</summary>
     internal int LastTopChunks { get; set; }
 
     /// <summary>What the plan's last run did, as the query's statistics say it (docs/design/16-queries.md §10); null before one.</summary>
@@ -188,12 +188,11 @@ internal sealed class AggregationPlan
     internal const int DefaultFoldWindow = 2_048;
 
     /// <summary>
-    /// How a key of one fixed-width column finds its rows' groups on the hashed path
-    /// (PLAN-HIGH-CARDINALITY, H15): -1 a row at a time; 0 in two passes, each row's home slot with no
-    /// branch on the keys, then the rows left in their order; more, in two passes whose first reads the
-    /// slot that many rows on ahead of each row. The switch the bench sweeps the distance with. A key
-    /// numbered by value goes by two passes too from 0 (H14), its pages read with no branch, and a row
-    /// at a time at -1.
+    /// How a key of one fixed-width column finds its rows' groups on the hashed path: -1 a row at a
+    /// time; 0 in two passes, each row's home slot with no branch on the keys, then the rows left in
+    /// their order; more, in two passes whose first reads the slot that many rows on ahead of each row.
+    /// The switch the bench sweeps the distance with. A key numbered by value goes by two passes too
+    /// from 0, its pages read with no branch, and a row at a time at -1.
     /// </summary>
     internal int ProbeAhead { get; set; } = DefaultProbeAhead;
 
@@ -210,22 +209,22 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// Whether a blocking group by holds its groups once, in the parts of <see cref="GroupCore"/>,
-    /// where its key travels in batches and its states lie in records (PLAN-HIGH-CARDINALITY, H4): the
-    /// switch the core is measured and tested by, off until its first milestone passes.
+    /// where its key travels in batches and its states lie in records: the switch that asks for the
+    /// core whatever the lanes, which the tests and the bench measure it by.
     /// </summary>
     internal bool Core { get; set; }
 
     /// <summary>
     /// Whether a lane whose budget cannot let its table grow turns to the core rather than failing,
-    /// where the core can hold the query's groups (PLAN-HIGH-CARDINALITY, H4, milestone 2): on by
-    /// default, off to measure or test the lanes' tables alone under a budget.
+    /// where the core can hold the query's groups: on by default, off to measure or test the lanes'
+    /// tables alone under a budget.
     /// </summary>
     internal bool CoreUnderPressure { get; set; } = true;
 
     /// <summary>
-    /// Whether the groups of a query come in an order shuffled the same way for a process (decision
-    /// 11): on in the repository's tests, so that none relies on the order the engine happens to give
-    /// groups no <c>OrderBy</c> sorts.
+    /// Whether the groups of a query come in an order shuffled the same way for a process: on in the
+    /// repository's tests, so that none relies on the order the engine happens to give groups no
+    /// <c>OrderBy</c> sorts.
     /// </summary>
     internal static bool ShuffledOrder { get; set; }
 
@@ -238,17 +237,17 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// Whether an integer key numbered by value over <see cref="ScatteredSpan"/> values or more, which
-    /// the zones say lies scattered over its span, takes the core from the start on the core's lanes
-    /// (decision 14): its lanes' tables would each hold most of its groups, out of the cache. False to
-    /// leave the core to <see cref="Core"/> and to pressure alone.
+    /// the zones say lies scattered over its span, takes the core from the start on the core's lanes:
+    /// its lanes' tables would each hold most of its groups, out of the cache. False to leave the core
+    /// to <see cref="Core"/> and to pressure alone.
     /// </summary>
     internal bool CoreScattered { get; set; } = true;
 
     /// <summary>
     /// Whether a hashed key, which nothing bounds before the pass, takes the core on its lanes once a
-    /// lane's first <see cref="AggregationPartition.JudgedRows"/> rows were nearly all new groups
-    /// (decision 14): a key of a million values or more, which the lanes' tables would each hold. False
-    /// to leave the core to <see cref="Core"/>, the zones and pressure.
+    /// lane's first <see cref="AggregationPartition.JudgedRows"/> rows were nearly all new groups: a key
+    /// of a million values or more, which the lanes' tables would each hold. False to leave the core to
+    /// <see cref="Core"/>, the zones and pressure.
     /// </summary>
     internal bool CoreOnNew { get; set; } = true;
 
@@ -285,58 +284,57 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// Whether the core under the governor spills its largest part to the query's scratch when its
-    /// budget holds no more (PLAN-HIGH-CARDINALITY, H6): on by default, off to test the refusal.
+    /// budget holds no more: on by default, off to test the refusal.
     /// </summary>
     internal bool CoreSpills { get; set; } = true;
 
     /// <summary>
     /// Whether a core, or a merge in parts, with no order nor window over its groups delivers them part
-    /// by part, its first batch once its first part is applied or merged (PLAN-HIGH-CARDINALITY, H7,
-    /// H14): on by default, off for the bench to weigh it against the delivery whole.
+    /// by part, its first batch once its first part is applied or merged: on by default, off for the
+    /// bench to weigh it against the delivery whole.
     /// </summary>
     internal bool CoreParted { get; set; } = true;
 
     /// <summary>
-    /// Whether a top-k of many groups ranks them in chunks at once, then the chunks' candidates
-    /// (PLAN-HIGH-CARDINALITY, H7): on by default, off for the bench to weigh it against one ranking.
+    /// Whether a top-k of many groups ranks them in chunks at once, then the chunks' candidates: on by
+    /// default, off for the bench to weigh it against one ranking.
     /// </summary>
     internal bool TopInChunks { get; set; } = true;
 
     /// <summary>
     /// Whether a top-k on a column's largest or smallest value of each group keeps the lanes' best
-    /// groups alone, dropping the rows past their frontier (PLAN-HIGH-CARDINALITY, H7): on by default,
-    /// off for the bench to weigh it against the group by of every group.
+    /// groups alone, dropping the rows past their frontier: on by default, off for the bench to weigh
+    /// it against the group by of every group.
     /// </summary>
     internal bool TopOnExtremes { get; set; } = true;
 
-    /// <summary>What the core tells of each group it makes as it makes it, a <c>Distinct</c>'s reader (PLAN-HIGH-CARDINALITY, H13); null for none.</summary>
+    /// <summary>What the core tells of each group it makes as it makes it, a <c>Distinct</c>'s reader; null for none.</summary>
     internal CoreEmitter? Emitter { get; set; }
 
     /// <summary>
     /// Whether a <c>Distinct</c> of this plan, on several lanes, takes the core's path, each value told
-    /// as it enters its part's set (PLAN-HIGH-CARDINALITY, H13): on by default, off for the tests and the
-    /// bench to weigh it against the values taken on the reader's thread.
+    /// as it enters its part's set: on by default, off for the tests and the bench to weigh it against
+    /// the values taken on the reader's thread.
     /// </summary>
     internal bool CoreDistinct { get; set; } = true;
 
     /// <summary>
     /// Whether the core asked for (<see cref="Core"/>) is the lean one lanes turn to under pressure: α at 1,
-    /// a part applied from 256 entries, batches of a kilobyte, its caches and batches sized on the budget
-    /// (PLAN-HIGH-CARDINALITY, H4, milestone 2): a <c>Distinct</c>'s, which tells its values as they enter
-    /// their sets and spills under its budget (H13).
+    /// a part applied from 256 entries, batches of a kilobyte, its caches and batches sized on the
+    /// budget: a <c>Distinct</c>'s, which tells its values as they enter their sets and spills under its
+    /// budget.
     /// </summary>
     internal bool CoreLean { get; set; }
 
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
 
-    /// <summary>The rows a lane's cache is judged over against ε, in capacities of the cache, or null for the core's own: ε's period (H14).</summary>
+    /// <summary>The rows a lane's cache is judged over against ε, in capacities of the cache, or null for the core's own: ε's period.</summary>
     internal int? CoreBypassPeriod { get; set; }
 
     /// <summary>
     /// Whether the merge in parts of partitions that number one span of values by value cuts it by
-    /// value (PLAN-HIGH-CARDINALITY, H14): false to hash them as any other key, the switch the bench
-    /// compares them with.
+    /// value: false to hash them as any other key, the switch the bench compares them with.
     /// </summary>
     internal bool MergeByValue { get; set; } = true;
 
@@ -407,8 +405,8 @@ internal sealed class AggregationPlan
     };
 
     /// <summary>
-    /// The layout of the key as the tuple of its values in one word (PLAN-HIGH-CARDINALITY, H11),
-    /// unless the statistics say a column is sorted, which hands its rows by range, or bound the
+    /// The layout of the key as the tuple of its values in one word, unless the statistics say a
+    /// column is sorted, which hands its rows by range, or bound the
     /// columns' values to a product a table of groups holds: both <see cref="PackedKeys{TKey}"/>'s.
     /// </summary>
     private RawLayout? Raw(KeyFacts? facts)
@@ -482,7 +480,7 @@ internal sealed class AggregationPlan
 /// a run that keeps them all until then (<see cref="AggregationPartition.Footprint"/>). Under the core,
 /// its sub-tables, the lanes' caches and every batch it made.
 /// </param>
-/// <param name="Core">What the core did, when it held the groups (PLAN-HIGH-CARDINALITY, H4); null otherwise.</param>
+/// <param name="Core">What the core did, when it held the groups; null otherwise.</param>
 internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts, long StateBytes, CoreRun? Core = null)
 {
     /// <summary>One lane's counts.</summary>
@@ -517,7 +515,7 @@ internal sealed class AggregationOutcome
 
     internal AggregationPlan Plan => _plan;
 
-    /// <summary>What the result holds of its query's memory budget, until it is delivered (PLAN-HIGH-CARDINALITY, H2); null for a result nobody counts.</summary>
+    /// <summary>What the result holds of its query's memory budget, until it is delivered; null for a result nobody counts.</summary>
     internal QueryMemory? Memory { get; set; }
 
     /// <summary>Gives back what the result held of its query's budget: delivered, it is the caller's.</summary>
@@ -532,9 +530,8 @@ internal sealed class AggregationOutcome
     }
 
     /// <summary>
-    /// The parts of the result delivered after these groups, one at a time (PLAN-HIGH-CARDINALITY, H6,
-    /// H7, H14): a core's, applied in the background or written to the scratch, or a merge's in parts;
-    /// null when the result is whole.
+    /// The parts of the result delivered after these groups, one at a time: a core's, applied in the
+    /// background or written to the scratch, or a merge's in parts; null when the result is whole.
     /// </summary>
     internal ResultParts? Parts { get; set; }
 
@@ -551,7 +548,7 @@ internal sealed class AggregationOutcome
             return _slots[index];
         }
 
-        // Made on the first read, which the chunks of a top-k may make at once (PLAN-HIGH-CARDINALITY, H7).
+        // Made on the first read, which the chunks of a top-k may make at once.
         foreach ((AggregateIdentity mean, int sum) in _plan.Shares)
         {
             if (mean.Equals(node.Identity))
@@ -566,7 +563,7 @@ internal sealed class AggregationOutcome
 
     /// <summary>
     /// The values of the chosen rows let go, and what they held of the query's memory: a part of a result
-    /// delivered part by part, once its batches are built (PLAN-HIGH-CARDINALITY, H7).
+    /// delivered part by part, once its batches are built.
     /// </summary>
     internal void LetChosen()
     {
@@ -612,7 +609,7 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// The bytes of records past which the slots fold a batch a window at a time: 1 MiB, the private
-    /// second level of cache of a current core (PLAN-HIGH-CARDINALITY, principle 14). Under it the
+    /// second level of cache of a current core. Under it the
     /// records of every group stay in cache from one slot to the next anyway: in one process, windows
     /// cost a count and a float mean on ten thousand groups 3 %, records of 640 KiB, and won nothing
     /// before a hundred thousand.
@@ -651,7 +648,7 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// The rows a group has seen, on the mean, past which its extremes rarely move: the k-th value is a
-    /// new maximum one time in k, which a branch predicts past a few dozen (H14).
+    /// new maximum one time in k, which a branch predicts past a few dozen.
     /// </summary>
     private const int SettledRows = 32;
 
@@ -677,7 +674,7 @@ internal sealed class AggregationPartition
         _window = plan.FoldWindow is int window and > 0 ? window : int.MaxValue;
 
         // Under the query's memory, the records and a key of one fixed column grow from the lane's
-        // shelf, which reserves each array before it comes (PLAN-HIGH-CARDINALITY, H2, decision 13).
+        // shelf, which reserves each array before it comes.
         Slots = NewSlots(plan, settled, source, out GroupRecords? records, _arrays);
         Records = records;
 
@@ -709,8 +706,8 @@ internal sealed class AggregationPartition
     internal GroupRecords? Records { get; private set; }
 
     /// <summary>
-    /// The lane's side of the query's core, which copies the partition into its batches when it fills
-    /// (PLAN-HIGH-CARDINALITY, H4); null without a core, or until the lane turns to it under pressure.
+    /// The lane's side of the query's core, which copies the partition into its batches when it fills;
+    /// null without a core, or until the lane turns to it under pressure.
     /// </summary>
     internal LaneCore? Core
     {
@@ -719,8 +716,8 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
-    /// The core the query turns to when its budget cannot let a lane's table grow (H4, milestone 2);
-    /// null for a partition that never turns to one.
+    /// The core the query turns to when its budget cannot let a lane's table grow; null for a partition
+    /// that never turns to one.
     /// </summary>
     internal CorePressure? Pressure
     {
@@ -738,8 +735,7 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// Whether the lane, one of the core's lanes on a hashed key, turns to the core when the groups its
-    /// first <see cref="JudgedRows"/> rows made say a key of <see cref="TurnValues"/> values or more
-    /// (decision 14).
+    /// first <see cref="JudgedRows"/> rows made say a key of <see cref="TurnValues"/> values or more.
     /// </summary>
     internal bool TurnOnNew { get; init; }
 
@@ -803,7 +799,7 @@ internal sealed class AggregationPartition
     /// Once <see cref="JudgedRows"/> rows are folded, a table of a hashed key reserves the groups its first
     /// rows foretell for the rows the partition expects: those a uniform key of <see cref="EstimatedValues"/>
     /// values makes from them, as its budget lets it. Grown by doubling, the table placed every group again
-    /// at each step, a sixth of a group by of 1.8M pairs of integers (PLAN-HIGH-CARDINALITY, H11). With no
+    /// at each step, a sixth of a group by of 1.8M pairs of integers. With no
     /// key, each slot foretells its own (<see cref="AggregateSlot.Foretell"/>).
     /// </summary>
     private void Foretell()
@@ -854,7 +850,7 @@ internal sealed class AggregationPartition
 
     private readonly CorePressure? _pressure;
 
-    /// <summary>The query's memory, in which the partition reserves what its groups hold (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
+    /// <summary>The query's memory, in which the partition reserves what its groups hold; null for a partition that does not count them.</summary>
     internal QueryMemory? Memory { get; }
 
     private LaneCore? _core;
@@ -881,7 +877,7 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// The bytes the partition's groups hold, at the capacity of their arrays: the keys' index, the
-    /// records, and what each slot holds apart from them (PLAN-HIGH-CARDINALITY, H1).
+    /// records, and what each slot holds apart from them.
     /// </summary>
     internal long Footprint => (Keys?.Footprint ?? 0) + (_componentKeys?.Footprint ?? 0) + AggregateSlot.FootprintOf(Slots);
 
@@ -908,7 +904,7 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// Lets the partition's tables go and gives back what it held of its query's memory, the arrays
-    /// left to the next collection (PLAN-HIGH-CARDINALITY, H2): a range a stream followed into the
+    /// left to the next collection: a range a stream followed into the
     /// partition before it, whose groups now live there.
     /// </summary>
     internal void LetGo()
@@ -932,8 +928,8 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// The cache of a lane of a lean core, from its first batch: its arrays reserved each alone, nothing
-    /// ahead, and taken past the budget when they must, as a lane turned to the core reserves its cache
-    /// (milestone 2). Bounded by the core's capacity, the caches are the least the query holds; a quarter
+    /// ahead, and taken past the budget when they must, as a lane turned to the core reserves its cache.
+    /// Bounded by the core's capacity, the caches are the least the query holds; a quarter
     /// of a megabyte ahead on every lane outweighed the budget of a small <c>Distinct</c>, which failed
     /// where its core would spill.
     /// </summary>
@@ -947,7 +943,7 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
-    /// The lane turning to <paramref name="core"/> (PLAN-HIGH-CARDINALITY, H4, milestone 2): its table,
+    /// The lane turning to <paramref name="core"/>: its table,
     /// which its budget could not let grow once more, emptied into the core's batches, then let go with
     /// what it held; the lane goes on with a cache of the core's size, which takes the null group, the
     /// one group no batch carries.
@@ -1000,7 +996,7 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
-    /// Whether the lane turns to the core before its next batch (H4, milestone 2): its budget could not
+    /// Whether the lane turns to the core before its next batch: its budget could not
     /// let its table grow once more, or another lane turned.
     /// </summary>
     internal bool MustTurn => _core is null && Pressure is { } pressure && (pressure.Turned || Pressed());
@@ -1015,7 +1011,7 @@ internal sealed class AggregationPartition
     {
         // A lane whose table holds less than the core would cost it keeps its table, but for one already
         // past its budget when the core spills, which a lane's table cannot; and but when a lane turned
-        // on what its rows showed (decision 14), where every lane turns while its table is small.
+        // on what its rows showed, where every lane turns while its table is small.
         CorePressure pressure = Pressure!;
         if (pressure.Core is not { } core || (_turnAt is null && !pressure.Outgrown && _arrays!.Out < core.LaneBytes && !(core.Spills && _arrays.Overdrawn)))
         {
@@ -1057,7 +1053,7 @@ internal sealed class AggregationPartition
         lane.Starved = false;
 
         // A table still to come back is waited for; with none left, the largest part goes to the
-        // scratch (H6). Otherwise the stack waits on its part, applied at a later burst or at the end.
+        // scratch. Otherwise the stack waits on its part, applied at a later burst or at the end.
         if (Pressure is { } pressure && pressure.Running > 0)
         {
             await pressure.RoomAsync(cancellationToken).ConfigureAwait(false);
@@ -1163,8 +1159,8 @@ internal sealed class AggregationPartition
             return _folded++ >= turnAt;
         }
 
-        // Nearly every one of its first rows a new group, a hashed key of a million values or more
-        // (decision 14): the lane turns to the core while its table is a batch's, which emptying costs
+        // Nearly every one of its first rows a new group, a hashed key of a million values or more: the
+        // lane turns to the core while its table is a batch's, which emptying costs
         // little, where turning once the table outgrew the cache paid for it twice.
         if (TurnOnNew && !_judged && _rowsFolded >= JudgedRows)
         {
@@ -1321,7 +1317,7 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// The key of the worst value a top on a column's extreme kept at its last trim, which a row's value
-    /// must reach to join it (PLAN-HIGH-CARDINALITY, H7, <see cref="ValueFrontier"/>); null before.
+    /// must reach to join it (<see cref="ValueFrontier"/>); null before.
     /// </summary>
     internal long? TopEdge { get; set; }
 
@@ -1347,7 +1343,7 @@ internal sealed class AggregationPartition
         }
 
         // Under the core, a lane whose cache finds too few of its keys folds its rows apart, a group
-        // each (PLAN-HIGH-CARDINALITY, H4).
+        // each.
         if (Core is { } core && core.Bypasses(batch))
         {
             return;
@@ -1386,7 +1382,7 @@ internal sealed class AggregationPartition
     /// <summary>
     /// Reserves twice what the partition's groups hold past the arrays its shelf hands out, a megabyte
     /// ahead at least: a reading of their lengths, once a batch. Those the shelf hands out, it reserves
-    /// as they come (PLAN-HIGH-CARDINALITY, H2, decision 13); the others are read here, until every
+    /// as they come; the others are read here, until every
     /// table grows from a shelf. Twice, because a table doubles within a batch, before the next
     /// reading: its new arrays are reserved before they come, the old ones beside them only for the
     /// copy, a moment no reading sees. What the groups hold is measured too: grown, the arrays they
@@ -1422,7 +1418,7 @@ internal sealed class AggregationPartition
             {
                 // A lane on the core folds a batch into its cache before it measures it: a batch of new
                 // groups past the cache's capacity, at most, which the next flush empties. It is counted
-                // past the budget, as the core then spills what it must (H6).
+                // past the budget, as the core then spills what it must.
                 if (_core is null)
                 {
                     throw memory.Exceeded("group by", Keys?.Count ?? 1, need);
@@ -1488,7 +1484,7 @@ internal sealed class AggregationPartition
         }
 
         // On a column's extreme, a row whose value falls short of the worst the top kept changes none
-        // of its groups, nor makes one (H7): the extreme is the query's one aggregate.
+        // of its groups, nor makes one: the extreme is the query's one aggregate.
         if (TopEdge is long edge)
         {
             int words = (rows + 63) >> 6;
@@ -1543,8 +1539,8 @@ internal sealed class AggregationPartition
             ? LastValue(ranged, rows, selection, LastValueGroup)
             : Components(arena, rows, selection, before, groups);
 
-        // Groups that have each seen many rows hold extremes that rarely move, which a branch predicts
-        // (H14): before, the slots fold without one.
+        // Groups that have each seen many rows hold extremes that rarely move, which a branch predicts:
+        // before, the slots fold without one.
         _rowsFolded += rows;
         _settled = _rowsFolded >= SettledRows * (long)groups;
         if (!_foretold && _rowsFolded >= JudgedRows)
@@ -1572,7 +1568,7 @@ internal sealed class AggregationPartition
                 int end = Math.Min(rows, start + window);
 
                 // The count rides on a fixed slot's pass when both fold the window's every row into one
-                // record (PLAN-HIGH-CARDINALITY, H14): a row's record reached once for both. With no slot
+                // record: a row's record reached once for both. With no slot
                 // to carry it, it folds first, alone: past the cache, its short pass brings the window's
                 // records in, many rows in flight, for the heavy passes after it.
                 bool carried = carrier >= 0 && Folds(count)
@@ -1888,7 +1884,7 @@ internal abstract class AggregationHost
     /// groups delivered (<see cref="GroupSelection.ApplyAsync"/>).
     /// </summary>
     /// <param name="query">The query.</param>
-    /// <param name="builder">What builds the batches of the parts a core delivers one at a time (H6, H7).</param>
+    /// <param name="builder">What builds the batches of the parts a core delivers one at a time.</param>
     /// <param name="cancellationToken">Cancels the run.</param>
     /// <returns>The merged states and keys, and the groups delivered, in order, before the result's window.</returns>
     internal async ValueTask<(AggregationOutcome Outcome, int[] Groups, int Count)> RunAsync(AggregationQuery query, PartBuilder builder, CancellationToken cancellationToken)
@@ -1902,14 +1898,14 @@ internal abstract class AggregationHost
             // no order, one lane keeps the first it met.
             KeyTop? top = KeyTop.Of(query) ?? KeyTop.FirstOf(query);
 
-            // With no order nor window over the groups, a core delivers them part by part (H7).
+            // With no order nor window over the groups, a core delivers them part by part.
             bool parted = query.Plan.CoreParted && top is null && !Array.Exists(query.Operators, op => op is GroupOrder or GroupWindow);
             AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             if (outcome.Parts is not null && Array.Exists(query.Operators, op => op is GroupOrder))
             {
                 // Groups spilled under an order: the reader sorts them in runs, each part through the
-                // operators before the order as it comes (H10).
+                // operators before the order as it comes.
                 return (outcome, [], 0);
             }
 
@@ -2030,7 +2026,7 @@ internal static class AggregationEngine
                 : null);
         // What the lanes' tables and the merge hold, reserved in the session's budget as they grow,
         // brought down to the result once the groups are merged and given back when it is delivered;
-        // all of it as soon as the query fails (PLAN-HIGH-CARDINALITY, H2).
+        // all of it as soon as the query fails.
         QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         GroupCore? core = null;
         CorePressure? pressure = null;
@@ -2042,7 +2038,7 @@ internal static class AggregationEngine
             pass = Batched(pass, memory, asked);
             int lanes = Admit(memory, asked, pass.Options.BatchRows);
 
-            // A key its zones say scattered over a wide span takes the core from the start (decision 14):
+            // A key its zones say scattered over a wide span takes the core from the start:
             // its lanes' tables, out of the cache, would each hold most of its groups.
             if (!plan.Core && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes) && facts is { } known && !sorted && top is null
                 && await ScatteredAsync(source, plan.Keys, known, metrics, cancellationToken).ConfigureAwait(false))
@@ -2050,7 +2046,7 @@ internal static class AggregationEngine
                 facts = known with { Scattered = true };
             }
 
-            // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
+            // The core holds the groups once a lane's cache fills: each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
             core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
             if (core is not null)
@@ -2060,8 +2056,8 @@ internal static class AggregationEngine
 
             // Without it, the core a lane turns to when its budget cannot let its table grow: made then,
             // never before, for a query it can hold, on two lanes or more, where the lanes' tables hold a
-            // group once each and the core once (H4, milestone 2, decision 12); on one, where the core
-            // spills its parts to the scratch, which a lane's table cannot (H6).
+            // group once each and the core once; on one, where the core spills its parts to the scratch,
+            // which a lane's table cannot.
             KeyFacts? tableFacts = facts;
             pressure = core is null && plan.CoreUnderPressure && plan.Grouped && !sorted && top is null && (lanes > 1 || plan.CoreSpills || plan.CoreTurnAt is not null)
                 ? new CorePressure(lean => GroupCore.Holding(plan, settled, columns, inputs, source, tableFacts, sorted, top: null, lanes, memory, lean), lanes)
@@ -2124,7 +2120,7 @@ internal static class AggregationEngine
             long merging = Stopwatch.GetTimestamp();
             plan.LastKeyBlocks = KeyBlocks(partitions);
 
-            // Under pressure (H4, milestone 2): a lane turned during the pass, or the merge of the lanes'
+            // Under pressure: a lane turned during the pass, or the merge of the lanes'
             // tables in parts would not fit twice over, its estimate falling a few hundred kilobytes short
             // at times, which no merge in parts can take back. The lanes that did not turn merge in series into the largest
             // of them, each let go once merged, which takes no more than the largest's growth. Then, if
@@ -2158,7 +2154,7 @@ internal static class AggregationEngine
 
                 if (parted && builder is not null)
                 {
-                    // Part by part (H7): each part's batches built as it is applied, while the others apply,
+                    // Part by part: each part's batches built as it is applied, while the others apply,
                     // the part let go then; the first batch once the first part is; the result starts with no
                     // group. What the lanes held is given back, the core's shelf counting the rest exactly.
                     CoreParts applying = await engaged.FinishPartedAsync(joined, lanes, plan, builder, cancellationToken).ConfigureAwait(false);
@@ -2188,7 +2184,7 @@ internal static class AggregationEngine
                     return Counted(outcome, memory, heldBytes);
                 }
 
-                // Parts spilled (H6): the groups held in memory first, then each part brought back alone.
+                // Parts spilled: the groups held in memory first, then each part brought back alone.
                 // The core's shelf counts what it holds exactly, which the result keeps; what the lanes
                 // held, their caches and their admission, is given back.
                 foreach (AggregationPartition partition in partitions)
@@ -2205,7 +2201,7 @@ internal static class AggregationEngine
                 await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, parted ? builder : null, merging, cancellationToken).ConfigureAwait(false);
             if (delivery is not null)
             {
-                // Part by part (H14): the result starts with no group, the parts come as they are merged
+                // Part by part: the result starts with no group, the parts come as they are merged
                 // and built, the lanes' tables let go once the last is merged. What the lanes held to
                 // fold their batches is given back now.
                 plan.LastGroups = 0;
@@ -2294,7 +2290,7 @@ internal static class AggregationEngine
     /// <summary>
     /// What a lane holds besides its tables, reserved for it before the pass: a batch's scratch, its
     /// keys' homes, the decoding of its columns. A quarter of a megabyte a lane on the bench's files,
-    /// measured (PLAN-HIGH-CARDINALITY, H2); four times that, for wider rows, until H14 sets it.
+    /// measured; four times that, for wider rows.
     /// </summary>
     private const long LaneBytes = 1 << 20;
 
@@ -2313,7 +2309,7 @@ internal static class AggregationEngine
 
     /// <summary>
     /// The lanes a query starts on: each lane's working memory reserved, <paramref name="lanes"/> of
-    /// them if its budget grants it, else half as many, down to one, before it fails (H2, the admission).
+    /// them if its budget grants it, else half as many, down to one, before it fails.
     /// A lane's working memory follows its batches: <paramref name="batchRows"/> rows of scratch, when
     /// the scan sets them, between a sixteenth of a megabyte and a megabyte; a megabyte when the scan
     /// decides.
@@ -2341,7 +2337,7 @@ internal static class AggregationEngine
     /// <summary>
     /// The bytes a row of a lane's batch may come to hold under the core, its budget short: its scratch,
     /// its entry, and the group it may add to the lane's cache before the cache is measured, past its
-    /// capacity (H6).
+    /// capacity.
     /// </summary>
     private const int CoreRowBytes = 72;
 
@@ -2367,7 +2363,7 @@ internal static class AggregationEngine
     /// <summary>
     /// What a merge of <paramref name="partitions"/> reserves at least: the places it cuts their groups by,
     /// and twice the largest partition's groups at what a group costs the lanes, the first parts' tables.
-    /// Past what its budget grants, the core ends the query instead (H4, milestone 2).
+    /// Past what its budget grants, the core ends the query instead.
     /// </summary>
     private static long MergeAhead(AggregationPartition[] partitions)
     {
@@ -2387,7 +2383,7 @@ internal static class AggregationEngine
     }
 
     /// <summary>
-    /// Under pressure (H4, milestone 2): the lanes that did not turn to the core, at the end of the pass,
+    /// Under pressure: the lanes that did not turn to the core, at the end of the pass,
     /// or those of them that ran out of rows, <paramref name="ended"/>, during it, merged in series into
     /// the largest of them, each let go once merged. The merge holds the tables it has not reached and
     /// the largest's growth, never a table of its own beside them: memory falls as it goes.
@@ -2477,7 +2473,7 @@ internal static class AggregationEngine
         if (partitions.Length == 1 || biggest.Keys is null || !inParts)
         {
             // The keys and the states in series, into the largest; a distinct count's pairs, when they
-            // are many, apart, by parts of the pairs taken side by side (PLAN-HIGH-CARDINALITY, H9).
+            // are many, apart, by parts of the pairs taken side by side.
             int[]? numbers = null;
             bool[]? apart = partitions.Length > 1 && degree > 1 ? Paired(partitions, inputs) : null;
             int[][] maps = new int[partitions.Length][];
@@ -2530,7 +2526,7 @@ internal static class AggregationEngine
         memory.Measure(cut);
 
         // Partitions that number one span of values by value are cut by value, each part numbered by value
-        // over its run of the span: no hash, no probe, no table that grows (PLAN-HIGH-CARDINALITY, H14).
+        // over its run of the span: no hash, no probe, no table that grows.
         (long Least, ulong Span)? values = keysOf[0].ValueSpan;
         for (int p = 1; p < keysOf.Length && values is not null; p++)
         {
@@ -2557,7 +2553,7 @@ internal static class AggregationEngine
         PartMerge merge = new PartMerge(partitions, keysOf, placed, starts, parts, plan, settled, inputs, source, memory, byValue, perGroup);
         if (builder is not null)
         {
-            // Part by part (PLAN-HIGH-CARDINALITY, H14): each part built into its batches by the worker
+            // Part by part: each part built into its batches by the worker
             // that merged it, or by the reader, which merges the next rather than wait; the lanes'
             // tables and the places of their groups go once the last part is merged.
             (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
@@ -2919,7 +2915,7 @@ internal static class AggregationEngine
     /// Whether the key, one integer column the statistics bound to <see cref="AggregationPlan.ScatteredSpan"/>
     /// values or more, few enough to be numbered by value, lies scattered over them: its zones cover half
     /// its span or more on the mean, where keys in the order of the rows cover a few values a zone. The
-    /// zones read once for the file, counted in <paramref name="metrics"/> (decision 14).
+    /// zones read once for the file, counted in <paramref name="metrics"/>.
     /// </summary>
     private static async ValueTask<bool> ScatteredAsync(ScanSource source, ColumnShape[] keys, KeyFacts facts, ScanMetrics metrics, CancellationToken cancellationToken)
     {
@@ -2954,8 +2950,7 @@ internal static class AggregationEngine
         return counted > 0 && covered >= 0.5 * counted;
     }
 
-    /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds it.</summary>
-    /// <summary><see cref="Facts"/>, the bounds of a source that reads its structures first, a dataset's (PLAN-HIGH-CARDINALITY, H12).</summary>
+    /// <summary><see cref="Facts"/>, the bounds of a source that reads its structures first, a dataset's.</summary>
     internal static async ValueTask<KeyFacts> FactsAsync(ScanSource source, ColumnShape[] keys, CancellationToken cancellationToken)
     {
         bool[] sorted = new bool[keys.Length];
@@ -2972,6 +2967,7 @@ internal static class AggregationEngine
         return new KeyFacts(sorted, bounds, source.RowBound);
     }
 
+    /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds it.</summary>
     internal static KeyFacts Facts(ScanSource source, ColumnShape[] keys)
     {
         bool[] sorted = new bool[keys.Length];
@@ -2987,8 +2983,8 @@ internal static class AggregationEngine
 
     /// <summary>
     /// The smallest and the largest value of an integer column of a key, as the source bounds them
-    /// without a read: a file's statistics, a dataset's summaries in hand (PLAN-HIGH-CARDINALITY,
-    /// H12); what bounds a table of its groups (<see cref="FixedKeys{TValue}"/>).
+    /// without a read: a file's statistics, a dataset's summaries in hand; what bounds a table of its
+    /// groups (<see cref="FixedKeys{TValue}"/>).
     /// </summary>
     internal static KeyBounds? Bounds(ScanSource source, ColumnShape key) =>
         key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 ? null : source.Bounds(key);
@@ -3191,7 +3187,7 @@ internal static class AggregationEngine
         long start = Stopwatch.GetTimestamp();
         await foreach (RecordBatch batch in source.BatchesAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
-            // Under pressure (H4, milestone 2), a lane turns to the core between two batches, and one whose
+            // Under pressure, a lane turns to the core between two batches, and one whose
             // rows the core could not take waits for the next table given back: on tasks, never a thread.
             if (partition.MustTurn)
             {
@@ -3240,7 +3236,7 @@ internal static class AggregationEngine
 
         // The degree is the parallelism: a partition already runs on the pool, and decoding ahead
         // inside each one would put twice the degree's lanes on it. Its reads go ahead of its decode
-        // instead, on a source whose read is a round trip (PLAN-HIGH-CARDINALITY, R6).
+        // instead, on a source whose read is a round trip.
         ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = true };
         int[] next = [-1];
         Task[] lanes = new Task[partitions.Length];

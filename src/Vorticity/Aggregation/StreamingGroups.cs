@@ -72,7 +72,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private int _followed;
 
     // What the stream's tables hold, reserved in its session's budget as they grow, its lanes' working
-    // memory admitted first; given back when the stream ends (PLAN-HIGH-CARDINALITY, H2).
+    // memory admitted first; given back when the stream ends.
     private QueryMemory? _memory;
 
     internal StreamingGroupBatches(AggregationQuery query, CancellationToken cancellationToken, ZoneFinality? zones = null)

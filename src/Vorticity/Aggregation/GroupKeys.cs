@@ -80,8 +80,8 @@ internal abstract class GroupKeys
     internal int Count { get; private protected set; }
 
     /// <summary>
-    /// The length an array of a table of groups, or of a distinct count's pairs, doubles to
-    /// (PLAN-HIGH-CARDINALITY, the cap). Groups and pairs are numbered by 32-bit integers, and their
+    /// The length an array of a table of groups, or of a distinct count's pairs, doubles to. Groups and
+    /// pairs are numbered by 32-bit integers, and their
     /// tables double: an open table, twice its entries long, holds 2^29 of them at most, a list 2^30.
     /// Past that, the query fails with a typed exception that says so, never an overflow.
     /// </summary>
@@ -110,7 +110,7 @@ internal abstract class GroupKeys
     /// <summary>An empty index of the same kind, for another partition.</summary>
     internal abstract GroupKeys Fresh();
 
-    /// <summary>The bytes the index holds, its tables and its keys at their capacity (PLAN-HIGH-CARDINALITY, H1).</summary>
+    /// <summary>The bytes the index holds, its tables and its keys at their capacity.</summary>
     internal abstract long Footprint { get; }
 
     /// <summary>Adds this partition's keys to <paramref name="target"/>; group <c>g</c> here is <c>map[g]</c> there.</summary>
@@ -135,7 +135,7 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// The span of values the index numbers its groups by, its least value and its width; null when it
-    /// hashes them. Partitions that number one span by value merge by value (PLAN-HIGH-CARDINALITY, H14).
+    /// hashes them. Partitions that number one span by value merge by value.
     /// </summary>
     internal virtual (long Least, ulong Span)? ValueSpan => null;
 
@@ -148,7 +148,7 @@ internal abstract class GroupKeys
     /// <summary>An empty index the part <paramref name="part"/> of a merge by value is merged into: numbered by value over its run of the span.</summary>
     internal virtual GroupKeys ForValuePart(int part, int partBits) => ForPart();
 
-    /// <summary>An empty index a sub-table of the core holds its groups in (PLAN-HIGH-CARDINALITY, H4), its arrays taken from and given back to <paramref name="shelf"/>.</summary>
+    /// <summary>An empty index a sub-table of the core holds its groups in, its arrays taken from and given back to <paramref name="shelf"/>.</summary>
     internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
 
     /// <summary>Gives the index's arrays back to its shelf, if it has one: a sub-table split, whose groups another holds. The index is empty after.</summary>
@@ -162,8 +162,8 @@ internal abstract class GroupKeys
     }
 
     /// <summary>
-    /// The bytes a key takes beside its group's record in an entry of a part's batch
-    /// (PLAN-HIGH-CARDINALITY, H4), a power of two; 0 for a key that does not travel in batches, whose
+    /// The bytes a key takes beside its group's record in an entry of a part's batch, a power of two; 0
+    /// for a key that does not travel in batches, whose
     /// query keeps a table on each lane and merges them at the end.
     /// </summary>
     internal virtual int EntryBytes => 0;
@@ -171,7 +171,7 @@ internal abstract class GroupKeys
     /// <summary>
     /// An index of the same kind that looks no key up: each row's key a group of its own, but a row
     /// whose key is the row before's, a run's or a code's; the null group one. What a lane folds its
-    /// rows into when its cache finds too few of its keys (PLAN-HIGH-CARDINALITY, H4, the bypass).
+    /// rows into when its cache finds too few of its keys, the bypass.
     /// Null for a key that does not travel in batches.
     /// </summary>
     internal virtual GroupKeys? Appending() => null;
@@ -189,7 +189,7 @@ internal abstract class GroupKeys
     /// <summary>
     /// The groups from <paramref name="from"/> on, but the null one, copied into entries of
     /// <paramref name="shape"/> one after the other, their records read from <paramref name="records"/>,
-    /// as many as <paramref name="entries"/> holds (PLAN-HIGH-CARDINALITY, H6).
+    /// as many as <paramref name="entries"/> holds.
     /// </summary>
     /// <returns>The group to copy next.</returns>
     internal virtual int CopyEntries(ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written) => throw NotEntries();
@@ -260,7 +260,7 @@ internal abstract class GroupKeys
     /// <summary>
     /// Whether the groups are numbered by the key's value, in a table the statistics bound: such a key
     /// takes the core from what its zones say, before the pass, and a hashed one from what its first
-    /// rows show (decision 14).
+    /// rows show.
     /// </summary>
     internal virtual bool NumberedByValue => false;
 
@@ -368,7 +368,7 @@ internal readonly record struct KeyBounds(long Min, long Max);
 internal static class MergeHash
 {
     /// <summary>
-    /// The seed, drawn once a process (PLAN-HIGH-CARDINALITY, H15): a text key is hashed once, by its
+    /// The seed, drawn once a process: a text key is hashed once, by its
     /// table under this seed, and the merge cuts by that hash while the table has no seed of its own;
     /// two runs of a query cut their groups alike.
     /// </summary>
@@ -376,7 +376,7 @@ internal static class MergeHash
 
     /// <summary>
     /// A key of one word: one round of the mix, a bijection whose every input bit reaches every bit
-    /// of the hash, where the key of two words takes two (PLAN-HIGH-CARDINALITY, H15).
+    /// of the hash, where the key of two words takes two.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong Of(ulong word, ulong seed) => Mix(word ^ seed);
@@ -388,7 +388,7 @@ internal static class MergeHash
     /// <summary>A key of bytes: XXH3 of 64 bits under <paramref name="seed"/>, the same bits as <see cref="System.IO.Hashing.XxHash3"/>.</summary>
     /// <remarks>
     /// Up to 16 bytes, XXH3's own short paths, inlined here: the library's dispatch and its two calls
-    /// took a fifth of a group by of short names (PLAN-HIGH-CARDINALITY, profiling). Longer keys go to
+    /// took a fifth of a group by of short names. Longer keys go to
     /// the library.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -470,7 +470,7 @@ internal static class MergeHash
 /// A key of one fixed-width column: a table of its own from the storage value to its group
 /// (<see cref="KeyTable{TValue}"/>), and a group for null. An integer key the statistics bound to a
 /// span of <see cref="DirectValues"/> values, or of up to <see cref="DirectPerRow"/> values a row of
-/// the source, is numbered by its value less the least instead (PLAN-HIGH-CARDINALITY, H11): a table
+/// the source, is numbered by its value less the least instead: a table
 /// from the number to its group, in pages allocated as values meet them, so that no row is hashed and
 /// the memory follows the pages the values touch.
 /// </summary>
@@ -880,7 +880,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     /// <summary>
-    /// Every row's group in two passes (PLAN-HIGH-CARDINALITY, H15): the group of each key that sits in
+    /// Every row's group in two passes: the group of each key that sits in
     /// its home slot, with no branch on the keys; then, in their order, the rows that pass left (keys
     /// past their home, new keys, nulls) through the whole lookup, which numbers a new key as it first
     /// comes. The rows left are gathered without a branch either.
@@ -956,7 +956,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private const int DirectChunk = 4096;
 
     /// <summary>
-    /// Every row's group read from the table of groups in two passes (PLAN-HIGH-CARDINALITY, H14),
+    /// Every row's group read from the table of groups in two passes,
     /// <see cref="DirectChunk"/> rows at a time: the group at each row's number, with no branch on the
     /// keys, a page not allocated yet read as <see cref="Unmet"/> and a value past the bounds as none;
     /// then, in their order, the rows the first pass left (values met for the first time, values past
@@ -1202,7 +1202,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _keys = grown;
     }
 
-    /// <summary>A sub-table of the core: the keys hashed, never by value, their arrays from the query's shelf (PLAN-HIGH-CARDINALITY, H4).</summary>
+    /// <summary>A sub-table of the core: the keys hashed, never by value, their arrays from the query's shelf.</summary>
     internal override GroupKeys ForTable(ArrayShelf shelf) => new FixedKeys<TValue>(_shape, sorted: false, shelf: shelf);
 
     internal override void Release()
@@ -1791,7 +1791,7 @@ internal sealed class BytesKeys : GroupKeys
     private const int TextChunk = 256;
 
     /// <summary>
-    /// Every row's group, <see cref="TextChunk"/> rows at a time (PLAN-HIGH-CARDINALITY, H14): their
+    /// Every row's group, <see cref="TextChunk"/> rows at a time: their
     /// hashes, then each found where its home slot holds it, the table read with no row waiting on
     /// another (<see cref="ByteKeyTable.FindAtHome"/>); then, in their order, the rows left through the
     /// whole lookup, their hashes known, which numbers a key as it first comes.

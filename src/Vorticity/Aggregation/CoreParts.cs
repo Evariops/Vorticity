@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The parts of a group by's result its core delivers one at a time (PLAN-HIGH-CARDINALITY, H6, H7),
+/// The parts of a group by's result its core delivers one at a time,
 /// each built into its batches and let go before it is handed to the reader: those its workers apply
 /// and build as each is done, while the others apply, and those the reader applies and builds itself
 /// when no worker's waits; then those it wrote to the scratch, each brought back alone.
@@ -35,7 +35,7 @@ internal sealed class CoreParts : ResultParts
     private bool _held;
     private bool _closed;
 
-    /// <summary>The parts a result delivered whole spilled, after the groups it holds; built by <paramref name="builder"/>, or brought back for the core's emitter alone (H13).</summary>
+    /// <summary>The parts a result delivered whole spilled, after the groups it holds; built by <paramref name="builder"/>, or brought back for the core's emitter alone.</summary>
     internal CoreParts(GroupCore core, CorePart[] spilled, AggregationPlan plan, PartBuilder? builder)
     {
         _core = core;
@@ -128,8 +128,8 @@ internal sealed class CoreParts : ResultParts
 
     /// <summary>
     /// The parts spilled brought back one after the other, their values told to the core's emitter as
-    /// they enter their sets, those written as told coming back first, then let go (PLAN-HIGH-CARDINALITY,
-    /// H13): the end of a <c>Distinct</c> that spilled.
+    /// they enter their sets, those written as told coming back first, then let go: the end of a
+    /// <c>Distinct</c> that spilled.
     /// </summary>
     internal async ValueTask EmitSpilledAsync(CancellationToken cancellationToken)
     {

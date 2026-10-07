@@ -10,8 +10,8 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The extremes of a text keep their values in pages the slot shares among its groups
-/// (PLAN-HIGH-CARDINALITY.md, H1, reduction 5): a page for many groups, not an object a group.
+/// The extremes of a text keep their values in pages the slot shares among its groups: a page for many
+/// groups, not an object a group.
 /// Values that grow move and leave their room behind, which a compaction takes back; a value longer
 /// than a quarter of a page takes one of its own. The answers are the rows', at one lane and four.
 /// </summary>
@@ -68,8 +68,8 @@ public sealed partial class TextExtremePagesTests
     }
 
     /// <summary>
-    /// The slot counts the bytes of its pages as it takes them (PLAN-HIGH-CARDINALITY.md, H1, the
-    /// footprint): what the thread allocates, the headers of the arrays aside. Values of 104 bytes'
+    /// The slot counts the bytes of its pages as it takes them, its footprint: what the thread
+    /// allocates, the headers of the arrays aside. Values of 104 bytes'
     /// room for a page and a half fill two pages; a value longer than a quarter of a page takes one of
     /// its own.
     /// </summary>

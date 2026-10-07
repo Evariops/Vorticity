@@ -76,7 +76,7 @@ internal sealed class ValueResultColumn<T> : ResultColumn
 
     internal override void Append(AggregationOutcome outcome, ColumnStore store, ReadOnlySpan<int> groups)
     {
-        // A slot that holds its answers as bytes writes them into a text or binary column as they lie (H14).
+        // A slot that holds its answers as bytes writes them into a text or binary column as they lie.
         Bind(outcome);
         if (_record is null && _slot is IBytesResults { HoldsBytes: true } bytes && store.Leaf is VarBinStore text)
         {

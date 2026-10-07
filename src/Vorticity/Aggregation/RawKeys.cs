@@ -95,8 +95,8 @@ internal sealed class RawLayout
 }
 
 /// <summary>
-/// A key of two to four fixed-width columns as the tuple of their values, packed into one word
-/// (PLAN-HIGH-CARDINALITY, H11): one probe a row, where <see cref="PackedKeys{TKey}"/> probes an index
+/// A key of two to four fixed-width columns as the tuple of their values, packed into one word: one
+/// probe a row, where <see cref="PackedKeys{TKey}"/> probes an index
 /// a column, then the tuple of their numbers. It is the form a key of several columns takes by itself,
 /// with no index of a column to share.
 /// </summary>
@@ -131,7 +131,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
     // fewer groups), under the bits of the word's hash below those of its home, compared before the
     // group's word is read. One array: a new word reads and writes one line of it, where a byte of tag
     // and a group number in two arrays made two lines, the numbers written at random chasing the tags
-    // out of the cache (PLAN-HIGH-CARDINALITY, H11).
+    // out of the cache.
     private uint[] _slots = new uint[32];
 
     // A batch's words, built a column at a time in two halves.
@@ -238,7 +238,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
     }
 
-    /// <summary>A sub-table of the core: its arrays from the query's shelf (PLAN-HIGH-CARDINALITY, H4).</summary>
+    /// <summary>A sub-table of the core: its arrays from the query's shelf.</summary>
     internal override GroupKeys ForTable(ArrayShelf shelf) => new RawKeys<TWord>(_layout, shelf: shelf);
 
     internal override void Release()
@@ -594,7 +594,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>
     /// Component <paramref name="component"/> of each group's word written to <paramref name="leaf"/> a chunk at
     /// a time, with its nulls when the column takes them: one value a call took a sixth of a group by of 1.8M
-    /// pairs (PLAN-HIGH-CARDINALITY, H11). A null's bits are zero, the default a column without nulls takes.
+    /// pairs. A null's bits are zero, the default a column without nulls takes.
     /// </summary>
     private void AppendValues<TValue>(int component, bool nullable, FixedStore leaf, ReadOnlySpan<int> groups)
         where TValue : unmanaged

@@ -67,7 +67,7 @@ internal sealed class GroupRecords
         }
 
         // The seed once, then the records seeded copied onto the next as many, doubling: a call a
-        // record cost more than its words when a lane makes a group a row (PLAN-HIGH-CARDINALITY, H4).
+        // record cost more than its words when a lane makes a group a row.
         ReadOnlySpan<ulong> seed = _layout.Seed;
         Span<ulong> made = _words.AsSpan(_base + (_groups * stride), (groups - _groups) * stride);
         if (stride == 1)
@@ -135,13 +135,13 @@ internal sealed class GroupRecords
     /// <summary>The states at byte <paramref name="offset"/> of the records, until they next grow.</summary>
     internal StateView<TState> View<TState>(int offset) => new StateView<TState>(_words.AsSpan(_base), _layout.Stride, offset);
 
-    /// <summary>The words of the records made, the first group's first: what a lane's cache copies into its batches (PLAN-HIGH-CARDINALITY, H4).</summary>
+    /// <summary>The words of the records made, the first group's first: what a lane's cache copies into its batches.</summary>
     internal ReadOnlySpan<ulong> Made => _words.AsSpan(_base, _groups * _layout.Stride);
 
     /// <summary>
     /// Reads <paramref name="groups"/> records of <paramref name="words"/>, from word
     /// <paramref name="start"/>, at the layout's stride: the entries of a part's batch, a record each,
-    /// which the slots that merge them view this way (PLAN-HIGH-CARDINALITY, H4). Records read so are
+    /// which the slots that merge them view this way. Records read so are
     /// never grown, seeded nor kept.
     /// </summary>
     internal void Over(ulong[] words, int start, int groups)
@@ -177,7 +177,7 @@ internal sealed class RecordLayout
     /// <summary>The bytes the states take from a record's first: past them, its words are padding.</summary>
     internal int Width { get; }
 
-    /// <summary>The same states at a stride of <paramref name="words"/>, at least the record's: the entries of a part's batch, a record and a key each (PLAN-HIGH-CARDINALITY, H4).</summary>
+    /// <summary>The same states at a stride of <paramref name="words"/>, at least the record's: the entries of a part's batch, a record and a key each.</summary>
     internal RecordLayout Widened(int words)
     {
         ulong[] seed = new ulong[words];

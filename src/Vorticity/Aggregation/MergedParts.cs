@@ -9,8 +9,7 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// The parts of a group by's result delivered one at a time, each built into its batches and let go
-/// before it is handed to the reader (PLAN-HIGH-CARDINALITY, H6, H7, H14): a core's, or a merge's in
-/// parts.
+/// before it is handed to the reader: a core's, or a merge's in parts.
 /// </summary>
 internal abstract class ResultParts
 {
@@ -181,8 +180,7 @@ internal sealed class PartMerge
 }
 
 /// <summary>
-/// The parts of a merge in parts delivered one at a time (PLAN-HIGH-CARDINALITY, H14), as a core's are
-/// (H7): each part merged and built into its batches by the worker that took it, while the others
+/// The parts of a merge in parts delivered one at a time, as a core's are: each part merged and built into its batches by the worker that took it, while the others
 /// merge, then let go, its batches handed to the result; and by the result's reader, which merges and
 /// builds the next part no worker took rather than wait for one. The lanes' tables go once the last
 /// part is merged.

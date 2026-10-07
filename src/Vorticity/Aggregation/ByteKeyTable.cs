@@ -11,7 +11,7 @@ namespace Vorticity.Aggregating;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A probe reads two lines (PLAN-HIGH-CARDINALITY, H15): its slot, the high half of the key's hash
+/// A probe reads two lines: its slot, the high half of the key's hash
 /// and where the key lies, then, when the half matches, the key itself, its number and its length
 /// ahead of its bytes. A slot holding the number alone sent the probe on to the key's hash, place and
 /// length, each in an array of its own: five lines. A slot of 8 bytes, where one of 16 held the number
@@ -48,7 +48,7 @@ internal sealed class ByteKeyTable
     // The lane's shelf its arrays grow from, under the query's memory; null for a table nothing counts.
     private readonly ArrayShelf? _shelf;
 
-    /// <summary>A table whose arrays grow from <paramref name="shelf"/>, which reserves each before it comes (PLAN-HIGH-CARDINALITY, H2); new ones when null.</summary>
+    /// <summary>A table whose arrays grow from <paramref name="shelf"/>, which reserves each before it comes; new ones when null.</summary>
     internal ByteKeyTable(ArrayShelf? shelf = null) => _shelf = shelf;
 
     /// <summary>The number of distinct keys.</summary>
@@ -119,7 +119,7 @@ internal sealed class ByteKeyTable
     internal ulong HashOf(int index) => _hashes[index];
 
     /// <summary>
-    /// The first half of a chunk's lookups (PLAN-HIGH-CARDINALITY, H14): each key's number where its home
+    /// The first half of a chunk's lookups: each key's number where its home
     /// slot holds it, -1 where it does not (past its home, new, or null). Every row's slot is read before
     /// any key is compared, and every candidate's key compared after, no row waiting on another: at a
     /// million keys, a lookup's two lines, its slot then its key, each a miss, one after the other. The
@@ -155,8 +155,7 @@ internal sealed class ByteKeyTable
 
     /// <summary>
     /// A number no key finds: an entry without bytes that no lookup reaches, for a group with no key,
-    /// the null of a text key, whose groups are then the table's entries (PLAN-HIGH-CARDINALITY, H1,
-    /// reduction 6). Its bytes are never read.
+    /// the null of a text key, whose groups are then the table's entries. Its bytes are never read.
     /// </summary>
     internal int AddDetached()
     {

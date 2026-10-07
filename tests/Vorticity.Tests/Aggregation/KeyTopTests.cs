@@ -118,8 +118,8 @@ public sealed partial class KeyTopTests
     [InlineData(14)]
     public async Task TheFirstGroupsOfAnOrderOnAnExtremeAreKeptAloneOnEachLane(int degree)
     {
-        // An integer column's largest value from the largest, its smallest from the smallest
-        // (PLAN-HIGH-CARDINALITY, H7): a thousand values among sixty thousand keys, each shared by
+        // An integer column's largest value from the largest, its smallest from the smallest: a thousand
+        // values among sixty thousand keys, each shared by
         // sixty of them, so that the k-th ties with dozens, which the key ranks. Each lane keeps its
         // best groups alone, and drops the rows short of the worst it keeps.
         (Row[] rows, string path) = await WriteAsync();

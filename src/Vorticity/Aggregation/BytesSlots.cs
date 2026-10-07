@@ -180,7 +180,7 @@ internal static class BytesWalk
 /// <summary>
 /// A slot whose answers are bytes, a text's or a binary's: written into a result's column as they lie,
 /// where a string a group decoded, then encoded again, made a million objects for the collector at a
-/// million groups (PLAN-HIGH-CARDINALITY, H14).
+/// million groups.
 /// </summary>
 internal interface IBytesResults
 {
@@ -194,7 +194,7 @@ internal interface IBytesResults
 /// <summary>
 /// The smallest or largest text or binary value of each group, in byte order: the values' bytes in
 /// pages the slot shares among its groups, no object per group nor an allocation per value as values
-/// come and go (PLAN-HIGH-CARDINALITY, H1, reduction 5). A value longer than the room of the one it
+/// come and go. A value longer than the room of the one it
 /// replaces moves to the end of the last page and leaves that room behind; the pages are compacted
 /// when what they leave behind outgrows what they hold.
 /// </summary>
@@ -204,7 +204,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
     /// The bytes of a page; a value longer than a quarter of one takes a page of its own. Past the large
     /// objects' threshold: a page lives as long as its groups, which no collection should copy. At 64 KiB,
     /// a million groups' pages on fourteen lanes were copied by every compacting collection, a fifth of
-    /// the query's cycles (H14).
+    /// the query's cycles.
     /// </summary>
     internal const int PageBytes = 1 << 17;
 
@@ -290,7 +290,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
     private const int Chunk = 256;
 
     /// <summary>
-    /// Every row of the window offered, <see cref="Chunk"/> rows at a time (PLAN-HIGH-CARDINALITY, H14):
+    /// Every row of the window offered, <see cref="Chunk"/> rows at a time:
     /// where each row's group holds its value, then each compared with its row's, no row waiting on
     /// another; then the rows that beat it offered in their order, a group two rows beat taking the
     /// better. At a million groups a row's offer read three lines, one after the other: the group's
@@ -519,7 +519,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     private CodeSet _distinct;
 
     // Each pair chained to the pair its group met before, by their numbers in the table plus one, and
-    // each group's last pair (PLAN-HIGH-CARDINALITY, H9): a group's pairs read without another's.
+    // each group's last pair: a group's pairs read without another's.
     private int[] _next = [];
     private int[] _first = [];
 
@@ -563,7 +563,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
         // Every group of the other: its pairs in the order they lie, each to its group's target. Some
-        // of them, a part of a parallel merge: their chains alone (PLAN-HIGH-CARDINALITY, H9).
+        // of them, a part of a parallel merge: their chains alone.
         BytesDistinctSlot source = (BytesDistinctSlot)other;
         ByteKeyTable seen = source._seen;
         if (from.Length == source._groups)

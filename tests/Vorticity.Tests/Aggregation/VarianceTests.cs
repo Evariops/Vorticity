@@ -19,7 +19,7 @@ public sealed partial class VarianceTests
 
     /// <summary>
     /// The center and what a stored value is worth are the run's, held by the slot's op: a group's
-    /// state is its two sums, a line of cache (PLAN-HIGH-CARDINALITY.md, H1, reduction 4).
+    /// state is its two sums, a line of cache.
     /// </summary>
     [Fact]
     public void AGroupsStateIsItsTwoSums()

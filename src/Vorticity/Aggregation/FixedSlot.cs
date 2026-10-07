@@ -206,7 +206,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 if (mask.IsEmpty)
                 {
                     // Every row and no null: a loop with nothing but the fold, the cursor's test of its mask
-                    // out of it; with no branch on the values while the groups have seen few rows (H14).
+                    // out of it; with no branch on the values while the groups have seen few rows.
                     if (input.Settled)
                     {
                         for (int row = input.Start; row < input.End; row++)
@@ -707,7 +707,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
         // Every group of the other: its pairs in the order they lie, each to its group's target. Some
-        // of them, a part of a parallel merge: their chains alone (PLAN-HIGH-CARDINALITY, H9).
+        // of them, a part of a parallel merge: their chains alone.
         FixedDistinctSlot<TValue> source = (FixedDistinctSlot<TValue>)other;
         if (_set is { } set)
         {

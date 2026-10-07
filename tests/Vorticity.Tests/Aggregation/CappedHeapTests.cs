@@ -11,7 +11,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// Queries under a heap the runtime caps (PLAN-HIGH-CARDINALITY, H2): the test assembly runs again in a
+/// Queries under a heap the runtime caps: the test assembly runs again in a
 /// process of its own under <c>DOTNET_GCHeapHardLimit</c>, where eight copies of a group by at once each
 /// end exact or fail with a <see cref="VortexMemoryException"/>, never with the runtime's
 /// <see cref="OutOfMemoryException"/>.

@@ -222,7 +222,7 @@ internal sealed class DatasetSnapshot
 
     /// <summary>
     /// The smallest and the largest value an integer column holds in the version, as the summaries of
-    /// its levels' root pages bound them, the loosest of their entries' (PLAN-HIGH-CARDINALITY, H12);
+    /// its levels' root pages bound them, the loosest of their entries';
     /// null when a root is not in hand, an entry says nothing of the column, or its bounds are no
     /// integers a long holds. No page is read for it.
     /// </summary>

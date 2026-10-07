@@ -9,7 +9,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The slots fold a batch a window of rows at a time (PLAN-HIGH-CARDINALITY.md, H15), every slot the
+/// The slots fold a batch a window of rows at a time, every slot the
 /// window before the next window: windows of one row, seven and sixty-four give the answers of the
 /// whole batch, for every kind of state, with nulls, under a filter's selection, on one lane and four.
 /// </summary>

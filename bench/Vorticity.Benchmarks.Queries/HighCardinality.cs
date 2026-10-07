@@ -5,7 +5,7 @@ using System.Threading.Tasks;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// The high-cardinality bench (PLAN-HIGH-CARDINALITY.md, H0b): keys in no order, in the order of the
+/// The high-cardinality bench: keys in no order, in the order of the
 /// rows, and at a regular stride, from 10³ to 10⁷ groups; ten rows a key, a key a row, a Zipf law,
 /// hot keys that drift; text, UUID and composite keys; distinct counts and the operators after a
 /// group by. Two matrices name them (<c>--matrix small</c>, <c>--matrix full</c>), so that an A/B
@@ -58,7 +58,7 @@ internal static class HighCardinality
         }
 
         // A distinct count by a million keys, twenty values a key: the pairs a merge in parts hands
-        // each part (PLAN-HIGH-CARDINALITY, H9).
+        // each part.
         yield return Spread("random", FullRows, "1e6", "count distinct", Matrix.Full);
 
         // A popularity law and hot keys that change as the rows go.
@@ -77,13 +77,13 @@ internal static class HighCardinality
         yield return ("visits", new Scenario("hc distinct users over the scan (1e7 users)", DistinctUsersAsync, 1, Matrix.Full));
 
         // What follows a group by of a million groups; on a text key, the ranking against the same group
-        // by delivered in no order (PLAN-HIGH-CARDINALITY, H7).
+        // by delivered in no order.
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, order by count take 100", TopCountsAsync, 1, Matrix.Full));
         yield return ($"spread-random-{FullRows}", new Scenario("hc random tenfold, where count > 10", HavingAsync, 1, Matrix.Full));
         yield return ("pages", new Scenario("hc text key 1e6 (urls), order by count take 100", TopUrlsAsync, 16, Matrix.Full));
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, order by max take 100", TopMostAsync, 1, Matrix.Full));
 
-        // The distinct values of a column, a million and ten million of them (PLAN-HIGH-CARDINALITY, H13).
+        // The distinct values of a column, a million and ten million of them.
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, distinct", (file, run) => DistinctAsync(file, run, s => s.K6), 16, Matrix.Full));
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e7, distinct", (file, run) => DistinctAsync(file, run, s => s.K7), 16, Matrix.Full));
     }

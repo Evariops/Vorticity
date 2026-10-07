@@ -50,7 +50,7 @@ internal sealed record ScanSpec
 
     /// <summary>
     /// Whether a scan of one lane reads its next splits while it decodes one, over a source whose read
-    /// is a round trip (PLAN-HIGH-CARDINALITY, R6): an aggregation's lanes, which decode nothing ahead
+    /// is a round trip: an aggregation's lanes, which decode nothing ahead
     /// and read every split they are given, so that no read ahead is wasted.
     /// </summary>
     internal bool ReadAhead { get; init; }

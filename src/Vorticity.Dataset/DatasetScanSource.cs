@@ -78,7 +78,7 @@ internal sealed class DatasetScanSource : ScanSource
 
     /// <summary>
     /// The loosest bounds the summaries of the version's root pages in hand give the column, over
-    /// every object (PLAN-HIGH-CARDINALITY, H12): a table of a key's groups by value over the objects,
+    /// every object: a table of a key's groups by value over the objects,
     /// as over a file, with no read of its own.
     /// </summary>
     internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => _version.Bounds(key.Path);

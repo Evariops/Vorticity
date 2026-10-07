@@ -11,8 +11,8 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// A key of two to four fixed-width columns as the tuple of their values in one word
-/// (PLAN-HIGH-CARDINALITY.md, H11): it groups as its tuples, with nulls, every NaN one value and both
+/// A key of two to four fixed-width columns as the tuple of their values in one word: it groups as its
+/// tuples, with nulls, every NaN one value and both
 /// zeros one, in 64 bits and in 128, on one lane and four, under a filter, and reads its components
 /// back.
 /// </summary>

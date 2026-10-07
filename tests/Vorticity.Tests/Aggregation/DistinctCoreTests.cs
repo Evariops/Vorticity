@@ -10,7 +10,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// A <c>Distinct</c> on several lanes through the core (PLAN-HIGH-CARDINALITY, H13): each value told as
+/// A <c>Distinct</c> on several lanes through the core: each value told as
 /// it enters its part's set, once, as the rows come, whatever the degree; the same values as on the
 /// reader's thread alone; under a budget that spills, the values of a part evicted told once it comes
 /// back, against the runs it wrote; every reservation and every file given back, read to its end or not.

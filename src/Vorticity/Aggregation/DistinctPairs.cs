@@ -4,8 +4,8 @@ using System.Runtime.CompilerServices;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The (group, value) pairs of a distinct count of fixed-width values, each once (PLAN-HIGH-CARDINALITY,
-/// H9): the pairs in the order they came, found by an open-addressing table of their numbers, each
+/// The (group, value) pairs of a distinct count of fixed-width values, each once: the pairs in the order
+/// they came, found by an open-addressing table of their numbers, each
 /// chained to the pair its group met before. A group's pairs are read without reading another's: a
 /// merge of some groups, a part of a parallel merge, reads theirs alone, where a set of pairs read
 /// every pair of every group for each part; keeping a few groups, as a streaming group by does, reads
@@ -37,7 +37,7 @@ internal sealed class DistinctPairs<TValue>
     // The shelf its arrays grow from, under the query's memory; null for pairs nothing counts.
     private ArrayShelf? _shelf;
 
-    /// <summary>The shelf the pairs' arrays grow from from now on (PLAN-HIGH-CARDINALITY, H2, decision 13).</summary>
+    /// <summary>The shelf the pairs' arrays grow from from now on.</summary>
     internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
 
     /// <summary>Gives the pairs' arrays back to their shelf: the pairs are let go, and read no more.</summary>
@@ -72,7 +72,7 @@ internal sealed class DistinctPairs<TValue>
     /// <summary>Adds the pair (<paramref name="group"/>, <paramref name="value"/>); whether it was new.</summary>
     internal bool Add(int group, TValue value)
     {
-        // The tags first (PLAN-HIGH-CARDINALITY, profiling): a new pair, every row of a count of
+        // The tags first: a new pair, every row of a count of
         // distinct values that are distinct, reads no pair of its chain, each a miss to memory.
         byte[] tags = _tags;
         int mask = tags.Length - 1;
@@ -123,8 +123,8 @@ internal sealed class DistinctPairs<TValue>
     /// An odd number the pair's hash is multiplied by, its home and tag the product's top bits. The hash
     /// adds the group to the low bits of a value's: one value's pairs over a thousand groups, their low
     /// bits in a row, filled runs of slots that linear probing walked to their end, 34 s for a count of
-    /// 8.6M distinct values by a thousand keys, where a million keys took 1.6 (PLAN-HIGH-CARDINALITY,
-    /// profiling). The product spreads them over the table.
+    /// 8.6M distinct values by a thousand keys, where a million keys took 1.6. The product spreads them
+    /// over the table.
     /// </summary>
     private const ulong Spreading = 0x9E37_79B9_7F4A_7C15UL;
 
@@ -233,7 +233,7 @@ internal sealed class DistinctPairs<TValue>
 
         // The arrays keep the size they reached: a streaming group by keeps its open groups a batch at a
         // time, and fitted to them, the slots and the pairs grew back by doubling every batch, a third of
-        // the cycles of the distinct users of each of 365 days (PLAN-HIGH-CARDINALITY, profiling). Their
+        // the cycles of the distinct users of each of 365 days. Their
         // bytes stay those of the most pairs held at once.
         int[] slots = _slots;
         byte[] tags = _tags;

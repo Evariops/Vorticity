@@ -147,8 +147,7 @@ internal static class ZonePruningPlan
     /// <summary>
     /// The zones of <paramref name="field"/>'s column as a pruner reads them, decoded once for the file,
     /// their read added to <paramref name="metrics"/>; null when the column has no zone map. What tells a
-    /// group by whether its key lies scattered over its span or in the order of the rows
-    /// (PLAN-HIGH-CARDINALITY, decision 14).
+    /// group by whether its key lies scattered over its span or in the order of the rows.
     /// </summary>
     internal static async ValueTask<ZoneColumn?> ZonesAsync(
         VortexFile file, FieldExpr field, Scanning.ScanMetrics? metrics, CancellationToken cancellationToken)

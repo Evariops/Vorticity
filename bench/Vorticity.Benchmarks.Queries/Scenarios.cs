@@ -24,7 +24,7 @@ internal enum Matrix
     /// <summary>In the small matrix, which every A/B runs, and the full one.</summary>
     Small,
 
-    /// <summary>In the full matrix alone, which the milestones run.</summary>
+    /// <summary>In the full matrix alone.</summary>
     Full,
 }
 

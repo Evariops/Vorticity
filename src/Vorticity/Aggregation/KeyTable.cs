@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The groups of a fixed-width key, in a table the engine owns (PLAN-HIGH-CARDINALITY, H15): a slot
+/// The groups of a fixed-width key, in a table the engine owns: a slot
 /// holds a key and its group, a key's home slot is its hash modulo a prime, by the fast modulo the
 /// runtime's dictionary takes. An integer is its own hash, folded to 32 bits, so that keys in a row
 /// land in slots in a row and a regular stride spreads over the prime; a float its bits, one pattern
@@ -18,7 +18,7 @@ namespace Vorticity.Aggregating;
 /// it was last placed had zero: keys at a stride of a power of two are then numbers in a row. Folded
 /// whole, keys at a stride of 2²² past 2³² made runs of ten homes in a row, which a prime laid over
 /// each other or apart by chance: 12 % of 10⁴ keys away from home under 17 929 slots, 73 % under 17 989,
-/// none under 17 959 (PLAN-HIGH-CARDINALITY, profiling).
+/// none under 17 959.
 /// </para>
 /// </remarks>
 /// <remarks>
@@ -48,7 +48,7 @@ internal struct KeyTable<TValue>
 
     // The slots, from the first word of a line of 64 bytes of their store: a line of slots is then
     // one of cache, where the data of an array of slots starts anywhere a word starts, and a slot of
-    // 32 bytes lay across two lines one time in three (PLAN-HIGH-CARDINALITY, profiling).
+    // 32 bytes lay across two lines one time in three.
     private ulong[] _store;
     private int _base;
     private int _length;
@@ -78,7 +78,7 @@ internal struct KeyTable<TValue>
         get => MemoryMarshal.CreateSpan(ref Unsafe.As<ulong, Slot>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_store), _base)), _length);
     }
 
-    /// <summary>A table that takes its arrays from a query's shelf and gives them back as it grows: a sub-table of the core (PLAN-HIGH-CARDINALITY, H4).</summary>
+    /// <summary>A table that takes its arrays from a query's shelf and gives them back as it grows: a sub-table of the core.</summary>
     internal KeyTable(ArrayShelf shelf)
         : this() => _shelf = shelf;
 
@@ -151,7 +151,7 @@ internal struct KeyTable<TValue>
 
     /// <summary>
     /// Each key's group where the key sits in its home slot, -1 where it does not (past its home, or
-    /// absent), with no branch on the keys (PLAN-HIGH-CARDINALITY, H15): the first pass over a batch,
+    /// absent), with no branch on the keys: the first pass over a batch,
     /// whose rows left go through <see cref="GetOrAdd"/> in their order. With <paramref name="ahead"/>
     /// rows, the slot of the row that far on is read first, its miss on its way while the rows before
     /// it compare; what those reads find goes to the sink returned, so that the JIT keeps them.

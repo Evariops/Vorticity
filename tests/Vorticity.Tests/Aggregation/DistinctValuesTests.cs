@@ -14,8 +14,8 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
-/// The values of a distinct count of one group, a count over the whole scan (PLAN-HIGH-CARDINALITY,
-/// profiling): each held once in its slot, the value of zero bits apart, a float's equal values as
+/// The values of a distinct count of one group, a count over the whole scan: each held once in its
+/// slot, the value of zero bits apart, a float's equal values as
 /// one, and a merge by parts finding every value of every lane in its part's run of slots, once.
 /// </summary>
 public sealed partial class DistinctValuesTests
