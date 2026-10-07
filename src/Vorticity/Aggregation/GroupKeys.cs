@@ -411,13 +411,16 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private int _sink;
 
     // The group of each value by its number, the value less the statistics' smallest, in pages of
-    // 2^PageBits numbers allocated as values meet them, -1 for a value not met yet; a value past the
-    // bounds, which exact statistics never leave, goes to the index alone.
-    private readonly int[]?[]? _pages;
+    // 2^PageBits numbers allocated as values meet them, -1 for a value not met yet, every page Unmet
+    // until then; a value past the bounds, which exact statistics never leave, goes to the index alone.
+    private readonly int[][]? _pages;
     private readonly long _directMin;
     private readonly ulong _span;
     private readonly long _rows;
     private int _pagesHeld;
+
+    // Whether the last chunk of rows met mostly values for the first time: the next goes by the lookup alone (DirectTwoPasses).
+    private bool _directNew;
 
     // Every key a group of its own, no table looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
     private readonly bool _appending;
@@ -444,11 +447,25 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             ulong span = (ulong)(known.Max - known.Min) + 1;
             if (span != 0 && (span <= DirectValues || (rows > 0 && span <= (ulong)(DirectPerRow * rows))))
             {
-                _pages = new int[]?[(int)((span + PageMask) >> PageBits)];
+                _pages = new int[(int)((span + PageMask) >> PageBits)][];
+                _pages.AsSpan().Fill(Unmet);
                 _directMin = known.Min;
                 _span = span;
             }
         }
+    }
+
+    /// <summary>
+    /// The page of the table of groups every number reads until its own is allocated: no value met, -1
+    /// throughout, and never written. A first pass reads it as any other, with no branch on the keys.
+    /// </summary>
+    private static readonly int[] Unmet = NewUnmet();
+
+    private static int[] NewUnmet()
+    {
+        int[] page = new int[1 << PageBits];
+        page.AsSpan().Fill(-1);
+        return page;
     }
 
     /// <summary>Whether the values are integers, which a table of groups can be indexed by.</summary>
@@ -683,7 +700,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
         if (_pages is not null)
         {
-            Direct(canonical, validity, rows, selection, rowGroups);
+            if (_probeAhead >= 0 && selection.IsEmpty)
+            {
+                DirectTwoPasses(canonical, validity, rows, rowGroups);
+            }
+            else
+            {
+                Direct(canonical, validity, rows, selection, rowGroups);
+            }
+
             return false;
         }
 
@@ -782,11 +807,113 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
     }
 
+    /// <summary>The rows <see cref="DirectTwoPasses"/> takes at a time: its rows left on the stack, and the lines its first pass read still in the first level of cache when the second comes.</summary>
+    private const int DirectChunk = 4096;
+
+    /// <summary>
+    /// Every row's group read from the table of groups in two passes (PLAN-HIGH-CARDINALITY, H14),
+    /// <see cref="DirectChunk"/> rows at a time: the group at each row's number, with no branch on the
+    /// keys, a page not allocated yet read as <see cref="Unmet"/> and a value past the bounds as none;
+    /// then, in their order, the rows the first pass left (values met for the first time, values past
+    /// the bounds, nulls) through the whole lookup, which numbers a value as it first comes. At a
+    /// million keys in no order, a row in four meets its value for the first time: a branch on it, a row
+    /// at a time, missed as often.
+    /// </summary>
+    /// <remarks>
+    /// A chunk whose first pass leaves more than seven rows in eight sends the next through the lookup
+    /// alone, a row at a time, until one makes fewer new groups than that: values met for the first
+    /// time one after the other, ten million keys in the order of the rows, made the first pass read
+    /// every page for nothing, 14 % of the scan.
+    /// </remarks>
+    private void DirectTwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    {
+        long min = _directMin;
+        ulong span = _span;
+        int[][] pages = _pages!;
+        Span<int> left = stackalloc int[DirectChunk];
+        for (int start = 0; start < rows; start += DirectChunk)
+        {
+            int end = Math.Min(rows, start + DirectChunk);
+            ReadOnlySpan<TValue> values = canonical[start..end];
+            Span<int> groups = rowGroups.AsSpan(start, end - start);
+            if (_directNew)
+            {
+                int before = Count;
+                for (int i = 0; i < values.Length; i++)
+                {
+                    if (!StorageValues.IsValid(validity, start + i))
+                    {
+                        groups[i] = NullGroup();
+                        continue;
+                    }
+
+                    TValue value = values[i];
+                    ulong number = (ulong)(Integer(value) - min);
+                    groups[i] = number < span ? Numbered(value, number) : Lookup(value);
+                }
+
+                _directNew = Count - before > values.Length - (values.Length >> 3);
+                continue;
+            }
+
+            for (int i = 0; i < values.Length; i++)
+            {
+                ulong number = (ulong)(Integer(values[i]) - min);
+                bool inside = number < span;
+                ulong at = inside ? number : 0;
+                int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[(int)(at >> PageBits)]), (int)at & PageMask);
+                groups[i] = inside ? group : -1;
+            }
+
+            // The rows left, gathered without a branch: no group, or a null.
+            int count = 0;
+            if (validity.IsEmpty)
+            {
+                for (int i = 0; i < groups.Length; i++)
+                {
+                    left[count] = i;
+                    count += groups[i] >>> 31;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < groups.Length; i++)
+                {
+                    int row = start + i;
+                    left[count] = i;
+                    count += (groups[i] >>> 31) | (int)(~(validity[row >> 6] >> (row & 63)) & 1);
+                }
+            }
+
+            for (int l = 0; l < count; l++)
+            {
+                int i = left[l];
+                if (!StorageValues.IsValid(validity, start + i))
+                {
+                    groups[i] = NullGroup();
+                    continue;
+                }
+
+                TValue value = values[i];
+                ulong number = (ulong)(Integer(value) - min);
+                groups[i] = number < span ? Numbered(value, number) : Lookup(value);
+            }
+
+            _directNew = count > values.Length - (values.Length >> 3);
+        }
+    }
+
     /// <summary>The group of a value within the bounds, by its number: added when it is new, its page allocated at the first value it holds.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int Numbered(TValue value, ulong number)
     {
-        int[] page = _pages![(int)(number >> PageBits)] ?? Page((int)(number >> PageBits));
+        int at = (int)(number >> PageBits);
+        int[] page = _pages![at];
+        if (page == Unmet)
+        {
+            page = Page(at);
+        }
+
         ref int group = ref page[(int)number & PageMask];
         if (group < 0)
         {
@@ -901,7 +1028,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             if (g != _null && DirectSlot(_keys[g], out ulong number))
             {
-                _pages![(int)(number >> PageBits)]![(int)number & PageMask] = -1;
+                _pages![(int)(number >> PageBits)][(int)number & PageMask] = -1;
             }
         }
 
@@ -922,7 +1049,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
             if (DirectSlot(_keys[i], out ulong number))
             {
-                _pages![(int)(number >> PageBits)]![(int)number & PageMask] = i;
+                _pages![(int)(number >> PageBits)][(int)number & PageMask] = i;
             }
             else
             {

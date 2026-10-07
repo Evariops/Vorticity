@@ -191,7 +191,9 @@ internal sealed class AggregationPlan
     /// How a key of one fixed-width column finds its rows' groups on the hashed path
     /// (PLAN-HIGH-CARDINALITY, H15): -1 a row at a time; 0 in two passes, each row's home slot with no
     /// branch on the keys, then the rows left in their order; more, in two passes whose first reads the
-    /// slot that many rows on ahead of each row. The switch the bench sweeps the distance with.
+    /// slot that many rows on ahead of each row. The switch the bench sweeps the distance with. A key
+    /// numbered by value goes by two passes too from 0 (H14), its pages read with no branch, and a row
+    /// at a time at -1.
     /// </summary>
     internal int ProbeAhead { get; set; } = DefaultProbeAhead;
 

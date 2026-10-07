@@ -51,6 +51,37 @@ public sealed partial class DirectPagesTests
         }
     }
 
+    // Keys in the order of the rows, each met first in a run of new values, then three times more: a
+    // chunk of new values sends the next through the lookup alone, and the repeats back to two passes
+    // (PLAN-HIGH-CARDINALITY, H14).
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task KeysMetInTheOrderOfTheRowsGroupByValue(int degree)
+    {
+        Row[] rows = new Row[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            rows[row] = new Row(row % 23 == 0 ? null : (row % 37_500) - 1_000, row % 100);
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            (List<Total> totals, bool byValue) = await RunAsync(file.Scan<Row>());
+            Assert.True(byValue, "the key was hashed, not numbered by value");
+            Assert.Equal(
+                [.. rows.GroupBy(r => r.Key).Select(g => new Total(g.Key, g.Count(), g.Sum(r => r.Value))).OrderBy(t => t.Key ?? int.MinValue)],
+                totals.OrderBy(t => t.Key ?? int.MinValue));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     // A span past four values a row is hashed: a table of groups that wide would hold more than the
     // rows could fill.
     [Fact]
