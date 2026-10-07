@@ -16,7 +16,7 @@ namespace Vorticity.Benchmarks.Complexity;
 /// </summary>
 internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateSlot<TResult>
     where TValue : unmanaged
-    where TOp : IValueOp<TValue, TState>
+    where TOp : struct, IValueOp<TValue, TState>
 {
     private readonly StorageKind _kind;
     private readonly Func<TState, TResult> _finish;
@@ -41,7 +41,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
 
         for (int g = _groups; g < groups; g++)
         {
-            _states[g] = TOp.Seed();
+            _states[g] = default(TOp).Seed();
         }
 
         _groups = Math.Max(_groups, groups);
@@ -59,7 +59,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                 int count = RowMasks.Count(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 if (count > 0)
                 {
-                    TOp.AddWeighted(ref state, FixedReader.Constant<TValue>(arena, node, _kind), count);
+                    default(TOp).AddWeighted(ref state, FixedReader.Constant<TValue>(arena, node, _kind), count);
                 }
 
                 return;
@@ -80,7 +80,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                         int count = RowMasks.Count(rows, Math.Max(runStart, start), Math.Min(runEnd, end));
                         if (count > 0)
                         {
-                            TOp.AddWeighted(ref state, values[r], count);
+                            default(TOp).AddWeighted(ref state, values[r], count);
                         }
                     }
 
@@ -104,7 +104,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                         int code = (int)codes[row];
                         if (StorageValues.IsValid(valid, code))
                         {
-                            TOp.Add(ref state, dictionary[code]);
+                            default(TOp).Add(ref state, dictionary[code]);
                         }
                     }
 
@@ -124,7 +124,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                 {
                     if (counts[code] > 0 && StorageValues.IsValid(valid, code))
                     {
-                        TOp.AddWeighted(ref state, dictionary[code], counts[code]);
+                        default(TOp).AddWeighted(ref state, dictionary[code], counts[code]);
                     }
                 }
 
@@ -153,7 +153,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
                 while (rows.Next(out int row))
                 {
-                    TOp.Add(ref states[groups[row]], value);
+                    default(TOp).Add(ref states[groups[row]], value);
                 }
 
                 return;
@@ -169,7 +169,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                     int code = (int)codes[row];
                     if (StorageValues.IsValid(valid, code))
                     {
-                        TOp.Add(ref states[groups[row]], dictionary[code]);
+                        default(TOp).Add(ref states[groups[row]], dictionary[code]);
                     }
                 }
 
@@ -182,7 +182,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
                 while (rows.Next(out int row))
                 {
-                    TOp.Add(ref states[groups[row]], values[row]);
+                    default(TOp).Add(ref states[groups[row]], values[row]);
                 }
 
                 return;
@@ -195,7 +195,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
         TState[] states = ((FixedSlotBefore<TValue, TState, TOp, TResult>)other)._states;
         for (int i = 0; i < from.Length; i++)
         {
-            TOp.Merge(ref _states[into[i]], in states[from[i]]);
+            default(TOp).Merge(ref _states[into[i]], in states[from[i]]);
         }
     }
 
@@ -214,7 +214,7 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
 
         if (rows.IsEmpty)
         {
-            TOp.AddSpan(ref state, values[start..end]);
+            default(TOp).AddSpan(ref state, values[start..end]);
             return;
         }
 
@@ -236,13 +236,13 @@ internal sealed class FixedSlotBefore<TValue, TState, TOp, TResult> : AggregateS
 
             if (word == ulong.MaxValue)
             {
-                TOp.AddSpan(ref state, values.Slice(baseRow, 64));
+                default(TOp).AddSpan(ref state, values.Slice(baseRow, 64));
                 continue;
             }
 
             while (word != 0)
             {
-                TOp.Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
+                default(TOp).Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
                 word &= word - 1;
             }
         }

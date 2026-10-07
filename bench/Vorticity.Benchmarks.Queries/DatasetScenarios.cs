@@ -30,6 +30,24 @@ internal static class DatasetScenarios
             yield return (dataset, new DatasetScenario($"dataset group by city, count avg, {label}", GroupByCityAsync));
             yield return (dataset, new DatasetScenario($"dataset first batch, full scan, {label}", FirstBatchAsync));
         }
+
+        // A million groups over sixteen objects, against `hc random 1e6 small, count sum` over their file.
+        yield return ($"spread-random-{HighCardinality.SmallRows}-16", new DatasetScenario("dataset hc random 1e6 small, count sum, 16 objects", SpreadTotalsAsync, 16));
+    }
+
+    private static async Task<long> SpreadTotalsAsync(VortexDataset dataset, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<KeyTotal> groups in run.Track(dataset.Scan<Spread>()
+            .GroupBy(s => s.K6)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))))
+            .As<KeyTotal>())
+        {
+            run.Answer();
+            rows += Scenarios.Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
     }
 
     private static async Task<long> GroupByCityAsync(VortexDataset dataset, Run run)

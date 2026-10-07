@@ -211,6 +211,94 @@ internal sealed class DatasetSnapshot
         return Interlocked.CompareExchange(ref roots[level], root, null) ?? root;
     }
 
+    /// <summary>The roots of every occupied level read, as a walk reads them first: then in hand.</summary>
+    internal async ValueTask ReadRootsAsync(CancellationToken cancellationToken)
+    {
+        foreach ((int level, DatasetTree _) in Levels.Occupied())
+        {
+            await RootAsync(level, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The smallest and the largest value an integer column holds in the version, as the summaries of
+    /// its levels' root pages bound them, the loosest of their entries';
+    /// null when a root is not in hand, an entry says nothing of the column, or its bounds are no
+    /// integers a long holds. No page is read for it.
+    /// </summary>
+    internal Aggregating.KeyBounds? Bounds(string path)
+    {
+        SummaryColumns wanted = new SummaryColumns([path]);
+        long min = long.MaxValue;
+        long max = long.MinValue;
+        bool any = false;
+        foreach ((int _, DatasetTree tree) in Levels.Occupied())
+        {
+            ReadOnlyMemory<byte> page;
+            try
+            {
+                if (!Pages.TryGetInHand(tree.Root, out page))
+                {
+                    return null;
+                }
+            }
+            catch (TornCommitException)
+            {
+                return null;
+            }
+
+            if (tree.Depth == 1)
+            {
+                foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
+                {
+                    if (!Widen(ObjectSummaries.Of(ObjectEntry.SummaryOf(leaf.Value).Span, wanted), path, ref min, ref max))
+                    {
+                        return null;
+                    }
+                }
+            }
+            else
+            {
+                foreach (InternalEntry child in TreePage.ReadInternal(page))
+                {
+                    if (child.Summary.IsEmpty || !Widen(ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(child.Summary.Span, out _), wanted), path, ref min, ref max))
+                    {
+                        return null;
+                    }
+                }
+            }
+
+            any = true;
+        }
+
+        return any && min <= max ? new Aggregating.KeyBounds(min, max) : null;
+    }
+
+    /// <summary>The bounds <paramref name="min"/> and <paramref name="max"/> widened to the column's summary; false when it gives none a long holds.</summary>
+    private static bool Widen(ObjectSummaries summaries, string path, ref long min, ref long max)
+    {
+        if (!summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax)
+        {
+            return false;
+        }
+
+        if (column.Min.Kind == FilterLiteralKind.Signed && column.Max.Kind == FilterLiteralKind.Signed)
+        {
+            min = Math.Min(min, column.Min.SignedValue);
+            max = Math.Max(max, column.Max.SignedValue);
+            return true;
+        }
+
+        if (column.Min.Kind == FilterLiteralKind.Unsigned && column.Max.Kind == FilterLiteralKind.Unsigned && column.Max.UnsignedValue <= long.MaxValue)
+        {
+            min = Math.Min(min, (long)column.Min.UnsignedValue);
+            max = Math.Max(max, (long)column.Max.UnsignedValue);
+            return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Whether a row the pruner keeps may lie under the page <paramref name="reference"/> names, from
     /// the pages in hand alone. A page that is not, or that an open read holds torn, is one the answer

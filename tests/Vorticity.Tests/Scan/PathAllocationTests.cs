@@ -257,18 +257,22 @@ public sealed class PathAllocationTests
         //
         // A scan of a file the session keeps mapped takes the mapping over rather than making one,
         // with no file object, view and owner of its own: 312 bytes less on every axis that scans.
-        ("open, first batch", File, 43_528, FirstBatch),
+        //
+        // A scan of one lane reads its next splits while it decodes one, over a source whose read
+        // is a round trip: what it holds for that is behind one
+        // reference of the enumerator, null over a mapping, 8 bytes on every axis that scans.
+        ("open, first batch", File, 43_536, FirstBatch),
         // A scan binds each batch into the object its previous batch was rather than allocating
         // one: 120 bytes less a batch after the first, on every axis below that reads more than
         // one -- 7 560 over the 64 batches of this file, 120 over the two the pruned filter reads.
         // A full scan now costs what its first batch does.
-        ("full scan", File, 43_528, FullScan),
+        ("full scan", File, 43_536, FullScan),
         // A projection of one whole column is held in the mask itself, with no node and no arrays:
         // 104 bytes less.
         ("projected scan, 1 of 5 columns", File, 45_880, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 44_776, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 44_784, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -315,20 +319,20 @@ public sealed class PathAllocationTests
         //
         // The mapping these scans read through is made by the scan rather than by the open, and
         // the reader that makes it is smaller than the mapped source was: 48 bytes less on each.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 2_872, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 2_880, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
-        ("scan, vortex.pco", "encodings/pco", 2_824, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 2_832, FullScan),
         // A node's frames go through one Vorticity.Zstd decompressor rather than one each, and the
         // decompressor is the process's, taken by the scan's context and given back when it is
         // disposed, so a warm scan builds none: its tables and buffers are 160 KB at least.
-        ("scan, vortex.zstd", "encodings/zstd", 2_824, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 2_832, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
-        ("scan, vortex.map", "encodings/map", 3_608, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 3_248, FullScan),
+        ("scan, vortex.map", "encodings/map", 3_616, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 3_256, FullScan),
     ];
 
     [Fact]

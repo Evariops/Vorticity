@@ -70,12 +70,18 @@ public sealed partial class WidenedSumTests
             RecordBinding binding = file.Scan<Sample>().Binding;
 
             // 40 000 rows of an int at most 2^30 fit 63 bits; of a long near 2^62 they do not.
-            Assert.IsType<FixedSlot<int, SumState<long>, NarrowSignedSum<int>, long>>(Create<long, int>(binding, r => r.Large, source));
-            Assert.IsType<FixedSlot<byte, SumState<ulong>, NarrowUnsignedSum<byte>, ulong>>(Create<ulong, byte>(binding, r => r.Small, source));
-            Assert.IsType<FixedSlot<long, SumState<Int128>, SignedSum<long>, long>>(Create<long, long>(binding, r => r.Wide, source));
+            Assert.IsType<FixedSlot<int, SumState<long>, NarrowSignedSum<int>, long>>(Create<long, int>(binding, r => r.Large, source, meanRead: true));
+            Assert.IsType<FixedSlot<byte, SumState<ulong>, NarrowUnsignedSum<byte>, ulong>>(Create<ulong, byte>(binding, r => r.Small, source, meanRead: true));
+            Assert.IsType<FixedSlot<long, SumState<Int128>, SignedSum<long>, long>>(Create<long, long>(binding, r => r.Wide, source, meanRead: true));
 
             // Without statistics, nothing is proven.
-            Assert.IsType<FixedSlot<int, SumState<Int128>, SignedSum<int>, long>>(Create<long, int>(binding, r => r.Large, null));
+            Assert.IsType<FixedSlot<int, SumState<Int128>, SignedSum<int>, long>>(Create<long, int>(binding, r => r.Large, null, meanRead: true));
+
+            // A sum no mean reads keeps the same width without the count.
+            Assert.IsType<FixedSlot<int, long, NarrowSignedTotal<int>, long>>(Create<long, int>(binding, r => r.Large, source, meanRead: false));
+            Assert.IsType<FixedSlot<byte, ulong, NarrowUnsignedTotal<byte>, ulong>>(Create<ulong, byte>(binding, r => r.Small, source, meanRead: false));
+            Assert.IsType<FixedSlot<long, Int128, SignedTotal<long>, long>>(Create<long, long>(binding, r => r.Wide, source, meanRead: false));
+            Assert.IsType<FixedSlot<int, Int128, SignedTotal<int>, long>>(Create<long, int>(binding, r => r.Large, null, meanRead: false));
         }
         finally
         {
@@ -85,9 +91,9 @@ public sealed partial class WidenedSumTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    private static AggregateSlot Create<TSum, TColumn>(RecordBinding binding, Func<Probe<Sample>, Sym<TColumn>> column, ScanSource? source)
+    private static AggregateSlot Create<TSum, TColumn>(RecordBinding binding, Func<Probe<Sample>, Sym<TColumn>> column, ScanSource? source, bool meanRead)
         where TSum : System.Numerics.INumber<TSum> =>
-        ((IAggregateNode)Aggregators.Sum<TSum>(Aggregators.Input(binding, column)).Node).Create(source);
+        ((IAggregateNode)Aggregators.Sum<TSum>(Aggregators.Input(binding, column)).Node).Create(source, meanRead);
 
     private static async Task<List<T>> ListAsync<T>(Scan<T> scan)
         where T : IVortexRecord<T>

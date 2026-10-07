@@ -17,6 +17,18 @@ public sealed partial class VarianceTests
 {
     private const int Rows = 60_000;
 
+    /// <summary>
+    /// The center and what a stored value is worth are the run's, held by the slot's op: a group's
+    /// state is its two sums, a line of cache.
+    /// </summary>
+    [Fact]
+    public void AGroupsStateIsItsTwoSums()
+    {
+        Aggregating.AggregateSlot slot = new Aggregating.FixedSlot<long, Aggregating.VarianceState, Aggregating.VarianceOp<long>, double?>(
+            Aggregating.StorageKind.Primitive, static s => s.Variance, new Aggregating.VarianceOp<long>(1_000, 1));
+        Assert.Equal(64, slot.StateBytes);
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(3)]

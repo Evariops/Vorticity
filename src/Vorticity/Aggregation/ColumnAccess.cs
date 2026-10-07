@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -353,12 +354,16 @@ internal readonly ref struct BytesBlock
     private readonly int _dataStart;
     private readonly int _dataCount;
 
+    // The first data buffer, resolved once: the one a decoded block's values lie in, as a rule.
+    private readonly ReadOnlySpan<byte> _first;
+
     private BytesBlock(CanonicalArena arena, ReadOnlySpan<byte> views, int dataStart, int dataCount, int length)
     {
         _arena = arena;
         _views = views;
         _dataStart = dataStart;
         _dataCount = dataCount;
+        _first = dataCount > 0 ? arena.DataBufferAt(dataStart).Span : default;
         Length = length;
     }
 
@@ -385,8 +390,13 @@ internal readonly ref struct BytesBlock
     }
 
     /// <summary>The bytes of row <paramref name="row"/>; undefined for a null row.</summary>
+    /// <remarks>
+    /// Inlined, its throws apart: a group by of texts reads it two or three times a row, and as a call
+    /// it took a twelfth of the cycles of a million (url, integer) groups.
+    /// </remarks>
     internal ReadOnlySpan<byte> this[int row]
     {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get
         {
             ReadOnlySpan<byte> view = _views.Slice(row * ViewSize, ViewSize);
@@ -398,20 +408,30 @@ internal readonly ref struct BytesBlock
 
             uint buffer = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
             uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-            if (buffer >= (uint)_dataCount)
-            {
-                throw new VortexFormatException($"Row {row} names data buffer {buffer} of {_dataCount}.");
-            }
-
-            ReadOnlySpan<byte> data = _arena.DataBufferAt(_dataStart + (int)buffer).Span;
+            ReadOnlySpan<byte> data = buffer == 0 && _dataCount > 0 ? _first : Data(row, buffer);
             if ((ulong)offset + size > (ulong)(uint)data.Length)
             {
-                throw new VortexFormatException($"Row {row} spans [{offset}, {(ulong)offset + size}) of a data buffer holding {data.Length} bytes.");
+                ThrowPast(row, offset, size, data.Length);
             }
 
             return data.Slice((int)offset, (int)size);
         }
     }
+
+    /// <summary>Data buffer <paramref name="buffer"/> of the block, which row <paramref name="row"/> names.</summary>
+    private ReadOnlySpan<byte> Data(int row, uint buffer)
+    {
+        if (buffer >= (uint)_dataCount)
+        {
+            throw new VortexFormatException($"Row {row} names data buffer {buffer} of {_dataCount}.");
+        }
+
+        return _arena.DataBufferAt(_dataStart + (int)buffer).Span;
+    }
+
+    [DoesNotReturn]
+    private static void ThrowPast(int row, uint offset, uint size, int length) =>
+        throw new VortexFormatException($"Row {row} spans [{offset}, {(ulong)offset + size}) of a data buffer holding {length} bytes.");
 }
 
 /// <summary>Storage values turned into the .NET values a caller asked for.</summary>

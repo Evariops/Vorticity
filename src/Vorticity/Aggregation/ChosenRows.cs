@@ -1,5 +1,7 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
@@ -12,8 +14,16 @@ namespace Vorticity.Aggregating;
 /// <summary>The values of one column of the chosen rows, by group: fetched after the pass, read as results.</summary>
 internal abstract class ChosenValues
 {
-    /// <summary>Makes room for groups up to <paramref name="groups"/>.</summary>
-    internal abstract void EnsureGroups(int groups);
+    /// <summary>
+    /// Makes room for the values of <paramref name="groups"/>, the groups a fetch reads, each below
+    /// <paramref name="most"/>: arrays their number when they are a few of many, a top-k's or a window's,
+    /// found through a map of their numbers; arrays indexed by the group otherwise. The arrays are held
+    /// under the result's <paramref name="memory"/> until it is delivered, the ones they replace let go. A fetch's values are the ones read until the next fetch.
+    /// </summary>
+    internal abstract void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory);
+
+    /// <summary>Lets the arrays go, and what they held of <paramref name="memory"/>.</summary>
+    internal abstract void Release(QueryMemory? memory);
 
     /// <summary>Leaves <paramref name="group"/> without a row: its value null, or a value type's default.</summary>
     internal abstract void Clear(int group);
@@ -28,30 +38,69 @@ internal abstract class ChosenValues
 /// <summary>The values of a column of chosen rows as <typeparamref name="T"/>, and the groups that have no row.</summary>
 internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
 {
+    /// <summary>The groups below which a fetch of some is a few of many: its values at a place of their own.</summary>
+    private const int Sparse = 8;
+
     private T[] _values = [];
     private bool[] _missing = [];
     private T[] _scratch = [];
 
+    // The place of each group fetched, when they are a few of many; null when the group is its place.
+    private Dictionary<int, int>? _places;
+
     /// <summary>The value of <paramref name="group"/>'s chosen row; the default when it has none.</summary>
-    internal T At(int group) => _values[group];
+    internal T At(int group) => _values[Place(group)];
 
     /// <summary>Whether <paramref name="group"/> has no chosen row: no candidate, or no row its filter keeps.</summary>
-    internal bool Missing(int group) => _missing[group];
+    internal bool Missing(int group) => _missing[Place(group)];
 
-    internal override void EnsureGroups(int groups)
+    private int Place(int group) => _places is null ? group : _places[group];
+
+    internal override void EnsureGroups(ReadOnlySpan<int> groups, int most, QueryMemory? memory)
     {
-        if (groups > _values.Length)
+        int length = most;
+        if ((long)groups.Length * Sparse < most)
         {
-            int length = Scratch.Capacity(groups, _values.Length);
-            Array.Resize(ref _values, length);
-            Array.Resize(ref _missing, length);
+            _places ??= [];
+            _places.Clear();
+            foreach (int group in groups)
+            {
+                _places.TryAdd(group, _places.Count);
+            }
+
+            length = _places.Count;
         }
+        else
+        {
+            _places = null;
+        }
+
+        if (length > _values.Length)
+        {
+            // Each value a fetch reads is written, or its group cleared: the arrays come new.
+            int capacity = Scratch.Capacity(length, _values.Length);
+            long element = Unsafe.SizeOf<T>() + sizeof(bool);
+            memory?.Hold(capacity * element, "fetch of the chosen rows");
+            memory?.LetGo(_values.Length * element);
+            _values = new T[capacity];
+            _missing = new bool[capacity];
+        }
+    }
+
+    internal override void Release(QueryMemory? memory)
+    {
+        memory?.LetGo(_values.Length * (long)(Unsafe.SizeOf<T>() + sizeof(bool)));
+        _values = [];
+        _missing = [];
+        _scratch = [];
+        _places = null;
     }
 
     internal override void Clear(int group)
     {
-        _values[group] = default!;
-        _missing[group] = true;
+        int place = Place(group);
+        _values[place] = default!;
+        _missing[place] = true;
     }
 
     internal override void Read(RecordBatch batch, int node, int first, ReadOnlySpan<int> rows, ReadOnlySpan<int> groups)
@@ -60,8 +109,9 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
         ResultValues.Copy(batch, batch.Arena, node, column.Read.Type, column.Read.Extensions, _scratch, null);
         for (int i = 0; i < groups.Length; i++)
         {
-            _values[groups[i]] = _scratch[rows[i] - first];
-            _missing[groups[i]] = false;
+            int place = Place(groups[i]);
+            _values[place] = _scratch[rows[i] - first];
+            _missing[place] = false;
         }
     }
 }
@@ -118,6 +168,24 @@ internal static class ChosenFetch
     internal static async ValueTask FetchAsync(
         AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
     {
+        // What the fetch sorts and reads by, an entry a group and choice — its position, its owner,
+        // its row and group, the take's position — reserved under the result's memory while it runs.
+        QueryMemory? memory = outcome.Memory;
+        long scratch = (long)groups.Length * outcome.Plan.ChosenRows.Length * ((3 * sizeof(long)) + (2 * sizeof(int)));
+        memory?.Hold(scratch, "fetch of the chosen rows");
+        try
+        {
+            await FetchRowsAsync(outcome, source, spec, metrics, groups, memory, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            memory?.LetGo(scratch);
+        }
+    }
+
+    private static async ValueTask FetchRowsAsync(
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, QueryMemory? memory, CancellationToken cancellationToken)
+    {
         IChosenColumn[] chosen = outcome.Plan.Chosen;
         (IAggregateNode Row, int[] Columns)[] choices = outcome.Plan.ChosenRows;
         int most = 0;
@@ -128,7 +196,7 @@ internal static class ChosenFetch
 
         for (int c = 0; c < chosen.Length; c++)
         {
-            outcome.ChosenOf(chosen[c]).EnsureGroups(most);
+            outcome.ChosenOf(chosen[c]).EnsureGroups(groups.Span, most, memory);
         }
 
         // Each row a group chose, with the choice and the group it serves; a group without a row
@@ -166,7 +234,7 @@ internal static class ChosenFetch
         // A take reads its positions in order, each once: the rows sorted, a row two choices share
         // read for both. Each choice lists, in that order, the row of the take it reads and the
         // group it serves.
-        Sort(positions, owners, count);
+        Sort(positions, owners, count, memory);
         for (int r = 0; r < choices.Length; r++)
         {
             ofChoice[r + 1] += ofChoice[r];
@@ -263,7 +331,7 @@ internal static class ChosenFetch
     /// many passes as the largest position has digits. A position is a row of the source, so two
     /// passes order four million rows; a comparison sort of a million would take ten times longer.
     /// </summary>
-    private static void Sort(long[] positions, long[] owners, int count)
+    private static void Sort(long[] positions, long[] owners, int count, QueryMemory? memory)
     {
         if (count < 4_096)
         {
@@ -279,8 +347,8 @@ internal static class ChosenFetch
 
         long[] fromPositions = positions;
         long[] fromOwners = owners;
-        long[] intoPositions = ArrayPool<long>.Shared.Rent(count);
-        long[] intoOwners = ArrayPool<long>.Shared.Rent(count);
+        long[] intoPositions = QueryArrays.Rent<long>(memory, count, "fetch of the chosen rows");
+        long[] intoOwners = QueryArrays.Rent<long>(memory, count, "fetch of the chosen rows");
         int[] starts = new int[1 << DigitBits];
         try
         {
@@ -318,8 +386,8 @@ internal static class ChosenFetch
         finally
         {
             // The rented pair is whichever two the passes did not leave the result in.
-            ArrayPool<long>.Shared.Return(ReferenceEquals(fromPositions, positions) ? intoPositions : fromPositions);
-            ArrayPool<long>.Shared.Return(ReferenceEquals(fromOwners, owners) ? intoOwners : fromOwners);
+            QueryArrays.Return(memory, ReferenceEquals(fromPositions, positions) ? intoPositions : fromPositions);
+            QueryArrays.Return(memory, ReferenceEquals(fromOwners, owners) ? intoOwners : fromOwners);
         }
     }
 }

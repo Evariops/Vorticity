@@ -32,6 +32,10 @@ public sealed partial class ParallelMergeTests
                 .Select(g => (
                     g.Key, g.Count(), g.Sum(x => x.Value), g.Average(x => x.Value), g.Variance(x => x.Value), g.CountDistinct(x => x.Text),
                     g.Any(x => x.Value > 90), g.Min(x => x.Text), g.Max(x => x.Value), g.First().Value));
+
+            // In parts, whichever lane the queue gave most ranges: under load, the merge may weigh
+            // a merge in series the faster.
+            byKey.Plan.MergeInParts = true;
             List<KeyStats> stats = await ListAsync(byKey.As<KeyStats>());
             Assert.True(byKey.Plan.LastRun!.MergeParts > 1, $"{byKey.Plan.LastRun.MergeParts} parts");
 
@@ -62,6 +66,7 @@ public sealed partial class ParallelMergeTests
 
             // A composite: each lane's indexes of its columns merged into one first, then its tuples by parts.
             Vorticity.Aggregation byPair = file.Scan<Row>().GroupBy(r => (r.Name, r.Small)).Select(g => (g.Key.Name, g.Key.Small, g.Count(), g.Sum(x => x.Value)));
+            byPair.Plan.MergeInParts = true;
             List<PairStats> pairs = await ListAsync(byPair.As<PairStats>());
             Assert.True(byPair.Plan.LastRun!.MergeParts > 1, $"{byPair.Plan.LastRun.MergeParts} parts");
             Assert.Equal(

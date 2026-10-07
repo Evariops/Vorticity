@@ -10,35 +10,44 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// A built-in aggregate over values of a fixed width: what one value, one value repeated, and a
-/// dense span of valid values each do to the state. The drivers call it monomorphised.
+/// dense span of valid values each do to the state. The drivers call it monomorphised, on the value
+/// of the op their slot holds: empty for most, what the run fixed for every group for a variance,
+/// which its groups' states then leave out.
 /// </summary>
 /// <typeparam name="TValue">The storage value.</typeparam>
 /// <typeparam name="TState">The state of one group.</typeparam>
 internal interface IValueOp<TValue, TState>
     where TValue : unmanaged
 {
-    static abstract TState Seed();
+    TState Seed();
 
-    static abstract void Add(ref TState state, TValue value);
+    void Add(ref TState state, TValue value);
+
+    /// <summary>
+    /// As <see cref="Add"/>, with no branch on the value where the op can tell: an extreme of integers
+    /// stores its choice whatever it is. The slot folds with it while its
+    /// groups have seen few rows, their extremes moving at random; past that, the branch predicts.
+    /// </summary>
+    void AddSelected(ref TState state, TValue value);
 
     /// <summary>Folds <paramref name="count"/> rows holding <paramref name="value"/>: a run, a constant block, a dictionary entry.</summary>
-    static abstract void AddWeighted(ref TState state, TValue value, long count);
+    void AddWeighted(ref TState state, TValue value, long count);
 
     /// <summary>Folds a dense span of valid values; where the kernels are vectorised.</summary>
-    static abstract void AddSpan(ref TState state, ReadOnlySpan<TValue> values);
+    void AddSpan(ref TState state, ReadOnlySpan<TValue> values);
 
-    static abstract void Merge(ref TState into, in TState other);
+    void Merge(ref TState into, in TState other);
 
     /// <summary>
     /// Folds the rows of <paramref name="block"/> that <paramref name="words"/> set, 64 rows a word
     /// and at most <see cref="WordFold.Run"/> words, none of them empty: row <c>i</c> when bit
     /// <c>i % 64</c> of word <c>i / 64</c> is set.
     /// </summary>
-    static abstract void AddWords(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words);
+    void AddWords(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words);
 
     /// <summary>The mean a sum's state holds, its total over its count, for a mean that shares the sum's slot; null with no value.</summary>
     /// <exception cref="NotSupportedException">The state is not a sum's.</exception>
-    static virtual double? Mean(in TState state) => throw new NotSupportedException($"{typeof(TState).Name} holds no mean.");
+    double? Mean(in TState state) => throw new NotSupportedException($"{typeof(TState).Name} holds no mean.");
 }
 
 /// <summary>A running sum at the widened type, and how many values it holds.</summary>
@@ -63,36 +72,38 @@ internal struct ExtremeState<TValue>
 internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
     where TValue : unmanaged, IBinaryInteger<TValue>
 {
-    public static SumState<Int128> Seed() => default;
+    public SumState<Int128> Seed() => default;
 
-    public static void Add(ref SumState<Int128> state, TValue value)
+    public void Add(ref SumState<Int128> state, TValue value)
     {
         state.Sum += Int128.CreateTruncating(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<Int128> state, TValue value, long count)
+    public void AddSelected(ref SumState<Int128> state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<Int128> state, TValue value, long count)
     {
         state.Sum += Int128.CreateTruncating(value) * count;
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<Int128> state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref SumState<Int128> state, ReadOnlySpan<TValue> values)
     {
         state.Sum += SumKernels.Signed(values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<Int128> into, in SumState<Int128> other)
+    public void Merge(ref SumState<Int128> into, in SumState<Int128> other)
     {
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
 
-    public static double? Mean(in SumState<Int128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+    public double? Mean(in SumState<Int128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
 
     [SkipLocalsInit]
-    public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref SumState<Int128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];
@@ -110,36 +121,38 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
 internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<long>>
     where TValue : unmanaged, IBinaryInteger<TValue>
 {
-    public static SumState<long> Seed() => default;
+    public SumState<long> Seed() => default;
 
-    public static void Add(ref SumState<long> state, TValue value)
+    public void Add(ref SumState<long> state, TValue value)
     {
         state.Sum += long.CreateTruncating(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<long> state, TValue value, long count)
+    public void AddSelected(ref SumState<long> state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<long> state, TValue value, long count)
     {
         state.Sum += long.CreateTruncating(value) * count;
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<long> state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref SumState<long> state, ReadOnlySpan<TValue> values)
     {
         state.Sum += (long)SumKernels.Signed(values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<long> into, in SumState<long> other)
+    public void Merge(ref SumState<long> into, in SumState<long> other)
     {
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
 
-    public static double? Mean(in SumState<long> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+    public double? Mean(in SumState<long> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
 
     [SkipLocalsInit]
-    public static void AddWords(ref SumState<long> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref SumState<long> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];
@@ -153,36 +166,38 @@ internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<lon
 internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<ulong>>
     where TValue : unmanaged, IBinaryInteger<TValue>
 {
-    public static SumState<ulong> Seed() => default;
+    public SumState<ulong> Seed() => default;
 
-    public static void Add(ref SumState<ulong> state, TValue value)
+    public void Add(ref SumState<ulong> state, TValue value)
     {
         state.Sum += ulong.CreateTruncating(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<ulong> state, TValue value, long count)
+    public void AddSelected(ref SumState<ulong> state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<ulong> state, TValue value, long count)
     {
         state.Sum += ulong.CreateTruncating(value) * (ulong)count;
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<ulong> state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref SumState<ulong> state, ReadOnlySpan<TValue> values)
     {
         state.Sum += (ulong)SumKernels.Unsigned(values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<ulong> into, in SumState<ulong> other)
+    public void Merge(ref SumState<ulong> into, in SumState<ulong> other)
     {
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
 
-    public static double? Mean(in SumState<ulong> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+    public double? Mean(in SumState<ulong> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
 
     [SkipLocalsInit]
-    public static void AddWords(ref SumState<ulong> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref SumState<ulong> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];
@@ -196,36 +211,38 @@ internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<u
 internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128>>
     where TValue : unmanaged, IBinaryInteger<TValue>
 {
-    public static SumState<UInt128> Seed() => default;
+    public SumState<UInt128> Seed() => default;
 
-    public static void Add(ref SumState<UInt128> state, TValue value)
+    public void Add(ref SumState<UInt128> state, TValue value)
     {
         state.Sum += UInt128.CreateTruncating(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<UInt128> state, TValue value, long count)
+    public void AddSelected(ref SumState<UInt128> state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<UInt128> state, TValue value, long count)
     {
         state.Sum += UInt128.CreateTruncating(value) * (ulong)count;
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<UInt128> state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref SumState<UInt128> state, ReadOnlySpan<TValue> values)
     {
         state.Sum += SumKernels.Unsigned(values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<UInt128> into, in SumState<UInt128> other)
+    public void Merge(ref SumState<UInt128> into, in SumState<UInt128> other)
     {
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
 
-    public static double? Mean(in SumState<UInt128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
+    public double? Mean(in SumState<UInt128> state) => state.Count == 0 ? null : double.CreateTruncating(state.Sum) / state.Count;
 
     [SkipLocalsInit]
-    public static void AddWords(ref SumState<UInt128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref SumState<UInt128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];
@@ -235,24 +252,134 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
     }
 }
 
+/// <summary>
+/// A sum of signed integers in 64 bits that no mean reads: the total alone, eight bytes a group where
+/// <see cref="NarrowSignedSum{TValue}"/> keeps the count a mean needs beside it. The statistics prove
+/// it cannot overflow, as for that one.
+/// </summary>
+internal readonly struct NarrowSignedTotal<TValue> : IValueOp<TValue, long>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public long Seed() => 0;
+
+    public void Add(ref long state, TValue value) => state += long.CreateTruncating(value);
+
+    public void AddSelected(ref long state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref long state, TValue value, long count) => state += long.CreateTruncating(value) * count;
+
+    public void AddSpan(ref long state, ReadOnlySpan<TValue> values) => state += (long)SumKernels.Signed(values);
+
+    public void Merge(ref long into, in long other) => into += other;
+
+    [SkipLocalsInit]
+    public void AddWords(ref long state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += (long)SumKernels.Signed(selected);
+    }
+}
+
+/// <summary>A sum of signed integers in 128 bits that no mean reads: the total alone, as <see cref="SignedSum{TValue}"/> without its count.</summary>
+internal readonly struct SignedTotal<TValue> : IValueOp<TValue, Int128>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public Int128 Seed() => default;
+
+    public void Add(ref Int128 state, TValue value) => state += Int128.CreateTruncating(value);
+
+    public void AddSelected(ref Int128 state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref Int128 state, TValue value, long count) => state += Int128.CreateTruncating(value) * count;
+
+    public void AddSpan(ref Int128 state, ReadOnlySpan<TValue> values) => state += SumKernels.Signed(values);
+
+    public void Merge(ref Int128 into, in Int128 other) => into += other;
+
+    [SkipLocalsInit]
+    public void AddWords(ref Int128 state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += SumKernels.Signed(selected);
+    }
+}
+
+/// <summary>A sum of unsigned integers in 64 bits that no mean reads, as <see cref="NarrowUnsignedSum{TValue}"/> without its count.</summary>
+internal readonly struct NarrowUnsignedTotal<TValue> : IValueOp<TValue, ulong>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public ulong Seed() => 0;
+
+    public void Add(ref ulong state, TValue value) => state += ulong.CreateTruncating(value);
+
+    public void AddSelected(ref ulong state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref ulong state, TValue value, long count) => state += ulong.CreateTruncating(value) * (ulong)count;
+
+    public void AddSpan(ref ulong state, ReadOnlySpan<TValue> values) => state += (ulong)SumKernels.Unsigned(values);
+
+    public void Merge(ref ulong into, in ulong other) => into += other;
+
+    [SkipLocalsInit]
+    public void AddWords(ref ulong state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += (ulong)SumKernels.Unsigned(selected);
+    }
+}
+
+/// <summary>A sum of unsigned integers in 128 bits that no mean reads, as <see cref="UnsignedSum{TValue}"/> without its count.</summary>
+internal readonly struct UnsignedTotal<TValue> : IValueOp<TValue, UInt128>
+    where TValue : unmanaged, IBinaryInteger<TValue>
+{
+    public UInt128 Seed() => default;
+
+    public void Add(ref UInt128 state, TValue value) => state += UInt128.CreateTruncating(value);
+
+    public void AddSelected(ref UInt128 state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref UInt128 state, TValue value, long count) => state += UInt128.CreateTruncating(value) * (ulong)count;
+
+    public void AddSpan(ref UInt128 state, ReadOnlySpan<TValue> values) => state += SumKernels.Unsigned(values);
+
+    public void Merge(ref UInt128 into, in UInt128 other) => into += other;
+
+    [SkipLocalsInit]
+    public void AddWords(ref UInt128 state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state += SumKernels.Unsigned(selected);
+    }
+}
+
 /// <summary>A sum of unscaled decimals in 128 bits, checked.</summary>
 internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
 {
-    public static SumState<Int128> Seed() => default;
+    public SumState<Int128> Seed() => default;
 
-    public static void Add(ref SumState<Int128> state, Int128 value)
+    public void Add(ref SumState<Int128> state, Int128 value)
     {
         state.Sum = checked(state.Sum + value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<Int128> state, Int128 value, long count)
+    public void AddSelected(ref SumState<Int128> state, Int128 value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<Int128> state, Int128 value, long count)
     {
         state.Sum = checked(state.Sum + checked(value * count));
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<Int128> state, ReadOnlySpan<Int128> values)
+    public void AddSpan(ref SumState<Int128> state, ReadOnlySpan<Int128> values)
     {
         Int128 sum = state.Sum;
         foreach (Int128 value in values)
@@ -264,14 +391,14 @@ internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<Int128> into, in SumState<Int128> other)
+    public void Merge(ref SumState<Int128> into, in SumState<Int128> other)
     {
         into.Sum = checked(into.Sum + other.Sum);
         into.Count += other.Count;
     }
 
-    public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
-        WordFold.Each<Int128, SumState<Int128>, DecimalSum>(ref state, block, words);
+    public void AddWords(ref SumState<Int128> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<Int128, SumState<Int128>, DecimalSum>(in this, ref state, block, words);
 }
 
 /// <summary>
@@ -281,67 +408,71 @@ internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
 /// </summary>
 internal readonly struct WideDecimalSum : IValueOp<Int128, SumState<WideSum>>
 {
-    public static SumState<WideSum> Seed() => default;
+    public SumState<WideSum> Seed() => default;
 
-    public static void Add(ref SumState<WideSum> state, Int128 value)
+    public void Add(ref SumState<WideSum> state, Int128 value)
     {
         state.Sum.Add(value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<WideSum> state, Int128 value, long count)
+    public void AddSelected(ref SumState<WideSum> state, Int128 value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<WideSum> state, Int128 value, long count)
     {
         state.Sum.AddProduct(value, count);
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<WideSum> state, ReadOnlySpan<Int128> values)
+    public void AddSpan(ref SumState<WideSum> state, ReadOnlySpan<Int128> values)
     {
         NarrowTotals.Add(ref state.Sum, values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<WideSum> into, in SumState<WideSum> other)
+    public void Merge(ref SumState<WideSum> into, in SumState<WideSum> other)
     {
         into.Sum.Merge(in other.Sum);
         into.Count += other.Count;
     }
 
-    public static void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
-        WordFold.Each<Int128, SumState<WideSum>, WideDecimalSum>(ref state, block, words);
+    public void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<Int128, SumState<WideSum>, WideDecimalSum>(in this, ref state, block, words);
 }
 
 /// <summary>A sum of unscaled decimals of more than 38 digits, exact whatever their count, through an <see cref="Int256"/> total spilled into 320 bits.</summary>
 internal readonly struct Decimal256Sum : IValueOp<Int256, SumState<WideSum>>
 {
-    public static SumState<WideSum> Seed() => default;
+    public SumState<WideSum> Seed() => default;
 
-    public static void Add(ref SumState<WideSum> state, Int256 value)
+    public void Add(ref SumState<WideSum> state, Int256 value)
     {
         state.Sum.Add(in value);
         state.Count++;
     }
 
-    public static void AddWeighted(ref SumState<WideSum> state, Int256 value, long count)
+    public void AddSelected(ref SumState<WideSum> state, Int256 value) => Add(ref state, value);
+
+    public void AddWeighted(ref SumState<WideSum> state, Int256 value, long count)
     {
         state.Sum.AddProduct(in value, count);
         state.Count += count;
     }
 
-    public static void AddSpan(ref SumState<WideSum> state, ReadOnlySpan<Int256> values)
+    public void AddSpan(ref SumState<WideSum> state, ReadOnlySpan<Int256> values)
     {
         NarrowTotals.Add(ref state.Sum, values);
         state.Count += values.Length;
     }
 
-    public static void Merge(ref SumState<WideSum> into, in SumState<WideSum> other)
+    public void Merge(ref SumState<WideSum> into, in SumState<WideSum> other)
     {
         into.Sum.Merge(in other.Sum);
         into.Count += other.Count;
     }
 
-    public static void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int256> block, ReadOnlySpan<ulong> words) =>
-        WordFold.Each<Int256, SumState<WideSum>, Decimal256Sum>(ref state, block, words);
+    public void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int256> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<Int256, SumState<WideSum>, Decimal256Sum>(in this, ref state, block, words);
 }
 
 /// <summary>The smallest or the largest value of a type with an order and no NaN: a decimal of 256 bits, which no vector kernel folds.</summary>
@@ -351,10 +482,10 @@ internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, Extre
     where TValue : unmanaged, IComparable<TValue>
     where TMax : struct, IFlag
 {
-    public static ExtremeState<TValue> Seed() => default;
+    public ExtremeState<TValue> Seed() => default;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void Add(ref ExtremeState<TValue> state, TValue value)
+    public void Add(ref ExtremeState<TValue> state, TValue value)
     {
         int order = value.CompareTo(state.Value);
         if (!state.Has || (TMax.Value ? order > 0 : order < 0))
@@ -364,9 +495,11 @@ internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, Extre
         }
     }
 
-    public static void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+    public void AddSelected(ref ExtremeState<TValue> state, TValue value) => Add(ref state, value);
 
-    public static void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
+    public void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+
+    public void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
     {
         foreach (TValue value in values)
         {
@@ -374,7 +507,7 @@ internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, Extre
         }
     }
 
-    public static void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
+    public void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
     {
         if (other.Has)
         {
@@ -382,8 +515,8 @@ internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, Extre
         }
     }
 
-    public static void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words) =>
-        WordFold.Each<TValue, ExtremeState<TValue>, OrderedExtremeOp<TValue, TMax>>(ref state, block, words);
+    public void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<TValue, ExtremeState<TValue>, OrderedExtremeOp<TValue, TMax>>(in this, ref state, block, words);
 }
 
 /// <summary>A compile-time boolean, so that a generic op's branch on it is specialised away.</summary>
@@ -402,13 +535,24 @@ internal readonly struct No : IFlag
     public static bool Value => false;
 }
 
+/// <summary>What the extremes of a type of values may take for granted.</summary>
+internal static class ExtremeOps
+{
+    /// <summary>Whether <typeparamref name="TValue"/> is an integer, which has no NaN: a constant of each instantiation.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool Integral<TValue>() =>
+        typeof(TValue) == typeof(long) || typeof(TValue) == typeof(int) || typeof(TValue) == typeof(short) || typeof(TValue) == typeof(sbyte)
+        || typeof(TValue) == typeof(ulong) || typeof(TValue) == typeof(uint) || typeof(TValue) == typeof(ushort) || typeof(TValue) == typeof(byte)
+        || typeof(TValue) == typeof(Int128) || typeof(TValue) == typeof(UInt128);
+}
+
 /// <summary>The smallest value, NaN skipped.</summary>
 internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
     where TValue : unmanaged, INumber<TValue>
 {
-    public static ExtremeState<TValue> Seed() => default;
+    public ExtremeState<TValue> Seed() => default;
 
-    public static void Add(ref ExtremeState<TValue> state, TValue value)
+    public void Add(ref ExtremeState<TValue> state, TValue value)
     {
         if (TValue.IsNaN(value))
         {
@@ -422,9 +566,23 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
-    public static void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select.</remarks>
+    public void AddSelected(ref ExtremeState<TValue> state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state.Value;
+            state.Value = state.Has && current <= value ? current : value;
+            state.Has = true;
+            return;
+        }
 
-    public static void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
+        Add(ref state, value);
+    }
+
+    public void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+
+    public void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
     {
         if (ExtremeKernels.TryMin(values, out TValue min))
         {
@@ -432,7 +590,7 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
-    public static void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
+    public void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
     {
         if (other.Has)
         {
@@ -442,7 +600,7 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
 
     /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
     [SkipLocalsInit]
-    public static void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];
@@ -455,9 +613,9 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
 internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
     where TValue : unmanaged, INumber<TValue>
 {
-    public static ExtremeState<TValue> Seed() => default;
+    public ExtremeState<TValue> Seed() => default;
 
-    public static void Add(ref ExtremeState<TValue> state, TValue value)
+    public void Add(ref ExtremeState<TValue> state, TValue value)
     {
         if (TValue.IsNaN(value))
         {
@@ -471,9 +629,23 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
-    public static void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select.</remarks>
+    public void AddSelected(ref ExtremeState<TValue> state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state.Value;
+            state.Value = state.Has && current >= value ? current : value;
+            state.Has = true;
+            return;
+        }
 
-    public static void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
+        Add(ref state, value);
+    }
+
+    public void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+
+    public void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
     {
         if (ExtremeKernels.TryMax(values, out TValue max))
         {
@@ -481,7 +653,7 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
-    public static void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
+    public void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
     {
         if (other.Has)
         {
@@ -491,7 +663,119 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
 
     /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
     [SkipLocalsInit]
-    public static void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
+        AddSpan(ref state, selected);
+    }
+}
+
+/// <summary>
+/// The smallest value, NaN skipped, in a state that is the value alone: the state starts at a value no
+/// row holds, which says that none was seen. For a float that
+/// is NaN, which no add keeps; for an integer, the top of its range where no row reaches it.
+/// </summary>
+internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
+    where TValue : unmanaged, INumber<TValue>
+{
+    /// <summary>Not read: the slot starts from the seed its column leaves unreached.</summary>
+    public TValue Seed() => throw new NotSupportedException("A seeded extreme starts from the seed its slot is given.");
+
+    public void Add(ref TValue state, TValue value)
+    {
+        // A state still at NaN takes any number, which a NaN compares false against.
+        if (!TValue.IsNaN(value) && !(state <= value))
+        {
+            state = value;
+        }
+    }
+
+    /// <remarks>
+    /// An integer, no NaN: the smaller of the two stored whatever it is, the choice a select. A
+    /// branch on it missed as often as a group met a new minimum, while its groups had seen few rows.
+    /// </remarks>
+    public void AddSelected(ref TValue state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state;
+            state = current <= value ? current : value;
+            return;
+        }
+
+        Add(ref state, value);
+    }
+
+    public void AddWeighted(ref TValue state, TValue value, long count) => Add(ref state, value);
+
+    public void AddSpan(ref TValue state, ReadOnlySpan<TValue> values)
+    {
+        if (ExtremeKernels.TryMin(values, out TValue min))
+        {
+            Add(ref state, min);
+        }
+    }
+
+    /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
+    public void Merge(ref TValue into, in TValue other) => Add(ref into, other);
+
+    /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
+    [SkipLocalsInit]
+    public void AddWords(ref TValue state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
+        AddSpan(ref state, selected);
+    }
+}
+
+/// <summary>The largest value, NaN skipped, in a state that is the value alone, as <see cref="SeededMinOp{TValue}"/>: an integer starts at the bottom of its range.</summary>
+internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
+    where TValue : unmanaged, INumber<TValue>
+{
+    /// <summary>Not read: the slot starts from the seed its column leaves unreached.</summary>
+    public TValue Seed() => throw new NotSupportedException("A seeded extreme starts from the seed its slot is given.");
+
+    public void Add(ref TValue state, TValue value)
+    {
+        if (!TValue.IsNaN(value) && !(state >= value))
+        {
+            state = value;
+        }
+    }
+
+    /// <remarks>An integer, no NaN: the larger of the two stored whatever it is, the choice a select.</remarks>
+    public void AddSelected(ref TValue state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state;
+            state = current >= value ? current : value;
+            return;
+        }
+
+        Add(ref state, value);
+    }
+
+    public void AddWeighted(ref TValue state, TValue value, long count) => Add(ref state, value);
+
+    public void AddSpan(ref TValue state, ReadOnlySpan<TValue> values)
+    {
+        if (ExtremeKernels.TryMax(values, out TValue max))
+        {
+            Add(ref state, max);
+        }
+    }
+
+    /// <remarks>A state that saw nothing holds the seed, which moves no other.</remarks>
+    public void Merge(ref TValue into, in TValue other) => Add(ref into, other);
+
+    /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
+    [SkipLocalsInit]
+    public void AddWords(ref TValue state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];
@@ -516,16 +800,16 @@ internal static class WordFold
     internal const int Run = 16;
 
     /// <summary>The rows <paramref name="words"/> hold, one at a time.</summary>
-    internal static void Each<TValue, TState, TOp>(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    internal static void Each<TValue, TState, TOp>(in TOp op, ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
         where TValue : unmanaged
-        where TOp : IValueOp<TValue, TState>
+        where TOp : struct, IValueOp<TValue, TState>
     {
         for (int w = 0; w < words.Length; w++)
         {
             ulong word = words[w];
             while (word != 0)
             {
-                TOp.Add(ref state, block[(w << 6) + BitOperations.TrailingZeroCount(word)]);
+                op.Add(ref state, block[(w << 6) + BitOperations.TrailingZeroCount(word)]);
                 word &= word - 1;
             }
         }

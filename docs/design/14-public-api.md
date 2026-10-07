@@ -277,8 +277,8 @@ form.
 | `ScanOptions` | batch cap, prefetch, degree, `Compact`, and the `Pruning` and `UseIndexes` switches, which exist to check the structures, never to change a result |
 | `VortexWriteOptions` | blocks and chunk targets, the compression profile and per-column hints, the target edition, statistics, string bounds, the index policy, the identity, user metadata, the degree |
 | `IndexPolicy`, `EncodingHint`, `CompressionProfile` | [10-indexes.md](10-indexes.md) §6, [11-write-strategy.md](11-write-strategy.md) §3.4 |
-| `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `KeyPlan`, `GroupPlan` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, how a count, an order and a group by will be answered ([16-queries.md](16-queries.md) §10) |
-| `ScanStatistics` | the same quantities, measured after the scan, with the time to its first batch, the groups, the most held at once, and how each key block was grouped |
+| `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `GroupPlan`, `GroupKeyPlan`, `GroupOrdering` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, how a count, an order and a group by will be answered ([16-queries.md](16-queries.md) §10) |
+| `ScanStatistics`, `GroupStatistics` | the same quantities, measured after the scan; for a group by, its groups, the most held at once and the bytes, what its core did, how each key block was grouped, and the time to its first batch |
 | `WriteReport` | what the writer chose, per column and per chunk, and every index built or abandoned |
 | `VortexDiagnostics` | the names of the meter and the activity source ([09-contracts.md](09-contracts.md) §5) |
 | `VortexException` and its three kinds | a malformed file, an unsupported component with its id and `ComponentKind`, a schema that does not fit ([03-architecture.md](03-architecture.md) §5) |

@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
@@ -21,6 +23,9 @@ namespace Vorticity.Keys;
 internal abstract class MemoryKeySource : KeySource
 {
     private int _at = -1;
+
+    // What the entries hold of their query's memory budget, given back once the cursor is.
+    private QueryMemory? _memory;
 
     private protected MemoryKeySource(FilterLiteralKind kind) => KeyKind = kind;
 
@@ -46,10 +51,12 @@ internal abstract class MemoryKeySource : KeySource
     /// <param name="column">The column.</param>
     /// <param name="kind">Its key domain: integers, floats or bytes.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
+    /// <param name="memory">What the entries are reserved under, which the source gives back once disposed; null for none.</param>
     internal static async ValueTask<MemoryKeySource> ReadAsync(
-        IAsyncEnumerator<RecordBatch> batches, FieldExpr column, FilterLiteralKind kind, CancellationToken cancellationToken)
+        IAsyncEnumerator<RecordBatch> batches, FieldExpr column, FilterLiteralKind kind, CancellationToken cancellationToken, QueryMemory? memory = null)
     {
         MemoryKeySource source = kind == FilterLiteralKind.Bytes ? new BytesKeys() : new FixedKeys(kind);
+        source._memory = memory;
         try
         {
             while (await batches.MoveNextAsync().ConfigureAwait(false))
@@ -151,7 +158,12 @@ internal abstract class MemoryKeySource : KeySource
 
     internal sealed override void Invalidate() => _at = -1;
 
-    public sealed override ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public sealed override ValueTask DisposeAsync()
+    {
+        _memory?.Dispose();
+        _memory = null;
+        return ValueTask.CompletedTask;
+    }
 
     /// <summary>Adds the non-null values of <paramref name="node"/>, its row 0 being row <paramref name="start"/>.</summary>
     private protected abstract void Add(CanonicalArena arena, int node, int rows, long start);
@@ -168,8 +180,13 @@ internal abstract class MemoryKeySource : KeySource
     /// <summary>The same against the key <paramref name="other"/> is on, a byte key read where it lends it.</summary>
     private protected abstract int BoundOf(KeySource other, bool upper);
 
-    /// <summary>Makes <paramref name="array"/> hold <paramref name="length"/> elements, its content kept.</summary>
-    private protected static void Grow<T>(ref T[] array, long length)
+    /// <summary>
+    /// Makes <paramref name="array"/> hold <paramref name="length"/> elements, its content kept; the new
+    /// array reserved under the query's memory first, the old one given back once replaced.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The budget does not grant the array.</exception>
+    private protected void Grow<T>(ref T[] array, long length)
+        where T : unmanaged
     {
         if (array.Length >= length)
         {
@@ -181,7 +198,11 @@ internal abstract class MemoryKeySource : KeySource
             throw new InvalidOperationException("The keys of a result held in memory outgrow the largest array: walk a smaller result.");
         }
 
-        Array.Resize(ref array, (int)Math.Min(Math.Max(length, array.Length * 2L), Array.MaxLength));
+        int grown = (int)Math.Min(Math.Max(length, array.Length * 2L), Array.MaxLength);
+        _memory?.Hold((long)grown * Unsafe.SizeOf<T>(), "keys of a result");
+        long old = (long)array.Length * Unsafe.SizeOf<T>();
+        Array.Resize(ref array, grown);
+        _memory?.LetGo(old);
     }
 
     private ValueTask<bool> PositionedAsync()

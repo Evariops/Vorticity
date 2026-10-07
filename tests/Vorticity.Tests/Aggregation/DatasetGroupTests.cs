@@ -70,6 +70,60 @@ public sealed partial class DatasetGroupTests
     }
 
     [Fact]
+    public async Task TheCoreOnADatasetIsTheSameBitsWhateverItsObjectsDegreeAndCompaction()
+    {
+        // Thirty thousand keys over the objects' pieces: the core asked
+        // for, at sizes that make every batch burst and split, and turned to under a budget a fifth of
+        // what the lanes' tables hold, against the lanes' tables; one set of 256 parts for every object
+        // of the query, the same bits whatever the objects, the degree, the rows deleted and the
+        // compaction, and no request to the store the lanes' tables would not make.
+        Trade[] rows = Trades();
+        string path = await WriteAsync(rows);
+        try
+        {
+            string? expected = null;
+            foreach (int objects in (int[])[1, 2, 7])
+            {
+                await using MemoryObjectStore memory = new MemoryObjectStore();
+                await using CountingObjectStore store = new CountingObjectStore(memory);
+                await using VortexDataset dataset = await VortexDataset.CreateAsync(
+                    store, VortexTypes.ToDType(Trade.Schema, new Vorticity.Types.DTypeArena()), Options(), Ct);
+                await AppendAsync(dataset, path, objects);
+                await dataset.DeleteAsync<Trade>(r => r.Size < 1_000.0f, Ct);
+                foreach (bool compacted in (bool[])[false, true])
+                {
+                    while (compacted && await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is not null)
+                    {
+                    }
+
+                    foreach (int degree in (int[])[1, 4])
+                    {
+                        // Once to warm what the dataset keeps of its objects, then counted.
+                        expected ??= await KeyedAsync(dataset, degree, Mode.Tables);
+                        Assert.Equal(expected, await KeyedAsync(dataset, degree, Mode.Tables));
+                        long before = store.Requests;
+                        Assert.Equal(expected, await KeyedAsync(dataset, degree, Mode.Tables));
+                        long tables = store.Requests - before;
+                        foreach (Mode mode in (Mode[])[Mode.Asked, Mode.Pressed])
+                        {
+                            before = store.Requests;
+                            Assert.Equal(expected, await KeyedAsync(dataset, degree, mode));
+                            Assert.Equal(tables, store.Requests - before);
+                        }
+                    }
+                }
+            }
+
+            // What .NET counts over the rows kept.
+            Assert.Equal(rows.Where(r => !(r.Size < 1_000.0f)).Select(r => r.Account).Distinct().Count(), expected!.Split(';').Length);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task ADatasetsObjectsAreReadSideBySide()
     {
         Trade[] rows = Trades();
@@ -223,7 +277,10 @@ public sealed partial class DatasetGroupTests
             $"{d.Desk}={d.Count}/{BitConverter.DoubleToInt64Bits(d.Sum):X}/{BitConverter.DoubleToInt64Bits(d.Mean ?? 0):X}/{BitConverter.DoubleToInt64Bits(d.Variance ?? 0):X}/{d.Lowest}/{d.Highest}"));
     }
 
-    /// <summary>Prices over many binades with nulls; sizes as singles; levels around a large offset, which a variance centered at zero still takes exactly.</summary>
+    /// <summary>
+    /// Prices over many binades with nulls; sizes as singles; levels around a large offset, which a
+    /// variance centered at zero still takes exactly; thirty thousand accounts in no order.
+    /// </summary>
     private static Trade[] Trades()
     {
         Random random = new Random(41);
@@ -231,10 +288,45 @@ public sealed partial class DatasetGroupTests
         for (int row = 0; row < Rows; row++)
         {
             double? price = row % 29 == 0 ? null : Math.ScaleB(random.NextDouble() + 0.5, random.Next(-12, 13)) * (random.Next(3) == 0 ? -1 : 1);
-            rows[row] = new Trade(Desks[row % 11 % Desks.Length], price, (float)(random.NextDouble() * 1e4), 1_000_000 + random.Next(1_000));
+            rows[row] = new Trade(Desks[row % 11 % Desks.Length], price, (float)(random.NextDouble() * 1e4), 1_000_000 + random.Next(1_000), (int)((long)row * 7_919 % 30_011));
         }
 
         return rows;
+    }
+
+    /// <summary>How a group by holds its groups: the lanes' tables alone, the core asked for, or the lanes turned to it mid-pass as under pressure.</summary>
+    private enum Mode
+    {
+        Tables,
+        Asked,
+        Pressed,
+    }
+
+    /// <summary>Each account's count, its float sum's bits and its highest level, as text, the groups held as <paramref name="mode"/> says.</summary>
+    private static async Task<string> KeyedAsync(VortexDataset dataset, int degree, Mode mode)
+    {
+        Vorticity.Aggregation accounts = dataset.Scan<Trade>().With(new ScanOptions { DegreeOfParallelism = degree, BatchRows = 2_048 })
+            .GroupBy(r => r.Account)
+            .Select(g => (g.Key, g.Count(), g.Sum(x => x.Price), g.Max(x => x.Level)));
+        AggregationPlan plan = accounts.Plan;
+        switch (mode)
+        {
+            case Mode.Asked:
+                plan.Core = true;
+                plan.CoreLanes = 1;
+                plan.CoreCapacity = 512;
+                plan.CoreFloor = 16;
+                plan.CoreTableGroups = 256;
+                plan.CoreBatchEntries = 64;
+                break;
+            case Mode.Pressed:
+                plan.CoreTurnAt = 2;
+                break;
+        }
+
+        List<AccountStats> read = await ListAsync(accounts.As<AccountStats>());
+        Assert.Equal(mode != Mode.Tables, plan.LastRun?.Core is not null);
+        return string.Join(";", read.OrderBy(a => a.Account).Select(a => $"{a.Account}={a.Count}/{BitConverter.DoubleToInt64Bits(a.Sum):X}/{a.Highest}"));
     }
 
     private static async Task<List<T>> ListAsync<T>(Scan<T> scan)
@@ -264,7 +356,10 @@ public sealed partial class DatasetGroupTests
     }
 
     [VortexRecord]
-    public partial record struct Trade(string Desk, double? Price, float Size, int Level);
+    public partial record struct Trade(string Desk, double? Price, float Size, int Level, int Account);
+
+    [VortexRecord]
+    public partial record struct AccountStats(int Account, long Count, double Sum, int Highest);
 
     [VortexRecord]
     public partial record struct DeskStats(string Desk, long Count, double Sum, double? Mean, double? Variance, int Lowest, double? Highest);

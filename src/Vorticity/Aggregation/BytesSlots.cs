@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -132,7 +136,7 @@ internal static class BytesWalk
             case ColumnEncoding.Constant:
             {
                 ReadOnlySpan<byte> value = BytesBlock.Constant(arena, node);
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     sink.Take(groups[row], value);
@@ -145,7 +149,7 @@ internal static class BytesWalk
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 BytesBlock dictionary = BytesBlock.Canonical(arena, entries, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     int code = (int)codes[row];
@@ -161,7 +165,7 @@ internal static class BytesWalk
             default:
             {
                 BytesBlock values = BytesBlock.Canonical(arena, node, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, valid), 0, input.Rows);
+                RowCursor rows = new RowCursor(mask.And(input, input.Selection, valid), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     sink.Take(groups[row], values[row]);
@@ -173,16 +177,61 @@ internal static class BytesWalk
     }
 }
 
-/// <summary>The smallest or largest text or binary value of each group, in byte order.</summary>
-internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
+/// <summary>
+/// A slot whose answers are bytes, a text's or a binary's: written into a result's column as they lie,
+/// where a string a group decoded, then encoded again, made a million objects for the collector at a
+/// million groups.
+/// </summary>
+internal interface IBytesResults
 {
+    /// <summary>Whether the slot's answers are bytes: a joined slot's are when its parts' are.</summary>
+    bool HoldsBytes { get; }
+
+    /// <summary>The bytes of <paramref name="groups"/>' answers appended to <paramref name="store"/>, a null where a group has none.</summary>
+    void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups);
+}
+
+/// <summary>
+/// The smallest or largest text or binary value of each group, in byte order: the values' bytes in
+/// pages the slot shares among its groups, no object per group nor an allocation per value as values
+/// come and go. A value longer than the room of the one it
+/// replaces moves to the end of the last page and leaves that room behind; the pages are compacted
+/// when what they leave behind outgrows what they hold.
+/// </summary>
+internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytesResults
+{
+    /// <summary>
+    /// The bytes of a page; a value longer than a quarter of one takes a page of its own. Past the large
+    /// objects' threshold: a page lives as long as its groups, which no collection should copy. At 64 KiB,
+    /// a million groups' pages on fourteen lanes were copied by every compacting collection, a fifth of
+    /// the query's cycles.
+    /// </summary>
+    internal const int PageBytes = 1 << 17;
+
     private readonly bool _max;
     private readonly ColumnShape _shape;
-    private byte[][] _best = [];
+
+    // Each group's value: the page and the offset its bytes start at, and its length, -1 for none.
+    private long[] _at = [];
     private int[] _lengths = [];
     private int _groups;
+
+    private byte[][] _pages = [];
+    private int _pageCount;
+    private int _fill = -1;
+    private int _used;
+
+    // The bytes of the pages, and the rooms of the values they hold.
+    private long _paged;
+    private long _held;
+
     private MaskCache _rows;
     private CodeSet _distinct;
+
+    // The shelf the slot's arrays and pages grow from, under the query's memory.
+    private ArrayShelf? _shelf;
+
+    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
 
     internal BytesExtremeSlot(ColumnShape shape, bool max)
     {
@@ -190,21 +239,26 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         _max = max;
     }
 
+    /// <summary>The arrays of bytes the slot holds its values in: its pages, whatever its groups.</summary>
+    internal int Pages => _pageCount;
+
+    /// <summary>The bytes of its pages, counted as it takes them.</summary>
+    internal long PagedBytes => _paged;
+
+    /// <summary>Its pages, counted as it takes them, and where each group's value lies.</summary>
+    internal override long Footprint =>
+        _paged + ((long)_at.Length * sizeof(long)) + ((long)_lengths.Length * sizeof(int)) + ((long)_pages.Length * IntPtr.Size);
+
     internal override void EnsureGroups(int groups)
     {
-        if (groups > _best.Length)
+        if (groups > _at.Length)
         {
-            int grown = Scratch.Capacity(groups, _best.Length);
-            Array.Resize(ref _best, grown);
-            Array.Resize(ref _lengths, grown);
+            int grown = Scratch.Capacity(groups, _at.Length);
+            ArrayShelf.Resize(_shelf, ref _at, grown);
+            ArrayShelf.Resize(_shelf, ref _lengths, grown);
         }
 
-        for (int g = _groups; g < groups; g++)
-        {
-            _best[g] = [];
-            _lengths[g] = -1;
-        }
-
+        _lengths.AsSpan(_groups, Math.Max(0, groups - _groups)).Fill(-1);
         _groups = Math.Max(_groups, groups);
     }
 
@@ -216,8 +270,67 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
+        CanonicalArena arena = input.Arena;
+        int node = input.Node;
+        if (EncodedForms.EncodingOf(arena, node) is not (ColumnEncoding.Constant or ColumnEncoding.Dictionary))
+        {
+            BytesBlock values = BytesBlock.Canonical(arena, node, out ReadOnlySpan<ulong> valid);
+            if (_rows.And(input, input.Selection, valid).IsEmpty)
+            {
+                Chunked(values, groups, input.Start, input.End);
+                return;
+            }
+        }
+
         Sink sink = new Sink(this);
         BytesWalk.Rows(ref sink, input, groups, ref _rows);
+    }
+
+    /// <summary>The rows <see cref="Chunked"/> takes at a time: where their groups' values lie, on the stack.</summary>
+    private const int Chunk = 256;
+
+    /// <summary>
+    /// Every row of the window offered, <see cref="Chunk"/> rows at a time:
+    /// where each row's group holds its value, then each compared with its row's, no row waiting on
+    /// another; then the rows that beat it offered in their order, a group two rows beat taking the
+    /// better. At a million groups a row's offer read three lines, one after the other: the group's
+    /// length, where its value lies, then its bytes, each a miss.
+    /// </summary>
+    [SkipLocalsInit]
+    private void Chunked(BytesBlock values, ReadOnlySpan<int> groups, int start, int end)
+    {
+        Span<long> at = stackalloc long[Chunk];
+        Span<int> lengths = stackalloc int[Chunk];
+        for (int first = start; first < end; first += Chunk)
+        {
+            int count = Math.Min(Chunk, end - first);
+            for (int i = 0; i < count; i++)
+            {
+                int group = groups[first + i];
+                lengths[i] = _lengths[group];
+                at[i] = _at[group];
+            }
+
+            // A row its group's value beats, or ties, is left out: the value only gets better.
+            for (int i = 0; i < count; i++)
+            {
+                int length = lengths[i];
+                if (length >= 0)
+                {
+                    long place = at[i];
+                    int order = values[first + i].SequenceCompareTo(_pages[(int)(place >> 32)].AsSpan((int)place, length));
+                    lengths[i] = (_max ? order <= 0 : order >= 0) ? int.MinValue : length;
+                }
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                if (lengths[i] != int.MinValue)
+                {
+                    Offer(groups[first + i], values[first + i]);
+                }
+            }
+        }
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
@@ -228,47 +341,162 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
             int g = from[i];
             if (source._lengths[g] >= 0)
             {
-                Offer(into[i], source._best[g].AsSpan(0, source._lengths[g]));
+                Offer(into[i], source.ValueOf(g));
             }
         }
     }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
+        // The values of the groups left out stay in the pages until the next compaction.
+        long held = 0;
         for (int i = 0; i < groups.Length; i++)
         {
-            _best[i] = _best[groups[i]];
-            _lengths[i] = _lengths[groups[i]];
+            _at[i] = _at[groups[i]];
+            int length = _lengths[i] = _lengths[groups[i]];
+            held += length < 0 ? 0 : Room(length);
         }
 
         // The groups past them are emptied again when they are made.
         _groups = groups.Length;
+        _held = held;
     }
 
     internal override TResult Result(int group) =>
-        _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(_best[group].AsSpan(0, _lengths[group]), _shape);
+        _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(ValueOf(group), _shape);
 
-    private void Offer(int group, ReadOnlySpan<byte> value)
+    public bool HoldsBytes => true;
+
+    /// <summary>The bytes of <paramref name="groups"/>' values written as they lie, a null for a group with none.</summary>
+    public void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            int group = groups[i];
+            if (_lengths[group] < 0)
+            {
+                store.AppendNulls(1);
+            }
+            else
+            {
+                // A value of the column the reader checked as it decoded it.
+                store.AppendValidated(ValueOf(group));
+            }
+        }
+    }
+
+    private ReadOnlySpan<byte> ValueOf(int group)
+    {
+        long at = _at[group];
+        return _pages[(int)(at >> 32)].AsSpan((int)at, _lengths[group]);
+    }
+
+    /// <summary>Keeps <paramref name="value"/> for <paramref name="group"/> when it beats the value the group holds.</summary>
+    internal void Offer(int group, ReadOnlySpan<byte> value)
     {
         int length = _lengths[group];
         if (length >= 0)
         {
-            int order = value.SequenceCompareTo(_best[group].AsSpan(0, length));
+            int order = value.SequenceCompareTo(ValueOf(group));
             if (_max ? order <= 0 : order >= 0)
             {
                 return;
             }
+
+            // In the room of the value it replaces when it fits; that room left behind otherwise.
+            if (value.Length <= Room(length))
+            {
+                long at = _at[group];
+                value.CopyTo(_pages[(int)(at >> 32)].AsSpan((int)at));
+                _held += Room(value.Length) - Room(length);
+                _lengths[group] = value.Length;
+                return;
+            }
+
+            _held -= Room(length);
+            _lengths[group] = -1;
         }
 
-        byte[] buffer = _best[group];
-        if (buffer.Length < value.Length)
-        {
-            _best[group] = buffer = new byte[Math.Max(value.Length, 16)];
-        }
-
-        value.CopyTo(buffer);
+        _at[group] = Place(value);
         _lengths[group] = value.Length;
+        _held += Room(value.Length);
     }
+
+    /// <summary>Copies <paramref name="value"/> to the end of the last page, or to a page of its own when it is long.</summary>
+    private long Place(ReadOnlySpan<byte> value)
+    {
+        int room = Room(value.Length);
+        if (room > PageBytes / 4)
+        {
+            int own = AddPage(room);
+            value.CopyTo(_pages[own]);
+            return (long)own << 32;
+        }
+
+        if (_fill < 0 || _used + room > PageBytes)
+        {
+            // A page more, unless the pages leave behind more than they hold: they are compacted first.
+            if (_paged - _held > _held + PageBytes)
+            {
+                Compact();
+            }
+
+            if (_fill < 0 || _used + room > PageBytes)
+            {
+                _fill = AddPage(PageBytes);
+                _used = 0;
+            }
+        }
+
+        long at = ((long)_fill << 32) | (uint)_used;
+        value.CopyTo(_pages[_fill].AsSpan(_used));
+        _used += room;
+        return at;
+    }
+
+    /// <summary>Copies every value held into new pages, in the order of the groups, and drops the old ones.</summary>
+    private void Compact()
+    {
+        byte[][] pages = _pages;
+        int held = _pageCount;
+        _pages = [];
+        _pageCount = 0;
+        _fill = -1;
+        _used = 0;
+        _paged = 0;
+        for (int g = 0; g < _groups; g++)
+        {
+            int length = _lengths[g];
+            if (length >= 0)
+            {
+                long at = _at[g];
+                _at[g] = Place(pages[(int)(at >> 32)].AsSpan((int)at, length));
+            }
+        }
+
+        // The old pages, and the array that listed them, go back to the shelf.
+        for (int p = 0; p < held; p++)
+        {
+            _shelf?.Give(pages[p]);
+        }
+
+        _shelf?.Give(pages);
+    }
+
+    private int AddPage(int bytes)
+    {
+        if (_pageCount == _pages.Length)
+        {
+            ArrayShelf.Resize(_shelf, ref _pages, Math.Max(4, _pageCount * 2));
+        }
+
+        _pages[_pageCount] = _shelf is null ? GC.AllocateUninitializedArray<byte>(bytes) : _shelf.Take<byte>(bytes, zeroed: false);
+        _paged += bytes;
+        return _pageCount++;
+    }
+
+    /// <summary>The bytes a value of <paramref name="length"/> takes in a page: whole words, so that a value a little longer still fits.</summary>
+    private static int Room(int length) => (length + 7) & ~7;
 
     private readonly struct Sink : IBytesSink
     {
@@ -281,20 +509,40 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 }
 
 /// <summary>The distinct non-null text or binary values of each group, keyed by group and value in one table.</summary>
-internal sealed class BytesDistinctSlot : AggregateSlot<long>
+internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 {
-    private readonly ByteKeyTable _seen = new ByteKeyTable();
+    private ByteKeyTable _seen = new ByteKeyTable();
     private long[] _counts = [];
     private int _groups;
     private byte[] _key = new byte[64];
     private MaskCache _rows;
     private CodeSet _distinct;
 
+    // Each pair chained to the pair its group met before, by their numbers in the table plus one, and
+    // each group's last pair: a group's pairs read without another's.
+    private int[] _next = [];
+    private int[] _first = [];
+
+    // The shelf the table, the counts and the chains grow from, under the query's memory.
+    private ArrayShelf? _shelf;
+
+    /// <summary>The shelf the slot grows from, set as it is made, before any pair: its table made again on it.</summary>
+    internal override void Govern(ArrayShelf shelf)
+    {
+        _shelf = shelf;
+        _seen = new ByteKeyTable(shelf);
+    }
+
     internal override void EnsureGroups(int groups)
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
+            ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
+        }
+
+        if (groups > _first.Length)
+        {
+            ArrayShelf.Resize(_shelf, ref _first, Scratch.Capacity(groups, _first.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -314,53 +562,163 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        // The pairs are keyed by group: each one's group found in the groups merged, which are every
-        // one of the other's, or a part of them whose targets a table gives.
+        // Every group of the other: its pairs in the order they lie, each to its group's target. Some
+        // of them, a part of a parallel merge: their chains alone.
         BytesDistinctSlot source = (BytesDistinctSlot)other;
-        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
         ByteKeyTable seen = source._seen;
-        for (int i = 0; i < seen.Count; i++)
+        if (from.Length == source._groups)
         {
-            ReadOnlySpan<byte> key = seen.KeyOf(i);
-            int target = targets[BinaryPrimitives.ReadInt32LittleEndian(key)];
-            if (target >= 0)
+            for (int i = 0; i < seen.Count; i++)
             {
-                Add(target, key[4..]);
+                ReadOnlySpan<byte> key = seen.KeyOf(i);
+                Add(into[BinaryPrimitives.ReadInt32LittleEndian(key)], key[4..]);
+            }
+
+            return;
+        }
+
+        int[] next = source._next;
+        for (int i = 0; i < from.Length; i++)
+        {
+            int group = from[i];
+            for (int number = group < source._first.Length ? source._first[group] : 0; number != 0; number = next[number - 1])
+            {
+                Add(into[i], seen.KeyOf(number - 1)[4..]);
             }
         }
     }
 
     internal override long Result(int group) => _counts[group];
 
-    internal override void Keep(ReadOnlySpan<int> groups)
+    public long Pairs => _seen.Count;
+
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
-        int[] renumbered = new int[_groups];
-        Array.Fill(renumbered, -1);
-        for (int i = 0; i < groups.Length; i++)
+        BytesDistinctSlot[] all = new BytesDistinctSlot[slots.Length];
+        for (int p = 0; p < slots.Length; p++)
         {
-            renumbered[groups[i]] = i;
+            all[p] = (BytesDistinctSlot)slots[p];
         }
 
-        // The pairs of the groups kept, numbered again, in a table emptied of the others.
-        List<byte[]> kept = [];
-        for (int entry = 0; entry < _seen.Count; entry++)
-        {
-            ReadOnlySpan<byte> key = _seen.KeyOf(entry);
-            int group = renumbered[BinaryPrimitives.ReadInt32LittleEndian(key)];
-            if (group >= 0)
+        // Each lane's pairs placed by part, the hash of the value under its group's target, then each
+        // part's pairs from every lane made distinct.
+        int shift = 64 - BitOperations.Log2((uint)parts);
+        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
+        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        long[][] counts = new long[parts][];
+        await SideBySide.RunAsync(
+            parts,
+            part =>
             {
-                byte[] copy = key.ToArray();
-                BinaryPrimitives.WriteInt32LittleEndian(copy, group);
-                kept.Add(copy);
+                ByteKeyTable distinct = new ByteKeyTable();
+                byte[] key = new byte[64];
+                long[] count = new long[groups];
+                for (int p = 0; p < all.Length; p++)
+                {
+                    (int[] placed, int[] starts) = cuts[p];
+                    int[] map = maps[p];
+                    ByteKeyTable lane = all[p]._seen;
+                    for (int i = starts[part]; i < starts[part + 1]; i++)
+                    {
+                        ReadOnlySpan<byte> pair = lane.KeyOf(placed[i]);
+                        int group = map[BinaryPrimitives.ReadInt32LittleEndian(pair)];
+                        Scratch.Grow(ref key, pair.Length);
+                        BinaryPrimitives.WriteInt32LittleEndian(key, group);
+                        pair[4..].CopyTo(key.AsSpan(4));
+                        distinct.GetOrAdd(key.AsSpan(0, pair.Length), out bool added);
+                        if (added)
+                        {
+                            count[group]++;
+                        }
+                    }
+                }
+
+                // The part's table, held until its pairs are counted.
+                long bytes = distinct.Footprint;
+                if (memory is not null && !memory.TryGrow(bytes))
+                {
+                    throw memory.Exceeded("merge of a distinct count", groups, bytes);
+                }
+
+                counts[part] = count;
+                memory?.Shrink(bytes);
+                memory?.Discard(bytes);
+            },
+            degree,
+            cancellationToken).ConfigureAwait(false);
+
+        EnsureGroups(groups);
+        Array.Clear(_counts);
+        foreach (long[] count in counts)
+        {
+            for (int group = 0; group < groups; group++)
+            {
+                _counts[group] += count[group];
             }
         }
 
         _seen.Clear();
-        foreach (byte[] key in kept)
+        Array.Clear(_first);
+    }
+
+    /// <summary>The table's pairs placed by part, the part of a pair the top bits past <paramref name="shift"/> of its value's hash under its group's target.</summary>
+    private (int[] Placed, int[] Starts) Cut(int[] map, int shift, int parts)
+    {
+        int count = _seen.Count;
+        int[] partOf = GC.AllocateUninitializedArray<int>(count);
+        int[] starts = new int[parts + 1];
+        for (int number = 0; number < count; number++)
         {
-            _seen.GetOrAdd(key, out _);
+            ReadOnlySpan<byte> pair = _seen.KeyOf(number);
+            int part = (int)(KeyHash.Pair(KeyHash.Bytes(pair[4..]), 0, map[BinaryPrimitives.ReadInt32LittleEndian(pair)]) >> shift);
+            partOf[number] = part;
+            starts[part + 1]++;
         }
 
+        for (int part = 0; part < parts; part++)
+        {
+            starts[part + 1] += starts[part];
+        }
+
+        int[] next = starts[..^1];
+        int[] placed = GC.AllocateUninitializedArray<int>(count);
+        for (int number = 0; number < count; number++)
+        {
+            placed[next[partOf[number]]++] = number;
+        }
+
+        return (placed, starts);
+    }
+
+    /// <summary>The table of its (group, value) pairs, their chains, and the counts.</summary>
+    internal override long Footprint =>
+        _seen.Footprint + ((long)_counts.Length * sizeof(long)) + ((long)(_next.Length + _first.Length) * sizeof(int)) + _key.Length;
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        // The pairs of the groups kept, their chains alone read: the values, each after its length, in
+        // one buffer, then a table emptied of every pair, which takes them back under their new groups.
+        byte[] values = [];
+        int used = 0;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            for (int number = _first[groups[i]]; number != 0; number = _next[number - 1])
+            {
+                ReadOnlySpan<byte> value = _seen.KeyOf(number - 1)[4..];
+                if (values.Length < used + 8 + value.Length)
+                {
+                    Array.Resize(ref values, Scratch.Capacity(used + 8 + value.Length, values.Length));
+                }
+
+                BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used), i);
+                BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used + 4), value.Length);
+                value.CopyTo(values.AsSpan(used + 8));
+                used += 8 + value.Length;
+            }
+        }
+
+        _seen.Clear();
+        Array.Clear(_first);
         for (int i = 0; i < groups.Length; i++)
         {
             _counts[i] = _counts[groups[i]];
@@ -368,19 +726,43 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
 
         _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
         _groups = groups.Length;
+        for (int at = 0; at < used;)
+        {
+            int group = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at));
+            int length = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at + 4));
+            Chain(group, values.AsSpan(at + 8, length));
+            at += 8 + length;
+        }
     }
 
     private void Add(int group, ReadOnlySpan<byte> value)
+    {
+        if (Chain(group, value))
+        {
+            _counts[group]++;
+        }
+    }
+
+    /// <summary>Adds the pair to the table, chained to its group's pair before it; whether it was new.</summary>
+    private bool Chain(int group, ReadOnlySpan<byte> value)
     {
         int length = 4 + value.Length;
         Scratch.Grow(ref _key, length);
         BinaryPrimitives.WriteInt32LittleEndian(_key, group);
         value.CopyTo(_key.AsSpan(4));
-        _seen.GetOrAdd(_key.AsSpan(0, length), out bool added);
+        int number = _seen.GetOrAdd(_key.AsSpan(0, length), out bool added);
         if (added)
         {
-            _counts[group]++;
+            if (number >= _next.Length)
+            {
+                ArrayShelf.Resize(_shelf, ref _next, Scratch.Capacity(number + 1, _next.Length));
+            }
+
+            _next[number] = _first[group];
+            _first[group] = number + 1;
         }
+
+        return added;
     }
 
     private readonly struct Sink : IBytesSink

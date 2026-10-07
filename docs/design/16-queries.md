@@ -22,7 +22,8 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
-> | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §6, §9 |
+> | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅, the core over a dataset's objects, its integer keys bounded by their summaries ✅, `Distinct` through the core's parts, each value told as it enters its set ✅ | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -136,7 +137,7 @@ makes per row are the strings and objects those views create (§7.2).
 | operator | holds | its first batch after |
 |---|---|---|
 | a scan, a filter, `Select` on a scan, `Truncate`, `Bucket`, `Skip`, `Take` | its window | its first split |
-| `Distinct` | the values met, or the last one on a column that streams | its first split: a value goes out the first time it is met |
+| `Distinct` | the values met, or the last one on a column that streams; through the core, its caches, parts and spill (§7.4) | its first split: a value goes out the first time it is met; through the core, once it enters its part's set |
 | `GroupBy` on a key that streams (§2.3) | the groups still open | the first group closed |
 | `GroupBy` on any other key | one state per group | the end of its input |
 | `Where` on groups, `Select` of groups, `Skip`, `Take` | nothing more | its input's |
@@ -509,8 +510,15 @@ some groups. Written before or after the `select`, the result is the same. Under
 are ranked in a heap of `Skip + Take` on the order's results alone: the others are compared and never
 delivered, a cost of `G log k` and a memory of `k` groups. The groups that tie with the last one kept
 are then ranked by their key, read from the groups' index where it orders as the key's column would:
-a top-k on a count that a million text keys share copies none of them. Under no order, or an order a
-streaming group by already delivers, a `Take` stops the read once it is served (§2.4).
+a top-k on a count that a million text keys share copies none of them. Many groups for a few kept
+are ranked in chunks at once, as many as the degree, each of 65 536 groups and sixteen times `k` at
+least: each chunk's first `k` on a task of its own, the results it orders by read into arrays the
+chunk's size, then those candidates once. Every group of the first `k` is among the first `k` of its
+chunk, ties broken by the key in both, so the groups and their order are one ranking's; on a million
+text keys, fourteen chunks rank in 0.68 ms against 2.6. A ranking that would build a column rather than
+read its results into arrays — a text result, a key its index does not order — ranks at once. Under no
+order, or an order a streaming group by already delivers, a `Take` stops the read once it is served
+(§2.4).
 
 Under no order, on a key that does not stream, the windows that open the operators reach `Skip + Take`
 groups, which ones not promised: one lane keeps the first it meets alone, the others dropped once
@@ -525,6 +533,16 @@ lane keeps, which only gets better, so it never comes back into the top, and the
 their rows. Once a lane has trimmed, a row whose integer key lies past the worst it keeps is neither
 grouped nor folded. A filter on the groups before the window keeps every group, since it could take
 some of the top out.
+
+An order on an integer column's `Max` alone, from the largest, or its `Min`, from the smallest, the
+query reading nothing else of the groups but their key, keeps its top the same way. A group trimmed
+held a value past the worst a lane keeps, which only gets better: made again, it enters the top only
+with a better value than every one it held, so the rows it lost change nothing of it. Once a lane has
+trimmed, a row whose value falls short of the worst it keeps — by the order's keys of 64 bits, ties
+kept for the key to rank — is neither grouped nor folded: one pass, no table of every group. On a
+million keys of twenty million rows, `order by max take 100` takes a sixth of the time at one lane and
+at fourteen. A float's extreme keeps every group: its NaN comes first from the largest, and is passed
+over once a number comes, so a group's extreme would not only get better.
 
 The operators apply in the order written, as in LINQ: a `Where` after a `Take` filters the groups
 taken.
@@ -552,8 +570,8 @@ await foreach (var (hour, city, readings, mean) in hourly)        // §1's Scan<
 |---|---|
 | `await foreach`, `ToBatchesAsync`, `ToRecordsAsync` | the result's batches, borrowed or owned, or its records |
 | `Where`, `Select`, `GroupBy`, `AggAsync`, `CountAsync` and the single answers | the same operators over the result's batches: a filter evaluated on each, a projection, an aggregate of an aggregate — daily from hourly |
-| `OrderBy`, `OrderByDescending` | free when the result arrives in that order, from a group by that streams on that key or an `orderby` of its query; otherwise the result is sorted, a blocking stage holding the result |
-| `Keys(r => …)` | the key cursor over the result's keys, sorted in memory unless the result arrives in their order |
+| `OrderBy`, `OrderByDescending` | free when the result arrives in that order, from a group by that streams on that key or an `orderby` of its query; otherwise the result is sorted, a blocking stage, under the session's memory budget: in memory while it holds the rows, in runs written to the scratch and merged back past it (§9.5) |
+| `Keys(r => …)` | the key cursor over the result's keys, sorted in memory unless the result arrives in their order, reserved under the session's memory budget until the cursor is disposed |
 | `Rows(range)`, `Rows(indices)` | positions in the order the result is delivered, read as a skip and a take of the stream |
 | `With(options)` | the options of what runs on the result; the query keeps its own |
 | `ExplainAsync`, `Statistics` | the query's plan with the result's operators after it, and what the whole pipeline did |
@@ -590,6 +608,18 @@ distinct value, an `Aggregation<T>` for one value and an `Aggregation` read thro
 several, unordered, and streaming whatever the key, since a value with no aggregate is final the
 first time it is met (§2.2). `(from r in scan select r.City).Distinct()` groups a dictionary column
 by code.
+
+On one lane, under a window, on a component that streams, or on a key the statistics bound to two
+million values or fewer whose index fits half its budget, the values are taken on the reader's
+thread, as they are met, the key numbered as a group by numbers it: by its value, in pages, within
+the statistics' bounds. Otherwise, on a key the core holds, they are many lanes' work: the pass runs
+on its own task, on a lane fewer than the degree, the reader counting in it, through the lean core —
+α at 1, a part applied from 256 entries, batches of a kilobyte — and each value is told as it enters
+its part's set, under the part's lock: once, as the rows come. Under its budget the core spills; a part
+evicted tells nothing more until the end, where the runs of keys it told come back first, silently,
+and then its other entries, each new value told. On 10⁷ values of 20M rows at fourteen lanes, the
+values take 0.42 of the reader's thread's time, the first in 7 ms; on 10⁶, which the statistics bound,
+the reader's thread hashes them faster in a table that stays in cache.
 
 ### 7.5 Writing a result
 
@@ -640,10 +670,11 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | run-end | one range per run | one per run |
 | dictionary | by code: a table from code to group, kept while blocks view the same values | one per distinct code met |
 | sorted by the statistics, canonical | runs detected | one per run |
-| canonical, an integer whose statistics bound it within 2¹⁶ values | a table from the value to its group, in front of the index | one per distinct value met |
-| canonical, any other | per row, a row equal to the one before reusing its group | one per row |
+| canonical, an integer whose statistics bound it within 2¹⁶ values, or within four times the rows | the value less the least numbers its group, in pages of 4 096 numbers allocated as values meet them, in front of the index; the pages carved from slabs of one, two, four, up to sixteen pages; a batch's rows found 4 096 at a time in two passes, each row's page read with no branch on the keys, then the rows left (values met for the first time) in their order, a chunk of new values sending the next through the lookup alone | one per distinct value met |
+| canonical, any other | per row, a row equal to the one before reusing its group; a fixed-width key hashed in two passes, each row's home slot probed as its hash is computed, the rows left looked up in their order, the slots from the start of a line of cache, so that a line of slots is one, the low bits a sample of the keys all leave zero left out of the homes, so that keys at a stride of a power of two lie in a row; a text key 256 rows at a time, their hashes, then every row's home slot, then every candidate's bytes, no row waiting on another, the rows left looked up in their order | one per row |
 | composite of two to four parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
-| composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶ | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
+| composite of two to four fixed-width parts whose values and nulls fit 64 or 128 bits, none sorted, their spans' product past 2¹⁶ | the parts' values themselves packed into one word, hashed into a table whose slot of four bytes holds the group's number and the hash's bits below the home's, so that a new tuple finds its free slot without reading a word, in one line of memory; a window of 256 rows reads its home slots first, and the words of the groups whose bits agree; the parts written to the result a chunk at a time | one per row |
+| composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶, hashed past it into a table of group numbers, each beside a byte of seven bits of the hash read first | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
 | composite of five parts or more | the tuple encoded into bytes, one hash | one per row |
 
 A function of a column (§3) groups as the column does, evaluated per code, per run or per value.
@@ -667,6 +698,17 @@ count is still a multiple of its unit, exact within the bounds. A filtered aggre
 filter's mask, evaluated once per batch and per distinct filter, as its selection. A chosen row keeps
 its position and the value it is chosen by (§5.3).
 
+Rows grouped one by one, every row selected and none null, fold in plain loops, and a count rides on
+the pass of the first fixed aggregate that shares its record, the record reached once for both. Past
+16 MiB of records, an aggregate whose state passes 16 bytes, an exact float sum or a variance, does
+not carry it: its pass, reaching each record first, would hold few rows in flight behind each miss,
+so the count folds first, alone, its short pass bringing the records in for the heavy one. An
+integer's minimum or maximum stores its choice as a select while the groups have seen fewer than 32
+rows each on the mean, a new extreme then as likely as not, and branches after, the branch then
+predicting. A text's minimum or maximum compares a chunk of rows against their groups' values before it
+offers any, and writes its values' bytes into the result's column as they lie, a page of 128 KiB
+holding them; the answers of a batch of groups are read under one view of the records.
+
 ### 9.3 Statistics and zone maps
 
 A whole-scan aggregate the file statistics settle reads nothing (§8). A block whose key, through its
@@ -688,52 +730,214 @@ their files count the rows a deletion removed.
 
 ### 9.4 Parallelism and the merge
 
-At a degree above one the rows are cut at chunk boundaries into ranges, each aggregated on a lane of
-its own. A range pre-aggregates while its keys repeat; when its groups approach its rows — keys that
-rarely repeat, a user or a session id — it stops, and partitions its rows by the hash of their key
-among the lanes, so that each lane owns a slice of the keys and every group has one state: memory is
-then the number of groups, not the degree times it. The ranges' groups merge part by part: the key
-space is cut by the top bits of a hash of the keys seeded for the merge, apart from the tables' own,
-each part merged from every range by a task the query awaits, never a thread blocked on others, and
-the parts are read as one, without a copy; a composite's indexes of its columns merge once, first.
-With few groups, or too few lanes for the parts to pay, the ranges merge in series into the one
-holding the most. A chosen row and a tie keep the earlier range's. On a dataset, a range is an
-object, and one of two shares of the rows or more is cut between its chunks, as a file's rows are,
-so that no chunk is read by two ranges; the objects cut are opened side by side to learn where
-their chunks end, and the ranges then find them open. No object settles (§9.3)
-([13-dataset.md](13-dataset.md)). A group by that streams runs as §2.5 says.
+At a degree above one the rows are cut into ranges that end where a chunk does, so that no chunk is
+read twice, more ranges than lanes and the last ones shrinking down to a chunk. A lane a degree takes
+them from a queue, one after the other, into the one partition it holds: a lane on a slower core
+takes fewer, and none waits on the others while ranges are left. A lane's partition is a table of the
+groups it met, its key's index (§9.1) and its states in records (§9.5), as a lane of one would hold
+them; a key every lane meets is held by every lane until the merge. On a source whose read is a round
+trip, a lane reads two slices of its rows ahead of its decoding.
+
+The lanes' groups merge at the end. When twice their entries are not fewer than the lanes times the
+entries a merge in series moves — few groups, or too few lanes — they merge in series into the lane
+holding the most, whose states stay where they are. Otherwise the key space is cut by the top bits of
+a hash of the keys, seeded once a process apart from the tables' own: a power of two of parts, at most
+twice the degree and 256, each with 512 of the largest lane's groups at least. Lanes that number one
+span of values by value (§9.1) cut it by value instead, into runs of a power of two numbers, each
+part numbered by value over its run: no hash, no probe, no table that grows. Each part is merged
+from every lane into a table of its own, sized from the entries the parts done had per group, by a
+task the query's workers take from a queue, never a thread blocked on another; the parts are read as
+one, without a copy. With no order nor window over the groups, the parts are delivered as a core's
+are (§9.5): each built into its batches by the worker that merged it, its table let go once built,
+the reader merging and building the next part rather than wait; the lanes' tables go once the last
+part is merged. A composite's indexes of its columns merge once, first. The pairs of a distinct
+count, chained by group, merge apart: past 65 536, the largest lane's taken as they are and the
+others' cut into parts by the hash of their group and value, four parts a worker, side by side. A
+distinct count with no key holds its values alone, each in its slot, homed by the top bits of its
+hash: a part is a run of every lane's slots, which its worker walks with nothing cut before, its own
+table homing them by the bits below the part's, which they share. A chosen row and a tie keep the
+earlier range's.
+
+On a dataset, a range is an object, and one of two shares of the rows or more is cut between its
+chunks, as a file's rows are, so that no chunk is read by two ranges; the objects cut are opened side
+by side to learn where their chunks end, and the ranges then find them open. No object settles (§9.3)
+([13-dataset.md](13-dataset.md)). A group by that streams runs as §2.5 says, its ranges grouped side
+by side and followed in the order of the rows; a top-k on the key, as §6 says. An integer key's
+groups are numbered by value as over a file: the summaries of the version's roots bound its values
+over every object, the roots read before the pass as its walk reads them first, and the rows of every
+object, deleted ones counted, bound what the table may span. The core holds one set of parts for every
+object of the query, and asks the store for nothing the lanes' tables would not: over 1, 2 and 7
+objects with rows deleted, before and after compaction, at one lane and four, asked for or turned to,
+its answers are the lanes' tables' bits.
+
+**The core.** A second engine holds each group once, on a key of one fixed-width column or of raw
+words (§9.1) whose states all lie in records, at eight lanes and more: when a plan asks for it, or
+from the start when the key is one integer column numbered by value over a million values or more
+that its zones say lies scattered, each zone covering half its span or more on the mean. Its lanes'
+tables would then each hold most of its groups, out of the cache; a key in the order of the rows,
+whose zones each cover a few of its values, and a narrower span keep the lanes' tables. A hashed key,
+which nothing bounds before the pass, turns to it once a lane's first batch says half a million values
+or more, the values of a uniform key that made as many groups from as many rows, when the source gives
+each lane 200 000 rows or more: the lanes turn while their tables are a batch's. The key space is cut into 256 parts by the top byte of
+the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
+kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
+falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
+of 512 KiB at most, which split on the next bit of the hash as they fill: by bursts, under the part's
+lock taken only when free, once its pending batches pass α times its groups and 16 384 entries, α
+derived from the degree between 1 and 8. A lane whose cache misses more than half its rows over four capacities of them sends
+its rows straight into batches for the next thirty-two. At the end every part applies what is pending, its sub-tables
+split ahead, and the sub-tables are the result, read as one. The arrays of its sub-tables and slabs
+come from a shelf of the query and go back to the process's, kept within a budget and swept after
+collections. On the bench it holds two to three times less than the tables of fourteen lanes, and at
+fourteen lanes takes ×0.69 at a million random keys, ×0.46 at ten million, ×0.64 on ten rows a key;
+but it costs time at one lane, at 10⁵ keys (×2.5) and on keys in the order of the rows (×1.2 to
+×2.6): it is what the governor turns to under pressure (§9.5), and what a scattered wide key takes
+from the start.
 
 ### 9.5 Memory
 
-A blocking group by holds one state per group (§9.4 keeps it so at any degree), each of the width
-§5.1 lets the engine choose, its keys once, and its output a batch at a time; a streaming one holds
-its open groups; a top-k on the key one and a half times `k` a lane, and a batch's (§6); one on an
-aggregate every group, as a blocking group by; a projection and a `Distinct` on a column that
-streams, their window. Nothing is held per row read.
+A blocking group by holds, on each lane, a table of the groups the lane met: their keys, and their
+states in records, each of the width §5.1 lets the engine choose (§9.4). A group every lane meets is
+held by every lane until the merge, whose parts then hold it once more; the core, where it runs, holds
+it once, in the sub-tables of its part, beside a cache a lane and the batches pending under α times
+the groups. Nothing is held per row read. Its output comes a batch at a time. A streaming group by
+holds its open groups; a top-k on the key one and a half times `k` a lane, and a batch's (§6); one on
+an aggregate every group, as a blocking group by; a projection and a `Distinct` on a column that
+streams, their window.
+
+| a `long` key, `Count` and a sum of a `long` | bytes a group |
+|---|---|
+| one lane | ≈ 25, on a million keys |
+| fourteen lanes, a table each, and the merge | ≈ 188 on a million keys over four million rows, each lane meeting a quarter of them; up to fourteen times one lane's when each meets every key |
+| fourteen lanes, the core | two to three times less than their tables, on the bench's wide keys |
+
+A row of data touches one line of cache of states, whatever its aggregates; a probe of a fixed-width
+key reads its slot, a probe of a text its slot and its bytes. A group is numbered by an `int`, and the
+tables double: an open table holds 2²⁹ groups at most, a list 2³⁰, a distinct count's pairs and
+values alike.
+Past that a group by fails with a `VortexUnsupportedException` that says so.
+
+**The governor.** A query's memory is reserved from a budget: the process's by default, or a
+`QueryMemoryBudget` the host creates and gives the sessions that share it, whose ceiling bounds their
+queries together; a query reserves in its budget, the budget in the process's, whatever the sum of the
+ceilings the host sets. The process's ceiling is its limit — the managed heap's,
+`GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, and in a container three quarters of the container's,
+which counts the engine's native memory too — less an eighth for the collector, less the rest of the
+process: what its heap held past the queries' tables at the last full collection, what the collector
+kept committed past its heap, and what the queries let go since. A limit of 4 GB is not 4 GB for the
+queries. A query reserves where its memory grows, the moment it does: each array of a lane's tables,
+before it is allocated, a doubling holding the old arrays beside the new for the copy and no more; the
+parts and the cut of a merge; the scratch a sort, a top or a fetch rents; the groups of its result and
+their order until it is delivered. A lane's working memory besides its tables, a batch's scratch and
+its decoding, is admitted with the query, 16 bytes a row of its batches between 64 KiB and a megabyte,
+a megabyte when the scan sets no batch size: a query its budget cannot give every lane starts on half
+as many, down to one. What the queries let go stays in the heap until a collection; when that, or what
+the collector keeps committed past its heap, stands between a reservation and the ceiling, a collection
+that gives it back comes first. A query refused fails with a `VortexMemoryException` that names the
+operator, its groups and its bytes, everything it held given back.
+
+**Under pressure**, a group by its lanes' tables outgrow ends in the core rather than failing, on a key
+the core can hold, at two lanes or more. A lane whose budget would not let its table double once more
+turns: the first makes the core, lean — α at 1, a part applied from 256 entries pending, a cache a
+quarter of a lane's, batches of a kilobyte. The others follow at their next batch, one at a time,
+those whose table holds more than the core would cost them; a lane waits for its turn on a task,
+folding nothing. A turning lane's groups are counted by part and copied into an array of their own a
+part, exactly their size, which the budget counts past its ceiling and takes back as the part applies
+it; the table is given back, and the lane goes on with a cache. A part's stack whose groups the budget
+cannot take yet waits while a lane still holds a table, and its lane waits for the next table given
+back; meanwhile, and while arrays of their own wait on their stacks, the core takes past its ceiling
+what an application asks more. A lane that runs out of rows without turning merges its table with the
+others that did, in series into the largest, each given back once merged; the last lane to stop empties
+that one into the core. A query whose pass fits and whose merge by parts does not merges its tables
+the same way, in series, each given back once merged, and needs no core. Under 70 % of the memory the
+lanes' tables hold at most, fourteen lanes on 10⁵ keys end exact, their peak within 1.4 % of the
+budget; a key of text, and a composite holding one, stay on the lanes' tables, which spill when spilling
+comes.
+
+**The share.** A budget counts the queries that hold memory under it. Past seven eighths of its
+ceiling, a query that would hold more than its share — the ceiling over the active queries — is told
+its lanes cannot grow, and they turn to the core first; a reservation itself is never refused for the
+share, since a query with nothing to give back would fail where it fit.
+
+**The spill.** When nothing is left to give back, the core writes the parts holding the most, their
+groups and their pending entries, a record and a key each, to a scratch file of the query — in
+`VortexSessionOptions.ScratchDirectory`, the system's temporary directory by default, never a
+`tmpfs`, the process's spills keeping a tenth of its free space — the largest first, until the query
+holds three quarters of its budget; a lane whose rows the core cannot take spills before its next
+batch, on a task. At the end, the parts held in memory are delivered first, then each spilled part
+alone: its runs read back a page at a time and applied into its sub-tables again, which merges the
+groups they share, delivered, then given back. A part is a 256th of the key space, so that one held
+again is that share of the groups and a page. Under a budget the pass sizes itself on it: a lane's
+batch takes a quarter of the ceiling over the lanes, the core's caches and open batches an eighth, its
+sub-tables split at a 256th, a lane turns once the budget could not take every growing lane's next
+doubling, and the scratch's page is a sixteenth. Under a tenth of what the lanes' tables would hold,
+fourteen lanes on 10⁶ keys end exact within 6 % of the budget. A key of text, a composite holding one
+and a distinct count do not enter the core, and are refused past their budget.
+
+**The sort in runs.** An order over groups that spilled sorts them in runs: the groups held in memory,
+then each part spilled as it comes back, pass through the filters before the order, and their rows —
+the order's results, the key's components that break their ties, then the result's columns — gather
+in a store while the budget holds them, a quarter of its ceiling at most. Past that, the store's rows
+are sorted and written to the scratch as a run, a Vortex file of their own, written as fast as the
+writer writes and without statistics, and the runs are merged back a batch of each at a time, the
+first run's rows first among equals, a contiguous stretch of one run at a time; the windows after the
+order, and the result's own, are cut across the merged rows. A result's scan sorted by `OrderBy`
+takes the same sort under its session's budget. Each column ranks across two runs' batches as within
+one, a null last and NaN after +∞; the runs' files are deleted once the sort is, read to its end or
+not. A result ten times its budget sorts exact, its peak within the budget. A window without an order
+over groups that spilled, or a filter after the order, needs every group at once, and fails saying so.
+
+**Part by part.** A core's result with no order nor window over its groups is delivered part by part.
+Once the lanes have deposited their caches, a worker a lane but one takes the parts in turn: it applies
+one, applies the operators on groups to its groups — a filter on them, the fetch of chosen rows, sized
+to the part — writes them into stores of the result's columns while they are in its cache, lets the
+part go, and hands its batches to the reader, a part a worker at most ahead of it; the reader applies
+the next part itself when none waits. The null groups follow as a part of their own, then the parts
+spilled. The first batch leaves once the first part is applied, and the result's window is cut across
+the parts' batches, a batch holding a part's groups at most. On 10⁷ keys, the first batch comes a
+quarter sooner at one lane and a third at fourteen, where the whole result takes 0.58 of the time, its
+batches built on every lane. The lanes' tables merged in parts (§9.4) are delivered the same way, each
+part built by whoever merged it; a part keeps what its table held of the query's memory until the
+reader is done with its batches, which the session's pool holds outside any query's count. At
+fourteen lanes, its batches no longer built on the reader's thread alone once the merge is done, a
+million keys took 0.83 of the time and four aggregates 0.68.
+
+Not yet: a comfort budget the host grants, none by default, buying a higher α; a key cursor over a
+result larger than its budget, which a merge of runs cannot seek in; text keys and distinct counts in
+the spill. Every state
+will spill as bytes, a custom state without references with its record; a custom aggregator whose
+state holds references, which no bytes stand for, fails the query instead.
 
 ## 10. Plan and statistics
 
-`ExplainAsync` on an aggregation, a projection or a result's scan returns the scan's
-`ScanPlan` with `Grouping`, null without a group by. It says what costs, so that the shape of LINQ
-does not hide it:
+`ExplainAsync` on an aggregation returns the scan's `ScanPlan` with `Grouping`, a `GroupPlan`, null
+without a group by. It says what costs, so that the shape of LINQ does not hide it, from the query and
+the statistics alone:
 
 | member | says |
 |---|---|
-| `GroupPlan.Keys` | per component: its column, its function, whether the statistics say it is sorted, whether they bound it for a direct index |
-| `GroupPlan.Streaming` | the component the groups stream on, or why none does (§2.3) |
-| `GroupPlan.Aggregates` | the aggregates once deduplicated, those the statistics settle, the filters of filtered groups and the columns they add to the pass |
-| `GroupPlan.RowFilter` | the conjuncts of a `Where` on keys moved to the rows (§6.2) |
-| `GroupPlan.Order` | none, streamed, a heap of `k`, or a sort of every group |
-| `GroupPlan.ChosenRows` | the chosen rows, and the operator before which they are fetched, in one take, for the groups left: the first that reads one, or the result's window |
-| `GroupPlan.Ranges`, `Partitioned` | how many ranges aggregate concurrently, and whether they partition by key |
-| `GroupPlan.Memory` | the memory the statistics bound, when they bound the groups: a direct-index key's range, a streaming key's open groups |
+| `Keys` | per component, a `GroupKeyPlan`: its column, whether the statistics say it is sorted, and the values they bound an integer column to, which a table of its groups indexes directly |
+| `Streaming`, `NotStreaming` | the component the groups stream on, or why none does (§2.3) |
+| `Aggregates` | the aggregates the pass computes, once the selection's duplicates are merged |
+| `RowFilter` | the conjuncts of a `Where` on keys moved to the rows (§6.2) |
+| `Order`, `Kept` | `GroupOrdering.None`, `Streamed` on the key the groups close in, `Top` with the groups a heap keeps for a window, or a `Sort` of every group |
+| `ChosenRows` | the columns of chosen rows the result reads |
+| `Degree` | the lanes the pass may run on at most |
+| `Core`, `CacheCapacity`, `Alpha` | whether the core holds the groups, the plan having asked for it at that degree; its caches' capacity and α (§9.4) |
+| `MostGroups` | the most groups the statistics allow, when they bound every component |
 
 A key's form is known only once its block is read, so the plan says what is possible and the
-statistics what happened. `Statistics` gains `Groups`, `PeakGroups` — the most groups held at once,
-which a streaming group by keeps small — the key blocks by how they were grouped,
-`KeyBlocksByRange` (constant, run-end, sorted), `KeyBlocksByCode`, `KeyBlocksHashed` and
-`KeyBlocksSettled` (§9.3), and `TimeToFirstBatch`, the time from the first `MoveNextAsync` to the
-first batch delivered.
+statistics what happened. Once the result is read, its `ScanStatistics` carry `Grouping`, a
+`GroupStatistics`: `Groups`, the groups the pass found before any operator on them; `PeakGroups`, the
+most held at once, which a streaming group by keeps small, and a core delivering part by part to the
+parts applied and not yet built; `PeakBytes`, the most it held of its memory
+budget; `Lanes` and `MergeParts`; what the core did, `Core`, `CacheEvictions`, `BypassedRows`,
+`Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts` and
+`SpilledBytes`, zero until spilling comes; the key blocks by how they were grouped,
+`KeyBlocksByRange` (constant, run-end), `KeyBlocksByCode` and `KeyBlocksHashed`; and
+`TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch. Both are properties
+outside the records' constructors. Nothing of them goes through the scan's own counters, which every
+batch touches.
 
 ## 11. Errors, cancellation, disposal
 
@@ -758,7 +962,8 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | arithmetic on results, `g.Sum(…) / g.Count()` | C# computes with results after the sink; filtering or ordering by a ratio is LINQ to objects over the delivered groups, or a query over the result's scan |
 | joins, `let`, a query over a group's rows | one table, no binding per row |
 | a synchronous twin, `ToList()` | async only where there is I/O, and no synchronous twin of an asynchronous call ([03-architecture.md](03-architecture.md) §1) |
-| an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3) |
+| an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3). Without one, the order is not defined: at one lane, the groups come in the order they were first met; at more, in the merge's: the largest lane's, then the others' as they merged in, or part by part of the key space, the parts cut by a hash seeded once a process, so that two runs of a query in one process cut them alike. The repository's tests run with an internal switch that shuffles it, the same way for a process, so that none relies on it |
+| the same bits for an aggregator of one's own whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in (§13), its consolidation made of merges alone; a merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, a third more at a million groups, whose 32 bytes a group leave the cache (§13); it is more accurate, and a second semantics would be a second test matrix |
 | approximate distinct counts, quantiles, grouping sets | later, as aggregates and as operators of the same pipeline |
 | aggregates on the tool path | a later surface, over the same engine |
@@ -770,10 +975,17 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | the two syntaxes build one plan | the queries of the guide, written both ways, compared plan for plan |
 | §1's boundary | `tests/MustNotCompile`, with exactly the expected diagnostics |
 | every answer is right | each key form of §9.1 × each aggregate of §5 × degree 1 and the machine's, against LINQ to objects over `ToRecordsAsync`, on the conformance corpus and the type matrix |
-| answers do not depend on the degree or the cut | every answer of §5 but the order-bound ones, float sums included, the same bits at degrees 1 to the machine's, over a file written in two row orders, and over a dataset cut into 1, 2 and 7 objects, before and after compaction |
+| answers do not depend on the degree or the cut | every answer of §5 but the order-bound ones, float sums included, the same bits at degrees 1 to the machine's, over a file written in two row orders, and over a dataset cut into 1, 2 and 7 objects, before and after compaction; and at every capacity of the lanes' caches, every α the internal switch forces (1, 2, 4, 8), and spilled under a heap ten times too small |
+| no batch is left behind | a holder of a part slowed on purpose while the lanes deposit: every deposited batch applied, the pending bytes counted at the governor; a pass cancelled in the middle of its bursts gives its budget back to zero |
+| a group by its lanes' tables outgrow ends under its budget | `CorePressureTests`: fourteen lanes on 10⁵ keys under 85, 70 and 50 % of what their tables reserve at most, refused with the core off, exact with it, every reservation given back; twice as many lanes as the pool may run threads, every wait on a task |
+| pending batches are bounded | the entries a part holds pending never above α times its groups, nor the rows its caches missed |
+| the sub-tables are read back little | the bytes of sub-tables a burst reads again, under ≈ 2s/α an entry, s a group's bytes in a sub-table; none on keys met twice at fourteen lanes once the sub-tables are grown |
+| memory is at most the strong reference's | the peak, caches included, at most that of a table on each lane, at the same degree, at degree 1 and at the machine's, on keys met twice, ten times, and once |
+| the round trips stay | the requests and the dependent steps of a group by over a source with latency, ratchets of `GroupRoundTripTests` |
+| queries share fairly | two to eight queries at once under one budget: none holds more than its share once the threshold is met, the one past it governed first |
 | a `Where` on keys prunes as a filter | `LiveBlocks` equal to the equivalent `Where` on rows |
 | the first batch waits for the first split | the time to first batch of a scan, a projection, a `Distinct` and a group by that streams, on two files sixteen times apart in size, locally and over the HTTP source with latency (`tests/Vorticity.Tests/IO/HttpRangeSegmentSource.cs`) |
-| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's at most the groups', not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4 |
+| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's following its groups, not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4; on an integer's extreme the same, at 1, 4 and 14, ties ranked by the key as LINQ ranks them |
 | a `Take` reads what it uses | `Requests` and `BlocksDecoded` of a `Take(n)` bounded by the splits that hold `n` results and the window |
 | nothing is allocated per batch, nor per group as batches | `ScanAllocationTests` extended to the result stream, `As` and the projection |
 | a short range costs its rows | a complexity probe whose time per row stays flat as runs shorten |

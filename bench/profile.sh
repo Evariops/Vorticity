@@ -18,7 +18,10 @@
 # The scenario is one of the report's: open, scan, project, filter-narrow, filter-wide, take, write,
 # append. The rows size the bands, the take and the append, as they do in the report. The report
 # leaves its fixtures in $TMPDIR/vorticity-report; any other file works, a file of the throughput
-# corpus for one encoding at a time.
+# corpus for one encoding at a time. Or a group by of the high-cardinality bench, over the spread
+# files vortex-queries writes in ~/.cache/vorticity/queries: group-<aggregates>-<key>, the plan's
+# switches after a +, as bench/Vorticity.Benchmarks.Runner/GroupScenarios.cs names them (the rows
+# are then unused); --threads gives its lanes.
 #
 # --threads gives the scans n lanes, or one per processor with `all`, as the report's all-core rows
 # do. The cycles report then comes with bench/profile/threads.py's view by thread: who ran in each

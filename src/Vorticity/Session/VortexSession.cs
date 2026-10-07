@@ -22,6 +22,8 @@ public sealed class VortexSessionOptions
     private long _indexCacheBytes = 64L * 1024 * 1024;
     private int _mappedFileCacheCount = 64;
     private bool _mapFiles = true;
+    private QueryMemoryBudget? _memoryBudget;
+    private string? _scratchDirectory;
     private bool _frozen;
 
     internal VortexSessionOptions()
@@ -154,6 +156,37 @@ public sealed class VortexSessionOptions
     {
         get => _mapFiles;
         set => _mapFiles = Set(value);
+    }
+
+    /// <summary>
+    /// The memory the session's queries share with those of every session given the same budget: the
+    /// tables of their groups and the parts their merges build. Null, the default, shares the process's,
+    /// a margin under the memory the process may use.
+    /// </summary>
+    /// <remarks>
+    /// A query that needs more than its budget grants fails with a <see cref="VortexMemoryException"/>.
+    /// The budget is the host's: disposing the session leaves it to the others.
+    /// </remarks>
+    public QueryMemoryBudget? MemoryBudget
+    {
+        get => _memoryBudget;
+        set => _memoryBudget = Set(value);
+    }
+
+    /// <summary>
+    /// Where a group by its memory budget cannot hold writes the groups it spills: a local directory,
+    /// never an object store. Null, the default, is the system's temporary directory.
+    /// </summary>
+    /// <remarks>
+    /// A directory on a file system in memory (<c>tmpfs</c>) is refused: spilling there would take the
+    /// memory it gives back. The process's spills together take at most 90 % of the directory's free
+    /// space; past it, the query fails with a <see cref="VortexMemoryException"/>. A spill's file has
+    /// no name once open, outside Windows, which deletes it on close: none is left behind.
+    /// </remarks>
+    public string? ScratchDirectory
+    {
+        get => _scratchDirectory;
+        set => _scratchDirectory = Set(value);
     }
 
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>

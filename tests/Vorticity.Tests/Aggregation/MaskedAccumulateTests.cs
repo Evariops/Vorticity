@@ -54,8 +54,9 @@ public sealed class MaskedAccumulateTests
 
     private static void Run<TValue, TState, TOp>(Func<Random, TValue> next, Func<TState, TState, bool> same)
         where TValue : unmanaged
-        where TOp : IValueOp<TValue, TState>
+        where TOp : struct, IValueOp<TValue, TState>
     {
+        TOp op = default;
         Random random = new Random(20260927);
         TValue[] values = new TValue[Rows];
         for (int i = 0; i < Rows; i++)
@@ -84,17 +85,17 @@ public sealed class MaskedAccumulateTests
 
             foreach ((int start, int end) in new[] { (0, Rows), (0, 640), (5, 2997), (64, 128), (70, 71), (130, 130), (1, 63), (1, 1100), (100, 2111) })
             {
-                TState expected = TOp.Seed();
+                TState expected = op.Seed();
                 for (int row = start; row < end; row++)
                 {
                     if ((mask[row >> 6] >> (row & 63) & 1) != 0)
                     {
-                        TOp.Add(ref expected, values[row]);
+                        op.Add(ref expected, values[row]);
                     }
                 }
 
-                TState actual = TOp.Seed();
-                FixedSlot<TValue, TState, TOp, object>.Accumulate(ref actual, values, mask, start, end);
+                TState actual = op.Seed();
+                FixedSlot<TValue, TState, TOp, object>.Accumulate(in op, ref actual, values, mask, start, end);
                 Assert.True(same(actual, expected), $"{typeof(TOp).Name}: {kept} of 64 over [{start}, {end}): {actual} against {expected}");
             }
         }

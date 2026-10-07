@@ -135,6 +135,29 @@ public sealed class VortexSchemaException : VortexException
     }
 }
 
+/// <summary>
+/// Thrown when a query needs more memory than its <see cref="QueryMemoryBudget"/> grants, and nothing it
+/// holds can go to disk. The message names the operator, its groups and the bytes it asked for, and
+/// what to change. The query has given back everything it held.
+/// </summary>
+public sealed class VortexMemoryException : VortexException
+{
+    /// <summary>A query out of memory, described by <paramref name="message"/>.</summary>
+    /// <param name="message">The operator, its groups, the bytes it held and asked for, and the budget's ceiling.</param>
+    public VortexMemoryException(string message)
+        : base(message)
+    {
+    }
+
+    /// <summary>A query out of memory, described by <paramref name="message"/>, found through <paramref name="innerException"/>.</summary>
+    /// <param name="message">The operator, its groups, the bytes it held and asked for, and the budget's ceiling.</param>
+    /// <param name="innerException">The cause.</param>
+    public VortexMemoryException(string message, Exception innerException)
+        : base(message, innerException)
+    {
+    }
+}
+
 /// <summary>The component kinds the library's own refusals name.</summary>
 internal static class VortexComponentKind
 {

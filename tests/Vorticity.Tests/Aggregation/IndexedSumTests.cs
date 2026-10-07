@@ -13,6 +13,33 @@ namespace Vorticity.Tests.Aggregation;
 /// </summary>
 public sealed class IndexedSumTests
 {
+    // The rounding in two words, which a sum's value takes, against the rounding of an Int128: the same
+    // bits for totals of every length, both signs, ties to even, and exponents down past the subnormals.
+    [Fact]
+    public void TheRoundingInWordsIsTheRoundingOf128Bits()
+    {
+        Random random = new Random(20261007);
+        for (int i = 0; i < 200_000; i++)
+        {
+            int bits = random.Next(1, 119);
+            UInt128 magnitude = ((UInt128)(ulong)random.NextInt64() << 64 | (ulong)random.NextInt64()) >> (128 - bits);
+            if (i % 7 == 0)
+            {
+                // A tie: the bit below the kept ones set alone, which rounds to the even.
+                int drop = Math.Max(1, bits - 53);
+                magnitude = (magnitude >> drop << drop) | ((UInt128)1 << (drop - 1));
+            }
+
+            Int128 total = random.Next(2) == 0 ? (Int128)magnitude : -(Int128)magnitude;
+            int exponent = random.Next(-1200, 900);
+            double expected = IndexedSum.Round(total, exponent);
+            double actual = IndexedSum.Round((ulong)(total >> 64), (ulong)total, exponent);
+            Assert.True(
+                BitConverter.DoubleToInt64Bits(expected) == BitConverter.DoubleToInt64Bits(actual),
+                $"{total} units of 2^{exponent}: {expected:R} rounded in 128 bits, {actual:R} in words");
+        }
+    }
+
     [Theory]
     [InlineData(1, 0)]
     [InlineData(2, 12)]

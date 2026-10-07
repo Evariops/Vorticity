@@ -84,11 +84,15 @@ internal static class Aggregators
         filter is null ? aggregate : new Sym<T>(((AggregateNode<T>)aggregate.Node).Filtered(filter));
 
     internal static Sym<long> Count() =>
-        new Sym<long>(new AggregateNode<long>(AggregateKind.Count, null, static () => new CountSlot(), static (StatisticsView view, out long value) =>
+        new Sym<long>(new AggregateNode<long>(AggregateKind.Count, null, static source => Counter(source), static (StatisticsView view, out long value) =>
         {
             value = view.Rows;
             return true;
         }));
+
+    /// <summary>A count of 32 bits where the source's rows are known to stay below 2^32, of 64 otherwise.</summary>
+    private static AggregateSlot<long> Counter(ScanSource? source) =>
+        source is { RowBound: >= 0 and <= uint.MaxValue } ? new CountSlot<uint>() : new CountSlot<long>();
 
     /// <summary>
     /// Whether the group holds a row <paramref name="filter"/> keeps: <c>Any(p)</c> when its last
@@ -149,7 +153,20 @@ internal static class Aggregators
             _ => throw shape.Unsupported("a sum"),
         };
 
-        return new Sym<T>(new AggregateNode<T>(AggregateKind.Sum, shape, create, (StatisticsView view, out T value) => SettleSum(shape, view, out value)));
+        Func<ScanSource?, AggregateSlot<T>>? alone = shape.Kind != StorageKind.Primitive ? null : shape.PType switch
+        {
+            PType.I8 => SignedAlone<sbyte, T>(shape),
+            PType.I16 => SignedAlone<short, T>(shape),
+            PType.I32 => SignedAlone<int, T>(shape),
+            PType.I64 => SignedAlone<long, T>(shape),
+            PType.U8 => UnsignedAlone<byte, T>(shape),
+            PType.U16 => UnsignedAlone<ushort, T>(shape),
+            PType.U32 => UnsignedAlone<uint, T>(shape),
+            PType.U64 => UnsignedAlone<ulong, T>(shape),
+            _ => null,
+        };
+
+        return new Sym<T>(new AggregateNode<T>(AggregateKind.Sum, shape, create, (StatisticsView view, out T value) => SettleSum(shape, view, out value), alone: alone));
     }
 
     /// <summary>
@@ -172,6 +189,25 @@ internal static class Aggregators
         source => Proven(source, shape, ulong.MaxValue)
             ? new FixedSlot<TValue, SumState<ulong>, NarrowUnsignedSum<TValue>, TResult>(StorageKind.Primitive, narrow)
             : new FixedSlot<TValue, SumState<UInt128>, UnsignedSum<TValue>, TResult>(StorageKind.Primitive, wide);
+
+    /// <summary>
+    /// The state of a sum of signed integers that no mean reads: its total alone, of the width
+    /// <see cref="Signed{TValue, TResult}"/> chooses, without the count only a mean divides by.
+    /// </summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> SignedAlone<TValue, TResult>(ColumnShape shape)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+        where TResult : INumber<TResult> =>
+        source => Proven(source, shape, (UInt128)long.MaxValue)
+            ? new FixedSlot<TValue, long, NarrowSignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true }
+            : new FixedSlot<TValue, Int128, SignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true };
+
+    /// <summary>The state of a sum of unsigned integers that no mean reads: its total alone.</summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> UnsignedAlone<TValue, TResult>(ColumnShape shape)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+        where TResult : INumber<TResult> =>
+        source => Proven(source, shape, ulong.MaxValue)
+            ? new FixedSlot<TValue, ulong, NarrowUnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true }
+            : new FixedSlot<TValue, UInt128, UnsignedTotal<TValue>, TResult>(StorageKind.Primitive, static s => TResult.CreateChecked(s)) { Checked = true };
 
     /// <summary>Whether the source's rows times the column's largest magnitude, from its statistics, stay at or below <paramref name="limit"/>.</summary>
     private static bool Proven(ScanSource? source, ColumnShape shape, UInt128 limit)
@@ -292,20 +328,19 @@ internal static class Aggregators
         {
             StorageKind.Primitive => shape.PType switch
             {
-                PType.I8 => source => new FixedSlot<sbyte, VarianceState, VarianceOp<sbyte>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.I16 => source => new FixedSlot<short, VarianceState, VarianceOp<short>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.I32 => source => new FixedSlot<int, VarianceState, VarianceOp<int>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.I64 => source => new FixedSlot<long, VarianceState, VarianceOp<long>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U8 => source => new FixedSlot<byte, VarianceState, VarianceOp<byte>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U16 => source => new FixedSlot<ushort, VarianceState, VarianceOp<ushort>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U32 => source => new FixedSlot<uint, VarianceState, VarianceOp<uint>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.U64 => source => new FixedSlot<ulong, VarianceState, VarianceOp<ulong>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.F16 => source => new FixedSlot<Half, VarianceState, VarianceOp<Half>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                PType.F32 => source => new FixedSlot<float, VarianceState, VarianceOp<float>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
-                _ => source => new FixedSlot<double, VarianceState, VarianceOp<double>, double?>(StorageKind.Primitive, finish, Centered(source, shape, 1)),
+                PType.I8 => source => VarianceSlot<sbyte>(source, shape, 1, finish),
+                PType.I16 => source => VarianceSlot<short>(source, shape, 1, finish),
+                PType.I32 => source => VarianceSlot<int>(source, shape, 1, finish),
+                PType.I64 => source => VarianceSlot<long>(source, shape, 1, finish),
+                PType.U8 => source => VarianceSlot<byte>(source, shape, 1, finish),
+                PType.U16 => source => VarianceSlot<ushort>(source, shape, 1, finish),
+                PType.U32 => source => VarianceSlot<uint>(source, shape, 1, finish),
+                PType.U64 => source => VarianceSlot<ulong>(source, shape, 1, finish),
+                PType.F16 => source => VarianceSlot<Half>(source, shape, 1, finish),
+                PType.F32 => source => VarianceSlot<float>(source, shape, 1, finish),
+                _ => source => VarianceSlot<double>(source, shape, 1, finish),
             },
-            StorageKind.Decimal => source =>
-                new FixedSlot<Int128, VarianceState, VarianceOp<Int128>, double?>(StorageKind.Decimal, finish, Centered(source, shape, Math.Pow(10, -shape.Type.Scale))),
+            StorageKind.Decimal => source => VarianceSlot<Int128>(source, shape, Math.Pow(10, -shape.Type.Scale), finish),
             _ => throw shape.Unsupported(deviation ? "a standard deviation" : "a variance"),
         };
 
@@ -313,11 +348,13 @@ internal static class Aggregators
     }
 
     /// <summary>
-    /// A variance's first state: its center, the middle of the column's bounds over the whole
+    /// A variance's slot, whose op holds its center: the middle of the column's bounds over the whole
     /// source where its statistics hold them, zero where they do not; the same for every group and
-    /// every partition of the run.
+    /// every partition of the run, and so held once rather than in each group's state.
     /// </summary>
-    private static VarianceState Centered(ScanSource? source, ColumnShape shape, double unit)
+    private static FixedSlot<TValue, VarianceState, VarianceOp<TValue>, double?> VarianceSlot<TValue>(
+        ScanSource? source, ColumnShape shape, double unit, Func<VarianceState, double?> finish)
+        where TValue : unmanaged, INumberBase<TValue>
     {
         double center = 0;
         if (source is not null && source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max))
@@ -326,7 +363,7 @@ internal static class Aggregators
             center = double.IsFinite(middle) ? middle : 0;
         }
 
-        return new VarianceState { Center = center, Unit = unit };
+        return new FixedSlot<TValue, VarianceState, VarianceOp<TValue>, double?>(shape.Kind, finish, new VarianceOp<TValue>(center, unit));
     }
 
     private static double Number(Expressions.FilterLiteral bound, double unit) => bound.Kind switch
@@ -339,7 +376,7 @@ internal static class Aggregators
 
     internal static Sym<T?> Extreme<T>(ColumnShape shape, bool max)
     {
-        Func<AggregateSlot<T?>> create = shape.Kind switch
+        Func<ScanSource?, AggregateSlot<T?>> create = shape.Kind switch
         {
             StorageKind.Primitive => shape.PType switch
             {
@@ -356,10 +393,10 @@ internal static class Aggregators
                 _ => Extreme<double, T>(shape, max),
             },
             StorageKind.Decimal => Extreme<Int128, T>(shape, max),
-            StorageKind.Decimal256 => OrderedExtreme<Int256, T>(shape, max),
+            StorageKind.Decimal256 => Unsourced(OrderedExtreme<Int256, T>(shape, max)),
             StorageKind.Uuid => Extreme<UInt128, T>(shape, max),
-            StorageKind.Bool => BoolExtreme<T>(shape, max),
-            StorageKind.Bytes => () => new BytesExtremeSlot<T?>(shape, max),
+            StorageKind.Bool => Unsourced(BoolExtreme<T>(shape, max)),
+            StorageKind.Bytes => Unsourced<T?>(() => new BytesExtremeSlot<T?>(shape, max)),
             _ => throw shape.Unsupported(max ? "a maximum" : "a minimum"),
         };
         return new Sym<T?>(new AggregateNode<T?>(max ? AggregateKind.Max : AggregateKind.Min, shape, create, (StatisticsView view, out T? value) => SettleExtreme(shape, max, view, out value)));
@@ -413,16 +450,67 @@ internal static class Aggregators
         }
     }
 
-    private static Func<AggregateSlot<T?>> Extreme<TValue, T>(ColumnShape shape, bool max)
-        where TValue : unmanaged, INumber<TValue>
+    /// <summary>
+    /// The state of an extreme: the value alone, from a seed no row holds, where the column leaves one
+    /// (<see cref="Unreached"/>); the value and whether one was seen otherwise.
+    /// </summary>
+    private static Func<ScanSource?, AggregateSlot<T?>> Extreme<TValue, T>(ColumnShape shape, bool max)
+        where TValue : unmanaged, INumber<TValue>, IMinMaxValue<TValue>
     {
         Func<ExtremeState<TValue>, T?> finish = s => s.Has ? StorageValues.ToClr<TValue, T>(s.Value, shape) : default;
-        if (max)
+        return source =>
         {
-            return () => new FixedSlot<TValue, ExtremeState<TValue>, MaxOp<TValue>, T?>(shape.Kind, finish);
+            if (!Unreached(source, shape, max, out TValue seed))
+            {
+                return max
+                    ? new FixedSlot<TValue, ExtremeState<TValue>, MaxOp<TValue>, T?>(shape.Kind, finish)
+                    : new FixedSlot<TValue, ExtremeState<TValue>, MinOp<TValue>, T?>(shape.Kind, finish);
+            }
+
+            // A group still at the seed, or at NaN, saw no value.
+            Func<TValue, T?> value = s => TValue.IsNaN(s) || s == seed ? default : StorageValues.ToClr<TValue, T>(s, shape);
+            return max
+                ? new FixedSlot<TValue, TValue, SeededMaxOp<TValue>, T?>(shape.Kind, value, seed)
+                : new FixedSlot<TValue, TValue, SeededMinOp<TValue>, T?>(shape.Kind, value, seed);
+        };
+    }
+
+    /// <summary>
+    /// The value an extreme's state starts from, which says that no value was seen, when no row of the
+    /// source can hold it: NaN for a float, which no add keeps; for a decimal of 38 digits or fewer, the
+    /// end of 128 bits, past all of them; for an integer, the end of its range the extreme moves away
+    /// from, where the statistics prove the column stops short of it. A uuid may hold any 128 bits.
+    /// </summary>
+    private static bool Unreached<TValue>(ScanSource? source, ColumnShape shape, bool max, out TValue seed)
+        where TValue : unmanaged, INumber<TValue>, IMinMaxValue<TValue>
+    {
+        if (typeof(TValue) == typeof(double) || typeof(TValue) == typeof(float) || typeof(TValue) == typeof(Half))
+        {
+            seed = TValue.CreateTruncating(double.NaN);
+            return true;
         }
 
-        return () => new FixedSlot<TValue, ExtremeState<TValue>, MinOp<TValue>, T?>(shape.Kind, finish);
+        seed = max ? TValue.MinValue : TValue.MaxValue;
+        if (shape.Kind == StorageKind.Decimal)
+        {
+            return true;
+        }
+
+        if (shape.Kind != StorageKind.Primitive || source is null
+            || !source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral low, out Expressions.FilterLiteral high))
+        {
+            return false;
+        }
+
+        // The column's bound on the seed's side, which must stop short of it.
+        Expressions.FilterLiteral bound = max ? low : high;
+        Int128 end = Int128.CreateTruncating(seed);
+        return bound.Kind switch
+        {
+            Expressions.FilterLiteralKind.Signed => max ? bound.SignedValue > end : bound.SignedValue < end,
+            Expressions.FilterLiteralKind.Unsigned => max ? bound.UnsignedValue > end : bound.UnsignedValue < end,
+            _ => false,
+        };
     }
 
     private static Func<AggregateSlot<T?>> OrderedExtreme<TValue, T>(ColumnShape shape, bool max)

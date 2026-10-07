@@ -96,9 +96,74 @@ internal struct IndexedSum
                 return 0;
             }
 
-            Int128 total = ((Int128)M0 << (2 * Width)) + ((Int128)M1 << Width) + M2;
-            return Round(total, (Width * (top - 2)) + Lowest);
+            // The bins' total in two words, each bin sign-extended and shifted into place, added with
+            // their carries: the shifts of an Int128 were calls to its operators.
+            ulong low = (ulong)M0 << (2 * Width);
+            ulong high = (ulong)(M0 >> (64 - (2 * Width)));
+            Add(ref high, ref low, (ulong)(M1 >> (64 - Width)), (ulong)M1 << Width);
+            Add(ref high, ref low, (ulong)(M2 >> 63), (ulong)M2);
+            return Round(high, low, (Width * (top - 2)) + Lowest);
         }
+    }
+
+    /// <summary>Adds the word pair (<paramref name="addHigh"/>, <paramref name="addLow"/>) to (<paramref name="high"/>, <paramref name="low"/>), the low word's carry into the high.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Add(ref ulong high, ref ulong low, ulong addHigh, ulong addLow)
+    {
+        ulong sum = low + addLow;
+        high += addHigh + (sum < low ? 1UL : 0UL);
+        low = sum;
+    }
+
+    /// <summary>
+    /// The value of the two's complement total (<paramref name="high"/>, <paramref name="low"/>) units of
+    /// <c>2^exponent</c>, rounded to the nearest double, ties to even, as <see cref="Round(Int128, int)"/>:
+    /// in words while fewer than 64 bits are dropped, the round bit and the bits below it read off the
+    /// low word; through the 128-bit rounding past them.
+    /// </summary>
+    internal static double Round(ulong high, ulong low, int exponent)
+    {
+        if ((high | low) == 0)
+        {
+            return 0;
+        }
+
+        bool negative = (long)high < 0;
+        if (negative)
+        {
+            low = ~low + 1;
+            high = ~high + (low == 0 ? 1UL : 0UL);
+        }
+
+        int length = high != 0 ? 128 - BitOperations.LeadingZeroCount(high) : 64 - BitOperations.LeadingZeroCount(low);
+        int leading = length - 1 + exponent;
+        int drop = Math.Max(leading - 52, Lowest) - exponent;
+        ulong kept;
+        if (drop <= 0)
+        {
+            // At most 53 bits: the low word holds them all, exact as a double.
+            kept = low;
+        }
+        else if (drop < 64)
+        {
+            kept = (low >> drop) | (high << (64 - drop));
+            ulong round = (low >> (drop - 1)) & 1;
+            ulong below = low & ((1UL << (drop - 1)) - 1);
+            if (round != 0 && (below != 0 || (kept & 1) != 0))
+            {
+                kept++;
+            }
+
+            exponent += drop;
+        }
+        else
+        {
+            double wide = Round(new Int128(high, low), exponent);
+            return negative ? -wide : wide;
+        }
+
+        double result = Math.ScaleB((double)kept, exponent);
+        return negative ? -result : result;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -477,14 +542,16 @@ internal struct IndexedSum
 internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
     where TValue : unmanaged, INumberBase<TValue>
 {
-    public static IndexedSum Seed() => default;
+    public IndexedSum Seed() => default;
 
-    public static void Add(ref IndexedSum state, TValue value) => state.Add(double.CreateTruncating(value));
+    public void Add(ref IndexedSum state, TValue value) => state.Add(double.CreateTruncating(value));
 
-    public static void AddWeighted(ref IndexedSum state, TValue value, long count) => state.AddWeighted(double.CreateTruncating(value), count);
+    public void AddSelected(ref IndexedSum state, TValue value) => Add(ref state, value);
+
+    public void AddWeighted(ref IndexedSum state, TValue value, long count) => state.AddWeighted(double.CreateTruncating(value), count);
 
     [SkipLocalsInit]
-    public static void AddSpan(ref IndexedSum state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref IndexedSum state, ReadOnlySpan<TValue> values)
     {
         if (typeof(TValue) == typeof(double))
         {
@@ -506,13 +573,13 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
         }
     }
 
-    public static void Merge(ref IndexedSum into, in IndexedSum other) => into.Merge(in other);
+    public void Merge(ref IndexedSum into, in IndexedSum other) => into.Merge(in other);
 
-    public static double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
+    public double? Mean(in IndexedSum state) => state.Count == 0 ? null : state.Value / state.Count;
 
     /// <remarks>The rows left out read as zero, which no bin takes anything of, and come off the count.</remarks>
     [SkipLocalsInit]
-    public static void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref IndexedSum state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         selected = selected[..block.Length];

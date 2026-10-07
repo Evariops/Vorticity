@@ -9,7 +9,24 @@ namespace Vorticity.Benchmarks.Queries;
 /// <param name="Name">The name the tables and the references use.</param>
 /// <param name="Query">One run over the open file.</param>
 /// <param name="ProbeEvery">The answers between two memory probes in the memory pass.</param>
-internal sealed record Scenario(string Name, Func<VortexFile, Run, Task<long>> Query, int ProbeEvery = 1);
+/// <param name="Matrix">The high-cardinality matrices the query belongs to (<c>--matrix</c>).</param>
+internal sealed record Scenario(string Name, Func<VortexFile, Run, Task<long>> Query, int ProbeEvery = 1, Matrix Matrix = Matrix.None);
+
+/// <summary>
+/// The matrices of the high-cardinality bench: the small one, the three distributions at 10³ and
+/// 10⁶ groups, belongs to the full one too, every fixture from 10³ to 10⁷ groups.
+/// </summary>
+internal enum Matrix
+{
+    /// <summary>In neither.</summary>
+    None,
+
+    /// <summary>In the small matrix, which every A/B runs, and the full one.</summary>
+    Small,
+
+    /// <summary>In the full matrix alone.</summary>
+    Full,
+}
 
 /// <summary>
 /// The queries, against the surface as it stands. Each returns a number its work depends on, so that

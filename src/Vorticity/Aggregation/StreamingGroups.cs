@@ -57,11 +57,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     // Each filter on groups and what it reads their results into, by the operator's place.
     private GroupSelection.GroupFilterRun?[]? _filters;
 
-    // On several lanes: the ranges grouped side by side, what each did, and the time spent
-    // following them.
+    // On several lanes: the ranges grouped side by side, what each did, the time spent following
+    // them, and the numbers of a range's groups past those every thread shares.
     private StreamingRanges? _ranges;
     private List<AggregationRun.Lane>? _lanes;
     private long _mergeTicks;
+    private int[]? _numbers;
 
     // On a key its zones prove final as the read goes: the floors, the first row not read yet, and
     // the ranges' rows when they go side by side.
@@ -69,6 +70,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private long _nextRow;
     private RowRange[] _rangeRows = [];
     private int _followed;
+
+    // What the stream's tables hold, reserved in its session's budget as they grow, its lanes' working
+    // memory admitted first; given back when the stream ends.
+    private QueryMemory? _memory;
 
     internal StreamingGroupBatches(AggregationQuery query, CancellationToken cancellationToken, ZoneFinality? zones = null)
     {
@@ -213,8 +218,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 }
 
                 long merging = Stopwatch.GetTimestamp();
-                _partition!.Follow(range);
+                _partition!.Follow(range, ref _numbers);
                 _mergeTicks += Stopwatch.GetTimestamp() - merging;
+
+                // The range's groups live in the partition now: its tables go, and what it held.
+                range.LetGo();
+                _partition.Recount();
                 _nextRow = _rangeRows[_followed++].End;
                 (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd));
                 _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
@@ -243,8 +252,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     {
         _drained = true;
         _query.Plan.LastRun = _lanes is null
-            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0)
-            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count);
+            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0, _partition.Footprint)
+            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count, _partition!.Footprint);
+        _query.Plan.LastKeyBlocks = _partition.Keys!.Blocks;
+        _query.Plan.LastPeakBytes = _memory?.Peak ?? 0;
         await CloseAsync(all: true).ConfigureAwait(false);
     }
 
@@ -260,6 +271,9 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         {
             await _inner.DisposeAsync().ConfigureAwait(false);
         }
+
+        // Every range awaited: none reserves any more.
+        _memory?.Dispose();
     }
 
     private async ValueTask StartAsync()
@@ -267,8 +281,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationHost host = _query.Host;
         host.Begin();
         _begun = true;
+        _memory = new QueryMemory(host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         _started = Stopwatch.GetTimestamp();
         _query.PeakGroups = 0;
+        _query.Plan.LastGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
@@ -292,7 +308,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         // The streaming component is sorted, which its part of a composite key reads as runs; a key
         // its zones prove final is not, and is grouped as any other.
-        KeyFacts facts = AggregationEngine.Facts(host.Source, plan.Keys);
+        KeyFacts facts = await AggregationEngine.FactsAsync(host.Source, plan.Keys, _cancellationToken).ConfigureAwait(false);
         bool runs = _zones is null && plan.Keys.Length == 1;
         if (_zones is null)
         {
@@ -300,7 +316,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _partition = new AggregationPartition(
-            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: runs, streaming, host.Source, facts)
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: runs, streaming, host.Source, facts, memory: _memory)
         {
             Backward = pass.Backward,
         };
@@ -315,10 +331,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             pass = settling.Pass(pass);
         }
 
-        _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
+        _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []) { Memory = _memory };
         int degree = pass.Options.DegreeOfParallelism > 0 ? pass.Options.DegreeOfParallelism : host.Source.Session.Options.MaxDegreeOfParallelism;
         if (descending || AggregationEngine.StreamingRanges(host.Source, pass, degree) is not { } ranges)
         {
+            AggregationEngine.Admit(_memory, 1, pass.Options.BatchRows);
             if (settling is not null)
             {
                 _partition.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -342,13 +359,14 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _pass = pass;
         _rangeRows = ranges;
         ScanSpec lane = pass with { Options = pass.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
+        QueryMemory memory = _memory;
         _ranges = new StreamingRanges(
             ranges,
-            degree,
+            AggregationEngine.Admit(memory, degree, pass.Options.BatchRows),
             async (rows, token) =>
             {
                 AggregationPartition range = new AggregationPartition(
-                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: runs, streaming, host.Source, facts);
+                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: runs, streaming, host.Source, facts, memory: memory);
                 if (settling is not null)
                 {
                     range.Settle(settling, rows);
@@ -417,6 +435,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private async ValueTask CloseAsync(bool all)
     {
         Close(all);
+        _query.Plan.LastGroups += _closedCount;
         if (_closedCount == 0)
         {
             return;
@@ -466,6 +485,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     // Descending, the batches come greatest first, and the groups of one ascend.
                     (int[] sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
                     sorted.AsSpan(0, sortedCount).CopyTo(_closed);
+                    _memory?.LetGo((long)sortedCount * sizeof(int));
                     count = sortedCount;
                     break;
                 }
@@ -519,6 +539,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     private void Emit()
     {
+        if (_current is null)
+        {
+            _query.Plan.LastFirstBatchTicks = Stopwatch.GetTimestamp() - _started;
+        }
+
         int count = Math.Min(_batchRows, _closedCount - _closedNext);
         ReadOnlySpan<int> groups = _closed.AsSpan(_closedNext, count);
         StructStore store = Store();
@@ -571,6 +596,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         {
             _ended = true;
             _query.Host.End();
+        }
+
+        // On one lane nothing runs beside the stream; ranges in flight are awaited when it is disposed.
+        if (_ranges is null)
+        {
+            _memory?.Dispose();
         }
     }
 }

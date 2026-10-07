@@ -8,35 +8,23 @@ namespace Vorticity.Aggregating;
 /// keeps its own, and the merge keeps the earlier range's first and the later range's last, so the
 /// row is the same at every degree.
 /// </summary>
-internal sealed class RowSlot(bool last) : AggregateSlot<long>
+internal sealed class RowSlot(bool last) : RecordSlot<long, long>
 {
-    private long[] _rows = [];
-    private int _groups;
-
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _rows.Length)
-        {
-            Array.Resize(ref _rows, Scratch.Capacity(groups, _rows.Length));
-        }
-
-        _rows.AsSpan(_groups, Math.Max(groups - _groups, 0)).Fill(-1);
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override long Seed => -1;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         int row = last ? Last(input.Selection, start, end) : First(input.Selection, start, end);
         if (row >= 0)
         {
-            Choose(ref _rows[group], input.StartRow + row);
+            Choose(ref State(group), input.StartRow + row);
         }
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
-        long[] rows = _rows;
-        RowCursor cursor = new RowCursor(input.Selection, 0, input.Rows);
+        StateView<long> rows = States;
+        RowCursor cursor = new RowCursor(input.Selection, input.Start, input.End);
         while (cursor.Next(out int row))
         {
             Choose(ref rows[groups[row]], input.StartRow + row);
@@ -45,27 +33,19 @@ internal sealed class RowSlot(bool last) : AggregateSlot<long>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        long[] rows = ((RowSlot)other)._rows;
+        StateView<long> rows = States;
+        StateView<long> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            if (rows[from[i]] >= 0)
+            long row = others[from[i]];
+            if (row >= 0)
             {
-                Choose(ref _rows[into[i]], rows[from[i]]);
+                Choose(ref rows[into[i]], row);
             }
         }
     }
 
-    internal override long Result(int group) => _rows[group];
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _rows[i] = _rows[groups[i]];
-        }
-
-        _groups = groups.Length;
-    }
+    internal override long Result(int group) => State(group);
 
     /// <summary>The first selected row of [<paramref name="start"/>, <paramref name="end"/>), or -1.</summary>
     internal static int First(ReadOnlySpan<ulong> selection, int start, int end)
@@ -112,87 +92,71 @@ internal sealed class RowSlot(bool last) : AggregateSlot<long>
 /// its position and the value: a null or a NaN is never one, and of equal values the first row in
 /// file order wins, in a range as in the merge, so the row is the same at every degree.
 /// </summary>
-internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : AggregateSlot<long>
+internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : RecordSlot<ChosenRow<TValue>, long>
     where TValue : unmanaged, INumberBase<TValue>, IComparisonOperators<TValue, TValue, bool>
 {
-    private TValue[] _best = [];
-    private long[] _rows = [];
-    private int _groups;
     private ValuesCache<TValue> _values;
     private MaskCache _mask;
 
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _rows.Length)
-        {
-            int length = Scratch.Capacity(groups, _rows.Length);
-            Array.Resize(ref _rows, length);
-            Array.Resize(ref _best, length);
-        }
-
-        _rows.AsSpan(_groups, Math.Max(groups - _groups, 0)).Fill(-1);
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override ChosenRow<TValue> Seed => new ChosenRow<TValue> { Row = -1 };
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, kind, out ReadOnlySpan<ulong> valid);
         RowCursor cursor = new RowCursor(_mask.And(input, input.Selection, valid), start, end);
+        ref ChosenRow<TValue> chosen = ref State(group);
         while (cursor.Next(out int row))
         {
-            Consider(group, values[row], input.StartRow + row);
+            Consider(ref chosen, values[row], input.StartRow + row);
         }
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, kind, out ReadOnlySpan<ulong> valid);
-        RowCursor cursor = new RowCursor(_mask.And(input, input.Selection, valid), 0, input.Rows);
+        RowCursor cursor = new RowCursor(_mask.And(input, input.Selection, valid), input.Start, input.End);
+        StateView<ChosenRow<TValue>> states = States;
         while (cursor.Next(out int row))
         {
-            Consider(groups[row], values[row], input.StartRow + row);
+            Consider(ref states[groups[row]], values[row], input.StartRow + row);
         }
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        ChosenBySlot<TValue> source = (ChosenBySlot<TValue>)other;
+        StateView<ChosenRow<TValue>> states = States;
+        StateView<ChosenRow<TValue>> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            int g = from[i];
-            if (source._rows[g] >= 0)
+            ref ChosenRow<TValue> source = ref others[from[i]];
+            if (source.Row >= 0)
             {
-                Consider(into[i], source._best[g], source._rows[g]);
+                Consider(ref states[into[i]], source.Best, source.Row);
             }
         }
     }
 
-    internal override long Result(int group) => _rows[group];
+    internal override long Result(int group) => State(group).Row;
 
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _rows[i] = _rows[groups[i]];
-            _best[i] = _best[groups[i]];
-        }
-
-        _groups = groups.Length;
-    }
-
-    private void Consider(int group, TValue value, long row)
+    private void Consider(ref ChosenRow<TValue> chosen, TValue value, long row)
     {
         if (TValue.IsNaN(value))
         {
             return;
         }
 
-        ref long kept = ref _rows[group];
-        ref TValue best = ref _best[group];
-        if (kept < 0 || (max ? value > best : value < best) || (value == best && row < kept))
+        if (chosen.Row < 0 || (max ? value > chosen.Best : value < chosen.Best) || (value == chosen.Best && row < chosen.Row))
         {
-            best = value;
-            kept = row;
+            chosen.Best = value;
+            chosen.Row = row;
         }
     }
+}
+
+/// <summary>A group's chosen row so far, its position in the source, -1 before any, and the value that chose it.</summary>
+internal struct ChosenRow<TValue>
+    where TValue : unmanaged
+{
+    internal long Row;
+    internal TValue Best;
 }

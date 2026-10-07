@@ -94,8 +94,10 @@ daily from the hourly, `CountAsync` and the other single answers read it, and a 
 `writer.WriteAsync(result)`, a batch at a time.
 
 Groups arrive in key order, nulls last, when the key comes from a dictionary or from a column the
-statistics say is sorted, and in no promised order otherwise; a null key is a group of its own.
-Memory follows the number of groups, 8 000 for this composite key, not the number of rows.
+statistics say is sorted. Otherwise their order is not defined: on one thread they come in the order
+their keys were first met, on more, part by part of the key space, cut the same way by every run of a
+query in one process; an order to rely on is asked for with `OrderBy`. A null key is a group of its
+own. Memory follows the number of groups, 8 000 for this composite key, not the number of rows.
 
 ## A filtered group
 

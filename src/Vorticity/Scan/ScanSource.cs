@@ -49,6 +49,13 @@ internal sealed record ScanSpec
     internal bool SinkDecodes { get; init; }
 
     /// <summary>
+    /// Whether a scan of one lane reads its next splits while it decodes one, over a source whose read
+    /// is a round trip: an aggregation's lanes, which decode nothing ahead
+    /// and read every split they are given, so that no read ahead is wasted.
+    /// </summary>
+    internal bool ReadAhead { get; init; }
+
+    /// <summary>
     /// Whether the consumer reads no row's place, as an aggregation folds values without asking
     /// where they lie, so that a source may leave a row out of a batch by its selection alone rather
     /// than gather the others: the rows kept are right, their numbering from the batch's start is not.
@@ -127,6 +134,20 @@ internal abstract class ScanSource
     /// whose statistics say a column is sorted needs no asking.
     /// </summary>
     internal virtual bool OrdersOnAsking(FieldExpr column) => false;
+
+    /// <summary>
+    /// The smallest and the largest value of an integer column of a key, as the source's statistics
+    /// bound them without a read: what bounds a table of its groups by value (<see cref="Aggregating.FixedKeys{TValue}"/>);
+    /// null when nothing in hand bounds them.
+    /// </summary>
+    internal virtual Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => null;
+
+    /// <summary>
+    /// <see cref="Bounds"/> once the source read what its scan reads first anyway: a dataset's roots,
+    /// whose summaries bound its objects, and no request the scan would not make.
+    /// </summary>
+    internal virtual ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken) =>
+        new ValueTask<Aggregating.KeyBounds?>(Bounds(key));
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -139,6 +160,9 @@ internal sealed class FileScanSource : ScanSource
     internal VortexFile File => _file;
 
     internal override VortexSchema Schema => _file.Schema;
+
+    /// <summary>The file statistics' extremes of the column, when they hold them exactly.</summary>
+    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => Aggregating.AggregationEngine.FileBounds(_file, key);
 
     internal override VortexSession Session => _file.Session;
 
@@ -318,6 +342,11 @@ internal sealed class FileScanSource : ScanSource
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
         builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings, spec.SinkDecodes);
+        if (spec.ReadAhead)
+        {
+            builder.WithReadAhead();
+        }
+
         if (spec.Pruned)
         {
             builder.WithPruned(spec.Live);

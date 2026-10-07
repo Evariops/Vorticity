@@ -66,5 +66,11 @@ internal static class References
         ("dataset of 16 objects against its file, degree N", "dataset group by city, count avg, 16 objects, degree N", "group by city (run-end), count avg, degree N", 1.000),
         ("dataset of 16 objects against its file", "dataset group by city, count avg, 16 objects", "group by city (run-end), count avg", 1.093),
         ("first batch of a dataset, 16 objects against 1", "dataset first batch, full scan, 16 objects", "dataset first batch, full scan, 1 object", 1.000),
+
+        // The in-cache path against the loop a caller would write by hand, an open-addressing table
+        // with the states inline, under 2. A thousand integer keys the statistics bound go through a table of groups; a thousand at a
+        // stride through the hashed index.
+        ("in-cache path against the hand kernel, 10^3 keys", "hc random 1e3 small, count sum", "hand kernel random 1e3 small, count sum", null),
+        ("in-cache path against the hand kernel, 10^3 keys at a stride", "hc strided 1e3 small, count sum", "hand kernel strided 1e3 small, count sum", null),
     ];
 }

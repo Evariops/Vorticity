@@ -2,6 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Writing;
 
@@ -12,50 +15,55 @@ namespace Vorticity.Aggregating;
 /// a constant as one weighted value, a run-end block a weighted value per run, a dictionary block a
 /// weighted value per distinct code, and a canonical block through the dense kernels.
 /// </summary>
-internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TResult>, IMeanSlot
+internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TState, TResult>, IMeanSlot
     where TValue : unmanaged
-    where TOp : IValueOp<TValue, TState>
+    where TOp : struct, IValueOp<TValue, TState>
 {
     private readonly StorageKind _kind;
     private readonly Func<TState, TResult> _finish;
     private readonly TState _seed;
-    private TState[] _states = [];
-    private int _groups;
+    private readonly TOp _op;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private int[] _counts = [];
 
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish)
-        : this(kind, finish, TOp.Seed())
+        : this(kind, finish, default(TOp))
     {
     }
 
-    /// <summary>A slot whose groups start from <paramref name="seed"/>: a state that carries what its run fixed, as a variance its center.</summary>
+    /// <summary>A slot whose op holds what the run fixed for every group, as a variance its center.</summary>
+    internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TOp op)
+        : this(kind, finish, op.Seed(), op)
+    {
+    }
+
+    /// <summary>A slot whose groups start from <paramref name="seed"/>: a value no row holds, for an extreme that keeps no flag.</summary>
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed)
+        : this(kind, finish, seed, default)
+    {
+    }
+
+    private FixedSlot(StorageKind kind, Func<TState, TResult> finish, TState seed, TOp op)
     {
         _kind = kind;
         _finish = finish;
         _seed = seed;
+        _op = op;
     }
 
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _states.Length)
-        {
-            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
-        }
+    /// <summary>
+    /// Whether the answer is the state converted with an overflow check, <c>TResult.CreateChecked</c>: the
+    /// state itself when it is the answer's type, which the results then copy with no call a group.
+    /// </summary>
+    internal bool Checked { get; init; }
 
-        for (int g = _groups; g < groups; g++)
-        {
-            _states[g] = _seed;
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override TState Seed => _seed;
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
-        ref TState state = ref _states[group];
+        TOp op = _op;
+        ref TState state = ref State(group);
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         switch (FixedReader.EncodingOf(arena, node, _kind))
@@ -65,7 +73,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 int count = RowMasks.Count(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 if (count > 0)
                 {
-                    TOp.AddWeighted(ref state, FixedReader.Constant<TValue>(arena, node, _kind), count);
+                    op.AddWeighted(ref state, FixedReader.Constant<TValue>(arena, node, _kind), count);
                 }
 
                 return;
@@ -86,7 +94,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                         int count = RowMasks.Count(rows, Math.Max(runStart, start), Math.Min(runEnd, end));
                         if (count > 0)
                         {
-                            TOp.AddWeighted(ref state, values[r], count);
+                            op.AddWeighted(ref state, values[r], count);
                         }
                     }
 
@@ -100,14 +108,14 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-                FoldCodes(ref state, codes, dictionary, valid, _rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
+                FoldCodes(in op, ref state, codes, dictionary, valid, _rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 return;
             }
 
             default:
             {
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
-                Accumulate(ref state, values, _rows.And(input, input.Selection, valid), start, end);
+                Accumulate(in op, ref state, values, _rows.And(input, input.Selection, valid), start, end);
                 return;
             }
         }
@@ -118,7 +126,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     /// range has fewer rows than the dictionary has values, a weighted value per code met otherwise.
     /// </summary>
     private void FoldCodes(
-        ref TState state, ReadOnlySpan<uint> codes, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid, ReadOnlySpan<ulong> rows, int start, int end)
+        in TOp op, ref TState state, ReadOnlySpan<uint> codes, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid, ReadOnlySpan<ulong> rows, int start, int end)
     {
         if (end - start < dictionary.Length)
         {
@@ -129,7 +137,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 int code = (int)codes[row];
                 if (StorageValues.IsValid(valid, code))
                 {
-                    TOp.Add(ref state, dictionary[code]);
+                    op.Add(ref state, dictionary[code]);
                 }
             }
 
@@ -149,14 +157,15 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
         {
             if (counts[code] > 0 && StorageValues.IsValid(valid, code))
             {
-                TOp.AddWeighted(ref state, dictionary[code], counts[code]);
+                op.AddWeighted(ref state, dictionary[code], counts[code]);
             }
         }
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
-        TState[] states = _states;
+        TOp op = _op;
+        StateView<TState> states = States;
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         switch (FixedReader.EncodingOf(arena, node, _kind))
@@ -164,10 +173,10 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.Constant:
             {
                 TValue value = FixedReader.Constant<TValue>(arena, node, _kind);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
-                    TOp.Add(ref states[groups[row]], value);
+                    op.Add(ref states[groups[row]], value);
                 }
 
                 return;
@@ -177,13 +186,13 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     int code = (int)codes[row];
                     if (StorageValues.IsValid(valid, code))
                     {
-                        TOp.Add(ref states[groups[row]], dictionary[code]);
+                        op.Add(ref states[groups[row]], dictionary[code]);
                     }
                 }
 
@@ -193,15 +202,95 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             default:
             {
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+                ReadOnlySpan<ulong> mask = _rows.And(input, input.Selection, valid);
+                if (mask.IsEmpty)
+                {
+                    // Every row and no null: a loop with nothing but the fold, the cursor's test of its mask
+                    // out of it; with no branch on the values while the groups have seen few rows.
+                    if (input.Settled)
+                    {
+                        for (int row = input.Start; row < input.End; row++)
+                        {
+                            op.Add(ref states[groups[row]], values[row]);
+                        }
+                    }
+                    else
+                    {
+                        for (int row = input.Start; row < input.End; row++)
+                        {
+                            op.AddSelected(ref states[groups[row]], values[row]);
+                        }
+                    }
+
+                    return;
+                }
+
+                RowCursor rows = new RowCursor(mask, input.Start, input.End);
                 while (rows.Next(out int row))
                 {
-                    TOp.Add(ref states[groups[row]], values[row]);
+                    op.Add(ref states[groups[row]], values[row]);
                 }
 
                 return;
             }
         }
+    }
+
+    internal override bool CarriesCount => true;
+
+    internal override bool StepRowsCounted(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot count) => count switch
+    {
+        CountSlot<uint> narrow => StepCounted(in input, groups, narrow.Counts),
+        CountSlot<long> wide => StepCounted(in input, groups, wide.Counts),
+        _ => false,
+    };
+
+    /// <summary>The window's rows folded and counted in one pass: every row selected, a column of values read whole, none null.</summary>
+    private bool StepCounted<TCount>(in BatchInput input, ReadOnlySpan<int> groups, StateView<TCount> counts)
+        where TCount : unmanaged, IBinaryInteger<TCount>
+    {
+        CanonicalArena arena = input.Arena;
+        int node = input.Node;
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<TState>() || !input.Selection.IsEmpty
+            || FixedReader.EncodingOf(arena, node, _kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
+        if (!_rows.And(input, input.Selection, valid).IsEmpty)
+        {
+            return false;
+        }
+
+        // Both states in one record, the count's beside the sum's: a row's record reached once, its
+        // start checked, the rows' groups and values read within the window the batch holds.
+        TOp op = _op;
+        StateView<TState> states = States;
+        nint state = states.Offset;
+        nint count = counts.Offset;
+        ref int groupOf = ref MemoryMarshal.GetReference(groups);
+        ref TValue valueOf = ref MemoryMarshal.GetReference(values);
+        if (input.Settled)
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
+            }
+        }
+        else
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -214,7 +303,8 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override void StepRanges(in BatchInput input, GroupRanges ranges)
     {
-        TState[] states = _states;
+        TOp op = _op;
+        StateView<TState> states = States;
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         ReadOnlySpan<int> starts = ranges.Starts;
@@ -231,7 +321,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                     int count = RowMasks.Count(rows, starts[r], ends[r]);
                     if (count > 0)
                     {
-                        TOp.AddWeighted(ref states[groups[r]], value, count);
+                        op.AddWeighted(ref states[groups[r]], value, count);
                     }
                 }
 
@@ -267,7 +357,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                             int count = RowMasks.Count(rows, Math.Max(atStart, start), Math.Min(atEnd, end));
                             if (count > 0)
                             {
-                                TOp.AddWeighted(ref state, values[at], count);
+                                op.AddWeighted(ref state, values[at], count);
                             }
                         }
 
@@ -285,7 +375,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 for (int r = 0; r < starts.Length; r++)
                 {
-                    FoldCodes(ref states[groups[r]], codes, dictionary, valid, rows, starts[r], ends[r]);
+                    FoldCodes(in op, ref states[groups[r]], codes, dictionary, valid, rows, starts[r], ends[r]);
                 }
 
                 return;
@@ -297,7 +387,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, valid);
                 for (int r = 0; r < starts.Length; r++)
                 {
-                    Accumulate(ref states[groups[r]], values, rows, starts[r], ends[r]);
+                    Accumulate(in op, ref states[groups[r]], values, rows, starts[r], ends[r]);
                 }
 
                 return;
@@ -307,26 +397,50 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        TState[] states = ((FixedSlot<TValue, TState, TOp, TResult>)other)._states;
+        TOp op = _op;
+        StateView<TState> states = States;
+        StateView<TState> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            TOp.Merge(ref _states[into[i]], in states[from[i]]);
+            op.Merge(ref states[into[i]], in others[from[i]]);
         }
     }
 
-    internal override TResult Result(int group) => _finish(_states[group]);
+    internal override TResult Result(int group) => _finish(State(group));
 
-    public double? Mean(int group) => TOp.Mean(in _states[group]);
-
-    internal override void Keep(ReadOnlySpan<int> groups)
+    /// <summary>The answers of <paramref name="groups"/> under one view of the records: a group at a time, each made its view, cost the reader a third of building a million of them.</summary>
+    internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
     {
-        for (int i = 0; i < groups.Length; i++)
+        StateView<TState> states = States;
+        if (typeof(TState) == typeof(TResult) && Checked)
         {
-            _states[i] = _states[groups[i]];
+            // A total of the answer's type: the state as it is, where the delegate cost a call a group.
+            for (int i = 0; i < groups.Length; i++)
+            {
+                TState state = states[groups[i]];
+                into[i] = Unsafe.As<TState, TResult>(ref state);
+            }
+
+            return;
         }
 
-        // The groups past them are seeded again when they are made.
-        _groups = groups.Length;
+        Func<TState, TResult> finish = _finish;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = finish(states[groups[i]]);
+        }
+    }
+
+    public double? Mean(int group) => _op.Mean(in State(group));
+
+    public void Means(ReadOnlySpan<int> groups, Span<double?> into)
+    {
+        StateView<TState> states = States;
+        TOp op = _op;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            into[i] = op.Mean(in states[groups[i]]);
+        }
     }
 
     /// <summary>
@@ -335,7 +449,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     /// value at a time elsewhere.
     /// </summary>
     [SkipLocalsInit]
-    internal static void Accumulate(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)
+    internal static void Accumulate(in TOp op, ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)
     {
         if (end <= start)
         {
@@ -344,7 +458,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
         if (rows.IsEmpty)
         {
-            TOp.AddSpan(ref state, values[start..end]);
+            op.AddSpan(ref state, values[start..end]);
             return;
         }
 
@@ -373,7 +487,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 full &= word == ulong.MaxValue;
                 if (count == WordFold.Run)
                 {
-                    Fold(ref state, values, run, w + 1 - count, full);
+                    Fold(in op, ref state, values, run, w + 1 - count, full);
                     count = 0;
                     full = true;
                 }
@@ -383,60 +497,115 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
             if (count > 0)
             {
-                Fold(ref state, values, run[..count], w - count, full);
+                Fold(in op, ref state, values, run[..count], w - count, full);
                 count = 0;
                 full = true;
             }
 
             while (word != 0)
             {
-                TOp.Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
+                op.Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
                 word &= word - 1;
             }
         }
 
         if (count > 0)
         {
-            Fold(ref state, values, run[..count], last + 1 - count, full);
+            Fold(in op, ref state, values, run[..count], last + 1 - count, full);
         }
     }
 
     /// <summary>The rows a run of words from word <paramref name="from"/> holds.</summary>
-    private static void Fold(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> run, int from, bool full)
+    private static void Fold(in TOp op, ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> run, int from, bool full)
     {
         ReadOnlySpan<TValue> block = values.Slice(from << 6, run.Length << 6);
         if (full)
         {
-            TOp.AddSpan(ref state, block);
+            op.AddSpan(ref state, block);
         }
         else
         {
-            TOp.AddWords(ref state, block, run);
+            op.AddWords(ref state, block, run);
         }
     }
 }
 
 /// <summary>The distinct non-null values of each group, one set for every group of the partition.</summary>
-internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
+internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSlot
     where TValue : unmanaged, IEquatable<TValue>
 {
     private readonly StorageKind _kind;
-    private readonly HashSet<DistinctEntry<TValue>> _seen = [];
+    private DistinctPairs<TValue> _pairs = new DistinctPairs<TValue>();
     private long[] _counts = [];
     private int _groups;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private CodeSet _distinct;
 
+    // The values of a slot of one group alone, a count over the whole scan, where a pair would take
+    // its group and its chain for nothing; null for a slot of groups, which holds pairs.
+    private DistinctValues<TValue>? _set;
+
+    // The values of the uniform column its first rows foretold (Foretell); 0 before.
+    private double _universe;
+
+    // The shelf the pairs and the counts grow from, under the query's memory.
+    private ArrayShelf? _shelf;
+
     internal FixedDistinctSlot(StorageKind kind) => _kind = kind;
+
+    internal override void Govern(ArrayShelf shelf)
+    {
+        _shelf = shelf;
+        _pairs.Govern(shelf);
+        _set?.Govern(shelf);
+    }
+
+    internal override void Ungrouped()
+    {
+        _set = new DistinctValues<TValue>();
+        _set.Govern(_shelf);
+    }
+
+    /// <summary>
+    /// The values a uniform column of <see cref="AggregationPartition.EstimatedValues"/> values makes
+    /// from <paramref name="expected"/> rows, reserved in the set: grown by doubling, it placed every value
+    /// again at each step, and took new memory each time, a fifth of the distinct users of a scan of 20M
+    /// visits at one lane, more than a quarter at fourteen.
+    /// </summary>
+    internal override void Foretell(long rows, long expected, QueryMemory? memory)
+    {
+        if (_set is not { Count: > 0 } set)
+        {
+            return;
+        }
+
+        double values = AggregationPartition.EstimatedValues(rows, set.Count);
+        _universe = values;
+        double foretold = double.IsPositiveInfinity(values) ? expected : values * -double.ExpM1(-expected / values);
+        long count = (long)Math.Min(foretold, expected);
+        if (count < 2 * set.Count || count > int.MaxValue / 4)
+        {
+            return;
+        }
+
+        // Past what the budget grants, the set grows as before.
+        if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count)))
+        {
+            return;
+        }
+
+        set.Reserve((int)count);
+    }
 
     internal override void EnsureGroups(int groups)
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
+            ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
+        _pairs.EnsureGroups(groups);
         _groups = Math.Max(_groups, groups);
     }
 
@@ -514,7 +683,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         {
             int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
             ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-            RowCursor coded = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+            RowCursor coded = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
             while (coded.Next(out int row))
             {
                 int code = (int)codes[row];
@@ -528,7 +697,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         }
 
         ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> validity);
-        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, validity), 0, input.Rows);
+        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, validity), input.Start, input.End);
         while (rows.Next(out int row))
         {
             Add(groups[row], values[row]);
@@ -537,45 +706,195 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        // The pairs are keyed by group: each one's group found in the groups merged, which are every
-        // one of the other's, or a part of them whose targets a table gives.
+        // Every group of the other: its pairs in the order they lie, each to its group's target. Some
+        // of them, a part of a parallel merge: their chains alone.
         FixedDistinctSlot<TValue> source = (FixedDistinctSlot<TValue>)other;
-        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
-        foreach (DistinctEntry<TValue> entry in source._seen)
+        if (_set is { } set)
         {
-            int target = targets[entry.Group];
-            if (target >= 0)
-            {
-                Add(target, entry.Value);
-            }
+            _counts[0] += set.MergeAll(source._set!);
+            return;
+        }
+
+        if (from.Length == source._groups)
+        {
+            _pairs.MergeAll(source._pairs, into, _counts);
+            return;
+        }
+
+        for (int i = 0; i < from.Length; i++)
+        {
+            _counts[into[i]] += _pairs.MergeGroup(source._pairs, from[i], into[i]);
         }
     }
 
     internal override long Result(int group) => _counts[group];
 
-    internal override void Keep(ReadOnlySpan<int> groups)
+    public long Pairs => _set?.Count ?? _pairs.Count;
+
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
-        int[] renumbered = new int[_groups];
-        Array.Fill(renumbered, -1);
-        for (int i = 0; i < groups.Length; i++)
+        if (_set is not null)
         {
-            renumbered[groups[i]] = i;
-            _counts[i] = _counts[groups[i]];
+            await MergeSetsInPartsAsync(slots, parts, degree, memory, cancellationToken).ConfigureAwait(false);
+            return;
         }
 
-        List<DistinctEntry<TValue>> kept = [];
-        foreach (DistinctEntry<TValue> entry in _seen)
+        DistinctPairs<TValue>[] all = new DistinctPairs<TValue>[slots.Length];
+        for (int p = 0; p < slots.Length; p++)
         {
-            if (renumbered[entry.Group] >= 0)
+            all[p] = ((FixedDistinctSlot<TValue>)slots[p])._pairs;
+        }
+
+        // Each lane's pairs placed by part, then each part's pairs from every lane made distinct.
+        int shift = 64 - BitOperations.Log2((uint)parts);
+        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[all.Length];
+        await SideBySide.RunAsync(all.Length, p => cuts[p] = all[p].Cut(maps[p], shift, parts), degree, cancellationToken).ConfigureAwait(false);
+        long[][] counts = new long[parts][];
+        await SideBySide.RunAsync(
+            parts,
+            part =>
             {
-                kept.Add(new DistinctEntry<TValue>(renumbered[entry.Group], entry.Value));
+                DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
+                distinct.EnsureGroups(groups);
+                long[] count = new long[groups];
+                for (int p = 0; p < all.Length; p++)
+                {
+                    (int[] placed, int[] starts) = cuts[p];
+                    int[] map = maps[p];
+                    DistinctPairs<TValue> lane = all[p];
+                    for (int i = starts[part]; i < starts[part + 1]; i++)
+                    {
+                        int group = map[lane.GroupAt(placed[i])];
+                        if (distinct.Add(group, lane.ValueAt(placed[i])))
+                        {
+                            count[group]++;
+                        }
+                    }
+                }
+
+                // The part's table, held until its pairs are counted.
+                long bytes = distinct.Footprint;
+                if (memory is not null && !memory.TryGrow(bytes))
+                {
+                    throw memory.Exceeded("merge of a distinct count", groups, bytes);
+                }
+
+                counts[part] = count;
+                memory?.Shrink(bytes);
+                memory?.Discard(bytes);
+            },
+            degree,
+            cancellationToken).ConfigureAwait(false);
+
+        EnsureGroups(groups);
+        Array.Clear(_counts);
+        foreach (long[] count in counts)
+        {
+            for (int group = 0; group < groups; group++)
+            {
+                _counts[group] += count[group];
             }
         }
 
-        _seen.Clear();
-        foreach (DistinctEntry<TValue> entry in kept)
+        // The pairs are counted: let go, their arrays given back.
+        _pairs.Release();
+        _pairs = new DistinctPairs<TValue>();
+        _pairs.Govern(_shelf);
+        _pairs.EnsureGroups(groups);
+    }
+
+    /// <summary>
+    /// The values of every lane's slot of one group made distinct by parts side by side, a part the
+    /// top bits of their hash: a run of homes, which a part's worker walks in every lane's slots, in
+    /// order, with nothing placed or cut before.
+    /// </summary>
+    private async Task MergeSetsInPartsAsync(AggregateSlot[] slots, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
+    {
+        DistinctValues<TValue>[] all = new DistinctValues<TValue>[slots.Length];
+        bool zero = false;
+        long most = 0;
+        long sum = 0;
+        double universe = 0;
+        for (int p = 0; p < slots.Length; p++)
         {
-            _seen.Add(entry);
+            FixedDistinctSlot<TValue> lane = (FixedDistinctSlot<TValue>)slots[p];
+            all[p] = lane._set!;
+            zero |= all[p].HoldsZero;
+            most = Math.Max(most, all[p].Count);
+            sum += all[p].Count;
+            universe = Math.Max(universe, lane._universe);
+        }
+
+        // A part's table reserves its share of the values every lane's make together: a uniform
+        // column's, each value in a lane by chance, K (1 - Π (1 - c / K)) of the K the lanes' first rows
+        // foretold, all of them when none repeated; with none foretold, the lane that holds the most.
+        // Grown by doubling from that lane's share, the parts' tables took a seventh of the cycles of
+        // the distinct users of a scan of 20M visits at fourteen lanes.
+        double union = most;
+        if (double.IsPositiveInfinity(universe))
+        {
+            union = sum;
+        }
+        else if (universe > 0)
+        {
+            double none = 0;
+            foreach (DistinctValues<TValue> lane in all)
+            {
+                none += Math.Log(Math.Max(0, 1 - (lane.Count / universe)));
+            }
+
+            union = Math.Clamp(-universe * double.ExpM1(none), most, sum);
+        }
+
+        int bits = BitOperations.Log2((uint)parts);
+        int share = (int)Math.Min(union / parts, int.MaxValue / 4);
+        long[] counts = new long[parts];
+        await SideBySide.RunAsync(
+            parts,
+            part =>
+            {
+                DistinctValues<TValue> distinct = new DistinctValues<TValue>(share, skip: bits);
+                foreach (DistinctValues<TValue> lane in all)
+                {
+                    distinct.AddPart(lane, part, bits);
+                }
+
+                // The part's table, held until its values are counted.
+                long bytes = distinct.Footprint;
+                if (memory is not null && !memory.TryGrow(bytes))
+                {
+                    throw memory.Exceeded("merge of a distinct count", 1, bytes);
+                }
+
+                counts[part] = distinct.Count;
+                memory?.Shrink(bytes);
+                memory?.Discard(bytes);
+            },
+            degree,
+            cancellationToken).ConfigureAwait(false);
+
+        // The value of zero bits, which no slot holds, once.
+        long count = zero ? 1 : 0;
+        foreach (long part in counts)
+        {
+            count += part;
+        }
+
+        _counts[0] = count;
+        _set!.Release();
+        _set = new DistinctValues<TValue>();
+        _set.Govern(_shelf);
+    }
+
+    /// <summary>The (group, value) pairs, or the values of a slot of one group, and the counts.</summary>
+    internal override long Footprint => (_set?.Footprint ?? _pairs.Footprint) + ((long)_counts.Length * sizeof(long));
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        _pairs.Keep(groups);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _counts[i] = _counts[groups[i]];
         }
 
         _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
@@ -620,7 +939,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
     private void Add(int group, TValue value)
     {
-        if (_seen.Add(new DistinctEntry<TValue>(group, value)))
+        if (_set is { } set ? set.Add(value) : _pairs.Add(group, value))
         {
             _counts[group]++;
         }
@@ -629,21 +948,25 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
 /// <summary>A value seen by one group.</summary>
 /// <remarks>
-/// Hashed under multipliers drawn once a process (<see cref="KeyHash.Chained"/>): the default hash
-/// of a 64-bit value folds its halves together, and a prime bucket count takes an integer's
-/// multiples to one bucket, so values could be built to share one chain of the set and make every
-/// insert a walk of the values before it. Equal values hash alike: every NaN and both zeros of a
-/// float are equal, so they are given one pattern of bits first.
+/// Hashed under seeds drawn once a process (<see cref="KeyHash.Pair"/>), the group the tag: the
+/// default hash of a 64-bit value folds its halves together, and a prime bucket count takes an
+/// integer's multiples to one bucket, so values could be built to share one run of a table and make
+/// every insert a walk of the values before it. Equal values hash alike: every NaN and both zeros of
+/// a float are equal, so they are given one pattern of bits first.
 /// </remarks>
 internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
     where TValue : unmanaged, IEquatable<TValue>
 {
+    /// <summary>The hash of the pair (<paramref name="group"/>, <paramref name="value"/>), for a table that probes linearly: good in its low bits.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public override int GetHashCode()
+    internal static ulong Hash(int group, TValue value)
     {
-        (ulong low, ulong high) = KeyWords.Of(Value);
-        return KeyHash.Chained(low, high, Group);
+        (ulong low, ulong high) = KeyWords.Of(value);
+        return KeyHash.Pair(low, high, group);
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public override int GetHashCode() => (int)Hash(Group, Value);
 }
 
 /// <summary>A fixed-width value as the words a hash reads.</summary>
@@ -681,13 +1004,23 @@ internal static class KeyWords
             return (words ^ (Unsafe.Add(ref words, 2) * 0x9E3779B97F4A7C15UL), Unsafe.Add(ref words, 1) ^ (Unsafe.Add(ref words, 3) * 0xC2B2AE3D27D4EB4FUL));
         }
 
+        if (Unsafe.SizeOf<TValue>() == 16)
+        {
+            // Its two words as they lie, the low first: the shift of a UInt128 by 64 stayed a call to its
+            // operator, a fiftieth of a group by of uuids.
+            Halves halves = Unsafe.BitCast<TValue, Halves>(value);
+            return (halves.Low, halves.High);
+        }
+
         return Unsafe.SizeOf<TValue>() switch
         {
             1 => (Unsafe.BitCast<TValue, byte>(value), 0),
             2 => (Unsafe.BitCast<TValue, ushort>(value), 0),
             4 => (Unsafe.BitCast<TValue, uint>(value), 0),
-            8 => (Unsafe.BitCast<TValue, ulong>(value), 0),
-            _ => ((ulong)Unsafe.BitCast<TValue, UInt128>(value), (ulong)(Unsafe.BitCast<TValue, UInt128>(value) >> 64)),
+            _ => (Unsafe.BitCast<TValue, ulong>(value), 0),
         };
     }
+
+    /// <summary>A value of sixteen bytes as its two words, the low one first, as a little-endian machine lays them out.</summary>
+    private readonly record struct Halves(ulong Low, ulong High);
 }

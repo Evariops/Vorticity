@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Hashing;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
@@ -13,22 +14,97 @@ public sealed class GroupHashTests
 {
     private const int CrowdedKeys = 4_096;
 
-    // Every value a * (2^32 + 1) has the same 64-bit hash, 0: a column of them would pile into one
-    // bucket and make a group-by quadratic.
+    // Every value a * (2^32 + 1) folds to the same 32 bits, 0: a column of them would pile into one
+    // chain of the key table and make a group-by quadratic, but past MaxChain links the table takes a seed.
     [Fact]
-    public void FixedKeysCrowdedIntoOneBucketAreRehashedUnderASeed()
+    public void FixedKeysCrowdedIntoOneSlotAreRehashedUnderASeed()
     {
-        GroupIndex<long> index = new GroupIndex<long>();
+        KeyTable<long> table = new KeyTable<long>();
         for (int a = 0; a < CrowdedKeys; a++)
         {
-            Assert.Equal(a, Group(ref index, Crowded(a), a));
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), a));
         }
 
-        Assert.True(index.Hardened);
+        Assert.True(table.Seeded);
         for (int a = 0; a < CrowdedKeys; a++)
         {
-            Assert.Equal(a, Group(ref index, Crowded(a), -1));
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), -1));
         }
+    }
+
+    // The merge's hash of bytes inlines XXH3's paths of 16 bytes and less: the same bits as the
+    // library's, at every length on both sides of each path's edge, under any seed.
+    [Fact]
+    public void AShortKeyHashesAsTheLibraryHashesIt()
+    {
+        Random random = new Random(20261007);
+        ulong[] seeds = [MergeHash.Seed, 0, 1, ulong.MaxValue, 0x8000_0000_0000_0000UL, 0x0000_0000_FFFF_FFFFUL];
+        byte[] bytes = new byte[40];
+        foreach (ulong seed in seeds.Concat(Enumerable.Range(0, 32).Select(_ => (ulong)random.NextInt64() ^ ((ulong)random.Next() << 63))))
+        {
+            for (int length = 0; length <= bytes.Length; length++)
+            {
+                for (int draw = 0; draw < 16; draw++)
+                {
+                    random.NextBytes(bytes);
+                    ReadOnlySpan<byte> key = bytes.AsSpan(0, length);
+                    Assert.Equal(XxHash3.HashToUInt64(key, unchecked((long)seed)), MergeHash.Of(key, seed));
+                }
+            }
+        }
+    }
+
+    // Keys that share their home fill its line, then its chain: every one keeps its group, and a
+    // chain shorter than MaxChain takes no seed.
+    [Fact]
+    public void KeysPastAFullLineKeepTheirGroupsInItsChain()
+    {
+        KeyTable<long> table = new KeyTable<long>();
+        for (int a = 0; a < 40; a++)
+        {
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), a));
+        }
+
+        Assert.False(table.Seeded);
+        for (int a = 0; a < 40; a++)
+        {
+            Assert.Equal(a, table.GetOrAdd(Crowded(a), -1));
+        }
+    }
+
+    // Keys of a structure the identity keeps: a stride of 2^22 (identifiers whose sequence field is
+    // zero), a permutation of the integers, hot keys in a row among a range folded onto them modulo a
+    // prime a little smaller than it. A probe over the whole table walked their runs and took a seed;
+    // a line and its chain take none, and number the keys as they come.
+    [Theory]
+    [InlineData("strided")]
+    [InlineData("permutation")]
+    [InlineData("drift")]
+    public void StructuredKeysTakeNoSeed(string pattern)
+    {
+        const int Rows = 400_000;
+        KeyTable<long> table = new KeyTable<long>();
+        Dictionary<long, int> oracle = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            ulong mix = Mix((ulong)row);
+            long key = pattern switch
+            {
+                "strided" => (long)(mix % 100_000) << 22,
+                "permutation" => unchecked((uint)row * 2_654_435_761u),
+                _ => (mix & 1) == 0 ? (row / (Rows / 16) * 1_000) + (long)((mix >> 1) % 1_000) : 100_000 + (long)((mix >> 32) % 100_000),
+            };
+            if (!oracle.TryGetValue(key, out int expected))
+            {
+                expected = oracle.Count;
+                oracle.Add(key, expected);
+            }
+
+            Assert.Equal(expected, table.GetOrAdd(key, table.Count));
+        }
+
+        Assert.False(table.Seeded);
+        Assert.Equal(oracle.Count, table.Count);
     }
 
     // The index is rehashed while the groups fill: every group keeps its rows through it.
@@ -72,50 +148,51 @@ public sealed class GroupHashTests
         }
     }
 
-    [Fact]
-    public void SpreadFixedKeysKeepTheDefaultHash()
+    // Keys in no order, in a row and at a regular stride keep the identity: a row of keys lands in a
+    // row of slots, a stride spreads over the prime.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(1_024)]
+    public void SpreadFixedKeysKeepTheIdentity(long stride)
     {
-        GroupIndex<long> index = new GroupIndex<long>();
+        KeyTable<long> table = new KeyTable<long>();
         Random random = new Random(18);
-        for (int i = 0; i < 100_000; i++)
+        long[] keys = new long[100_000];
+        for (int i = 0; i < keys.Length; i++)
         {
-            Group(ref index, random.NextInt64(), index.Count);
+            keys[i] = stride == 0 ? random.NextInt64() : i * stride;
+            Assert.Equal(i, table.GetOrAdd(keys[i], i));
         }
 
-        Assert.False(index.Hardened);
+        Assert.False(table.Seeded);
+        Assert.Equal(keys.Length, table.Count);
+        Assert.Equal(77, table.GetOrAdd(keys[77], -1));
     }
 
     [Fact]
-    public void AHardenedIndexStillGroupsEqualFloatsTogether()
+    public void ASeededTableStillGroupsEqualFloatsTogether()
     {
-        GroupIndex<double> index = new GroupIndex<double>();
+        KeyTable<double> table = new KeyTable<double>();
         for (int a = 1; a <= 4_096; a++)
         {
-            Group(ref index, BitConverter.UInt64BitsToDouble((ulong)a * ((1UL << 32) + 1)), index.Count);
+            table.GetOrAdd(BitConverter.UInt64BitsToDouble((ulong)a * ((1UL << 32) + 1)), table.Count);
         }
 
-        Assert.True(index.Hardened);
-        int zero = Group(ref index, 0.0, index.Count);
-        Assert.Equal(zero, Group(ref index, -0.0, -1));
-        int nan = Group(ref index, double.NaN, index.Count);
-        Assert.Equal(nan, Group(ref index, BitConverter.UInt64BitsToDouble(0x7FF8_0000_0000_0001), -1));
+        Assert.True(table.Seeded);
+        int zero = table.GetOrAdd(0.0, table.Count);
+        Assert.Equal(zero, table.GetOrAdd(-0.0, -1));
+        int nan = table.GetOrAdd(double.NaN, table.Count);
+        Assert.Equal(nan, table.GetOrAdd(BitConverter.UInt64BitsToDouble(0x7FF8_0000_0000_0001), -1));
     }
 
-    // Keys whose unseeded XxHash3 share their low bits all land in one slot of the table's probe
-    // sequence: the cluster grows by one each insert until the table takes a seed.
+    // Keys whose XxHash3 under the process's seed share their low bits, built by whoever learns the
+    // seed, all land in one slot of the table's probe sequence: the cluster grows by one each insert
+    // until the table takes a seed of its own.
     [Fact]
     public void ByteKeysCraftedToShareASlotReseedTheTable()
     {
-        List<byte[]> keys = [];
-        for (int i = 0; keys.Count < 1_024; i++)
-        {
-            byte[] key = Encoding.ASCII.GetBytes("k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if ((XxHash3.HashToUInt64(key) & 0x7FF) == 0)
-            {
-                keys.Add(key);
-            }
-        }
-
+        List<byte[]> keys = Crowded();
         ByteKeyTable table = new ByteKeyTable();
         for (int i = 0; i < keys.Count; i++)
         {
@@ -131,8 +208,44 @@ public sealed class GroupHashTests
         }
     }
 
+    // The null of a text key is an entry no key finds:
+    // numbered with the keys, kept by Retain, passed over when the table rehashes or takes a seed;
+    // the empty key is a key of its own.
     [Fact]
-    public void OrdinaryByteKeysKeepTheUnseededHash()
+    public void ADetachedEntryNumbersAGroupNoKeyFinds()
+    {
+        List<byte[]> keys = Crowded();
+        ByteKeyTable table = new ByteKeyTable();
+        Assert.Equal(0, table.GetOrAdd(keys[0], out bool added));
+        Assert.Equal(1, table.AddDetached());
+        Assert.Equal(2, table.GetOrAdd([], out added));
+        Assert.True(added);
+        for (int i = 1; i < keys.Count; i++)
+        {
+            Assert.Equal(i + 2, table.GetOrAdd(keys[i], out added));
+            Assert.True(added);
+        }
+
+        Assert.True(table.Reseeded);
+        Assert.Equal(2, table.GetOrAdd([], out added));
+        Assert.False(added);
+
+        // Every entry kept but the first: the detached one numbered 0 and found by no key.
+        table.Retain([.. Enumerable.Range(1, table.Count - 1)]);
+        Assert.Equal(1, table.GetOrAdd([], out added));
+        Assert.False(added);
+        for (int i = 1; i < keys.Count; i++)
+        {
+            Assert.Equal(i + 1, table.GetOrAdd(keys[i], out added));
+            Assert.False(added);
+        }
+
+        Assert.Equal(keys.Count + 1, table.GetOrAdd(keys[0], out added));
+        Assert.True(added);
+    }
+
+    [Fact]
+    public void OrdinaryByteKeysKeepTheProcessHash()
     {
         ByteKeyTable table = new ByteKeyTable();
         for (int i = 0; i < 100_000; i++)
@@ -143,30 +256,80 @@ public sealed class GroupHashTests
         Assert.False(table.Reseeded);
     }
 
+    // A key's length lies ahead of its bytes in 7-bit groups: one byte below 128, more past it, and
+    // none of it moves a key's bytes through growths and a Retain.
+    [Fact]
+    public void ByteKeysOfEveryLengthKeepTheirBytes()
+    {
+        int[] lengths = [0, 1, 127, 128, 300, 16_383, 16_384, 20_000];
+        ByteKeyTable table = new ByteKeyTable();
+        List<byte[]> keys = [];
+        for (int i = 0; i < 400; i++)
+        {
+            byte[] key = new byte[lengths[i % lengths.Length] + (i / lengths.Length)];
+            new Random(i).NextBytes(key);
+            keys.Add(key);
+            Assert.Equal(i, table.GetOrAdd(key, out bool added));
+            Assert.True(added);
+        }
+
+        table.Retain([.. Enumerable.Range(0, keys.Count).Where(i => i % 2 == 1)]);
+        for (int i = 0; i < table.Count; i++)
+        {
+            byte[] key = keys[(2 * i) + 1];
+            Assert.True(table.KeyOf(i).SequenceEqual(key));
+            Assert.Equal(i, table.GetOrAdd(key, out bool added));
+            Assert.False(added);
+        }
+    }
+
+    // A text key is hashed once: the hash its table keeps is the one a merge cuts the parts by, while
+    // the table has no seed of its own, through growths and a Retain.
+    [Fact]
+    public void AByteKeyKeepsTheHashTheMergeCutsBy()
+    {
+        ByteKeyTable table = new ByteKeyTable();
+        for (int i = 0; i < 5_000; i++)
+        {
+            table.GetOrAdd(Encoding.ASCII.GetBytes("key-" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)), out _);
+        }
+
+        table.Retain([.. Enumerable.Range(0, table.Count).Where(i => i % 3 != 0)]);
+        Assert.False(table.Reseeded);
+        for (int i = 0; i < table.Count; i++)
+        {
+            Assert.Equal(MergeHash.Of(table.KeyOf(i), MergeHash.Seed), table.HashOf(i));
+            Assert.Equal(i, table.GetOrAdd(table.KeyOf(i).ToArray(), out bool added));
+            Assert.False(added);
+        }
+    }
+
     /// <summary>Key <paramref name="a"/> of a column whose every key has the default hash 0.</summary>
     private static long Crowded(int a) => a * ((1L << 32) + 1);
 
-    /// <summary>
-    /// The group of <paramref name="value"/>, numbered <paramref name="next"/> when it is new; the
-    /// index is told when its keys double, as its owner tells it.
-    /// </summary>
-    private static int Group<TValue>(ref GroupIndex<TValue> index, TValue value, int next)
-        where TValue : unmanaged, IEquatable<TValue>
+    /// <summary>SplitMix64, as the queries bench draws its keys.</summary>
+    private static ulong Mix(ulong x)
     {
-        ref int group = ref index.Slot(value, out bool exists);
-        if (exists)
+        x += 0x9E3779B97F4A7C15UL;
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9UL;
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EBUL;
+        return x ^ (x >> 31);
+    }
+
+    /// <summary>A thousand text keys whose XxHash3 under the process's seed share their low eleven bits.</summary>
+    private static List<byte[]> Crowded()
+    {
+        List<byte[]> keys = [];
+        for (int i = 0; keys.Count < 1_024; i++)
         {
-            return group;
+            byte[] key = Encoding.ASCII.GetBytes("k" + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if ((XxHash3.HashToUInt64(key, unchecked((long)MergeHash.Seed)) & 0x7FF) == 0)
+            {
+                keys.Add(key);
+            }
         }
 
-        group = next;
-        int count = index.Count;
-        if ((count & (count - 1)) == 0)
-        {
-            index.Doubled();
-        }
-
-        return next;
+        return keys;
     }
 
     /// <summary>One row: a key, written by hand as the generator would.</summary>

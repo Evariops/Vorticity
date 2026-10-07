@@ -186,6 +186,41 @@ public sealed partial class GroupOrderTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(14)]
+    public async Task ATopKOfManyGroupsRanksItsChunksAtOnceTiesIncluded(int degree)
+    {
+        // 300 000 names seen one to four times: past two chunks of 65 536 groups, each chunk's first k
+        // ranked on a task of its own, then theirs. The k-th group ties
+        // with tens of thousands, which the key ranks: the same groups, in the same order, as one
+        // ranking of them all.
+        Draw[] rows = Draws(300_000);
+        string path = await WriteAsync(rows);
+        try
+        {
+            List<string> byName = [.. rows.GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
+            List<long> byId = [.. rows.GroupBy(r => r.Id).OrderBy(g => g.Count()).ThenBy(g => g.Key).Select(g => g.Key)];
+            List<string> byCountThenMean = [.. rows.GroupBy(r => r.Name)
+                .OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value), Floats).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Aggregation<string> names = file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Take(100).Select(g => g.Key);
+            Assert.Equal(byName.Take(100), await names.ToListAsync(Ct));
+            Assert.Equal(degree > 1, names.Plan.LastTopChunks > 1);
+            Assert.Equal(byName.Skip(30).Take(70), await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Skip(30).Take(70).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(byId.Take(1_000), await file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(1_000).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(
+                byCountThenMean.Take(100),
+                await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key).ToListAsync(Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public void AnAggregatesNumbersRankAsTheirColumnInBothDirections()
     {
@@ -258,9 +293,9 @@ public sealed partial class GroupOrderTests
         {
             Comparer<T> expected = descending ? Comparer<T>.Create((a, b) => a is null || b is null ? ascending.Compare(a, b) : ascending.Compare(b, a)) : ascending;
             int[] ranked = [.. Enumerable.Range(0, values.Length).OrderBy(i => values[i], expected)];
-            long[] keys = ValuesOrder.Rent<T>(values.Length);
+            long[] keys = ValuesOrder.Rent<T>(memory: null, values.Length);
             values.CopyTo(ValuesOrder.Values<T>(keys, values.Length));
-            ColumnOrder order = ValuesOrder.Over<T>(keys, values.Length, descending);
+            ColumnOrder order = ValuesOrder.Over<T>(keys, values.Length, descending, memory: null);
             try
             {
                 int[] sorted = [.. Enumerable.Range(0, values.Length)];
@@ -269,7 +304,7 @@ public sealed partial class GroupOrderTests
                 for (int keep = 1; keep < values.Length; keep++)
                 {
                     int[] positions = [.. Enumerable.Range(0, values.Length)];
-                    (int before, int tied) = order.TopTied(positions, values.Length, keep, Ct);
+                    (int before, int tied) = order.TopTied(positions, values.Length, keep, memory: null, Ct);
                     T last = values[ranked[keep - 1]];
                     Assert.Equal(values.Count(v => expected.Compare(v, last) < 0), before);
                     Assert.Equal(values.Count(v => expected.Compare(v, last) == 0), tied);
@@ -289,21 +324,21 @@ public sealed partial class GroupOrderTests
         group.Where(r => r.Reading is double value && !double.IsNaN(value)).Max(r => r.Reading);
 
     /// <summary>
-    /// 40 000 names seen one to four times each, scattered: a count each shares with thousands. A
-    /// score per name, NaN or null for some, which 8 names share; a value whose mean many share,
-    /// null for a seventh of the names.
+    /// <paramref name="names"/> names seen one to four times each, scattered: a count each shares with
+    /// thousands. A score per name, NaN or null for some, which 8 names share; a value whose mean many
+    /// share, null for a seventh of the names.
     /// </summary>
-    private static Draw[] Draws()
+    private static Draw[] Draws(int names = 40_000)
     {
         List<Draw> rows = [];
-        for (int n = 0; n < 40_000; n++)
+        for (int n = 0; n < names; n++)
         {
             int repeats = 1 + (int)((uint)(n * 2_654_435_761u) >> 30);
             int bucket = n % 5_000;
             double? score = bucket == 7 ? double.NaN : bucket == 11 ? null : bucket * 0.5;
             for (int r = 0; r < repeats; r++)
             {
-                rows.Add(new Draw($"name-{(n * 7_919) % 40_000:x5}-{n}", n, score, n % 7 == 0 ? null : (n % 13) + (r % 2)));
+                rows.Add(new Draw($"name-{(n * 7_919) % names:x5}-{n}", n, score, n % 7 == 0 ? null : (n % 13) + (r % 2)));
             }
         }
 

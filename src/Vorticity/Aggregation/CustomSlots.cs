@@ -3,45 +3,33 @@ using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
 
-/// <summary>A caller's aggregator, handed the canonical form of each block.</summary>
-internal sealed class CustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
+/// <summary>
+/// A caller's aggregator, handed the canonical form of each block; its state in the group's record
+/// when it holds no reference.
+/// </summary>
+internal sealed class CustomSlot<T, TAggregator, TState> : RecordSlot<TState, TState>
     where T : unmanaged
     where TAggregator : IAggregator<T, TState>
 {
-    private TState[] _states = [];
-    private int _groups;
     private T[] _values = [];
     private MaskCache _rows;
     private ulong[] _clip = [];
 
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _states.Length)
-        {
-            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
-        }
-
-        for (int g = _groups; g < groups; g++)
-        {
-            _states[g] = TAggregator.Seed();
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override TState Seed => TAggregator.Seed();
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         ReadOnlySpan<T> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
         if (start == 0 && end == input.Rows && input.Selection.IsEmpty)
         {
-            TAggregator.Step(ref _states[group], values, valid, new Selection(input.Rows));
+            TAggregator.Step(ref State(group), values, valid, new Selection(input.Rows));
             return;
         }
 
         Selection rows = RowMasks.Window(input.Selection, input.Rows, start, end, ref _clip);
         if (rows.Count > 0)
         {
-            TAggregator.Step(ref _states[group], values, valid, rows);
+            TAggregator.Step(ref State(group), values, valid, rows);
         }
 
         RowMasks.Unclip(_clip, start, end);
@@ -50,65 +38,41 @@ internal sealed class CustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         ReadOnlySpan<T> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+        RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
+        StateView<TState> states = States;
         while (rows.Next(out int row))
         {
-            TAggregator.Step(ref _states[groups[row]], values.Slice(row, 1), default, new Selection(1));
+            TAggregator.Step(ref states[groups[row]], values.Slice(row, 1), default, new Selection(1));
         }
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        TState[] states = ((CustomSlot<T, TAggregator, TState>)other)._states;
+        StateView<TState> states = States;
+        StateView<TState> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            TAggregator.Merge(ref _states[into[i]], in states[from[i]]);
+            TAggregator.Merge(ref states[into[i]], in others[from[i]]);
         }
     }
 
-    internal override TState Result(int group) => _states[group];
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _states[i] = _states[groups[i]];
-        }
-
-        // The groups past them are seeded again when they are made.
-        _groups = groups.Length;
-    }
+    internal override TState Result(int group) => State(group);
 }
 
 /// <summary>A caller's aggregator that reads the encoded forms: a constant, a run-end or a dictionary block reaches it undecoded.</summary>
-internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
+internal sealed class EncodedCustomSlot<T, TAggregator, TState> : RecordSlot<TState, TState>
     where T : unmanaged
     where TAggregator : IEncodedAggregator<T, TState>
 {
-    private TState[] _states = [];
-    private int _groups;
     private T[] _values = [];
     private MaskCache _rows;
     private ulong[] _clip = [];
 
-    internal override void EnsureGroups(int groups)
-    {
-        if (groups > _states.Length)
-        {
-            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
-        }
-
-        for (int g = _groups; g < groups; g++)
-        {
-            _states[g] = TAggregator.Seed();
-        }
-
-        _groups = Math.Max(_groups, groups);
-    }
+    internal override TState Seed => TAggregator.Seed();
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
-        ref TState state = ref _states[group];
+        ref TState state = ref State(group);
         CanonicalArena arena = input.Arena;
         int node = input.Node;
         switch (EncodedForms.EncodingOf(arena, node))
@@ -204,15 +168,16 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
     {
         CanonicalArena arena = input.Arena;
         int node = input.Node;
+        StateView<TState> states = States;
         switch (EncodedForms.EncodingOf(arena, node))
         {
             case ColumnEncoding.Constant:
             {
                 T value = FixedReader.Constant<T>(arena, node, StorageKind.Primitive);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
-                    TAggregator.StepConstant(ref _states[groups[row]], value, 1);
+                    TAggregator.StepConstant(ref states[groups[row]], value, 1);
                 }
 
                 return;
@@ -222,13 +187,13 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<T> dictionary = FixedReader.Values(arena, entries, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     int code = (int)codes[row];
                     if (StorageValues.IsValid(valid, code))
                     {
-                        TAggregator.StepConstant(ref _states[groups[row]], dictionary[code], 1);
+                        TAggregator.StepConstant(ref states[groups[row]], dictionary[code], 1);
                     }
                 }
 
@@ -238,10 +203,10 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
             default:
             {
                 ReadOnlySpan<T> values = FixedReader.Values(arena, node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
+                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
                 while (rows.Next(out int row))
                 {
-                    TAggregator.StepConstant(ref _states[groups[row]], values[row], 1);
+                    TAggregator.StepConstant(ref states[groups[row]], values[row], 1);
                 }
 
                 return;
@@ -251,23 +216,13 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        TState[] states = ((EncodedCustomSlot<T, TAggregator, TState>)other)._states;
+        StateView<TState> states = States;
+        StateView<TState> others = StatesOf(other);
         for (int i = 0; i < from.Length; i++)
         {
-            TAggregator.Merge(ref _states[into[i]], in states[from[i]]);
+            TAggregator.Merge(ref states[into[i]], in others[from[i]]);
         }
     }
 
-    internal override TState Result(int group) => _states[group];
-
-    internal override void Keep(ReadOnlySpan<int> groups)
-    {
-        for (int i = 0; i < groups.Length; i++)
-        {
-            _states[i] = _states[groups[i]];
-        }
-
-        // The groups past them are seeded again when they are made.
-        _groups = groups.Length;
-    }
+    internal override TState Result(int group) => State(group);
 }

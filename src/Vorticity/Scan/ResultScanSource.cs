@@ -48,6 +48,12 @@ internal abstract class ResultQuery
     /// <summary>How the values of column <paramref name="column"/> are records: a custom aggregate's state; null for a column of values.</summary>
     internal virtual IVortexRecord? RecordOf(int column) => null;
 
+    /// <summary>What the query's group by did, once it ran; null without a group by.</summary>
+    internal virtual GroupStatistics? Grouping => null;
+
+    /// <summary>The scan's statistics, with what its group by did.</summary>
+    internal ScanStatistics Statistics() => ScanStatistics.From(Metrics) with { Grouping = Grouping };
+
     /// <summary>The window [<paramref name="skip"/>, <paramref name="skip"/> + <paramref name="take"/>) of a window [<paramref name="skipped"/>, <paramref name="skipped"/> + <paramref name="taken"/>): the operators in the order written.</summary>
     internal static (long Skip, long Take) Within(long skipped, long taken, long skip, long take)
     {
@@ -139,7 +145,10 @@ internal sealed class ResultScanSource : ScanSource
 
     internal override bool MayMatch(VortexExpr filter) => true;
 
-    /// <summary>The keys of a result's column, read whole as the query runs and sorted in memory unless they arrive in order.</summary>
+    /// <summary>
+    /// The keys of a result's column, read whole as the query runs and sorted in memory unless they
+    /// arrive in order, reserved under the session's memory budget until the cursor is disposed.
+    /// </summary>
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
         if (Unordered(path, out FilterLiteralKind kind) is { } reason)
@@ -147,8 +156,17 @@ internal sealed class ResultScanSource : ScanSource
             throw new NotSupportedException($"'{path}' has no key cursor: {reason}.");
         }
 
-        MemoryKeySource source = await MemoryKeySource.ReadAsync(_query.Batches(cancellationToken), new FieldExpr(path), kind, cancellationToken).ConfigureAwait(false);
-        return new KeyCursor(source, distinct);
+        QueryMemory memory = new QueryMemory(Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        try
+        {
+            MemoryKeySource source = await MemoryKeySource.ReadAsync(_query.Batches(cancellationToken), new FieldExpr(path), kind, cancellationToken, memory).ConfigureAwait(false);
+            return new KeyCursor(source, distinct);
+        }
+        catch
+        {
+            memory.Dispose();
+            throw;
+        }
     }
 
     internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
@@ -201,9 +219,10 @@ internal sealed class ResultScanSource : ScanSource
     }
 
     /// <summary>
-    /// The rows a spec keeps of a result, in the order of one of its columns: gathered into one
-    /// batch, sorted by position, nulls last, ties in the result's order, then delivered a batch at
-    /// a time. A blocking stage, holding the rows kept.
+    /// The rows a spec keeps of a result, in the order of one of its columns, nulls last, ties in the
+    /// result's order: sorted under the session's memory budget, in memory while it holds them, by runs
+    /// written to the scratch and merged back otherwise; delivered a batch
+    /// at a time. A blocking stage.
     /// </summary>
     private sealed class SortedEnumerator : IAsyncEnumerator<RecordBatch>
     {
@@ -211,13 +230,9 @@ internal sealed class ResultScanSource : ScanSource
         private readonly ScanSpec _spec;
         private readonly Enumerator _kept;
         private readonly CancellationToken _cancellationToken;
-        private StructStore? _store;
-        private CanonicalArena? _arena;
-        private RecordBatch? _current;
-        private int[] _positions = [];
-        private int _root;
-        private int _count;
-        private int _next;
+        private QueryMemory? _memory;
+        private ExternalSort? _sort;
+        private IAsyncEnumerator<RecordBatch>? _sorted;
 
         internal SortedEnumerator(ResultScanSource source, ScanSpec spec, IAsyncEnumerator<RecordBatch> inner, CancellationToken cancellationToken)
         {
@@ -227,57 +242,49 @@ internal sealed class ResultScanSource : ScanSource
             _kept = new Enumerator(source, spec with { OrderPath = null, Descending = false, Options = spec.Options with { Compact = true } }, inner);
         }
 
-        public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
+        public RecordBatch Current => _sorted?.Current ?? throw new InvalidOperationException("The stream has no current batch.");
 
         [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
         public async ValueTask<bool> MoveNextAsync()
         {
-            if (_store is null)
+            if (_sorted is null)
             {
                 VortexSchema schema = _spec.Projection is { IsAll: false } mask ? ToolPaths.Project(_source.Schema, mask) : _source.Schema;
-                VortexSessionOptions options = _source.Session.Options;
-                _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(schema, new DTypeArena()), options.EnginePool, options.Extensions);
-                _arena = new CanonicalArena(64, options.EnginePool);
+                VortexSession session = _source.Session;
+                _memory = new QueryMemory(session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+                VortexType type = schema.IndexOfName(_spec.OrderPath!) is int at and >= 0 ? schema[at].Type : VortexType.Null;
+                int[] delivered = new int[schema.Count];
+                for (int c = 0; c < delivered.Length; c++)
+                {
+                    delivered[c] = c;
+                }
+
+                _sort = new ExternalSort(session, schema, [new SortKey(new FieldExpr(_spec.OrderPath!), type, _spec.Descending)], delivered, _memory, GroupBatches.BatchRows);
                 while (await _kept.MoveNextAsync().ConfigureAwait(false))
                 {
-                    RecordBatch batch = _kept.Current;
-                    StoreRows.Append(_store, batch.Arena, batch.RootIndex);
+                    await _sort.AddAsync(_kept.Current, _cancellationToken).ConfigureAwait(false);
                 }
 
-                _count = _store.Rows;
-                _root = _store.Build(_arena, _count);
-                int key = FilterEvaluator.Resolve(_arena, _root, new FieldExpr(_spec.OrderPath!), _count);
-                ColumnOrder order = ColumnOrder.For(_arena, key, schema.IndexOfName(_spec.OrderPath!) is int at and >= 0 ? schema[at].Type : VortexType.Null, _spec.Descending);
-                _positions = new int[_count];
-                for (int i = 0; i < _count; i++)
-                {
-                    _positions[i] = i;
-                }
-
-                GroupSort.Sort(_positions, _count, new ChainOrder([order, ColumnOrder.Positions]), long.MaxValue, _cancellationToken);
+                _sorted = await _sort.SortedAsync(_cancellationToken).ConfigureAwait(false);
             }
 
-            if (_next >= _count)
-            {
-                _current?.Dispose();
-                return false;
-            }
-
-            _cancellationToken.ThrowIfCancellationRequested();
-            int rows = Math.Min(GroupBatches.BatchRows, _count - _next);
-            int gathered = CanonicalFilter.Apply(_arena!, _root, _positions.AsSpan(_next, rows));
-            _current?.Dispose();
-            _current = RecordBatch.Over(_arena!, gathered, _next, _current);
-            _next += rows;
-            return true;
+            return await _sorted.MoveNextAsync().ConfigureAwait(false);
         }
 
         public async ValueTask DisposeAsync()
         {
-            _current?.Dispose();
+            if (_sorted is not null)
+            {
+                await _sorted.DisposeAsync().ConfigureAwait(false);
+            }
+
             await _kept.DisposeAsync().ConfigureAwait(false);
-            _store?.Release();
-            _arena?.Reset();
+            if (_sort is not null)
+            {
+                await _sort.DisposeAsync().ConfigureAwait(false);
+            }
+
+            _memory?.Dispose();
         }
     }
 

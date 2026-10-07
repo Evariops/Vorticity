@@ -41,6 +41,9 @@ internal sealed class NativeSegmentOwner : SegmentOwner
 
     private static long s_finalizedBlocks;
 
+    // The bytes of every block allocated and not yet freed, pooled or not.
+    private static long s_nativeBytes;
+
     /// <summary>
     /// The next block rented by the same arena, while an arena holds this one: the arena chains
     /// its blocks through them rather than listing them in an array it would have to grow.
@@ -81,6 +84,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         _pool = pool;
         _bucketIndex = bucketIndex;
         Buffer = VortexBuffer.FromPointer((byte*)pointer, length, alignmentExponent);
+        Interlocked.Add(ref s_nativeBytes, Math.Max(capacity, 1));
     }
 
 
@@ -111,6 +115,12 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// when an owner is deliberately dropped, which is the only way to prove the backstop works.
     /// </summary>
     internal static long FinalizedBlockCount => Interlocked.Read(ref s_finalizedBlocks);
+
+    /// <summary>
+    /// The bytes of the native blocks the process holds, rented, parked in a pool or owned alone: memory
+    /// a container's limit counts, and the collector's does not.
+    /// </summary>
+    internal static long NativeBytes => Interlocked.Read(ref s_nativeBytes);
 
     /// <summary>
     /// Allocates <paramref name="length"/> bytes aligned to <paramref name="alignment"/>.
@@ -213,6 +223,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         }
 
         NativeMemory.AlignedFree((void*)pointer);
+        Interlocked.Add(ref s_nativeBytes, -Math.Max(_capacity, 1));
         GC.SuppressFinalize(this);
         return true;
     }

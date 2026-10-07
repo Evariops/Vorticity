@@ -151,7 +151,14 @@ public sealed partial class Scan<TRecord>
     {
         ResultNode<T> node = AggregationPlan.Result(aggregate);
         AggregationOutcome outcome = await Host.RunAsync(new AggregationPlan([node], []), cancellationToken).ConfigureAwait(false);
-        return node.Bind(outcome)(0);
+        try
+        {
+            return node.Bind(outcome)(0);
+        }
+        finally
+        {
+            outcome.Delivered();
+        }
     }
 
     /// <summary>The scan as the aggregation engine sees it.</summary>

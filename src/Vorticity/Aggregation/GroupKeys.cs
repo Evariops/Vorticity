@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -65,15 +67,38 @@ internal sealed class GroupRanges
 /// </summary>
 internal abstract class GroupKeys
 {
+    /// <summary>The longest array a table of groups doubles from: twice as long, an int no longer counts it.</summary>
+    private const int MostDoubled = 1 << 30;
+
+    // The key blocks grouped by their runs, by their dictionary's codes, and row by row.
+    private long _rangeBlocks;
     private long _dictionaryBlocks;
-    private long _otherBlocks;
+    private long _hashedBlocks;
     private int[] _codeGroups = [];
     private CanonicalOrigin _codeOrigin;
 
     internal int Count { get; private protected set; }
 
+    /// <summary>
+    /// The length an array of a table of groups, or of a distinct count's pairs, doubles to. Groups and
+    /// pairs are numbered by 32-bit integers, and their
+    /// tables double: an open table, twice its entries long, holds 2^29 of them at most, a list 2^30.
+    /// Past that, the query fails with a typed exception that says so, never an overflow.
+    /// </summary>
+    /// <exception cref="VortexUnsupportedException">The array cannot double.</exception>
+    internal static int Doubled(int length) => length < MostDoubled ? length * 2 : throw TooMany();
+
+    private static VortexUnsupportedException TooMany() => new VortexUnsupportedException(
+        "group by of more than 2^29 groups",
+        ComponentKind.Feature,
+        "A group by numbers its groups, and a distinct count its pairs, by 32-bit integers, and its tables double: an open table holds "
+        + "536,870,912 of them at most, a list 1,073,741,824. Group by fewer keys at once, or filter the rows first.");
+
     /// <summary>Whether every key block was dictionary-encoded, which makes the key source ordered.</summary>
-    internal bool OnlyDictionaries => _dictionaryBlocks > 0 && _otherBlocks == 0;
+    internal bool OnlyDictionaries => _dictionaryBlocks > 0 && _rangeBlocks == 0 && _hashedBlocks == 0;
+
+    /// <summary>The key blocks the index grouped, by how: by their runs, constant or run-end; by their dictionary's codes; row by row.</summary>
+    internal (long ByRange, long ByCode, long Hashed) Blocks => (_rangeBlocks, _dictionaryBlocks, _hashedBlocks);
 
     /// <summary>
     /// Maps the selected rows of a batch to groups, creating the groups of keys not seen before: as
@@ -84,6 +109,9 @@ internal abstract class GroupKeys
 
     /// <summary>An empty index of the same kind, for another partition.</summary>
     internal abstract GroupKeys Fresh();
+
+    /// <summary>The bytes the index holds, its tables and its keys at their capacity.</summary>
+    internal abstract long Footprint { get; }
 
     /// <summary>Adds this partition's keys to <paramref name="target"/>; group <c>g</c> here is <c>map[g]</c> there.</summary>
     internal void MergeInto(GroupKeys target, Span<int> map) => MergeInto(target, Numbers.Upto(Count), map);
@@ -105,10 +133,84 @@ internal abstract class GroupKeys
     /// <summary>An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what the partitions were rebased on.</summary>
     internal virtual GroupKeys ForPart() => Fresh();
 
+    /// <summary>
+    /// The span of values the index numbers its groups by, its least value and its width; null when it
+    /// hashes them. Partitions that number one span by value merge by value.
+    /// </summary>
+    internal virtual (long Least, ulong Span)? ValueSpan => null;
+
+    /// <summary>
+    /// The part of a merge by value each group's key falls in: the span cut into 2^<paramref name="partBits"/>
+    /// runs of numbers, the first part for the null group and for a value past the span.
+    /// </summary>
+    internal virtual void PartsByValue(int partBits, Span<byte> parts) => throw new NotSupportedException("Only keys numbered by value are cut by value.");
+
+    /// <summary>An empty index the part <paramref name="part"/> of a merge by value is merged into: numbered by value over its run of the span.</summary>
+    internal virtual GroupKeys ForValuePart(int part, int partBits) => ForPart();
+
+    /// <summary>An empty index a sub-table of the core holds its groups in, its arrays taken from and given back to <paramref name="shelf"/>.</summary>
+    internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
+
+    /// <summary>Gives the index's arrays back to its shelf, if it has one: a sub-table split, whose groups another holds. The index is empty after.</summary>
+    internal virtual void Release()
+    {
+    }
+
     /// <summary>Makes room for <paramref name="groups"/> groups at once, where the index can: the part of a merge, whose keys the partitions count.</summary>
     internal virtual void Reserve(int groups)
     {
     }
+
+    /// <summary>
+    /// The bytes a key takes beside its group's record in an entry of a part's batch, a power of two; 0
+    /// for a key that does not travel in batches, whose
+    /// query keeps a table on each lane and merges them at the end.
+    /// </summary>
+    internal virtual int EntryBytes => 0;
+
+    /// <summary>
+    /// An index of the same kind that looks no key up: each row's key a group of its own, but a row
+    /// whose key is the row before's, a run's or a code's; the null group one. What a lane folds its
+    /// rows into when its cache finds too few of its keys, the bypass.
+    /// Null for a key that does not travel in batches.
+    /// </summary>
+    internal virtual GroupKeys? Appending() => null;
+
+    /// <summary>
+    /// Copies every group but the null one into an entry of the lane's batch of the part its key falls
+    /// in, the top bits of its hash under <see cref="MergeHash.Seed"/> as <see cref="Parts"/> cuts: the
+    /// group's record, read from <paramref name="records"/>, then its key.
+    /// </summary>
+    internal virtual void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => throw NotEntries();
+
+    /// <summary>Counts every group but the null one by the part <see cref="Scatter"/> copies it to.</summary>
+    internal virtual void CountParts(Span<int> counts) => throw NotEntries();
+
+    /// <summary>
+    /// The groups from <paramref name="from"/> on, but the null one, copied into entries of
+    /// <paramref name="shape"/> one after the other, their records read from <paramref name="records"/>,
+    /// as many as <paramref name="entries"/> holds.
+    /// </summary>
+    /// <returns>The group to copy next.</returns>
+    internal virtual int CopyEntries(ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written) => throw NotEntries();
+
+    /// <summary>The sub-table of each entry of <paramref name="batch"/> in its part's directory: the bits of its key's hash from <paramref name="shift"/> up, under <paramref name="mask"/>.</summary>
+    internal virtual void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) => throw NotEntries();
+
+    /// <summary>
+    /// The group here of the key of each entry of <paramref name="batch"/> that <paramref name="entries"/>
+    /// names, added when it is new, new keys numbered in the entries' order; <paramref name="scratch"/>
+    /// the caller's, of <see cref="EntryScratch"/> words.
+    /// </summary>
+    internal virtual void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, Span<ulong> scratch) => throw NotEntries();
+
+    /// <summary>The words of scratch <see cref="GroupsOf"/> takes for <paramref name="entries"/> entries.</summary>
+    internal static int EntryScratch(int entries, int keyBytes) => entries * (((keyBytes + sizeof(ulong) - 1) / sizeof(ulong)) + 1);
+
+    /// <summary>The hash of the key of entry <paramref name="entry"/> of <paramref name="batch"/> under <see cref="MergeHash.Seed"/>, as <see cref="Parts"/> takes it.</summary>
+    internal virtual ulong HashAt(PartBatch batch, EntryShape shape, int entry) => throw NotEntries();
+
+    private static NotSupportedException NotEntries() => new NotSupportedException("These keys do not travel in a part's batches.");
 
     /// <summary>
     /// Readies the indexes of a parallel merge's partitions, this one the first of them, for their
@@ -156,6 +258,13 @@ internal abstract class GroupKeys
         CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int frontier, bool descending, Span<ulong> narrowed) => false;
 
     /// <summary>
+    /// Whether the groups are numbered by the key's value, in a table the statistics bound: such a key
+    /// takes the core from what its zones say, before the pass, and a hashed one from what its first
+    /// rows show.
+    /// </summary>
+    internal virtual bool NumberedByValue => false;
+
+    /// <summary>
     /// Whether group <paramref name="group"/>'s key, an integer, lies below <paramref name="bound"/>:
     /// the groups a floor the zones give proves final. False for the null group, and for keys these
     /// do not read as integers.
@@ -193,20 +302,25 @@ internal abstract class GroupKeys
 
     private protected void Saw(ColumnEncoding encoding)
     {
-        if (encoding == ColumnEncoding.Dictionary)
+        switch (encoding)
         {
-            _dictionaryBlocks++;
-        }
-        else
-        {
-            _otherBlocks++;
+            case ColumnEncoding.Dictionary:
+                _dictionaryBlocks++;
+                break;
+            case ColumnEncoding.Constant or ColumnEncoding.RunEnd:
+                _rangeBlocks++;
+                break;
+            default:
+                _hashedBlocks++;
+                break;
         }
     }
 
     private protected void MergeSeen(GroupKeys target)
     {
+        target._rangeBlocks += _rangeBlocks;
         target._dictionaryBlocks += _dictionaryBlocks;
-        target._otherBlocks += _otherBlocks;
+        target._hashedBlocks += _hashedBlocks;
     }
 
     /// <summary>
@@ -246,19 +360,102 @@ internal abstract class GroupKeys
 internal readonly record struct KeyBounds(long Min, long Max);
 
 /// <summary>
-/// The hash a parallel merge cuts the keys by: a mix of 64 bits under a seed drawn once a merge, the
-/// same in every partition, apart from each table's own hash, which a table may draw again alone:
-/// a key hashed by its table could fall in two parts. The default hash of an integer is its value,
-/// whose high bits cut nothing.
+/// The hash a parallel merge cuts the keys by: a mix of 64 bits under <see cref="Seed"/>, the same in
+/// every partition, apart from each table's own hash, which a table may draw again alone: a key
+/// hashed by its table could fall in two parts. The default hash of an integer is its value, whose
+/// high bits cut nothing.
 /// </summary>
 internal static class MergeHash
 {
+    /// <summary>
+    /// The seed, drawn once a process: a text key is hashed once, by its
+    /// table under this seed, and the merge cuts by that hash while the table has no seed of its own;
+    /// two runs of a query cut their groups alike.
+    /// </summary>
+    internal static readonly ulong Seed = ((ulong)Random.Shared.NextInt64() << 1) | 1;
+
+    /// <summary>
+    /// A key of one word: one round of the mix, a bijection whose every input bit reaches every bit
+    /// of the hash, where the key of two words takes two.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Of(ulong word, ulong seed) => Mix(word ^ seed);
+
     /// <summary>A key of two words, every bit of each reaching every bit of the hash.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong Of(ulong low, ulong high, ulong seed) => Mix(Mix(low ^ seed) ^ high);
 
-    /// <summary>A key of bytes.</summary>
-    internal static ulong Of(ReadOnlySpan<byte> bytes, ulong seed) => System.IO.Hashing.XxHash3.HashToUInt64(bytes, unchecked((long)seed));
+    /// <summary>A key of bytes: XXH3 of 64 bits under <paramref name="seed"/>, the same bits as <see cref="System.IO.Hashing.XxHash3"/>.</summary>
+    /// <remarks>
+    /// Up to 16 bytes, XXH3's own short paths, inlined here: the library's dispatch and its two calls
+    /// took a fifth of a group by of short names. Longer keys go to
+    /// the library.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Of(ReadOnlySpan<byte> bytes, ulong seed) =>
+        bytes.Length <= 16 ? Short(bytes, seed) : System.IO.Hashing.XxHash3.HashToUInt64(bytes, unchecked((long)seed));
 
+    // XXH3's default secret, the words its paths of 16 bytes and less read, folded two by two: its
+    // first two of 32 bits, then its words of 64 bits from byte 8, 24, 40 and 56.
+    private const uint OneToThree = 0x396CFEB8U ^ 0xBE4BA423U;
+    private const ulong FourToEight = 0x1CAD21F7_2C81017CUL ^ 0xDB979083_E96DD4DEUL;
+    private const ulong NineToSixteenLow = 0x1F67B3B7_A4A44072UL ^ 0x78E5C0CC_4EE679CBUL;
+    private const ulong NineToSixteenHigh = 0x2172FFCC_7DD05A82UL ^ 0x8E2443F7_744608B8UL;
+    private const ulong Empty = 0x4C263A81_E69035E0UL ^ 0xCB00C391_BB52283CUL;
+
+    /// <summary>XXH3 of at most 16 bytes, as its reference writes it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Short(ReadOnlySpan<byte> bytes, ulong seed)
+    {
+        int length = bytes.Length;
+        ref byte first = ref MemoryMarshal.GetReference(bytes);
+        if (length > 8)
+        {
+            ulong low = Unsafe.ReadUnaligned<ulong>(ref first) ^ (NineToSixteenLow + seed);
+            ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - 8)) ^ (NineToSixteenHigh - seed);
+            ulong upper = Math.BigMul(low, high, out ulong lower);
+            ulong acc = (ulong)length + BinaryPrimitives.ReverseEndianness(low) + high + (upper ^ lower);
+            acc ^= acc >> 37;
+            acc *= 0x165667919E3779F9UL;
+            return acc ^ (acc >> 32);
+        }
+
+        if (length >= 4)
+        {
+            ulong mixed = seed ^ ((ulong)BinaryPrimitives.ReverseEndianness((uint)seed) << 32);
+            ulong word = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref first, length - 4))
+                + ((ulong)Unsafe.ReadUnaligned<uint>(ref first) << 32);
+            ulong h = word ^ (FourToEight - mixed);
+            h ^= BitOperations.RotateLeft(h, 49) ^ BitOperations.RotateLeft(h, 24);
+            h *= 0x9FB21C651E98DF25UL;
+            h ^= (h >> 35) + (ulong)length;
+            h *= 0x9FB21C651E98DF25UL;
+            return h ^ (h >> 28);
+        }
+
+        if (length > 0)
+        {
+            uint combined = ((uint)first << 16) | ((uint)Unsafe.Add(ref first, length >> 1) << 24)
+                | Unsafe.Add(ref first, length - 1) | ((uint)length << 8);
+            return Avalanche(combined ^ (OneToThree + seed));
+        }
+
+        return Avalanche(seed ^ Empty);
+    }
+
+    /// <summary>XXH64's avalanche, which XXH3's shortest keys end with.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Avalanche(ulong h)
+    {
+        h ^= h >> 33;
+        h *= 0xC2B2AE3D27D4EB4FUL;
+        h ^= h >> 29;
+        h *= 0x165667B19E3779F9UL;
+        return h ^ (h >> 32);
+    }
+
+    /// <remarks>Inlined: the native compiler left it a call a group where a merge cuts its keys into parts.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Mix(ulong x)
     {
         x ^= x >> 33;
@@ -270,41 +467,108 @@ internal static class MergeHash
 }
 
 /// <summary>
-/// A key of one fixed-width column: a hash map from the storage value to its group, and a group for
-/// null. An integer key the statistics bound to <see cref="DirectValues"/> values has a table from
-/// the value to its group in front of the map, so that a value is hashed once a partition.
+/// A key of one fixed-width column: a table of its own from the storage value to its group
+/// (<see cref="KeyTable{TValue}"/>), and a group for null. An integer key the statistics bound to a
+/// span of <see cref="DirectValues"/> values, or of up to <see cref="DirectPerRow"/> values a row of
+/// the source, is numbered by its value less the least instead: a table
+/// from the number to its group, in pages allocated as values meet them, so that no row is hashed and
+/// the memory follows the pages the values touch.
 /// </summary>
 internal sealed class FixedKeys<TValue> : GroupKeys
     where TValue : unmanaged, IEquatable<TValue>, IComparable<TValue>
 {
-    /// <summary>The most values a table of groups covers: 2^16, a quarter of a megabyte.</summary>
+    /// <summary>The span of values a table of groups covers whatever the rows: 2^16, a quarter of a megabyte.</summary>
     internal const long DirectValues = 1 << 16;
+
+    /// <summary>The values a row of the source a table of groups may span past <see cref="DirectValues"/>: four, the budget of a numbering by value.</summary>
+    internal const long DirectPerRow = 4;
+
+    /// <summary>The values of a page of the table of groups, as a power of two: 4 096, 16 KiB.</summary>
+    private const int PageBits = 12;
+
+    private const int PageMask = (1 << PageBits) - 1;
 
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
     private readonly KeyBounds? _bounds;
-    private GroupIndex<TValue> _index = new GroupIndex<TValue>();
+    private KeyTable<TValue> _index = new KeyTable<TValue>();
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
     private ValuesCache<TValue> _entries;
 
-    // The group of each value from the statistics' smallest, -1 for a value not met yet: what the
-    // index would answer, read without a hash.
-    private readonly int[]? _direct;
-    private readonly long _directMin;
+    // The hashed path in two passes (AggregationPlan.ProbeAhead): each row's home slot, then the rows
+    // the first pass left; what its reads ahead found, written so that they stay.
+    private readonly int _probeAhead;
+    private uint[] _homes = [];
+    private int[] _left = [];
+    private int _sink;
 
-    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null)
+    // The group of each value by its number, the value less the statistics' smallest, in pages of
+    // 2^PageBits numbers allocated as values meet them, -1 for a value not met yet, every page Unmet
+    // until then; a value past the bounds, which exact statistics never leave, goes to the index alone.
+    // A page lies in a slab of pages at its start (Page): the slab of each page, and where it starts.
+    private readonly int[][]? _pages;
+    private readonly int[]? _pageStarts;
+    private readonly long _directMin;
+    private readonly ulong _span;
+    private readonly long _rows;
+
+    // The slab the next pages come from, its pages handed out, the pages of the next slab, and the
+    // numbers every slab holds.
+    private int[]? _slab;
+    private int _slabUsed;
+    private int _slabPages = 1;
+    private long _slabsHeld;
+
+    // Whether the last chunk of rows met mostly values for the first time: the next goes by the lookup alone (DirectTwoPasses).
+    private bool _directNew;
+
+    // Every key a group of its own, no table looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
+    private readonly bool _appending;
+    private readonly ArrayShelf? _shelf;
+
+    internal FixedKeys(
+        ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead, long rows = -1, bool appending = false,
+        ArrayShelf? shelf = null)
     {
         _shape = shape;
         _sorted = sorted;
         _bounds = bounds;
-        if (Integers && bounds is { } known && known.Max >= known.Min && (ulong)(known.Max - known.Min) < DirectValues)
+        _probeAhead = probeAhead;
+        _rows = rows;
+        _appending = appending;
+        _shelf = shelf;
+        if (shelf is not null)
         {
-            _direct = new int[(int)(known.Max - known.Min + 1)];
-            _direct.AsSpan().Fill(-1);
-            _directMin = known.Min;
+            _index = new KeyTable<TValue>(shelf);
         }
+        if (Integers && bounds is { } known && known.Max >= known.Min)
+        {
+            // The span counts both ends; a span of every long wraps to none.
+            ulong span = (ulong)(known.Max - known.Min) + 1;
+            if (span != 0 && (span <= DirectValues || (rows > 0 && span <= (ulong)(DirectPerRow * rows))))
+            {
+                _pages = new int[(int)((span + PageMask) >> PageBits)][];
+                _pages.AsSpan().Fill(Unmet);
+                _pageStarts = new int[_pages.Length];
+                _directMin = known.Min;
+                _span = span;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The page of the table of groups every number reads until its own is allocated: no value met, -1
+    /// throughout, and never written. A first pass reads it as any other, with no branch on the keys.
+    /// </summary>
+    private static readonly int[] Unmet = NewUnmet();
+
+    private static int[] NewUnmet()
+    {
+        int[] page = new int[1 << PageBits];
+        page.AsSpan().Fill(-1);
+        return page;
     }
 
     /// <summary>Whether the values are integers, which a table of groups can be indexed by.</summary>
@@ -439,6 +703,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 word &= validity[w];
             }
 
+            if (word == ulong.MaxValue)
+            {
+                narrowed[w] = Reached(values.Slice(w << 6, 64), edge, descending);
+                continue;
+            }
+
             ulong kept = 0;
             while (word != 0)
             {
@@ -452,6 +722,32 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
+    /// edge, compared with no branch, as <see cref="ValueFrontier"/> compares its values: from the
+    /// word's bits a row at a time, each row waited on the one before it.
+    /// </summary>
+    private static ulong Reached(ReadOnlySpan<TValue> values, TValue edge, bool descending)
+    {
+        ulong reached = 0;
+        if (descending)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                reached |= (values[i].CompareTo(edge) >= 0 ? 1UL : 0UL) << i;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                reached |= (values[i].CompareTo(edge) <= 0 ? 1UL : 0UL) << i;
+            }
+        }
+
+        return reached;
     }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
@@ -537,9 +833,23 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return true;
         }
 
-        if (_direct is not null)
+        if (_pages is not null)
         {
-            Direct(canonical, validity, rows, selection, rowGroups);
+            if (_probeAhead >= 0 && selection.IsEmpty)
+            {
+                DirectTwoPasses(canonical, validity, rows, rowGroups);
+            }
+            else
+            {
+                Direct(canonical, validity, rows, selection, rowGroups);
+            }
+
+            return false;
+        }
+
+        if (_probeAhead >= 0 && selection.IsEmpty && !_appending)
+        {
+            TwoPasses(canonical, validity, rows, rowGroups);
             return false;
         }
 
@@ -570,14 +880,63 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     /// <summary>
-    /// Each selected row's group read from the table of groups, a value not met yet looked up in
-    /// the index once; a value past the statistics' bounds, which exact statistics never leave, in
+    /// Every row's group in two passes: the group of each key that sits in
+    /// its home slot, with no branch on the keys; then, in their order, the rows that pass left (keys
+    /// past their home, new keys, nulls) through the whole lookup, which numbers a new key as it first
+    /// comes. The rows left are gathered without a branch either.
+    /// </summary>
+    private void TwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    {
+        if (_probeAhead > 0)
+        {
+            Scratch.Grow(ref _homes, rows);
+        }
+
+        Span<int> groups = rowGroups.AsSpan(0, rows);
+        _sink ^= _index.FindAtHome(canonical[..rows], groups, _homes, _probeAhead, out bool missed);
+
+        // Every row found its group, none null: the usual batch once the keys are known.
+        if (!missed && validity.IsEmpty)
+        {
+            return;
+        }
+
+        Scratch.Grow(ref _left, rows);
+        int[] left = _left;
+        int count = 0;
+        if (validity.IsEmpty)
+        {
+            for (int row = 0; row < rows; row++)
+            {
+                left[count] = row;
+                count += groups[row] >>> 31;
+            }
+        }
+        else
+        {
+            for (int row = 0; row < rows; row++)
+            {
+                left[count] = row;
+                count += (groups[row] >>> 31) | (int)(~(validity[row >> 6] >> (row & 63)) & 1);
+            }
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            int row = left[i];
+            rowGroups[row] = StorageValues.IsValid(validity, row) ? Lookup(canonical[row]) : NullGroup();
+        }
+    }
+
+    /// <summary>
+    /// Each selected row's group read from the table of groups by the value's number, a value not met
+    /// yet numbered there; a value past the statistics' bounds, which exact statistics never leave, in
     /// the index alone.
     /// </summary>
     private void Direct(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups)
     {
-        int[] direct = _direct!;
         long min = _directMin;
+        ulong span = _span;
         RowCursor selected = new RowCursor(selection, 0, rows);
         while (selected.Next(out int row))
         {
@@ -588,21 +947,167 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
 
             TValue value = canonical[row];
-            ulong slot = (ulong)(Integer(value) - min);
-            if (slot >= (ulong)direct.Length)
+            ulong number = (ulong)(Integer(value) - min);
+            rowGroups[row] = number < span ? Numbered(value, number) : Lookup(value);
+        }
+    }
+
+    /// <summary>The rows <see cref="DirectTwoPasses"/> takes at a time: its rows left on the stack, and the lines its first pass read still in the first level of cache when the second comes.</summary>
+    private const int DirectChunk = 4096;
+
+    /// <summary>
+    /// Every row's group read from the table of groups in two passes,
+    /// <see cref="DirectChunk"/> rows at a time: the group at each row's number, with no branch on the
+    /// keys, a page not allocated yet read as <see cref="Unmet"/> and a value past the bounds as none;
+    /// then, in their order, the rows the first pass left (values met for the first time, values past
+    /// the bounds, nulls) through the whole lookup, which numbers a value as it first comes. At a
+    /// million keys in no order, a row in four meets its value for the first time: a branch on it, a row
+    /// at a time, missed as often.
+    /// </summary>
+    /// <remarks>
+    /// A chunk whose first pass leaves more than seven rows in eight sends the next through the lookup
+    /// alone, a row at a time, until one makes fewer new groups than that: values met for the first
+    /// time one after the other, ten million keys in the order of the rows, made the first pass read
+    /// every page for nothing, 14 % of the scan.
+    /// </remarks>
+    private void DirectTwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    {
+        long min = _directMin;
+        ulong span = _span;
+        int[][] pages = _pages!;
+        int[] starts = _pageStarts!;
+        Span<int> left = stackalloc int[DirectChunk];
+        for (int start = 0; start < rows; start += DirectChunk)
+        {
+            int end = Math.Min(rows, start + DirectChunk);
+            ReadOnlySpan<TValue> values = canonical[start..end];
+            Span<int> groups = rowGroups.AsSpan(start, end - start);
+            if (_directNew)
             {
-                rowGroups[row] = Lookup(value);
+                int before = Count;
+                for (int i = 0; i < values.Length; i++)
+                {
+                    if (!StorageValues.IsValid(validity, start + i))
+                    {
+                        groups[i] = NullGroup();
+                        continue;
+                    }
+
+                    TValue value = values[i];
+                    ulong number = (ulong)(Integer(value) - min);
+                    groups[i] = number < span ? Numbered(value, number) : Lookup(value);
+                }
+
+                _directNew = Count - before > values.Length - (values.Length >> 3);
                 continue;
             }
 
-            int group = direct[(int)slot];
-            if (group < 0)
+            int missed = 0;
+            for (int i = 0; i < values.Length; i++)
             {
-                group = direct[(int)slot] = Lookup(value);
+                ulong number = (ulong)(Integer(values[i]) - min);
+                bool inside = number < span;
+                ulong at = inside ? number : 0;
+                int page = (int)(at >> PageBits);
+                int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[page]), starts[page] + ((int)at & PageMask));
+                group = inside ? group : -1;
+                groups[i] = group;
+                missed |= group;
             }
 
-            rowGroups[row] = group;
+            // Every row found its group, none null: the usual chunk once the values are known.
+            if (missed >= 0 && validity.IsEmpty)
+            {
+                _directNew = false;
+                continue;
+            }
+
+            // The rows left, gathered without a branch: no group, or a null.
+            int count = 0;
+            if (validity.IsEmpty)
+            {
+                for (int i = 0; i < groups.Length; i++)
+                {
+                    left[count] = i;
+                    count += groups[i] >>> 31;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < groups.Length; i++)
+                {
+                    int row = start + i;
+                    left[count] = i;
+                    count += (groups[i] >>> 31) | (int)(~(validity[row >> 6] >> (row & 63)) & 1);
+                }
+            }
+
+            for (int l = 0; l < count; l++)
+            {
+                int i = left[l];
+                if (!StorageValues.IsValid(validity, start + i))
+                {
+                    groups[i] = NullGroup();
+                    continue;
+                }
+
+                TValue value = values[i];
+                ulong number = (ulong)(Integer(value) - min);
+                groups[i] = number < span ? Numbered(value, number) : Lookup(value);
+            }
+
+            _directNew = count > values.Length - (values.Length >> 3);
         }
+    }
+
+    /// <summary>The group of a value within the bounds, by its number: added when it is new, its page allocated at the first value it holds.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int Numbered(TValue value, ulong number)
+    {
+        int at = (int)(number >> PageBits);
+        int[] slab = _pages![at];
+        if (slab == Unmet)
+        {
+            slab = Page(at);
+        }
+
+        ref int group = ref slab[_pageStarts![at] + ((int)number & PageMask)];
+        if (group < 0)
+        {
+            group = Add(value);
+        }
+
+        return group;
+    }
+
+    /// <summary>The most pages a slab holds: 256 KiB.</summary>
+    private const int MostSlabPages = 16;
+
+    /// <summary>
+    /// The page of the table of groups at <paramref name="at"/>, allocated, every number in it not met
+    /// yet; the slab it lies in. Pages come from slabs of one page, then two, four, up to sixteen: a
+    /// table whose values are many takes its pages sixteen at a time, one that meets a few keeps them
+    /// a page each. Measured on the Mac on 2026-10-07, at fourteen lanes, a million keys in no order
+    /// made 3 400 pages of 16 KiB, each through the lock the runtime allocates by: 14 % of the cycles,
+    /// most of them waiting on it.
+    /// </summary>
+    /// <returns>The slab the page lies in, where <see cref="_pageStarts"/> says.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int[] Page(int at)
+    {
+        if (_slab is null || _slabUsed == _slab.Length >> PageBits)
+        {
+            int length = _slabPages << PageBits;
+            _slab = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
+            _slabUsed = 0;
+            _slabsHeld += length;
+            _slabPages = Math.Min(MostSlabPages, _slabPages * 2);
+        }
+
+        int start = _slabUsed++ << PageBits;
+        _slab.AsSpan(start, 1 << PageBits).Fill(-1);
+        _pageStarts![at] = start;
+        return _pages![at] = _slab;
     }
 
     /// <summary>An integer value as a long; an unsigned one past the longs as a negative, which no table holds.</summary>
@@ -617,26 +1122,96 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         : typeof(TValue) == typeof(uint) ? Unsafe.BitCast<TValue, uint>(value)
         : (long)Unsafe.BitCast<TValue, ulong>(value);
 
-    /// <summary>Where the table of groups holds <paramref name="value"/>'s group; false past its bounds.</summary>
-    private bool DirectSlot(TValue value, out int slot)
+    /// <summary>The number <paramref name="value"/>'s group is held at in the table of groups; false past its bounds, or with no such table.</summary>
+    private bool DirectSlot(TValue value, out ulong number)
     {
-        ulong at = (ulong)(Integer(value) - _directMin);
-        slot = (int)at;
-        return at < (ulong)_direct!.Length;
+        // Only an integer key has the table: no other value is read as a long.
+        if (_pages is null)
+        {
+            number = 0;
+            return false;
+        }
+
+        number = (ulong)(Integer(value) - _directMin);
+        return number < _span;
     }
 
-    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds);
+    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds, _probeAhead, _rows);
+
+    /// <summary>Whether the groups are numbered by value, in the pages of a table of groups, rather than hashed.</summary>
+    internal bool ByValue => _pages is not null;
+
+    internal override bool NumberedByValue => ByValue;
+
+    /// <summary>The index, the keys of the groups, the pages of the table of groups, the values a batch reads and its homes and rows left.</summary>
+    internal override long Footprint =>
+        _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
+        + (_slabsHeld * sizeof(int)) + ((long)(_pages?.Length ?? 0) * (IntPtr.Size + sizeof(int)))
+        + ((long)(_homes.Length + _left.Length) * sizeof(int));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
     internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
 
+    internal override (long Least, ulong Span)? ValueSpan => _pages is null ? null : (_directMin, _span);
+
+    /// <summary>The bits of a number below its part's in a merge by value: the span cut into 2^<paramref name="partBits"/> runs of a power of two each.</summary>
+    private int ValuePartShift(int partBits) => Math.Max(0, 64 - System.Numerics.BitOperations.LeadingZeroCount(_span - 1) - partBits);
+
+    internal override void PartsByValue(int partBits, Span<byte> parts)
+    {
+        int shift = ValuePartShift(partBits);
+        for (int g = 0; g < Count; g++)
+        {
+            ulong number = g == _null ? 0 : (ulong)(Integer(_keys[g]) - _directMin);
+            parts[g] = (byte)(number < _span ? number >> shift : 0);
+        }
+    }
+
+    /// <summary>
+    /// A part of a merge by value numbers its run of the span whatever its entries: the lanes numbered
+    /// all of it, and its pages come as its values meet them.
+    /// </summary>
+    internal override GroupKeys ForValuePart(int part, int partBits)
+    {
+        int shift = ValuePartShift(partBits);
+        long least = _directMin + ((long)part << shift);
+        long most = Math.Min(_directMin + (long)(_span - 1), least + ((1L << shift) - 1));
+        return new FixedKeys<TValue>(_shape, _sorted, new KeyBounds(least, most), _probeAhead, rows: 1L << shift);
+    }
+
     internal override void Reserve(int groups)
     {
-        _index.Reserve(groups);
+        // Keys numbered by value take the index only past the bounds, which exact statistics never leave.
+        if (_pages is null)
+        {
+            _index.Reserve(groups);
+        }
+
         if (_keys.Length < groups)
         {
-            Array.Resize(ref _keys, groups);
+            Grow(groups);
         }
+    }
+
+    /// <summary>The keys' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>
+    private void Grow(int length)
+    {
+        TValue[] grown = _shelf is null ? new TValue[length] : _shelf.Take<TValue>(length, zeroed: false);
+        _keys.AsSpan(0, Count).CopyTo(grown);
+        _shelf?.Give(_keys);
+        _keys = grown;
+    }
+
+    /// <summary>A sub-table of the core: the keys hashed, never by value, their arrays from the query's shelf.</summary>
+    internal override GroupKeys ForTable(ArrayShelf shelf) => new FixedKeys<TValue>(_shape, sorted: false, shelf: shelf);
+
+    internal override void Release()
+    {
+        _index.Release();
+        _shelf?.Give(_keys);
+        _keys = [];
+        Count = 0;
+        _null = -1;
     }
 
     internal override int NullNumber => _null;
@@ -658,15 +1233,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        // The table of groups forgets every group's number, then learns the kept ones' new ones.
-        if (_direct is int[] direct)
+        // The table of groups forgets every group's number, then learns the kept ones' new ones; a
+        // value it holds is in no index.
+        for (int g = 0; g < Count; g++)
         {
-            for (int g = 0; g < Count; g++)
+            if (g != _null && DirectSlot(_keys[g], out ulong number))
             {
-                if (g != _null && DirectSlot(_keys[g], out int slot))
-                {
-                    direct[slot] = -1;
-                }
+                int page = (int)(number >> PageBits);
+                _pages![page][_pageStarts![page] + ((int)number & PageMask)] = -1;
             }
         }
 
@@ -680,13 +1254,19 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _index.Clear();
         for (int i = 0; i < groups.Length; i++)
         {
-            if (i != nullGroup)
+            if (i == nullGroup)
             {
-                _index.Slot(_keys[i], out _) = i;
-                if (_direct is not null && DirectSlot(_keys[i], out int slot))
-                {
-                    _direct[slot] = i;
-                }
+                continue;
+            }
+
+            if (DirectSlot(_keys[i], out ulong number))
+            {
+                int page = (int)(number >> PageBits);
+                _pages![page][_pageStarts![page] + ((int)number & PageMask)] = i;
+            }
+            else
+            {
+                _index.GetOrAdd(_keys[i], i);
             }
         }
 
@@ -711,8 +1291,65 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            (ulong low, ulong high) = KeyWords.Of(_keys[g]);
-            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(low, high, seed) >> shift);
+            parts[g] = g == _null ? (byte)0 : (byte)(EntryKeys.Hash(_keys[g], seed) >> shift);
+        }
+    }
+
+    internal override int EntryBytes => Unsafe.SizeOf<TValue>();
+
+    internal override GroupKeys? Appending() => new FixedKeys<TValue>(_shape, sorted: false, appending: true);
+
+    internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
+
+    internal override void CountParts(Span<int> counts) => EntryKeys.CountParts<TValue>(_keys.AsSpan(0, Count), _null, counts);
+
+    internal override int CopyEntries(ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written) =>
+        EntryKeys.Copy<TValue>(_keys.AsSpan(0, Count), _null, records, shape, from, entries, out written);
+
+    internal override void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) =>
+        EntryKeys.TablesOf<TValue>(batch, shape, shift, mask, tables);
+
+    internal override ulong HashAt(PartBatch batch, EntryShape shape, int entry) => EntryKeys.Hash(EntryKeys.KeyAt<TValue>(batch, shape, entry), MergeHash.Seed);
+
+    /// <summary>
+    /// The keys gathered first, then found in two passes as a batch's rows are (<see cref="TwoPasses"/>):
+    /// each key in its home slot with no branch on the keys, then the rest in their order, which
+    /// numbers a new key as it first comes.
+    /// </summary>
+    internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, Span<ulong> scratch)
+    {
+        int count = entries.Length;
+        if (_pages is not null || _appending)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                groups[i] = Lookup(EntryKeys.KeyAt<TValue>(batch, shape, entries[i]));
+            }
+
+            return;
+        }
+
+        int keyWords = (Unsafe.SizeOf<TValue>() + sizeof(ulong) - 1) / sizeof(ulong);
+        Span<TValue> keys = MemoryMarshal.Cast<ulong, TValue>(scratch[..(count * keyWords)])[..count];
+        Span<uint> homes = MemoryMarshal.Cast<ulong, uint>(scratch.Slice(count * keyWords, count))[..count];
+        for (int i = 0; i < count; i++)
+        {
+            keys[i] = EntryKeys.KeyAt<TValue>(batch, shape, entries[i]);
+        }
+
+        groups = groups[..count];
+        _sink ^= _index.FindAtHome(keys, groups, homes, 0, out bool missed);
+        if (!missed)
+        {
+            return;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            if (groups[i] < 0)
+            {
+                groups[i] = Lookup(keys[i]);
+            }
         }
     }
 
@@ -830,12 +1467,19 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     private int Lookup(TValue value)
     {
-        ref int group = ref _index.Slot(value, out bool exists);
-        if (!exists)
+        if (_appending)
         {
-            // Filled before the key is stored: storing it may double the keys and move the index to
-            // another dictionary, which copies the slot; the one read below keeps the number too.
-            group = Count;
+            return Add(value);
+        }
+
+        if (DirectSlot(value, out ulong number))
+        {
+            return Numbered(value, number);
+        }
+
+        int group = _index.GetOrAdd(value, Count);
+        if (group == Count)
+        {
             Add(value);
         }
 
@@ -856,8 +1500,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         if (Count == _keys.Length)
         {
-            Array.Resize(ref _keys, Count * 2);
-            _index.Doubled();
+            Grow(Doubled(Count));
         }
 
         _keys[Count] = value;
@@ -870,15 +1513,19 @@ internal sealed class BytesKeys : GroupKeys
 {
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
-    private readonly ByteKeyTable _table = new ByteKeyTable();
-    private int[] _groupOfEntry = new int[16];
-    private int[] _entryOfGroup = new int[16];
+
+    // A group is the table's entry of its key; the null group an entry no key finds.
+    private readonly ByteKeyTable _table;
     private int _null = -1;
 
-    internal BytesKeys(ColumnShape shape, bool sorted)
+    /// <param name="shape">The key's column.</param>
+    /// <param name="sorted">Whether the statistics say the column is sorted.</param>
+    /// <param name="shelf">The lane's shelf the table grows from, under its query's memory; null for a table nothing counts.</param>
+    internal BytesKeys(ColumnShape shape, bool sorted, ArrayShelf? shelf = null)
     {
         _shape = shape;
         _sorted = sorted;
+        _table = new ByteKeyTable(shelf);
     }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
@@ -978,6 +1625,12 @@ internal sealed class BytesKeys : GroupKeys
             return true;
         }
 
+        if (selection.IsEmpty && !_table.Reseeded)
+        {
+            Chunked(canonical, validity, rows, rowGroups);
+            return false;
+        }
+
         RowCursor selected = new RowCursor(selection, 0, rows);
         int lastRow = -1;
         int lastGroup = -1;
@@ -1004,6 +1657,8 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new BytesKeys(_shape, _sorted);
 
+    internal override long Footprint => _table.Footprint;
+
     internal override int NullNumber => _null;
 
     internal override bool Orders(int component) => true;
@@ -1012,36 +1667,10 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        // The entries of the kept keys, which ascend with their groups, the null group having none:
-        // listed where the groups of the entries go, which are numbered again below.
-        int nullGroup = -1;
-        int kept = 0;
-        for (int i = 0; i < groups.Length; i++)
-        {
-            if (groups[i] == _null)
-            {
-                nullGroup = i;
-                continue;
-            }
-
-            _groupOfEntry[kept++] = _entryOfGroup[groups[i]];
-        }
-
-        _table.Retain(_groupOfEntry.AsSpan(0, kept));
-        int entry = 0;
-        for (int i = 0; i < groups.Length; i++)
-        {
-            if (i == nullGroup)
-            {
-                _entryOfGroup[i] = -1;
-                continue;
-            }
-
-            _groupOfEntry[entry] = i;
-            _entryOfGroup[i] = entry++;
-        }
-
-        _null = nullGroup;
+        // The kept groups ascend, and are the entries the table keeps, the null group's with them.
+        int nullGroup = groups.IndexOf(_null);
+        _table.Retain(groups);
+        _null = _null < 0 ? -1 : nullGroup;
         Count = groups.Length;
         Renumbered();
     }
@@ -1052,7 +1681,7 @@ internal sealed class BytesKeys : GroupKeys
         for (int i = 0; i < groups.Length; i++)
         {
             int g = groups[i];
-            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(_entryOfGroup[g]));
+            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(g), HashOf(g));
         }
 
         MergeSeen(target);
@@ -1062,9 +1691,12 @@ internal sealed class BytesKeys : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(_table.KeyOf(_entryOfGroup[g]), seed) >> shift);
+            parts[g] = g == _null ? (byte)0 : (byte)((seed == MergeHash.Seed ? HashOf(g) : MergeHash.Of(_table.KeyOf(g), seed)) >> shift);
         }
     }
+
+    /// <summary>The hash of group <paramref name="group"/>'s key under <see cref="MergeHash.Seed"/>: the table's, unless it took a seed of its own.</summary>
+    private ulong HashOf(int group) => _table.Reseeded ? MergeHash.Of(_table.KeyOf(group), MergeHash.Seed) : _table.HashOf(group);
 
     internal override int CompareKeys(GroupKeys other, int a, int b, int component)
     {
@@ -1076,7 +1708,7 @@ internal sealed class BytesKeys : GroupKeys
             return leftNull == rightNull ? 0 : leftNull ? 1 : -1;
         }
 
-        return _table.KeyOf(_entryOfGroup[a]).SequenceCompareTo(right._table.KeyOf(right._entryOfGroup[b]));
+        return _table.KeyOf(a).SequenceCompareTo(right._table.KeyOf(b));
     }
 
     internal override int[] Order(bool sorted)
@@ -1103,11 +1735,13 @@ internal sealed class BytesKeys : GroupKeys
     internal override Func<int, T> Reader<T>(int component)
     {
         ColumnShape shape = _shape;
-        return group => group == _null ? default! : StorageValues.BytesToClr<T>(_table.KeyOf(_entryOfGroup[group]), shape);
+        return group => group == _null ? default! : StorageValues.BytesToClr<T>(_table.KeyOf(group), shape);
     }
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
+        // The keys came from the column the reader checked as it decoded it: no text function makes a key
+        // yet (16-queries.md §3), and one that would must check what it makes.
         VarBinStore leaf = (VarBinStore)store.Leaf;
         foreach (int group in groups)
         {
@@ -1117,7 +1751,7 @@ internal sealed class BytesKeys : GroupKeys
             }
             else
             {
-                leaf.Append(_table.KeyOf(_entryOfGroup[group]));
+                leaf.AppendValidated(_table.KeyOf(group));
             }
         }
     }
@@ -1129,7 +1763,7 @@ internal sealed class BytesKeys : GroupKeys
             return a == b ? 0 : a == _null ? 1 : -1;
         }
 
-        return _table.KeyOf(_entryOfGroup[a]).SequenceCompareTo(_table.KeyOf(_entryOfGroup[b]));
+        return _table.KeyOf(a).SequenceCompareTo(_table.KeyOf(b));
     }
 
     private static bool SameKey(BytesBlock values, ReadOnlySpan<ulong> validity, int left, int right)
@@ -1138,43 +1772,66 @@ internal sealed class BytesKeys : GroupKeys
         return leftValid == StorageValues.IsValid(validity, right) && (!leftValid || values[left].SequenceEqual(values[right]));
     }
 
-    private int Lookup(ReadOnlySpan<byte> value)
+    /// <summary>The group of <paramref name="value"/>, its entry in the table, numbered as it first comes.</summary>
+    private int Lookup(ReadOnlySpan<byte> value) => Lookup(value, MergeHash.Of(value, MergeHash.Seed));
+
+    /// <summary>As <see cref="Lookup(ReadOnlySpan{byte})"/>, the value's hash under <see cref="MergeHash.Seed"/> known.</summary>
+    private int Lookup(ReadOnlySpan<byte> value, ulong hash)
     {
-        int entry = _table.GetOrAdd(value, out bool added);
-        if (!added)
+        int group = _table.GetOrAdd(value, hash, out bool added);
+        if (added)
         {
-            return _groupOfEntry[entry];
+            Count = _table.Count;
         }
 
-        if (entry == _groupOfEntry.Length)
-        {
-            Array.Resize(ref _groupOfEntry, entry * 2);
-        }
-
-        int group = NewGroup(entry);
-        _groupOfEntry[entry] = group;
         return group;
+    }
+
+    /// <summary>The rows <see cref="Chunked"/> takes at a time: their hashes and numbers on the stack.</summary>
+    private const int TextChunk = 256;
+
+    /// <summary>
+    /// Every row's group, <see cref="TextChunk"/> rows at a time: their
+    /// hashes, then each found where its home slot holds it, the table read with no row waiting on
+    /// another (<see cref="ByteKeyTable.FindAtHome"/>); then, in their order, the rows left through the
+    /// whole lookup, their hashes known, which numbers a key as it first comes.
+    /// </summary>
+    [SkipLocalsInit]
+    private void Chunked(BytesBlock canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    {
+        Span<ulong> hashes = stackalloc ulong[TextChunk];
+        Span<int> found = stackalloc int[TextChunk];
+        ulong seed = MergeHash.Seed;
+        for (int start = 0; start < rows; start += TextChunk)
+        {
+            int count = Math.Min(TextChunk, rows - start);
+            Span<ulong> chunk = hashes[..count];
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+                chunk[i] = StorageValues.IsValid(validity, row) ? MergeHash.Of(canonical[row], seed) : 0;
+            }
+
+            _table.FindAtHome(chunk, canonical, start, validity, found);
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+                rowGroups[row] = found[i] >= 0 ? found[i]
+                    : StorageValues.IsValid(validity, row) ? Lookup(canonical[row], chunk[i])
+                    : NullGroup();
+            }
+        }
     }
 
     private int NullGroup()
     {
         if (_null < 0)
         {
-            _null = NewGroup(-1);
+            _null = _table.AddDetached();
+            Count = _table.Count;
         }
 
         return _null;
-    }
-
-    private int NewGroup(int entry)
-    {
-        if (Count == _entryOfGroup.Length)
-        {
-            Array.Resize(ref _entryOfGroup, Count * 2);
-        }
-
-        _entryOfGroup[Count] = entry;
-        return Count++;
     }
 }
 
@@ -1206,6 +1863,9 @@ internal sealed class BoolKeys : GroupKeys
     }
 
     internal override GroupKeys Fresh() => new BoolKeys(_shape);
+
+    /// <summary>Three groups at most; the words a batch reads.</summary>
+    internal override long Footprint => (long)(_bits.Length + _validity.Length) * sizeof(ulong);
 
     internal override int NullNumber => _groups[2];
 
@@ -1242,7 +1902,7 @@ internal sealed class BoolKeys : GroupKeys
     {
         for (int g = 0; g < Count; g++)
         {
-            parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, 0, seed) >> shift);
+            parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, seed) >> shift);
         }
     }
 

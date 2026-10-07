@@ -437,8 +437,8 @@ public sealed class Aggregation<TResult>
 
     internal Aggregation(ResultQuery query) => _query = query;
 
-    /// <summary>What the scan did; valid once the aggregation has been enumerated.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);
+    /// <summary>What the scan did, and its group by; valid once the aggregation has been enumerated.</summary>
+    public ScanStatistics Statistics => _query.Statistics();
 
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
     internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;
@@ -525,8 +525,8 @@ public sealed class Aggregation
     /// <summary>The query, for the tests that read what its run held.</summary>
     internal ResultQuery Query => _query;
 
-    /// <summary>What the scan did; valid once the result has been read.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);
+    /// <summary>What the scan did, and its group by; valid once the result has been read.</summary>
+    public ScanStatistics Statistics => _query.Statistics();
 
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
     internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;

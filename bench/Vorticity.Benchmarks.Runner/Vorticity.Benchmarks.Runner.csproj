@@ -29,8 +29,11 @@
     <UseLdClassicXCodeLinker>false</UseLdClassicXCodeLinker>
   </PropertyGroup>
 
+  <!-- The group-bys of the high-cardinality bench, for the profiler, read their files as records:
+       the generator writes their readers, ahead of time as the rest. -->
   <ItemGroup>
     <ProjectReference Include="../Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.Scenarios.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

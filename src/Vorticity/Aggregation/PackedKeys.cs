@@ -11,7 +11,9 @@ namespace Vorticity.Aggregating;
 /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds an integer.</summary>
 /// <param name="Sorted">Whether each column is sorted, in the key's order.</param>
 /// <param name="Bounds">The values each integer column holds, when the statistics hold them exactly.</param>
-internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds);
+/// <param name="Rows">The rows of the source, which bound what a table of groups by value may span; -1 when unknown.</param>
+/// <param name="Scattered">Whether the key, numbered by value over a wide span, lies scattered over it, as its zones say: what takes the core from the start.</param>
+internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1, bool Scattered = false);
 
 /// <summary>
 /// A key of two to four columns as the numbers its parts have in indexes of their own, packed into
@@ -61,9 +63,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private readonly bool[] _ranged;
     private TKey[] _keys = new TKey[16];
 
-    // The groups by open addressing: a group number a slot, -1 for none, the slots a power of two
-    // at most half full.
-    private int[] _hashed = NewSlots(32);
+    // The groups by open addressing, the slots a power of two at most half full: a slot's tag, zero
+    // for none, its top bit set and seven bits of the word below those of its home; and its group
+    // number, read only where the tags agree, as RawKeys finds its words.
+    private byte[] _tags = new byte[32];
+    private int[] _hashed = new int[32];
 
     // The table of groups, -1 for a tuple not met yet, null once the parts outgrow it: each part's
     // number in its own bits, from bit _shifts[p], _bits[p] of them.
@@ -78,13 +82,18 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private int[] _renumbered = [];
     private int[] _held = [];
 
+    // The lane's shelf its tables grow from, under the query's memory; null for tables nothing counts.
+    private readonly ArrayShelf? _shelf;
+
     /// <param name="shapes">The key's columns.</param>
     /// <param name="facts">What the statistics say of them.</param>
     /// <param name="shared">The indexes of the columns, shared by the parts of a parallel merge; fresh ones when null.</param>
-    internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts, GroupKeys[]? shared = null)
+    /// <param name="shelf">The lane's shelf its tables and its columns' indexes grow from; null for tables nothing counts.</param>
+    internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts, GroupKeys[]? shared = null, ArrayShelf? shelf = null)
     {
         _shapes = shapes;
         _facts = facts;
+        _shelf = shelf;
         _parts = new GroupKeys[shapes.Length];
         _ids = new int[shapes.Length][];
         _partRanges = new GroupRanges[shapes.Length];
@@ -93,7 +102,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         _shifts = new int[shapes.Length];
         for (int p = 0; p < shapes.Length; p++)
         {
-            _parts[p] = shared?[p] ?? AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p]);
+            _parts[p] = shared?[p] ?? AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p], shelf: shelf);
             _ids[p] = [];
             _partRanges[p] = new GroupRanges();
             _bits[p] = 2;
@@ -389,7 +398,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (total > TableBits)
         {
-            _table = null;
+            DropTable();
             return;
         }
 
@@ -397,6 +406,17 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         {
             Rebuild();
         }
+    }
+
+    /// <summary>The table of groups let go, its array given back: the parts outgrew it.</summary>
+    private void DropTable()
+    {
+        if (_table is { } held)
+        {
+            _shelf?.Give(held);
+        }
+
+        _table = null;
     }
 
     /// <summary>The table at the parts' bits, filled with every group's slot.</summary>
@@ -411,11 +431,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (shift > TableBits)
         {
-            _table = null;
+            DropTable();
             return;
         }
 
-        int[] table = _table is { } held && held.Length == 1 << shift ? held : new int[1 << shift];
+        int[] table = _table is { } held && held.Length == 1 << shift ? held : NewTable(1 << shift);
         table.AsSpan().Fill(-1);
         Span<int> ids = stackalloc int[_parts.Length];
         for (int g = 0; g < Count; g++)
@@ -428,8 +448,16 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             table[SlotAt(ids, shift)] = g;
         }
 
+        if (!ReferenceEquals(table, _table))
+        {
+            DropTable();
+        }
+
         _table = table;
     }
+
+    /// <summary>A table of groups of <paramref name="length"/> slots, from the shelf when the keys have one.</summary>
+    private int[] NewTable(int length) => _shelf is null ? new int[length] : _shelf.Take<int>(length, zeroed: false);
 
     private int SlotAt(ReadOnlySpan<int> ids, int bits)
     {
@@ -464,6 +492,22 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     }
 
     internal override GroupKeys Fresh() => new PackedKeys<TKey>(_shapes, _facts);
+
+    /// <summary>The parts' indexes, the packed keys of the groups, the slots or the table that find them, and the scratch a keep reuses.</summary>
+    internal override long Footprint
+    {
+        get
+        {
+            long bytes = ((long)_keys.Length * Unsafe.SizeOf<TKey>()) + _tags.Length
+                + ((long)(_hashed.Length + (_table?.Length ?? 0) + _slots.Length + _partIds.Length + _renumbered.Length + _held.Length) * sizeof(int));
+            foreach (GroupKeys part in _parts)
+            {
+                bytes += part.Footprint;
+            }
+
+            return bytes;
+        }
+    }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
@@ -567,7 +611,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         for (int g = 0; g < Count; g++)
         {
             (ulong low, ulong high) = KeyWords.Of(_keys[g]);
-            parts[g] = (byte)(MergeHash.Of(low, high, seed) >> shift);
+            parts[g] = (byte)((Unsafe.SizeOf<TKey>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed)) >> shift);
         }
     }
 
@@ -649,7 +693,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         // Its own slots and table no longer find the words; a rebased index is read, not assigned.
         parts.CopyTo(_parts, 0);
-        _table = null;
+        DropTable();
     }
 
     internal override int[] Order(bool sorted) => Identity(Count);
@@ -679,20 +723,29 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// <summary>The group of a word, added when it is new.</summary>
     private int Lookup(TKey key)
     {
-        int[] hashed = _hashed;
-        int mask = hashed.Length - 1;
-        int slot = Home(key, hashed.Length);
+        // The tags first, as RawKeys: a new tuple finds its free slot without reading a group number
+        // or a word, where it read the word of each group its chain passed.
+        byte[] tags = _tags;
+        int mask = tags.Length - 1;
+        int shift = Shift(tags.Length);
+        ulong hash = Hash(key);
+        int slot = (int)(hash >> shift);
+        byte tag = Tag(hash, shift);
         while (true)
         {
-            int group = hashed[slot];
-            if (group < 0)
+            byte seen = tags[slot];
+            if (seen == 0)
             {
                 break;
             }
 
-            if (_keys[group].Equals(key))
+            if (seen == tag)
             {
-                return group;
+                int group = _hashed[slot];
+                if (_keys[group].Equals(key))
+                {
+                    return group;
+                }
             }
 
             slot = (slot + 1) & mask;
@@ -700,15 +753,16 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (Count == _keys.Length)
         {
-            Array.Resize(ref _keys, Count * 2);
+            ArrayShelf.Resize(_shelf, ref _keys, Doubled(Count));
         }
 
         int added = Count++;
         _keys[added] = key;
-        hashed[slot] = added;
-        if (Count * 2 > hashed.Length)
+        tags[slot] = tag;
+        _hashed[slot] = added;
+        if (Count * 2 > tags.Length)
         {
-            Rehash(hashed.Length * 2);
+            Rehash(Doubled(tags.Length));
         }
 
         return added;
@@ -717,47 +771,59 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// <summary>The slots at <paramref name="length"/>, every group placed again from its word.</summary>
     private void Rehash(int length)
     {
-        int[] hashed = _hashed.Length == length ? _hashed : NewSlots(length);
-        if (ReferenceEquals(hashed, _hashed))
+        byte[] tags = _tags;
+        int[] hashed = _hashed;
+        if (tags.Length == length)
         {
-            hashed.AsSpan().Fill(-1);
+            tags.AsSpan().Clear();
+        }
+        else
+        {
+            tags = _shelf is null ? new byte[length] : _shelf.Take<byte>(length, zeroed: true);
+            hashed = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
+            _shelf?.Give(_tags);
+            _shelf?.Give(_hashed);
         }
 
         int mask = length - 1;
+        int shift = Shift(length);
         for (int g = 0; g < Count; g++)
         {
-            int slot = Home(_keys[g], length);
-            while (hashed[slot] >= 0)
+            ulong hash = Hash(_keys[g]);
+            int slot = (int)(hash >> shift);
+            while (tags[slot] != 0)
             {
                 slot = (slot + 1) & mask;
             }
 
+            tags[slot] = Tag(hash, shift);
             hashed[slot] = g;
         }
 
+        _tags = tags;
         _hashed = hashed;
     }
 
-    /// <summary>A word's first slot among <paramref name="length"/>, a power of two: the top bits of the word, mixed first when it is wide.</summary>
+    /// <summary>A word's hash, whose top bits are its home slot: the word itself, mixed already, or a wide one's halves mixed.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Home(TKey key, int length)
+    private static ulong Hash(TKey key)
     {
-        int shift = 64 - BitOperations.Log2((uint)length);
         if (typeof(TKey) == typeof(ulong))
         {
-            return (int)(Unsafe.BitCast<TKey, ulong>(key) >> shift);
+            return Unsafe.BitCast<TKey, ulong>(key);
         }
 
         UInt128 wide = Unsafe.BitCast<TKey, UInt128>(key);
-        return (int)(((((ulong)wide * Odd) ^ (ulong)(wide >> 64)) * Odd) >> shift);
+        return (((ulong)wide * Odd) ^ (ulong)(wide >> 64)) * Odd;
     }
 
-    private static int[] NewSlots(int length)
-    {
-        int[] slots = new int[length];
-        slots.AsSpan().Fill(-1);
-        return slots;
-    }
+    /// <summary>The shift that leaves a hash's home among <paramref name="length"/> slots, a power of two.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Shift(int length) => 64 - BitOperations.Log2((uint)length);
+
+    /// <summary>A slot's tag: its top bit, so that none is zero, over the seven bits of the hash below the home's.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte Tag(ulong hash, int shift) => (byte)(0x80 | (hash >> (shift - 7)));
 
     /// <summary>The inverse of an odd number modulo 2^64, by Newton's iteration: each step doubles the bits it holds.</summary>
     private static ulong Invert(ulong odd)
