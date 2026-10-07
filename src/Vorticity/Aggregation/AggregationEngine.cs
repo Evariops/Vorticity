@@ -788,6 +788,51 @@ internal sealed class AggregationPartition
     // Whether the lane judged its first rows (TurnOnNew).
     private bool _judged;
 
+    // Whether the partition reserved its table for the groups its first rows foretold (Foretell).
+    private bool _foretold;
+
+    /// <summary>The rows the partition expects to fold, the source's shared among the lanes; -1 when unknown.</summary>
+    internal long ExpectedRows { get; init; } = -1;
+
+    /// <summary>
+    /// Once <see cref="JudgedRows"/> rows are folded, a table of a hashed key reserves the groups its first
+    /// rows foretell for the rows the partition expects: those a uniform key of <see cref="EstimatedValues"/>
+    /// values makes from them, as its budget lets it. Grown by doubling, the table placed every group again
+    /// at each step, a sixth of a group by of 1.8M pairs of integers (PLAN-HIGH-CARDINALITY, H11).
+    /// </summary>
+    private void Foretell()
+    {
+        _foretold = true;
+        if (Keys is not { NumberedByValue: false } keys || keys.Count == 0 || ExpectedRows <= _rowsFolded)
+        {
+            return;
+        }
+
+        // A lane its first rows turn to the core reserves nothing: its table goes.
+        double values = EstimatedValues(_rowsFolded, keys.Count);
+        if (TurnOnNew && values >= TurnValues)
+        {
+            return;
+        }
+
+        double expected = double.IsPositiveInfinity(values) ? ExpectedRows : values * -double.ExpM1(-ExpectedRows / values);
+        long groups = (long)Math.Min(expected, ExpectedRows);
+        if (groups < 2L * keys.Count || groups > int.MaxValue / 4)
+        {
+            return;
+        }
+
+        // What the partition takes a group now, its slack included, times the groups foretold: past what
+        // the budget grants, the table grows as before.
+        if (Memory is { } memory && !memory.CanGrow(Footprint / keys.Count * groups))
+        {
+            return;
+        }
+
+        keys.Reserve((int)groups);
+        Records?.Reserve((int)groups);
+    }
+
     private readonly CorePressure? _pressure;
 
     /// <summary>The query's memory, in which the partition reserves what its groups hold (PLAN-HIGH-CARDINALITY, H2); null for a partition that does not count them.</summary>
@@ -1477,6 +1522,10 @@ internal sealed class AggregationPartition
         // (H14): before, the slots fold without one.
         _rowsFolded += rows;
         _settled = _rowsFolded >= SettledRows * (long)groups;
+        if (!_foretold && _rowsFolded >= JudgedRows)
+        {
+            Foretell();
+        }
         for (int i = 0; i < Slots.Length; i++)
         {
             Slots[i].EnsureGroups(groups);
@@ -1999,6 +2048,7 @@ internal static class AggregationEngine
                     Top = top,
                     Core = core?.Lane(),
                     Pressure = pressure,
+                    ExpectedRows = core is null && top is null && facts?.Rows is long rows ? rows : -1,
                 };
                 if (core is { Lean: true })
                 {
@@ -2028,6 +2078,7 @@ internal static class AggregationEngine
                         Pressure = pressure,
                         TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
                             && facts?.Rows is long sourceRows && sourceRows >= lanes * AggregationPartition.LaneRows,
+                        ExpectedRows = core is null && top is null && facts?.Rows is long laneRows ? laneRows / lanes : -1,
                     };
                     if (core is { Lean: true })
                     {
