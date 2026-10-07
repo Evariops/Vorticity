@@ -371,9 +371,11 @@ internal static class MergeHash
     /// A key of one word: one round of the mix, a bijection whose every input bit reaches every bit
     /// of the hash, where the key of two words takes two (PLAN-HIGH-CARDINALITY, H15).
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong Of(ulong word, ulong seed) => Mix(word ^ seed);
 
     /// <summary>A key of two words, every bit of each reaching every bit of the hash.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong Of(ulong low, ulong high, ulong seed) => Mix(Mix(low ^ seed) ^ high);
 
     /// <summary>A key of bytes: XXH3 of 64 bits under <paramref name="seed"/>, the same bits as <see cref="System.IO.Hashing.XxHash3"/>.</summary>
@@ -445,6 +447,8 @@ internal static class MergeHash
         return h ^ (h >> 32);
     }
 
+    /// <remarks>Inlined: the native compiler left it a call a group where a merge cuts its keys into parts.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Mix(ulong x)
     {
         x ^= x >> 33;
