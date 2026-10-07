@@ -83,6 +83,16 @@ internal static class GroupScenarios
             return path => NamesAsync(path, configure);
         }
 
+        if (shape[1] == "users")
+        {
+            return shape[2] switch
+            {
+                "scan" => path => UsersAsync(path),
+                "day" => path => UsersByDayAsync(path, configure),
+                _ => null,
+            };
+        }
+
         if (shape[1] == "pairs")
         {
             return shape[2] switch
@@ -380,6 +390,29 @@ internal static class GroupScenarios
         return rows;
     }
 
+    /// <summary>The distinct users of the visits file over the whole scan: one set of ten million values.</summary>
+    private static async Task<long> UsersAsync(string path)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        return await file.Scan<Visit>().CountDistinctAsync(v => v.User);
+    }
+
+    /// <summary>The distinct users of each day of the visits file: 365 groups, sorted, ten million users.</summary>
+    private static async Task<long> UsersByDayAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long users = 0;
+        await foreach (Columns<DayUsers> days in Configured(file.Scan<Visit>()
+            .GroupBy(v => v.Day)
+            .Select(g => (g.Key, g.CountDistinct(v => v.User))), configure)
+            .As<DayUsers>())
+        {
+            users += Sum(days.Column<long>(1).Values);
+        }
+
+        return users;
+    }
+
     private static async Task<long> UrlSmallsAsync(string path, Action<AggregationPlan>? configure)
     {
         await using VortexFile file = await ScenarioSet.OpenAsync(path);
@@ -514,6 +547,14 @@ public partial record struct Draw(int K4, int K100, int K1000, int K100k, int K1
 /// <summary>A pair of integer keys' rows and the sum of their values.</summary>
 [VortexRecord]
 public partial record struct PairTotal(int First, int Second, long Count, long Total);
+
+/// <summary>A row of the bench's visits file: a user among ten million, a day among 365, in order.</summary>
+[VortexRecord]
+public partial record struct Visit(int User, int Day);
+
+/// <summary>A day and its distinct users.</summary>
+[VortexRecord]
+public partial record struct DayUsers(int Day, long Users);
 
 /// <summary>A row of the bench's pages file: a URL of about forty bytes among a million, a UUID among a million, a small integer, an integer key, a value.</summary>
 [VortexRecord]
