@@ -65,6 +65,8 @@ internal readonly struct VarianceOp<TValue> : IValueOp<TValue, VarianceState>
         state.Squares.Add(shifted * shifted);
     }
 
+    public void AddSelected(ref VarianceState state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref VarianceState state, TValue value, long count)
     {
         double shifted = (double.CreateTruncating(value) * _unit) - _center;

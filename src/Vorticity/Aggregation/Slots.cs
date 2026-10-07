@@ -11,12 +11,12 @@ namespace Vorticity.Aggregating;
 /// <summary>One column of one batch, as an aggregate is handed it.</summary>
 internal readonly ref struct BatchInput
 {
-    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0)
-        : this(batch, arena, node, rows, selection, startRow, 0, rows)
+    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0, bool settled = true)
+        : this(batch, arena, node, rows, selection, startRow, 0, rows, settled)
     {
     }
 
-    private BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, int start, int end)
+    private BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow, int start, int end, bool settled)
     {
         Batch = batch;
         Arena = arena;
@@ -26,7 +26,14 @@ internal readonly ref struct BatchInput
         StartRow = startRow;
         Start = start;
         End = end;
+        Settled = settled;
     }
+
+    /// <summary>
+    /// Whether the partition's groups have each seen many rows, their extremes moved rarely: a slot then
+    /// folds with a branch on the value, which predicts, rather than <see cref="IValueOp{TValue,TState}.AddSelected"/> (H14).
+    /// </summary>
+    internal bool Settled { get; }
 
     /// <summary>
     /// The first row of the window <see cref="AggregateSlot.StepRows"/> folds, 0 for the batch: a
@@ -39,7 +46,7 @@ internal readonly ref struct BatchInput
     internal int End { get; }
 
     /// <summary>The same column, the rows of [<paramref name="start"/>, <paramref name="end"/>) folded alone.</summary>
-    internal BatchInput Window(int start, int end) => new BatchInput(Batch, Arena, Node, Rows, Selection, StartRow, start, end);
+    internal BatchInput Window(int start, int end) => new BatchInput(Batch, Arena, Node, Rows, Selection, StartRow, start, end, Settled);
 
     /// <summary>The source's row the batch's first row is: what a chosen row is kept as, its position.</summary>
     internal long StartRow { get; }

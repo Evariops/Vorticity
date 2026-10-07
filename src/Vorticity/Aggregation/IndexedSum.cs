@@ -481,6 +481,8 @@ internal readonly struct IndexedFloatSum<TValue> : IValueOp<TValue, IndexedSum>
 
     public void Add(ref IndexedSum state, TValue value) => state.Add(double.CreateTruncating(value));
 
+    public void AddSelected(ref IndexedSum state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref IndexedSum state, TValue value, long count) => state.AddWeighted(double.CreateTruncating(value), count);
 
     [SkipLocalsInit]

@@ -613,6 +613,16 @@ internal sealed class AggregationPartition
     private int[] _followMap = [];
     private int[] _followComponents = [];
 
+    // The rows the partition folded, and whether its groups had seen SettledRows each at the batch folded.
+    private long _rowsFolded;
+    private bool _settled = true;
+
+    /// <summary>
+    /// The rows a group has seen, on the mean, past which its extremes rarely move: the k-th value is a
+    /// new maximum one time in k, which a branch predicts past a few dozen (H14).
+    /// </summary>
+    private const int SettledRows = 32;
+
     // The blocks the zone maps settled in the partition's rows, the next to fold and the end.
     private ZoneSettling? _settling;
     private int _settledNext;
@@ -1359,6 +1369,11 @@ internal sealed class AggregationPartition
         LastValueGroup = _componentKeys is null
             ? LastValue(ranged, rows, selection, LastValueGroup)
             : Components(arena, rows, selection, before, groups);
+
+        // Groups that have each seen many rows hold extremes that rarely move, which a branch predicts
+        // (H14): before, the slots fold without one.
+        _rowsFolded += rows;
+        _settled = _rowsFolded >= SettledRows * (long)groups;
         for (int i = 0; i < Slots.Length; i++)
         {
             Slots[i].EnsureGroups(groups);
@@ -1596,7 +1611,7 @@ internal sealed class AggregationPartition
     {
         int column = _inputs[slot];
         int filter = _filterOf[slot];
-        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter), _startRow);
+        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter), _startRow, _settled);
     }
 
     /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>

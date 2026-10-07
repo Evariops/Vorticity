@@ -199,10 +199,21 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 ReadOnlySpan<ulong> mask = _rows.And(input, input.Selection, valid);
                 if (mask.IsEmpty)
                 {
-                    // Every row and no null: a loop with nothing but the fold, the cursor's test of its mask out of it.
-                    for (int row = input.Start; row < input.End; row++)
+                    // Every row and no null: a loop with nothing but the fold, the cursor's test of its mask
+                    // out of it; with no branch on the values while the groups have seen few rows (H14).
+                    if (input.Settled)
                     {
-                        op.Add(ref states[groups[row]], values[row]);
+                        for (int row = input.Start; row < input.End; row++)
+                        {
+                            op.Add(ref states[groups[row]], values[row]);
+                        }
+                    }
+                    else
+                    {
+                        for (int row = input.Start; row < input.End; row++)
+                        {
+                            op.AddSelected(ref states[groups[row]], values[row]);
+                        }
                     }
 
                     return;
@@ -254,11 +265,23 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         nint count = counts.Offset;
         ref int groupOf = ref MemoryMarshal.GetReference(groups);
         ref TValue valueOf = ref MemoryMarshal.GetReference(values);
-        for (int row = input.Start; row < input.End; row++)
+        if (input.Settled)
         {
-            ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
-            op.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
-            Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
+            }
+        }
+        else
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
+            }
         }
 
         return true;

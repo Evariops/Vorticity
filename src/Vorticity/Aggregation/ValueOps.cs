@@ -23,6 +23,13 @@ internal interface IValueOp<TValue, TState>
 
     void Add(ref TState state, TValue value);
 
+    /// <summary>
+    /// As <see cref="Add"/>, with no branch on the value where the op can tell: an extreme of integers
+    /// stores its choice whatever it is (PLAN-HIGH-CARDINALITY, H14). The slot folds with it while its
+    /// groups have seen few rows, their extremes moving at random; past that, the branch predicts.
+    /// </summary>
+    void AddSelected(ref TState state, TValue value);
+
     /// <summary>Folds <paramref name="count"/> rows holding <paramref name="value"/>: a run, a constant block, a dictionary entry.</summary>
     void AddWeighted(ref TState state, TValue value, long count);
 
@@ -73,6 +80,8 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         state.Count++;
     }
 
+    public void AddSelected(ref SumState<Int128> state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref SumState<Int128> state, TValue value, long count)
     {
         state.Sum += Int128.CreateTruncating(value) * count;
@@ -120,6 +129,8 @@ internal readonly struct NarrowSignedSum<TValue> : IValueOp<TValue, SumState<lon
         state.Count++;
     }
 
+    public void AddSelected(ref SumState<long> state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref SumState<long> state, TValue value, long count)
     {
         state.Sum += long.CreateTruncating(value) * count;
@@ -162,6 +173,8 @@ internal readonly struct NarrowUnsignedSum<TValue> : IValueOp<TValue, SumState<u
         state.Sum += ulong.CreateTruncating(value);
         state.Count++;
     }
+
+    public void AddSelected(ref SumState<ulong> state, TValue value) => Add(ref state, value);
 
     public void AddWeighted(ref SumState<ulong> state, TValue value, long count)
     {
@@ -206,6 +219,8 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
         state.Count++;
     }
 
+    public void AddSelected(ref SumState<UInt128> state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref SumState<UInt128> state, TValue value, long count)
     {
         state.Sum += UInt128.CreateTruncating(value) * (ulong)count;
@@ -249,6 +264,8 @@ internal readonly struct NarrowSignedTotal<TValue> : IValueOp<TValue, long>
 
     public void Add(ref long state, TValue value) => state += long.CreateTruncating(value);
 
+    public void AddSelected(ref long state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref long state, TValue value, long count) => state += long.CreateTruncating(value) * count;
 
     public void AddSpan(ref long state, ReadOnlySpan<TValue> values) => state += (long)SumKernels.Signed(values);
@@ -272,6 +289,8 @@ internal readonly struct SignedTotal<TValue> : IValueOp<TValue, Int128>
     public Int128 Seed() => default;
 
     public void Add(ref Int128 state, TValue value) => state += Int128.CreateTruncating(value);
+
+    public void AddSelected(ref Int128 state, TValue value) => Add(ref state, value);
 
     public void AddWeighted(ref Int128 state, TValue value, long count) => state += Int128.CreateTruncating(value) * count;
 
@@ -297,6 +316,8 @@ internal readonly struct NarrowUnsignedTotal<TValue> : IValueOp<TValue, ulong>
 
     public void Add(ref ulong state, TValue value) => state += ulong.CreateTruncating(value);
 
+    public void AddSelected(ref ulong state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref ulong state, TValue value, long count) => state += ulong.CreateTruncating(value) * (ulong)count;
 
     public void AddSpan(ref ulong state, ReadOnlySpan<TValue> values) => state += (ulong)SumKernels.Unsigned(values);
@@ -320,6 +341,8 @@ internal readonly struct UnsignedTotal<TValue> : IValueOp<TValue, UInt128>
     public UInt128 Seed() => default;
 
     public void Add(ref UInt128 state, TValue value) => state += UInt128.CreateTruncating(value);
+
+    public void AddSelected(ref UInt128 state, TValue value) => Add(ref state, value);
 
     public void AddWeighted(ref UInt128 state, TValue value, long count) => state += UInt128.CreateTruncating(value) * (ulong)count;
 
@@ -347,6 +370,8 @@ internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
         state.Sum = checked(state.Sum + value);
         state.Count++;
     }
+
+    public void AddSelected(ref SumState<Int128> state, Int128 value) => Add(ref state, value);
 
     public void AddWeighted(ref SumState<Int128> state, Int128 value, long count)
     {
@@ -391,6 +416,8 @@ internal readonly struct WideDecimalSum : IValueOp<Int128, SumState<WideSum>>
         state.Count++;
     }
 
+    public void AddSelected(ref SumState<WideSum> state, Int128 value) => Add(ref state, value);
+
     public void AddWeighted(ref SumState<WideSum> state, Int128 value, long count)
     {
         state.Sum.AddProduct(value, count);
@@ -423,6 +450,8 @@ internal readonly struct Decimal256Sum : IValueOp<Int256, SumState<WideSum>>
         state.Sum.Add(in value);
         state.Count++;
     }
+
+    public void AddSelected(ref SumState<WideSum> state, Int256 value) => Add(ref state, value);
 
     public void AddWeighted(ref SumState<WideSum> state, Int256 value, long count)
     {
@@ -466,6 +495,8 @@ internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, Extre
         }
     }
 
+    public void AddSelected(ref ExtremeState<TValue> state, TValue value) => Add(ref state, value);
+
     public void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
 
     public void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
@@ -504,6 +535,17 @@ internal readonly struct No : IFlag
     public static bool Value => false;
 }
 
+/// <summary>What the extremes of a type of values may take for granted.</summary>
+internal static class ExtremeOps
+{
+    /// <summary>Whether <typeparamref name="TValue"/> is an integer, which has no NaN: a constant of each instantiation.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool Integral<TValue>() =>
+        typeof(TValue) == typeof(long) || typeof(TValue) == typeof(int) || typeof(TValue) == typeof(short) || typeof(TValue) == typeof(sbyte)
+        || typeof(TValue) == typeof(ulong) || typeof(TValue) == typeof(uint) || typeof(TValue) == typeof(ushort) || typeof(TValue) == typeof(byte)
+        || typeof(TValue) == typeof(Int128) || typeof(TValue) == typeof(UInt128);
+}
+
 /// <summary>The smallest value, NaN skipped.</summary>
 internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
     where TValue : unmanaged, INumber<TValue>
@@ -522,6 +564,20 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
             state.Value = value;
             state.Has = true;
         }
+    }
+
+    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select (H14).</remarks>
+    public void AddSelected(ref ExtremeState<TValue> state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state.Value;
+            state.Value = state.Has && current <= value ? current : value;
+            state.Has = true;
+            return;
+        }
+
+        Add(ref state, value);
     }
 
     public void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
@@ -573,6 +629,20 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         }
     }
 
+    /// <remarks>An integer, no NaN: the value stored whatever it is, the choice a select (H14).</remarks>
+    public void AddSelected(ref ExtremeState<TValue> state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state.Value;
+            state.Value = state.Has && current >= value ? current : value;
+            state.Has = true;
+            return;
+        }
+
+        Add(ref state, value);
+    }
+
     public void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
 
     public void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
@@ -622,6 +692,22 @@ internal readonly struct SeededMinOp<TValue> : IValueOp<TValue, TValue>
         }
     }
 
+    /// <remarks>
+    /// An integer, no NaN: the smaller of the two stored whatever it is, the choice a select (H14). A
+    /// branch on it missed as often as a group met a new minimum, while its groups had seen few rows.
+    /// </remarks>
+    public void AddSelected(ref TValue state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state;
+            state = current <= value ? current : value;
+            return;
+        }
+
+        Add(ref state, value);
+    }
+
     public void AddWeighted(ref TValue state, TValue value, long count) => Add(ref state, value);
 
     public void AddSpan(ref TValue state, ReadOnlySpan<TValue> values)
@@ -659,6 +745,19 @@ internal readonly struct SeededMaxOp<TValue> : IValueOp<TValue, TValue>
         {
             state = value;
         }
+    }
+
+    /// <remarks>An integer, no NaN: the larger of the two stored whatever it is, the choice a select (H14).</remarks>
+    public void AddSelected(ref TValue state, TValue value)
+    {
+        if (ExtremeOps.Integral<TValue>())
+        {
+            TValue current = state;
+            state = current >= value ? current : value;
+            return;
+        }
+
+        Add(ref state, value);
     }
 
     public void AddWeighted(ref TValue state, TValue value, long count) => Add(ref state, value);
