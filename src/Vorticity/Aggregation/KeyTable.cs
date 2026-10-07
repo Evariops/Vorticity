@@ -37,7 +37,12 @@ internal struct KeyTable<TValue>
     /// <summary>The slots of a table's first growth: a prime.</summary>
     private const int FirstSlots = 31;
 
-    private Slot[] _slots;
+    // The slots, from the first word of a line of 64 bytes of their store: a line of slots is then
+    // one of cache, where the data of an array of slots starts anywhere a word starts, and a slot of
+    // 32 bytes lay across two lines one time in three (PLAN-HIGH-CARDINALITY, profiling).
+    private ulong[] _store;
+    private int _base;
+    private int _length;
     private int[] _chains;
     private Entry[] _overflow;
     private int _overflowed;
@@ -49,9 +54,16 @@ internal struct KeyTable<TValue>
 
     public KeyTable()
     {
-        _slots = [];
+        _store = [];
         _chains = [];
         _overflow = [];
+    }
+
+    /// <summary>The slots, from the first line of their store.</summary>
+    private readonly Span<Slot> Slots
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => MemoryMarshal.CreateSpan(ref Unsafe.As<ulong, Slot>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_store), _base)), _length);
     }
 
     /// <summary>A table that takes its arrays from a query's shelf and gives them back as it grows: a sub-table of the core (PLAN-HIGH-CARDINALITY, H4).</summary>
@@ -66,7 +78,7 @@ internal struct KeyTable<TValue>
 
     /// <summary>The bytes of the slots, the chains' heads and their links.</summary>
     internal readonly long Footprint =>
-        ((long)_slots.Length * Unsafe.SizeOf<Slot>()) + ((long)_chains.Length * sizeof(int)) + ((long)_overflow.Length * Unsafe.SizeOf<Entry>());
+        ((long)_store.Length * sizeof(ulong)) + ((long)_chains.Length * sizeof(int)) + ((long)_overflow.Length * Unsafe.SizeOf<Entry>());
 
     /// <summary>The slots of a line: as many as 64 bytes hold, a power of two.</summary>
     /// <remarks>Inlined, a constant: the native compiler left it a call, a twentieth of the cycles of a group by of unique keys.</remarks>
@@ -102,10 +114,10 @@ internal struct KeyTable<TValue>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int GetOrAdd(TValue key, int next)
     {
-        Slot[] slots = _slots;
+        Span<Slot> slots = Slots;
         if (slots.Length != 0)
         {
-            ref Slot slot = ref slots[Home(key)];
+            ref Slot slot = ref slots[(int)Home(key)];
             if (slot.Group != 0)
             {
                 if (slot.Key.Equals(key))
@@ -139,7 +151,7 @@ internal struct KeyTable<TValue>
     /// <param name="missed">Whether a key found no group: the rows left to the lookup, none when false.</param>
     internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead, out bool missed)
     {
-        Slot[] slots = _slots;
+        Span<Slot> slots = Slots;
         if (slots.Length == 0)
         {
             groups[..keys.Length].Fill(-1);
@@ -157,7 +169,7 @@ internal struct KeyTable<TValue>
         // Every home is below the slots' length, by the fast modulo: no bound to check. A match is a
         // bit, and the group its mask over the slot's group plus one, less one: the JIT branched on
         // the choice of the group or -1, even with both at hand.
-        ref Slot first = ref MemoryMarshal.GetArrayDataReference(slots);
+        ref Slot first = ref MemoryMarshal.GetReference(slots);
         int any = 0;
         if (ahead <= 0)
         {
@@ -210,7 +222,7 @@ internal struct KeyTable<TValue>
     internal void Reserve(int keys)
     {
         long slots = ((10L * keys) / 6) + 1;
-        if (slots > _slots.Length)
+        if (slots > _length)
         {
             Resize(PrimeAtLeast((int)Math.Min(int.MaxValue / 2, slots)));
         }
@@ -219,7 +231,7 @@ internal struct KeyTable<TValue>
     /// <summary>Forgets every key, keeping the slots and the seed.</summary>
     internal void Clear()
     {
-        Array.Clear(_slots);
+        Array.Clear(_store);
         Array.Clear(_chains);
         _overflowed = 0;
         _count = 0;
@@ -229,19 +241,19 @@ internal struct KeyTable<TValue>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int Search(TValue key, int next)
     {
-        if (_slots.Length == 0)
+        if (_length == 0)
         {
             Resize(FirstSlots);
         }
 
-        Slot[] slots = _slots;
+        Span<Slot> slots = Slots;
         uint at = Home(key);
         uint first = at & ~(uint)(Width - 1);
         uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
         uint probe = at;
         do
         {
-            ref Slot slot = ref slots[probe];
+            ref Slot slot = ref slots[(int)probe];
             if (slot.Group == 0)
             {
                 if (_count >= _growAt)
@@ -299,7 +311,7 @@ internal struct KeyTable<TValue>
 
     /// <summary>The slot <paramref name="key"/> starts from: its folded bits, mixed under the seed once there is one, modulo the slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private readonly uint Home(TValue key) => HomeOf(key, _seed, _multiplier, (uint)_slots.Length);
+    private readonly uint Home(TValue key) => HomeOf(key, _seed, _multiplier, (uint)_length);
 
     /// <summary>As <see cref="Home"/>, the table's seed, multiplier and length given.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -327,11 +339,16 @@ internal struct KeyTable<TValue>
     /// <summary>Places every key again in <paramref name="length"/> slots, a prime, under the seed the table has.</summary>
     private void Resize(int length)
     {
-        Slot[] old = _slots;
+        ulong[] oldStore = _store;
+        Span<Slot> old = Slots;
         int[] chains = _chains;
         Entry[] overflow = _overflow;
         int overflowed = _overflowed;
-        _slots = NewArray<Slot>(length);
+
+        // The store a line longer than the slots, which start at its first line.
+        _store = NewArray<ulong>(checked((int)((((long)length * Unsafe.SizeOf<Slot>()) + GroupRecords.Line - sizeof(ulong)) / sizeof(ulong))));
+        _base = LineStart(_store);
+        _length = length;
         _chains = NewArray<int>((length >> WidthShift) + 1);
         _overflow = NewArray<Entry>(overflowed);
         _overflowed = 0;
@@ -350,18 +367,27 @@ internal struct KeyTable<TValue>
             Place(overflow[i].Key, overflow[i].Group);
         }
 
-        _shelf?.Give(old);
+        _shelf?.Give(oldStore);
         _shelf?.Give(chains);
         _shelf?.Give(overflow);
+    }
+
+    /// <summary>The word of <paramref name="store"/> a line of 64 bytes starts at.</summary>
+    private static unsafe int LineStart(ulong[] store)
+    {
+        nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(store));
+        return (int)((-address & (GroupRecords.Line - 1)) / sizeof(ulong));
     }
 
     /// <summary>Gives the table's arrays back to its shelf: a sub-table split, whose groups another holds.</summary>
     internal void Release()
     {
-        _shelf?.Give(_slots);
+        _shelf?.Give(_store);
         _shelf?.Give(_chains);
         _shelf?.Give(_overflow);
-        _slots = [];
+        _store = [];
+        _base = 0;
+        _length = 0;
         _chains = [];
         _overflow = [];
         _overflowed = 0;
@@ -372,14 +398,14 @@ internal struct KeyTable<TValue>
     /// <summary>A key of the table placed again: the first free slot of its line from its home, or its line's chain.</summary>
     private void Place(TValue key, int group)
     {
-        Slot[] slots = _slots;
+        Span<Slot> slots = Slots;
         uint at = Home(key);
         uint first = at & ~(uint)(Width - 1);
         uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
         uint probe = at;
         do
         {
-            ref Slot slot = ref slots[probe];
+            ref Slot slot = ref slots[(int)probe];
             if (slot.Group == 0)
             {
                 slot.Key = key;
