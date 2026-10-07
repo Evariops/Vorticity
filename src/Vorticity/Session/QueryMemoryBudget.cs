@@ -44,7 +44,7 @@ public sealed class QueryMemoryBudget
     // whether a collection is being asked for, and the full collection after which the last one asked
     // for left the collector holding what it held.
     private long _measured;
-    private Rest _rest = new Rest(-1, 0, 0);
+    private Rest _rest = new Rest(-1, -1, 0, 0, 0);
     private long _pending;
     private int _collecting;
     private int _futile = -1;
@@ -94,7 +94,7 @@ public sealed class QueryMemoryBudget
         get
         {
             Rest rest = Volatile.Read(ref _rest);
-            return rest.Live + rest.Reclaimable + Volatile.Read(ref _pending);
+            return rest.Live + rest.Uncertain + rest.Reclaimable + Volatile.Read(ref _pending);
         }
     }
 
@@ -249,25 +249,38 @@ public sealed class QueryMemoryBudget
     /// with the rest until the next.
     /// </summary>
     /// <remarks>
-    /// Between two full collections, a counter read; once a collection, the collector's state, read
-    /// from the full collection itself: one of the youngest generations after it would count the large
-    /// arrays let go since as live.
+    /// Between two collections, a counter read; once a collection, the collector's state, read from
+    /// the full collection itself: one of the youngest generations after it would count the large
+    /// arrays let go since as live. What the heap holds at a collection of the youngest generations,
+    /// past the queries' tables and what they let go, is the uncertain part: the host's growth since
+    /// the last full collection, and the garbage the oldest generation keeps, which only a full one
+    /// tells apart. Before the first full collection, it is all the process knows. It counts with the
+    /// rest, and as what a collection may give back (<see cref="Collect"/>).
     /// </remarks>
     private void Observe()
     {
         Rest rest = Volatile.Read(ref _rest);
         int full = GC.CollectionCount(2);
-        if (full == rest.Collections)
+        int any = GC.CollectionCount(0);
+        if (full == rest.Collections && any == rest.Ephemeral)
         {
             return;
         }
 
-        Interlocked.Exchange(ref _pending, 0);
-        GCMemoryInfo blocking = GC.GetGCMemoryInfo(GCKind.FullBlocking);
-        GCMemoryInfo background = GC.GetGCMemoryInfo(GCKind.Background);
-        GCMemoryInfo info = background.Index > blocking.Index ? background : blocking;
-        long inUse = info.HeapSizeBytes - info.FragmentedBytes;
-        Volatile.Write(ref _rest, new Rest(full, Math.Max(0, inUse - Volatile.Read(ref _measured)), Math.Max(0, info.TotalCommittedBytes - inUse)));
+        if (full != rest.Collections)
+        {
+            Interlocked.Exchange(ref _pending, 0);
+            GCMemoryInfo blocking = GC.GetGCMemoryInfo(GCKind.FullBlocking);
+            GCMemoryInfo background = GC.GetGCMemoryInfo(GCKind.Background);
+            GCMemoryInfo info = background.Index > blocking.Index ? background : blocking;
+            long inUse = info.HeapSizeBytes - info.FragmentedBytes;
+            Volatile.Write(ref _rest, new Rest(full, any, Math.Max(0, inUse - Volatile.Read(ref _measured)), 0, Math.Max(0, info.TotalCommittedBytes - inUse)));
+            return;
+        }
+
+        GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
+        long held = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - Volatile.Read(ref _measured) - Volatile.Read(ref _pending);
+        Volatile.Write(ref _rest, rest with { Ephemeral = any, Uncertain = Math.Max(0, held - rest.Live) });
     }
 
     /// <summary>
@@ -284,7 +297,7 @@ public sealed class QueryMemoryBudget
     private long? Collect(long bytes)
     {
         Rest rest = Volatile.Read(ref _rest);
-        long reclaimable = rest.Reclaimable + Volatile.Read(ref _pending);
+        long reclaimable = rest.Reclaimable + rest.Uncertain + Volatile.Read(ref _pending);
         if (reclaimable < Math.Max(bytes, _ceiling / 16) || ReservedBytes + bytes > _ceiling - rest.Live || GC.CollectionCount(2) == Volatile.Read(ref _futile))
         {
             return null;
@@ -399,8 +412,10 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
-    /// The rest of the process as read after a full collection: that collection's number, what its
-    /// heap held past the queries' tables, and what the collector kept committed past its heap.
+    /// The rest of the process as read after a full collection: that collection's number, and the
+    /// count of collections of any generation since read; what its heap held past the queries' tables,
+    /// and what a collection of the youngest generations since saw held past that; what the collector
+    /// kept committed past its heap.
     /// </summary>
-    private sealed record Rest(int Collections, long Live, long Reclaimable);
+    private sealed record Rest(int Collections, int Ephemeral, long Live, long Uncertain, long Reclaimable);
 }

@@ -45,7 +45,7 @@ public sealed partial class CappedHeapTests
         Task<string> errors = child.StandardError.ReadToEndAsync(Ct);
         await child.WaitForExitAsync(Ct).WaitAsync(TimeSpan.FromMinutes(5), Ct);
         string said = await output + await errors;
-        Assert.DoesNotContain(nameof(OutOfMemoryException), said, StringComparison.Ordinal);
+        Assert.False(said.Contains(nameof(OutOfMemoryException), StringComparison.Ordinal), said);
         Assert.True(child.ExitCode == 0, said);
         Assert.Contains("ENDED", said, StringComparison.Ordinal);
     }
@@ -65,7 +65,17 @@ public sealed partial class CappedHeapTests
             data[row] = new Row((int)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % 1_000_000), row % 100);
         }
 
-        Dictionary<int, long> expected = data.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => g.Sum(r => r.Value));
+        // What each key sums to, and how many keys: checked as the results come, none kept, for the
+        // test's own memory is not the governor's to count.
+        long[] expected = new long[1_000_000];
+        bool[] met = new bool[expected.Length];
+        foreach (Row row in data)
+        {
+            expected[row.Key] += row.Value;
+            met[row.Key] = true;
+        }
+
+        int keys = met.Count(m => m);
         string path = Path.Combine(Path.GetTempPath(), $"capped-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
         await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
         {
@@ -86,14 +96,14 @@ public sealed partial class CappedHeapTests
                     {
                         try
                         {
-                            List<KeySum> sums = [];
+                            int read = 0;
                             await foreach (KeySum sum in file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Sum(x => x.Value))).As<KeySum>().ToRecordsAsync(Ct))
                             {
-                                sums.Add(sum);
+                                Assert.Equal(expected[sum.Key], sum.Sum);
+                                read++;
                             }
 
-                            Assert.Equal(expected.Count, sums.Count);
-                            Assert.All(sums, sum => Assert.Equal(expected[sum.Key], sum.Sum));
+                            Assert.Equal(keys, read);
                             return "ended";
                         }
                         catch (VortexMemoryException)
