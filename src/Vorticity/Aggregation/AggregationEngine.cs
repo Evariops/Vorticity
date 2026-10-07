@@ -311,6 +311,13 @@ internal sealed class AggregationPlan
     /// <summary>The rows a lane's cache is judged over against ε, in capacities of the cache, or null for the core's own: ε's period (H14).</summary>
     internal int? CoreBypassPeriod { get; set; }
 
+    /// <summary>
+    /// Whether the merge in parts of partitions that number one span of values by value cuts it by
+    /// value (PLAN-HIGH-CARDINALITY, H14): false to hash them as any other key, the switch the bench
+    /// compares them with.
+    /// </summary>
+    internal bool MergeByValue { get; set; } = true;
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
@@ -2236,6 +2243,15 @@ internal static class AggregationEngine
 
         memory.Measure(cut);
 
+        // Partitions that number one span of values by value are cut by value, each part numbered by value
+        // over its run of the span: no hash, no probe, no table that grows (PLAN-HIGH-CARDINALITY, H14).
+        (long Least, ulong Span)? values = keysOf[0].ValueSpan;
+        for (int p = 1; p < keysOf.Length && values is not null; p++)
+        {
+            values = keysOf[p].ValueSpan == values ? values : null;
+        }
+
+        bool byValue = values is not null && plan.MergeByValue;
         ulong seed = MergeHash.Seed;
         int shift = 64 - BitOperations.Log2((uint)parts);
         int[][] placed = new int[partitions.Length][];
@@ -2244,7 +2260,7 @@ internal static class AggregationEngine
         for (int p = 0; p < partitions.Length; p++)
         {
             int partition = p;
-            cutting[p] = Task.Run(() => (placed[partition], starts[partition]) = Cut(keysOf[partition], seed, shift, parts), token);
+            cutting[p] = Task.Run(() => (placed[partition], starts[partition]) = Cut(keysOf[partition], seed, shift, parts, byValue), token);
         }
 
         await GuardedAsync(cutting, failed).ConfigureAwait(false);
@@ -2297,7 +2313,7 @@ internal static class AggregationEngine
                             throw memory.Exceeded("merge of a group by", reserve, ahead);
                         }
 
-                        GroupKeys keys = keysOf[0].ForPart();
+                        GroupKeys keys = byValue ? keysOf[0].ForValuePart(part, 64 - shift) : keysOf[0].ForPart();
                         keys.Reserve(reserve);
                         AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source);
                         foreach (AggregateSlot slot in slots)
@@ -2455,14 +2471,21 @@ internal static class AggregationEngine
         return most < 2 ? 1 : 1 << BitOperations.Log2((uint)most);
     }
 
-    /// <summary>A partition's groups placed by part, the top bits of their keys' hashes; where each part's begin, and the end.</summary>
-    private static (int[] Placed, int[] Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts)
+    /// <summary>A partition's groups placed by part, the top bits of their keys' hashes, or of their numbers when <paramref name="byValue"/>; where each part's begin, and the end.</summary>
+    private static (int[] Placed, int[] Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts, bool byValue)
     {
         int count = keys.Count;
         byte[] partOf = ArrayPool<byte>.Shared.Rent(count);
         try
         {
-            keys.Parts(seed, shift, partOf.AsSpan(0, count));
+            if (byValue)
+            {
+                keys.PartsByValue(64 - shift, partOf.AsSpan(0, count));
+            }
+            else
+            {
+                keys.Parts(seed, shift, partOf.AsSpan(0, count));
+            }
             int[] starts = new int[parts + 1];
             for (int g = 0; g < count; g++)
             {

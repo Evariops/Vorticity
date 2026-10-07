@@ -131,6 +131,21 @@ internal abstract class GroupKeys
     /// <summary>An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what the partitions were rebased on.</summary>
     internal virtual GroupKeys ForPart() => Fresh();
 
+    /// <summary>
+    /// The span of values the index numbers its groups by, its least value and its width; null when it
+    /// hashes them. Partitions that number one span by value merge by value (PLAN-HIGH-CARDINALITY, H14).
+    /// </summary>
+    internal virtual (long Least, ulong Span)? ValueSpan => null;
+
+    /// <summary>
+    /// The part of a merge by value each group's key falls in: the span cut into 2^<paramref name="partBits"/>
+    /// runs of numbers, the first part for the null group and for a value past the span.
+    /// </summary>
+    internal virtual void PartsByValue(int partBits, Span<byte> parts) => throw new NotSupportedException("Only keys numbered by value are cut by value.");
+
+    /// <summary>An empty index the part <paramref name="part"/> of a merge by value is merged into: numbered by value over its run of the span.</summary>
+    internal virtual GroupKeys ForValuePart(int part, int partBits) => ForPart();
+
     /// <summary>An empty index a sub-table of the core holds its groups in (PLAN-HIGH-CARDINALITY, H4), its arrays taken from and given back to <paramref name="shelf"/>.</summary>
     internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
 
@@ -973,9 +988,41 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
     internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
 
+    internal override (long Least, ulong Span)? ValueSpan => _pages is null ? null : (_directMin, _span);
+
+    /// <summary>The bits of a number below its part's in a merge by value: the span cut into 2^<paramref name="partBits"/> runs of a power of two each.</summary>
+    private int ValuePartShift(int partBits) => Math.Max(0, 64 - System.Numerics.BitOperations.LeadingZeroCount(_span - 1) - partBits);
+
+    internal override void PartsByValue(int partBits, Span<byte> parts)
+    {
+        int shift = ValuePartShift(partBits);
+        for (int g = 0; g < Count; g++)
+        {
+            ulong number = g == _null ? 0 : (ulong)(Integer(_keys[g]) - _directMin);
+            parts[g] = (byte)(number < _span ? number >> shift : 0);
+        }
+    }
+
+    /// <summary>
+    /// A part of a merge by value numbers its run of the span whatever its entries: the lanes numbered
+    /// all of it, and its pages come as its values meet them.
+    /// </summary>
+    internal override GroupKeys ForValuePart(int part, int partBits)
+    {
+        int shift = ValuePartShift(partBits);
+        long least = _directMin + ((long)part << shift);
+        long most = Math.Min(_directMin + (long)(_span - 1), least + ((1L << shift) - 1));
+        return new FixedKeys<TValue>(_shape, _sorted, new KeyBounds(least, most), _probeAhead, rows: 1L << shift);
+    }
+
     internal override void Reserve(int groups)
     {
-        _index.Reserve(groups);
+        // Keys numbered by value take the index only past the bounds, which exact statistics never leave.
+        if (_pages is null)
+        {
+            _index.Reserve(groups);
+        }
+
         if (_keys.Length < groups)
         {
             Grow(groups);

@@ -82,6 +82,43 @@ public sealed partial class DirectPagesTests
         }
     }
 
+    // Lanes that number one span by value merge in parts cut by value, each part numbered by value over
+    // its run of the span (PLAN-HIGH-CARDINALITY, H14): the same groups as hashed parts, the null group
+    // among them, whatever the parts.
+    [Theory]
+    [InlineData(2)]
+    [InlineData(8)]
+    [InlineData(64)]
+    public async Task AMergeInPartsCutsTheSpanByValue(int parts)
+    {
+        Row[] rows = MakeRows(span: 300_000);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation grouped = file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value)));
+            grouped.Plan.MergeInParts = true;
+            grouped.Plan.MergeParts = parts;
+            GroupKeys?[] lanes = [];
+            grouped.Plan.Watch = partitions => lanes = [.. partitions.Select(partition => partition.Keys)];
+            List<Total> totals = [];
+            await foreach (Total total in grouped.As<Total>().ToRecordsAsync(Ct))
+            {
+                totals.Add(total);
+            }
+
+            Assert.True(lanes.Length > 1 && lanes.All(keys => keys is FixedKeys<int> { ByValue: true }), "the lanes did not number the key by value");
+            Assert.Equal(
+                [.. rows.GroupBy(r => r.Key).Select(g => new Total(g.Key, g.Count(), g.Sum(r => r.Value))).OrderBy(t => t.Key ?? int.MinValue)],
+                totals.OrderBy(t => t.Key ?? int.MinValue));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     // A span past four values a row is hashed: a table of groups that wide would hold more than the
     // rows could fill.
     [Fact]
