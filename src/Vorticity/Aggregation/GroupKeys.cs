@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -374,8 +376,74 @@ internal static class MergeHash
     /// <summary>A key of two words, every bit of each reaching every bit of the hash.</summary>
     internal static ulong Of(ulong low, ulong high, ulong seed) => Mix(Mix(low ^ seed) ^ high);
 
-    /// <summary>A key of bytes.</summary>
-    internal static ulong Of(ReadOnlySpan<byte> bytes, ulong seed) => System.IO.Hashing.XxHash3.HashToUInt64(bytes, unchecked((long)seed));
+    /// <summary>A key of bytes: XXH3 of 64 bits under <paramref name="seed"/>, the same bits as <see cref="System.IO.Hashing.XxHash3"/>.</summary>
+    /// <remarks>
+    /// Up to 16 bytes, XXH3's own short paths, inlined here: the library's dispatch and its two calls
+    /// took a fifth of a group by of short names (PLAN-HIGH-CARDINALITY, profiling). Longer keys go to
+    /// the library.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Of(ReadOnlySpan<byte> bytes, ulong seed) =>
+        bytes.Length <= 16 ? Short(bytes, seed) : System.IO.Hashing.XxHash3.HashToUInt64(bytes, unchecked((long)seed));
+
+    // XXH3's default secret, the words its paths of 16 bytes and less read, folded two by two: its
+    // first two of 32 bits, then its words of 64 bits from byte 8, 24, 40 and 56.
+    private const uint OneToThree = 0x396CFEB8U ^ 0xBE4BA423U;
+    private const ulong FourToEight = 0x1CAD21F7_2C81017CUL ^ 0xDB979083_E96DD4DEUL;
+    private const ulong NineToSixteenLow = 0x1F67B3B7_A4A44072UL ^ 0x78E5C0CC_4EE679CBUL;
+    private const ulong NineToSixteenHigh = 0x2172FFCC_7DD05A82UL ^ 0x8E2443F7_744608B8UL;
+    private const ulong Empty = 0x4C263A81_E69035E0UL ^ 0xCB00C391_BB52283CUL;
+
+    /// <summary>XXH3 of at most 16 bytes, as its reference writes it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Short(ReadOnlySpan<byte> bytes, ulong seed)
+    {
+        int length = bytes.Length;
+        ref byte first = ref MemoryMarshal.GetReference(bytes);
+        if (length > 8)
+        {
+            ulong low = Unsafe.ReadUnaligned<ulong>(ref first) ^ (NineToSixteenLow + seed);
+            ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - 8)) ^ (NineToSixteenHigh - seed);
+            ulong upper = Math.BigMul(low, high, out ulong lower);
+            ulong acc = (ulong)length + BinaryPrimitives.ReverseEndianness(low) + high + (upper ^ lower);
+            acc ^= acc >> 37;
+            acc *= 0x165667919E3779F9UL;
+            return acc ^ (acc >> 32);
+        }
+
+        if (length >= 4)
+        {
+            ulong mixed = seed ^ ((ulong)BinaryPrimitives.ReverseEndianness((uint)seed) << 32);
+            ulong word = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref first, length - 4))
+                + ((ulong)Unsafe.ReadUnaligned<uint>(ref first) << 32);
+            ulong h = word ^ (FourToEight - mixed);
+            h ^= BitOperations.RotateLeft(h, 49) ^ BitOperations.RotateLeft(h, 24);
+            h *= 0x9FB21C651E98DF25UL;
+            h ^= (h >> 35) + (ulong)length;
+            h *= 0x9FB21C651E98DF25UL;
+            return h ^ (h >> 28);
+        }
+
+        if (length > 0)
+        {
+            uint combined = ((uint)first << 16) | ((uint)Unsafe.Add(ref first, length >> 1) << 24)
+                | Unsafe.Add(ref first, length - 1) | ((uint)length << 8);
+            return Avalanche(combined ^ (OneToThree + seed));
+        }
+
+        return Avalanche(seed ^ Empty);
+    }
+
+    /// <summary>XXH64's avalanche, which XXH3's shortest keys end with.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Avalanche(ulong h)
+    {
+        h ^= h >> 33;
+        h *= 0xC2B2AE3D27D4EB4FUL;
+        h ^= h >> 29;
+        h *= 0x165667B19E3779F9UL;
+        return h ^ (h >> 32);
+    }
 
     private static ulong Mix(ulong x)
     {

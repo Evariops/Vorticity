@@ -32,6 +32,28 @@ public sealed class GroupHashTests
         }
     }
 
+    // The merge's hash of bytes inlines XXH3's paths of 16 bytes and less: the same bits as the
+    // library's, at every length on both sides of each path's edge, under any seed.
+    [Fact]
+    public void AShortKeyHashesAsTheLibraryHashesIt()
+    {
+        Random random = new Random(20261007);
+        ulong[] seeds = [MergeHash.Seed, 0, 1, ulong.MaxValue, 0x8000_0000_0000_0000UL, 0x0000_0000_FFFF_FFFFUL];
+        byte[] bytes = new byte[40];
+        foreach (ulong seed in seeds.Concat(Enumerable.Range(0, 32).Select(_ => (ulong)random.NextInt64() ^ ((ulong)random.Next() << 63))))
+        {
+            for (int length = 0; length <= bytes.Length; length++)
+            {
+                for (int draw = 0; draw < 16; draw++)
+                {
+                    random.NextBytes(bytes);
+                    ReadOnlySpan<byte> key = bytes.AsSpan(0, length);
+                    Assert.Equal(XxHash3.HashToUInt64(key, unchecked((long)seed)), MergeHash.Of(key, seed));
+                }
+            }
+        }
+    }
+
     // Keys that share their home fill its line, then its chain: every one keeps its group, and a
     // chain shorter than MaxChain takes no seed.
     [Fact]
