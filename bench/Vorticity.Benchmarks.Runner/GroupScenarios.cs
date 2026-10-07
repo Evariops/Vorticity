@@ -20,8 +20,9 @@ namespace Vorticity.Bench.Runner;
 /// <c>range</c> (a count, the least and the largest of a value), <c>deviation</c>, <c>top</c> (ordered
 /// by the count, the first hundred), <c>most</c> (ordered by the largest value, the first hundred),
 /// <c>countdistinct</c>, <c>distinct</c> (the key's distinct values) over an integer key (<c>k3</c>
-/// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); and
-/// <c>strided</c>, a count and a sum over the strided file's long keys.
+/// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); <c>strided</c>, a count and a sum over the strided
+/// file's long keys; and <c>pairs</c>, a count and a sum by a pair of integers of the draws file
+/// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000).
 /// </para>
 /// <para>
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
@@ -58,6 +59,16 @@ internal static class GroupScenarios
         if (shape[1] == "strided")
         {
             return StridedKey(shape[2]) is { } stridedKey ? path => StridedAsync(path, stridedKey, configure) : null;
+        }
+
+        if (shape[1] == "pairs")
+        {
+            return shape[2] switch
+            {
+                "k100k" => path => PairsAsync(path, static d => d.K100k, static d => d.K100, configure),
+                "k4" => path => PairsAsync(path, static d => d.K4, static d => d.K1000, configure),
+                _ => null,
+            };
         }
 
         if (Key(shape[2]) is not { } key)
@@ -281,6 +292,21 @@ internal static class GroupScenarios
         return values;
     }
 
+    private static async Task<long> PairsAsync(string path, Func<Probe<Draw>, Sym<int>> first, Func<Probe<Draw>, Sym<int>> second, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<PairTotal> groups in Configured(file.Scan<Draw>()
+            .GroupBy(d => (first(d), second(d)))
+            .Select(g => (g.Key.Item1, g.Key.Item2, g.Count(), g.Sum(d => d.Value))), configure)
+            .As<PairTotal>())
+        {
+            rows += Sum(groups.Column<long>(2).Values);
+        }
+
+        return rows;
+    }
+
     private static async Task<long> StridedAsync(string path, Func<Probe<Strided>, Sym<long>> key, Action<AggregationPlan>? configure)
     {
         await using VortexFile file = await ScenarioSet.OpenAsync(path);
@@ -343,3 +369,11 @@ public partial record struct KeyMost(int Key, long? Most);
 /// <summary>A long key's rows and the sum of their values.</summary>
 [VortexRecord]
 public partial record struct LongKeyTotal(long Key, long Count, long Total);
+
+/// <summary>A row of the bench's draws file: keys of 4 to a million values, a value, a price.</summary>
+[VortexRecord]
+public partial record struct Draw(int K4, int K100, int K1000, int K100k, int K1M, long Value, double Price);
+
+/// <summary>A pair of integer keys' rows and the sum of their values.</summary>
+[VortexRecord]
+public partial record struct PairTotal(int First, int Second, long Count, long Total);
