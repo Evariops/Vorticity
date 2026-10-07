@@ -772,7 +772,10 @@ words (§9.1) whose states all lie in records, at eight lanes and more: when a p
 from the start when the key is one integer column numbered by value over a million values or more
 that its zones say lies scattered, each zone covering half its span or more on the mean. Its lanes'
 tables would then each hold most of its groups, out of the cache; a key in the order of the rows,
-whose zones each cover a few of its values, and a narrower span keep the lanes' tables. The key space is cut into 256 parts by the top byte of
+whose zones each cover a few of its values, and a narrower span keep the lanes' tables. A hashed key,
+which nothing bounds before the pass, turns to it once a lane's first batch says half a million values
+or more, the values of a uniform key that made as many groups from as many rows, when the source gives
+each lane 200 000 rows or more: the lanes turn while their tables are a batch's. The key space is cut into 256 parts by the top byte of
 the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
 kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
 falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
