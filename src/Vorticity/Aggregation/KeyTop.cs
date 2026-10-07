@@ -299,6 +299,12 @@ internal static class ValueFrontier
                 word &= validity[w];
             }
 
+            if (word == ulong.MaxValue)
+            {
+                narrowed[w] = Reached(values.Slice(w << 6, 64), edge, descending);
+                continue;
+            }
+
             ulong kept = 0;
             while (word != 0)
             {
@@ -312,5 +318,35 @@ internal static class ValueFrontier
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The bits of the 64 <paramref name="values"/> of a word every row of which is kept that reach the
+    /// edge, compared with no branch: taken from its bits a row at a time, each row waited on the one
+    /// before it to clear its bit, and the frontier took three quarters of a top by a column's largest
+    /// value (PLAN-HIGH-CARDINALITY, profiling).
+    /// </summary>
+    private static ulong Reached<T>(ReadOnlySpan<T> values, long edge, bool descending)
+        where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>
+    {
+        // From the largest, a value's key is its complement: at most the edge when the value is at least the edge's.
+        ulong reached = 0;
+        if (descending)
+        {
+            long least = ~edge;
+            for (int i = 0; i < values.Length; i++)
+            {
+                reached |= (long.CreateTruncating(values[i]) >= least ? 1UL : 0UL) << i;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                reached |= (long.CreateTruncating(values[i]) <= edge ? 1UL : 0UL) << i;
+            }
+        }
+
+        return reached;
     }
 }
