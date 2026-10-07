@@ -767,9 +767,12 @@ object of the query, and asks the store for nothing the lanes' tables would not:
 objects with rows deleted, before and after compaction, at one lane and four, asked for or turned to,
 its answers are the lanes' tables' bits.
 
-**The core.** A second engine holds each group once, built and measured but not the default: off
-unless a plan asks for it, then at eight lanes and more, on a key of one fixed-width column or of raw
-words (§9.1) whose states all lie in records. The key space is cut into 256 parts by the top byte of
+**The core.** A second engine holds each group once, on a key of one fixed-width column or of raw
+words (§9.1) whose states all lie in records, at eight lanes and more: when a plan asks for it, or
+from the start when the key is one integer column numbered by value over a million values or more
+that its zones say lies scattered, each zone covering half its span or more on the mean. Its lanes'
+tables would then each hold most of its groups, out of the cache; a key in the order of the rows,
+whose zones each cover a few of its values, and a narrower span keep the lanes' tables. The key space is cut into 256 parts by the top byte of
 the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
 kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
 falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
@@ -779,9 +782,11 @@ derived from the degree between 1 and 8. A lane whose cache misses more than hal
 its rows straight into batches for the next thirty-two. At the end every part applies what is pending, its sub-tables
 split ahead, and the sub-tables are the result, read as one. The arrays of its sub-tables and slabs
 come from a shelf of the query and go back to the process's, kept within a budget and swept after
-collections. On the bench it holds two to three times less than the tables of fourteen lanes, but
-costs time at one lane and at some cardinalities: it is what the governor turns to under pressure
-(§9.5), and an option at eight lanes and more.
+collections. On the bench it holds two to three times less than the tables of fourteen lanes, and at
+fourteen lanes takes ×0.69 at a million random keys, ×0.46 at ten million, ×0.64 on ten rows a key;
+but it costs time at one lane, at 10⁵ keys (×2.5) and on keys in the order of the rows (×1.2 to
+×2.6): it is what the governor turns to under pressure (§9.5), and what a scattered wide key takes
+from the start.
 
 ### 9.5 Memory
 
