@@ -17,7 +17,8 @@ namespace Vorticity.Bench.Runner;
 /// A name is <c>group-&lt;aggregates&gt;-&lt;key&gt;</c>, run over one of the bench's spread files
 /// (<c>~/.cache/vorticity/queries/spread-random-4000000.vortex</c> and its siblings, which
 /// <c>vortex-queries --matrix small</c> writes): <c>total</c> (a count and a sum), <c>four</c>,
-/// <c>range</c> (a count, the least and the largest of a value), <c>deviation</c>, <c>top</c> (ordered
+/// <c>range</c> (a count, the least and the largest of a value), <c>mean</c> (a count and the mean of a
+/// float), <c>deviation</c>, <c>top</c> (ordered
 /// by the count, the first hundred), <c>most</c> (ordered by the largest value, the first hundred),
 /// <c>first</c> (the hundred smallest keys and their counts), <c>countdistinct</c>, <c>distinct</c>
 /// (the key's distinct values) over an integer key (<c>k3</c>
@@ -103,6 +104,7 @@ internal static class GroupScenarios
             "four" => path => FourAsync(path, key, configure),
             "range" => path => RangeAsync(path, key, configure),
             "deviation" => path => DeviationAsync(path, key, configure),
+            "mean" => path => MeanAsync(path, key, configure),
             "top" => path => TopAsync(path, key, configure),
             "most" => path => MostAsync(path, key, configure),
             "first" => path => FirstAsync(path, key, configure),
@@ -229,6 +231,22 @@ internal static class GroupScenarios
             .GroupBy(key)
             .Select(g => (g.Key, g.Count(), g.Min(s => s.Value), g.Max(s => s.Value))), configure)
             .As<KeyRange>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>A count and the mean of a float: the exact sum of 32 bytes beside a count of 4, a record of 40.</summary>
+    private static async Task<long> MeanAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyMean> groups in Configured(file.Scan<Spread>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.Average(s => s.Real))), configure)
+            .As<KeyMean>())
         {
             rows += Sum(groups.Column<long>(1).Values);
         }
@@ -468,6 +486,10 @@ public partial record struct KeyTotal(int Key, long Count, long Total);
 /// <summary>An integer key's rows, the total and the largest of a value, and the mean of a float.</summary>
 [VortexRecord]
 public partial record struct KeyFour(int Key, long Count, long Total, double? Mean, long? Largest);
+
+/// <summary>An integer key's rows and the mean of a float.</summary>
+[VortexRecord]
+public partial record struct KeyMean(int Key, long Count, double? Mean);
 
 /// <summary>An integer key's rows and the standard deviation of a float.</summary>
 [VortexRecord]
