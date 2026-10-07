@@ -5,5 +5,18 @@
   ],
   "prHourlyLimit": 0,
   "minimumReleaseAge": "2 days",
-  "internalChecksFilter": "strict"
+  "internalChecksFilter": "strict",
+  "packageRules": [
+    {
+      "description": "The vortex crates move together, crates.io pins and git tags alike: one crate per pull request leaves two vortex versions side by side in a lockfile until the last one lands.",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchDepNames": [
+        "vortex",
+        "vortex-*"
+      ],
+      "groupName": "vortex"
+    }
+  ]
 }
