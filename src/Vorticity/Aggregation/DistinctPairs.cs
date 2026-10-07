@@ -22,8 +22,12 @@ internal sealed class DistinctPairs<TValue>
 {
     private Pair[] _pairs = new Pair[16];
 
-    // A pair's number plus one, 0 for none: a power of two of them, at most half full.
+    // A pair's number plus one, read only where its slot's tag agrees: a power of two of them, at most half full.
     private int[] _slots = new int[32];
+
+    // Each slot's tag, 0 for none: its top bit set over the top seven bits of the pair's hash, read
+    // first, so that a new pair finds its free slot without reading the pairs its chain passes.
+    private byte[] _tags = new byte[32];
 
     // Each group's last pair, its number plus one, 0 for a group with none.
     private int[] _first = [];
@@ -41,9 +45,11 @@ internal sealed class DistinctPairs<TValue>
     {
         _shelf?.Give(_pairs);
         _shelf?.Give(_slots);
+        _shelf?.Give(_tags);
         _shelf?.Give(_first);
         _pairs = [];
         _slots = [];
+        _tags = [];
         _first = [];
         _count = 0;
     }
@@ -52,7 +58,7 @@ internal sealed class DistinctPairs<TValue>
     internal int Count => _count;
 
     /// <summary>The bytes of the pairs, the slots and the groups' chains, at their capacity.</summary>
-    internal long Footprint => ((long)_pairs.Length * Unsafe.SizeOf<Pair>()) + ((long)(_slots.Length + _first.Length) * sizeof(int));
+    internal long Footprint => ((long)_pairs.Length * Unsafe.SizeOf<Pair>()) + ((long)(_slots.Length + _first.Length) * sizeof(int)) + _tags.Length;
 
     /// <summary>Makes room for the chains of groups up to <paramref name="groups"/>.</summary>
     internal void EnsureGroups(int groups)
@@ -66,22 +72,30 @@ internal sealed class DistinctPairs<TValue>
     /// <summary>Adds the pair (<paramref name="group"/>, <paramref name="value"/>); whether it was new.</summary>
     internal bool Add(int group, TValue value)
     {
-        int[] slots = _slots;
-        int mask = slots.Length - 1;
-        int at = (int)DistinctEntry<TValue>.Hash(group, value) & mask;
+        // The tags first (PLAN-HIGH-CARDINALITY, profiling): a new pair, every row of a count of
+        // distinct values that are distinct, reads no pair of its chain, each a miss to memory.
+        byte[] tags = _tags;
+        int mask = tags.Length - 1;
+        int shift = Shift(tags.Length);
+        ulong spread = Spread(group, value);
+        int at = (int)(spread >> shift);
+        byte tag = Tag(spread, shift);
         Pair[] pairs = _pairs;
         while (true)
         {
-            int number = slots[at];
-            if (number == 0)
+            byte seen = tags[at];
+            if (seen == 0)
             {
                 break;
             }
 
-            ref Pair pair = ref pairs[number - 1];
-            if (pair.Group == group && pair.Value.Equals(value))
+            if (seen == tag)
             {
-                return false;
+                ref Pair pair = ref pairs[_slots[at] - 1];
+                if (pair.Group == group && pair.Value.Equals(value))
+                {
+                    return false;
+                }
             }
 
             at = (at + 1) & mask;
@@ -95,14 +109,39 @@ internal sealed class DistinctPairs<TValue>
 
         pairs[_count] = new Pair { Value = value, Group = group, Next = _first[group] };
         _first[group] = ++_count;
-        slots[at] = _count;
-        if (_count * 2 > slots.Length)
+        tags[at] = tag;
+        _slots[at] = _count;
+        if (_count * 2 > tags.Length)
         {
-            Rehash(GroupKeys.Doubled(slots.Length));
+            Rehash(GroupKeys.Doubled(tags.Length));
         }
 
         return true;
     }
+
+    /// <summary>
+    /// An odd number the pair's hash is multiplied by, its home and tag the product's top bits. The hash
+    /// adds the group to the low bits of a value's: one value's pairs over a thousand groups, their low
+    /// bits in a row, filled runs of slots that linear probing walked to their end, 34 s for a count of
+    /// 8.6M distinct values by a thousand keys, where a million keys took 1.6 (PLAN-HIGH-CARDINALITY,
+    /// profiling). The product spreads them over the table.
+    /// </summary>
+    private const ulong Spreading = 0x9E37_79B9_7F4A_7C15UL;
+
+    /// <summary>The shift that leaves a product's home among <paramref name="length"/> slots, a power of two.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Shift(int length) => 64 - System.Numerics.BitOperations.Log2((uint)length);
+
+    /// <summary>The slot the pair (<paramref name="group"/>, <paramref name="value"/>) starts from among <paramref name="length"/>, a power of two.</summary>
+    internal static int HomeOf(int group, TValue value, int length) => (int)(Spread(group, value) >> Shift(length));
+
+    /// <summary>The pair's hash times <see cref="Spreading"/>: its home is the top bits, its tag the seven below.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Spread(int group, TValue value) => DistinctEntry<TValue>.Hash(group, value) * Spreading;
+
+    /// <summary>A slot's tag: its top bit, so that none is zero, over the seven bits of the product below the home's.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte Tag(ulong spread, int shift) => (byte)(0x80 | (spread >> (shift - 7)));
 
     /// <summary>Adds every pair of <paramref name="other"/>, its group <c>g</c> as <c>map[g]</c>, in the order they lie; each new one counted at its group.</summary>
     internal void MergeAll(DistinctPairs<TValue> other, ReadOnlySpan<int> map, Span<long> counts)
@@ -193,8 +232,11 @@ internal sealed class DistinctPairs<TValue>
         }
 
         int[] slots = _slots;
+        byte[] tags = _tags;
+        int length = (int)Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1)));
         _pairs = NewArray<Pair>(Math.Max(16, kept));
-        _slots = NewArray<int>((int)Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1))));
+        _slots = NewArray<int>(length);
+        _tags = NewArray<byte>(length);
         _first = NewArray<int>(Math.Max(16, groups.Length));
         _count = 0;
         for (int i = 0; i < groups.Length; i++)
@@ -207,6 +249,7 @@ internal sealed class DistinctPairs<TValue>
 
         _shelf?.Give(pairs);
         _shelf?.Give(slots);
+        _shelf?.Give(tags);
         _shelf?.Give(first);
     }
 
@@ -217,22 +260,29 @@ internal sealed class DistinctPairs<TValue>
     private void Rehash(int length)
     {
         int[] old = _slots;
-        int[] slots = NewArray<int>(length);
+        byte[] oldTags = _tags;
+        byte[] tags = NewArray<byte>(length);
+        int[] slots = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
         int mask = length - 1;
+        int shift = Shift(length);
         Pair[] pairs = _pairs;
         for (int number = 0; number < _count; number++)
         {
-            int at = (int)DistinctEntry<TValue>.Hash(pairs[number].Group, pairs[number].Value) & mask;
-            while (slots[at] != 0)
+            ulong spread = Spread(pairs[number].Group, pairs[number].Value);
+            int at = (int)(spread >> shift);
+            while (tags[at] != 0)
             {
                 at = (at + 1) & mask;
             }
 
+            tags[at] = Tag(spread, shift);
             slots[at] = number + 1;
         }
 
         _slots = slots;
+        _tags = tags;
         _shelf?.Give(old);
+        _shelf?.Give(oldTags);
     }
 
     /// <summary>A value, the group that saw it, and the number plus one of that group's pair before it.</summary>

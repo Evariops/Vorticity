@@ -18,6 +18,35 @@ public sealed partial class DistinctPairsTests
 {
     private const int Rows = 240_000;
 
+    // The hash of a pair adds its group to the low bits of its value's: a value's pairs over a thousand
+    // groups filled runs of slots in a row, which linear probing walked to their end, 34 s for a count by
+    // a thousand keys where a million took 1.6. Their homes spread: placed as the table places them,
+    // 200 000 pairs at 38 % load land a few slots from home, and no further.
+    [Fact]
+    public void PairsOfFewGroupsAndManyValuesSpreadOverTheTable()
+    {
+        const int Length = 1 << 19;
+        bool[] taken = new bool[Length];
+        int longest = 0;
+        for (long value = 0; value < 200; value++)
+        {
+            for (int group = 0; group < 1_000; group++)
+            {
+                int home = DistinctPairs<long>.HomeOf(group, value * 7_919, Length);
+                int at = home;
+                while (taken[at])
+                {
+                    at = (at + 1) & (Length - 1);
+                }
+
+                taken[at] = true;
+                longest = Math.Max(longest, (at - home) & (Length - 1));
+            }
+        }
+
+        Assert.True(longest < 64, $"a pair landed {longest} slots past its home");
+    }
+
     [Fact]
     public void AMergeOfSomeGroupsTakesTheirPairsAlone()
     {
