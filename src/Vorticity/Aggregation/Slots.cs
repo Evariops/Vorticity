@@ -74,6 +74,16 @@ internal abstract class AggregateSlot
     internal abstract void StepRows(in BatchInput input, ReadOnlySpan<int> groups);
 
     /// <summary>
+    /// As <see cref="StepRows"/>, the rows counted into <paramref name="count"/>'s groups in the same
+    /// pass, the record of a row's group reached once for both (PLAN-HIGH-CARDINALITY, H14): when every
+    /// row of the window is selected and none is null. False when it cannot, nothing folded nor counted.
+    /// </summary>
+    internal virtual bool StepRowsCounted(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot count) => false;
+
+    /// <summary>Whether the slot can count rows in its own pass (<see cref="StepRowsCounted"/>).</summary>
+    internal virtual bool CarriesCount => false;
+
+    /// <summary>
     /// Whether <see cref="StepRanges"/> folds ranges of a few rows of <paramref name="input"/> for
     /// less than a group per row: in one call, its column's form read once, and in less work per
     /// range than its rows would cost. Otherwise ranges that short are folded row by row.
@@ -516,12 +526,26 @@ internal sealed class CountSlot<TCount> : RecordSlot<TCount, long>
 {
     internal override TCount Seed => TCount.Zero;
 
+    /// <summary>The counts, for a slot that counts the rows it folds into them (<see cref="AggregateSlot.StepRowsCounted"/>).</summary>
+    internal StateView<TCount> Counts => States;
+
     internal override void StepRange(in BatchInput input, int start, int end, int group) =>
         State(group) += TCount.CreateTruncating(RowMasks.Count(input.Selection, start, end));
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
         StateView<TCount> counts = States;
+        if (input.Selection.IsEmpty)
+        {
+            // Every row: a loop with nothing but the count, the cursor's test of its mask out of it.
+            for (int row = input.Start; row < input.End; row++)
+            {
+                counts[groups[row]]++;
+            }
+
+            return;
+        }
+
         RowCursor rows = new RowCursor(input.Selection, input.Start, input.End);
         while (rows.Next(out int row))
         {

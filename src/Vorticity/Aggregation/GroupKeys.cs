@@ -881,6 +881,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 continue;
             }
 
+            int missed = 0;
             for (int i = 0; i < values.Length; i++)
             {
                 ulong number = (ulong)(Integer(values[i]) - min);
@@ -888,7 +889,16 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 ulong at = inside ? number : 0;
                 int page = (int)(at >> PageBits);
                 int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[page]), starts[page] + ((int)at & PageMask));
-                groups[i] = inside ? group : -1;
+                group = inside ? group : -1;
+                groups[i] = group;
+                missed |= group;
+            }
+
+            // Every row found its group, none null: the usual chunk once the values are known.
+            if (missed >= 0 && validity.IsEmpty)
+            {
+                _directNew = false;
+                continue;
             }
 
             // The rows left, gathered without a branch: no group, or a null.

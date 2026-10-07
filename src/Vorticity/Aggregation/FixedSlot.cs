@@ -195,7 +195,19 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
             default:
             {
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
+                ReadOnlySpan<ulong> mask = _rows.And(input, input.Selection, valid);
+                if (mask.IsEmpty)
+                {
+                    // Every row and no null: a loop with nothing but the fold, the cursor's test of its mask out of it.
+                    for (int row = input.Start; row < input.End; row++)
+                    {
+                        op.Add(ref states[groups[row]], values[row]);
+                    }
+
+                    return;
+                }
+
+                RowCursor rows = new RowCursor(mask, input.Start, input.End);
                 while (rows.Next(out int row))
                 {
                     op.Add(ref states[groups[row]], values[row]);
@@ -204,6 +216,44 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 return;
             }
         }
+    }
+
+    internal override bool CarriesCount => true;
+
+    internal override bool StepRowsCounted(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot count) => count switch
+    {
+        CountSlot<uint> narrow => StepCounted(in input, groups, narrow.Counts),
+        CountSlot<long> wide => StepCounted(in input, groups, wide.Counts),
+        _ => false,
+    };
+
+    /// <summary>The window's rows folded and counted in one pass: every row selected, a column of values read whole, none null.</summary>
+    private bool StepCounted<TCount>(in BatchInput input, ReadOnlySpan<int> groups, StateView<TCount> counts)
+        where TCount : unmanaged, IBinaryInteger<TCount>
+    {
+        CanonicalArena arena = input.Arena;
+        int node = input.Node;
+        if (!input.Selection.IsEmpty || FixedReader.EncodingOf(arena, node, _kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
+        if (!_rows.And(input, input.Selection, valid).IsEmpty)
+        {
+            return false;
+        }
+
+        TOp op = _op;
+        StateView<TState> states = States;
+        for (int row = input.Start; row < input.End; row++)
+        {
+            int group = groups[row];
+            op.Add(ref states[group], values[row]);
+            counts[group]++;
+        }
+
+        return true;
     }
 
     /// <summary>

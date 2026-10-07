@@ -1356,12 +1356,18 @@ internal sealed class AggregationPartition
             // folded whole: a window would cost its calls for nothing.
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
             int window = Records is { } records && (long)groups * records.Layout.Stride * sizeof(ulong) > WindowedBytes ? _window : rows;
+            (int count, int carrier) = CountCarrier();
             for (int start = 0; start < rows; start += window)
             {
                 int end = Math.Min(rows, start + window);
+
+                // The count rides on a fixed slot's pass when both fold the window's every row into one
+                // record (PLAN-HIGH-CARDINALITY, H14): a row's record reached once for both.
+                bool carried = count >= 0 && Folds(count)
+                    && Slots[carrier].StepRowsCounted(Input(number, arena, carrier, rows, selection).Window(start, end), rowGroups, Slots[count]);
                 for (int i = 0; i < Slots.Length; i++)
                 {
-                    if (Folds(i))
+                    if (Folds(i) && !(carried && (i == count || i == carrier)))
                     {
                         Slots[i].StepRows(Input(number, arena, i, rows, selection).Window(start, end), rowGroups);
                     }
@@ -1579,6 +1585,29 @@ internal sealed class AggregationPartition
 
     /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>
     private bool Folds(int slot) => _filterOf[slot] < 0 || !_masks!.KeepsNone(_filterOf[slot]);
+
+    /// <summary>
+    /// The slot of a count of rows and the fixed slot that can carry it in its own pass: both unfiltered,
+    /// their states in one record; (-1, -1) when there is none.
+    /// </summary>
+    private (int Count, int Carrier) CountCarrier()
+    {
+        int count = Array.FindIndex(Slots, slot => slot is CountSlot<uint> or CountSlot<long>);
+        if (count < 0 || _filterOf[count] >= 0 || Slots[count].Bound is not { } records)
+        {
+            return (-1, -1);
+        }
+
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            if (i != count && _filterOf[i] < 0 && Slots[i].CarriesCount && ReferenceEquals(Slots[i].Bound, records))
+            {
+                return (count, i);
+            }
+        }
+
+        return (-1, -1);
+    }
 }
 
 /// <summary>The scan an aggregation runs on, whatever its record type.</summary>
