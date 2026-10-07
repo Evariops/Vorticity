@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅; the spill, delivery part by part 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅; delivery part by part without a spill, the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -791,15 +791,31 @@ lanes' tables hold at most, fourteen lanes on 10⁵ keys end exact, their peak w
 budget; a key of text, and a composite holding one, stay on the lanes' tables, which spill when spilling
 comes.
 
-Not yet, and in this order: a comfort budget the host grants, none by default, buys a higher α,
-and the query holding more than its share — its budget's ceiling over its sessions' active queries,
-the limit over every active query at the process's threshold — gives up its comfort first, then
-lowers α to its floor, which applies its pending batches, then spills its largest parts: their
-sub-tables, sorted by hash, written as runs to a local scratch file of the query, never to the object
-store nor a `tmpfs`, the process's runs within 90 % of the scratch's free space; a spilled part
-merges its runs as a stream when it is delivered. Every state will spill as bytes, a custom state
-without references with its record; a custom aggregator whose state holds references, which no bytes
-stand for, fails the query instead.
+**The share.** A budget counts the queries that hold memory under it. Past seven eighths of its
+ceiling, a query that would hold more than its share — the ceiling over the active queries — is told
+its lanes cannot grow, and they turn to the core first; a reservation itself is never refused for the
+share, since a query with nothing to give back would fail where it fit.
+
+**The spill.** When nothing is left to give back, the core writes the parts holding the most, their
+groups and their pending entries, a record and a key each, to a scratch file of the query — in
+`VortexSessionOptions.ScratchDirectory`, the system's temporary directory by default, never a
+`tmpfs`, the process's spills keeping a tenth of its free space — the largest first, until the query
+holds three quarters of its budget; a lane whose rows the core cannot take spills before its next
+batch, on a task. At the end, the parts held in memory are delivered first, then each spilled part
+alone: its runs read back a page at a time and applied into its sub-tables again, which merges the
+groups they share, delivered, then given back. A part is a 256th of the key space, so that one held
+again is that share of the groups and a page. Under a budget the pass sizes itself on it: a lane's
+batch takes a quarter of the ceiling over the lanes, the core's caches and open batches an eighth, its
+sub-tables split at a 256th, a lane turns once the budget could not take every growing lane's next
+doubling, and the scratch's page is a sixteenth. Under a tenth of what the lanes' tables would hold,
+fourteen lanes on 10⁶ keys end exact within 6 % of the budget. An order or a window over groups that
+spilled needs every group at once, and fails saying so until the external sort. A key of text, a
+composite holding one and a distinct count do not enter the core, and are refused past their budget.
+
+Not yet: a comfort budget the host grants, none by default, buying a higher α; an order over spilled
+groups by an external sort of the result; text keys and distinct counts in the spill. Every state
+will spill as bytes, a custom state without references with its record; a custom aggregator whose
+state holds references, which no bytes stand for, fails the query instead.
 
 ## 10. Plan and statistics
 
