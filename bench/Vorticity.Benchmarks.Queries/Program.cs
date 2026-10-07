@@ -60,6 +60,7 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     [$"readings-{large}"] = () => Fixtures.ReadingsAsync(large),
     ["draws"] = () => Fixtures.DrawsAsync(2_000_000),
     ["names"] = () => Fixtures.NamesAsync(2_000_000),
+    ["few-names"] = () => Fixtures.FewNamesAsync(4_000_000),
     ["skewed"] = () => Fixtures.SkewedAsync(4_000_000),
     [$"skewed-{large}"] = () => Fixtures.SkewedAsync(large),
     [$"spread-random-{HighCardinality.SmallRows}"] = () => Fixtures.RandomSpreadAsync(HighCardinality.SmallRows),

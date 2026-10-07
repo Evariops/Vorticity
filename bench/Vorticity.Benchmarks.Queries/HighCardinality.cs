@@ -67,6 +67,7 @@ internal static class HighCardinality
 
         // Text, UUID and composite keys, and the extremes of a text.
         yield return ("pages", new Scenario("hc text key 1e6 (urls), count", UrlsAsync, 16, Matrix.Full));
+        yield return ("few-names", new Scenario("hc text key 1e3 (names), count", NamesAsync, 1, Matrix.Full));
         yield return ("pages", new Scenario("hc uuid key 1e6, count", IdsAsync, 16, Matrix.Full));
         yield return ("pages", new Scenario("hc (text, int) key, count", UrlSmallsAsync, 16, Matrix.Full));
         yield return ("pages", new Scenario("hc int key 1e6, min and max of a text", TextExtremesAsync, 16, Matrix.Full));
@@ -263,6 +264,18 @@ internal static class HighCardinality
     {
         long rows = 0;
         await foreach (Columns<NameCount> groups in run.Track(file.Scan<Page>().GroupBy(p => p.Url).Select(g => (g.Key, g.Count()))).As<NameCount>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> NamesAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<NameCount> groups in run.Track(file.Scan<Named>().GroupBy(n => n.Name).Select(g => (g.Key, g.Count()))).As<NameCount>())
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);

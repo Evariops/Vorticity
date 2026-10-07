@@ -239,6 +239,10 @@ internal static class Fixtures
     internal static ValueTask<string> NamesAsync(int rows) => WriteOnceAsync($"names-{rows}.vortex", rows, canonical: true, row =>
         new Named(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"user-{(long)row * 7_919 % 1_000_000:D7}"), (long)(Mix((ulong)row) % 1_000)));
 
+    /// <summary>The names of <see cref="NamesAsync"/> among a thousand: a text key whose groups stay in cache, stored canonical.</summary>
+    internal static ValueTask<string> FewNamesAsync(int rows) => WriteOnceAsync($"names-1e3-{rows}.vortex", rows, canonical: true, row =>
+        new Named(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"user-{(long)row * 7_919 % 1_000:D7}"), (long)(Mix((ulong)row) % 1_000)));
+
     /// <summary>
     /// The readings of the readings file of <paramref name="rows"/> rows as a dataset of
     /// <paramref name="objects"/> objects of equal rows, written on first use in a directory; with

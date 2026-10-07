@@ -21,8 +21,10 @@ namespace Vorticity.Bench.Runner;
 /// by the count, the first hundred), <c>most</c> (ordered by the largest value, the first hundred),
 /// <c>countdistinct</c>, <c>distinct</c> (the key's distinct values) over an integer key (<c>k3</c>
 /// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); <c>strided</c>, a count and a sum over the strided
-/// file's long keys; and <c>pairs</c>, a count and a sum by a pair of integers of the draws file
-/// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000).
+/// file's long keys; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
+/// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000); <c>pages</c>, a count by a text of the pages
+/// file (<c>url</c>) or by its UUID (<c>uuid</c>), a million groups each; and <c>names-name</c>, a
+/// count by the name of a names file (a million names, or a thousand in <c>names-1e3-4000000</c>).
 /// </para>
 /// <para>
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
@@ -59,6 +61,21 @@ internal static class GroupScenarios
         if (shape[1] == "strided")
         {
             return StridedKey(shape[2]) is { } stridedKey ? path => StridedAsync(path, stridedKey, configure) : null;
+        }
+
+        if (shape[1] == "pages")
+        {
+            return shape[2] switch
+            {
+                "url" => path => UrlsAsync(path, configure),
+                "uuid" => path => IdsAsync(path, configure),
+                _ => null,
+            };
+        }
+
+        if (shape[1] == "names" && shape[2] == "name")
+        {
+            return path => NamesAsync(path, configure);
         }
 
         if (shape[1] == "pairs")
@@ -292,6 +309,51 @@ internal static class GroupScenarios
         return values;
     }
 
+    private static async Task<long> UrlsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<NameCount> groups in Configured(file.Scan<Page>()
+            .GroupBy(p => p.Url)
+            .Select(g => (g.Key, g.Count())), configure)
+            .As<NameCount>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> NamesAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<NameCount> groups in Configured(file.Scan<Named>()
+            .GroupBy(n => n.Name)
+            .Select(g => (g.Key, g.Count())), configure)
+            .As<NameCount>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> IdsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<IdCount> groups in Configured(file.Scan<Page>()
+            .GroupBy(p => p.Id)
+            .Select(g => (g.Key, g.Count())), configure)
+            .As<IdCount>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
     private static async Task<long> PairsAsync(string path, Func<Probe<Draw>, Sym<int>> first, Func<Probe<Draw>, Sym<int>> second, Action<AggregationPlan>? configure)
     {
         await using VortexFile file = await ScenarioSet.OpenAsync(path);
@@ -377,3 +439,19 @@ public partial record struct Draw(int K4, int K100, int K1000, int K100k, int K1
 /// <summary>A pair of integer keys' rows and the sum of their values.</summary>
 [VortexRecord]
 public partial record struct PairTotal(int First, int Second, long Count, long Total);
+
+/// <summary>A row of the bench's pages file: a URL of about forty bytes among a million, a UUID among a million, a small integer, an integer key, a value.</summary>
+[VortexRecord]
+public partial record struct Page(string Url, Guid Id, int Small, int Key, long Value);
+
+/// <summary>A text key's rows.</summary>
+[VortexRecord]
+public partial record struct NameCount(string Name, long Count);
+
+/// <summary>A row of the bench's names files: a name, a value.</summary>
+[VortexRecord]
+public partial record struct Named(string Name, long Value);
+
+/// <summary>A UUID key's rows.</summary>
+[VortexRecord]
+public partial record struct IdCount(Guid Id, long Count);
