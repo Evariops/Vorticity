@@ -846,13 +846,23 @@ internal static class KeyWords
             return (words ^ (Unsafe.Add(ref words, 2) * 0x9E3779B97F4A7C15UL), Unsafe.Add(ref words, 1) ^ (Unsafe.Add(ref words, 3) * 0xC2B2AE3D27D4EB4FUL));
         }
 
+        if (Unsafe.SizeOf<TValue>() == 16)
+        {
+            // Its two words as they lie, the low first: the shift of a UInt128 by 64 stayed a call to its
+            // operator, a fiftieth of a group by of uuids.
+            Halves halves = Unsafe.BitCast<TValue, Halves>(value);
+            return (halves.Low, halves.High);
+        }
+
         return Unsafe.SizeOf<TValue>() switch
         {
             1 => (Unsafe.BitCast<TValue, byte>(value), 0),
             2 => (Unsafe.BitCast<TValue, ushort>(value), 0),
             4 => (Unsafe.BitCast<TValue, uint>(value), 0),
-            8 => (Unsafe.BitCast<TValue, ulong>(value), 0),
-            _ => ((ulong)Unsafe.BitCast<TValue, UInt128>(value), (ulong)(Unsafe.BitCast<TValue, UInt128>(value) >> 64)),
+            _ => (Unsafe.BitCast<TValue, ulong>(value), 0),
         };
     }
+
+    /// <summary>A value of sixteen bytes as its two words, the low one first, as a little-endian machine lays them out.</summary>
+    private readonly record struct Halves(ulong Low, ulong High);
 }
