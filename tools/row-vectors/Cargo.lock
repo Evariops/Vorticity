@@ -768,7 +768,7 @@ version = "0.1.0"
 dependencies = [
  "vortex-array",
  "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
- "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
  "vortex-row",
 ]
 

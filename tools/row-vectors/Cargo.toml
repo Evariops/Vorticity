@@ -22,4 +22,4 @@ description = "Emits golden row-encoding vectors from the reference vortex-row i
 vortex-row = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }
 vortex-array = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }
 vortex-buffer = { git = "https://github.com/vortex-data/vortex", tag = "0.87.0" }
-vortex-error = { git = "https://github.com/vortex-data/vortex", tag = "0.86.1" }
+vortex-error = { git = "https://github.com/vortex-data/vortex", tag = "0.87.0" }
