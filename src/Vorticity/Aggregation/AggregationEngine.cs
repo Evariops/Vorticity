@@ -153,8 +153,8 @@ internal sealed class AggregationPlan
             core?.ReloadedBytes ?? 0,
             core?.Tables ?? 0,
             core?.Splits ?? 0,
-            0,
-            0,
+            core?.SpilledParts ?? 0,
+            core?.SpilledBytes ?? 0,
             LastKeyBlocks.ByRange,
             LastKeyBlocks.ByCode,
             LastKeyBlocks.Hashed,
@@ -255,6 +255,12 @@ internal sealed class AggregationPlan
 
     /// <summary>The spins a burst waits once it holds its part, or null: the tests' slowed holder, which the lanes deposit past.</summary>
     internal int? CoreBurstSpin { get; set; }
+
+    /// <summary>
+    /// Whether the core under the governor spills its largest part to the query's scratch when its
+    /// budget holds no more (PLAN-HIGH-CARDINALITY, H6): on by default, off to test the refusal.
+    /// </summary>
+    internal bool CoreSpills { get; set; } = true;
 
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
@@ -440,7 +446,14 @@ internal sealed class AggregationOutcome
     internal QueryMemory? Memory { get; set; }
 
     /// <summary>Gives back what the result held of its query's budget: delivered, it is the caller's.</summary>
-    internal void Delivered() => Memory?.Dispose();
+    internal void Delivered()
+    {
+        Spilled?.Close();
+        Memory?.Dispose();
+    }
+
+    /// <summary>The parts of the result written to the scratch (PLAN-HIGH-CARDINALITY, H6), delivered after these groups, one at a time; null when none was.</summary>
+    internal SpilledParts? Spilled { get; set; }
 
     internal GroupKeys? Keys { get; }
 
@@ -747,8 +760,10 @@ internal sealed class AggregationPartition
     /// </summary>
     internal async ValueTask TurnAsync(CancellationToken cancellationToken)
     {
+        // A lane whose table holds less than the core would cost it keeps its table, but for one already
+        // past its budget when the core spills, which a lane's table cannot.
         CorePressure pressure = Pressure!;
-        if (pressure.Core is not { } core || (_turnAt is null && _arrays!.Out < core.LaneBytes))
+        if (pressure.Core is not { } core || (_turnAt is null && _arrays!.Out < core.LaneBytes && !(core.Spills && _arrays.Overdrawn)))
         {
             if (_arrays is { Overdrawn: true })
             {
@@ -781,11 +796,22 @@ internal sealed class AggregationPartition
         await LeaveAsync(core, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>A lane that turned to the core whose rows the core could not take yet: it waits for the next table given back.</summary>
-    internal Task RoomAsync(CancellationToken cancellationToken)
+    /// <summary>A lane on the core whose rows the core could not take yet: it waits for the next table given back, or spills a part.</summary>
+    internal async ValueTask RoomAsync(CancellationToken cancellationToken)
     {
-        _core!.Starved = false;
-        return Pressure!.RoomAsync(cancellationToken);
+        LaneCore lane = _core!;
+        lane.Starved = false;
+
+        // A table still to come back is waited for; with none left, the largest part goes to the
+        // scratch (H6). Otherwise the stack waits on its part, applied at a later burst or at the end.
+        if (Pressure is { } pressure && pressure.Running > 0)
+        {
+            await pressure.RoomAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else if (lane.Core.CanSpill)
+        {
+            await lane.Core.SpillAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
@@ -870,10 +896,11 @@ internal sealed class AggregationPartition
     private bool _ended;
 
     /// <summary>
-    /// Whether the lane's budget could not let its table grow once more: its arrays doubled and a
-    /// megabyte past them, asked without reserving, or an array it took past the budget in the batch
-    /// before; or the plan's batch to turn at, in the tests. The table keeps everything its budget lets
-    /// it hold: the lanes' tables stay the way the query runs while they fit.
+    /// Whether the lane's budget could not let its table grow once more: its arrays doubled, the entries
+    /// the table would empty into, and a megabyte past them, on every lane that still grows one, asked
+    /// without reserving; or an array it took past the budget in the batch before; or the plan's batch to
+    /// turn at, in the tests. The table keeps everything its budget lets it hold: the lanes' tables stay
+    /// the way the query runs while they fit.
     /// </summary>
     private bool Pressed()
     {
@@ -882,7 +909,10 @@ internal sealed class AggregationPartition
             return _folded++ >= turnAt;
         }
 
-        return _arrays is { Overdrawn: true } || (Memory is { } memory && !memory.CanGrow(_arrays!.Out + QueryMemory.Chunk));
+        // A doubling and the entries its table empties into, on every lane that still grows one: the
+        // lanes grow together, and each one's doubling past the budget would come at once.
+        return _arrays is { Overdrawn: true }
+            || (Memory is { } memory && !memory.CanGrow(((2 * _arrays!.Out) + QueryMemory.Chunk) * Math.Max(1, Pressure?.Running ?? 1)));
     }
 
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
@@ -1117,7 +1147,15 @@ internal sealed class AggregationPartition
             // The megabyte ahead may be what does not fit: the need alone, before failing.
             if (grow == need || !memory.TryGrow(need))
             {
-                throw memory.Exceeded("group by", Keys?.Count ?? 1, need);
+                // A lane on the core folds a batch into its cache before it measures it: a batch of new
+                // groups past the cache's capacity, at most, which the next flush empties. It is counted
+                // past the budget, as the core then spills what it must (H6).
+                if (_core is null)
+                {
+                    throw memory.Exceeded("group by", Keys?.Count ?? 1, need);
+                }
+
+                memory.Force(need);
             }
 
             grow = need;
@@ -1633,14 +1671,19 @@ internal static class AggregationEngine
         // brought down to the result once the groups are merged and given back when it is delivered;
         // all of it as soon as the query fails (PLAN-HIGH-CARDINALITY, H2).
         QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        GroupCore? core = null;
+        CorePressure? pressure = null;
         try
         {
-            // Admitted first, each lane's working memory: on fewer lanes when its budget is short.
-            int lanes = Admit(memory, ranges is null ? 1 : Math.Min(degree, ranges.Length), pass.Options.BatchRows);
+            // The lanes' batches under the budget, then each lane's working memory admitted: on fewer
+            // lanes when its budget is short.
+            int asked = ranges is null ? 1 : Math.Min(degree, ranges.Length);
+            pass = Batched(pass, memory, asked);
+            int lanes = Admit(memory, asked, pass.Options.BatchRows);
 
             // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
-            GroupCore? core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
+            core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
             if (core is not null)
             {
                 facts = GroupCore.CacheFacts(facts);
@@ -1648,9 +1691,10 @@ internal static class AggregationEngine
 
             // Without it, the core a lane turns to when its budget cannot let its table grow: made then,
             // never before, for a query it can hold, on two lanes or more, where the lanes' tables hold a
-            // group once each and the core once (H4, milestone 2, decision 12).
+            // group once each and the core once (H4, milestone 2, decision 12); on one, where the core
+            // spills its parts to the scratch, which a lane's table cannot (H6).
             KeyFacts? tableFacts = facts;
-            CorePressure? pressure = core is null && plan.CoreUnderPressure && plan.Grouped && !sorted && top is null && (lanes > 1 || plan.CoreTurnAt is not null)
+            pressure = core is null && plan.CoreUnderPressure && plan.Grouped && !sorted && top is null && (lanes > 1 || plan.CoreSpills || plan.CoreTurnAt is not null)
                 ? new CorePressure(() => GroupCore.Holding(plan, settled, columns, inputs, source, tableFacts, sorted, top: null, lanes, memory, lean: true), lanes)
                 : null;
 
@@ -1699,12 +1743,13 @@ internal static class AggregationEngine
             plan.LastKeyBlocks = KeyBlocks(partitions);
 
             // Under pressure (H4, milestone 2): a lane turned during the pass, or the merge of the lanes'
-            // tables in parts would not fit. The lanes that did not turn merge in series into the largest
+            // tables in parts would not fit twice over, its estimate falling a few hundred kilobytes short
+            // at times, which no merge in parts can take back. The lanes that did not turn merge in series into the largest
             // of them, each let go once merged, which takes no more than the largest's growth. Then, if
             // lanes turned, the largest empties its table into the core with the memory the others gave
             // back, and the core ends the query; else the largest holds the result.
             AggregationPartition[] merged = partitions;
-            if (pressure is not null && partitions.Length > 1 && (pressure.Turned || !memory.CanGrow(MergeAhead(partitions))))
+            if (pressure is not null && partitions.Length > 1 && (pressure.Turned || !memory.CanGrow(2 * MergeAhead(partitions))))
             {
                 AggregationPartition? largest = MergeUnturned(partitions);
                 if (pressure.Made is { Engaged: true } pressed)
@@ -1729,14 +1774,30 @@ internal static class AggregationEngine
                     partition.Join(engaged);
                 }
 
-                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
+                (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
-                foreach (AggregationPartition partition in partitions)
+                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, Shuffled(held.Order(sorted: false)));
+                if (spilled.Length == 0)
                 {
-                    partition.Release();
+                    foreach (AggregationPartition partition in partitions)
+                    {
+                        partition.Release();
+                    }
+
+                    return Counted(outcome, memory, heldBytes);
                 }
 
-                return Counted(new AggregationOutcome(plan, heldSlots, held, Shuffled(held.Order(sorted: false))), memory, heldBytes);
+                // Parts spilled (H6): the groups held in memory first, then each part brought back alone.
+                // The core's shelf counts what it holds exactly, which the result keeps; what the lanes
+                // held, their caches and their admission, is given back.
+                foreach (AggregationPartition partition in partitions)
+                {
+                    partition.LetGo();
+                }
+
+                memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
+                outcome.Spilled = new SpilledParts(engaged, spilled, plan);
+                return Counted(outcome, memory, memory.Held);
             }
 
             (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes) = await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, cancellationToken).ConfigureAwait(false);
@@ -1762,6 +1823,8 @@ internal static class AggregationEngine
         }
         catch
         {
+            // A spill's scratch closes with the query that failed: its file goes now, not at a collection.
+            (core ?? pressure?.Made)?.CloseSpill();
             memory.Dispose();
             throw;
         }
@@ -1772,7 +1835,7 @@ internal static class AggregationEngine
     /// copy shuffled by a draw the process's seed and the groups' count make: the same for two identical
     /// queries of a process, and unlike the merge's.
     /// </summary>
-    private static int[] Shuffled(int[] order)
+    internal static int[] Shuffled(int[] order)
     {
         if (!AggregationPlan.ShuffledOrder || order.Length < 2)
         {
@@ -1844,7 +1907,7 @@ internal static class AggregationEngine
     /// </summary>
     internal static int Admit(QueryMemory memory, int lanes, int batchRows = 0)
     {
-        long laneBytes = batchRows > 0 ? Math.Clamp(batchRows * RowBytes, LeastLaneBytes, LaneBytes) : LaneBytes;
+        long laneBytes = Working(batchRows);
         while (!memory.TryGrow(lanes * laneBytes))
         {
             if (lanes == 1)
@@ -1857,6 +1920,35 @@ internal static class AggregationEngine
 
         memory.Measure(lanes * laneBytes);
         return lanes;
+    }
+
+    /// <summary>The working memory a lane is admitted with, its batches of <paramref name="batchRows"/> rows, or the scan's.</summary>
+    private static long Working(int batchRows) => batchRows > 0 ? Math.Clamp(batchRows * RowBytes, LeastLaneBytes, LaneBytes) : LaneBytes;
+
+    /// <summary>
+    /// The bytes a row of a lane's batch may come to hold under the core, its budget short: its scratch,
+    /// its entry, and the group it may add to the lane's cache before the cache is measured, past its
+    /// capacity (H6).
+    /// </summary>
+    private const int CoreRowBytes = 72;
+
+    /// <summary>
+    /// The pass with its lanes' batches under <paramref name="memory"/>'s budget: what a batch may come to
+    /// hold on every one of <paramref name="lanes"/> lanes, a quarter of the ceiling at most, in batches
+    /// of a power of two from 1 024 rows; the scan's own when the budget leaves them room, as the
+    /// process's does.
+    /// </summary>
+    private static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes)
+    {
+        int asked = pass.Options.BatchRows > 0 ? pass.Options.BatchRows : GroupBatches.BatchRows;
+        long room = memory.Ceiling / 4 / Math.Max(1, lanes) / CoreRowBytes;
+        if (room >= asked)
+        {
+            return pass;
+        }
+
+        int rows = (int)Math.Max(1_024, BitOperations.RoundUpToPowerOf2((ulong)Math.Max(1, room)) / 2);
+        return rows >= asked ? pass : pass with { Options = pass.Options with { BatchRows = rows } };
     }
 
     /// <summary>

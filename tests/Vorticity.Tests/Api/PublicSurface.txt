@@ -1888,6 +1888,7 @@ Vorticity:     property int MappedFileCacheCount { get; set; }
 Vorticity:     property int MaxConcurrentReads { get; set; }
 Vorticity:     property int MaxDegreeOfParallelism { get; set; }
 Vorticity:     property long IndexCacheBytes { get; set; }
+Vorticity:     property string ScratchDirectory { get; set; }
 Vorticity: sealed class Vorticity.VortexTornTail : IEquatable<VortexTornTail>
 Vorticity:     ctor VortexTornTail(long, long, string)
 Vorticity:     method VortexTornTail <Clone>$()

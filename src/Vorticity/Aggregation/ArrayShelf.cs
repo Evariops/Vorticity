@@ -205,7 +205,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         {
             if (!memory.TryGrow(counted))
             {
-                if (!overdraw && Pressure is not { Owed: true })
+                if (!overdraw && !Overdraws && Pressure is not { Owed: true })
                 {
                     throw memory.Exceeded("group by", -1, counted);
                 }
@@ -237,12 +237,19 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return;
         }
 
-        // Let go past the shelf's budget: it leaves the query's count.
-        if (!Give(typeof(T), array, Unsafe.SizeOf<T>()))
+        // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.
+        if (Drops || !Give(typeof(T), array, Unsafe.SizeOf<T>()))
         {
             Leave(array.Length * (long)Unsafe.SizeOf<T>());
         }
     }
+
+    /// <summary>
+    /// Whether a query's shelf lets go of what it is given rather than keep it for the next to ask:
+    /// the core delivering its parts one after the other once it spilled (H6), each given back once
+    /// delivered.
+    /// </summary>
+    internal bool Drops { get; set; }
 
     /// <summary>
     /// An array the shelf handed out that nothing will take again, of a length no other asks: it leaves

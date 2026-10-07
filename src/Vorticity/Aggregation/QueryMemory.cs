@@ -94,6 +94,9 @@ internal sealed class QueryMemory : IDisposable
     /// <summary>The most bytes the query held of its budget at once.</summary>
     internal long Peak => Volatile.Read(ref _peak);
 
+    /// <summary>The ceiling of the query's budget, as it stands.</summary>
+    internal long Ceiling => _budget.CeilingBytes;
+
     /// <summary>The bytes its tables hold, as last measured: at most what it holds of its budget, which keeps room for their growth.</summary>
     internal long Measured => Volatile.Read(ref _measured);
 

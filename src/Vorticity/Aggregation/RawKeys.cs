@@ -250,6 +250,9 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     internal override void CountParts(Span<int> counts) => EntryKeys.CountParts<TWord>(_keys.AsSpan(0, Count), -1, counts);
 
+    internal override int CopyEntries(ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written) =>
+        EntryKeys.Copy<TWord>(_keys.AsSpan(0, Count), -1, records, shape, from, entries, out written);
+
     internal override void TablesOf(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables) =>
         EntryKeys.TablesOf<TWord>(batch, shape, shift, mask, tables);
 

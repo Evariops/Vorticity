@@ -33,7 +33,7 @@ namespace Vorticity.Aggregating;
 /// meanwhile by a lane that failed the lock waiting for the end. No lane ever waits on the lock.
 /// </para>
 /// </remarks>
-internal sealed class GroupCore
+internal sealed partial class GroupCore
 {
     /// <summary>The parts of the key space: a byte of the hash names one, and a lane's open batch of each stays a few lines of its first level of cache.</summary>
     internal const int PartCount = 256;
@@ -105,6 +105,9 @@ internal sealed class GroupCore
     private readonly QueryMemory? _memory;
     private readonly long _groupBytes;
 
+    // The bytes a sub-table holds at most before it splits: what a split's two halves take at once, each.
+    private readonly long _tableBytes;
+
     // The batches applied that their lanes did not keep, for any lane to fill again: a lane that never
     // holds a part takes back those others applied, so that the batches made follow the entries in
     // flight, not the deposits. Chains go in and out whole, a lock a slab's worth.
@@ -148,6 +151,10 @@ internal sealed class GroupCore
         // it enters the query, given back as it leaves; those on the shelf's piles stay counted.
         _memory = memory;
         _shelf = memory is null ? new ArrayShelf() : new ArrayShelf(memory, pooled: true);
+
+        // A core that spills takes past its budget what a stack asks more, and its lane spills the
+        // largest part before its next batch (H6).
+        _shelf.Overdraws = memory is not null && plan.CoreSpills;
         Kind = kind;
         int keyBytes = kind.EntryBytes;
         Shape = EntryShape.Of(layout, keyBytes);
@@ -162,11 +169,28 @@ internal sealed class GroupCore
         Alpha = plan.CoreAlpha ?? (lean ? 1 : (int)Math.Clamp((lanes - 1) * groupBytes / entryBytes, 1, MostAlpha));
         Floor = plan.CoreFloor ?? (lean ? LeanFloor : DefaultFloor);
         long cacheBytes = (lanes == 1 ? AloneCacheBytes : LaneCacheBytes) / (lean ? 4 : 1);
+        long batchBytes = lean ? LeanBatchBytes : BatchBytes;
+
+        // Under its budget, the lanes' caches and open batches take an eighth of its ceiling at most,
+        // half each: the rest is for the groups. Small batches deposit more often, small caches flush
+        // more often; a sub-table splits at a 256th of the ceiling, the two halves of a split a 128th.
+        // Under pressure, memory comes first.
+        long tableBytes = TableBytes;
+        if (lean && memory is not null)
+        {
+            long ceiling = memory.Ceiling;
+            long lane = ceiling / 8 / Math.Max(1, lanes);
+            cacheBytes = Math.Min(cacheBytes, lane / 2);
+            batchBytes = Math.Clamp(lane / 2 / PartCount, 4L * entryBytes, batchBytes);
+            tableBytes = Math.Clamp(ceiling / PartCount, 64 * groupBytes, TableBytes);
+        }
+
         Capacity = plan.CoreCapacity ?? (int)Math.Max(64, cacheBytes / groupBytes);
         FlushAt = Math.Max(1, (int)(2L * Capacity / 3));
         Bypass = plan.CoreBypass ?? DefaultBypass;
-        _tableGroups = plan.CoreTableGroups ?? Math.Max(64, TableBytes / groupBytes);
-        _batchEntries = plan.CoreBatchEntries ?? Math.Max(1, (lean ? LeanBatchBytes : BatchBytes) / entryBytes);
+        _tableGroups = plan.CoreTableGroups ?? Math.Max(64, tableBytes / groupBytes);
+        _tableBytes = _tableGroups * groupBytes;
+        _batchEntries = plan.CoreBatchEntries ?? (int)Math.Max(1, batchBytes / entryBytes);
         _batchWords = _batchEntries * Shape.Words;
         LaneBytes = ((long)PartCount * _batchWords * sizeof(ulong)) + (Capacity * groupBytes);
         for (int p = 0; p < PartCount; p++)
@@ -442,12 +466,15 @@ internal sealed class GroupCore
 
     /// <summary>
     /// Whether a part's stack of <paramref name="pending"/> entries waits for room: under pressure, while
-    /// a lane still holds a table it gives back, when the budget could not take a group an entry, twice
-    /// over for a doubling, and a sub-table's doubling at its bound. Its lane waits for the next table
-    /// given back before its next batch.
+    /// a lane still holds a table it gives back, or when the core spills, when the budget could not take
+    /// a group an entry, twice over for a doubling, and a split's two halves at the sub-tables' bound.
+    /// Its lane waits for the next table given back, or spills, before its next batch.
     /// </summary>
     private bool Waits(long pending) =>
-        Pressure is { Holding: true } && !_memory!.CanGrow((2 * pending * _groupBytes) + TableBytes);
+        _memory is { } memory && !memory.CanGrow(Growth(pending)) && (Pressure is { Holding: true } || CanSpill);
+
+    /// <summary>The most a part's application of <paramref name="pending"/> entries may take: a group an entry, twice over for a doubling, and a split's two halves.</summary>
+    private long Growth(long pending) => (2 * pending * _groupBytes) + (2 * _tableBytes);
 
     /// <summary>The entries pending past which a part is applied: its floor, or α times its groups.</summary>
     private long Threshold(CorePart part) => Math.Max(Floor, (long)Alpha * Volatile.Read(ref part.Groups));
@@ -627,10 +654,15 @@ internal sealed class GroupCore
     /// <summary>
     /// The end of the pass: every lane's cache and open batches deposited, every part's stack applied,
     /// the parts taken from a queue by up to <paramref name="degree"/> workers, the lanes' null groups
-    /// merged into the first part, and the sub-tables read as one.
+    /// merged into the first part, and the sub-tables read as one. A part spilled, or one its budget
+    /// cannot apply its stack into, writes its stack to the scratch instead, and comes back when it is
+    /// delivered, after the parts held in memory (H6).
     /// </summary>
-    /// <returns>The groups' keys and slots, and the bytes the core held at the end past the lanes' caches: its sub-tables and every batch made.</returns>
-    internal async ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Bytes)> FinishAsync(
+    /// <returns>
+    /// The groups' keys and slots of the parts held in memory, the bytes the core held at the end past
+    /// the lanes' caches, its sub-tables and every batch made, and the parts spilled.
+    /// </returns>
+    internal async ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Bytes, CorePart[] Spilled)> FinishAsync(
         AggregationPartition[] lanes, int degree, CancellationToken cancellationToken)
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -655,14 +687,14 @@ internal sealed class GroupCore
         int workers = Math.Clamp(degree, 1, PartCount);
         if (workers == 1)
         {
-            ApplyParts(queue, token);
+            await ApplyPartsAsync(queue, token).ConfigureAwait(false);
         }
         else
         {
             Task[] applying = new Task[workers];
             for (int w = 0; w < workers; w++)
             {
-                applying[w] = Task.Run(() => ApplyParts(queue, token), token);
+                applying[w] = Task.Run(() => ApplyPartsAsync(queue, token).AsTask(), token);
             }
 
             await AggregationEngine.GuardedAsync(applying, failed).ConfigureAwait(false);
@@ -683,8 +715,15 @@ internal sealed class GroupCore
 
         List<GroupKeys> keys = [];
         List<AggregateSlot[]> slots = [];
+        List<CorePart> spilled = [];
         foreach (CorePart part in _parts)
         {
+            if (part.Runs is not null)
+            {
+                spilled.Add(part);
+                continue;
+            }
+
             foreach (SubTable table in part.Tables)
             {
                 keys.Add(table.Keys);
@@ -701,7 +740,9 @@ internal sealed class GroupCore
         }
 
         // The slabs, every batch applied, and the arrays the sub-tables left go to the process's shelf,
-        // for the next query: the result keeps this shelf, not what it held.
+        // for the next query: the result keeps this shelf, not what it held. A core with parts spilled
+        // keeps its shelf for the parts it brings back, each exact under its budget, and hands it on
+        // once the last is delivered.
         lock (_freeGate)
         {
             _free = null;
@@ -713,10 +754,39 @@ internal sealed class GroupCore
             _slabs.Clear();
         }
 
-        _shelf.Clear();
+        if (spilled.Count == 0)
+        {
+            _shelf.Clear();
+        }
+        else
+        {
+            _shelf.Overdraws = false;
+        }
 
         (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined([.. keys], [.. slots], keys.Count);
-        return (joined, joinedSlots, bytes);
+        return (joined, joinedSlots, bytes, [.. spilled]);
+    }
+
+    /// <summary>A part's sub-tables read as one, once it is back in memory (H6): its keys and its slots.</summary>
+    internal (GroupKeys Keys, AggregateSlot[] Slots) Joined(CorePart part)
+    {
+        List<GroupKeys> keys = [];
+        List<AggregateSlot[]> slots = [];
+        foreach (SubTable table in part.Tables)
+        {
+            keys.Add(table.Keys);
+            slots.Add(table.Slots);
+        }
+
+        if (keys.Count == 0)
+        {
+            SubTable empty = NewTable(0);
+            keys.Add(empty.Keys);
+            slots.Add(empty.Slots);
+        }
+
+        (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined([.. keys], [.. slots], keys.Count);
+        return (joined, joinedSlots);
     }
 
     /// <summary>The null group of a lane's partition, if it has one, merged into the first part's first sub-table.</summary>
@@ -769,8 +839,12 @@ internal sealed class GroupCore
         }
     }
 
-    /// <summary>Applies the parts a worker takes from the queue, the last taken in <paramref name="queue"/>'s one element, each its whole stack.</summary>
-    private void ApplyParts(int[] queue, CancellationToken cancellationToken)
+    /// <summary>
+    /// Applies the parts a worker takes from the queue, the last taken in <paramref name="queue"/>'s one
+    /// element, each its whole stack. A part spilled writes its stack to the scratch; one whose budget
+    /// cannot take its stack's groups is spilled first (H6).
+    /// </summary>
+    private async ValueTask ApplyPartsAsync(int[] queue, CancellationToken cancellationToken)
     {
         CoreApplier applier = new CoreApplier(this, lane: null);
         int index;
@@ -778,10 +852,33 @@ internal sealed class GroupCore
         {
             cancellationToken.ThrowIfCancellationRequested();
             CorePart part = _parts[index];
+            if (Spills && (part.Runs is not null || !Affords(Volatile.Read(ref part.Pending.Value))))
+            {
+                await _spilling.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    if (part.Runs is null && part.Tables.Count > 0)
+                    {
+                        await EvictAsync(part, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    await WritePendingAsync(part, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _spilling.Release();
+                }
+
+                continue;
+            }
+
             int applied = applier.Apply(part, Interlocked.Exchange(ref part.Head.Value, null), burst: false);
             Interlocked.Add(ref part.Pending.Value, -applied);
         }
     }
+
+    /// <summary>Whether the budget could take the groups of <paramref name="pending"/> entries applied at once (<see cref="Growth"/>).</summary>
+    private bool Affords(long pending) => _memory is null || _memory.CanGrow(Growth(pending));
 
     /// <summary>What the core did, for the plan's last run (PLAN-HIGH-CARDINALITY, R5a).</summary>
     internal CoreRun Run()
@@ -803,7 +900,11 @@ internal sealed class GroupCore
             Interlocked.Read(ref _reloaded),
             tables,
             Volatile.Read(ref _splits),
-            Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong));
+            Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong))
+        {
+            SpilledParts = SpilledParts,
+            SpilledBytes = SpilledBytes,
+        };
     }
 }
 
@@ -824,7 +925,14 @@ internal sealed class GroupCore
 /// <param name="BatchBytes">The bytes of every batch made.</param>
 internal sealed record CoreRun(
     int Alpha, int Capacity, long Flushes, long FlushedGroups, long BypassedRows, long Bursts, long PendingPeakBytes, long ReloadedBytes, int Tables, int Splits,
-    long BatchBytes);
+    long BatchBytes)
+{
+    /// <summary>The parts the core wrote to its scratch (H6).</summary>
+    internal int SpilledParts { get; init; }
+
+    /// <summary>The bytes it wrote there.</summary>
+    internal long SpilledBytes { get; init; }
+}
 
 /// <summary>Where a group's record and its key lie in an entry of a part's batch (PLAN-HIGH-CARDINALITY, H4).</summary>
 /// <param name="RecordWords">The words of a record, copied whole from a lane's cache.</param>
@@ -905,7 +1013,15 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
         Keys.Release();
         records?.Release();
     }
+
+    /// <summary>The groups from <paramref name="from"/> on copied into entries of <paramref name="shape"/>, as many as <paramref name="entries"/> holds (H6).</summary>
+    /// <returns>The group to copy next.</returns>
+    internal int CopyEntries(EntryShape shape, int from, Span<ulong> entries, out int written) =>
+        Keys.CopyEntries(records is null ? default : records.Made, shape, from, entries, out written);
 }
+
+/// <summary>A part's groups written to the query's scratch as it was spilled (H6): their entries, one after the other, from <paramref name="Offset"/>.</summary>
+internal readonly record struct PartRun(long Offset, long Entries);
 
 /// <summary>
 /// One of the parts of the key space (PLAN-HIGH-CARDINALITY, H4): the lock a lane applies it under, the
@@ -932,6 +1048,12 @@ internal sealed class CorePart
 
     /// <summary>The groups of the sub-tables, as the last application left them.</summary>
     internal int Groups;
+
+    /// <summary>
+    /// The part's groups written to the scratch, one run each time it was spilled (H6); null for a
+    /// part never spilled. Written by the eviction alone, which one task runs at a time.
+    /// </summary>
+    internal List<PartRun>? Runs;
 
     /// <summary>Doubles the directory: one more bit of the hash, each sub-table at both places its old one gave.</summary>
     internal void Grow()
@@ -1152,6 +1274,9 @@ internal sealed class LaneCore
         Shape = core.Shape;
         _entryWords = Shape.Words;
     }
+
+    /// <summary>The core the lane's side belongs to.</summary>
+    internal GroupCore Core => _core;
 
     internal EntryShape Shape { get; }
 
@@ -1758,6 +1883,41 @@ internal static class EntryKeys
             // The key last: it may lie in the record's padding.
             Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref Unsafe.As<ulong, byte>(ref entry), keyOffset), key);
         }
+    }
+
+    /// <summary>
+    /// The groups from <paramref name="from"/> on, but group <paramref name="skip"/>, copied into entries
+    /// of <paramref name="shape"/> one after the other, as many as <paramref name="entries"/> holds: a
+    /// sub-table written to the scratch as a part is spilled (H6).
+    /// </summary>
+    /// <returns>The group to copy next.</returns>
+    internal static int Copy<TKey>(ReadOnlySpan<TKey> keys, int skip, ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written)
+        where TKey : unmanaged
+    {
+        int stride = shape.RecordWords;
+        int words = shape.Words;
+        nint keyOffset = shape.KeyOffset;
+        int room = entries.Length / words;
+        int g = from;
+        int n = 0;
+        for (; g < keys.Length && n < room; g++)
+        {
+            if (g == skip)
+            {
+                continue;
+            }
+
+            Span<ulong> entry = entries.Slice(n * words, words);
+            entry.Clear();
+            records.Slice(g * stride, stride).CopyTo(entry);
+
+            // The key last: it may lie in the record's padding.
+            Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref Unsafe.As<ulong, byte>(ref MemoryMarshal.GetReference(entry)), keyOffset), keys[g]);
+            n++;
+        }
+
+        written = n;
+        return g;
     }
 
     /// <summary>Counts each key but group <paramref name="skip"/>'s by its part, as <see cref="Scatter"/> would place it.</summary>

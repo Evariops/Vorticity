@@ -194,6 +194,13 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private RecordBatch? _current;
     private bool _done;
 
+    // A result whose core spilled (PLAN-HIGH-CARDINALITY, H6): the outcome of the groups held in memory,
+    // which holds the query's memory until the end, the parts left to bring back, and the groups the
+    // parts before the current one passed, their operators applied.
+    private AggregationOutcome? _held;
+    private SpilledParts? _spilled;
+    private long _seen;
+
     internal GroupBatches(AggregationQuery query, CancellationToken cancellationToken)
     {
         _query = query;
@@ -220,7 +227,17 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
             return new ValueTask<bool>(false);
         }
 
-        return _outcome is null ? RunAsync() : new ValueTask<bool>(Next());
+        if (_outcome is null)
+        {
+            return RunAsync();
+        }
+
+        if (Next())
+        {
+            return new ValueTask<bool>(true);
+        }
+
+        return _spilled is null ? new ValueTask<bool>(End()) : NextPartAsync();
     }
 
     public ValueTask DisposeAsync()
@@ -234,24 +251,64 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     {
         long started = Stopwatch.GetTimestamp();
         (_outcome, _groups, _count) = await _query.Host.RunAsync(_query, _cancellationToken).ConfigureAwait(false);
-        bool first = Next();
+        _held = _outcome;
+        _spilled = _outcome.Spilled;
+        if (_spilled is not null && Array.Exists(_query.Operators, op => op is GroupOrder or GroupWindow))
+        {
+            int parts = _spilled.Count;
+            Release();
+            throw new VortexMemoryException(
+                $"The group by spilled {parts} parts of its groups to its scratch, its memory budget holding no more, and an order or a window over groups needs every group at once: an order over groups the budget cannot hold waits for the external sort. Give its session a larger QueryMemoryBudget, or filter the rows first.");
+        }
+
+        bool first = Next() || (_spilled is not null ? await NextPartAsync().ConfigureAwait(false) : End());
         _query.Plan.LastFirstBatchTicks = Stopwatch.GetTimestamp() - started;
         return first;
     }
 
+    /// <summary>
+    /// The next part of a result whose core spilled brought back and its operators applied, until one
+    /// has groups the result's window keeps: the parts held in memory came first.
+    /// </summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<bool> NextPartAsync()
+    {
+        while (true)
+        {
+            _seen += _count;
+            if (_query.Take != long.MaxValue && _seen >= _query.Skip + _query.Take)
+            {
+                return End();
+            }
+
+            if (await _spilled!.NextAsync(_cancellationToken).ConfigureAwait(false) is not { } part)
+            {
+                return End();
+            }
+
+            _outcome = part;
+            _next = 0;
+            (_groups, _count) = await GroupSelection.ApplyAsync(_query, part, _query.Host.Spec(_query.RowFilter), _cancellationToken).ConfigureAwait(false);
+            if (Next())
+            {
+                return true;
+            }
+        }
+    }
+
+    /// <summary>The next batch of the current part's groups, within the result's window; false once the part has none left.</summary>
     private bool Next()
     {
         AggregationOutcome outcome = _outcome!;
         int[] order = _groups;
-        if (_next == 0 && _query.Skip > 0)
+        if (_next == 0 && _query.Skip > _seen)
         {
-            _next = (int)Math.Min(_query.Skip, _count);
+            _next = (int)Math.Min(_query.Skip - _seen, _count);
         }
 
-        long end = _query.Take == long.MaxValue ? _count : Math.Min(_count, _query.Skip + _query.Take);
+        long end = _query.Take == long.MaxValue ? _count : Math.Clamp(_query.Skip + _query.Take - _seen, 0, _count);
         if (_next >= end)
         {
-            Release();
             return false;
         }
 
@@ -270,9 +327,16 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         CanonicalArena arena = _arena!;
         arena.ResetKeepingBlocks();
         int root = store.Build(arena, count);
-        _current = RecordBatch.Over(arena, root, _next - _query.Skip, _current);
+        _current = RecordBatch.Over(arena, root, _seen + _next - _query.Skip, _current);
         _next += count;
         return true;
+    }
+
+    /// <summary>The end of the result: everything it held given back.</summary>
+    private bool End()
+    {
+        Release();
+        return false;
     }
 
     /// <summary>The stores of the result's columns, made once per stream from the session's pool.</summary>
@@ -296,7 +360,9 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
-        _outcome?.Delivered();
+
+        // The outcome held in memory holds the query's memory and its spilled parts: given back last.
+        (_held ?? _outcome)?.Delivered();
     }
 }
 

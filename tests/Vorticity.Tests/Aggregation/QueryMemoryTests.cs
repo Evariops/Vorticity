@@ -35,8 +35,11 @@ public sealed partial class QueryMemoryTests
             });
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            VortexMemoryException failure = await Assert.ThrowsAsync<VortexMemoryException>(async () =>
-                await file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value)).ToListAsync(Ct));
+
+            // The refusal the spill otherwise replaces (SpillTests): the spill switched off.
+            Aggregation<long> sums = file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value));
+            sums.Plan.CoreSpills = false;
+            VortexMemoryException failure = await Assert.ThrowsAsync<VortexMemoryException>(async () => await sums.ToListAsync(Ct));
 
             Assert.Contains("group by", failure.Message, StringComparison.Ordinal);
             Assert.Contains("2,097,152", failure.Message, StringComparison.Ordinal);
@@ -186,9 +189,13 @@ public sealed partial class QueryMemoryTests
 
                 if (query % 10 == 0)
                 {
-                    // Every tenth, a query its budget refuses: everything it took given back.
-                    await Assert.ThrowsAsync<VortexMemoryException>(async () => await refused.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct));
+                    // Every tenth, a query its budget refuses, the spill switched off: everything it took
+                    // given back; and the same query spilling under that budget, exact.
+                    Aggregation<long> counts = refused.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count());
+                    counts.Plan.CoreSpills = false;
+                    await Assert.ThrowsAsync<VortexMemoryException>(async () => await counts.ToListAsync(Ct));
                     failures++;
+                    Assert.Equal(5_000, (await refused.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct)).Count);
                 }
             }
 
@@ -488,12 +495,18 @@ public sealed partial class QueryMemoryTests
             Assert.Equal([Keys, Keys], counts);
             Assert.Equal(0, budget.ReservedBytes);
 
-            // Too small for either query: each fails apart, and the budget is whole after both.
+            // Too small for either query, the spill switched off: each fails apart, and the budget is
+            // whole after both.
             QueryMemoryBudget small = new QueryMemoryBudget(1 << 20);
             await using VortexSession third = VortexSession.Create(options => options.MemoryBudget = small);
             await using VortexFile c = await third.OpenAsync(path, cancellationToken: Ct);
-            await Assert.ThrowsAsync<VortexMemoryException>(async () => await c.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct));
-            await Assert.ThrowsAsync<VortexMemoryException>(async () => await c.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct));
+            for (int query = 0; query < 2; query++)
+            {
+                Aggregation<long> counted = c.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count());
+                counted.Plan.CoreSpills = false;
+                await Assert.ThrowsAsync<VortexMemoryException>(async () => await counted.ToListAsync(Ct));
+            }
+
             Assert.Equal(0, small.ReservedBytes);
         }
         finally
