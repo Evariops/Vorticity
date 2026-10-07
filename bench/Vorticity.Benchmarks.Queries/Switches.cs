@@ -34,7 +34,11 @@ internal static class Switches
         "coredistinct" => new Switch("reader's thread", Set("CoreDistinct", false), "core", Set("CoreDistinct", true)),
         _ when name.StartsWith("capacity:", StringComparison.Ordinal) => CorePair(name, "CoreCapacity", "capacity"),
         _ when name.StartsWith("alpha:", StringComparison.Ordinal) => CorePair(name, "CoreAlpha", "alpha"),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, extremes, coredistinct, capacity:A:B, alpha:A:B."),
+        _ when name.StartsWith("floor:", StringComparison.Ordinal) => CorePair(name, "CoreFloor", "floor"),
+        _ when name.StartsWith("table:", StringComparison.Ordinal) => CorePair(name, "CoreTableGroups", "table"),
+        _ when name.StartsWith("batch:", StringComparison.Ordinal) => CorePair(name, "CoreBatchEntries", "batch"),
+        _ when name.StartsWith("bypass:", StringComparison.Ordinal) => CorePair(name, "CoreBypass", "bypass", percent: true),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, extremes, coredistinct, capacity:A:B, alpha:A:B, floor:A:B, table:A:B, batch:A:B, bypass:A:B (percent)."),
     };
 
     /// <summary>Both settings, <paramref name="first"/> then <paramref name="then"/>: the core on, and one of its own switches.</summary>
@@ -45,9 +49,9 @@ internal static class Switches
     };
 
     /// <summary>As <see cref="Pair"/>, under the core (PLAN-HIGH-CARDINALITY, H4): its cache's capacity or its α at A against B.</summary>
-    private static Switch CorePair(string name, string property, string label)
+    private static Switch CorePair(string name, string property, string label, bool percent = false)
     {
-        Switch pair = Pair(name, property, label);
+        Switch pair = Pair(name, property, label, percent);
         Action<AggregationPlan> core = Core();
         return pair with { SetA = plan => { core(plan); pair.SetA(plan); }, SetB = plan => { core(plan); pair.SetB(plan); } };
     }
@@ -64,14 +68,19 @@ internal static class Switches
         };
     }
 
-    /// <summary><c>name:A:B</c>, the integer switch <paramref name="property"/> at A against B, either of them <c>auto</c> for the engine's own.</summary>
-    private static Switch Pair(string name, string property, string label)
+    /// <summary>
+    /// <c>name:A:B</c>, the integer switch <paramref name="property"/> at A against B, either of them
+    /// <c>auto</c> for the engine's own; a share in percent when <paramref name="percent"/>, set as a fraction.
+    /// </summary>
+    private static Switch Pair(string name, string property, string label, bool percent = false)
     {
         string[] values = name.Split(':');
         return new Switch($"{label} {values[1]}", Of(values[1]), $"{label} {values[2]}", Of(values[2]));
 
         Action<AggregationPlan> Of(string value) =>
-            value == "auto" ? static _ => { } : Set(property, int.Parse(value, CultureInfo.InvariantCulture));
+            value == "auto" ? static _ => { }
+            : percent ? Set(property, int.Parse(value, CultureInfo.InvariantCulture) / 100.0)
+            : Set(property, int.Parse(value, CultureInfo.InvariantCulture));
     }
 
     /// <summary>Sets the plan's switch <paramref name="property"/> to <paramref name="value"/>.</summary>

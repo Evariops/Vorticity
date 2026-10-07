@@ -45,7 +45,23 @@ internal static class Program
             return 2;
         }
 
-        Func<string, Task<long>>? scenario = ScenarioSet.ForReport(args[1], rows);
+        Func<string, Task<long>>? scenario;
+        bool grouped = false;
+        try
+        {
+            scenario = ScenarioSet.ForReport(args[1], rows);
+            if (scenario is null && GroupScenarios.For(args[1]) is { } group)
+            {
+                scenario = group;
+                grouped = true;
+            }
+        }
+        catch (ArgumentException error)
+        {
+            Console.Error.WriteLine(error.Message);
+            return 2;
+        }
+
         if (scenario is null)
         {
             Console.Error.WriteLine($"no scenario named '{args[1]}'");
@@ -54,8 +70,16 @@ internal static class Program
 
         // A round maps its file anew, as the reference maps it at each call: the default session
         // would hand round two the mapping round one left, pages already mapped. The bench host
-        // sets the same session in `Scenarios.OpenFilesCold`.
-        ScenarioSet.Session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
+        // sets the same session in `Scenarios.OpenFilesCold`. A group by takes its lanes from the
+        // session, as the queries bench gives them.
+        ScenarioSet.Session = VortexSession.Create(options =>
+        {
+            options.MappedFileCacheCount = 0;
+            if (grouped)
+            {
+                options.MaxDegreeOfParallelism = threads;
+            }
+        });
 
         // The rounds are printed once they are all done, so that formatting a line is not an
         // allocation of the round after it.
@@ -84,6 +108,11 @@ internal static class Program
                     CultureInfo.InvariantCulture,
                     $"round={round} rows={delivered[round]} work_us={workMicros[round]} allocated_bytes={allocated[round]}"));
             }
+        }
+
+        if (grouped && GroupScenarios.Describe() is { } engine)
+        {
+            Console.WriteLine(engine);
         }
 
         (long cpuMs, long rssBytes) = ProcessCost.Read();
