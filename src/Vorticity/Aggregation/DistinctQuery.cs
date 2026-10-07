@@ -242,7 +242,13 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, []);
             _memory = new QueryMemory(projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
             AggregationEngine.Admit(_memory, 1);
-            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming, memory: _memory);
+
+            // The statistics' bounds, as a group by takes them: an integer they bound is numbered by its
+            // value, in pages, where without them it was hashed, twice as long at a million values
+            // (PLAN-HIGH-CARDINALITY, profiling). A sorted column keeps the index that forgets.
+            KeyFacts? facts = _streaming < 0 ? await AggregationEngine.FactsAsync(projection.Host.Source, plan.Keys, _cancellationToken).ConfigureAwait(false) : null;
+            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming, facts: facts, memory: _memory);
+            plan.Watch?.Invoke([_partition]);
             _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
             _inner = projection.Host.Source.BatchesAsync(spec, projection.Metrics).GetAsyncEnumerator(_cancellationToken);
         }

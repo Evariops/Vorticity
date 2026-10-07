@@ -82,6 +82,34 @@ public sealed partial class DirectPagesTests
         }
     }
 
+    // A distinct on one lane takes the statistics' bounds as a group by does, and numbers the key by its
+    // value: its values come in the order the rows first meet them, as they did hashed, a window of them
+    // included (PLAN-HIGH-CARDINALITY, profiling).
+    [Fact]
+    public async Task ADistinctOfABoundedKeyNumbersItByValueInTheOrderMet()
+    {
+        Row[] rows = MakeRows(span: 300_000);
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 1);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<int?> expected = [.. rows.Select(r => r.Key).Distinct()];
+            Aggregation<int?> distinct = file.Scan<Row>().Select(r => r.Key).Distinct();
+            bool byValue = false;
+            ((DistinctQuery)distinct.Query).Plan.Watch = partitions => byValue = partitions.All(partition => partition.Keys is FixedKeys<int> { ByValue: true });
+            Assert.Equal(expected, await distinct.ToListAsync(Ct));
+            Assert.True(byValue, "the distinct hashed its key, not numbered it by value");
+            Assert.Equal(
+                expected.Skip(1_000).Take(5_000),
+                await file.Scan<Row>().Select(r => r.Key).Distinct().Skip(1_000).Take(5_000).ToListAsync(Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     // Lanes that number one span by value merge in parts cut by value, each part numbered by value over
     // its run of the span (PLAN-HIGH-CARDINALITY, H14): the same groups as hashed parts, the null group
     // among them, whatever the parts.
