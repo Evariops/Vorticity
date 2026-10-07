@@ -546,6 +546,9 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     // its group and its chain for nothing; null for a slot of groups, which holds pairs.
     private DistinctValues<TValue>? _set;
 
+    // The values of the uniform column its first rows foretold (Foretell); 0 before.
+    private double _universe;
+
     // The shelf the pairs and the counts grow from, under the query's memory.
     private ArrayShelf? _shelf;
 
@@ -578,6 +581,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         }
 
         double values = AggregationPartition.EstimatedValues(rows, set.Count);
+        _universe = values;
         double foretold = double.IsPositiveInfinity(values) ? expected : values * -double.ExpM1(-expected / values);
         long count = (long)Math.Min(foretold, expected);
         if (count < 2 * set.Count || count > int.MaxValue / 4)
@@ -809,16 +813,41 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         DistinctValues<TValue>[] all = new DistinctValues<TValue>[slots.Length];
         bool zero = false;
         long most = 0;
+        long sum = 0;
+        double universe = 0;
         for (int p = 0; p < slots.Length; p++)
         {
-            all[p] = ((FixedDistinctSlot<TValue>)slots[p])._set!;
+            FixedDistinctSlot<TValue> lane = (FixedDistinctSlot<TValue>)slots[p];
+            all[p] = lane._set!;
             zero |= all[p].HoldsZero;
             most = Math.Max(most, all[p].Count);
+            sum += all[p].Count;
+            universe = Math.Max(universe, lane._universe);
         }
 
-        // A part holds at least its share of the lane that holds the most.
+        // A part's table reserves its share of the values every lane's make together: a uniform
+        // column's, each value in a lane by chance, K (1 - Π (1 - c / K)) of the K the lanes' first rows
+        // foretold, all of them when none repeated; with none foretold, the lane that holds the most.
+        // Grown by doubling from that lane's share, the parts' tables took a seventh of the cycles of
+        // the distinct users of a scan of 20M visits at fourteen lanes.
+        double union = most;
+        if (double.IsPositiveInfinity(universe))
+        {
+            union = sum;
+        }
+        else if (universe > 0)
+        {
+            double none = 0;
+            foreach (DistinctValues<TValue> lane in all)
+            {
+                none += Math.Log(Math.Max(0, 1 - (lane.Count / universe)));
+            }
+
+            union = Math.Clamp(-universe * double.ExpM1(none), most, sum);
+        }
+
         int bits = BitOperations.Log2((uint)parts);
-        int share = (int)(most / parts);
+        int share = (int)Math.Min(union / parts, int.MaxValue / 4);
         long[] counts = new long[parts];
         await SideBySide.RunAsync(
             parts,
