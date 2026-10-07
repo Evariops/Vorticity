@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅; the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅; datasets, `Distinct` by parts 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -570,8 +570,8 @@ await foreach (var (hour, city, readings, mean) in hourly)        // §1's Scan<
 |---|---|
 | `await foreach`, `ToBatchesAsync`, `ToRecordsAsync` | the result's batches, borrowed or owned, or its records |
 | `Where`, `Select`, `GroupBy`, `AggAsync`, `CountAsync` and the single answers | the same operators over the result's batches: a filter evaluated on each, a projection, an aggregate of an aggregate — daily from hourly |
-| `OrderBy`, `OrderByDescending` | free when the result arrives in that order, from a group by that streams on that key or an `orderby` of its query; otherwise the result is sorted, a blocking stage holding the result |
-| `Keys(r => …)` | the key cursor over the result's keys, sorted in memory unless the result arrives in their order |
+| `OrderBy`, `OrderByDescending` | free when the result arrives in that order, from a group by that streams on that key or an `orderby` of its query; otherwise the result is sorted, a blocking stage, under the session's memory budget: in memory while it holds the rows, in runs written to the scratch and merged back past it (§9.5) |
+| `Keys(r => …)` | the key cursor over the result's keys, sorted in memory unless the result arrives in their order, reserved under the session's memory budget until the cursor is disposed |
 | `Rows(range)`, `Rows(indices)` | positions in the order the result is delivered, read as a skip and a take of the stream |
 | `With(options)` | the options of what runs on the result; the query keeps its own |
 | `ExplainAsync`, `Statistics` | the query's plan with the result's operators after it, and what the whole pipeline did |
@@ -825,9 +825,21 @@ again is that share of the groups and a page. Under a budget the pass sizes itse
 batch takes a quarter of the ceiling over the lanes, the core's caches and open batches an eighth, its
 sub-tables split at a 256th, a lane turns once the budget could not take every growing lane's next
 doubling, and the scratch's page is a sixteenth. Under a tenth of what the lanes' tables would hold,
-fourteen lanes on 10⁶ keys end exact within 6 % of the budget. An order or a window over groups that
-spilled needs every group at once, and fails saying so until the external sort. A key of text, a
-composite holding one and a distinct count do not enter the core, and are refused past their budget.
+fourteen lanes on 10⁶ keys end exact within 6 % of the budget. A key of text, a composite holding one
+and a distinct count do not enter the core, and are refused past their budget.
+
+**The sort in runs.** An order over groups that spilled sorts them in runs: the groups held in memory,
+then each part spilled as it comes back, pass through the filters before the order, and their rows —
+the order's results, the key's components that break their ties, then the result's columns — gather
+in a store while the budget holds them, a quarter of its ceiling at most. Past that, the store's rows
+are sorted and written to the scratch as a run, a Vortex file of their own, written as fast as the
+writer writes and without statistics, and the runs are merged back a batch of each at a time, the
+first run's rows first among equals, a contiguous stretch of one run at a time; the windows after the
+order, and the result's own, are cut across the merged rows. A result's scan sorted by `OrderBy`
+takes the same sort under its session's budget. Each column ranks across two runs' batches as within
+one, a null last and NaN after +∞; the runs' files are deleted once the sort is, read to its end or
+not. A result ten times its budget sorts exact, its peak within the budget. A window without an order
+over groups that spilled, or a filter after the order, needs every group at once, and fails saying so.
 
 **Part by part.** A core's result with no order nor window over its groups is delivered part by part.
 Once the lanes have deposited their caches, a worker a lane but one takes the parts in turn: it applies
@@ -840,8 +852,9 @@ the parts' batches, a batch holding a part's groups at most. On 10⁷ keys, the 
 quarter sooner at one lane and a third at fourteen, where the whole result takes 0.58 of the time, its
 batches built on every lane.
 
-Not yet: a comfort budget the host grants, none by default, buying a higher α; an order over spilled
-groups by an external sort of the result; text keys and distinct counts in the spill. Every state
+Not yet: a comfort budget the host grants, none by default, buying a higher α; a key cursor over a
+result larger than its budget, which a merge of runs cannot seek in; text keys and distinct counts in
+the spill. Every state
 will spill as bytes, a custom state without references with its record; a custom aggregator whose
 state holds references, which no bytes stand for, fails the query instead.
 
