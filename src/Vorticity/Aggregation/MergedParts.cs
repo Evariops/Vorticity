@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
@@ -134,34 +133,30 @@ internal sealed class PartMerge
             slot.EnsureGroups(reserve);
         }
 
-        int[] map = ArrayPool<int>.Shared.Rent(Math.Max(1, most));
-        try
+        // Where each partition's groups land in the part, the largest partition's share at most: an array
+        // of the part's own, left to the next collection, never a shared pool's, whose retention no
+        // budget sees.
+        int[] map = GC.AllocateUninitializedArray<int>(Math.Max(1, most));
+        for (int p = 0; p < _partitions.Length; p++)
         {
-            for (int p = 0; p < _partitions.Length; p++)
+            int from = _starts[p][part];
+            int count = _starts[p][part + 1] - from;
+            if (count == 0)
             {
-                int from = _starts[p][part];
-                int count = _starts[p][part + 1] - from;
-                if (count == 0)
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
-                Span<int> into = map.AsSpan(0, count);
-                _keysOf[p].MergeInto(keys, groups, into);
-                for (int s = 0; s < slots.Length; s++)
+            ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
+            Span<int> into = map.AsSpan(0, count);
+            _keysOf[p].MergeInto(keys, groups, into);
+            for (int s = 0; s < slots.Length; s++)
+            {
+                slots[s].EnsureGroups(keys.Count);
+                if (_inputs[s] != AggregationPartition.Settled)
                 {
-                    slots[s].EnsureGroups(keys.Count);
-                    if (_inputs[s] != AggregationPartition.Settled)
-                    {
-                        slots[s].MergeFrom(_partitions[p].Slots[s], groups, into);
-                    }
+                    slots[s].MergeFrom(_partitions[p].Slots[s], groups, into);
                 }
             }
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(map);
         }
 
         // Twice what the part's table came to, beside the lanes', which live until the merge is done.
