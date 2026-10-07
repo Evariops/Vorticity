@@ -9,7 +9,7 @@ namespace Vorticity.Aggregating;
 /// chained to the pair its group met before. A group's pairs are read without reading another's: a
 /// merge of some groups, a part of a parallel merge, reads theirs alone, where a set of pairs read
 /// every pair of every group for each part; keeping a few groups, as a streaming group by does, reads
-/// their pairs alone and holds no more than them.
+/// their pairs alone and holds no other, in arrays of the size the most pairs held at once took.
 /// </summary>
 /// <remarks>
 /// A pair takes its value, its group and the number of its group's pair before it, and a slot of
@@ -231,10 +231,14 @@ internal sealed class DistinctPairs<TValue>
             }
         }
 
+        // The arrays keep the size they reached: a streaming group by keeps its open groups a batch at a
+        // time, and fitted to them, the slots and the pairs grew back by doubling every batch, a third of
+        // the cycles of the distinct users of each of 365 days (PLAN-HIGH-CARDINALITY, profiling). Their
+        // bytes stay those of the most pairs held at once.
         int[] slots = _slots;
         byte[] tags = _tags;
-        int length = (int)Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1)));
-        _pairs = NewArray<Pair>(Math.Max(16, kept));
+        int length = (int)Math.Max(Math.Max(32, System.Numerics.BitOperations.RoundUpToPowerOf2((uint)(2 * kept + 1))), slots.Length);
+        _pairs = NewArray<Pair>(Math.Max(16, Math.Max(kept, pairs.Length)));
         _slots = NewArray<int>(length);
         _tags = NewArray<byte>(length);
         _first = NewArray<int>(Math.Max(16, groups.Length));
