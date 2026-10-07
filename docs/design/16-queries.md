@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅; the top-k by `Max` or `Min` in one pass, the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅; the external sort 🚧 | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -534,6 +534,16 @@ their rows. Once a lane has trimmed, a row whose integer key lies past the worst
 grouped nor folded. A filter on the groups before the window keeps every group, since it could take
 some of the top out.
 
+An order on an integer column's `Max` alone, from the largest, or its `Min`, from the smallest, the
+query reading nothing else of the groups but their key, keeps its top the same way. A group trimmed
+held a value past the worst a lane keeps, which only gets better: made again, it enters the top only
+with a better value than every one it held, so the rows it lost change nothing of it. Once a lane has
+trimmed, a row whose value falls short of the worst it keeps — by the order's keys of 64 bits, ties
+kept for the key to rank — is neither grouped nor folded: one pass, no table of every group. On a
+million keys of twenty million rows, `order by max take 100` takes a sixth of the time at one lane and
+at fourteen. A float's extreme keeps every group: its NaN comes first from the largest, and is passed
+over once a number comes, so a group's extreme would not only get better.
+
 The operators apply in the order written, as in LINQ: a `Where` after a `Take` filters the groups
 taken.
 
@@ -912,7 +922,7 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | queries share fairly | two to eight queries at once under one budget: none holds more than its share once the threshold is met, the one past it governed first |
 | a `Where` on keys prunes as a filter | `LiveBlocks` equal to the equivalent `Where` on rows |
 | the first batch waits for the first split | the time to first batch of a scan, a projection, a `Distinct` and a group by that streams, on two files sixteen times apart in size, locally and over the HTTP source with latency (`tests/Vorticity.Tests/IO/HttpRangeSegmentSource.cs`) |
-| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's following its groups, not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4 |
+| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's following its groups, not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4; on an integer's extreme the same, at 1, 4 and 14, ties ranked by the key as LINQ ranks them |
 | a `Take` reads what it uses | `Requests` and `BlocksDecoded` of a `Take(n)` bounded by the splits that hold `n` results and the window |
 | nothing is allocated per batch, nor per group as batches | `ScanAllocationTests` extended to the result stream, `As` and the projection |
 | a short range costs its rows | a complexity probe whose time per row stays flat as runs shorten |
