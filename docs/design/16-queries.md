@@ -23,7 +23,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅, the core over a dataset's objects, its integer keys bounded by their summaries ✅; `Distinct` by parts 🚧 | §9.1, §9.4, §9.5, §12, §13 |
+> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅, the core over a dataset's objects, its integer keys bounded by their summaries ✅, `Distinct` through the core's parts, each value told as it enters its set ✅ | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -137,7 +137,7 @@ makes per row are the strings and objects those views create (§7.2).
 | operator | holds | its first batch after |
 |---|---|---|
 | a scan, a filter, `Select` on a scan, `Truncate`, `Bucket`, `Skip`, `Take` | its window | its first split |
-| `Distinct` | the values met, or the last one on a column that streams | its first split: a value goes out the first time it is met |
+| `Distinct` | the values met, or the last one on a column that streams; through the core, its caches, parts and spill (§7.4) | its first split: a value goes out the first time it is met; through the core, once it enters its part's set |
 | `GroupBy` on a key that streams (§2.3) | the groups still open | the first group closed |
 | `GroupBy` on any other key | one state per group | the end of its input |
 | `Where` on groups, `Select` of groups, `Skip`, `Take` | nothing more | its input's |
@@ -608,6 +608,17 @@ distinct value, an `Aggregation<T>` for one value and an `Aggregation` read thro
 several, unordered, and streaming whatever the key, since a value with no aggregate is final the
 first time it is met (§2.2). `(from r in scan select r.City).Distinct()` groups a dictionary column
 by code.
+
+On one lane, under a window, on a component that streams, or on a key the statistics bound to two
+million values or fewer whose index fits half its budget, the values are taken on the reader's
+thread, as they are met. Otherwise, on a key the core holds, they are many lanes' work: the pass runs
+on its own task, on a lane fewer than the degree, the reader counting in it, through the lean core —
+α at 1, a part applied from 256 entries, batches of a kilobyte — and each value is told as it enters
+its part's set, under the part's lock: once, as the rows come. Under its budget the core spills; a part
+evicted tells nothing more until the end, where the runs of keys it told come back first, silently,
+and then its other entries, each new value told. On 10⁷ values of 20M rows at fourteen lanes, the
+values take 0.42 of the reader's thread's time, the first in 7 ms; on 10⁶, which the statistics bound,
+the reader's thread hashes them faster in a table that stays in cache.
 
 ### 7.5 Writing a result
 
