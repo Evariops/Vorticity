@@ -603,7 +603,7 @@ dependencies = [
  "sha2",
  "vortex",
  "vortex-btrblocks 0.86.1",
- "vortex-onpair 0.86.1",
+ "vortex-onpair 0.87.0",
 ]
 
 [[package]]
