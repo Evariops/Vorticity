@@ -119,6 +119,41 @@ internal sealed class ByteKeyTable
     internal ulong HashOf(int index) => _hashes[index];
 
     /// <summary>
+    /// The first half of a chunk's lookups (PLAN-HIGH-CARDINALITY, H14): each key's number where its home
+    /// slot holds it, -1 where it does not (past its home, new, or null). Every row's slot is read before
+    /// any key is compared, and every candidate's key compared after, no row waiting on another: at a
+    /// million keys, a lookup's two lines, its slot then its key, each a miss, one after the other. The
+    /// rows left go through <see cref="GetOrAdd(ReadOnlySpan{byte}, ulong, out bool)"/> in their order.
+    /// </summary>
+    /// <param name="hashes">Each row's hash under <see cref="MergeHash.Seed"/>; the table not <see cref="Reseeded"/>.</param>
+    /// <param name="keys">The rows' keys, row <paramref name="first"/> the chunk's first.</param>
+    /// <param name="first">The chunk's first row in <paramref name="keys"/> and <paramref name="validity"/>.</param>
+    /// <param name="validity">The rows' validity; empty when none is null.</param>
+    /// <param name="numbers">Each row's number, or -1.</param>
+    internal void FindAtHome(ReadOnlySpan<ulong> hashes, BytesBlock keys, int first, ReadOnlySpan<ulong> validity, Span<int> numbers)
+    {
+        Slot[] slots = _slots;
+        int mask = slots.Length - 1;
+        numbers = numbers[..hashes.Length];
+        for (int i = 0; i < hashes.Length; i++)
+        {
+            ulong hash = hashes[i];
+            Slot slot = slots[(int)hash & mask];
+            numbers[i] = slot.Half == (uint)(hash >> 32) ? slot.Place - 1 : -1;
+        }
+
+        for (int i = 0; i < numbers.Length; i++)
+        {
+            int offset = numbers[i];
+            if (offset >= 0)
+            {
+                int row = first + i;
+                numbers[i] = StorageValues.IsValid(validity, row) && Stored(offset).SequenceEqual(keys[row]) ? NumberAt(offset) : -1;
+            }
+        }
+    }
+
+    /// <summary>
     /// A number no key finds: an entry without bytes that no lookup reaches, for a group with no key,
     /// the null of a text key, whose groups are then the table's entries (PLAN-HIGH-CARDINALITY, H1,
     /// reduction 6). Its bytes are never read.

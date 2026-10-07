@@ -1512,6 +1512,12 @@ internal sealed class BytesKeys : GroupKeys
             return true;
         }
 
+        if (selection.IsEmpty && !_table.Reseeded)
+        {
+            Chunked(canonical, validity, rows, rowGroups);
+            return false;
+        }
+
         RowCursor selected = new RowCursor(selection, 0, rows);
         int lastRow = -1;
         int lastGroup = -1;
@@ -1664,6 +1670,42 @@ internal sealed class BytesKeys : GroupKeys
         }
 
         return group;
+    }
+
+    /// <summary>The rows <see cref="Chunked"/> takes at a time: their hashes and numbers on the stack.</summary>
+    private const int TextChunk = 256;
+
+    /// <summary>
+    /// Every row's group, <see cref="TextChunk"/> rows at a time (PLAN-HIGH-CARDINALITY, H14): their
+    /// hashes, then each found where its home slot holds it, the table read with no row waiting on
+    /// another (<see cref="ByteKeyTable.FindAtHome"/>); then, in their order, the rows left through the
+    /// whole lookup, their hashes known, which numbers a key as it first comes.
+    /// </summary>
+    [SkipLocalsInit]
+    private void Chunked(BytesBlock canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    {
+        Span<ulong> hashes = stackalloc ulong[TextChunk];
+        Span<int> found = stackalloc int[TextChunk];
+        ulong seed = MergeHash.Seed;
+        for (int start = 0; start < rows; start += TextChunk)
+        {
+            int count = Math.Min(TextChunk, rows - start);
+            Span<ulong> chunk = hashes[..count];
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+                chunk[i] = StorageValues.IsValid(validity, row) ? MergeHash.Of(canonical[row], seed) : 0;
+            }
+
+            _table.FindAtHome(chunk, canonical, start, validity, found);
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+                rowGroups[row] = found[i] >= 0 ? found[i]
+                    : StorageValues.IsValid(validity, row) ? Lookup(canonical[row], chunk[i])
+                    : NullGroup();
+            }
+        }
     }
 
     private int NullGroup()
