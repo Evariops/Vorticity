@@ -62,8 +62,11 @@ public sealed partial class SharedBudgetTests
             VortexFile gone = await leaving.OpenAsync(path, cancellationToken: Ct);
             Assert.Equal(100_000, (await gone.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count()).ToListAsync(Ct)).Count);
 
-            // A query of the staying session in flight, its groups held, while the other is disposed.
+            // A query of the staying session in flight, its groups held, while the other is disposed:
+            // delivered whole, its reservation stays as it is while its reader waits, where parts merged
+            // and built in the background would change it (PLAN-HIGH-CARDINALITY, H14).
             Aggregation<long> sums = kept.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Sum(x => x.Value));
+            sums.Plan.CoreParted = false;
             await using IAsyncEnumerator<long> reading = sums.GetAsyncEnumerator(Ct);
             Assert.True(await reading.MoveNextAsync());
             long held = budget.ReservedBytes;
