@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using Vorticity.Arrays;
 using Vorticity.Writing;
 
@@ -14,7 +15,6 @@ internal sealed class JoinedKeys : GroupKeys
     private readonly GroupKeys[] _parts;
     private readonly int[] _offsets;
     private readonly int _null;
-    private int[] _local = [];
 
     internal JoinedKeys(GroupKeys[] parts, int[] offsets, int count)
     {
@@ -57,25 +57,35 @@ internal sealed class JoinedKeys : GroupKeys
         };
     }
 
-    /// <summary>The groups a run at a time of one part, their numbers in it: a batch in delivery order comes in long runs.</summary>
+    /// <summary>
+    /// The groups a run at a time of one part, their numbers in it: a batch in delivery order comes in
+    /// long runs. The numbers in a buffer of the read's own, which the chunks of a top-k read at once.
+    /// </summary>
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
-        Scratch.Grow(ref _local, groups.Length);
-        int start = 0;
-        while (start < groups.Length)
+        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        try
         {
-            int part = JoinedParts.PartOf(_offsets, groups[start]);
-            int low = _offsets[part];
-            int high = part + 1 < _offsets.Length ? _offsets[part + 1] : Count;
-            int end = start;
-            while (end < groups.Length && groups[end] >= low && groups[end] < high)
+            int start = 0;
+            while (start < groups.Length)
             {
-                _local[end] = groups[end] - low;
-                end++;
-            }
+                int part = JoinedParts.PartOf(_offsets, groups[start]);
+                int low = _offsets[part];
+                int high = part + 1 < _offsets.Length ? _offsets[part + 1] : Count;
+                int end = start;
+                while (end < groups.Length && groups[end] >= low && groups[end] < high)
+                {
+                    local[end] = groups[end] - low;
+                    end++;
+                }
 
-            _parts[part].Append(component, store, _local.AsSpan(start, end - start));
-            start = end;
+                _parts[part].Append(component, store, local.AsSpan(start, end - start));
+                start = end;
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(local);
         }
     }
 
@@ -87,12 +97,12 @@ internal sealed class JoinedKeys : GroupKeys
 
     internal override GroupKeys Fresh() => throw JoinedParts.Read();
 
-    /// <summary>Its parts' indexes, and the numbers a read of one of them takes.</summary>
+    /// <summary>Its parts' indexes.</summary>
     internal override long Footprint
     {
         get
         {
-            long bytes = (long)_local.Length * sizeof(int);
+            long bytes = 0;
             foreach (GroupKeys part in _parts)
             {
                 bytes += part.Footprint;

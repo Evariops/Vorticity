@@ -32,6 +32,9 @@ internal abstract class ResultColumn
     /// numbers a column would order the same; null otherwise. Released, it gives the array back.
     /// </summary>
     internal virtual ColumnOrder? OrderOf(AggregationOutcome outcome, ReadOnlySpan<int> groups, bool descending) => null;
+
+    /// <summary>Whether <see cref="OrderOf"/> reads the values into an array: the column is built for an order otherwise.</summary>
+    internal virtual bool ReadsOrder => false;
 }
 
 /// <summary>A component of the key, in a column of the key column's own type: its values written as the index holds them.</summary>
@@ -82,9 +85,11 @@ internal sealed class ValueResultColumn<T> : ResultColumn
         ResultValues.Append(store, _values, groups.Length, _record);
     }
 
+    internal override bool ReadsOrder => _record is null && ValuesOrder.Orders<T>();
+
     internal override ColumnOrder? OrderOf(AggregationOutcome outcome, ReadOnlySpan<int> groups, bool descending)
     {
-        if (_record is not null || !ValuesOrder.Orders<T>())
+        if (!ReadsOrder)
         {
             return null;
         }

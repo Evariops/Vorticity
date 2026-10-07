@@ -75,9 +75,11 @@ internal static class HighCardinality
         yield return ("visits", new Scenario("hc distinct users by day (365 groups, 1e7 users)", DistinctByDayAsync, 1, Matrix.Full));
         yield return ("visits", new Scenario("hc distinct users over the scan (1e7 users)", DistinctUsersAsync, 1, Matrix.Full));
 
-        // What follows a group by of a million groups.
+        // What follows a group by of a million groups; on a text key, the ranking against the same group
+        // by delivered in no order (PLAN-HIGH-CARDINALITY, H7).
         yield return ($"spread-random-{FullRows}", new Scenario("hc random 1e6, order by count take 100", TopCountsAsync, 1, Matrix.Full));
         yield return ($"spread-random-{FullRows}", new Scenario("hc random tenfold, where count > 10", HavingAsync, 1, Matrix.Full));
+        yield return ("pages", new Scenario("hc text key 1e6 (urls), order by count take 100", TopUrlsAsync, 16, Matrix.Full));
     }
 
     /// <summary>A group by of the matrix: its distribution's file, a key column, a set of aggregates.</summary>
@@ -320,6 +322,23 @@ internal static class HighCardinality
             .Take(100)
             .Select(g => (g.Key, g.Count())))
             .As<KeyCount>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> TopUrlsAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<NameCount> groups in run.Track(file.Scan<Page>()
+            .GroupBy(p => p.Url)
+            .OrderByDescending(g => g.Count())
+            .Take(100)
+            .Select(g => (g.Key, g.Count())))
+            .As<NameCount>())
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);

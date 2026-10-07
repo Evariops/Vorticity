@@ -601,7 +601,8 @@ internal static class GroupSelection
         int operators = query.Operators.Length;
         bool chosen = query.Plan.Chosen.Length > 0;
         int reader = chosen ? query.ChosenReader : operators;
-        (int[] groups, int count) = Apply(query, outcome, 0, reader, outcome.Order, outcome.Order.Length, cancellationToken);
+        int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : query.Session.Options.MaxDegreeOfParallelism;
+        (int[] groups, int count) = await OperatorsAsync(query, outcome, 0, reader, outcome.Order, outcome.Order.Length, degree, cancellationToken).ConfigureAwait(false);
         if (!chosen)
         {
             return (groups, count);
@@ -610,7 +611,7 @@ internal static class GroupSelection
         if (reader < operators)
         {
             await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
-            return Apply(query, outcome, reader, operators, groups, count, cancellationToken);
+            return await OperatorsAsync(query, outcome, reader, operators, groups, count, degree, cancellationToken).ConfigureAwait(false);
         }
 
         // No operator reads them: the result's window alone is read.
@@ -620,9 +621,13 @@ internal static class GroupSelection
         return (groups, count);
     }
 
-    /// <summary>Operators <paramref name="start"/> to <paramref name="end"/> of the query, applied in order to the first <paramref name="count"/> of <paramref name="groups"/>.</summary>
-    private static (int[] Groups, int Count) Apply(
-        AggregationQuery query, AggregationOutcome outcome, int start, int end, int[] groups, int count, CancellationToken cancellationToken)
+    /// <summary>
+    /// Operators <paramref name="start"/> to <paramref name="end"/> of the query, applied in order to the
+    /// first <paramref name="count"/> of <paramref name="groups"/>; a top-k on up to <paramref name="degree"/>
+    /// tasks.
+    /// </summary>
+    private static async ValueTask<(int[] Groups, int Count)> OperatorsAsync(
+        AggregationQuery query, AggregationOutcome outcome, int start, int end, int[] groups, int count, int degree, CancellationToken cancellationToken)
     {
         GroupOperator[] operators = query.Operators;
         for (int o = start; o < end; o++)
@@ -635,11 +640,16 @@ internal static class GroupSelection
                     break;
                 case GroupOrder order:
                 {
-                    // An order followed by a window ranks only the groups the window can keep.
+                    // An order followed by a window ranks only the groups the window can keep; a few of
+                    // many, chunk by chunk at once.
                     long keep = o + 1 < operators.Length
                         ? operators[o + 1] is GroupWindow window ? Saturated(window.Skip, window.Take) : long.MaxValue
                         : Saturated(query.Skip, query.Take);
-                    (groups, count) = Order(query, outcome, order, groups, count, keep, cancellationToken);
+                    int chunks = TopChunks(query, outcome, order, count, keep, degree);
+                    query.Plan.LastTopChunks = chunks;
+                    (groups, count) = chunks > 1
+                        ? await TopInChunksAsync(query, outcome, order, groups, count, (int)keep, chunks, cancellationToken).ConfigureAwait(false)
+                        : Order(query, outcome, order, groups, count, keep, cancellationToken);
                     break;
                 }
 
@@ -661,6 +671,106 @@ internal static class GroupSelection
     }
 
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
+
+    /// <summary>The groups a chunk of a top-k ranks at least: fewer, its task costs more than it shares.</summary>
+    private const int TopChunk = 65_536;
+
+    /// <summary>
+    /// The chunks a top-k of <paramref name="keep"/> among <paramref name="count"/> groups ranks on tasks
+    /// of their own, up to <paramref name="degree"/>, each of <see cref="TopChunk"/> groups and sixteen
+    /// times its k at least; one, ranking them all at once, when the groups are too few, or when the
+    /// ranking would build a column, which the chunks would share, rather than read the results it
+    /// orders by into arrays and break its ties on the groups' index.
+    /// </summary>
+    private static int TopChunks(AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int count, long keep, int degree)
+    {
+        if (!query.Plan.TopInChunks || keep <= 0 || keep >= count)
+        {
+            return 1;
+        }
+
+        int chunks = (int)Math.Clamp(Math.Min(count / TopChunk, count / (16 * keep)), 1, Math.Max(1, degree));
+        if (chunks == 1 || order.Keys.Length == 0 || outcome.Keys is not { } index)
+        {
+            return 1;
+        }
+
+        for (int k = 0; k < query.Keys.Length; k++)
+        {
+            if (!index.Orders(k))
+            {
+                return 1;
+            }
+        }
+
+        foreach (OrderKey key in order.Keys)
+        {
+            if (!key.Field.Column(query.Keys).ReadsOrder)
+            {
+                return 1;
+            }
+        }
+
+        return chunks;
+    }
+
+    /// <summary>
+    /// The first <paramref name="keep"/> of many groups in the order's order (PLAN-HIGH-CARDINALITY, H7):
+    /// the groups cut into <paramref name="chunks"/>, each chunk's first <paramref name="keep"/> ranked on
+    /// a task of its own, the results it orders by read into arrays the chunk's size, then those
+    /// candidates ranked once. Every group of the first k is among the first k of its chunk, ties broken
+    /// by the key in both: the groups and their order are those of one ranking.
+    /// </summary>
+    private static async ValueTask<(int[] Groups, int Count)> TopInChunksAsync(
+        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int count, int keep, int chunks, CancellationToken cancellationToken)
+    {
+        int size = (count + chunks - 1) / chunks;
+        Task<(int[] Groups, int Count)>[] ranking = new Task<(int[] Groups, int Count)>[chunks];
+        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken token = failed.Token;
+        for (int c = 0; c < chunks; c++)
+        {
+            int first = c * size;
+            int length = Math.Min(size, count - first);
+            ranking[c] = Task.Run(() => TopOfChunk(query, outcome, order, groups, first, length, keep, token), token);
+        }
+
+        await AggregationEngine.GuardedAsync(ranking, failed).ConfigureAwait(false);
+        int candidates = 0;
+        foreach (Task<(int[] Groups, int Count)> chunk in ranking)
+        {
+            candidates += (await chunk.ConfigureAwait(false)).Count;
+        }
+
+        int[] best = new int[candidates];
+        int at = 0;
+        foreach (Task<(int[] Groups, int Count)> chunk in ranking)
+        {
+            (int[] kept, int n) = await chunk.ConfigureAwait(false);
+            kept.AsSpan(0, n).CopyTo(best.AsSpan(at));
+            at += n;
+        }
+
+        // Each chunk's ranking held its groups as a result's: the last one alone is.
+        outcome.Memory?.LetGo((long)candidates * sizeof(int));
+        return Order(query, outcome, order, best, candidates, keep, cancellationToken);
+    }
+
+    /// <summary>The first <paramref name="keep"/> of a chunk of <paramref name="groups"/>, in order, its groups in an array of the pool while it ranks.</summary>
+    private static (int[] Groups, int Count) TopOfChunk(
+        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int first, int length, int keep, CancellationToken cancellationToken)
+    {
+        int[] chunk = QueryArrays.Rent<int>(outcome.Memory, length, "top of a group by");
+        try
+        {
+            groups.AsSpan(first, length).CopyTo(chunk);
+            return Order(query, outcome, order, chunk, length, keep, cancellationToken);
+        }
+        finally
+        {
+            QueryArrays.Return(outcome.Memory, chunk);
+        }
+    }
 
     /// <summary>
     /// The groups in the order's order, the first <paramref name="keep"/> at most. The results it

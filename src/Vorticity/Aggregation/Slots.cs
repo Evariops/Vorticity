@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -270,33 +271,41 @@ internal static class Numbers
 /// </summary>
 internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) : AggregateSlot<TResult>, IMeanSlot
 {
-    private int[] _local = [];
-
     internal override TResult Result(int group)
     {
         int part = JoinedParts.PartOf(offsets, group);
         return ((AggregateSlot<TResult>)parts[part]).Result(group - offsets[part]);
     }
 
-    /// <summary>The groups a run at a time of one part, their numbers in it: a batch in delivery order comes in long runs.</summary>
+    /// <summary>
+    /// The groups a run at a time of one part, their numbers in it: a batch in delivery order comes in
+    /// long runs. The numbers in a buffer of the read's own, which the chunks of a top-k read at once.
+    /// </summary>
     internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
     {
-        Scratch.Grow(ref _local, groups.Length);
-        int start = 0;
-        while (start < groups.Length)
+        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        try
         {
-            int part = JoinedParts.PartOf(offsets, groups[start]);
-            int low = offsets[part];
-            int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
-            int end = start;
-            while (end < groups.Length && groups[end] >= low && groups[end] < high)
+            int start = 0;
+            while (start < groups.Length)
             {
-                _local[end] = groups[end] - low;
-                end++;
-            }
+                int part = JoinedParts.PartOf(offsets, groups[start]);
+                int low = offsets[part];
+                int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
+                int end = start;
+                while (end < groups.Length && groups[end] >= low && groups[end] < high)
+                {
+                    local[end] = groups[end] - low;
+                    end++;
+                }
 
-            ((AggregateSlot<TResult>)parts[part]).Results(_local.AsSpan(start, end - start), into[start..end]);
-            start = end;
+                ((AggregateSlot<TResult>)parts[part]).Results(local.AsSpan(start, end - start), into[start..end]);
+                start = end;
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(local);
         }
     }
 

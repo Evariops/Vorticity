@@ -29,9 +29,10 @@ internal static class Switches
         _ when name.StartsWith("probe:", StringComparison.Ordinal) => Pair(name, "ProbeAhead", "probe"),
         "core" => new Switch("reference", Set("Core", false), "core", Core()),
         "parted" => new Switch("whole", Under(Core(), Set("CoreParted", false)), "parted", Under(Core(), Set("CoreParted", true))),
+        "topchunks" => new Switch("one ranking", Set("TopInChunks", false), "in chunks", Set("TopInChunks", true)),
         _ when name.StartsWith("capacity:", StringComparison.Ordinal) => CorePair(name, "CoreCapacity", "capacity"),
         _ when name.StartsWith("alpha:", StringComparison.Ordinal) => CorePair(name, "CoreAlpha", "alpha"),
-        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, capacity:A:B, alpha:A:B."),
+        _ => throw new ArgumentException($"No switch named '{name}': merge, parts:A:B, window:A:B, probe:A:B, core, parted, topchunks, capacity:A:B, alpha:A:B."),
     };
 
     /// <summary>Both settings, <paramref name="first"/> then <paramref name="then"/>: the core on, and one of its own switches.</summary>

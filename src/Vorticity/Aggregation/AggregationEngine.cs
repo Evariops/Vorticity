@@ -130,6 +130,9 @@ internal sealed class AggregationPlan
     /// <summary>The time from the first move of the plan's last result to its first batch, in <see cref="Stopwatch"/> ticks.</summary>
     internal long LastFirstBatchTicks { get; set; }
 
+    /// <summary>The chunks the last run's top-k ranked on tasks of their own (PLAN-HIGH-CARDINALITY, H7); one when it ranked its groups at once.</summary>
+    internal int LastTopChunks { get; set; }
+
     /// <summary>What the plan's last run did, as the query's statistics say it (docs/design/16-queries.md §10); null before one.</summary>
     internal GroupStatistics? Statistics()
     {
@@ -268,6 +271,12 @@ internal sealed class AggregationPlan
     /// bench to weigh it against the delivery whole.
     /// </summary>
     internal bool CoreParted { get; set; } = true;
+
+    /// <summary>
+    /// Whether a top-k of many groups ranks them in chunks at once, then the chunks' candidates
+    /// (PLAN-HIGH-CARDINALITY, H7): on by default, off for the bench to weigh it against one ranking.
+    /// </summary>
+    internal bool TopInChunks { get; set; } = true;
 
     /// <summary>The share of its rows a lane's cache finds below which the lane bypasses it, ε, or null for the core's own: 1 bypasses it always once it has filled, 0 never.</summary>
     internal double? CoreBypass { get; set; }
@@ -482,12 +491,13 @@ internal sealed class AggregationOutcome
             return _slots[index];
         }
 
+        // Made on the first read, which the chunks of a top-k may make at once (PLAN-HIGH-CARDINALITY, H7).
         foreach ((AggregateIdentity mean, int sum) in _plan.Shares)
         {
             if (mean.Equals(node.Identity))
             {
-                _views ??= new AggregateSlot?[_slots.Length];
-                return _views[sum] ??= new MeanView((IMeanSlot)_slots[sum]);
+                AggregateSlot?[] views = Volatile.Read(ref _views) ?? Interlocked.CompareExchange(ref _views, new AggregateSlot?[_slots.Length], null) ?? _views!;
+                return Volatile.Read(ref views[sum]) ?? Interlocked.CompareExchange(ref views[sum], new MeanView((IMeanSlot)_slots[sum]), null) ?? views[sum]!;
             }
         }
 
