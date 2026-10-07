@@ -178,16 +178,35 @@ internal static class BytesWalk
 }
 
 /// <summary>
+/// A slot whose answers are bytes, a text's or a binary's: written into a result's column as they lie,
+/// where a string a group decoded, then encoded again, made a million objects for the collector at a
+/// million groups (PLAN-HIGH-CARDINALITY, H14).
+/// </summary>
+internal interface IBytesResults
+{
+    /// <summary>Whether the slot's answers are bytes: a joined slot's are when its parts' are.</summary>
+    bool HoldsBytes { get; }
+
+    /// <summary>The bytes of <paramref name="groups"/>' answers appended to <paramref name="store"/>, a null where a group has none.</summary>
+    void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups);
+}
+
+/// <summary>
 /// The smallest or largest text or binary value of each group, in byte order: the values' bytes in
 /// pages the slot shares among its groups, no object per group nor an allocation per value as values
 /// come and go (PLAN-HIGH-CARDINALITY, H1, reduction 5). A value longer than the room of the one it
 /// replaces moves to the end of the last page and leaves that room behind; the pages are compacted
 /// when what they leave behind outgrows what they hold.
 /// </summary>
-internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
+internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytesResults
 {
-    /// <summary>The bytes of a page; a value longer than a quarter of one takes a page of its own.</summary>
-    internal const int PageBytes = 1 << 16;
+    /// <summary>
+    /// The bytes of a page; a value longer than a quarter of one takes a page of its own. Past the large
+    /// objects' threshold: a page lives as long as its groups, which no collection should copy. At 64 KiB,
+    /// a million groups' pages on fourteen lanes were copied by every compacting collection, a fifth of
+    /// the query's cycles (H14).
+    /// </summary>
+    internal const int PageBytes = 1 << 17;
 
     private readonly bool _max;
     private readonly ColumnShape _shape;
@@ -251,8 +270,67 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
     {
+        CanonicalArena arena = input.Arena;
+        int node = input.Node;
+        if (EncodedForms.EncodingOf(arena, node) is not (ColumnEncoding.Constant or ColumnEncoding.Dictionary))
+        {
+            BytesBlock values = BytesBlock.Canonical(arena, node, out ReadOnlySpan<ulong> valid);
+            if (_rows.And(input, input.Selection, valid).IsEmpty)
+            {
+                Chunked(values, groups, input.Start, input.End);
+                return;
+            }
+        }
+
         Sink sink = new Sink(this);
         BytesWalk.Rows(ref sink, input, groups, ref _rows);
+    }
+
+    /// <summary>The rows <see cref="Chunked"/> takes at a time: where their groups' values lie, on the stack.</summary>
+    private const int Chunk = 256;
+
+    /// <summary>
+    /// Every row of the window offered, <see cref="Chunk"/> rows at a time (PLAN-HIGH-CARDINALITY, H14):
+    /// where each row's group holds its value, then each compared with its row's, no row waiting on
+    /// another; then the rows that beat it offered in their order, a group two rows beat taking the
+    /// better. At a million groups a row's offer read three lines, one after the other: the group's
+    /// length, where its value lies, then its bytes, each a miss.
+    /// </summary>
+    [SkipLocalsInit]
+    private void Chunked(BytesBlock values, ReadOnlySpan<int> groups, int start, int end)
+    {
+        Span<long> at = stackalloc long[Chunk];
+        Span<int> lengths = stackalloc int[Chunk];
+        for (int first = start; first < end; first += Chunk)
+        {
+            int count = Math.Min(Chunk, end - first);
+            for (int i = 0; i < count; i++)
+            {
+                int group = groups[first + i];
+                lengths[i] = _lengths[group];
+                at[i] = _at[group];
+            }
+
+            // A row its group's value beats, or ties, is left out: the value only gets better.
+            for (int i = 0; i < count; i++)
+            {
+                int length = lengths[i];
+                if (length >= 0)
+                {
+                    long place = at[i];
+                    int order = values[first + i].SequenceCompareTo(_pages[(int)(place >> 32)].AsSpan((int)place, length));
+                    lengths[i] = (_max ? order <= 0 : order >= 0) ? int.MinValue : length;
+                }
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                if (lengths[i] != int.MinValue)
+                {
+                    Offer(groups[first + i], values[first + i]);
+                }
+            }
+        }
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
@@ -286,6 +364,25 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
 
     internal override TResult Result(int group) =>
         _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(ValueOf(group), _shape);
+
+    public bool HoldsBytes => true;
+
+    /// <summary>The bytes of <paramref name="groups"/>' values written as they lie, a null for a group with none.</summary>
+    public void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            int group = groups[i];
+            if (_lengths[group] < 0)
+            {
+                store.AppendNulls(1);
+            }
+            else
+            {
+                store.Append(ValueOf(group));
+            }
+        }
+    }
 
     private ReadOnlySpan<byte> ValueOf(int group)
     {

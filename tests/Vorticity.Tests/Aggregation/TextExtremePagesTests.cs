@@ -69,19 +69,22 @@ public sealed partial class TextExtremePagesTests
 
     /// <summary>
     /// The slot counts the bytes of its pages as it takes them (PLAN-HIGH-CARDINALITY.md, H1, the
-    /// footprint): what the thread allocates, the headers of the arrays aside. A thousand values of
-    /// 104 bytes' room fill two pages; a value longer than a quarter of a page takes one of its own.
+    /// footprint): what the thread allocates, the headers of the arrays aside. Values of 104 bytes'
+    /// room for a page and a half fill two pages; a value longer than a quarter of a page takes one of
+    /// its own.
     /// </summary>
     [Fact]
     public void ThePagesAreCountedAsTheyAreTaken()
     {
+        const int Page = BytesExtremeSlot<string>.PageBytes;
+        int groups = (Page + (Page / 2)) / 104;
         BytesExtremeSlot<string> slot = new BytesExtremeSlot<string>(null!, max: true);
-        slot.EnsureGroups(1_000);
+        slot.EnsureGroups(groups);
         byte[] value = new byte[100];
-        byte[] longest = new byte[30_000];
+        byte[] longest = new byte[(Page / 4) + 4_000];
         longest[0] = byte.MaxValue;
         long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int g = 0; g < 1_000; g++)
+        for (int g = 0; g < groups; g++)
         {
             value[0] = (byte)g;
             slot.Offer(g, value);
@@ -90,10 +93,10 @@ public sealed partial class TextExtremePagesTests
         slot.Offer(0, longest);
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        Assert.Equal((2 * BytesExtremeSlot<string>.PageBytes) + 30_000, slot.PagedBytes);
+        Assert.Equal((2 * Page) + longest.Length, slot.PagedBytes);
         Assert.Equal(3, slot.Pages);
         Assert.InRange(allocated - slot.PagedBytes, 0, 256);
-        Assert.InRange(slot.Footprint - slot.PagedBytes, 1_000 * (sizeof(long) + sizeof(int)), 3_000 * (sizeof(long) + sizeof(int)));
+        Assert.InRange(slot.Footprint - slot.PagedBytes, groups * (sizeof(long) + sizeof(int)), 3 * groups * (sizeof(long) + sizeof(int)));
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

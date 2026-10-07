@@ -76,6 +76,14 @@ internal sealed class ValueResultColumn<T> : ResultColumn
 
     internal override void Append(AggregationOutcome outcome, ColumnStore store, ReadOnlySpan<int> groups)
     {
+        // A slot that holds its answers as bytes writes them into a text or binary column as they lie (H14).
+        Bind(outcome);
+        if (_record is null && _slot is IBytesResults { HoldsBytes: true } bytes && store.Leaf is VarBinStore text)
+        {
+            bytes.AppendBytes(text, groups);
+            return;
+        }
+
         if (_values.Length < groups.Length)
         {
             _values = new T[Scratch.Capacity(groups.Length, _values.Length)];
@@ -100,17 +108,21 @@ internal sealed class ValueResultColumn<T> : ResultColumn
         return ValuesOrder.Over<T>(keys, groups.Length, descending, outcome.Memory);
     }
 
-    /// <summary>The values of <paramref name="groups"/>, from the aggregate's slot or through its reader.</summary>
-    private void Read(AggregationOutcome outcome, ReadOnlySpan<int> groups, Span<T> values)
+    /// <summary>The aggregate's slot, or else its reader, bound once per run, not per batch: the same for every batch.</summary>
+    private void Bind(AggregationOutcome outcome)
     {
         if (!ReferenceEquals(outcome, _outcome))
         {
-            // Bound once per run, not per batch: the slot lookup and the reader are the same for every batch.
             _outcome = outcome;
             _slot = _node is IAggregateNode aggregate ? (AggregateSlot<T>)outcome.SlotOf(aggregate) : null;
             _read = _slot is null ? _node.Bind(outcome) : null;
         }
+    }
 
+    /// <summary>The values of <paramref name="groups"/>, from the aggregate's slot or through its reader.</summary>
+    private void Read(AggregationOutcome outcome, ReadOnlySpan<int> groups, Span<T> values)
+    {
+        Bind(outcome);
         if (_slot is not null)
         {
             _slot.Results(groups, values);

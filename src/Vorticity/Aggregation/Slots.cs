@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -286,8 +287,38 @@ internal static class Numbers
 /// The answers of an aggregate merged in parts, read as one slot: each group's answer from the part
 /// that holds it, a mean too where the parts hold one.
 /// </summary>
-internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) : AggregateSlot<TResult>, IMeanSlot
+internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) : AggregateSlot<TResult>, IMeanSlot, IBytesResults
 {
+    public bool HoldsBytes => parts.Length > 0 && parts[0] is IBytesResults { HoldsBytes: true };
+
+    /// <summary>The bytes of the groups' answers, a run at a time of one part, as <see cref="Results"/> reads them.</summary>
+    public void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups)
+    {
+        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        try
+        {
+            int start = 0;
+            while (start < groups.Length)
+            {
+                int part = JoinedParts.PartOf(offsets, groups[start]);
+                int low = offsets[part];
+                int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
+                int end = start;
+                while (end < groups.Length && groups[end] >= low && groups[end] < high)
+                {
+                    local[end] = groups[end] - low;
+                    end++;
+                }
+
+                ((IBytesResults)parts[part]).AppendBytes(store, local.AsSpan(start, end - start));
+                start = end;
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(local);
+        }
+    }
     internal override TResult Result(int group)
     {
         int part = JoinedParts.PartOf(offsets, group);
