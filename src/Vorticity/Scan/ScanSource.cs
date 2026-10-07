@@ -134,6 +134,20 @@ internal abstract class ScanSource
     /// whose statistics say a column is sorted needs no asking.
     /// </summary>
     internal virtual bool OrdersOnAsking(FieldExpr column) => false;
+
+    /// <summary>
+    /// The smallest and the largest value of an integer column of a key, as the source's statistics
+    /// bound them without a read: what bounds a table of its groups by value (<see cref="Aggregating.FixedKeys{TValue}"/>);
+    /// null when nothing in hand bounds them.
+    /// </summary>
+    internal virtual Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => null;
+
+    /// <summary>
+    /// <see cref="Bounds"/> once the source read what its scan reads first anyway: a dataset's roots,
+    /// whose summaries bound its objects, and no request the scan would not make.
+    /// </summary>
+    internal virtual ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken) =>
+        new ValueTask<Aggregating.KeyBounds?>(Bounds(key));
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -146,6 +160,9 @@ internal sealed class FileScanSource : ScanSource
     internal VortexFile File => _file;
 
     internal override VortexSchema Schema => _file.Schema;
+
+    /// <summary>The file statistics' extremes of the column, when they hold them exactly.</summary>
+    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => Aggregating.AggregationEngine.FileBounds(_file, key);
 
     internal override VortexSession Session => _file.Session;
 

@@ -308,7 +308,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         // The streaming component is sorted, which its part of a composite key reads as runs; a key
         // its zones prove final is not, and is grouped as any other.
-        KeyFacts facts = AggregationEngine.Facts(host.Source, plan.Keys);
+        KeyFacts facts = await AggregationEngine.FactsAsync(host.Source, plan.Keys, _cancellationToken).ConfigureAwait(false);
         bool runs = _zones is null && plan.Keys.Length == 1;
         if (_zones is null)
         {

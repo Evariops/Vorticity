@@ -1718,7 +1718,7 @@ internal static class AggregationEngine
 
         (ColumnShape[] columns, int[] inputs) = Columns(plan, settled);
         bool sorted = plan.Keys.Length == 1 && IsSorted(source, plan.Keys[0]);
-        KeyFacts? facts = plan.Grouped ? Facts(source, plan.Keys) : null;
+        KeyFacts? facts = plan.Grouped ? await FactsAsync(source, plan.Keys, cancellationToken).ConfigureAwait(false) : null;
         ScanSpec pass = PassSpec(spec, columns, plan, source.Schema);
 
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
@@ -2652,6 +2652,23 @@ internal static class AggregationEngine
     }
 
     /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds it.</summary>
+    /// <summary><see cref="Facts"/>, the bounds of a source that reads its structures first, a dataset's (PLAN-HIGH-CARDINALITY, H12).</summary>
+    internal static async ValueTask<KeyFacts> FactsAsync(ScanSource source, ColumnShape[] keys, CancellationToken cancellationToken)
+    {
+        bool[] sorted = new bool[keys.Length];
+        KeyBounds?[] bounds = new KeyBounds?[keys.Length];
+        for (int k = 0; k < keys.Length; k++)
+        {
+            sorted[k] = IsSorted(source, keys[k]);
+            ColumnShape key = keys[k];
+            bounds[k] = key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1
+                ? null
+                : await source.BoundsAsync(key, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new KeyFacts(sorted, bounds, source.RowBound);
+    }
+
     internal static KeyFacts Facts(ScanSource source, ColumnShape[] keys)
     {
         bool[] sorted = new bool[keys.Length];
@@ -2666,18 +2683,23 @@ internal static class AggregationEngine
     }
 
     /// <summary>
-    /// The smallest and the largest value of an integer column of a key, when the file statistics
-    /// hold them exactly: what bounds a table of its groups (<see cref="FixedKeys{TValue}"/>).
+    /// The smallest and the largest value of an integer column of a key, as the source bounds them
+    /// without a read: a file's statistics, a dataset's summaries in hand (PLAN-HIGH-CARDINALITY,
+    /// H12); what bounds a table of its groups (<see cref="FixedKeys{TValue}"/>).
     /// </summary>
-    internal static KeyBounds? Bounds(ScanSource source, ColumnShape key)
+    internal static KeyBounds? Bounds(ScanSource source, ColumnShape key) =>
+        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 ? null : source.Bounds(key);
+
+    /// <summary>The smallest and the largest value of an integer column of a key, when <paramref name="file"/>'s statistics hold them exactly.</summary>
+    internal static KeyBounds? FileBounds(VortexFile file, ColumnShape key)
     {
-        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || source is not FileScanSource file || !file.File.HasFileStatistics
-            || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct || key.Column.FieldPath[0] >= file.File.Statistics.Count)
+        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || !file.HasFileStatistics
+            || key.Column.FieldPath.Length != 1 || !file.Schema.RootIsStruct || key.Column.FieldPath[0] >= file.Statistics.Count)
         {
             return null;
         }
 
-        FieldStatistics statistics = file.File.Statistics[key.Column.FieldPath[0]];
+        FieldStatistics statistics = file.Statistics[key.Column.FieldPath[0]];
         return key.PType switch
         {
             PType.I8 => Bounds<sbyte>(statistics),

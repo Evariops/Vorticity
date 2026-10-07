@@ -280,6 +280,42 @@ internal static class Fixtures
         return path;
     }
 
+    /// <summary>
+    /// The rows of the spread file in no order of <paramref name="rows"/> rows as a dataset of
+    /// <paramref name="objects"/> objects of equal rows, every column canonical as the file's, written on
+    /// first use in a directory (PLAN-HIGH-CARDINALITY, H12).
+    /// </summary>
+    internal static async ValueTask<string> SpreadDatasetAsync(int rows, int objects)
+    {
+        string path = Path.Combine(Directory, $"spread-random-{rows}-{objects}-canonical.dataset");
+        if (System.IO.Directory.Exists(path))
+        {
+            return path;
+        }
+
+        string partial = path + ".partial";
+        if (System.IO.Directory.Exists(partial))
+        {
+            System.IO.Directory.Delete(partial, recursive: true);
+        }
+
+        string file = await RandomSpreadAsync(rows).ConfigureAwait(false);
+        await using (Vorticity.Dataset.FileObjectStore store = new Vorticity.Dataset.FileObjectStore(partial))
+        {
+            await using Vorticity.Dataset.VortexDataset dataset = await Vorticity.Dataset.VortexDataset.CreateAsync(
+                store, Spread.Schema, new Vorticity.Dataset.DatasetOptions { Write = new VortexWriteOptions { Compression = CompressionProfile.None } }).ConfigureAwait(false);
+            await using VortexFile open = await VortexFile.OpenAsync(file).ConfigureAwait(false);
+            for (int o = 0; o < objects; o++)
+            {
+                RowRange slice = new RowRange(rows * (long)o / objects, rows * (long)(o + 1) / objects);
+                await dataset.AppendAsync(open.Scan<Spread>().Rows(slice).ToBatchesAsync()).ConfigureAwait(false);
+            }
+        }
+
+        System.IO.Directory.Move(partial, path);
+        return path;
+    }
+
     /// <summary>The file <paramref name="name"/> of <paramref name="rows"/> rows made by <paramref name="row"/>, written on first use; every column canonical when <paramref name="canonical"/>.</summary>
     private static async ValueTask<string> WriteOnceAsync<T>(string name, int rows, bool canonical, Func<int, T> row)
         where T : IVortexRecord<T>

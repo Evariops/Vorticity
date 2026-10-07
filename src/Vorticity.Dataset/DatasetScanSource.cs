@@ -29,6 +29,9 @@ internal sealed class DatasetScanSource : ScanSource
 
     internal override VortexSession Session => _dataset.Session;
 
+    /// <summary>The rows of every object of the version, deleted ones counted, as its levels hold them: what bounds a table of a key's groups by value.</summary>
+    internal override long RowBound => _version.RowCount;
+
     /// <summary>The version every sink of the scan reads.</summary>
     internal ulong Version => _version.Version;
 
@@ -72,6 +75,20 @@ internal sealed class DatasetScanSource : ScanSource
     /// </summary>
     internal override bool OrdersOnAsking(FieldExpr column) =>
         _version.Schema.Key is { } key && key.Paths.Count > 0 && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
+
+    /// <summary>
+    /// The loosest bounds the summaries of the version's root pages in hand give the column, over
+    /// every object (PLAN-HIGH-CARDINALITY, H12): a table of a key's groups by value over the objects,
+    /// as over a file, with no read of its own.
+    /// </summary>
+    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key) => _version.Bounds(key.Path);
+
+    /// <summary>The version's roots read first, as its walk reads them: then in hand.</summary>
+    internal override async ValueTask<Aggregating.KeyBounds?> BoundsAsync(Aggregating.ColumnShape key, CancellationToken cancellationToken)
+    {
+        await _version.ReadRootsAsync(cancellationToken).ConfigureAwait(false);
+        return _version.Bounds(key.Path);
+    }
 
     /// <summary>The rows a range takes at least: below, opening its scan costs more than the rows it reads.</summary>
     private const long PieceRows = 8_192;

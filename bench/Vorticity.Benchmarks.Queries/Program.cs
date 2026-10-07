@@ -76,6 +76,7 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["readings-1"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 1, deleted: false),
     ["readings-16"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: false),
     ["readings-16-deleted"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: true),
+    [$"spread-random-{HighCardinality.SmallRows}-16"] = () => Fixtures.SpreadDatasetAsync(HighCardinality.SmallRows, 16),
 };
 Dictionary<string, string> files = new Dictionary<string, string>(StringComparer.Ordinal);
 (string File, Scenario Scenario)[] scenarios = [.. Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()).Concat(HandKernels.All())];
