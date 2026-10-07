@@ -428,11 +428,19 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // The group of each value by its number, the value less the statistics' smallest, in pages of
     // 2^PageBits numbers allocated as values meet them, -1 for a value not met yet, every page Unmet
     // until then; a value past the bounds, which exact statistics never leave, goes to the index alone.
+    // A page lies in a slab of pages at its start (Page): the slab of each page, and where it starts.
     private readonly int[][]? _pages;
+    private readonly int[]? _pageStarts;
     private readonly long _directMin;
     private readonly ulong _span;
     private readonly long _rows;
-    private int _pagesHeld;
+
+    // The slab the next pages come from, its pages handed out, the pages of the next slab, and the
+    // numbers every slab holds.
+    private int[]? _slab;
+    private int _slabUsed;
+    private int _slabPages = 1;
+    private long _slabsHeld;
 
     // Whether the last chunk of rows met mostly values for the first time: the next goes by the lookup alone (DirectTwoPasses).
     private bool _directNew;
@@ -464,6 +472,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             {
                 _pages = new int[(int)((span + PageMask) >> PageBits)][];
                 _pages.AsSpan().Fill(Unmet);
+                _pageStarts = new int[_pages.Length];
                 _directMin = known.Min;
                 _span = span;
             }
@@ -845,6 +854,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         long min = _directMin;
         ulong span = _span;
         int[][] pages = _pages!;
+        int[] starts = _pageStarts!;
         Span<int> left = stackalloc int[DirectChunk];
         for (int start = 0; start < rows; start += DirectChunk)
         {
@@ -876,7 +886,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 ulong number = (ulong)(Integer(values[i]) - min);
                 bool inside = number < span;
                 ulong at = inside ? number : 0;
-                int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[(int)(at >> PageBits)]), (int)at & PageMask);
+                int page = (int)(at >> PageBits);
+                int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[page]), starts[page] + ((int)at & PageMask));
                 groups[i] = inside ? group : -1;
             }
 
@@ -923,13 +934,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private int Numbered(TValue value, ulong number)
     {
         int at = (int)(number >> PageBits);
-        int[] page = _pages![at];
-        if (page == Unmet)
+        int[] slab = _pages![at];
+        if (slab == Unmet)
         {
-            page = Page(at);
+            slab = Page(at);
         }
 
-        ref int group = ref page[(int)number & PageMask];
+        ref int group = ref slab[_pageStarts![at] + ((int)number & PageMask)];
         if (group < 0)
         {
             group = Add(value);
@@ -938,14 +949,34 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return group;
     }
 
-    /// <summary>The page of the table of groups at <paramref name="at"/>, allocated: every number in it not met yet.</summary>
+    /// <summary>The most pages a slab holds: 256 KiB.</summary>
+    private const int MostSlabPages = 16;
+
+    /// <summary>
+    /// The page of the table of groups at <paramref name="at"/>, allocated, every number in it not met
+    /// yet; the slab it lies in. Pages come from slabs of one page, then two, four, up to sixteen: a
+    /// table whose values are many takes its pages sixteen at a time, one that meets a few keeps them
+    /// a page each. Measured on the Mac on 2026-10-07, at fourteen lanes, a million keys in no order
+    /// made 3 400 pages of 16 KiB, each through the lock the runtime allocates by: 14 % of the cycles,
+    /// most of them waiting on it.
+    /// </summary>
+    /// <returns>The slab the page lies in, where <see cref="_pageStarts"/> says.</returns>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int[] Page(int at)
     {
-        int[] page = _shelf is null ? new int[1 << PageBits] : _shelf.Take<int>(1 << PageBits, zeroed: false);
-        page.AsSpan().Fill(-1);
-        _pagesHeld++;
-        return _pages![at] = page;
+        if (_slab is null || _slabUsed == _slab.Length >> PageBits)
+        {
+            int length = _slabPages << PageBits;
+            _slab = _shelf is null ? GC.AllocateUninitializedArray<int>(length) : _shelf.Take<int>(length, zeroed: false);
+            _slabUsed = 0;
+            _slabsHeld += length;
+            _slabPages = Math.Min(MostSlabPages, _slabPages * 2);
+        }
+
+        int start = _slabUsed++ << PageBits;
+        _slab.AsSpan(start, 1 << PageBits).Fill(-1);
+        _pageStarts![at] = start;
+        return _pages![at] = _slab;
     }
 
     /// <summary>An integer value as a long; an unsigned one past the longs as a negative, which no table holds.</summary>
@@ -982,7 +1013,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <summary>The index, the keys of the groups, the pages of the table of groups, the values a batch reads and its homes and rows left.</summary>
     internal override long Footprint =>
         _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
-        + (((long)_pagesHeld << PageBits) * sizeof(int)) + ((long)(_pages?.Length ?? 0) * IntPtr.Size)
+        + (_slabsHeld * sizeof(int)) + ((long)(_pages?.Length ?? 0) * (IntPtr.Size + sizeof(int)))
         + ((long)(_homes.Length + _left.Length) * sizeof(int));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
@@ -1075,7 +1106,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             if (g != _null && DirectSlot(_keys[g], out ulong number))
             {
-                _pages![(int)(number >> PageBits)][(int)number & PageMask] = -1;
+                int page = (int)(number >> PageBits);
+                _pages![page][_pageStarts![page] + ((int)number & PageMask)] = -1;
             }
         }
 
@@ -1096,7 +1128,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
             if (DirectSlot(_keys[i], out ulong number))
             {
-                _pages![(int)(number >> PageBits)][(int)number & PageMask] = i;
+                int page = (int)(number >> PageBits);
+                _pages![page][_pageStarts![page] + ((int)number & PageMask)] = i;
             }
             else
             {
