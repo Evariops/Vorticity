@@ -275,6 +275,12 @@ internal readonly ref struct StateView<TState>
 
     internal StateView(Span<TState> array) => _array = array;
 
+    /// <summary>The bytes from a record's start to the state, for a slot that reaches two states of one record at once.</summary>
+    internal int Offset => _offset;
+
+    /// <summary>The first byte of <paramref name="group"/>'s record, its start checked against the records' end: states in records alone.</summary>
+    internal ref byte Record(int group) => ref Unsafe.As<ulong, byte>(ref _words[group * _stride]);
+
     /// <summary>The state of <paramref name="group"/>; the record's start checked against the records' end.</summary>
     internal ref TState this[int group]
     {

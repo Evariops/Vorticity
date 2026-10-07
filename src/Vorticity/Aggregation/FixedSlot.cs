@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -233,7 +234,8 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     {
         CanonicalArena arena = input.Arena;
         int node = input.Node;
-        if (!input.Selection.IsEmpty || FixedReader.EncodingOf(arena, node, _kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary)
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<TState>() || !input.Selection.IsEmpty
+            || FixedReader.EncodingOf(arena, node, _kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary)
         {
             return false;
         }
@@ -244,13 +246,19 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
             return false;
         }
 
+        // Both states in one record, the count's beside the sum's: a row's record reached once, its
+        // start checked, the rows' groups and values read within the window the batch holds.
         TOp op = _op;
         StateView<TState> states = States;
+        nint state = states.Offset;
+        nint count = counts.Offset;
+        ref int groupOf = ref MemoryMarshal.GetReference(groups);
+        ref TValue valueOf = ref MemoryMarshal.GetReference(values);
         for (int row = input.Start; row < input.End; row++)
         {
-            int group = groups[row];
-            op.Add(ref states[group], values[row]);
-            counts[group]++;
+            ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+            op.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+            Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
         }
 
         return true;
