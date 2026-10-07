@@ -474,7 +474,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal const long DirectValues = 1 << 16;
 
     /// <summary>The values a row of the source a table of groups may span past <see cref="DirectValues"/>: four, the budget of a numbering by value.</summary>
-    private const long DirectPerRow = 4;
+    internal const long DirectPerRow = 4;
 
     /// <summary>The values of a page of the table of groups, as a power of two: 4 096, 16 KiB.</summary>
     private const int PageBits = 12;

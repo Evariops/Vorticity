@@ -237,6 +237,20 @@ internal sealed class AggregationPlan
     internal int? CoreTurnAt { get; set; }
 
     /// <summary>
+    /// Whether an integer key numbered by value over <see cref="ScatteredSpan"/> values or more, which
+    /// the zones say lies scattered over its span, takes the core from the start on the core's lanes
+    /// (decision 14): its lanes' tables would each hold most of its groups, out of the cache. False to
+    /// leave the core to <see cref="Core"/> and to pressure alone.
+    /// </summary>
+    internal bool CoreScattered { get; set; } = true;
+
+    /// <summary>
+    /// The span of values from which a key the zones say scattered takes the core: measured on
+    /// 2026-10-07 at fourteen lanes, the core ×0.72 at 10⁶ random keys and ×0.52 at 10⁷, ×2.47 at 10⁵.
+    /// </summary>
+    internal const long ScatteredSpan = 1_000_000;
+
+    /// <summary>
     /// The lanes from which the core holds the groups, or null for the core's own: below, each lane's
     /// table and the merge cost less (<see cref="GroupCore.Of"/>); 1 in the tests and the bench, which
     /// run the core at every degree.
@@ -1874,6 +1888,14 @@ internal static class AggregationEngine
             pass = Batched(pass, memory, asked);
             int lanes = Admit(memory, asked, pass.Options.BatchRows);
 
+            // A key its zones say scattered over a wide span takes the core from the start (decision 14):
+            // its lanes' tables, out of the cache, would each hold most of its groups.
+            if (!plan.Core && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes) && facts is { } known && !sorted && top is null
+                && await ScatteredAsync(source, plan.Keys, known, metrics, cancellationToken).ConfigureAwait(false))
+            {
+                facts = known with { Scattered = true };
+            }
+
             // The core holds the groups once a lane's cache fills (PLAN-HIGH-CARDINALITY, H4): each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
             core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
@@ -2733,6 +2755,45 @@ internal static class AggregationEngine
         int index = key.Column.FieldPath[0];
         VortexFileStatistics statistics = file.File.Statistics;
         return index < statistics.Count && statistics[index].TryGetIsSorted(out bool sorted) && sorted;
+    }
+
+    /// <summary>
+    /// Whether the key, one integer column the statistics bound to <see cref="AggregationPlan.ScatteredSpan"/>
+    /// values or more, few enough to be numbered by value, lies scattered over them: its zones cover half
+    /// its span or more on the mean, where keys in the order of the rows cover a few values a zone. The
+    /// zones read once for the file, counted in <paramref name="metrics"/> (decision 14).
+    /// </summary>
+    private static async ValueTask<bool> ScatteredAsync(ScanSource source, ColumnShape[] keys, KeyFacts facts, ScanMetrics metrics, CancellationToken cancellationToken)
+    {
+        if (keys.Length != 1 || source is not FileScanSource file || facts.Bounds[0] is not { } bounds || bounds.Max < bounds.Min)
+        {
+            return false;
+        }
+
+        ulong span = (ulong)(bounds.Max - bounds.Min) + 1;
+        if (span < AggregationPlan.ScatteredSpan || facts.Rows <= 0 || span > (ulong)(FixedKeys<int>.DirectPerRow * facts.Rows))
+        {
+            return false;
+        }
+
+        if (await Compute.ZonePruningPlan.ZonesAsync(file.File, keys[0].Field, metrics, cancellationToken).ConfigureAwait(false) is not { HasStatistics: true } zones)
+        {
+            return false;
+        }
+
+        double covered = 0;
+        int counted = 0;
+        for (int z = 0; z < zones.ZoneCount; z++)
+        {
+            Compute.ZoneBounds zone = zones.Bounds(z);
+            if (zone.HasMin && zone.HasMax)
+            {
+                covered += (double)(zone.Max.SignedValue - zone.Min.SignedValue + 1) / span;
+                counted++;
+            }
+        }
+
+        return counted > 0 && covered >= 0.5 * counted;
     }
 
     /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds it.</summary>

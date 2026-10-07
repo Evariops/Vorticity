@@ -428,6 +428,40 @@ public sealed partial class GroupCoreTests
     }
 
     /// <summary>The core at sizes that make every batch of rows copy a cache, every deposit burst, every burst split.</summary>
+    // A key its zones say scattered over a span of a million values or more takes the core from the start
+    // on the core's lanes, its answers the lanes' tables'; the same span in the order of the rows, whose
+    // zones each cover a few values, keeps the lanes' tables (PLAN-HIGH-CARDINALITY, decision 14). The
+    // core's lanes brought down to two, so that four lanes take the rule on a file of 300 000 rows.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AKeyTheZonesSayScatteredTakesTheCoreFromTheStart(bool scattered)
+    {
+        const int Count = 300_000;
+        Row[] rows = new Row[Count];
+        for (int row = 0; row < Count; row++)
+        {
+            ulong mix = (ulong)row * 0x9E37_79B9_7F4A_7C15UL;
+            int key = scattered ? (int)((mix >> 20) % 1_100_000) : row * 4;
+            rows[row] = new Row(key, $"name-{(mix >> 40) % 2_000:D4}", row % 7, (long)((mix >> 8) % 100), ((double)((mix >> 12) % 100_000) / 3) - 9_000);
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Dictionary<int, KeyStats> reference = ByKey(await ListAsync(Query(file, static plan => plan.CoreScattered = false).As<KeyStats>()));
+            Vorticity.Aggregation chosen = Query(file, static plan => plan.CoreLanes = 2);
+            Assert.Equal(reference, ByKey(await ListAsync(chosen.As<KeyStats>())));
+            Assert.Equal(scattered, chosen.Plan.LastRun!.Core is not null);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static void Tiny(AggregationPlan plan)
     {
         plan.Core = true;

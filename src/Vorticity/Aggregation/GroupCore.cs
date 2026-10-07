@@ -288,7 +288,9 @@ internal sealed partial class GroupCore
     internal static GroupCore? Of(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory = null) =>
-        plan.Core && lanes >= (plan.CoreLanes ?? DefaultLanes) ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory, lean: plan.CoreLean) : null;
+        (plan.Core || (plan.CoreScattered && facts is { Scattered: true })) && lanes >= (plan.CoreLanes ?? DefaultLanes)
+            ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory, lean: plan.CoreLean)
+            : null;
 
     /// <summary>
     /// A core that holds the query's groups, or null when it cannot: the key does not travel in

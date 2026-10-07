@@ -145,6 +145,31 @@ internal static class ZonePruningPlan
         scope is null ? live.LiveCount : live.LiveCountWithin(scope);
 
     /// <summary>
+    /// The zones of <paramref name="field"/>'s column as a pruner reads them, decoded once for the file,
+    /// their read added to <paramref name="metrics"/>; null when the column has no zone map. What tells a
+    /// group by whether its key lies scattered over its span or in the order of the rows
+    /// (PLAN-HIGH-CARDINALITY, decision 14).
+    /// </summary>
+    internal static async ValueTask<ZoneColumn?> ZonesAsync(
+        VortexFile file, FieldExpr field, Scanning.ScanMetrics? metrics, CancellationToken cancellationToken)
+    {
+        if (!TryLocate(file.LayoutTree, field, out LayoutNode node, out ZoneMap map))
+        {
+            return null;
+        }
+
+        if (file.DecodedZones(node.Index) is { } decoded)
+        {
+            return decoded;
+        }
+
+        ZoneColumn[] columns = new ZoneColumn[1];
+        (int segments, long bytes) = await DecodeAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
+        Scanning.ScanMetrics.Note(metrics, segments, bytes);
+        return columns[0];
+    }
+
+    /// <summary>
     /// Decodes the zone maps of every column <paramref name="filter"/> reads.
     /// </summary>
     /// <param name="file">The open file.</param>
