@@ -753,7 +753,10 @@ the reader merging and building the next part rather than wait; the lanes' table
 part is merged. A composite's indexes of its columns merge once, first. The pairs of a distinct
 count, chained by group, merge apart: past 65 536, the largest lane's taken as they are and the
 others' cut into parts by the hash of their group and value, four parts a worker, side by side. A
-chosen row and a tie keep the earlier range's.
+distinct count with no key holds its values alone, each in its slot, homed by the top bits of its
+hash: a part is a run of every lane's slots, which its worker walks with nothing cut before, its own
+table homing them by the bits below the part's, which they share. A chosen row and a tie keep the
+earlier range's.
 
 On a dataset, a range is an object, and one of two shares of the rows or more is cut between its
 chunks, as a file's rows are, so that no chunk is read by two ranges; the objects cut are opened side
@@ -810,7 +813,8 @@ streams, their window.
 
 A row of data touches one line of cache of states, whatever its aggregates; a probe of a fixed-width
 key reads its slot, a probe of a text its slot and its bytes. A group is numbered by an `int`, and the
-tables double: an open table holds 2²⁹ groups at most, a list 2³⁰, a distinct count's pairs alike.
+tables double: an open table holds 2²⁹ groups at most, a list 2³⁰, a distinct count's pairs and
+values alike.
 Past that a group by fails with a `VortexUnsupportedException` that says so.
 
 **The governor.** A query's memory is reserved from a budget: the process's by default, or a

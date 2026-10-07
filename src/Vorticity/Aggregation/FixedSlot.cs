@@ -542,6 +542,10 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     private MaskCache _rows;
     private CodeSet _distinct;
 
+    // The values of a slot of one group alone, a count over the whole scan, where a pair would take
+    // its group and its chain for nothing; null for a slot of groups, which holds pairs.
+    private DistinctValues<TValue>? _set;
+
     // The shelf the pairs and the counts grow from, under the query's memory.
     private ArrayShelf? _shelf;
 
@@ -551,6 +555,13 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     {
         _shelf = shelf;
         _pairs.Govern(shelf);
+        _set?.Govern(shelf);
+    }
+
+    internal override void Ungrouped()
+    {
+        _set = new DistinctValues<TValue>();
+        _set.Govern(_shelf);
     }
 
     internal override void EnsureGroups(int groups)
@@ -664,6 +675,12 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         // Every group of the other: its pairs in the order they lie, each to its group's target. Some
         // of them, a part of a parallel merge: their chains alone (PLAN-HIGH-CARDINALITY, H9).
         FixedDistinctSlot<TValue> source = (FixedDistinctSlot<TValue>)other;
+        if (_set is { } set)
+        {
+            _counts[0] += set.MergeAll(source._set!);
+            return;
+        }
+
         if (from.Length == source._groups)
         {
             _pairs.MergeAll(source._pairs, into, _counts);
@@ -678,10 +695,16 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
     internal override long Result(int group) => _counts[group];
 
-    public long Pairs => _pairs.Count;
+    public long Pairs => _set?.Count ?? _pairs.Count;
 
     public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
+        if (_set is not null)
+        {
+            await MergeSetsInPartsAsync(slots, parts, degree, memory, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         DistinctPairs<TValue>[] all = new DistinctPairs<TValue>[slots.Length];
         for (int p = 0; p < slots.Length; p++)
         {
@@ -746,8 +769,66 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _pairs.EnsureGroups(groups);
     }
 
-    /// <summary>The (group, value) pairs and the counts.</summary>
-    internal override long Footprint => _pairs.Footprint + ((long)_counts.Length * sizeof(long));
+    /// <summary>
+    /// The values of every lane's slot of one group made distinct by parts side by side, a part the
+    /// top bits of their hash: a run of homes, which a part's worker walks in every lane's slots, in
+    /// order, with nothing placed or cut before.
+    /// </summary>
+    private async Task MergeSetsInPartsAsync(AggregateSlot[] slots, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
+    {
+        DistinctValues<TValue>[] all = new DistinctValues<TValue>[slots.Length];
+        bool zero = false;
+        long most = 0;
+        for (int p = 0; p < slots.Length; p++)
+        {
+            all[p] = ((FixedDistinctSlot<TValue>)slots[p])._set!;
+            zero |= all[p].HoldsZero;
+            most = Math.Max(most, all[p].Count);
+        }
+
+        // A part holds at least its share of the lane that holds the most.
+        int bits = BitOperations.Log2((uint)parts);
+        int share = (int)(most / parts);
+        long[] counts = new long[parts];
+        await SideBySide.RunAsync(
+            parts,
+            part =>
+            {
+                DistinctValues<TValue> distinct = new DistinctValues<TValue>(share, skip: bits);
+                foreach (DistinctValues<TValue> lane in all)
+                {
+                    distinct.AddPart(lane, part, bits);
+                }
+
+                // The part's table, held until its values are counted.
+                long bytes = distinct.Footprint;
+                if (memory is not null && !memory.TryGrow(bytes))
+                {
+                    throw memory.Exceeded("merge of a distinct count", 1, bytes);
+                }
+
+                counts[part] = distinct.Count;
+                memory?.Shrink(bytes);
+                memory?.Discard(bytes);
+            },
+            degree,
+            cancellationToken).ConfigureAwait(false);
+
+        // The value of zero bits, which no slot holds, once.
+        long count = zero ? 1 : 0;
+        foreach (long part in counts)
+        {
+            count += part;
+        }
+
+        _counts[0] = count;
+        _set!.Release();
+        _set = new DistinctValues<TValue>();
+        _set.Govern(_shelf);
+    }
+
+    /// <summary>The (group, value) pairs, or the values of a slot of one group, and the counts.</summary>
+    internal override long Footprint => (_set?.Footprint ?? _pairs.Footprint) + ((long)_counts.Length * sizeof(long));
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
@@ -799,7 +880,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
     private void Add(int group, TValue value)
     {
-        if (_pairs.Add(group, value))
+        if (_set is { } set ? set.Add(value) : _pairs.Add(group, value))
         {
             _counts[group]++;
         }

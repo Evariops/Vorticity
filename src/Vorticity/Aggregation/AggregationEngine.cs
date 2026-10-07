@@ -691,9 +691,14 @@ internal sealed class AggregationPartition
 
         if (Keys is null)
         {
-            foreach (AggregateSlot slot in Slots)
+            for (int i = 0; i < Slots.Length; i++)
             {
-                slot.EnsureGroups(1);
+                if (_inputs[i] != Settled)
+                {
+                    Slots[i].Ungrouped();
+                }
+
+                Slots[i].EnsureGroups(1);
             }
         }
     }

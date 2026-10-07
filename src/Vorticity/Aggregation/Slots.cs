@@ -155,6 +155,15 @@ internal abstract class AggregateSlot
     }
 
     /// <summary>
+    /// Tells the slot, as its partition makes it and before it steps a row, that it holds group 0
+    /// alone: an aggregate over the whole scan, with no key. Nothing for a slot whose states take no
+    /// shape of their own for one group.
+    /// </summary>
+    internal virtual void Ungrouped()
+    {
+    }
+
+    /// <summary>
     /// The bytes the slot holds apart from the records it shares (<see cref="Bound"/>): its arrays at
     /// their capacity and, for a state of a variable size, the bytes it counts as it takes them
     /// (PLAN-HIGH-CARDINALITY, H1). Zero for a slot whose states all lie in records.
