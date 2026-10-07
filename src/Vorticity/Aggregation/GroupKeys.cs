@@ -1627,6 +1627,8 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
+        // The keys came from the column the reader checked as it decoded it: no text function makes a key
+        // yet (16-queries.md §3), and one that would must check what it makes.
         VarBinStore leaf = (VarBinStore)store.Leaf;
         foreach (int group in groups)
         {
@@ -1636,7 +1638,7 @@ internal sealed class BytesKeys : GroupKeys
             }
             else
             {
-                leaf.Append(_table.KeyOf(group));
+                leaf.AppendValidated(_table.KeyOf(group));
             }
         }
     }

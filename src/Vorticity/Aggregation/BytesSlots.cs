@@ -379,7 +379,8 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
             }
             else
             {
-                store.Append(ValueOf(group));
+                // A value of the column the reader checked as it decoded it.
+                store.AppendValidated(ValueOf(group));
             }
         }
     }
