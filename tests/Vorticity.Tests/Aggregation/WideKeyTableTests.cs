@@ -265,6 +265,63 @@ public sealed partial class WideKeyTableTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task AStreamingKeyWithAUuidPartCondensesAndKeepsItsOpenGroups(int degree)
+    {
+        // Twenty days in order, 10 000 rows a day over 30 000 users: the users' part passes 4 096 groups
+        // within the first day, moves to slots of a hash and a group, then keeps the open day's users at
+        // each batch closed.
+        const int users = 30_000;
+        Random random = new Random(47);
+        Guid[] ids = new Guid[users];
+        for (int i = 0; i < users; i++)
+        {
+            ids[i] = new Guid(random.Next(), (short)random.Next(), (short)random.Next(), 7, 7, 7, 7, 7, 7, 7, (byte)i);
+        }
+
+        Visit[] rows = new Visit[20 * 10_000];
+        for (int row = 0; row < rows.Length; row++)
+        {
+            rows[row] = new Visit(ids[random.Next(users)], row / 10_000, row % 1_000);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "wide-keys", $"days-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Visit>(path))
+        {
+            await writer.WriteAsync<Visit>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation query = file.Scan<Visit>().GroupBy(r => (r.Day, r.User)).Select(g => (g.Key.Day, g.Key.User, g.Count(), g.Sum(r => r.Value)));
+            Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)query.Query) >= 0);
+
+            Dictionary<(int, Guid), DayUserTotal> read = [];
+            await foreach (DayUserTotal total in query.As<DayUserTotal>().ToRecordsAsync(Ct))
+            {
+                read.Add((total.Day, total.User), total);
+            }
+
+            Dictionary<(int, Guid), DayUserTotal> expected = rows.GroupBy(r => (r.Day, r.User))
+                .ToDictionary(g => g.Key, g => new DayUserTotal(g.Key.Day, g.Key.User, g.Count(), g.Sum(r => r.Value)));
+            Assert.Equal(expected.Count, read.Count);
+            foreach (((int, Guid) key, DayUserTotal total) in expected)
+            {
+                Assert.Equal(total, read[key]);
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>The keys into the table in their order, numbered from <paramref name="groups"/> as they are new; the groups at the end.</summary>
@@ -296,4 +353,7 @@ public sealed partial class WideKeyTableTests
 
     [VortexRecord]
     public partial record struct UserTotal(Guid User, long Count, long Sum);
+
+    [VortexRecord]
+    public partial record struct DayUserTotal(int Day, Guid User, long Count, long Sum);
 }

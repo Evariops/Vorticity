@@ -519,8 +519,8 @@ internal static class MergeHash
 
 /// <summary>
 /// A key of one fixed-width column: a table of its own from the storage value to its group
-/// (<see cref="KeyTable{TValue}"/>, or <see cref="WideKeyTable{TValue}"/> for a key wider than a word,
-/// whose slots hold no key), and a group for null. An integer key the statistics bound to a
+/// (<see cref="KeyTable{TValue}"/>; for a key wider than a word past a few thousand groups,
+/// <see cref="WideKeyTable{TValue}"/>, whose slots hold no key), and a group for null. An integer key the statistics bound to a
 /// span of <see cref="DirectValues"/> values, or of up to <see cref="DirectPerRow"/> values a row of
 /// the source, is numbered by its value less the least instead: a table
 /// from the number to its group, in pages allocated as values meet them, so that no row is hashed and
@@ -544,9 +544,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private readonly bool _sorted;
     private readonly KeyBounds? _bounds;
 
-    // The index of a key of a word at most, of a wider one (Wide): one of them, the other left empty.
+    // The index: a table whose slots hold their keys, and for a key wider than a word past CompactFrom
+    // groups one whose slots hold a hash and a group (Condense), the other then left empty.
     private KeyTable<TValue> _index = new KeyTable<TValue>();
     private WideKeyTable<TValue> _wide = new WideKeyTable<TValue>();
+    private bool _compact;
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
@@ -596,13 +598,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _shelf = shelf;
         if (shelf is not null)
         {
+            _index = new KeyTable<TValue>(shelf);
             if (Wide)
             {
                 _wide = new WideKeyTable<TValue>(shelf);
-            }
-            else
-            {
-                _index = new KeyTable<TValue>(shelf);
             }
         }
 
@@ -634,24 +633,68 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return page;
     }
 
-    /// <summary>
-    /// Whether the key is wider than a word, a decimal, a UUID or a short text's word, its groups in a
-    /// <see cref="WideKeyTable{TValue}"/>, whose slots hold no key: a constant once compiled.
-    /// </summary>
+    /// <summary>Whether the key is wider than a word, a decimal, a UUID or a short text's word: a constant once compiled.</summary>
     private static bool Wide
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => Unsafe.SizeOf<TValue>() > sizeof(ulong);
     }
 
-    /// <summary>The first pass of the index the key's width takes (<see cref="KeyTable{TValue}.FindAtHome"/>).</summary>
+    /// <summary>
+    /// The groups past which a key wider than a word leaves slots that hold it for slots of its hash and
+    /// its group (<see cref="WideKeyTable{TValue}"/>): 4 096, a table of a few hundred kilobytes. Measured on
+    /// 2026-10-08 against slots that hold the key: a hundred short texts took ×1.10 the time in slots of a
+    /// hash and a group, a second read every row; a million UUIDs took a quarter of the memory (38.5 MB
+    /// against 139.7), ×1.06 the time at one lane and ×0.92 at fourteen. A short text's words turn into
+    /// bytes before, at <c>ShortTextKeys.MostWords</c>.
+    /// </summary>
+    private static int CompactFrom
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => typeof(TValue) == typeof(TextWord) ? int.MaxValue : 1 << 12;
+    }
+
+    /// <summary>Whether the groups are in the table of a hash and a group: a key wider than a word, past <see cref="CompactFrom"/> groups.</summary>
+    private bool Compact
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Wide && _compact;
+    }
+
+    /// <summary>The first pass of the index the groups are in (<see cref="KeyTable{TValue}.FindAtHome"/>).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead, out bool missed) =>
-        Wide ? _wide.FindAtHome(keys, groups, homes, ahead, _keys.AsSpan(0, Count), out missed) : _index.FindAtHome(keys, groups, homes, ahead, out missed);
+        Compact ? _wide.FindAtHome(keys, groups, homes, ahead, _keys.AsSpan(0, Count), out missed) : _index.FindAtHome(keys, groups, homes, ahead, out missed);
 
-    /// <summary>The group of <paramref name="value"/> in the index the key's width takes, <paramref name="next"/> when it is new.</summary>
+    /// <summary>The group of <paramref name="value"/> in the index the groups are in, <paramref name="next"/> when it is new.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int GetOrAdd(TValue value, int next) => Wide ? _wide.GetOrAdd(value, next, _keys) : _index.GetOrAdd(value, next);
+    private int GetOrAdd(TValue value, int next) => Compact ? _wide.GetOrAdd(value, next, _keys) : _index.GetOrAdd(value, next);
+
+    /// <summary>
+    /// The groups moved to slots of a hash and a group, past <see cref="CompactFrom"/>: every key placed
+    /// again from the groups' keys, room made for as many again, the table that held them given back.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Condense()
+    {
+        _wide.Reserve(2 * Count);
+        for (int g = 0; g < Count; g++)
+        {
+            if (g != _null)
+            {
+                _wide.GetOrAdd(_keys[g], g, _keys);
+            }
+        }
+
+        _index.Release();
+        _compact = true;
+    }
+
+    /// <summary>The bytes the index grows by for <paramref name="more"/> new groups: the compact table's own past <see cref="CompactFrom"/>.</summary>
+    private long IndexGrowthFor(int more) =>
+        Compact ? _wide.GrowthFor(more)
+        : Wide && Count + (long)more > CompactFrom ? WideKeyTable<TValue>.BytesFor(2 * (Count + more))
+        : _index.GrowthFor(more);
 
     /// <summary>Whether the values are integers, which a table of groups can be indexed by.</summary>
     private static readonly bool Integers =
@@ -1304,7 +1347,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>The index, the keys of the groups, the pages of the table of groups, the values a batch reads and its homes and rows left.</summary>
     internal override long Footprint =>
-        (Wide ? _wide.Footprint : _index.Footprint) + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
+        _index.Footprint + _wide.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
         + (_slabsHeld * sizeof(int)) + ((long)(_pages?.Length ?? 0) * (IntPtr.Size + sizeof(int)))
         + ((long)(_homes.Length + _left.Length) * sizeof(int));
 
@@ -1343,7 +1386,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         // Keys numbered by value take the index only past the bounds, which exact statistics never leave.
         if (_pages is null)
         {
-            if (Wide)
+            if (Wide && !_compact && groups > CompactFrom)
+            {
+                Condense();
+            }
+
+            if (Compact)
             {
                 _wide.Reserve(groups);
             }
@@ -1373,13 +1421,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Release()
     {
+        _index.Release();
         if (Wide)
         {
             _wide.Release();
-        }
-        else
-        {
-            _index.Release();
+            _compact = false;
         }
 
         _shelf?.Give(_keys);
@@ -1425,7 +1471,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             _keys[i] = _keys[groups[i]];
         }
 
-        if (Wide)
+        if (Compact)
         {
             _wide.Clear(Count + groups.Length);
         }
@@ -1518,7 +1564,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         long bytes = TableGrowth.Of(Count, more, _keys.Length, _keys.Length, Unsafe.SizeOf<TValue>());
         if (_pages is null)
         {
-            return bytes + (Wide ? _wide.GrowthFor(more) : _index.GrowthFor(more));
+            return bytes + IndexGrowthFor(more);
         }
 
         long left = Math.Max(0, ((long)_pages.Length << PageBits) - _slabsHeld) >> PageBits;
@@ -1710,6 +1756,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         if (group == Count)
         {
             Add(value);
+            if (Wide && !_compact && Count > CompactFrom)
+            {
+                Condense();
+            }
         }
 
         return group;

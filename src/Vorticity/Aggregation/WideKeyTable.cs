@@ -19,7 +19,9 @@ namespace Vorticity.Aggregating;
 /// 96 bytes as a word, 69 to 123 as a UUID: what let a short text's words hold no more than a few
 /// thousand groups (<see cref="ShortTextKeys"/>). Here a line holds eight slots, and a group takes 29 to
 /// 43. A key found pays a second read, the key of the group its slot names, once the hash agrees: 32
-/// bits, so that another key's group is read one time in four billion.
+/// bits, so that another key's group is read one time in four billion. That read costs more than the
+/// cache it spares while the groups are few: <see cref="FixedKeys{TValue}"/> moves its groups here past a
+/// few thousand of them, from slots that hold their keys.
 /// </para>
 /// <para>
 /// A growth places each slot again by the hash it keeps, reading no key; a seed hashes every key again,
@@ -80,6 +82,13 @@ internal struct WideKeyTable<TValue>
     /// <summary>The bytes of the slots, the chains' heads and their links.</summary>
     internal readonly long Footprint =>
         ((long)_store.Length * sizeof(ulong)) + ((long)_chains.Length * sizeof(int)) + ((long)_overflow.Length * Unsafe.SizeOf<Entry>());
+
+    /// <summary>The bytes of a table reserved for <paramref name="keys"/> keys: its slots six tenths full, and their chains' heads.</summary>
+    internal static long BytesFor(int keys)
+    {
+        long slots = ((10L * keys) / 6) + 1;
+        return ((slots + (GroupRecords.Line / sizeof(ulong))) * sizeof(ulong)) + (((slots >> WidthShift) + 1) * sizeof(int));
+    }
 
     /// <summary>
     /// The bytes the table would take more were <paramref name="more"/> new keys to come: past six tenths
