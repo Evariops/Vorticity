@@ -35,7 +35,9 @@ namespace Vorticity.Bench.Runner;
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
 /// <c>whole</c> (the core's groups delivered whole), <c>tables</c> (the lanes' tables, the core taken
 /// neither from the first batch nor from the first rows), <c>nofan</c> (the lanes all start at the head
-/// of the queue), <c>capacity=N</c>, <c>alpha=N</c>, <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
+/// of the queue), <c>noretire</c> (lanes under pressure write their tables rather than retire into
+/// one), <c>budget=N</c> (the session's memory budget, in MiB, under which the runner prints its peak),
+/// <c>capacity=N</c>, <c>alpha=N</c>, <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
 /// (the core's ε, in percent). The degree is the runner's <c>--threads</c>.
 /// </para>
 /// </remarks>
@@ -175,8 +177,20 @@ internal static class GroupScenarios
             "window" => plan => plan.FoldWindow = Valued(value, name),
             "probe" => plan => plan.ProbeAhead = Valued(value, name),
             "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
-            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, nofan, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
+            "noretire" => static plan => plan.LanesRetire = false,
+            "budget" => Budget(Valued(value, name)),
+            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, nofan, noretire, budget=N (MiB), capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
+    }
+
+    /// <summary>The memory budget the runner's session takes, in bytes, a scenario's <c>budget=N</c> in MiB; null for the process's.</summary>
+    internal static long? BudgetBytes { get; private set; }
+
+    /// <summary>The session's budget set to <paramref name="mebibytes"/>: a switch of the session, not of the plan.</summary>
+    private static Action<AggregationPlan> Budget(int mebibytes)
+    {
+        BudgetBytes = (long)mebibytes << 20;
+        return static _ => { };
     }
 
     private static int Valued(int? value, string name) =>
@@ -218,6 +232,13 @@ internal static class GroupScenarios
         string line = string.Create(
             CultureInfo.InvariantCulture,
             $"lanes={run.Lanes.Length} merge_parts={run.MergeParts} merge_us={run.MergeTicks * 1_000_000 / System.Diagnostics.Stopwatch.Frequency} state_bytes={run.StateBytes} groups={s_last.LastGroups}");
+        if (run.SpilledRuns > 0)
+        {
+            line += string.Create(
+                CultureInfo.InvariantCulture,
+                $" spilled_runs={run.SpilledRuns} spilled_bytes={run.SpilledBytes} spill_read_bytes={run.SpillReadBytes} first_spill_share={run.FirstSpillShare:F2}");
+        }
+
         return run.Core is not { } core
             ? line
             : line + string.Create(

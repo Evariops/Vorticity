@@ -72,12 +72,14 @@ internal static class Program
         // would hand round two the mapping round one left, pages already mapped. The bench host
         // sets the same session in `Scenarios.OpenFilesCold`. A group by takes its lanes from the
         // session, as the queries bench gives them.
+        QueryMemoryBudget? budget = grouped && GroupScenarios.BudgetBytes is long bytes ? new QueryMemoryBudget(bytes) : null;
         ScenarioSet.Session = VortexSession.Create(options =>
         {
             options.MappedFileCacheCount = 0;
             if (grouped)
             {
                 options.MaxDegreeOfParallelism = threads;
+                options.MemoryBudget = budget;
             }
         });
 
@@ -113,6 +115,11 @@ internal static class Program
         if (grouped && GroupScenarios.Describe() is { } engine)
         {
             Console.WriteLine(engine);
+        }
+
+        if (budget is not null)
+        {
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"budget_bytes={budget.CeilingBytes} budget_peak_bytes={budget.PeakBytes}"));
         }
 
         (long cpuMs, long rssBytes) = ProcessCost.Read();
