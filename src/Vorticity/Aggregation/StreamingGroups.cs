@@ -225,7 +225,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 range.LetGo();
                 _partition.Recount();
                 _nextRow = _rangeRows[_followed++].End;
-                (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd));
+                (long arrays, long bytes, long copied) = range.Growth;
+                (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd, range.RowsFolded, arrays, bytes, copied));
                 _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
                 await CloseAsync(all: false).ConfigureAwait(false);
                 continue;
@@ -251,9 +252,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private async ValueTask DrainAsync()
     {
         _drained = true;
+        (long arrays, long bytes, long copied) = _partition!.Growth;
         _query.Plan.LastRun = _lanes is null
-            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0, _partition.Footprint)
-            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count, _partition!.Footprint);
+            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition.Keys!.Count, _partition.RowsFolded, arrays, bytes, copied)], 0, 0, _partition.Footprint)
+            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count, _partition.Footprint);
         _query.Plan.LastKeyBlocks = _partition.Keys!.Blocks;
         _query.Plan.LastPeakBytes = _memory?.Peak ?? 0;
         await CloseAsync(all: true).ConfigureAwait(false);

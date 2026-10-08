@@ -483,11 +483,18 @@ internal sealed class AggregationPlan
 /// <param name="Core">What the core did, when it held the groups; null otherwise.</param>
 internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts, long StateBytes, CoreRun? Core = null)
 {
+    /// <summary>The groups of the lanes' tables the merge put into another table: every lane's but the largest's in series, every lane's by parts.</summary>
+    internal long MergeEntries { get; init; }
+
     /// <summary>One lane's counts.</summary>
     /// <param name="ActiveTicks">The time its passes took, in <see cref="Stopwatch"/> ticks.</param>
     /// <param name="Ranges">The ranges of rows it read.</param>
     /// <param name="Groups">Its groups at the end of its pass, before the merge.</param>
-    internal readonly record struct Lane(long ActiveTicks, int Ranges, int Groups);
+    /// <param name="Rows">The rows it folded.</param>
+    /// <param name="Arrays">The arrays its shelf handed out as its tables grew.</param>
+    /// <param name="ArrayBytes">Their bytes.</param>
+    /// <param name="CopiedBytes">The bytes its tables copied from an array into the one that replaced it.</param>
+    internal readonly record struct Lane(long ActiveTicks, int Ranges, int Groups, long Rows = 0, long Arrays = 0, long ArrayBytes = 0, long CopiedBytes = 0);
 }
 
 /// <summary>An aggregation that has run: the merged states and keys, and the order of the groups.</summary>
@@ -909,6 +916,18 @@ internal sealed class AggregationPartition
     // takes its cache's.
     private ArrayShelf? _arrays;
 
+    // What the growths of the tables of the shelf the partition let go of, turning to the core, cost.
+    private long _handed;
+    private long _handedBytes;
+    private long _copiedBytes;
+
+    /// <summary>The rows the partition folded.</summary>
+    internal long RowsFolded => _rowsFolded;
+
+    /// <summary>What its tables' growths cost: the arrays its shelves handed out, their bytes, and the bytes copied from an array into the one that replaced it.</summary>
+    internal (long Arrays, long Bytes, long Copied) Growth =>
+        (_handed + (_arrays?.Handed ?? 0), _handedBytes + (_arrays?.HandedBytes ?? 0), _copiedBytes + (_arrays?.CopiedBytes ?? 0));
+
     /// <summary>The bytes the partition reserved in the query's memory for the arrays its shelf does not hand out, read once a batch.</summary>
     internal long Accounted { get; private set; }
 
@@ -1017,6 +1036,7 @@ internal sealed class AggregationPartition
         Keys = cache.Keys;
         Slots = cache.Slots;
         Records = cache.Records;
+        (_handed, _handedBytes, _copiedBytes) = Growth;
         _arrays = cache._arrays;
         Accounted = cache.Accounted;
         Measured = cache.Measured;
@@ -2242,7 +2262,7 @@ internal static class AggregationEngine
                 return Counted(outcome, memory, memory.Held);
             }
 
-            (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes, MergedParts? delivery) =
+            (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes, MergedParts? delivery, long entries) =
                 await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, parted ? builder : null, merging, cancellationToken).ConfigureAwait(false);
             if (delivery is not null)
             {
@@ -2255,7 +2275,7 @@ internal static class AggregationEngine
                 return Counted(first, memory, memory.Held);
             }
 
-            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes);
+            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes) with { MergeEntries = entries };
 
             // The lanes' tables die with the merge, but the one a merge in series kept as the result.
             long result = mergedBytes;
@@ -2480,7 +2500,7 @@ internal static class AggregationEngine
     /// batches by whoever merged it (<see cref="MergedParts"/>).
     /// </summary>
     /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series; or, part by part, no group and the parts to come.</returns>
-    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged, MergedParts? Delivery)> MergeAsync(
+    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged, MergedParts? Delivery, long Entries)> MergeAsync(
         AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, QueryMemory memory,
         PartBuilder? builder, long started, CancellationToken cancellationToken)
     {
@@ -2536,7 +2556,7 @@ internal static class AggregationEngine
                 await MergePairedAsync(partitions, largest, maps, apart, degree, memory, cancellationToken).ConfigureAwait(false);
             }
 
-            return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0, null);
+            return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0, null, serial);
         }
 
         parts = Math.Max(parts, 2);
@@ -2602,9 +2622,9 @@ internal static class AggregationEngine
             // that merged it, or by the reader, which merges the next rather than wait; the lanes'
             // tables and the places of their groups go once the last part is merged.
             (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
-            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - started, parts, 0);
+            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - started, parts, 0) with { MergeEntries = laneGroups };
             MergedParts delivery = new MergedParts(merge, builder, Math.Clamp(degree - 1, 1, parts), plan, memory, cut, started, cancellationToken);
-            return (none, noSlots, parts, 0, delivery);
+            return (none, noSlots, parts, 0, delivery, laneGroups);
         }
 
         GroupKeys[] partKeys = new GroupKeys[parts];
@@ -2633,7 +2653,7 @@ internal static class AggregationEngine
         }
 
         (GroupKeys joinedKeys, AggregateSlot[] joinedSlots, int joinedParts) = Joined(partKeys, partSlots, parts);
-        return (joinedKeys, joinedSlots, joinedParts, merged, null);
+        return (joinedKeys, joinedSlots, joinedParts, merged, null, laneGroups);
     }
 
     /// <summary>The pairs past which a distinct count's merge in series goes by parts instead: below, handing the parts out costs more than the pairs.</summary>
@@ -3260,8 +3280,10 @@ internal static class AggregationEngine
         long state = merged;
         for (int p = 0; p < lanes.Length; p++)
         {
-            lanes[p] = new AggregationRun.Lane(partitions[p].ActiveTicks, partitions[p].Ranges, partitions[p].GroupsAtEnd);
-            state += partitions[p].Footprint;
+            AggregationPartition partition = partitions[p];
+            (long arrays, long bytes, long copied) = partition.Growth;
+            lanes[p] = new AggregationRun.Lane(partition.ActiveTicks, partition.Ranges, partition.GroupsAtEnd, partition.RowsFolded, arrays, bytes, copied);
+            state += partition.Footprint;
         }
 
         return new AggregationRun(lanes, mergeTicks, mergeParts, state);

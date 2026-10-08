@@ -114,6 +114,15 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The bytes of the arrays a lane's shelf handed out that its tables hold: what its query's memory counts of them.</summary>
     internal long Out => _out;
 
+    /// <summary>The arrays a lane's shelf handed out, every one, as its tables grew: a count of the work a growth costs, which the tests hold.</summary>
+    internal long Handed { get; private set; }
+
+    /// <summary>The bytes of those arrays.</summary>
+    internal long HandedBytes { get; private set; }
+
+    /// <summary>The bytes a lane's tables copied from an array into the one that replaced it (<see cref="Resize{T}"/>).</summary>
+    internal long CopiedBytes { get; private set; }
+
     /// <summary>The most bytes the shelf keeps on its piles; past it, what it is given goes.</summary>
     internal long Budget => _budget;
 
@@ -155,7 +164,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
 
         T[] grown = shelf.Take<T>(length, zeroed: true);
-        array.AsSpan(0, Math.Min(array.Length, length)).CopyTo(grown);
+        int copied = Math.Min(array.Length, length);
+        array.AsSpan(0, copied).CopyTo(grown);
+        if (shelf.Lane)
+        {
+            shelf.CopiedBytes += (long)copied * Unsafe.SizeOf<T>();
+        }
+
         shelf.Give(array);
         array = grown;
     }
@@ -171,11 +186,14 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         if (Lane)
         {
-            if ((long)length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+            long bytes = (long)length * Unsafe.SizeOf<T>();
+            if (bytes >= LeastCounted)
             {
                 Reserve(_memory!, bytes);
             }
 
+            Handed++;
+            HandedBytes += bytes;
             return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
         }
 

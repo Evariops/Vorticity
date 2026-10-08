@@ -70,7 +70,7 @@ dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --che
                                                           -- --throughput --write --check  ~9 min
 ```
 
-`bench/gate.sh` is the short answer to "is this safe to push": the nine deterministic ratchets, a
+`bench/gate.sh` is the short answer to "is this safe to push": the ten deterministic ratchets, a
 row-count agreement with the reference through FFI, and every ratio against it. It is a command
 with an exit code, so a hook can run it:
 
@@ -99,11 +99,13 @@ run alone, one test at a time: `AllocationCollection`, `FinalizerCollection`, `A
 
 ## The ratchet rule
 
-Nine test classes hold a number rather than a behaviour — `PathAllocationTests`,
+Ten test classes hold a number rather than a behaviour — `PathAllocationTests`,
 `ScanAllocationTests`, `WriteAllocationTests`, `WrittenSizeTests`, `FlatLayoutDecodeCountTests`,
-`RoundTripCountTests`, `LiveMemoryTests`, `CorpusCoverageTests`, `DatasetBudgetTests` — and the
-benchmark harness holds a reference ratio per axis. They exist to fail on a regression nobody was
-watching for.
+`RoundTripCountTests`, `LiveMemoryTests`, `CorpusCoverageTests`, `DatasetBudgetTests`,
+`WorkCounterTests` — and the benchmark harness holds a reference ratio per axis. They exist to fail
+on a regression nobody was watching for. The last counts the work of a group by at one lane, the
+rows, groups, arrays and bytes its tables took, which a clock on a shared machine cannot resolve: a
+change that moves one of its lines writes the line again in the same commit, with the reason.
 
 **A ratchet comes down, and does not go up to make something pass.** That is the whole rule, and it
 is the one that decides whether any of these numbers is still worth having: a reference that stops

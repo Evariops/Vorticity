@@ -1171,6 +1171,8 @@ internal sealed partial class GroupCore
         {
             SpilledParts = SpilledParts,
             SpilledBytes = SpilledBytes,
+            AppliedEntries = Interlocked.Read(ref _applied),
+            MadeGroups = Interlocked.Read(ref _made),
         };
     }
 }
@@ -1199,6 +1201,12 @@ internal sealed record CoreRun(
 
     /// <summary>The bytes it wrote there.</summary>
     internal long SpilledBytes { get; init; }
+
+    /// <summary>The entries the parts applied into their sub-tables, from the lanes' batches and from the scratch.</summary>
+    internal long AppliedEntries { get; init; }
+
+    /// <summary>The groups those entries made.</summary>
+    internal long MadeGroups { get; init; }
 }
 
 /// <summary>Where a group's record and its key lie in an entry of a part's batch.</summary>
