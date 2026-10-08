@@ -155,10 +155,14 @@ smallest bound to come go out, in key order, and the memory is the groups the ov
 The zone maps are read before the pass, for a key of one column of integers as they are stored, a
 timestamp's among them, under no order but the key's ascending; the groups stream when no value
 waits past its own block more than an eighth of the blocks, and go out once the pass has run
-otherwise. Against the blocking pass, a nearly sorted key of a million values over four million
-rows answers first after 2 ms rather than 30, holds a fifteenth of the memory on one lane and a
-third on fourteen, and runs 5 to 23 % longer, the ranges of the lanes followed into one partition in
-the order of the rows.
+otherwise. Each range a lane groups absorbs the few groups the ranges before it left open, and stands
+for them from then on, rather than putting all of its own into them. Against the blocking pass, a nearly
+sorted key of a million values over four million rows answers first after 1 to 2 ms rather than 34,
+holds a fifteenth of the memory on one lane and runs 0.84 of its time there; on fourteen lanes it holds a
+third of the memory and runs 2.1 times as long, its ranges taken in series in the order of the rows
+(12 ms against 5.7), where the blocking pass builds its parts side by side. So on several lanes the pass
+blocks, unless the query asks for a window (`Take`) or its budget is short of 32 bytes for each row of
+the source, where the stream's memory pays; on one lane, it streams.
 
 So, on such a key:
 
