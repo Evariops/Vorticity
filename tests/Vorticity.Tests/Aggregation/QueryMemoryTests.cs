@@ -284,6 +284,37 @@ public sealed partial class QueryMemoryTests
     }
 
     [Theory]
+    [InlineData(64, 4, 2)]
+    [InlineData(20, 4, 1)]
+    [InlineData(16, 4, 0)]
+    [InlineData(15, 2, 2)]
+    [InlineData(5, 1, 2)]
+    [InlineData(1, 1, 0)]
+    public void AdmissionReservesTheReadsAheadAndDropsThemBeforeTheLanes(int mebibytes, int lanes, int ahead)
+    {
+        // Lanes of a megabyte of working memory each, over a source that copies splits of a quarter of a
+        // megabyte: two splits ahead a lane, then one, then none, before the lanes are halved; the lanes
+        // left read two again as far as they fit. A source that reads in place reserves none and reads two.
+        const long Split = 256 * 1024;
+        QueryMemoryBudget budget = new QueryMemoryBudget((long)mebibytes << 20);
+        using (QueryMemory memory = new QueryMemory(budget))
+        {
+            Assert.Equal(lanes, AggregationEngine.Admit(memory, 4, 0, 0, Split, out int admitted));
+            Assert.Equal(ahead, admitted);
+            Assert.Equal(lanes * ((1L << 20) + (ahead * Split)), memory.Held);
+        }
+
+        using (QueryMemory memory = new QueryMemory(new QueryMemoryBudget(64L << 20)))
+        {
+            Assert.Equal(4, AggregationEngine.Admit(memory, 4, 0, 0, splitBytes: 0, out int inPlace));
+            Assert.Equal(2, inPlace);
+            Assert.Equal(4L << 20, memory.Held);
+        }
+
+        Assert.Equal(0, budget.ReservedBytes);
+    }
+
+    [Theory]
     [InlineData(2)]
     [InlineData(3)]
     [InlineData(4)]

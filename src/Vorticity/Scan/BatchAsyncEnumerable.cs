@@ -131,16 +131,16 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: Prefetch == ReadsAhead);
+            readAhead: ReadsAhead);
 
-    /// <summary>Batches decoded ahead of the consumer, on lanes of their own; or <see cref="ReadsAhead"/>.</summary>
+    /// <summary>Batches decoded ahead of the consumer, on lanes of their own; or, below zero, <see cref="ReadsAhead"/>.</summary>
     internal int Prefetch { get; init; }
 
     /// <summary>
-    /// The <see cref="Prefetch"/> of a scan of one lane that decodes nothing ahead and reads its next
-    /// splits while it decodes one, over a source whose read is a round trip: an aggregation's lanes.
+    /// The splits a scan of one lane that decodes nothing ahead reads ahead of the one it decodes, over a
+    /// source whose read is a round trip, an aggregation's lanes: held in <see cref="Prefetch"/>, negated.
     /// </summary>
-    internal const int ReadsAhead = -1;
+    private int ReadsAhead => Prefetch < 0 ? -Prefetch : 0;
 
     /// <summary>Whether a filtered batch is compacted to its surviving rows rather than delivered whole with a selection.</summary>
     internal bool Compact { get; init; } = true;
@@ -189,7 +189,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: Prefetch == ReadsAhead);
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead);
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -211,7 +211,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: Prefetch == ReadsAhead);
+            readAhead: ReadsAhead);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -311,10 +311,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The splits a scan of one lane reads ahead of the one it decodes, over a source whose read is a
-    /// round trip: two. Measured on 2026-10-06 at fourteen lanes and 20 ms a request, four read no
-    /// faster and held 10 to 28 MiB more: what is left is each range's first read.
+    /// round trip, when its budget grants them: two. Measured on 2026-10-06 at fourteen lanes and 20 ms a
+    /// request, four read no faster and held 10 to 28 MiB more: what is left is each range's first read.
     /// </summary>
-    private const int ReadAheadSplits = 2;
+    internal const int ReadAheadSplits = 2;
 
     internal BatchAsyncEnumerator(
         VortexFile file,
@@ -337,7 +337,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool sinkDecodes = false,
         ZonePruner? zones = null,
         int widenRows = 0,
-        bool readAhead = false)
+        int readAhead = 0)
     {
         _compact = compact;
         _widenRows = widenRows > plan.MaxRows && compact && !filterProven && !reverse && take is null &&
@@ -359,10 +359,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _cursor = plan.CreateCursor(reverse);
 
         // A scan of one lane that asks for it, an aggregation's lane, whose decode is the caller's,
-        // reads ahead over a source whose read is a round trip. Over a
-        // mapping a read is a view, and there is nothing to overlap; the file the scan reads through
+        // reads ahead over a source whose read is a round trip, as many splits as its admission granted.
+        // Over a mapping a read is a view, and there is nothing to overlap; the file the scan reads through
         // may be the one the open read whole, which is asked of its source.
-        _ahead = readAhead && window == 1 && !file.Source.ReadsInPlace ? new AheadReads(ReadAheadSplits) : null;
+        _ahead = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace ? new AheadReads(readAhead) : null;
         _segments = new ScanSegments(_ahead is { } ahead ? ahead.Lanes.Length : degree);
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses

@@ -130,6 +130,64 @@ public sealed partial class GroupRoundTripTests
         }
     }
 
+    // The reads a lane has in flight over a source that copies them, positional reads here, are reserved
+    // with its working memory when it is admitted: two splits a lane, each the largest of the layout.
+    // Over a mapping, a read is a view, and nothing more is reserved. Under a budget short of them, the
+    // lanes read fewer ahead and the query ends within it.
+    [Fact]
+    public async Task AGroupByOverACopyingSourceReservesItsReadsInFlight()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            (long mapped, long mappedPeak) = await AdmittedAsync(path, degree: 4, copying: false, 1L << 30);
+            (long copied, long copiedPeak) = await AdmittedAsync(path, degree: 4, copying: true, 1L << 30);
+            await using (VortexSession session = VortexSession.Create(options => options.MapFiles = false))
+            await using (VortexFile file = await session.OpenAsync(path, cancellationToken: Ct))
+            {
+                long split = new FileScanSource(file).ReadAheadBytes(new ScanSpec());
+                Assert.True(split > 0);
+                Assert.Equal(mapped + (4 * Vorticity.Scanning.BatchAsyncEnumerator.ReadAheadSplits * split), copied);
+            }
+
+            // One lane reads nothing ahead, whatever its source; and under a budget a split short of what
+            // the copying lanes hold at their peak, they read fewer splits ahead, and the query ends within it.
+            Assert.Equal((await AdmittedAsync(path, degree: 1, copying: false, 1L << 30)).Admitted, (await AdmittedAsync(path, degree: 1, copying: true, 1L << 30)).Admitted);
+            long tight = Math.Max(mappedPeak, copiedPeak) - ((copied - mapped) / 2);
+            (long _, long tightPeak) = await AdmittedAsync(path, degree: 4, copying: true, tight);
+            Assert.InRange(tightPeak, 0, tight);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// What the group by's lanes were admitted with of a budget of <paramref name="ceiling"/> bytes, over the
+    /// file mapped or read by positional reads that copy, and the most it held; nothing held after.
+    /// </summary>
+    private static async Task<(long Admitted, long Peak)> AdmittedAsync(string path, int degree, bool copying, long ceiling)
+    {
+        QueryMemoryBudget budget = new QueryMemoryBudget(ceiling);
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.MaxDegreeOfParallelism = degree;
+            options.MemoryBudget = budget;
+            options.MapFiles = !copying;
+        });
+        long admitted = 0;
+        await using (VortexFile file = await session.OpenAsync(path, cancellationToken: Ct))
+        {
+            Vorticity.Aggregation grouped = file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value)));
+            grouped.Plan.Watch = _ => admitted = budget.ReservedBytes;
+            Assert.Equal(Rows, await CountAsync(grouped.As<KeyTotal>()));
+        }
+
+        Assert.Equal(0, budget.ReservedBytes);
+        return (admitted, budget.PeakBytes);
+    }
+
     /// <summary>The rows, requests and steps of a scan as an aggregation's lane reads it: one lane, no prefetch.</summary>
     private static async Task<(long Rows, long Requests, long Steps)> LaneAsync(string path, bool readAhead)
     {
@@ -141,7 +199,7 @@ public sealed partial class GroupRoundTripTests
             ScanSpec spec = new ScanSpec
             {
                 Options = new ScanOptions { DegreeOfParallelism = 1, Prefetch = 0 },
-                ReadAhead = readAhead,
+                ReadAhead = readAhead ? Vorticity.Scanning.BatchAsyncEnumerator.ReadAheadSplits : 0,
             };
             await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(spec, new Vorticity.Scanning.ScanMetrics()).WithCancellation(Ct))
             {

@@ -2758,7 +2758,11 @@ internal static class AggregationEngine
             int spilledRow = spill is not null && plan.Grouped && !sorted && top is null
                 && memory.Ceiling / 16 / asked / LaneRowBytes < GroupBatches.BatchRows && !GroupCore.Holds(plan, settled, source, facts) ? LaneRowBytes : 0;
             pass = Batched(pass, memory, asked, spilledRow);
-            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow);
+
+            // Lanes that read ahead over a source that copies its reads hold their splits in flight beside
+            // their working memory, admitted with it: the largest split of the layout, so many a lane.
+            long splitBytes = ranges is null ? 0 : source.ReadAheadBytes(pass);
+            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, out int ahead);
 
             // The core holds the groups once a lane's cache fills: each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
@@ -2840,7 +2844,13 @@ internal static class AggregationEngine
                 // Lanes that judge their key on their first rows start across the source, unless the
                 // zones settle blocks in the order of the rows.
                 bool fan = settling is null && plan.Fan && Array.Exists(partitions, partition => partition.TurnOnNew || partition.TurnOnSpread);
-                await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, fan, cancellationToken).ConfigureAwait(false);
+                await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, fan, ahead, cancellationToken).ConfigureAwait(false);
+
+                // The reads in flight end with the pass.
+                if (splitBytes > 0)
+                {
+                    memory.LetGo(lanes * ahead * splitBytes);
+                }
             }
 
             long merging = Stopwatch.GetTimestamp();
@@ -3136,9 +3146,22 @@ internal static class AggregationEngine
     /// the scan sets them, between a sixteenth of a megabyte and a megabyte; a megabyte when the scan
     /// decides.
     /// </summary>
-    internal static int Admit(QueryMemory memory, int lanes, int batchRows = 0, int spilledRow = 0)
+    internal static int Admit(QueryMemory memory, int lanes, int batchRows = 0, int spilledRow = 0) =>
+        Admit(memory, lanes, batchRows, spilledRow, splitBytes: 0, out _);
+
+    /// <summary>
+    /// <see cref="Admit(QueryMemory, int, int, int)"/>, each lane reading <paramref name="ahead"/> splits
+    /// ahead of <paramref name="splitBytes"/> bytes at most, over a source that copies its reads: two,
+    /// reserved with its working memory; under a budget short of them, one, then none, before the lanes
+    /// are halved, the lanes left reading two again as far as they fit. A lane without reads ahead waits
+    /// on each of its reads. Nothing is reserved for a source that reads in place, whose lanes read two
+    /// ahead.
+    /// </summary>
+    internal static int Admit(QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, out int ahead)
     {
-        long laneBytes = Working(batchRows);
+        long working = Working(batchRows);
+        ahead = BatchAsyncEnumerator.ReadAheadSplits;
+        long laneBytes = working + (splitBytes * ahead);
 
         // Their working memory a quarter of the ceiling at most: past it, their tables share the rest so
         // thinly that each one's batch of new groups outgrows its share, and lanes that spill would
@@ -3146,24 +3169,40 @@ internal static class AggregationEngine
         // what they take past the budget before they write their tables (Batched).
         while (lanes > 1 && (4 * lanes * laneBytes > memory.Ceiling || 16L * lanes * Math.Max(batchRows, 1_024) * spilledRow > memory.Ceiling))
         {
+            if (splitBytes > 0 && ahead > 0 && 4 * lanes * laneBytes > memory.Ceiling)
+            {
+                laneBytes = working + (splitBytes * --ahead);
+                continue;
+            }
+
             lanes = Math.Max(1, lanes / 2);
+            ahead = BatchAsyncEnumerator.ReadAheadSplits;
+            laneBytes = working + (splitBytes * ahead);
         }
 
         while (!memory.TryGrow(lanes * laneBytes))
         {
+            if (splitBytes > 0 && ahead > 0)
+            {
+                laneBytes = working + (splitBytes * --ahead);
+                continue;
+            }
+
             if (lanes == 1)
             {
                 throw memory.Exceeded("group by", 0, laneBytes);
             }
 
             lanes = Math.Max(1, lanes / 2);
+            ahead = BatchAsyncEnumerator.ReadAheadSplits;
+            laneBytes = working + (splitBytes * ahead);
         }
 
         memory.Measure(lanes * laneBytes);
         return lanes;
     }
 
-    /// <summary>Gives back the working memory of <paramref name="lanes"/> lanes <see cref="Admit"/> admitted, their batches of <paramref name="batchRows"/> rows.</summary>
+    /// <summary>Gives back the working memory of <paramref name="lanes"/> lanes <see cref="Admit(QueryMemory, int, int, int)"/> admitted, their batches of <paramref name="batchRows"/> rows.</summary>
     internal static void Dismiss(QueryMemory memory, int lanes, int batchRows) => memory.LetGo(lanes * Working(batchRows));
 
     /// <summary>The working memory a lane is admitted with, its batches of <paramref name="batchRows"/> rows, or the scan's.</summary>
@@ -4061,15 +4100,15 @@ internal static class AggregationEngine
     /// </summary>
     private static async Task RunQueueAsync(
         ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition[] partitions, RowRange[] ranges, ZoneSettling? settling,
-        bool fan, CancellationToken cancellationToken)
+        bool fan, int ahead, CancellationToken cancellationToken)
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
 
         // The degree is the parallelism: a partition already runs on the pool, and decoding ahead
         // inside each one would put twice the degree's lanes on it. Its reads go ahead of its decode
-        // instead, on a source whose read is a round trip.
-        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = true };
+        // instead, on a source whose read is a round trip: the splits its admission granted.
+        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = ahead };
         int[] next = [-1];
 
         // The ranges the fan's first ranges took, each its lane's before any lane starts, which the queue

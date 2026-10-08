@@ -49,11 +49,11 @@ internal sealed record ScanSpec
     internal bool SinkDecodes { get; init; }
 
     /// <summary>
-    /// Whether a scan of one lane reads its next splits while it decodes one, over a source whose read
-    /// is a round trip: an aggregation's lanes, which decode nothing ahead
-    /// and read every split they are given, so that no read ahead is wasted.
+    /// The splits a scan of one lane reads ahead while it decodes one, over a source whose read is a
+    /// round trip, 0 for none: an aggregation's lanes, which decode nothing ahead and read every split they
+    /// are given, so that no read ahead is wasted, as many as their admission reserved.
     /// </summary>
-    internal bool ReadAhead { get; init; }
+    internal int ReadAhead { get; init; }
 
     /// <summary>
     /// Whether the consumer reads no row's place, as an aggregation folds values without asking
@@ -118,6 +118,13 @@ internal abstract class ScanSource
 
     /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
     internal virtual long RowBound => -1;
+
+    /// <summary>
+    /// The most bytes one split of <paramref name="spec"/> read ahead holds (<see cref="ScanSpec.ReadAhead"/>),
+    /// over a source that copies what it reads; 0 over one that reads in place, where a read is a view,
+    /// and for a source that reads nothing ahead.
+    /// </summary>
+    internal virtual long ReadAheadBytes(ScanSpec spec) => 0;
 
     /// <summary>
     /// The ranges of rows a pass of <paramref name="degree"/> lanes reads side by side, each a range
@@ -282,6 +289,10 @@ internal sealed class FileScanSource : ScanSource
 
     internal override long RowBound => _file.RowCount;
 
+    /// <summary>The segments the largest split of the scan asks for, over a source that copies them: the layout walked once, nothing read.</summary>
+    internal override long ReadAheadBytes(ScanSpec spec) =>
+        _file.Source.ReadsInPlace || spec.MatchesNothing ? 0 : Builder(spec, new ScanMetrics()).LargestSplitBytes();
+
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);
 
@@ -342,9 +353,9 @@ internal sealed class FileScanSource : ScanSource
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
         builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings, spec.SinkDecodes);
-        if (spec.ReadAhead)
+        if (spec.ReadAhead > 0)
         {
-            builder.WithReadAhead();
+            builder.WithReadAhead(spec.ReadAhead);
         }
 
         if (spec.Pruned)
