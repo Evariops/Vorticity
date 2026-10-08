@@ -556,6 +556,11 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     // The values of the uniform column its first rows foretold (Foretell); 0 before.
     private double _universe;
 
+    // The runs the set of a count over the whole scan went to when its budget held it no more, and the
+    // file they lie in, its lane's; null before the first.
+    private List<SpillRun>? _runs;
+    private SpillFile? _file;
+
     // The shelf the pairs and the counts grow from, under the query's memory.
     private ArrayShelf? _shelf;
 
@@ -587,7 +592,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     /// again at each step, and took new memory each time, a fifth of the distinct users of a scan of 20M
     /// visits at one lane, more than a quarter at fourteen.
     /// </summary>
-    internal override void Foretell(long rows, long expected, QueryMemory? memory)
+    internal override void Foretell(long rows, long expected, QueryMemory? memory, int lanes)
     {
         if (_set is not { Count: > 0 } set)
         {
@@ -603,8 +608,8 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             return;
         }
 
-        // Past what the budget grants, the set grows as before.
-        if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count)))
+        // Past what the budget grants every lane at once, the set grows as before.
+        if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count) * lanes))
         {
             return;
         }
@@ -969,6 +974,172 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set!.Release();
         _set = new DistinctValues<TValue>();
         _set.Govern(_shelf);
+    }
+
+    internal override bool SpillsAlone => _set is not null;
+
+    internal override bool Spilled => _runs is not null;
+
+    internal override long GrowthAhead(int rows) => _set?.GrowthFor(rows) ?? 0;
+
+    /// <summary>
+    /// The set's values written to the lane's file as a run, section after section, a section the values
+    /// whose hash has its top byte, walked in the order the set's slots hold them; then the set let go,
+    /// its slots given back, and a new one started.
+    /// </summary>
+    internal override async ValueTask SpillAsync(SpillScope scope, SpillBuffer buffer, CancellationToken cancellationToken)
+    {
+        DistinctValues<TValue> set = _set!;
+        if (set.Count == 0)
+        {
+            return;
+        }
+
+        SpillFile file = _file ??= scope.NewFile();
+        SpillRun run = new SpillRun(file) { Zero = set.HoldsZero };
+        buffer.Clear();
+        for (int section = 0; section < SpillRun.Sections; section++)
+        {
+            run.Starts[section] = file.Length + buffer.Length;
+            int at = -1;
+            while (at != DistinctValues<TValue>.PartDone)
+            {
+                if (buffer.Full)
+                {
+                    await file.AppendAsync(buffer.Written, cancellationToken).ConfigureAwait(false);
+                    buffer.Clear();
+                }
+
+                int copied = set.CopyPart(section, SpillRun.SectionBits, ref at, MemoryMarshal.Cast<byte, TValue>(buffer.Room));
+                buffer.Advance(copied * Unsafe.SizeOf<TValue>());
+                run.Counts[section] += copied;
+            }
+        }
+
+        run.Starts[SpillRun.Sections] = file.Length + buffer.Length;
+        if (buffer.Length > 0)
+        {
+            await file.AppendAsync(buffer.Written, cancellationToken).ConfigureAwait(false);
+            buffer.Clear();
+        }
+
+        (_runs ??= []).Add(run);
+        scope.Ran(run.Bytes);
+        set.Release();
+        _set = new DistinctValues<TValue>();
+        _set.Govern(_shelf);
+    }
+
+    /// <summary>
+    /// The values every lane's runs hold, made distinct part by part, the top bits of their hash: the
+    /// lanes' sets written as runs too first, which gives their memory to the parts. Each part a set of
+    /// its own, sized by what its sections count, which never doubles; as many parts as make one a
+    /// quarter of the room the budget leaves at most, as many at once as half that room holds.
+    /// </summary>
+    internal override async Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, int degree, QueryMemory memory, CancellationToken cancellationToken)
+    {
+        List<SpillRun> runs = [];
+        bool zero = false;
+        long total = 0;
+        SpillBuffer page = new SpillBuffer(memory);
+        try
+        {
+            foreach (AggregateSlot slot in lanes)
+            {
+                FixedDistinctSlot<TValue> lane = (FixedDistinctSlot<TValue>)slot;
+                await lane.SpillAsync(scope, page, cancellationToken).ConfigureAwait(false);
+                foreach (SpillRun run in lane._runs ?? [])
+                {
+                    runs.Add(run);
+                    zero |= run.Zero;
+                    total += run.Entries(0, SpillRun.Sections);
+                }
+            }
+        }
+        finally
+        {
+            page.Release();
+        }
+
+        long room = Math.Max(memory.Ceiling / 16, memory.Ceiling - memory.Held);
+        int bits = 1;
+        while (bits < SpillRun.SectionBits && DistinctValues<TValue>.FootprintOf((int)Math.Min(total >> bits, int.MaxValue / 4)) > room / 4)
+        {
+            bits++;
+        }
+
+        int parts = 1 << bits;
+        long share = DistinctValues<TValue>.FootprintOf((int)Math.Min(total >> bits, int.MaxValue / 4)) + SpillBuffer.PageOf(memory, degree);
+        int workers = (int)Math.Clamp(room / 2 / Math.Max(1, share), 1, Math.Max(1, degree));
+        long[] counts = new long[parts];
+        await SideBySide.RunAsync(
+            parts,
+            async (part, token) =>
+            {
+                (int first, int past) = SpillRun.Of(part, bits);
+                long capacity = 0;
+                foreach (SpillRun run in runs)
+                {
+                    capacity += run.Entries(first, past);
+                }
+
+                // The part's set, as many values as its sections hold at most: it never doubles.
+                int values = (int)Math.Min(capacity, int.MaxValue / 4);
+                long bytes = DistinctValues<TValue>.FootprintOf(values);
+                memory.Hold(bytes, "merge of a spilled distinct count");
+                SpillBuffer buffer = new SpillBuffer(memory, degree);
+                try
+                {
+                    DistinctValues<TValue> distinct = new DistinctValues<TValue>(values, skip: bits);
+                    foreach (SpillRun run in runs)
+                    {
+                        // A page at a time: the run's stretch of the part may be long.
+                        long offset = run.Starts[first];
+                        long end = run.Starts[past];
+                        while (offset < end)
+                        {
+                            int length = (int)Math.Min(buffer.Page, end - offset);
+                            await run.File.ReadAsync(offset, buffer.Ensure(length), token).ConfigureAwait(false);
+                            Add(distinct, buffer.Span(length));
+                            offset += length;
+                        }
+                    }
+
+                    counts[part] = distinct.Count;
+                }
+                finally
+                {
+                    buffer.Release();
+                    memory.LetGo(bytes);
+                }
+            },
+            workers,
+            cancellationToken).ConfigureAwait(false);
+
+        // The value of zero bits, which no section holds, once.
+        long count = zero ? 1 : 0;
+        foreach (long part in counts)
+        {
+            count += part;
+        }
+
+        foreach (AggregateSlot slot in lanes)
+        {
+            FixedDistinctSlot<TValue> lane = (FixedDistinctSlot<TValue>)slot;
+            lane._runs = null;
+            lane._counts[0] = 0;
+        }
+
+        _counts[0] = count;
+    }
+
+    /// <summary>Adds the values of a page read back.</summary>
+    private static void Add(DistinctValues<TValue> distinct, ReadOnlySpan<byte> values)
+    {
+        foreach (TValue value in MemoryMarshal.Cast<byte, TValue>(values))
+        {
+            distinct.Add(value);
+        }
     }
 
     /// <summary>The (group, value) pairs, or the values of a slot of one group, or each group's set and those let go, and the counts.</summary>

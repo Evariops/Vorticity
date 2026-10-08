@@ -84,6 +84,10 @@ internal sealed class DistinctValues<TValue>
     /// <summary>The bytes of the slots, at their capacity.</summary>
     internal long Footprint => (long)_slots.Length * Unsafe.SizeOf<TValue>();
 
+    /// <summary>The bytes of the slots <paramref name="values"/> more values could make it take beside the ones it holds: 0 when they cannot make it double.</summary>
+    internal long GrowthFor(int values) =>
+        (_count + (long)values) * 2 > _slots.Length ? FootprintOf((int)Math.Min(_count + (long)values, int.MaxValue / 4)) : 0;
+
     /// <summary>Gives the slots back to their shelf: the values are let go, and read no more.</summary>
     internal void Release()
     {
@@ -176,6 +180,65 @@ internal sealed class DistinctValues<TValue>
         for (int at = to & mask; !IsFree(slots[at]); at = (at + 1) & mask)
         {
             AddOfPart(slots[at], part, shift);
+        }
+    }
+
+    /// <summary>The cursor of <see cref="CopyPart"/> past a part's last value.</summary>
+    internal const int PartDone = int.MaxValue;
+
+    /// <summary>
+    /// Copies the values of part <paramref name="part"/> of <c>2^<paramref name="bits"/></c>, the top bits
+    /// of their hash, into <paramref name="into"/>, as they lie, walked as <see cref="AddPart"/> walks
+    /// them: a run of homes, a stretch of the slots, then the values probing took past it. The set takes
+    /// its homes from the top bits, no <c>skip</c>. The value of zero bits, which no slot holds, is not
+    /// among them. <paramref name="at"/> is the slot to read next, -1 to start, <see cref="PartDone"/>
+    /// once the part is copied: a part copied a page at a time.
+    /// </summary>
+    /// <returns>The values copied.</returns>
+    internal int CopyPart(int part, int bits, ref int at, Span<TValue> into)
+    {
+        TValue[] slots = _slots;
+        int mask = slots.Length - 1;
+        int laneBits = BitOperations.Log2((uint)slots.Length);
+        int from = laneBits >= bits ? part << (laneBits - bits) : part >> (bits - laneBits);
+        int to = laneBits >= bits ? (part + 1) << (laneBits - bits) : from + 1;
+        int shift = 64 - bits;
+        int copied = 0;
+        at = Math.Max(at, from);
+        while (copied < into.Length)
+        {
+            // Within the run of homes a free slot is passed; past it, it ends the part. A table at most
+            // half full leaves one before the walk comes round to the run again.
+            TValue value = slots[at & mask];
+            if (IsFree(value))
+            {
+                if (at >= to)
+                {
+                    at = PartDone;
+                    break;
+                }
+            }
+            else if ((int)(HashOf(value) >> shift) == part)
+            {
+                into[copied++] = value;
+            }
+
+            at++;
+        }
+
+        return copied;
+    }
+
+    /// <summary>Adds to <paramref name="counts"/> the values of each part of <c>2^<paramref name="bits"/></c>, the top bits of their hash; the value of zero bits not among them.</summary>
+    internal void CountParts(int bits, Span<long> counts)
+    {
+        int shift = 64 - bits;
+        foreach (TValue value in _slots)
+        {
+            if (!IsFree(value))
+            {
+                counts[bits == 0 ? 0 : (int)(HashOf(value) >> shift)]++;
+            }
         }
     }
 

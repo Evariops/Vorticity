@@ -135,6 +135,19 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>Whether the shelf took an array past its budget, which turns its lane to the core at the next batch.</summary>
     internal bool Overdrawn { get; private set; }
 
+    /// <summary>The lane gave back what it took past the budget, its tables written to the scratch: it may take past it again.</summary>
+    internal void Relieved() => Overdrawn = false;
+
+    /// <summary>What a lane's shelf reserved ahead of the arrays to come given back: its tables grow no more, but by a merge, which reserves again.</summary>
+    internal void GiveBackAhead()
+    {
+        if (_memory is { } memory && _credit > 0)
+        {
+            memory.Shrink(_credit);
+            _credit = 0;
+        }
+    }
+
     /// <summary>
     /// The pressure the core whose shelf this is was made under: while memory is still
     /// to come back, a lane's table or the batches it emptied into, the shelf takes past the budget what

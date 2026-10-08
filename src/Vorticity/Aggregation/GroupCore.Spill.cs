@@ -22,9 +22,6 @@ namespace Vorticity.Aggregating;
 /// </remarks>
 internal sealed partial class GroupCore
 {
-    // The spills of the process together: what keeps a tenth of their directories' free space.
-    private static long s_spilled;
-
     private readonly SemaphoreSlim _spilling = new SemaphoreSlim(1, 1);
     private RunScratch? _scratch;
     private string? _scratchDirectory;
@@ -243,17 +240,15 @@ internal sealed partial class GroupCore
     {
         RunScratch scratch = Scratch();
         int bytes = entries * Shape.Words * sizeof(ulong);
-        long spilled = Interlocked.Add(ref s_spilled, bytes);
-        if (Free(_scratchDirectory!) is long free && free - bytes < (free + spilled) / 10)
+        if (!SpillSpace.TryClaim(_scratchDirectory!, bytes))
         {
-            Interlocked.Add(ref s_spilled, -bytes);
             throw _memory!.Exceeded("spill of a group by", -1, bytes);
         }
 
         // Under the host's scratch budget, every byte written counted, and given back when the scratch closes.
         if (_source?.Session.Options.ScratchBudget is { } budget && !budget.TryReserve(bytes))
         {
-            Interlocked.Add(ref s_spilled, -bytes);
+            SpillSpace.Release(bytes);
             throw ScratchExceeded(budget, "spill of a group by", bytes);
         }
 
@@ -423,7 +418,7 @@ internal sealed partial class GroupCore
         if (_scratch is not null)
         {
             long spilled = Interlocked.Read(ref _spilledBytes);
-            Interlocked.Add(ref s_spilled, -spilled);
+            SpillSpace.Release(spilled);
             _source?.Session.Options.ScratchBudget?.Release(spilled);
             _scratch.Dispose();
             _scratch = null;

@@ -54,8 +54,10 @@ public sealed partial class QueryMemoryTests
     [Theory]
     [InlineData(1)]
     [InlineData(14)]
-    public async Task ADistinctCountPastItsBudgetFailsAndGivesEverythingBack(int degree)
+    public async Task ADistinctCountPastItsBudgetSpillsAndGivesEverythingBack(int degree)
     {
+        // Its values go to the scratch and come back part by part (LaneSpillTests); a scratch it cannot
+        // write is the refusal.
         string path = await WriteAsync();
         try
         {
@@ -67,7 +69,7 @@ public sealed partial class QueryMemoryTests
             });
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            await Assert.ThrowsAsync<VortexMemoryException>(async () => await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+            Assert.Equal(Keys, await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
             Assert.Equal(0, budget.ReservedBytes);
         }
         finally

@@ -310,6 +310,12 @@ internal sealed class AggregationPlan
     internal bool CoreSpills { get; set; } = true;
 
     /// <summary>
+    /// Whether the lanes write what they hold to the query's scratch when its budget holds it no more and
+    /// the core cannot take it: on by default, off to test the refusal.
+    /// </summary>
+    internal bool LanesSpill { get; set; } = true;
+
+    /// <summary>
     /// Whether a core, or a merge in parts, with no order nor window over its groups delivers them part
     /// by part, its first batch once its first part is applied or merged: on by default, off for the
     /// bench to weigh it against the delivery whole.
@@ -506,6 +512,27 @@ internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTic
 {
     /// <summary>The groups of the lanes' tables the merge put into another table: every lane's but the largest's in series, every lane's by parts.</summary>
     internal long MergeEntries { get; init; }
+
+    /// <summary>The runs the lanes wrote to their scratch when the budget held their tables no more and the core could not take them.</summary>
+    internal int SpilledRuns { get; init; }
+
+    /// <summary>The bytes of those runs.</summary>
+    internal long SpilledBytes { get; init; }
+
+    /// <summary>The bytes read back from them.</summary>
+    internal long SpillReadBytes { get; init; }
+
+    /// <summary>What the query held of its budget's ceiling when the first run was written; -1 without one.</summary>
+    internal double FirstSpillShare { get; init; } = -1;
+
+    /// <summary>The run's counts with what <paramref name="spill"/> wrote and read, when it wrote anything.</summary>
+    internal AggregationRun Spilled(SpillScope? spill) => spill is not { Runs: > 0 } ? this : this with
+    {
+        SpilledRuns = spill.Runs,
+        SpilledBytes = spill.WrittenBytes,
+        SpillReadBytes = spill.ReadBytes,
+        FirstSpillShare = spill.FirstShare,
+    };
 
     /// <summary>One lane's counts.</summary>
     /// <param name="ActiveTicks">The time its passes took, in <see cref="Stopwatch"/> ticks.</param>
@@ -761,11 +788,85 @@ internal sealed class AggregationPartition
         {
             // A lane that can turn to the core takes past its budget in the middle of a batch, and turns at the next.
             _pressure = value;
-            if (_arrays is not null)
+            if (_arrays is not null && value is not null)
             {
-                _arrays.Overdraws = value is not null;
+                _arrays.Overdraws = true;
             }
         }
+    }
+
+    /// <summary>
+    /// What the lane writes to the query's scratch when its budget holds its groups no more and the core
+    /// cannot take them; null for a lane that never spills. Over the whole scan, a slot that holds a set
+    /// of values spills alone (<see cref="AggregateSlot.SpillsAlone"/>), and its arrays may take past the
+    /// budget within a batch, the lane spilling before the next.
+    /// </summary>
+    internal SpillScope? Spill
+    {
+        get => _spill;
+        init
+        {
+            _spill = value;
+            _spillsAlone = value is not null && Keys is null && Array.Exists(Slots, slot => slot.SpillsAlone);
+            if (_spillsAlone && _arrays is not null)
+            {
+                _arrays.Overdraws = true;
+            }
+        }
+    }
+
+    private readonly SpillScope? _spill;
+    private readonly bool _spillsAlone;
+
+    /// <summary>The lanes the pass runs on, which grow their tables together: what a lane asks the budget for before a batch is that many times its own growth.</summary>
+    internal int Lanes { get; init; } = 1;
+
+    /// <summary>
+    /// Whether the lane, over the whole scan, writes its slots' sets to the scratch before its next batch
+    /// of <paramref name="rows"/> rows: an array it took past the budget in the batch before, or what its
+    /// sets may take folding the batch, a doubling, that the budget would not grant on every lane at once.
+    /// </summary>
+    internal bool MustSpill(int rows)
+    {
+        if (!_spillsAlone || Memory is not { } memory || _arrays is not { } arrays)
+        {
+            return false;
+        }
+
+        if (arrays.Overdrawn)
+        {
+            return true;
+        }
+
+        long ahead = 0;
+        foreach (AggregateSlot slot in Slots)
+        {
+            ahead += slot.SpillsAlone ? slot.GrowthAhead(rows) : 0;
+        }
+
+        return ahead > 0 && !memory.CanGrow(ahead * Lanes);
+    }
+
+    /// <summary>The slots that spill alone write their sets to the lane's scratch, each emptied, its arrays given back.</summary>
+    internal async ValueTask SpillAloneAsync(CancellationToken cancellationToken)
+    {
+        SpillBuffer buffer = new SpillBuffer(Memory, Lanes);
+        try
+        {
+            foreach (AggregateSlot slot in Slots)
+            {
+                if (slot.SpillsAlone)
+                {
+                    await slot.SpillAsync(_spill!, buffer, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        finally
+        {
+            buffer.Release();
+        }
+
+        _arrays!.Relieved();
     }
 
     /// <summary>
@@ -960,7 +1061,7 @@ internal sealed class AggregationPartition
             {
                 if (_inputs[i] != Settled)
                 {
-                    Slots[i].Foretell(_rowsFolded, ExpectedRows, Memory);
+                    Slots[i].Foretell(_rowsFolded, ExpectedRows, Memory, Lanes);
                 }
             }
 
@@ -1553,6 +1654,8 @@ internal sealed class AggregationPartition
             memory.Shrink(Accounted - unshelved);
             Accounted = unshelved;
         }
+
+        _arrays?.GiveBackAhead();
     }
 
     /// <summary>
@@ -2206,6 +2309,10 @@ internal static class AggregationEngine
         QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         GroupCore? core = null;
         CorePressure? pressure = null;
+
+        // What the lanes write to the scratch when the budget holds them no more and the core cannot take
+        // them: no file until one does.
+        SpillScope? spill = plan.LanesSpill ? new SpillScope(source.Session.Options, memory) : null;
         try
         {
             // The lanes' batches under the budget, then each lane's working memory admitted: on fewer
@@ -2238,6 +2345,7 @@ internal static class AggregationEngine
                     Top = top,
                     Core = core?.Lane(),
                     Pressure = pressure,
+                    Spill = spill,
                     ExpectedRows = core is null && top is null ? source.RowBound : -1,
                 };
                 if (core is { Lean: true })
@@ -2270,6 +2378,8 @@ internal static class AggregationEngine
                             && facts?.Rows is long sourceRows && sourceRows >= lanes * AggregationPartition.LaneRows,
                         TurnOnSpread = pressure is not null && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes),
                         ExpectedRows = core is null && top is null && source.RowBound >= 0 ? source.RowBound / lanes : -1,
+                        Spill = spill,
+                        Lanes = lanes,
                     };
                     if (core is { Lean: true })
                     {
@@ -2371,7 +2481,7 @@ internal static class AggregationEngine
             }
 
             (GroupKeys? keys, AggregateSlot[] slots, int parts, long mergedBytes, MergedParts? delivery, long entries) =
-                await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, parted ? builder : null, merging, cancellationToken).ConfigureAwait(false);
+                await MergeAsync(merged, plan, settled, inputs, lanes, source, memory, spill, parted ? builder : null, merging, cancellationToken).ConfigureAwait(false);
             if (delivery is not null)
             {
                 // Part by part: the result starts with no group, the parts come as they are merged
@@ -2383,7 +2493,8 @@ internal static class AggregationEngine
                 return Counted(first, memory, memory.Held);
             }
 
-            plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes) with { MergeEntries = entries };
+            plan.LastRun = (Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes) with { MergeEntries = entries }).Spilled(spill);
+            spill?.Dispose();
 
             // The lanes' tables die with the merge, but the one a merge in series kept as the result.
             long result = mergedBytes;
@@ -2407,6 +2518,7 @@ internal static class AggregationEngine
         {
             // A spill's scratch closes with the query that failed: its file goes now, not at a collection.
             (core ?? pressure?.Made)?.CloseSpill();
+            spill?.Dispose();
             memory.Dispose();
             throw;
         }
@@ -2610,7 +2722,7 @@ internal static class AggregationEngine
     /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series; or, part by part, no group and the parts to come.</returns>
     private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts, long Merged, MergedParts? Delivery, long Entries)> MergeAsync(
         AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, QueryMemory memory,
-        PartBuilder? builder, long started, CancellationToken cancellationToken)
+        SpillScope? spill, PartBuilder? builder, long started, CancellationToken cancellationToken)
     {
         int largest = 0;
         for (int p = 1; p < partitions.Length; p++)
@@ -2645,6 +2757,22 @@ internal static class AggregationEngine
 
         if (partitions.Length == 1 || biggest.Keys is null || !inParts)
         {
+            // Over the whole scan, a slot one lane spilled merges every lane's runs and values apart,
+            // part by part, its answer in the largest's slot and the others' emptied: the merge in
+            // series adds nothing more.
+            if (biggest.Keys is null && Array.Exists(partitions, partition => Array.Exists(partition.Slots, slot => slot.Spilled)))
+            {
+                biggest.Trim();
+                for (int s = 0; s < biggest.Slots.Length; s++)
+                {
+                    if (inputs[s] != AggregationPartition.Settled && Array.Exists(partitions, partition => partition.Slots[s].Spilled))
+                    {
+                        AggregateSlot[] lanes = Array.ConvertAll(partitions, partition => partition.Slots[s]);
+                        await biggest.Slots[s].MergeSpilledAsync(lanes, spill!, degree, memory, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+
             // The keys and the states in series, into the largest; a distinct count's pairs, when they
             // are many, apart, by parts of the pairs taken side by side.
             int[]? numbers = null;
@@ -3328,6 +3456,10 @@ internal static class AggregationEngine
             if (partition.MustTurn)
             {
                 await partition.TurnAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else if (partition.MustSpill(batch.RowCount))
+            {
+                await partition.SpillAloneAsync(cancellationToken).ConfigureAwait(false);
             }
 
             partition.Process(batch);
