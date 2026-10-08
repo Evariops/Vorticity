@@ -284,6 +284,60 @@ public sealed partial class QueryMemoryTests
     }
 
     [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(8)]
+    public async Task AStreamUnderABudgetOneLaneFitsEndsExactAtEveryDegree(int times)
+    {
+        // A sorted key of 40 values, each with 10 000 values of its own: a distinct count by it streams,
+        // on several lanes by ranges side by side, each holding every group of its rows until it goes out,
+        // which no range can spill. Under a few times what one lane holds, the budget admits one lane, which
+        // streams its groups out as they close, or a few ranges; a set the stream takes from a range moves
+        // from one count to the other, and once a range is refused, the rest of the rows stream on one
+        // lane. Under two and three times, the ranges failed; the query ends exact.
+        Row[] rows = new Row[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            rows[row] = new Row(row / 10_000, row);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "query-memory", $"days-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            long alone = 0;
+            foreach (int degree in new[] { 1, 14 })
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(degree == 1 ? 1L << 30 : times * alone);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                });
+
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                List<KeyCount> counts = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.CountDistinct(x => x.Value))).As<KeyCount>().ToRecordsAsync(Ct).ToListAsync(Ct);
+                Assert.Equal(Enumerable.Range(0, Rows / 10_000).Select(k => new KeyCount(k, 10_000)), counts);
+                Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+                Assert.Equal(0, budget.ReservedBytes);
+                alone = budget.PeakBytes;
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
     [InlineData(1)]
     [InlineData(14)]
     public async Task EveryTableAShelfGrowsGivesBackWhatItReserved(int degree)
@@ -563,6 +617,9 @@ public sealed partial class QueryMemoryTests
 
     [VortexRecord]
     public partial record struct Row(int Key, long Value);
+
+    [VortexRecord]
+    public partial record struct KeyCount(int Key, long Count);
 
     [VortexRecord]
     public partial record struct Wide(int Key, int Other, long Value, string Name, int Extra);

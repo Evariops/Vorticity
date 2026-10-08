@@ -64,6 +64,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private long _mergeTicks;
     private int[]? _numbers;
 
+    // The lanes the budget admitted for the ranges, and the blocks the zone maps settle: what the rest of
+    // the rows need once a range refused its memory streams them on one lane (NarrowAsync).
+    private int _admitted;
+    private ZoneSettling? _settling;
+
     // On a key its zones prove final as the read goes: the floors, the first row not read yet, and
     // the ranges' rows when they go side by side.
     private readonly ZoneFinality? _zones;
@@ -211,14 +216,28 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             if (_ranges is not null)
             {
                 // A range grouped on its lane follows the rows before it, as its batches would have.
-                if (await _ranges.NextAsync().ConfigureAwait(false) is not { } range)
+                AggregationPartition? range;
+                try
+                {
+                    range = await _ranges.NextAsync().ConfigureAwait(false);
+                }
+                catch (VortexMemoryException)
+                {
+                    await NarrowAsync().ConfigureAwait(false);
+                    continue;
+                }
+
+                if (range is null)
                 {
                     await DrainAsync().ConfigureAwait(false);
                     continue;
                 }
 
+                // A group open across two ranges merges their states, which may grow while the ranges in
+                // flight hold the rest of the budget: the merge takes past it rather than fail halfway, and
+                // the ranges go, the rest of the rows streaming on one lane.
                 long merging = Stopwatch.GetTimestamp();
-                _partition!.Follow(range, ref _numbers);
+                bool overdrawn = _partition!.FollowPast(range, ref _numbers);
                 _mergeTicks += Stopwatch.GetTimestamp() - merging;
 
                 // The range's groups live in the partition now: its tables go, and what it held.
@@ -228,6 +247,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 (long arrays, long bytes, long copied) = range.Growth;
                 (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd, range.RowsFolded, arrays, bytes, copied));
                 _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
+                if (overdrawn && _followed < _rangeRows.Length)
+                {
+                    await NarrowAsync().ConfigureAwait(false);
+                }
+
                 await CloseAsync(all: false).ConfigureAwait(false);
                 continue;
             }
@@ -246,6 +270,29 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
             await CloseAsync(all: false).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The ranges let go once one is refused its memory, or the stream's partition took past the budget
+    /// to follow one, each in flight with what it held, and the rows from the next range's first on
+    /// streamed through the partition on one lane, which lets each group go as it closes where a range
+    /// holds every group of its rows: under 16 to 192 MiB, fourteen lanes of the distinct users of each
+    /// day failed where one stream fit. A stream refused too fails.
+    /// </summary>
+    private async ValueTask NarrowAsync()
+    {
+        StreamingRanges ranges = _ranges!;
+        _ranges = null;
+        await ranges.DisposeAsync().ConfigureAwait(false);
+        ScanSpec pass = _pass!;
+        AggregationEngine.Dismiss(_memory!, _admitted - 1, pass.Options.BatchRows);
+        RowRange rest = new RowRange(_rangeRows[_followed].Start, _rangeRows[^1].End);
+        if (_settling is not null)
+        {
+            _partition!.Settle(_settling, rest);
+        }
+
+        _inner = _query.Host.Source.BatchesAsync(pass with { Rows = rest }, _query.Host.Metrics).GetAsyncEnumerator(_cancellationToken);
     }
 
     /// <summary>The end of the rows: every group closes, the null group last, and the plan keeps what the run did.</summary>
@@ -335,9 +382,14 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []) { Memory = _memory };
         int degree = pass.Options.DegreeOfParallelism > 0 ? pass.Options.DegreeOfParallelism : host.Source.Session.Options.MaxDegreeOfParallelism;
-        if (descending || AggregationEngine.StreamingRanges(host.Source, pass, degree) is not { } ranges)
+        RowRange[]? ranges = descending ? null : AggregationEngine.StreamingRanges(host.Source, pass, degree);
+
+        // On the one lane a budget may admit, the rows stream through one partition, which lets each group
+        // go as it closes, where a range holds every group of its rows until it goes out: under twice what
+        // one lane holds, the ranges of a distinct count by day, one after another, failed where one stream fit.
+        int lanes = AggregationEngine.Admit(_memory, ranges is null ? 1 : degree, pass.Options.BatchRows);
+        if (ranges is null || lanes == 1)
         {
-            AggregationEngine.Admit(_memory, 1, pass.Options.BatchRows);
             if (settling is not null)
             {
                 _partition.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -360,11 +412,13 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         _pass = pass;
         _rangeRows = ranges;
+        _admitted = lanes;
+        _settling = settling;
         ScanSpec lane = pass with { Options = pass.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
         QueryMemory memory = _memory;
         _ranges = new StreamingRanges(
             ranges,
-            AggregationEngine.Admit(memory, degree, pass.Options.BatchRows),
+            lanes,
             async (rows, token) =>
             {
                 AggregationPartition range = new AggregationPartition(
@@ -374,7 +428,17 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     range.Settle(settling, rows);
                 }
 
-                await AggregationEngine.RunPartitionAsync(host.Source, lane with { Rows = rows }, host.Metrics, range, token).ConfigureAwait(false);
+                try
+                {
+                    await AggregationEngine.RunPartitionAsync(host.Source, lane with { Rows = rows }, host.Metrics, range, token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // A range that fails gives back what it held: the stream may go on without it.
+                    range.LetGo();
+                    throw;
+                }
+
                 return range;
             },
             _cancellationToken);
@@ -667,6 +731,17 @@ internal sealed class StreamingRanges : IAsyncDisposable
         }
 
         await Task.WhenAll(running).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+
+        // A range done and never gone out gives back what it held, the stream going on without it or
+        // ending; one that failed gave it back as it failed.
+        foreach (Task<AggregationPartition> grouping in running)
+        {
+            if (grouping.IsCompletedSuccessfully)
+            {
+                (await grouping.ConfigureAwait(false)).LetGo();
+            }
+        }
+
         _stop.Dispose();
     }
 

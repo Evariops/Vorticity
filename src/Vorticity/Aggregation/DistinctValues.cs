@@ -68,10 +68,18 @@ internal sealed class DistinctValues<TValue>
     /// <summary>The shelf the slots grow from from now on.</summary>
     internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
 
-    /// <summary>The set moved to another lane's slot: its slots adopted by <paramref name="shelf"/>, which they grow from from now on.</summary>
+    /// <summary>The set moved to another lane's slot: its slots handed from its shelf to <paramref name="shelf"/>, which they grow from from now on.</summary>
     internal void MoveTo(ArrayShelf? shelf)
     {
-        shelf?.Adopt(_slots);
+        if (_shelf is { } from)
+        {
+            from.Hand(_slots, shelf);
+        }
+        else
+        {
+            shelf?.Adopt(_slots);
+        }
+
         _shelf = shelf;
     }
 

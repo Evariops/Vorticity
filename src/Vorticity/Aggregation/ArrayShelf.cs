@@ -289,9 +289,39 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal bool Drops { get; set; }
 
     /// <summary>
+    /// An array this shelf handed out that <paramref name="to"/>'s tables hold from now on, never counted
+    /// twice: between two lanes' shelves of one query, its bytes move from one count to the other and the
+    /// budget is not asked; else out of a lane's count first, then into the other's
+    /// (<see cref="Adopt{T}"/>). Adopted alone, a set a stream took from a range it followed counted twice
+    /// until the range was let go, and asked for more ahead while the range kept its own: the stream
+    /// failed under three times what one lane holds.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the array to <paramref name="to"/>.</exception>
+    internal void Hand<T>(T[] array, ArrayShelf? to)
+    {
+        long bytes = (long)array.Length * Unsafe.SizeOf<T>();
+        if (Lane && to is { Lane: true } && to._memory == _memory)
+        {
+            if (bytes >= LeastCounted)
+            {
+                _out -= bytes;
+                to._out += bytes;
+            }
+
+            return;
+        }
+
+        if (Lane && bytes >= LeastCounted)
+        {
+            Unreserve(_memory!, bytes);
+        }
+
+        to?.Adopt(array);
+    }
+
+    /// <summary>
     /// An array another lane's shelf handed out, which this lane's tables now hold: reserved and
-    /// measured here as if handed out here, before the other gives it back with its tables. Nothing
-    /// for a shelf that is not a lane's.
+    /// measured here as if handed out here. Nothing for a shelf that is not a lane's.
     /// </summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
     internal void Adopt<T>(T[] array)

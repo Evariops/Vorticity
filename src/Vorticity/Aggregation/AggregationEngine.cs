@@ -2383,6 +2383,36 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
+    /// <see cref="Follow"/>, its arrays taken past the budget when it refuses them rather than the merge
+    /// failing halfway; whether they were, the partition then relieved.
+    /// </summary>
+    /// <param name="next">The partition of the next range.</param>
+    /// <param name="numbers">The numbers of the groups of a partition past those every thread shares, the caller's.</param>
+    internal bool FollowPast(AggregationPartition next, ref int[]? numbers)
+    {
+        if (_arrays is not { } arrays)
+        {
+            Follow(next, ref numbers);
+            return false;
+        }
+
+        bool overdraws = arrays.Overdraws;
+        arrays.Overdraws = true;
+        try
+        {
+            Follow(next, ref numbers);
+        }
+        finally
+        {
+            arrays.Overdraws = overdraws;
+        }
+
+        bool overdrawn = arrays.Overdrawn;
+        arrays.Relieved();
+        return overdrawn;
+    }
+
+    /// <summary>
     /// Folds in the partition of the range of rows after this one's, as its batches would have been
     /// folded: its groups mapped onto this one's by key, the new ones numbered after, in the order
     /// they were met; the streaming component of each, and the last value met, carried over.
@@ -3132,6 +3162,9 @@ internal static class AggregationEngine
         memory.Measure(lanes * laneBytes);
         return lanes;
     }
+
+    /// <summary>Gives back the working memory of <paramref name="lanes"/> lanes <see cref="Admit"/> admitted, their batches of <paramref name="batchRows"/> rows.</summary>
+    internal static void Dismiss(QueryMemory memory, int lanes, int batchRows) => memory.LetGo(lanes * Working(batchRows));
 
     /// <summary>The working memory a lane is admitted with, its batches of <paramref name="batchRows"/> rows, or the scan's.</summary>
     private static long Working(int batchRows) => batchRows > 0 ? Math.Clamp(batchRows * RowBytes, LeastLaneBytes, LaneBytes) : LaneBytes;
