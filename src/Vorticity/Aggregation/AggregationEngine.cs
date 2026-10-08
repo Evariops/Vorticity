@@ -898,6 +898,18 @@ internal sealed class AggregationPartition
     private bool _spilling;
     private bool _hashed;
 
+    /// <summary>
+    /// Whether the lane knows from its first batch that the core cannot hold the query, which a budget
+    /// that cuts its batches finds out before the pass: it asks the budget for what its table would take
+    /// folding a batch from then on. Without it, a lane asks for its arrays' doubling until it first
+    /// turns, which a key numbered by value outgrows by the pages a batch meets: fourteen lanes of a
+    /// distinct count by 10⁶ keys held twice a budget of 14 MiB before the first wrote its table.
+    /// </summary>
+    internal bool Spilling
+    {
+        init => _spilling = value;
+    }
+
     /// <summary>The runs the lane wrote its table to; null when it wrote none.</summary>
     internal List<SpillRun>? Runs => _runs;
 
@@ -2743,6 +2755,7 @@ internal static class AggregationEngine
                     Core = core?.Lane(),
                     Pressure = pressure,
                     Spill = spill,
+                    Spilling = spilledRow > 0,
                     ExpectedRows = core is null && top is null ? source.RowBound : -1,
                 };
                 if (core is { Lean: true })
@@ -2776,6 +2789,7 @@ internal static class AggregationEngine
                         TurnOnSpread = pressure is not null && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes),
                         ExpectedRows = core is null && top is null && source.RowBound >= 0 ? source.RowBound / lanes : -1,
                         Spill = spill,
+                        Spilling = spilledRow > 0,
                         Lanes = lanes,
                     };
                     if (core is { Lean: true })

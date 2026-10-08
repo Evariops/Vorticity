@@ -87,6 +87,24 @@ public sealed partial class GroupSpillTests
 
     [Theory]
     [InlineData(1, 10)]
+    [InlineData(14, 10)]
+    public async Task ADistinctCountByAWideIntegerHoldsItsPeakFromTheFirstBatch(int degree, int percent)
+    {
+        // A key of 10⁶ values numbered by value: a lane's first batch meets nearly every page of its span,
+        // 4 MB a lane, past what the budget leaves each. Lanes that asked for their arrays' doubling until
+        // they first turned held twice their budget before the first wrote its table.
+        (_, Row[] rows) = await Fixture.Async;
+        Dictionary<int, KeyCount> expected = rows.GroupBy(r => r.Wide).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Value).Distinct().LongCount()));
+        await ExactAsync(
+            degree,
+            percent,
+            file => file.Scan<Row>().GroupBy(r => r.Wide).Select(g => (g.Key, g.CountDistinct(x => x.Value))),
+            (KeyCount count) => count.Key,
+            expected);
+    }
+
+    [Theory]
+    [InlineData(1, 10)]
     [InlineData(4, 10)]
     public async Task ATextsDistinctCountByAnIntegerSpillsAndEndsExact(int degree, int percent)
     {
@@ -648,8 +666,8 @@ public sealed partial class GroupSpillTests
 
     /// <summary>
     /// The rows, written once for the class: 300 000 names of twelve bytes, 150 000 integer keys, a small
-    /// integer, a value of a thousand, texts of seven bytes among 50 000, and a price over forty binades,
-    /// of both signs, NaN one row in 97.
+    /// integer, a value of a thousand, texts of seven bytes among 50 000, a price over forty binades,
+    /// of both signs, NaN one row in 97, and integers over a span of 10⁶.
     /// </summary>
     private static class Fixture
     {
@@ -670,7 +688,8 @@ public sealed partial class GroupSpillTests
                     (int)((mix >> 40) % 7),
                     (long)((mix >> 44) % 1_000),
                     $"t-{(mix >> 8) % 50_000:D5}",
-                    price);
+                    price,
+                    (int)((mix >> 24) % 1_000_000));
             }
 
             string directory = System.IO.Path.Combine(AppContext.BaseDirectory, "group-spill");
@@ -695,7 +714,7 @@ public sealed partial class GroupSpillTests
     }
 
     [VortexRecord]
-    public partial record struct Row(string Name, int Key, int Small, long Value, string Text, double Price);
+    public partial record struct Row(string Name, int Key, int Small, long Value, string Text, double Price, int Wide);
 
     [VortexRecord]
     public partial record struct NamePrice(string Name, double Sum, double? Mean);
