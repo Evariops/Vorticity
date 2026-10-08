@@ -856,8 +856,8 @@ others that did, in series into the largest, each given back once merged; the la
 that one into the core. A query whose pass fits and whose merge by parts does not merges its tables
 the same way, in series, each given back once merged, and needs no core. Under 70 % of the memory the
 lanes' tables hold at most, fourteen lanes on 10⁵ keys end exact, their peak within 1.4 % of the
-budget; a key of text, and a composite holding one, stay on the lanes' tables, which spill when spilling
-comes.
+budget; a key of text, a composite holding one, a text's extremes and a distinct count stay on the
+lanes' tables, which spill (below).
 
 **The share.** A budget counts the queries that hold memory under it. Past seven eighths of its
 ceiling, a query that would hold more than its share — the ceiling over the active queries — is told
@@ -878,8 +878,33 @@ again is that share of the groups and a page. Under a budget the pass sizes itse
 batch takes a quarter of the ceiling over the lanes, the core's caches and open batches an eighth, its
 sub-tables split at a 256th, a lane turns once the budget could not take every growing lane's next
 doubling, and the scratch's page is a sixteenth. Under a tenth of what the lanes' tables would hold,
-fourteen lanes on 10⁶ keys end exact within 6 % of the budget. A key of text, a composite holding one
-and a distinct count do not enter the core, and are refused past their budget.
+fourteen lanes on 10⁶ keys end exact within 6 % of the budget.
+
+**The lanes' spill.** The groups the core cannot hold — a key of text or a composite holding one, a
+text's extremes, a distinct count by key — stay on the lanes' tables, which spill themselves. Before a
+batch, a lane asks the budget for what its table would take were the batch all new groups, each array's
+next growth, on every lane at once; past it, the lane's table goes to its scratch as a run, in 256
+sections by the top byte of its keys' hash under the merge's seed, each group with its key, its record
+and the states its slots keep apart, a text's bytes, a distinct count's values. The lane goes on with
+its table emptied in place, its arrays kept. While other lanes run, a pressed lane may first merge its
+table into one that the lanes retiring share and retire at its range's end: a sketch of each table's
+keys, HyperLogLog's on their hashes, tells what the shared table lacks of the lane's, and so what it
+grows by; past what the budget grants, or once half of the groups merged into it came new to it, the
+lanes' keys apart, the lanes write their own. At the end every table goes to the scratch, and the result comes
+back part by part, as a merge in parts delivers it: a part is a stretch of every run's sections, merged
+into a table that grows from a shelf of its own under the budget, built into batches and let go; as
+few parts as keep one within half the room the budget leaves, as many built ahead as that half holds,
+none when one takes it all. A distinct count over the whole scan spills its set alone, by the top
+byte of its values' hash, its parts counted from sets sized by their sections; a `Distinct` on a key the
+core cannot take spills the reader's index, the values met before its first run told as they came, the
+others told at the end, each part read back, the first run's values silently first. Such a query's
+batches of new groups on every lane come to a sixteenth of the ceiling, 128 bytes a row, and lanes
+whose working memory passes a quarter of it start on half as many. A state with references fails the
+query past its budget, typed. On the bench, a count by 10⁶ URLs over 4M rows ends exact at one lane
+in 0.38 s under half of the 90 MB its table holds, writing 7 runs, and in 0.33 s under a tenth,
+writing 62, against 0.20 s with the budget it needs; fourteen lanes, which hold 564 MB in 0.067 s,
+end in 0.29 s under half of it, writing 35 runs, and in 0.30 s under a tenth, writing 160; every peak
+within 6 % of its budget.
 
 **The sort in runs.** An order over groups that spilled sorts them in runs: the groups held in memory,
 then each part spilled as it comes back, pass through the filters before the order, and their rows —
@@ -909,10 +934,7 @@ reader is done with its batches, which the session's pool holds outside any quer
 fourteen lanes, its batches no longer built on the reader's thread alone once the merge is done, a
 million keys took 0.83 of the time and four aggregates 0.68.
 
-Not yet: a key cursor over a result larger than its budget, which a merge of runs cannot seek in;
-text keys and distinct counts in the spill. Every state
-will spill as bytes, a custom state without references with its record; a custom aggregator whose
-state holds references, which no bytes stand for, fails the query instead.
+Not yet: a key cursor over a result larger than its budget, which a merge of runs cannot seek in.
 
 ## 10. Plan and statistics
 
@@ -938,8 +960,9 @@ statistics what happened. Once the result is read, its `ScanStatistics` carry `G
 most held at once, which a streaming group by keeps small, and a core delivering part by part to the
 parts applied and not yet built; `PeakBytes`, the most it held of its memory
 budget; `Lanes` and `MergeParts`; what the core did, `Core`, `CacheEvictions`, `BypassedRows`,
-`Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts` and
-`SpilledBytes`, zero until spilling comes; the key blocks by how they were grouped,
+`Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts`, the core's
+parts written to scratch, `SpilledRuns`, the lanes' tables written, and `SpilledBytes`, what either
+wrote, zero until spilling comes; the key blocks by how they were grouped,
 `KeyBlocksByRange` (constant, run-end), `KeyBlocksByCode` and `KeyBlocksHashed`; and
 `TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch; `CoreReason`, why the
 core held the groups, asked for, a lane's first rows, its first batch's spread or the memory budget,
