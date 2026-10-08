@@ -102,6 +102,8 @@ internal static class GroupScenarios
                 "q5" => path => DbSumsByIntAsync(path, configure),
                 "q7" => path => DbRangeByIdAsync(path, configure),
                 "q10" => path => DbSumCountBySixAsync(path, configure),
+                "id3" => path => DbSumByTextAsync(path, configure),
+                "id6" => path => DbSumByIntAsync(path, configure),
                 _ => null,
             };
         }
@@ -610,6 +612,37 @@ internal static class GroupScenarios
         return groups;
     }
 
+    /// <summary>
+    /// The sum of <c>v1</c> by <c>id3</c>, a text of 12 bytes of N/100 values: beside <see cref="DbSumByIntAsync"/>,
+    /// the same group by over a short text and over a word.
+    /// </summary>
+    private static async Task<long> DbSumByTextAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id3).Select(g => (g.Key, g.Sum(r => r.V1))), configure).As<DbTextSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>The sum of <c>v1</c> by <c>id6</c>, an integer of N/100 values.</summary>
+    private static async Task<long> DbSumByIntAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbIntSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id6).Select(g => (g.Key, g.Sum(r => r.V1))), configure).As<DbIntSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values);
+        }
+
+        return groups;
+    }
+
     /// <summary>db-benchmark's q2: the sum of <c>v1</c> by <c>id1</c> and <c>id2</c>, two texts of 100 values.</summary>
     private static async Task<long> DbSumByTwoIdsAsync(string path, Action<AggregationPlan>? configure)
     {
@@ -806,6 +839,10 @@ public partial record struct GroupByRow(string Id1, string Id2, string Id3, int 
 /// <summary>db-benchmark's q1: a text key and a sum.</summary>
 [VortexRecord]
 public partial record struct DbTextSum(string Key, long V1);
+
+/// <summary>An integer key of db-benchmark's rows and a sum.</summary>
+[VortexRecord]
+public partial record struct DbIntSum(int Key, long V1);
 
 /// <summary>db-benchmark's q2: two text keys and a sum.</summary>
 [VortexRecord]

@@ -402,7 +402,11 @@ internal struct KeyTable<TValue>
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         uint hash;
-        if (seed != 0)
+        if (typeof(TValue) == typeof(TextWord))
+        {
+            hash = TextWord.Home(low, high, seed);
+        }
+        else if (seed != 0)
         {
             hash = (uint)((Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed)) >> 32);
         }

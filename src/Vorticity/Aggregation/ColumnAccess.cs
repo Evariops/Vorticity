@@ -418,6 +418,32 @@ internal readonly ref struct BytesBlock
         }
     }
 
+    /// <summary>
+    /// Row <paramref name="row"/>'s value as one word, when it is 12 bytes or less, which its view holds
+    /// whole: its length in the low 32 bits, its bytes above, zero past them whatever the view holds there
+    /// (<see cref="ShortTextKeys"/>); false for a longer value. Undefined for a null row.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TryWord(int row, out TextWord word)
+    {
+        ReadOnlySpan<byte> view = _views.Slice(row * ViewSize, ViewSize);
+        ulong low = BinaryPrimitives.ReadUInt64LittleEndian(view);
+        uint size = (uint)low;
+        if (size > MaxInline)
+        {
+            word = default;
+            return false;
+        }
+
+        // The value's bits from the view's start: 32 for its length, then 8 a byte, 32 to 128.
+        int bits = 32 + (8 * (int)size);
+        ulong high = BinaryPrimitives.ReadUInt64LittleEndian(view[8..]);
+        low &= bits >= 64 ? ulong.MaxValue : (1UL << bits) - 1;
+        high &= bits <= 64 ? 0 : bits >= 128 ? ulong.MaxValue : (1UL << (bits - 64)) - 1;
+        word = new TextWord(low, high);
+        return true;
+    }
+
     /// <summary>Data buffer <paramref name="buffer"/> of the block, which row <paramref name="row"/> names.</summary>
     private ReadOnlySpan<byte> Data(int row, uint buffer)
     {

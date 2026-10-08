@@ -497,7 +497,7 @@ internal sealed class AggregationPlan
             StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf),
             StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
             StorageKind.Bool => new BoolKeys(key),
-            StorageKind.Bytes => new BytesKeys(key, sorted, shelf),
+            StorageKind.Bytes => new ShortTextKeys(key, sorted, probeAhead, shelf),
             _ => throw key.Unsupported("a group key"),
         };
 }

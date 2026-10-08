@@ -587,6 +587,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             _index = new KeyTable<TValue>(shelf);
         }
+
         if (Integers && bounds is { } known && known.Max >= known.Min)
         {
             // The span counts both ends; a span of every long wraps to none.
@@ -871,6 +872,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         ReadOnlySpan<TValue> canonical = FixedReader.Values(arena, node, kind, ref _values, out ReadOnlySpan<ulong> validity);
+        return AssignValues(canonical, validity, rows, selection, rowGroups, ranges);
+    }
+
+    /// <summary>
+    /// <see cref="Assign"/> over a block's values in canonical form, which a caller may have made: a short
+    /// text key's words (<see cref="ShortTextKeys"/>).
+    /// </summary>
+    internal bool AssignValues(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    {
         if (_sorted)
         {
             Runs(canonical, validity, rows, selection, ranges);
@@ -969,6 +979,36 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             int row = left[i];
             rowGroups[row] = StorageValues.IsValid(validity, row) ? Lookup(canonical[row]) : NullGroup();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="TwoPasses"/> over the rows from <paramref name="start"/> of a block, <paramref name="values"/>
+    /// theirs, every row selected: a short text key's words taken a few thousand rows at a time, so that a
+    /// lane that meets many keys turns into bytes before its table of words grows (<see cref="ShortTextKeys"/>).
+    /// </summary>
+    internal void AssignRange(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, int[] rowGroups)
+    {
+        int rows = values.Length;
+        if (_probeAhead > 0)
+        {
+            Scratch.Grow(ref _homes, rows);
+        }
+
+        Span<int> groups = rowGroups.AsSpan(start, rows);
+        _sink ^= _index.FindAtHome(values, groups, _homes, Math.Max(_probeAhead, 0), out bool missed);
+        if (!missed && validity.IsEmpty)
+        {
+            return;
+        }
+
+        for (int i = 0; i < rows; i++)
+        {
+            bool valid = StorageValues.IsValid(validity, start + i);
+            if (groups[i] < 0 || !valid)
+            {
+                groups[i] = valid ? Lookup(values[i]) : NullGroup();
+            }
         }
     }
 
@@ -1593,7 +1633,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return leftValid == StorageValues.IsValid(validity, right) && (!leftValid || values[left].Equals(values[right]));
     }
 
-    private int Lookup(TValue value)
+    /// <summary>The group of <paramref name="value"/>, numbered as it first comes.</summary>
+    internal int Lookup(TValue value)
     {
         if (_appending)
         {
@@ -1614,7 +1655,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return group;
     }
 
-    private int NullGroup()
+    /// <summary>The group of the null key, numbered as it first comes.</summary>
+    internal int NullGroup()
     {
         if (_null < 0)
         {
@@ -1623,6 +1665,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
         return _null;
     }
+
+    /// <summary>The key of group <paramref name="group"/>; the null group's is the default value.</summary>
+    internal TValue KeyAt(int group) => _keys[group];
 
     private int Add(TValue value)
     {
@@ -1945,7 +1990,10 @@ internal sealed class BytesKeys : GroupKeys
     }
 
     /// <summary>The group of <paramref name="value"/>, its entry in the table, numbered as it first comes.</summary>
-    private int Lookup(ReadOnlySpan<byte> value) => Lookup(value, MergeHash.Of(value, MergeHash.Seed));
+    internal int Lookup(ReadOnlySpan<byte> value) => Lookup(value, MergeHash.Of(value, MergeHash.Seed));
+
+    /// <summary>The bytes of group <paramref name="group"/>'s key; none for the null group.</summary>
+    internal ReadOnlySpan<byte> KeyOf(int group) => _table.KeyOf(group);
 
     /// <summary>As <see cref="Lookup(ReadOnlySpan{byte})"/>, the value's hash under <see cref="MergeHash.Seed"/> known.</summary>
     private int Lookup(ReadOnlySpan<byte> value, ulong hash)
@@ -1995,7 +2043,8 @@ internal sealed class BytesKeys : GroupKeys
         }
     }
 
-    private int NullGroup()
+    /// <summary>The group of the null key, numbered as it first comes.</summary>
+    internal int NullGroup()
     {
         if (_null < 0)
         {
