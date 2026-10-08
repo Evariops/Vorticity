@@ -836,9 +836,13 @@ parts and the cut of a merge; the scratch a sort, a top or a fetch rents; the gr
 their order until it is delivered. A lane's working memory besides its tables, a batch's scratch and
 its decoding, is admitted with the query, 16 bytes a row of its batches between 64 KiB and a megabyte,
 a megabyte when the scan sets no batch size: a query its budget cannot give every lane starts on half
-as many, down to one. What the queries let go stays in the heap until a collection; when that, or what
-the collector keeps committed past its heap, stands between a reservation and the ceiling, a collection
-that gives it back comes first. A query refused fails with a `VortexMemoryException` that names the
+as many, down to one. Over a source that copies what it reads, a store or positional reads, a lane's
+two splits read ahead of its decode are admitted with it, each the largest split of the layout, which
+a walk of the layout finds before the pass; under a budget short of them, the lanes read one ahead,
+then none, before they are halved, and give them back when the pass ends. A mapping reads in place,
+its reads views of it: nothing more is admitted. What the queries let go stays in the heap until a
+collection; when that, or what the collector keeps committed past its heap, stands between a
+reservation and the ceiling, a collection that gives it back comes first. A query refused fails with a `VortexMemoryException` that names the
 operator, its groups and its bytes, everything it held given back.
 
 **Under pressure**, a group by its lanes' tables outgrow ends in the core rather than failing, on a key
