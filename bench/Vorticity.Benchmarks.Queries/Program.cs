@@ -16,6 +16,7 @@
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
+//   … -- --fixture spread-random-20000000-core2025.10                                   that fixture written if it is not yet, its path printed
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -78,7 +79,23 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["readings-16"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: false),
     ["readings-16-deleted"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: true),
     [$"spread-random-{HighCardinality.SmallRows}-16"] = () => Fixtures.SpreadDatasetAsync(HighCardinality.SmallRows, 16),
+    [$"spread-random-{HighCardinality.FullRows}-16"] = () => Fixtures.SpreadDatasetAsync(HighCardinality.FullRows, 16),
+    [$"spread-random-{HighCardinality.FullRows}-core2025.10"] = () => Fixtures.RandomSpreadAsync(HighCardinality.FullRows, VortexEdition.Core20251000),
+    [$"spread-strided-{HighCardinality.FullRows}-core2025.10"] = () => Fixtures.StridedSpreadAsync(HighCardinality.FullRows, VortexEdition.Core20251000),
 };
+
+// --fixture NAME: that file written, if it is not yet, and its path printed: what the native runner reads.
+if (Text(args, "--fixture") is { } fixtureName)
+{
+    if (!fixtures.TryGetValue(fixtureName, out Func<ValueTask<string>>? fixture))
+    {
+        Console.Error.WriteLine($"no fixture named '{fixtureName}': {string.Join(", ", fixtures.Keys)}");
+        return 2;
+    }
+
+    Console.WriteLine(await fixture().ConfigureAwait(false));
+    return 0;
+}
 Dictionary<string, string> files = new Dictionary<string, string>(StringComparer.Ordinal);
 (string File, Scenario Scenario)[] scenarios = [.. Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()).Concat(HandKernels.All())];
 

@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 
 using Vorticity.Aggregating;
 using Vorticity.Bench.Scenarios;
+using Vorticity.Dataset;
 
 namespace Vorticity.Bench.Runner;
 
@@ -32,7 +33,8 @@ namespace Vorticity.Bench.Runner;
 /// </para>
 /// <para>
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
-/// <c>whole</c> (the core's groups delivered whole), <c>capacity=N</c>, <c>alpha=N</c>,
+/// <c>whole</c> (the core's groups delivered whole), <c>tables</c> (the lanes' tables, the core taken
+/// neither from the zones nor from the first rows), <c>capacity=N</c>, <c>alpha=N</c>,
 /// <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
 /// (the core's ε, in percent). The degree is the runner's <c>--threads</c>.
 /// </para>
@@ -70,6 +72,11 @@ internal static class GroupScenarios
         if (shape[1] == "stridedfloor" && shape[2] == "k7")
         {
             return StridedFloorAsync;
+        }
+
+        if (shape[1] == "total" && shape[2] is "drift" or "zipf")
+        {
+            return shape[2] == "drift" ? path => SkewsAsync(path, static s => s.Drift, configure) : path => SkewsAsync(path, static s => s.Zipf, configure);
         }
 
         if (shape[1] == "pages")
@@ -144,6 +151,11 @@ internal static class GroupScenarios
                 plan.CoreLanes = 1;
             },
             "whole" => static plan => plan.CoreParted = false,
+            "tables" => static plan =>
+            {
+                plan.CoreScattered = false;
+                plan.CoreOnNew = false;
+            },
             "capacity" => plan => plan.CoreCapacity = Valued(value, name),
             "alpha" => plan => plan.CoreAlpha = Valued(value, name),
             "floor" => plan => plan.CoreFloor = Valued(value, name),
@@ -152,7 +164,7 @@ internal static class GroupScenarios
             "window" => plan => plan.FoldWindow = Valued(value, name),
             "probe" => plan => plan.ProbeAhead = Valued(value, name),
             "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
-            _ => throw new ArgumentException($"No switch named '{name}': core, whole, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
+            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
     }
 
@@ -199,7 +211,7 @@ internal static class GroupScenarios
             ? line
             : line + string.Create(
                 CultureInfo.InvariantCulture,
-                $" core_alpha={core.Alpha} core_capacity={core.Capacity} flushes={core.Flushes} flushed_groups={core.FlushedGroups} bypassed_rows={core.BypassedRows} bursts={core.Bursts} pending_peak_bytes={core.PendingPeakBytes} reloaded_bytes={core.ReloadedBytes} tables={core.Tables} splits={core.Splits} batch_bytes={core.BatchBytes}");
+                $" core_reason={core.Reason} core_alpha={core.Alpha} core_capacity={core.Capacity} flushes={core.Flushes} flushed_groups={core.FlushedGroups} bypassed_rows={core.BypassedRows} bursts={core.Bursts} pending_peak_bytes={core.PendingPeakBytes} reloaded_bytes={core.ReloadedBytes} tables={core.Tables} splits={core.Splits} batch_bytes={core.BatchBytes}");
     }
 
     /// <summary>The aggregation with the scenario's switches set on its plan.</summary>
@@ -212,9 +224,10 @@ internal static class GroupScenarios
 
     private static async Task<long> TotalAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
     {
-        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        (IAsyncDisposable source, Scan<Spread> scan) = await ScanAsync<Spread>(path);
+        await using IAsyncDisposable closing = source;
         long rows = 0;
-        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Spread>()
+        await foreach (Columns<KeyTotal> groups in Configured(scan
             .GroupBy(key)
             .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
             .As<KeyTotal>())
@@ -223,6 +236,34 @@ internal static class GroupScenarios
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The scan of <paramref name="path"/>, a file or a dataset's directory, through the runner's session,
+    /// and what closes it: the bench's datasets are the spread files' rows cut into objects.
+    /// </summary>
+    private static async Task<(IAsyncDisposable Source, Scan<T> Scan)> ScanAsync<T>(string path)
+        where T : IVortexRecord<T>
+    {
+        if (!System.IO.Directory.Exists(path))
+        {
+            VortexFile file = await ScenarioSet.OpenAsync(path);
+            return (file, file.Scan<T>());
+        }
+
+        FileObjectStore store = new FileObjectStore(path);
+        VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = ScenarioSet.Session ?? VortexSession.Default });
+        return (new Closing(dataset, store), dataset.Scan<T>());
+    }
+
+    /// <summary>A dataset and its store, closed in that order.</summary>
+    private sealed class Closing(VortexDataset dataset, FileObjectStore store) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            await dataset.DisposeAsync();
+            await store.DisposeAsync();
+        }
     }
 
     private static async Task<long> FourAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
@@ -495,6 +536,22 @@ internal static class GroupScenarios
         return rows;
     }
 
+    /// <summary>A count and a sum by the skews file's hot keys that drift as the rows go, or its Zipf key.</summary>
+    private static async Task<long> SkewsAsync(string path, Func<Probe<Skews>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Skews>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
+            .As<KeyTotal>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
     /// <summary>
     /// The floor under the strided file's group by of 10⁷ keys: the same two columns read and decoded on
     /// the same lanes, their values summed, no key grouped. What the group by takes past it is its own.
@@ -530,6 +587,10 @@ public partial record struct Spread(int K3, int K4, int K5, int K6, int K7, int 
 /// <summary>A row of the bench's strided file: its keys shifted left by 22 bits.</summary>
 [VortexRecord]
 public partial record struct Strided(long K3, long K4, long K5, long K6, long K7, long Value, double Real);
+
+/// <summary>A row of the bench's skews file: a key drawn by a Zipf law over a million values, hot keys that drift, a value.</summary>
+[VortexRecord]
+public partial record struct Skews(int Zipf, int Drift, long Value);
 
 /// <summary>The strided file's key of 10⁷ values and its value, alone.</summary>
 [VortexRecord]

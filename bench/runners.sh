@@ -202,11 +202,11 @@ case "$1" in
 
         # One run: the median of its rounds after the first, in microseconds, and the result it gave.
         run() {
-            local side="$1" bin="$2" name="$3" file="$4" threads="$5" log="$6"
+            local side="$1" bin="$2" name="$3" file="$4" threads="$5" log="$6" label="$7"
             [ "$rest" -gt 0 ] && sleep "$rest"
             "$bin" --scenario "$name" "$file" 0 --repeat "$repeat" --threads "$threads" > "$log" 2>&1 || {
                 echo "the $side runner failed on $name at $threads:" >&2; tail -5 "$log" >&2; return 1; }
-            awk -v side="$side" -v name="$name" -v threads="$threads" '
+            awk -v side="$side" -v name="$label" -v threads="$threads" '
                 /^round=/ {
                     split($0, f, " ")
                     for (i in f) { split(f[i], kv, "="); v[kv[1]] = kv[2] }
@@ -225,21 +225,22 @@ case "$1" in
             file="${spec#*@}"
             [ "$file" = "$spec" ] && file="$(file_of "$name")"
             case "$file" in */*) ;; *) file="$corpus/$file" ;; esac
-            [ -f "$file" ] || { echo "no file $file for $name: vortex-queries --matrix small or full writes it" >&2; exit 2; }
+            [ -e "$file" ] || { echo "no file $file for $name: vortex-queries --matrix small or full, or --fixture, writes it" >&2; exit 2; }
+            label="$name@$(basename "$file")"
             for threads in ${degrees//,/ }; do
                 started="$(load)"
                 for ((i = 1; i <= alternations; i++)); do
-                    log="$out/$name-$threads-$i"
+                    log="$out/$name-$(basename "$file")-$threads-$i"
                     if ((i % 2 == 1)); then
-                        run before "$before_bin" "$name" "$file" "$threads" "$log-before.log" >> "$tsv" || exit 1
-                        run after "$after_bin" "$name" "$file" "$threads" "$log-after.log" >> "$tsv" || exit 1
+                        run before "$before_bin" "$name" "$file" "$threads" "$log-before.log" "$label" >> "$tsv" || exit 1
+                        run after "$after_bin" "$name" "$file" "$threads" "$log-after.log" "$label" >> "$tsv" || exit 1
                     else
-                        run after "$after_bin" "$name" "$file" "$threads" "$log-after.log" >> "$tsv" || exit 1
-                        run before "$before_bin" "$name" "$file" "$threads" "$log-before.log" >> "$tsv" || exit 1
+                        run after "$after_bin" "$name" "$file" "$threads" "$log-after.log" "$label" >> "$tsv" || exit 1
+                        run before "$before_bin" "$name" "$file" "$threads" "$log-before.log" "$label" >> "$tsv" || exit 1
                     fi
                 done
 
-                printf '%s\t%s\tload\t%s\t%s\n' "$name" "$threads" "$started" "$(load)" >> "$tsv"
+                printf '%s\t%s\tload\t%s\t%s\n' "$label" "$threads" "$started" "$(load)" >> "$tsv"
             done
         done
 
@@ -262,7 +263,7 @@ case "$1" in
                 result[key] = $5
             }
             END {
-                printf "%-48s %10s %10s %7s %15s %13s\n", "scenario (degree)", "before ms", "after ms", "ratio", "pairs min-max", "load"
+                printf "%-64s %10s %10s %7s %15s %13s\n", "scenario@file (degree)", "before ms", "after ms", "ratio", "pairs min-max", "load"
                 for (i = 1; i <= n; i++) {
                     key = order[i]; b = key SUBSEP "before"; a = key SUBSEP "after"
                     nb = count[b]; na = count[a]
@@ -271,7 +272,7 @@ case "$1" in
                     lo = 1e9; hi = 0
                     for (j = 0; j < nb && j < na; j++) { r = times[a, j] / times[b, j]; lo = r < lo ? r : lo; hi = r > hi ? r : hi }
                     mb = median(lb, nb); ma = median(la, na)
-                    printf "%-48s %10.2f %10.2f %7.3f %7.3f-%-7.3f %13s%s\n", key, mb / 1000, ma / 1000, ma / mb, lo, hi, loads[key], (key in differs) ? "  RESULT DIFFERS" : ""
+                    printf "%-64s %10.2f %10.2f %7.3f %7.3f-%-7.3f %13s%s\n", key, mb / 1000, ma / 1000, ma / mb, lo, hi, loads[key], (key in differs) ? "  RESULT DIFFERS" : ""
                 }
             }' "$tsv"
         ;;
