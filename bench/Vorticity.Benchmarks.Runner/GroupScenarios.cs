@@ -34,8 +34,8 @@ namespace Vorticity.Bench.Runner;
 /// <para>
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
 /// <c>whole</c> (the core's groups delivered whole), <c>tables</c> (the lanes' tables, the core taken
-/// neither from the zones nor from the first rows), <c>capacity=N</c>, <c>alpha=N</c>,
-/// <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
+/// neither from the first batch nor from the first rows), <c>nofan</c> (the lanes all start at the head
+/// of the queue), <c>capacity=N</c>, <c>alpha=N</c>, <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
 /// (the core's ε, in percent). The degree is the runner's <c>--threads</c>.
 /// </para>
 /// </remarks>
@@ -77,6 +77,16 @@ internal static class GroupScenarios
         if (shape[1] == "total" && shape[2] is "drift" or "zipf")
         {
             return shape[2] == "drift" ? path => SkewsAsync(path, static s => s.Drift, configure) : path => SkewsAsync(path, static s => s.Zipf, configure);
+        }
+
+        if (shape[1] == "total" && shape[2] is "rising" or "falling")
+        {
+            return shape[2] == "rising" ? path => PhasesAsync(path, static p => p.Rising, configure) : path => PhasesAsync(path, static p => p.Falling, configure);
+        }
+
+        if (shape[1] == "total" && shape[2] == "session")
+        {
+            return path => SessionsAsync(path, configure);
         }
 
         if (shape[1] == "pages")
@@ -156,6 +166,7 @@ internal static class GroupScenarios
                 plan.CoreScattered = false;
                 plan.CoreOnNew = false;
             },
+            "nofan" => static plan => plan.Fan = false,
             "capacity" => plan => plan.CoreCapacity = Valued(value, name),
             "alpha" => plan => plan.CoreAlpha = Valued(value, name),
             "floor" => plan => plan.CoreFloor = Valued(value, name),
@@ -164,7 +175,7 @@ internal static class GroupScenarios
             "window" => plan => plan.FoldWindow = Valued(value, name),
             "probe" => plan => plan.ProbeAhead = Valued(value, name),
             "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
-            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
+            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, nofan, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
     }
 
@@ -536,6 +547,38 @@ internal static class GroupScenarios
         return rows;
     }
 
+    /// <summary>A count and a sum by the phases file's key that turns from few values to many, or from many to few.</summary>
+    private static async Task<long> PhasesAsync(string path, Func<Probe<Phases>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Phases>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
+            .As<KeyTotal>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>A count and a sum by the phases file's sessions, two consecutive rows each, hashed.</summary>
+    private static async Task<long> SessionsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<LongKeyTotal> groups in Configured(file.Scan<Phases>()
+            .GroupBy(p => p.Session)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
+            .As<LongKeyTotal>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
     /// <summary>A count and a sum by the skews file's hot keys that drift as the rows go, or its Zipf key.</summary>
     private static async Task<long> SkewsAsync(string path, Func<Probe<Skews>, Sym<int>> key, Action<AggregationPlan>? configure)
     {
@@ -587,6 +630,10 @@ public partial record struct Spread(int K3, int K4, int K5, int K6, int K7, int 
 /// <summary>A row of the bench's strided file: its keys shifted left by 22 bits.</summary>
 [VortexRecord]
 public partial record struct Strided(long K3, long K4, long K5, long K6, long K7, long Value, double Real);
+
+/// <summary>A row of the bench's phases file: a key from few values to many, one from many to few, sessions of two rows hashed, a value.</summary>
+[VortexRecord]
+public partial record struct Phases(int Rising, int Falling, long Session, long Value);
 
 /// <summary>A row of the bench's skews file: a key drawn by a Zipf law over a million values, hot keys that drift, a value.</summary>
 [VortexRecord]

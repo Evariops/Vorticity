@@ -82,6 +82,7 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     [$"spread-random-{HighCardinality.FullRows}-16"] = () => Fixtures.SpreadDatasetAsync(HighCardinality.FullRows, 16),
     [$"spread-random-{HighCardinality.FullRows}-core2025.10"] = () => Fixtures.RandomSpreadAsync(HighCardinality.FullRows, VortexEdition.Core20251000),
     [$"spread-strided-{HighCardinality.FullRows}-core2025.10"] = () => Fixtures.StridedSpreadAsync(HighCardinality.FullRows, VortexEdition.Core20251000),
+    [$"phases-{HighCardinality.FullRows}"] = () => Fixtures.PhasesAsync(HighCardinality.FullRows),
 };
 
 // --fixture NAME: that file written, if it is not yet, and its path printed: what the native runner reads.

@@ -247,6 +247,22 @@ internal static class Fixtures
             (int)(c % 100), (int)((c >> 32) % 1_000_000), (long)(Mix(c) % 1_000));
     });
 
+    /// <summary>
+    /// Keys whose cardinality changes as the rows go, stored canonical: <c>Rising</c>, 10³ values over the
+    /// first quarter of the rows, then 10⁷; <c>Falling</c>, the other way round; <c>Session</c>, a session
+    /// of two consecutive rows, ten million of them, hashed to 64 bits, which a key of the first rows
+    /// alone reads as few.
+    /// </summary>
+    internal static ValueTask<string> PhasesAsync(int rows) => WriteOnceAsync($"phases-{rows}.vortex", rows, canonical: true, row =>
+    {
+        ulong a = Mix((ulong)row);
+        ulong b = Mix(a);
+        bool early = row < rows / 4;
+        int few = (int)(a % 1_000);
+        int many = (int)(b % 10_000_000);
+        return new Phases(early ? few : many, early ? many : few, (long)Mix((ulong)(row / 2)), (long)((a >> 40) % 1_000));
+    });
+
     /// <summary>Visits of ten million users over 365 days, the days in order, a user drawn at random for each; stored canonical.</summary>
     internal static ValueTask<string> VisitsAsync(int rows) => WriteOnceAsync($"visits-{rows}.vortex", rows, canonical: true, row =>
         new Visit((int)(Mix((ulong)row) % 10_000_000), (int)((long)row * 365 / rows)));

@@ -208,6 +208,10 @@ public partial record struct Strided(long K3, long K4, long K5, long K6, long K7
 [VortexRecord]
 public partial record struct Skews(int Zipf, int Drift, long Value);
 
+/// <summary>Keys whose cardinality changes as the rows go: few then many, many then few, and sessions of two rows.</summary>
+[VortexRecord]
+public partial record struct Phases(int Rising, int Falling, long Session, long Value);
+
 /// <summary>Text keys: a URL of about forty bytes among a million, a UUID among a million, a small integer; an integer key of a million values.</summary>
 [VortexRecord]
 public partial record struct Page(string Url, Guid Id, int Small, int Key, long Value);
