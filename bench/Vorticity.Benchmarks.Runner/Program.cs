@@ -122,6 +122,13 @@ internal static class Program
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"budget_bytes={budget.CeilingBytes} budget_peak_bytes={budget.PeakBytes}"));
         }
 
+        // What the scenarios bench/duckdb.sh compares read of their results, a round: DuckDB's outer query
+        // answers the same sum.
+        if (grouped && GroupScenarios.Checksum != 0)
+        {
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"checksum={GroupScenarios.Checksum / repeat:R}"));
+        }
+
         (long cpuMs, long rssBytes) = ProcessCost.Read();
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,

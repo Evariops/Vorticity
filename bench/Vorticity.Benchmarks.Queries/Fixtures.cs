@@ -1,5 +1,7 @@
 using System;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -159,6 +161,33 @@ internal static class Fixtures
             (int)(a % 1_000), (int)((a >> 32) % 10_000), (int)(b % 100_000), (int)((b >> 32) % 1_000_000), (int)(c % 10_000_000),
             (int)((c >> 32) % (ulong)Math.Max(1, rows / 10)), unchecked((int)((uint)row * 2_654_435_761u)), (long)(Mix(c) % 10_000), Mix(c) % 100_000 / 100.0);
     }, edition);
+
+    /// <summary>
+    /// The rows of db-benchmark's group by (its <c>groupby-datagen.R</c>, N rows, K groups, no nulls, not
+    /// sorted), drawn by the same laws from the bench's own stream rather than R's: <c>id1</c> and
+    /// <c>id2</c> among <c>sprintf("id%03d", 1:K)</c>, <c>id3</c> among <c>sprintf("id%010d", 1:(N/K))</c>,
+    /// <c>id4</c> and <c>id5</c> in 1..K, <c>id6</c> in 1..N/K, <c>v1</c> in 1..5, <c>v2</c> in 1..15,
+    /// <c>v3</c> uniform over [0, 100) rounded to six decimals; stored canonical. The same shape as the
+    /// published files, not the same bytes: both sides of a comparison read this file.
+    /// </summary>
+    internal static ValueTask<string> GroupByAsync(int rows, int k, VortexEdition? edition = null)
+    {
+        int many = Math.Max(1, rows / k);
+        string[] few = [.. Enumerable.Range(1, k).Select(i => string.Create(CultureInfo.InvariantCulture, $"id{i:D3}"))];
+        string[] ids = [.. Enumerable.Range(1, many).Select(i => string.Create(CultureInfo.InvariantCulture, $"id{i:D10}"))];
+        return WriteOnceAsync($"groupby-{rows}-{k}{Suffix(edition)}.vortex", rows, canonical: true, row =>
+        {
+            ulong a = Mix((ulong)row);
+            ulong b = Mix(a);
+            ulong c = Mix(b);
+            ulong d = Mix(c);
+            double v3 = Math.Round((Mix(d) >> 11) * (100.0 / (1UL << 53)), 6);
+            return new GroupByRow(
+                few[(int)(a % (ulong)k)], few[(int)((a >> 32) % (ulong)k)], ids[(int)(b % (ulong)many)],
+                (int)((b >> 32) % (ulong)k) + 1, (int)(c % (ulong)k) + 1, (int)((c >> 32) % (ulong)many) + 1,
+                (int)(d % 5) + 1, (int)((d >> 32) % 15) + 1, v3);
+        }, edition);
+    }
 
     /// <summary>
     /// What a fixture's name adds for a file written at an older edition: the edition, <c>-core2025.10</c>

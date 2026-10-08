@@ -91,6 +91,21 @@ internal static class GroupScenarios
             return path => SessionsAsync(path, configure);
         }
 
+        if (shape[1] == "db")
+        {
+            return shape[2] switch
+            {
+                "q1" => path => DbSumByIdAsync(path, configure),
+                "q2" => path => DbSumByTwoIdsAsync(path, configure),
+                "q3" => path => DbSumMeanByIdAsync(path, configure),
+                "q4" => path => DbMeansByIntAsync(path, configure),
+                "q5" => path => DbSumsByIntAsync(path, configure),
+                "q7" => path => DbRangeByIdAsync(path, configure),
+                "q10" => path => DbSumCountBySixAsync(path, configure),
+                _ => null,
+            };
+        }
+
         if (shape[1] == "pages")
         {
             return shape[2] switch
@@ -264,7 +279,9 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
             .As<KeyTotal>())
         {
-            rows += Sum(groups.Column<long>(1).Values);
+            long counted = Sum(groups.Column<long>(1).Values);
+            rows += counted;
+            Checksum += counted + Sum(groups.Column<long>(2).Values);
         }
 
         return rows;
@@ -322,7 +339,9 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Count(), g.Min(s => s.Value), g.Max(s => s.Value))), configure)
             .As<KeyRange>())
         {
-            rows += Sum(groups.Column<long>(1).Values);
+            long counted = Sum(groups.Column<long>(1).Values);
+            rows += counted;
+            Checksum += counted + Sum(groups.Column<long>(2).Values) + Sum(groups.Column<long>(3).Values);
         }
 
         return rows;
@@ -562,10 +581,127 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
             .As<LongKeyTotal>())
         {
-            rows += Sum(groups.Column<long>(1).Values);
+            long counted = Sum(groups.Column<long>(1).Values);
+            rows += counted;
+            Checksum += counted + Sum(groups.Column<long>(2).Values);
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// What the scenarios that bench/duckdb.sh runs read of their results, as DuckDB's outer query does:
+    /// every column they aggregate, summed, so that both sides do the same work, and the two answers can
+    /// be held to each other. Kept here, where no compiler drops it; the runner prints it a round.
+    /// </summary>
+    internal static double Checksum { get; private set; }
+
+    /// <summary>db-benchmark's q1: the sum of <c>v1</c> by <c>id1</c>, a text of 100 values.</summary>
+    private static async Task<long> DbSumByIdAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id1).Select(g => (g.Key, g.Sum(r => r.V1))), configure).As<DbTextSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q2: the sum of <c>v1</c> by <c>id1</c> and <c>id2</c>, two texts of 100 values.</summary>
+    private static async Task<long> DbSumByTwoIdsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTwoTextsSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => (r.Id1, r.Id2)).Select(g => (g.Key.Id1, g.Key.Id2, g.Sum(r => r.V1))), configure).As<DbTwoTextsSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(2).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q3: the sum of <c>v1</c> and the mean of <c>v3</c> by <c>id3</c>, a text of N/100 values.</summary>
+    private static async Task<long> DbSumMeanByIdAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextSumMean> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id3).Select(g => (g.Key, g.Sum(r => r.V1), g.Average(r => r.V3))), configure).As<DbTextSumMean>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values) + Sum(batch.Column<double>(2).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q4: the means of <c>v1</c>, <c>v2</c> and <c>v3</c> by <c>id4</c>, an integer of 100 values.</summary>
+    private static async Task<long> DbMeansByIntAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbIntMeans> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id4).Select(g => (g.Key, g.Average(r => r.V1), g.Average(r => r.V2), g.Average(r => r.V3))), configure).As<DbIntMeans>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<double>(1).Values) + Sum(batch.Column<double>(2).Values) + Sum(batch.Column<double>(3).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q5: the sums of <c>v1</c>, <c>v2</c> and <c>v3</c> by <c>id6</c>, an integer of N/100 values.</summary>
+    private static async Task<long> DbSumsByIntAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbIntSums> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id6).Select(g => (g.Key, g.Sum(r => r.V1), g.Sum(r => r.V2), g.Sum(r => r.V3))), configure).As<DbIntSums>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values) + Sum(batch.Column<long>(2).Values) + Sum(batch.Column<double>(3).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q7: the largest <c>v1</c> less the least <c>v2</c> by <c>id3</c>, the difference taken as the groups are read.</summary>
+    private static async Task<long> DbRangeByIdAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextRange> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id3).Select(g => (g.Key, g.Max(r => r.V1), g.Min(r => r.V2))), configure).As<DbTextRange>())
+        {
+            groups += batch.RowCount;
+            ReadOnlySpan<int> most = batch.Column<int>(1).Values;
+            ReadOnlySpan<int> least = batch.Column<int>(2).Values;
+            long range = 0;
+            for (int i = 0; i < most.Length; i++)
+            {
+                range += most[i] - least[i];
+            }
+
+            Checksum += range;
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q10: the sum of <c>v3</c> and the rows by all six keys, nearly a group a row.</summary>
+    private static async Task<long> DbSumCountBySixAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbSixSumCount> batch in Configured(file.Scan<GroupByRow>()
+            .GroupBy(r => (r.Id1, r.Id2, r.Id3, r.Id4, r.Id5, r.Id6))
+            .Select(g => (g.Key.Id1, g.Key.Id2, g.Key.Id3, g.Key.Id4, g.Key.Id5, g.Key.Id6, g.Sum(r => r.V3), g.Count())), configure).As<DbSixSumCount>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<double>(6).Values) + Sum(batch.Column<long>(7).Values);
+        }
+
+        return groups;
     }
 
     /// <summary>A count and a sum by the phases file's key that turns from few values to many, or from many to few.</summary>
@@ -642,6 +778,17 @@ internal static class GroupScenarios
 
         return sum;
     }
+
+    private static double Sum(ReadOnlySpan<double> values)
+    {
+        double sum = 0;
+        foreach (double value in values)
+        {
+            sum += value;
+        }
+
+        return sum;
+    }
 }
 
 /// <summary>A row of the bench's spread files: a key column per cardinality, from 10³ to 10⁷ values, a key ten rows a value and one a row a value, and two values to aggregate.</summary>
@@ -651,6 +798,38 @@ public partial record struct Spread(int K3, int K4, int K5, int K6, int K7, int 
 /// <summary>A row of the bench's strided file: its keys shifted left by 22 bits.</summary>
 [VortexRecord]
 public partial record struct Strided(long K3, long K4, long K5, long K6, long K7, long Value, double Real);
+
+/// <summary>A row of db-benchmark's group by: three text keys, three integer keys, two integers and a float to aggregate.</summary>
+[VortexRecord]
+public partial record struct GroupByRow(string Id1, string Id2, string Id3, int Id4, int Id5, int Id6, int V1, int V2, double V3);
+
+/// <summary>db-benchmark's q1: a text key and a sum.</summary>
+[VortexRecord]
+public partial record struct DbTextSum(string Key, long V1);
+
+/// <summary>db-benchmark's q2: two text keys and a sum.</summary>
+[VortexRecord]
+public partial record struct DbTwoTextsSum(string Id1, string Id2, long V1);
+
+/// <summary>db-benchmark's q3: a text key, a sum and a mean.</summary>
+[VortexRecord]
+public partial record struct DbTextSumMean(string Key, long V1, double? V3);
+
+/// <summary>db-benchmark's q4: an integer key and three means.</summary>
+[VortexRecord]
+public partial record struct DbIntMeans(int Key, double? V1, double? V2, double? V3);
+
+/// <summary>db-benchmark's q5: an integer key and three sums.</summary>
+[VortexRecord]
+public partial record struct DbIntSums(int Key, long V1, long V2, double V3);
+
+/// <summary>db-benchmark's q7: a text key, the largest of one value and the least of another.</summary>
+[VortexRecord]
+public partial record struct DbTextRange(string Key, int? V1, int? V2);
+
+/// <summary>db-benchmark's q10: six keys, a sum and the rows.</summary>
+[VortexRecord]
+public partial record struct DbSixSumCount(string Id1, string Id2, string Id3, int Id4, int Id5, int Id6, double V3, long Count);
 
 /// <summary>A row of the bench's phases file: a key from few values to many, one from many to few, sessions of two rows hashed, a value.</summary>
 [VortexRecord]
