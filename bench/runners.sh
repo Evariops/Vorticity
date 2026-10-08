@@ -4,7 +4,7 @@
 #
 #   bench/runners.sh keep [<commit>] [--force]
 #   bench/runners.sh list
-#   bench/runners.sh alt <before> <after> [--alternations N] [--repeat N] [--threads N[,M…]] <scenario>[@<file>] …
+#   bench/runners.sh alt <before> <after> [--alternations N] [--repeat N] [--rest S] [--threads N[,M…]] <scenario>[@<file>] …
 #
 #   bench/runners.sh keep main
 #   bench/runners.sh alt main HEAD --threads 1,14 group-pages-url group-users-day@visits-20000000.vortex
@@ -29,7 +29,10 @@
 # ~/.cache/vorticity/queries unless it holds a slash; without one, each family has its file, the one
 # bench/Vorticity.Benchmarks.Runner/GroupScenarios.cs names (vortex-queries --matrix small and full write
 # them). The table prints the machine's load before and after each scenario: on a machine whose load
-# passes its cores, a degree-14 ratio is to be replayed before it is believed.
+# passes its cores, a degree-14 ratio is to be replayed before it is believed. With --rest S, S
+# seconds of rest before every run: fourteen lanes heat a laptop, and on 2026-10-08 a group by of 10^7
+# keys run back to back read 133 ms in its first process and 165 to 245 in the next, where five
+# seconds of rest before each kept every process within 5 % of the others.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,7 +41,7 @@ corpus="${VORTICITY_QUERIES_CORPUS:-$HOME/.cache/vorticity/queries}"
 usage() {
     echo "usage: bench/runners.sh keep [<commit>] [--force]" >&2
     echo "       bench/runners.sh list" >&2
-    echo "       bench/runners.sh alt <before> <after> [--alternations N] [--repeat N] [--threads N[,M…]] <scenario>[@<file>] …" >&2
+    echo "       bench/runners.sh alt <before> <after> [--alternations N] [--repeat N] [--rest S] [--threads N[,M…]] <scenario>[@<file>] …" >&2
     exit 2
 }
 [ $# -ge 1 ] || usage
@@ -170,12 +173,14 @@ case "$1" in
         shift 2
         alternations=3
         repeat=8
+        rest=0
         degrees="1"
         scenarios=()
         while [ $# -gt 0 ]; do
             case "$1" in
                 --alternations) alternations="$2"; shift 2 ;;
                 --repeat) repeat="$2"; shift 2 ;;
+                --rest) rest="$2"; shift 2 ;;
                 --threads) degrees="$2"; shift 2 ;;
                 --*) usage ;;
                 *) scenarios+=("$1"); shift ;;
@@ -198,6 +203,7 @@ case "$1" in
         # One run: the median of its rounds after the first, in microseconds, and the result it gave.
         run() {
             local side="$1" bin="$2" name="$3" file="$4" threads="$5" log="$6"
+            [ "$rest" -gt 0 ] && sleep "$rest"
             "$bin" --scenario "$name" "$file" 0 --repeat "$repeat" --threads "$threads" > "$log" 2>&1 || {
                 echo "the $side runner failed on $name at $threads:" >&2; tail -5 "$log" >&2; return 1; }
             awk -v side="$side" -v name="$name" -v threads="$threads" '

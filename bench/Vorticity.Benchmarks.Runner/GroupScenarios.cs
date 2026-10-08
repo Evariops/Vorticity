@@ -23,7 +23,8 @@ namespace Vorticity.Bench.Runner;
 /// <c>first</c> (the hundred smallest keys and their counts), <c>countdistinct</c>, <c>distinct</c>
 /// (the key's distinct values) over an integer key (<c>k3</c>
 /// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); <c>strided</c>, a count and a sum over the strided
-/// file's long keys; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
+/// file's long keys, and <c>stridedfloor-k7</c>, its floor: the same two columns read and summed, no
+/// key grouped; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
 /// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000); <c>pages</c>, a count by a text of the pages
 /// file (<c>url</c>) or by its UUID (<c>uuid</c>), a million groups each, or the least and greatest
 /// URL by its integer key (<c>texts</c>); and <c>names-name</c>, a
@@ -32,8 +33,8 @@ namespace Vorticity.Bench.Runner;
 /// <para>
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
 /// <c>whole</c> (the core's groups delivered whole), <c>capacity=N</c>, <c>alpha=N</c>,
-/// <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>. The degree is
-/// the runner's <c>--threads</c>.
+/// <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
+/// (the core's ε, in percent). The degree is the runner's <c>--threads</c>.
 /// </para>
 /// </remarks>
 internal static class GroupScenarios
@@ -64,6 +65,11 @@ internal static class GroupScenarios
         if (shape[1] == "strided")
         {
             return StridedKey(shape[2]) is { } stridedKey ? path => StridedAsync(path, stridedKey, configure) : null;
+        }
+
+        if (shape[1] == "stridedfloor" && shape[2] == "k7")
+        {
+            return StridedFloorAsync;
         }
 
         if (shape[1] == "pages")
@@ -145,7 +151,8 @@ internal static class GroupScenarios
             "batch" => plan => plan.CoreBatchEntries = Valued(value, name),
             "window" => plan => plan.FoldWindow = Valued(value, name),
             "probe" => plan => plan.ProbeAhead = Valued(value, name),
-            _ => throw new ArgumentException($"No switch named '{name}': core, whole, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N.", nameof(option)),
+            "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
+            _ => throw new ArgumentException($"No switch named '{name}': core, whole, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
     }
 
@@ -488,6 +495,22 @@ internal static class GroupScenarios
         return rows;
     }
 
+    /// <summary>
+    /// The floor under the strided file's group by of 10⁷ keys: the same two columns read and decoded on
+    /// the same lanes, their values summed, no key grouped. What the group by takes past it is its own.
+    /// </summary>
+    private static async Task<long> StridedFloorAsync(string path)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long sum = 0;
+        await foreach (Columns<StridedPair> batch in file.Scan<StridedPair>())
+        {
+            sum += Sum(batch.Column<long>(0).Values) + Sum(batch.Column<long>(1).Values);
+        }
+
+        return sum;
+    }
+
     private static long Sum(ReadOnlySpan<long> values)
     {
         long sum = 0;
@@ -507,6 +530,10 @@ public partial record struct Spread(int K3, int K4, int K5, int K6, int K7, int 
 /// <summary>A row of the bench's strided file: its keys shifted left by 22 bits.</summary>
 [VortexRecord]
 public partial record struct Strided(long K3, long K4, long K5, long K6, long K7, long Value, double Real);
+
+/// <summary>The strided file's key of 10⁷ values and its value, alone.</summary>
+[VortexRecord]
+public partial record struct StridedPair(long K7, long Value);
 
 /// <summary>An integer key's rows.</summary>
 [VortexRecord]
