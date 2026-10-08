@@ -28,11 +28,14 @@ namespace Vorticity.Bench.Runner;
 /// key grouped; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
 /// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000); <c>pages</c>, a count by a text of the pages
 /// file (<c>url</c>) or by its UUID (<c>uuid</c>), a million groups each, or the least and greatest
-/// URL by its integer key (<c>texts</c>); and <c>names-name</c>, a
-/// count by the name of a names file (a million names, or a thousand in <c>names-1e3-4000000</c>).
+/// URL by its integer key (<c>texts</c>); <c>names-name</c>, a
+/// count by the name of a names file (a million names, or a thousand in <c>names-1e3-4000000</c>); and
+/// <c>total-late</c>, a count and a sum by the late file's key, a million keys nearly in order, each
+/// late by up to 2 500 rows (<c>late-4000000.vortex</c>), which streams.
 /// </para>
 /// <para>
-/// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
+/// The plan's switches follow, each after a <c>+</c>: <c>zones</c> (a key its zones prove final
+/// streams at every degree), <c>blocking</c> (no stream), <c>core</c> (the core at every degree),
 /// <c>whole</c> (the core's groups delivered whole), <c>tables</c> (the lanes' tables, the core taken
 /// neither from the first batch nor from the first rows), <c>nofan</c> (the lanes all start at the head
 /// of the queue), <c>noretire</c> (lanes under pressure write their tables rather than retire into
@@ -89,6 +92,11 @@ internal static class GroupScenarios
         if (shape[1] == "total" && shape[2] == "session")
         {
             return path => SessionsAsync(path, configure);
+        }
+
+        if (shape[1] == "total" && shape[2] == "late")
+        {
+            return path => LateAsync(path, configure);
         }
 
         if (shape[1] == "db")
@@ -174,6 +182,8 @@ internal static class GroupScenarios
         int? value = at < 0 ? null : int.Parse(option.AsSpan(at + 1), NumberStyles.Integer, CultureInfo.InvariantCulture);
         return name switch
         {
+            "zones" => static plan => plan.ZonesAtEveryDegree = true,
+            "blocking" => static plan => plan.Blocking = true,
             "core" => static plan =>
             {
                 plan.Core = true;
@@ -196,7 +206,7 @@ internal static class GroupScenarios
             "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
             "noretire" => static plan => plan.LanesRetire = false,
             "budget" => Budget(Valued(value, name)),
-            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, nofan, noretire, budget=N (MiB), capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
+            _ => throw new ArgumentException($"No switch named '{name}': zones, blocking, core, whole, tables, nofan, noretire, budget=N (MiB), capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
     }
 
@@ -769,6 +779,22 @@ internal static class GroupScenarios
         return rows;
     }
 
+    /// <summary>A count and a sum by the late file's key, nearly in order: its zones prove each key final, so it streams.</summary>
+    private static async Task<long> LateAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Keyed>()
+            .GroupBy(k => k.Key)
+            .Select(g => (g.Key, g.Count(), g.Sum(k => k.Value))), configure)
+            .As<KeyTotal>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
     /// <summary>A count and a sum by the skews file's hot keys that drift as the rows go, or its Zipf key.</summary>
     private static async Task<long> SkewsAsync(string path, Func<Probe<Skews>, Sym<int>> key, Action<AggregationPlan>? configure)
     {
@@ -911,6 +937,10 @@ public partial record struct KeyMost(int Key, long? Most);
 /// <summary>A long key's rows and the sum of their values.</summary>
 [VortexRecord]
 public partial record struct LongKeyTotal(long Key, long Count, long Total);
+
+/// <summary>A row of the late file: a key nearly in order, late by up to 2 500 rows, and a value.</summary>
+[VortexRecord]
+public partial record struct Keyed(int Key, long Value);
 
 /// <summary>A row of the bench's draws file: keys of 4 to a million values, a value, a price.</summary>
 [VortexRecord]
