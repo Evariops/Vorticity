@@ -115,6 +115,13 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool Blocking { get; set; }
 
+    /// <summary>
+    /// Whether a key its zones may prove final streams on several lanes all the same, where its pass blocks
+    /// by default there (<see cref="ZoneFinality.Candidate"/>): the switch the bench and the tests compare
+    /// the two paths with.
+    /// </summary>
+    internal bool ZonesAtEveryDegree { get; set; }
+
     /// <summary>What the plan's last run did, lane by lane, and its merge; null before one.</summary>
     internal AggregationRun? LastRun { get; set; }
 
@@ -2462,25 +2469,67 @@ internal sealed class AggregationPartition
     /// <param name="numbers">The numbers of the groups of a partition past those every thread shares, the caller's.</param>
     internal bool FollowPast(AggregationPartition next, ref int[]? numbers)
     {
-        if (_arrays is not { } arrays)
-        {
-            Follow(next, ref numbers);
-            return false;
-        }
-
-        bool overdraws = arrays.Overdraws;
-        arrays.Overdraws = true;
+        bool overdraws = OverdrawFrom();
         try
         {
             Follow(next, ref numbers);
         }
         finally
         {
-            arrays.Overdraws = overdraws;
+            OverdrawTo(overdraws);
         }
 
-        bool overdrawn = arrays.Overdrawn;
-        arrays.Relieved();
+        return Overdrew();
+    }
+
+    /// <summary>
+    /// Folds in <paramref name="earlier"/>, the open groups of the rows before this partition's, which
+    /// stands for both from then on: the few groups those rows left open where following this partition
+    /// would put all of its own into them. Taken past the budget as <see cref="FollowPast"/> takes them;
+    /// whether they were.
+    /// </summary>
+    /// <param name="earlier">The partition of the rows before.</param>
+    /// <param name="numbers">The numbers of the groups of a partition past those every thread shares, the caller's.</param>
+    internal bool AbsorbPast(AggregationPartition earlier, ref int[]? numbers)
+    {
+        bool overdraws = OverdrawFrom();
+        try
+        {
+            MergeFrom(earlier, ref numbers);
+        }
+        finally
+        {
+            OverdrawTo(overdraws);
+        }
+
+        return Overdrew();
+    }
+
+    /// <summary>The partition's arrays taken past the budget from now on; whether they were before.</summary>
+    private bool OverdrawFrom()
+    {
+        bool overdraws = _arrays?.Overdraws ?? false;
+        if (_arrays is { } arrays)
+        {
+            arrays.Overdraws = true;
+        }
+
+        return overdraws;
+    }
+
+    private void OverdrawTo(bool overdraws)
+    {
+        if (_arrays is { } arrays)
+        {
+            arrays.Overdraws = overdraws;
+        }
+    }
+
+    /// <summary>Whether the arrays were taken past the budget, the partition relieved.</summary>
+    private bool Overdrew()
+    {
+        bool overdrawn = _arrays is { Overdrawn: true };
+        _arrays?.Relieved();
         return overdrawn;
     }
 

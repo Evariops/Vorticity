@@ -36,6 +36,9 @@ public sealed partial class ZoneFinalityTests
             Vorticity.Aggregation byTime = file.Scan<Event>().With(new ScanOptions { BatchRows = 8_192 })
                 .GroupBy(r => r.At).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
             AggregationQuery query = (AggregationQuery)byTime.Query;
+
+            // On several lanes the pass blocks by default: the zones' path, asked for.
+            query.Plan.ZonesAtEveryDegree = true;
             Assert.Equal(-1, StreamingGroupBatches.Streaming(query));
             Assert.True(ZoneFinality.Candidate(query));
             Assert.Equal(expected, await ListAsync(byTime.As<AtTotal>()));
@@ -55,6 +58,47 @@ public sealed partial class ZoneFinalityTests
             // Down, the key's zones prove nothing: every group held, the same answers.
             List<AtTotal> down = await ListAsync(file.Scan<Event>().GroupBy(r => r.At).OrderByDescending(g => g.Key).Take(3).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))).As<AtTotal>());
             Assert.Equal(expected.Where(e => e.At is not null).Reverse().Take(3), down);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task OnSeveralLanesTheZonesStreamUnderAWindowOrABudgetAlone()
+    {
+        // The stream took twice the blocking pass's time on several lanes: there it streams under a window
+        // or a budget short of what the blocking pass holds, and on one lane, as it did everywhere.
+        Event[] rows = Events(shuffled: false);
+        string path = await WriteAsync(rows);
+        try
+        {
+            foreach ((int degree, long? budget, bool take, bool zones) in new (int, long?, bool, bool)[]
+            {
+                (1, null, false, true),
+                (4, null, false, false),
+                (4, null, true, true),
+                (4, 1L << 20, false, true),
+                (4, 1L << 30, false, false),
+            })
+            {
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    if (budget is long ceiling)
+                    {
+                        options.MemoryBudget = new QueryMemoryBudget(ceiling);
+                    }
+                });
+
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Scan<Event> scan = file.Scan<Event>();
+                Vorticity.Aggregation byTime = take
+                    ? scan.GroupBy(r => r.At).OrderBy(g => g.Key).Take(5).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)))
+                    : scan.GroupBy(r => r.At).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
+                Assert.Equal(zones, ZoneFinality.Candidate((AggregationQuery)byTime.Query));
+            }
         }
         finally
         {

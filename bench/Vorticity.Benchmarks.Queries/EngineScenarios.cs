@@ -53,6 +53,7 @@ internal static class EngineScenarios
         yield return ("medium", new Scenario("group by medium key (200k keys x 20), count sum", KeyedAsync, 10_000));
         yield return ("late", new Scenario("group by nearly sorted key (1M keys, late by 2 500), count sum", (file, run) => LateKeysAsync(file, run, blocking: false), 100_000));
         yield return ("late", new Scenario("group by nearly sorted key (1M keys, late by 2 500), count sum, blocking", (file, run) => LateKeysAsync(file, run, blocking: true), 100_000));
+        yield return ("late", new Scenario("group by nearly sorted key (1M keys, late by 2 500), count sum, zones", (file, run) => LateKeysAsync(file, run, blocking: false, zones: true), 100_000));
 
         // The floors at equal work: a count and an integer sum, which a hand loop does exactly.
         yield return ("readings", new Scenario("group by city (run-end), count sum of an int", CityDaysAsync));
@@ -273,13 +274,14 @@ internal static class EngineScenarios
     }
 
     /// <summary>A key its zones prove final as the read goes (6g), or the same query forced to block.</summary>
-    private static async Task<long> LateKeysAsync(VortexFile file, Run run, bool blocking)
+    private static async Task<long> LateKeysAsync(VortexFile file, Run run, bool blocking, bool zones = false)
     {
         long rows = 0;
         Aggregation keys = run.Track(file.Scan<Keyed>()
             .GroupBy(k => k.Key)
             .Select(g => (g.Key, g.Count(), g.Sum(k => k.Value))));
         ((AggregationQuery)keys.Query).Plan.Blocking = blocking;
+        ((AggregationQuery)keys.Query).Plan.ZonesAtEveryDegree = zones;
         await foreach (Columns<KeyTotal> groups in keys.As<KeyTotal>())
         {
             run.Answer();

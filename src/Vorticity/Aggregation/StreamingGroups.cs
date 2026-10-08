@@ -237,11 +237,29 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 // flight hold the rest of the budget: the merge takes past it rather than fail halfway, and
                 // the ranges go, the rest of the rows streaming on one lane.
                 long merging = Stopwatch.GetTimestamp();
-                bool overdrawn = _partition!.FollowPast(range, ref _numbers);
-                _mergeTicks += Stopwatch.GetTimestamp() - merging;
+                bool overdrawn;
+                if (_zones is not null && _partition!.Keys!.Count < range.Keys!.Count)
+                {
+                    // On a key its zones prove final, most of a range's groups are closed by the floor its own
+                    // rows raise: the few groups left open go into the range, which becomes the partition,
+                    // rather than every group of the range into them. On 4M rows of a key late by 2 500 at
+                    // fourteen lanes, following put 31 ranges of 33 000 groups each into the open ones, in
+                    // series: 6.3 ms of 15.7.
+                    AggregationPartition open = _partition;
+                    overdrawn = range.AbsorbPast(open, ref _numbers);
+                    _partition = range;
+                    _outcome = new AggregationOutcome(_query.Plan, range.Slots, range.Keys, []) { Memory = _memory };
+                    open.LetGo();
+                }
+                else
+                {
+                    overdrawn = _partition!.FollowPast(range, ref _numbers);
 
-                // The range's groups live in the partition now: its tables go, and what it held.
-                range.LetGo();
+                    // The range's groups live in the partition now: its tables go, and what it held.
+                    range.LetGo();
+                }
+
+                _mergeTicks += Stopwatch.GetTimestamp() - merging;
                 _partition.Recount();
                 _nextRow = _rangeRows[_followed++].End;
                 (long arrays, long bytes, long copied) = range.Growth;
