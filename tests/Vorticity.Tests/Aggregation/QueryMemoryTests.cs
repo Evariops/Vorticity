@@ -377,7 +377,7 @@ public sealed partial class QueryMemoryTests
         Wide[] data = new Wide[rows];
         for (int row = 0; row < rows; row++)
         {
-            data[row] = new Wide(row % 50_000, row % 7, row % 100, $"n{row % 50_000}", row % 3);
+            data[row] = new Wide(row % 50_000, row % 7, row % 100, $"n{row % 50_000}", row % 3, row % 5, row % 11, (short)(row % 13), row % 2 == 0);
         }
 
         string path = Path.Combine(AppContext.BaseDirectory, "query-memory", $"wide-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
@@ -399,7 +399,8 @@ public sealed partial class QueryMemoryTests
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
 
-            // A text key; a key of two columns; one of five, encoded into bytes.
+            // A text key; a key of two columns; one of five, its numbers packed into a word; one of nine,
+            // encoded into bytes.
             Assert.Equal(50_000, (await file.Scan<Wide>().GroupBy(r => r.Name).Select(g => g.Count()).ToListAsync(Ct)).Count);
             Assert.Equal(0, budget.ReservedBytes);
             Assert.Equal(data.Select(r => (r.Key, r.Other)).Distinct().Count(), (await file.Scan<Wide>().GroupBy(r => (r.Key, r.Other)).Select(g => g.Count()).ToListAsync(Ct)).Count);
@@ -407,6 +408,10 @@ public sealed partial class QueryMemoryTests
             Assert.Equal(
                 data.Select(r => (r.Key, r.Other, r.Value, r.Name, r.Extra)).Distinct().Count(),
                 (await file.Scan<Wide>().GroupBy(r => (r.Key, r.Other, r.Value, r.Name, r.Extra)).Select(g => g.Count()).ToListAsync(Ct)).Count);
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Equal(
+                data.Select(r => (r.Key, r.Other, r.Value, r.Name, r.Extra, r.Fourth, r.Fifth, r.Tiny, r.Even)).Distinct().Count(),
+                (await file.Scan<Wide>().GroupBy(r => (r.Key, r.Other, r.Value, r.Name, r.Extra, r.Fourth, r.Fifth, r.Tiny, r.Even)).Select(g => g.Count()).ToListAsync(Ct)).Count);
             Assert.Equal(0, budget.ReservedBytes);
 
             // A text's extreme, and distinct counts of a text and of an integer.
@@ -653,5 +658,5 @@ public sealed partial class QueryMemoryTests
     public partial record struct KeyCount(int Key, long Count);
 
     [VortexRecord]
-    public partial record struct Wide(int Key, int Other, long Value, string Name, int Extra);
+    public partial record struct Wide(int Key, int Other, long Value, string Name, int Extra, int Fourth, int Fifth, short Tiny, bool Even);
 }

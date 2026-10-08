@@ -433,7 +433,7 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// The index of the groups of one partition: a key of one column by its own index, of two to
-    /// four by their indexes' numbers packed into a word, of more by their values encoded into bytes.
+    /// eight by their indexes' numbers packed into a word, of more by their values encoded into bytes.
     /// </summary>
     /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
@@ -444,6 +444,7 @@ internal sealed class AggregationPlan
         2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout, shelf: shelf) : new RawKeys<UInt128>(layout, shelf: shelf),
         2 => new PackedKeys<ulong>(Keys, facts, shelf: shelf),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts, shelf: shelf),
+        <= 8 => new PackedKeys<PackedTuple>(Keys, facts, shelf: shelf),
         _ => new CompositeKeys(Keys, shelf),
     };
 

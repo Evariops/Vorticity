@@ -56,6 +56,25 @@ public sealed partial class GroupSpillTests
     }
 
     [Theory]
+    [InlineData(1, 10)]
+    [InlineData(4, 50)]
+    [InlineData(14, 10)]
+    public async Task AKeyOfSixPartsSpillsAndEndsExact(int degree, int percent)
+    {
+        // Two texts and four integers, their numbers in a word of 256 bits: each part's values written
+        // by its index, the words packed again as the runs are read back.
+        (_, Row[] rows) = await Fixture.Async;
+        Dictionary<(string, int, int, string, int, long), SixCount> expected = rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value))
+            .ToDictionary(g => g.Key, g => new SixCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
+        await ExactAsync(
+            degree,
+            percent,
+            file => file.Scan<Row>().GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value)).Select(g => (g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count())),
+            (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value),
+            expected);
+    }
+
+    [Theory]
     [MemberData(nameof(Budgets))]
     public async Task ATextsExtremesByAnIntegerSpillAndEndExact(int degree, int percent)
     {
@@ -751,6 +770,9 @@ public sealed partial class GroupSpillTests
 
     [VortexRecord]
     public partial record struct PairTotal(string Name, int Small, long Count, long Total);
+
+    [VortexRecord]
+    public partial record struct SixCount(string Name, int Key, int Small, string Text, int Wide, long Value, long Count);
 
     [VortexRecord]
     public partial record struct KeyTexts(int Key, string? Least, string? Greatest);

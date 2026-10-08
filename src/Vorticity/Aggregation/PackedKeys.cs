@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -15,7 +16,7 @@ namespace Vorticity.Aggregating;
 internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1);
 
 /// <summary>
-/// A key of two to four columns as the numbers its parts have in indexes of their own, packed into
+/// A key of two to eight columns as the numbers its parts have in indexes of their own, packed into
 /// one word: each column is grouped by the index of a key of one column, with that index's paths by
 /// run, by code and by value, its nulls in its null group, and the tuple of the parts' groups is the
 /// key. No row is encoded into bytes; a row whose parts are the row before's is a comparison of
@@ -37,11 +38,16 @@ internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, lon
 /// product spreads the tuples of small numbers over the whole word, and is undone by the number's
 /// inverse. The groups are found by open addressing, a slot from the top bits of the word, in a
 /// table of group numbers at most half full; the words are kept once, by group. A word of 128 bits
-/// is mixed by the same number before its top bits are read. Drawn once a process, the number cannot
-/// be aimed at: no data is built to crowd the slots.
+/// is mixed by the same number before its top bits are read, one of 256 bits each of its four words in
+/// turn. Drawn once a process, the number cannot be aimed at: no data is built to crowd the slots.
+/// </para>
+/// <para>
+/// Five columns and more went through <see cref="CompositeKeys"/>, each row's values encoded into bytes,
+/// hashed and stored, the merge hashing them again: db-benchmark's q10, six columns of which three are
+/// texts and a group nearly a row, spent half its cycles there at fourteen lanes.
 /// </para>
 /// </remarks>
-/// <typeparam name="TKey">The word: <see cref="ulong"/> for two parts, <see cref="UInt128"/> for three or four.</typeparam>
+/// <typeparam name="TKey">The word: <see cref="ulong"/> for two parts, <see cref="UInt128"/> for three or four, <see cref="PackedTuple"/> for five to eight.</typeparam>
 internal sealed class PackedKeys<TKey> : GroupKeys
     where TKey : unmanaged, IEquatable<TKey>
 {
@@ -474,9 +480,19 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             return Unsafe.BitCast<ulong, TKey>(low * Odd);
         }
 
+        if (typeof(TKey) == typeof(PackedTuple))
+        {
+            return Unsafe.BitCast<PackedTuple, TKey>(new PackedTuple(low, PairAt(ids, 2), PairAt(ids, 4), PairAt(ids, 6)));
+        }
+
         ulong high = (uint)ids[2] | (ids.Length > 3 ? (ulong)(uint)ids[3] << 32 : 0);
         return Unsafe.BitCast<UInt128, TKey>(new UInt128(high, low));
     }
+
+    /// <summary>The numbers of parts <paramref name="first"/> and the next in one word, none past the parts.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong PairAt(ReadOnlySpan<int> ids, int first) =>
+        first >= ids.Length ? 0 : (uint)ids[first] | (first + 1 < ids.Length ? (ulong)(uint)ids[first + 1] << 32 : 0);
 
     /// <summary>The number part <paramref name="part"/> has in a word.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -485,6 +501,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         if (typeof(TKey) == typeof(ulong))
         {
             return (int)(uint)((Unsafe.BitCast<TKey, ulong>(key) * Inverse) >> (32 * part));
+        }
+
+        if (typeof(TKey) == typeof(PackedTuple))
+        {
+            return Unsafe.BitCast<TKey, PackedTuple>(key).Id(part);
         }
 
         return (int)(uint)(Unsafe.BitCast<TKey, UInt128>(key) >> (32 * part));
@@ -903,6 +924,15 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             return Unsafe.BitCast<TKey, ulong>(key);
         }
 
+        if (typeof(TKey) == typeof(PackedTuple))
+        {
+            PackedTuple tuple = Unsafe.BitCast<TKey, PackedTuple>(key);
+            ulong mixed = tuple.A * Odd;
+            mixed = (mixed ^ tuple.B) * Odd;
+            mixed = (mixed ^ tuple.C) * Odd;
+            return (mixed ^ tuple.D) * Odd;
+        }
+
         UInt128 wide = Unsafe.BitCast<TKey, UInt128>(key);
         return (((ulong)wide * Odd) ^ (ulong)(wide >> 64)) * Odd;
     }
@@ -926,4 +956,46 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         return inverse;
     }
+}
+
+/// <summary>
+/// The word of a key of five to eight parts (<see cref="PackedKeys{TKey}"/>): their numbers, 32 bits each,
+/// two to a word of 64, the first parts in <see cref="A"/>; zero past the last part.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal readonly struct PackedTuple : IEquatable<PackedTuple>
+{
+    internal readonly ulong A;
+    internal readonly ulong B;
+    internal readonly ulong C;
+    internal readonly ulong D;
+
+    internal PackedTuple(ulong a, ulong b, ulong c, ulong d)
+    {
+        A = a;
+        B = b;
+        C = c;
+        D = d;
+    }
+
+    /// <summary>The number of part <paramref name="part"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int Id(int part)
+    {
+        ulong word = (part >> 1) switch
+        {
+            0 => A,
+            1 => B,
+            2 => C,
+            _ => D,
+        };
+
+        return (int)(uint)(word >> (32 * (part & 1)));
+    }
+
+    public bool Equals(PackedTuple other) => A == other.A && B == other.B && C == other.C && D == other.D;
+
+    public override bool Equals(object? obj) => obj is PackedTuple other && Equals(other);
+
+    public override int GetHashCode() => HashCode.Combine(A, B, C, D);
 }
