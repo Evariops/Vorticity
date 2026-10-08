@@ -782,8 +782,14 @@ cardinality changes as the rows go would mislead them together. The first lane w
 turns them all, not most of them: on 2·10⁷ rows at fourteen lanes, a key of 10³ values on its first
 quarter and 10⁷ on the rest takes 65.6 ms against 64.2 for the core asked for; the other way round,
 40.6 against 40.0, where a majority of lanes that met the 10³ values kept the lanes' tables, 59.0. A
-hashed key local in the rows, sessions of two rows, reads as 4·10⁴ values on a lane's first rows and
-keeps the lanes' tables, at twice the core's time. The key space is cut into 256 parts by the top byte of
+hashed key local in the rows, sessions of two rows, reads as 4·10⁴ values on a lane's first rows; past
+them, a lane counts its new groups a window of 65 536 rows at a time, never a row at a time. A key drawn
+from a fixed set of values brings them at a falling rate, e^(−r/K), which the first rows judged; one whose
+rate, after three windows, has kept four fifths of itself over two is projected linearly, its groups
+plus the rate times its rows left, and past half a million, with rows left of twice its groups to repay
+emptying its table, the lane turns, once. A key whose last window's keys rise, in the order of the rows,
+never does. The sessions take 134 ms this way, against 205 on the lanes' tables and 98 with the core
+asked for; a hundred thousand values at random turn on nothing. The key space is cut into 256 parts by the top byte of
 the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
 kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
 falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
@@ -969,7 +975,8 @@ parts written to scratch, `SpilledRuns`, the lanes' tables written, and `Spilled
 wrote, zero until spilling comes; the key blocks by how they were grouped,
 `KeyBlocksByRange` (constant, run-end), `KeyBlocksByCode` and `KeyBlocksHashed`; and
 `TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch; `CoreReason`, why the
-core held the groups, asked for, a lane's first rows, its first batch's spread or the memory budget,
+core held the groups, asked for, a lane's first rows, its first batch's spread, the projection of its new
+groups past its first rows or the memory budget,
 `None` when the lanes' tables did; and `TurnedAfterRows`, the rows the first lane to turn had folded
 into its own table, 0 on its first batch and -1 when no lane turned. Both are properties
 outside the records' constructors. Nothing of them goes through the scan's own counters, which every
