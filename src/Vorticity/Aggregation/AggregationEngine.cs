@@ -2086,13 +2086,15 @@ internal sealed class AggregationPartition
             {
                 // A lane on the core folds a batch into its cache before it measures it: a batch of new
                 // groups past the cache's capacity, at most, which the next flush empties. It is counted
-                // past the budget, as the core then spills what it must.
-                if (_core is null)
+                // past the budget, as the core then spills what it must; a lane whose table spills, as it
+                // writes its table before its next batch.
+                if (_core is null && !CanEvict)
                 {
                     throw memory.Exceeded("group by", Keys?.Count ?? 1, need);
                 }
 
                 memory.Force(need);
+                _arrays?.Overdrew();
             }
 
             grow = need;

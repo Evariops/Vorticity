@@ -141,6 +141,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The lane gave back what it took past the budget, its tables written to the scratch: it may take past it again.</summary>
     internal void Relieved() => Overdrawn = false;
 
+    /// <summary>The lane took past the budget what its tables hold apart from the shelf's arrays: it is overdrawn as if the shelf had.</summary>
+    internal void Overdrew() => Overdrawn = true;
+
     /// <summary>What a lane's shelf reserved ahead of the arrays to come given back: its tables grow no more, but by a merge, which reserves again.</summary>
     internal void GiveBackAhead()
     {
