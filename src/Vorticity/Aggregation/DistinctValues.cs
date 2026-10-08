@@ -38,6 +38,9 @@ internal sealed class DistinctValues<TValue>
     // The shelf the slots grow from, under the query's memory; null for values nothing counts.
     private ArrayShelf? _shelf;
 
+    // The seeds of the values' hash, the process's, kept here (KeyHash.SeededPair).
+    private readonly KeyHash.PairSeeds _seeds = KeyHash.Seeds;
+
     /// <summary>
     /// Values whose slots take <paramref name="capacity"/> before they double, the top
     /// <paramref name="skip"/> bits of every hash the same: a part's (<see cref="AddPart"/>), whose homes,
@@ -114,6 +117,7 @@ internal sealed class DistinctValues<TValue>
     }
 
     /// <summary>Adds <paramref name="value"/>; whether it was new.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal bool Add(TValue value)
     {
         value = Canonical(value);
@@ -124,7 +128,7 @@ internal sealed class DistinctValues<TValue>
             return added;
         }
 
-        return Insert(value, Hash(value));
+        return Insert(value, HashOf(value));
     }
 
     /// <summary>Adds every value of <paramref name="other"/>, in the order its slots hold them.</summary>
@@ -135,7 +139,7 @@ internal sealed class DistinctValues<TValue>
         _zero |= other._zero;
         foreach (TValue value in other._slots)
         {
-            if (!IsFree(value) && Insert(value, Hash(value)))
+            if (!IsFree(value) && Insert(value, HashOf(value)))
             {
                 added++;
             }
@@ -179,7 +183,7 @@ internal sealed class DistinctValues<TValue>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void AddOfPart(TValue value, int part, int shift)
     {
-        ulong hash = Hash(value);
+        ulong hash = HashOf(value);
         if ((int)(hash >> shift) == part)
         {
             Insert(value, hash);
@@ -187,6 +191,7 @@ internal sealed class DistinctValues<TValue>
     }
 
     /// <summary>Adds <paramref name="value"/>, not the free one, of hash <paramref name="hash"/>; whether it was new.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool Insert(TValue value, ulong hash)
     {
         TValue[] slots = _slots;
@@ -232,7 +237,7 @@ internal sealed class DistinctValues<TValue>
         {
             if (!IsFree(value))
             {
-                int at = Home(Hash(value), shift);
+                int at = Home(HashOf(value), shift);
                 while (!IsFree(slots[at]))
                 {
                     at = (at + 1) & mask;
@@ -259,7 +264,7 @@ internal sealed class DistinctValues<TValue>
         {
             if (!IsFree(_slots[at]))
             {
-                farthest = Math.Max(farthest, (at - Home(Hash(_slots[at]), shift)) & mask);
+                farthest = Math.Max(farthest, (at - Home(HashOf(_slots[at]), shift)) & mask);
             }
         }
 
@@ -286,6 +291,14 @@ internal sealed class DistinctValues<TValue>
     {
         (ulong low, ulong high) = KeyWords.Of(value);
         return KeyHash.Pair(low, high, 0);
+    }
+
+    /// <summary><see cref="Hash"/> under the seeds the set keeps: the same hash, a row at a time.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ulong HashOf(TValue value)
+    {
+        (ulong low, ulong high) = KeyWords.Of(value);
+        return KeyHash.SeededPair(low, high, 0, in _seeds);
     }
 
     /// <summary>A value as the bits it lies in: a float's one pattern a value, every NaN and both zeros made one.</summary>

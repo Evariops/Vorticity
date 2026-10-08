@@ -66,6 +66,23 @@ internal static class KeyHash
         return hash ^ (hash >> 32);
     }
 
+    /// <summary>The seeds of <see cref="Pair"/>, for a table to keep beside its slots.</summary>
+    internal static PairSeeds Seeds => new PairSeeds(Left, Right);
+
+    /// <summary>
+    /// <see cref="Pair"/> under <paramref name="seeds"/>, kept by the caller: the same
+    /// hash. Ahead of time, a static field of a class with a constructor is read behind a check that the
+    /// constructor ran, an acquiring load, a row at a time; a just-in-time compiler that saw it run reads
+    /// the seeds as constants. Held in the table's own fields, they are a load from a line it reads anyway.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong SeededPair(ulong low, ulong high, int tag, in PairSeeds seeds)
+    {
+        ulong upper = Math.BigMul(low ^ seeds.Left, high ^ seeds.Right, out ulong lower);
+        ulong hash = ((upper ^ lower) * seeds.Right) + (ulong)tag;
+        return hash ^ (hash >> 32);
+    }
+
     /// <summary>
     /// A value's bits as two words and a tag that tells apart equal values -- the group it was seen
     /// in -- for a table that chains its buckets: the high half of the sum of the words' products by
@@ -181,6 +198,9 @@ internal static class KeyHash
         hash ^= hash >> 32;
         return hash;
     }
+
+    /// <summary>The two seeds of a pair's hash.</summary>
+    internal readonly record struct PairSeeds(ulong Left, ulong Right);
 
     private static ulong DrawSeed()
     {
