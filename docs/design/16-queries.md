@@ -775,7 +775,15 @@ with no zone maps, ten million keys at fourteen lanes take 77 ms this way, again
 tables and 79 on the same rows with zone maps. A hashed key,
 which nothing bounds before the pass, turns to it once a lane's first batch says half a million values
 or more, the values of a uniform key that made as many groups from as many rows, when the source gives
-each lane 200 000 rows or more: the lanes turn while their tables are a batch's. The key space is cut into 256 parts by the top byte of
+each lane 200 000 rows or more: the lanes turn while their tables are a batch's. Lanes that may turn
+so take their first range i / N of the way through the queue, lane i of N, then the queue's next
+ones, unless the zones settle blocks in the order of the rows: all on the first rows, a key whose
+cardinality changes as the rows go would mislead them together. The first lane whose rows say turn
+turns them all, not most of them: on 2·10⁷ rows at fourteen lanes, a key of 10³ values on its first
+quarter and 10⁷ on the rest takes 65.6 ms against 64.2 for the core asked for; the other way round,
+40.6 against 40.0, where a majority of lanes that met the 10³ values kept the lanes' tables, 59.0. A
+hashed key local in the rows, sessions of two rows, reads as 4·10⁴ values on a lane's first rows and
+keeps the lanes' tables, at twice the core's time. The key space is cut into 256 parts by the top byte of
 the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
 kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
 falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
@@ -933,7 +941,10 @@ budget; `Lanes` and `MergeParts`; what the core did, `Core`, `CacheEvictions`, `
 `Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts` and
 `SpilledBytes`, zero until spilling comes; the key blocks by how they were grouped,
 `KeyBlocksByRange` (constant, run-end), `KeyBlocksByCode` and `KeyBlocksHashed`; and
-`TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch. Both are properties
+`TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch; `CoreReason`, why the
+core held the groups, asked for, a lane's first rows, its first batch's spread or the memory budget,
+`None` when the lanes' tables did; and `TurnedAfterRows`, the rows the first lane to turn had folded
+into its own table, 0 on its first batch and -1 when no lane turned. Both are properties
 outside the records' constructors. Nothing of them goes through the scan's own counters, which every
 batch touches.
 

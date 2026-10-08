@@ -908,6 +908,13 @@ Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte>>)
 Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint>>)
 Vorticity:     method Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort>>)
 Vorticity:     property TKey Key { get; }
+Vorticity: enum Vorticity.GroupCoreReason
+Vorticity:     const GroupCoreReason Asked = 1
+Vorticity:     const GroupCoreReason FirstRows = 2
+Vorticity:     const GroupCoreReason None = 0
+Vorticity:     const GroupCoreReason Pressure = 4
+Vorticity:     const GroupCoreReason Spread = 3
+Vorticity:     field int value__
 Vorticity: sealed class Vorticity.GroupKeyPlan : IEquatable<GroupKeyPlan>
 Vorticity:     ctor GroupKeyPlan(string, bool, Nullable<long>)
 Vorticity:     method GroupKeyPlan <Clone>$()
@@ -960,6 +967,7 @@ Vorticity:     method bool op_Inequality(GroupStatistics, GroupStatistics)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out long, out long, out long, out int, out int, out bool, out long, out long, out long, out long, out long, out int, out int, out int, out long, out long, out long, out long, out TimeSpan)
+Vorticity:     property GroupCoreReason CoreReason { get; init; }
 Vorticity:     property TimeSpan TimeToFirstBatch { get; init; }
 Vorticity:     property bool Core { get; init; }
 Vorticity:     property int Lanes { get; init; }
@@ -979,6 +987,7 @@ Vorticity:     property long PeakGroups { get; init; }
 Vorticity:     property long PendingBytes { get; init; }
 Vorticity:     property long ReloadedBytes { get; init; }
 Vorticity:     property long SpilledBytes { get; init; }
+Vorticity:     property long TurnedAfterRows { get; init; }
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
 Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
 Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)

@@ -161,7 +161,18 @@ internal sealed class AggregationPlan
             LastKeyBlocks.ByRange,
             LastKeyBlocks.ByCode,
             LastKeyBlocks.Hashed,
-            Stopwatch.GetElapsedTime(0, LastFirstBatchTicks));
+            Stopwatch.GetElapsedTime(0, LastFirstBatchTicks))
+        {
+            CoreReason = core?.Reason switch
+            {
+                null => GroupCoreReason.None,
+                CoreReason.Plan => GroupCoreReason.Asked,
+                CoreReason.FirstRows => GroupCoreReason.FirstRows,
+                CoreReason.Spread => GroupCoreReason.Spread,
+                _ => GroupCoreReason.Pressure,
+            },
+            TurnedAfterRows = core?.TurnedAfterRows ?? -1,
+        };
     }
 
     /// <summary>Called with the lanes' partitions once made, before the pass: what a test watches their tables by. Null but in tests.</summary>
@@ -253,6 +264,13 @@ internal sealed class AggregationPlan
     /// <see cref="Core"/>, the zones and pressure.
     /// </summary>
     internal bool CoreOnNew { get; set; } = true;
+
+    /// <summary>
+    /// Whether the lanes that judge their key on their first rows start across the source, lane i at
+    /// i / N of the queue, rather than all at its start: on by default, off for the tests and the bench
+    /// to weigh it against the queue's order alone.
+    /// </summary>
+    internal bool Fan { get; set; } = true;
 
     /// <summary>
     /// The span of values from which a key its first batch shows scattered takes the core: measured on
@@ -774,9 +792,26 @@ internal sealed class AggregationPartition
     /// </summary>
     internal const double SpreadShare = 0.75;
 
-    // Whether the lane's first batch was judged, and showed the key scattered (Judge).
+    // Whether the lane's first batch was judged (Judge).
     private bool _spreadJudged;
-    private bool _spread;
+
+    /// <summary>
+    /// The lane's first range ended before <see cref="JudgedRows"/> rows: it judges its key on that range's
+    /// rows alone, rather than on rows the queue hands it next, which come from elsewhere in the source
+    /// and differ from one run to the next. The ranges near the queue's end are the shortest, and a fan
+    /// starts a lane there.
+    /// </summary>
+    internal void RangeEnded()
+    {
+        if (TurnOnNew && !_judged && Ranges == 1 && _rowsFolded > 0 && Pressure is { } pressure && Keys is { NumberedByValue: false } keys)
+        {
+            _judged = true;
+            if (EstimatedValues(_rowsFolded, keys.Count) >= TurnValues)
+            {
+                pressure.Outgrew(CoreReason.FirstRows, _rowsFolded);
+            }
+        }
+    }
 
     // The map of the first batch's values over the span, 4 096 bits.
     private ulong[]? _spreadMap;
@@ -814,8 +849,7 @@ internal sealed class AggregationPartition
         double drawn = spread.Bins * -double.ExpM1(-(double)spread.Values / spread.Bins);
         if (spread.Set >= SpreadShare * drawn)
         {
-            _spread = true;
-            Pressure!.Outgrew(CoreReason.Spread);
+            Pressure!.Outgrew(CoreReason.Spread, _rowsFolded);
         }
     }
 
@@ -1083,6 +1117,7 @@ internal sealed class AggregationPartition
         // query holds once it turned.
         LaneCore lane = core.Lane();
         _core = lane;
+        core.TurnedAfter(_rowsFolded);
         lane.Pressed = true;
         lane.Turning = true;
         lane.Empty(this);
@@ -1148,6 +1183,7 @@ internal sealed class AggregationPartition
                 throw Memory!.Exceeded("group by", Keys?.Count ?? 1, _arrays.Out);
             }
 
+            _stayed = true;
             Gave();
             await LeaveAsync(pressure.Core, cancellationToken).ConfigureAwait(false);
             return;
@@ -1267,6 +1303,10 @@ internal sealed class AggregationPartition
     /// <summary>Whether the lane ran out of rows without turning to the core, under pressure.</summary>
     internal bool HasEnded => Volatile.Read(ref _ended);
 
+    // Whether the lane kept its table when it was to turn, the core unable to hold the query or its table
+    // too small to repay emptying it.
+    private bool _stayed;
+
     // Whether the lane left the lanes that run with a table they may give back, gave its table back to
     // the count, and ran out of rows.
     private bool _left;
@@ -1287,9 +1327,10 @@ internal sealed class AggregationPartition
             return _folded++ >= turnAt;
         }
 
-        // A key its first batch showed scattered over a wide span (Judge): the lane turns before it
-        // folds a row, its table empty.
-        if (_spread)
+        // A lane's first rows turned the query to the core: a key its first batch showed scattered over a
+        // wide span (Judge), the lane turning before it folds a row; or the first rows below. Once,
+        // unless the lane kept its table, the core unable to hold the query.
+        if (Pressure!.Outgrown && !_stayed)
         {
             return true;
         }
@@ -1302,7 +1343,7 @@ internal sealed class AggregationPartition
             _judged = true;
             if (Keys is { NumberedByValue: false } keys && EstimatedValues(_rowsFolded, keys.Count) >= TurnValues)
             {
-                Pressure!.Outgrew(CoreReason.FirstRows);
+                Pressure.Outgrew(CoreReason.FirstRows, _rowsFolded);
                 return true;
             }
         }
@@ -2242,7 +2283,11 @@ internal static class AggregationEngine
                 }
 
                 plan.Watch?.Invoke(partitions);
-                await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
+
+                // Lanes that judge their key on their first rows start across the source, unless the
+                // zones settle blocks in the order of the rows.
+                bool fan = settling is null && plan.Fan && Array.Exists(partitions, partition => partition.TurnOnNew || partition.TurnOnSpread);
+                await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, fan, cancellationToken).ConfigureAwait(false);
             }
 
             long merging = Stopwatch.GetTimestamp();
@@ -3296,6 +3341,7 @@ internal static class AggregationEngine
         partition.ActiveTicks += Stopwatch.GetTimestamp() - start;
         partition.Ranges++;
         partition.GroupsAtEnd = partition.Keys?.Count ?? 1;
+        partition.RangeEnded();
     }
 
     /// <summary>What the partitions did, gathered once they have merged into the first: the plan's last run.</summary>
@@ -3318,11 +3364,14 @@ internal static class AggregationEngine
     /// <summary>
     /// Runs the ranges on a worker per partition, each taking the next range of the queue as it
     /// finishes one and folding it into its partition: a lane on a slow core takes fewer, and no
-    /// lane waits on the others while ranges are left.
+    /// lane waits on the others while ranges are left. With <paramref name="fan"/>, lane i takes its
+    /// first range i / N of the way through the queue, then the queue's next ones as they come, those a
+    /// lane took already left out: the lanes judge their key on rows from across the source rather than
+    /// all on its first rows, which a key whose cardinality changes as the rows go misleads together.
     /// </summary>
     private static async Task RunQueueAsync(
         ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition[] partitions, RowRange[] ranges, ZoneSettling? settling,
-        CancellationToken cancellationToken)
+        bool fan, CancellationToken cancellationToken)
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
@@ -3332,18 +3381,38 @@ internal static class AggregationEngine
         // instead, on a source whose read is a round trip.
         ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = true };
         int[] next = [-1];
+
+        // The ranges the fan's first ranges took, each its lane's before any lane starts, which the queue
+        // passes over: a lane that started first would take another's from the queue. Null without a fan.
+        int[]? taken = fan ? new int[ranges.Length] : null;
+        for (int p = 0; taken is not null && p < partitions.Length; p++)
+        {
+            taken[(int)((long)p * ranges.Length / partitions.Length)] = 1;
+        }
+
         Task[] lanes = new Task[partitions.Length];
         for (int p = 0; p < partitions.Length; p++)
         {
             AggregationPartition partition = partitions[p];
+            int first = (int)((long)p * ranges.Length / partitions.Length);
             lanes[p] = Task.Run(
                 async () =>
                 {
                     try
                     {
+                        if (taken is not null)
+                        {
+                            await RunPartitionAsync(source, lane with { Rows = ranges[first] }, metrics, partition, token).ConfigureAwait(false);
+                        }
+
                         int at;
                         while ((at = Interlocked.Increment(ref next[0])) < ranges.Length)
                         {
+                            if (taken is not null && Interlocked.Exchange(ref taken[at], 1) != 0)
+                            {
+                                continue;
+                            }
+
                             if (settling is not null)
                             {
                                 partition.Settle(settling, ranges[at]);
