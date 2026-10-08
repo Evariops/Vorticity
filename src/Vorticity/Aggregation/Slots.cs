@@ -129,6 +129,13 @@ internal abstract class AggregateSlot
     /// </summary>
     internal abstract void Keep(ReadOnlySpan<int> groups);
 
+    /// <summary>
+    /// Forgets every group's state, the arrays kept at their length: a lane's table emptied into a spill,
+    /// which the next fills to the same size. <see cref="Keep"/> with no group, unless the slot keeps its
+    /// arrays twice over for it.
+    /// </summary>
+    internal virtual void Clear() => Keep([]);
+
     /// <summary>The bytes of a group's state when it lies in the group's record (<see cref="GroupRecords"/>); 0 for a slot that keeps its states apart.</summary>
     internal virtual int StateBytes => 0;
 
@@ -195,6 +202,13 @@ internal abstract class AggregateSlot
     /// Nothing for a slot whose states lie in the records, which its partition asks.
     /// </summary>
     internal virtual long GrowthFor(int more) => 0;
+
+    /// <summary>
+    /// The bytes the slot's arrays would take more merging <paramref name="from"/>'s states, the same
+    /// aggregate's of another lane, <paramref name="groups"/> of its groups new here: its growth for the
+    /// new groups, unless its states hold more than a value a group.
+    /// </summary>
+    internal virtual long GrowthFor(AggregateSlot from, int groups) => GrowthFor(groups);
 
     /// <summary>
     /// Whether the slot's states go to a lane's spill with its keys and come back: in the records, as

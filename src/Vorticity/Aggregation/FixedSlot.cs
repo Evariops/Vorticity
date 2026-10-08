@@ -979,9 +979,31 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     /// <summary>A count by group, in pairs; a streaming group by's sets by group never spill, its groups few.</summary>
     internal override bool SpillsStates => _set is null && _sets is null;
 
+    /// <summary>The pairs forgotten in place, no spare arrays kept beside them as a streaming group by's keep does.</summary>
+    internal override void Clear()
+    {
+        if (_set is not null || _sets is not null)
+        {
+            Keep([]);
+            return;
+        }
+
+        _pairs.Clear();
+        _counts.AsSpan(0, _groups).Clear();
+        _groups = 0;
+    }
+
     /// <summary>The counts of the groups, and their pairs, a new pair a row at most.</summary>
     internal override long GrowthFor(int more) =>
         _set is not null || _sets is not null ? 0 : TableGrowth.Of(_groups, more, _counts.Length, _counts.Length, sizeof(long)) + _pairs.GrowthFor(more);
+
+    /// <summary>
+    /// The counts of the new groups, and every pair of the other's: a group held here meets values of its
+    /// own there, and its pairs may all be new where its group is not.
+    /// </summary>
+    internal override long GrowthFor(AggregateSlot from, int groups) =>
+        _set is not null || _sets is not null ? 0
+        : TableGrowth.Of(_groups, groups, _counts.Length, _counts.Length, sizeof(long)) + _pairs.GrowthFor((int)((FixedDistinctSlot<TValue>)from).Pairs);
 
     /// <summary>Each group's values, their number first.</summary>
     internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)

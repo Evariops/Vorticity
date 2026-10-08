@@ -999,13 +999,9 @@ internal sealed class AggregationPartition
 
             (_runs ??= []).Add(run);
             _spill.Ran(run.Bytes);
-            (long range, long code, long hashed) = keys.Blocks;
-            _evictedBlocks = (_evictedBlocks.ByRange + range, _evictedBlocks.ByCode + code, _evictedBlocks.Hashed + hashed);
             _evictedGroups += count;
             _evictedBytes += Footprint;
-            GiveBack();
-            Renew();
-            _arrays?.Relieved();
+            Emptied();
         }
         finally
         {
@@ -1122,6 +1118,8 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void HandTo(AggregationPartition retired)
     {
+        // What the tables it replaces held, little or nothing, given back first.
+        retired.GiveBack();
         retired.Keys = Keys;
         retired.Slots = Slots;
         retired.Records = Records;
@@ -1135,11 +1133,31 @@ internal sealed class AggregationPartition
         Renew();
     }
 
-    /// <summary>The lane's table let go once another holds its groups, and made again empty.</summary>
+    /// <summary>
+    /// The lane's table emptied once another holds its groups, or the scratch: in place, its arrays kept
+    /// at their length and still counted, once its keys are hashed, so that the next table fills them
+    /// without growing; made again otherwise, hashed, what it held given back.
+    /// </summary>
     internal void Emptied()
     {
-        GiveBack();
-        Renew();
+        if (_hashed)
+        {
+            Keys!.Keep([]);
+            Records?.Keep([]);
+            foreach (AggregateSlot slot in Slots)
+            {
+                slot.Clear();
+            }
+        }
+        else
+        {
+            // The key blocks the table counted, kept: its keys go.
+            (long range, long code, long hashed) = Keys!.Blocks;
+            _evictedBlocks = (_evictedBlocks.ByRange + range, _evictedBlocks.ByCode + code, _evictedBlocks.Hashed + hashed);
+            GiveBack();
+            Renew();
+        }
+
         _arrays?.Relieved();
     }
 
@@ -1797,6 +1815,21 @@ internal sealed class AggregationPartition
 
         long growth = GrowthFor(_coming);
         return growth > 0 && !memory.CanGrow((growth + SpillBuffer.PageOf(memory, Lanes)) * running);
+    }
+
+    /// <summary>
+    /// The bytes the table would take more merging <paramref name="lane"/>'s, <paramref name="groups"/> of
+    /// its groups new here: the table the retired lanes share, before it takes a lane's.
+    /// </summary>
+    internal long GrowthFor(AggregationPartition lane, int groups)
+    {
+        long bytes = (Keys?.GrowthFor(groups) ?? 0) + (Records?.GrowthFor(groups) ?? 0);
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            bytes += _inputs[i] == Settled ? 0 : Slots[i].GrowthFor(lane.Slots[i], groups);
+        }
+
+        return bytes;
     }
 
     /// <summary>The bytes the lane's table would take more were <paramref name="rows"/> rows to come, as many new groups and values at most.</summary>

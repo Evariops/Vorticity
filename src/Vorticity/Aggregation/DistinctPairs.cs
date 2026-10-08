@@ -267,6 +267,22 @@ internal sealed class DistinctPairs<TValue>
     }
 
     /// <summary>
+    /// Forgets every pair, the arrays kept at their length and the spares a <see cref="Keep"/> left given
+    /// back: a table emptied into a spill, which the next fills to the same size.
+    /// </summary>
+    internal void Clear()
+    {
+        Give(_sparePairs, _spareSlots, _spareTags, _spareFirst);
+        _sparePairs = [];
+        _spareSlots = [];
+        _spareTags = [];
+        _spareFirst = [];
+        Array.Clear(_tags);
+        Array.Clear(_first);
+        _count = 0;
+    }
+
+    /// <summary>
     /// Keeps the pairs of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
     /// <c>i</c>: their chains read, and nothing else, into arrays their size.
     /// </summary>

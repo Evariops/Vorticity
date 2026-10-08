@@ -641,10 +641,15 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     internal override bool SpillsStates => true;
 
     /// <summary>The counts and chains of the groups, and the table of pairs and their chains, a new pair a row at most.</summary>
-    internal override long GrowthFor(int more) =>
-        TableGrowth.Of(_groups, more, Math.Min(_counts.Length, _first.Length), Math.Min(_counts.Length, _first.Length), sizeof(long) + sizeof(int))
-        + _seen.GrowthFor(more)
-        + TableGrowth.Of(_seen.Count, more, _next.Length, _next.Length, sizeof(int));
+    internal override long GrowthFor(int more) => GrowthFor(more, more);
+
+    /// <summary>The counts and chains of the new groups, and every pair of the other's, which may all be new where their groups are not.</summary>
+    internal override long GrowthFor(AggregateSlot from, int groups) => GrowthFor(groups, (int)((BytesDistinctSlot)from).Pairs);
+
+    private long GrowthFor(int groups, int pairs) =>
+        TableGrowth.Of(_groups, groups, Math.Min(_counts.Length, _first.Length), Math.Min(_counts.Length, _first.Length), sizeof(long) + sizeof(int))
+        + _seen.GrowthFor(pairs)
+        + TableGrowth.Of(_seen.Count, pairs, _next.Length, _next.Length, sizeof(int));
 
     /// <summary>Each group's values, their number first, each after its length.</summary>
     internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)

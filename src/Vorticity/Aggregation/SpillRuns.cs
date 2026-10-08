@@ -285,8 +285,9 @@ internal sealed class LaneRetirement
     /// <paramref name="lane"/>'s table merged into the shared one, the lane's emptied; the first lane's
     /// handed over whole. Whether it was, and whether the lane retires: one already
     /// <paramref name="retiring"/>, or another that takes ranges with it; the last one goes on, its table
-    /// empty. Nothing done when merging no longer pays, or when the shared table's growth for the lane's
-    /// groups is more than the budget grants: the lane writes its table instead.
+    /// empty. A lane alone starts no shared table. When the shared table cannot take the lane's, the larger
+    /// of the two goes to the scratch: the lane's, nothing merged; or the shared one, the lane's taking its
+    /// place. Once merging no longer pays, the shared table goes to the scratch, and nothing is merged.
     /// </summary>
     internal async ValueTask<(bool Merged, bool Retires)> TakeAsync(AggregationPartition lane, bool retiring, CancellationToken cancellationToken)
     {
@@ -296,11 +297,23 @@ internal sealed class LaneRetirement
             int count = lane.Keys!.Count;
             if (_merged >= Judged && 2 * _grew >= _merged)
             {
+                // The memory the shared table holds is given back once, its groups to the scratch.
+                if (Retired is { Keys.Count: > 0 } stale)
+                {
+                    await stale.EvictAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 return (false, false);
             }
 
+            bool retires = retiring || _takers > 1;
             if (Retired is null)
             {
+                if (!retires)
+                {
+                    return (false, false);
+                }
+
                 _sketch = KeySketch.Of(lane.Keys, lane.Memory);
                 Retired = lane.Sibling();
                 lane.HandTo(Retired);
@@ -313,22 +326,30 @@ internal sealed class LaneRetirement
                 KeySketch sketch = KeySketch.Of(lane.Keys, lane.Memory);
                 double lacks = Math.Max(0, sketch.Estimate(_sketch) - _sketch!.Estimate());
                 int grows = (int)Math.Min(count, (1.1 * lacks) + 1_024);
-                if (lane.Memory is { } memory && !memory.CanGrow(retired.GrowthFor(grows)))
+                if (lane.Memory is { } memory && !memory.CanGrow(retired.GrowthFor(lane, grows)))
                 {
-                    return (false, false);
-                }
+                    if (retired.Keys!.Count <= count)
+                    {
+                        return (false, false);
+                    }
 
-                int before = retired.Keys!.Count;
-                int[]? numbers = null;
-                retired.MergeFrom(lane, ref numbers);
-                retired.Recount();
-                _sketch.Merge(sketch);
-                _merged += count;
-                _grew += retired.Keys.Count - before;
-                lane.Emptied();
+                    await retired.EvictAsync(cancellationToken).ConfigureAwait(false);
+                    lane.HandTo(retired);
+                    _sketch = sketch;
+                }
+                else
+                {
+                    int before = retired.Keys!.Count;
+                    int[]? numbers = null;
+                    retired.MergeFrom(lane, ref numbers);
+                    retired.Recount();
+                    _sketch.Merge(sketch);
+                    _merged += count;
+                    _grew += retired.Keys.Count - before;
+                    lane.Emptied();
+                }
             }
 
-            bool retires = retiring || _takers > 1;
             if (!retiring && retires)
             {
                 Lanes++;
@@ -534,26 +555,34 @@ internal sealed class SpillBuffer
         return _bytes.AsMemory(0, length);
     }
 
-    /// <summary><paramref name="bytes"/> more, written next.</summary>
+    /// <summary><paramref name="bytes"/> more, written next: the room checked here, grown out of line.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal Span<byte> Take(int bytes)
     {
-        Grow(_length + bytes);
-        Span<byte> taken = _bytes.AsSpan(_length, bytes);
-        _length += bytes;
-        return taken;
+        int at = _length;
+        if (at + bytes > _bytes.Length)
+        {
+            Grow(at + bytes);
+        }
+
+        _length = at + bytes;
+        return _bytes.AsSpan(at, bytes);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void Write<T>(T value)
         where T : unmanaged => MemoryMarshal.Write(Take(Unsafe.SizeOf<T>()), in value);
 
     internal void Write<T>(ReadOnlySpan<T> values)
         where T : unmanaged => MemoryMarshal.AsBytes(values).CopyTo(Take(values.Length * Unsafe.SizeOf<T>()));
 
-    /// <summary>Bytes after their length.</summary>
+    /// <summary>Bytes after their length, one room taken for both.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void WriteBytes(ReadOnlySpan<byte> value)
     {
-        Write(value.Length);
-        value.CopyTo(Take(value.Length));
+        Span<byte> taken = Take(sizeof(int) + value.Length);
+        MemoryMarshal.Write(taken, value.Length);
+        value.CopyTo(taken[sizeof(int)..]);
     }
 
     /// <summary>Writes <paramref name="value"/> again at <paramref name="at"/>, written before: a count known once what it counts is written.</summary>
@@ -568,6 +597,7 @@ internal sealed class SpillBuffer
         _length = 0;
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private void Grow(int length)
     {
         if (length <= _bytes.Length)
