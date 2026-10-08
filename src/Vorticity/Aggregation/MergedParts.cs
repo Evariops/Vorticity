@@ -120,6 +120,28 @@ internal sealed class PartMerge : PartSource
         new ValueTask<(GroupKeys, AggregateSlot[], long, long)>(Merge(part));
 
     /// <summary>
+    /// A part's table and slots sized for <paramref name="expected"/> groups and a tenth, its entries at
+    /// most: once its second partition is merged, its groups to come at the rate of new groups that
+    /// partition brought. Before a part is done, a part reserves what its largest partition sends: groups
+    /// nearly all new then grew its table four times at fourteen lanes, each growth placing every group
+    /// again; shared ones bring none, and nothing is sized.
+    /// </summary>
+    private static void SizeFor(GroupKeys keys, AggregateSlot[] slots, long expected, int entries)
+    {
+        if (expected - keys.Count <= keys.Count / 8)
+        {
+            return;
+        }
+
+        int target = (int)Math.Min(entries, expected + (expected / 10));
+        keys.Reserve(target);
+        foreach (AggregateSlot slot in slots)
+        {
+            slot.EnsureGroups(target);
+        }
+    }
+
+    /// <summary>
     /// The part <paramref name="part"/> merged from every partition: its keys and slots, and what it
     /// reserved and measured of the query's memory, twice its groups' bytes beside the lanes' tables.
     /// </summary>
@@ -166,6 +188,8 @@ internal sealed class PartMerge : PartSource
         // of the part's own, left to the next collection, never a shared pool's, whose retention no
         // budget sees.
         int[] map = GC.AllocateUninitializedArray<int>(Math.Max(1, most));
+        int merged = 0;
+        int sending = 0;
         for (int p = 0; p < _partitions.Length; p++)
         {
             int from = _starts[p][part];
@@ -177,6 +201,7 @@ internal sealed class PartMerge : PartSource
 
             ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
             Span<int> into = map.AsSpan(0, count);
+            int before = keys.Count;
             _keysOf[p].MergeInto(keys, groups, into);
             for (int s = 0; s < slots.Length; s++)
             {
@@ -185,6 +210,12 @@ internal sealed class PartMerge : PartSource
                 {
                     slots[s].MergeFrom(_partitions[p].Slots[s], groups, into);
                 }
+            }
+
+            merged += count;
+            if (++sending == 2 && merged < entries)
+            {
+                SizeFor(keys, slots, keys.Count + ((long)(entries - merged) * (keys.Count - before) / count), entries);
             }
         }
 
