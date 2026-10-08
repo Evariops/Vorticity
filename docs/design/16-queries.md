@@ -859,7 +859,9 @@ share, since a query with nothing to give back would fail where it fit.
 **The spill.** When nothing is left to give back, the core writes the parts holding the most, their
 groups and their pending entries, a record and a key each, to a scratch file of the query — in
 `VortexSessionOptions.ScratchDirectory`, the system's temporary directory by default, never a
-`tmpfs`, the process's spills keeping a tenth of its free space — the largest first, until the query
+`tmpfs`, the process's spills keeping a tenth of its free space, and under the host's
+`VortexSessionOptions.ScratchBudget` when it gives one, which the runs of a sort count against too,
+every byte reserved before it is written and given back when the scratch closes — the largest first, until the query
 holds three quarters of its budget; a lane whose rows the core cannot take spills before its next
 batch, on a task. At the end, the parts held in memory are delivered first, then each spilled part
 alone: its runs read back a page at a time and applied into its sub-tables again, which merges the

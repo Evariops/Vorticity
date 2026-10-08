@@ -1410,6 +1410,10 @@ Vorticity:     property long BytesRequested { get; init; }
 Vorticity:     property long CacheHits { get; init; }
 Vorticity:     property long Requests { get; init; }
 Vorticity:     property long Rows { get; init; }
+Vorticity: sealed class Vorticity.ScratchBudget
+Vorticity:     ctor ScratchBudget(long)
+Vorticity:     property long CeilingBytes { get; }
+Vorticity:     property long ReservedBytes { get; }
 Vorticity: enum Vorticity.SeekOp
 Vorticity:     const SeekOp After = 2
 Vorticity:     const SeekOp AtOrAfter = 1
@@ -1881,6 +1885,7 @@ Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
 Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
+Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
 Vorticity:     property bool MapFiles { get; set; }

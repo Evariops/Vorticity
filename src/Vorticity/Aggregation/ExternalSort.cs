@@ -52,6 +52,9 @@ internal sealed class ExternalSort : IAsyncDisposable
     private long _held;
     private bool _disposed;
 
+    // The bytes of the runs the sort holds of its session's scratch budget, when it has one.
+    private long _scratch;
+
     /// <param name="session">The session whose pool, scratch directory and writer the sort uses.</param>
     /// <param name="schema">The rows' columns.</param>
     /// <param name="keys">The chain of columns the rows sort by, the first first.</param>
@@ -143,6 +146,8 @@ internal sealed class ExternalSort : IAsyncDisposable
 
         _disposed = true;
         LetStoreGo();
+        _session.Options.ScratchBudget?.Release(_scratch);
+        _scratch = 0;
         foreach (string run in _runs)
         {
             try
@@ -211,6 +216,17 @@ internal sealed class ExternalSort : IAsyncDisposable
         }
 
         int[] positions = Ranked(store.Build(arena, rows), rows, cancellationToken);
+
+        // Under the host's scratch budget, the run reserved at what its rows hold before it is written,
+        // then at the bytes it took once it is; all of it given back when the sort is disposed.
+        ScratchBudget? budget = _session.Options.ScratchBudget;
+        long reserved = _held;
+        if (budget is not null && !budget.TryReserve(reserved))
+        {
+            throw GroupCore.ScratchExceeded(budget, "sort of a result", reserved);
+        }
+
+        _scratch += budget is null ? 0 : reserved;
         string path = RunPath();
         _runs.Add(path);
         VortexFileWriter writer = _session.CreateWriter(path, _schema, RunOptions);
@@ -238,6 +254,21 @@ internal sealed class ExternalSort : IAsyncDisposable
             }
 
             await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        if (budget is not null)
+        {
+            long written = new System.IO.FileInfo(path).Length;
+            if (written < reserved)
+            {
+                budget.Release(reserved - written);
+            }
+            else if (written > reserved && !budget.TryReserve(written - reserved))
+            {
+                throw GroupCore.ScratchExceeded(budget, "sort of a result", written - reserved);
+            }
+
+            _scratch += written - reserved;
         }
 
         store.Truncate(0);

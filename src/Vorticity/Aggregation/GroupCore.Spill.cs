@@ -250,6 +250,13 @@ internal sealed partial class GroupCore
             throw _memory!.Exceeded("spill of a group by", -1, bytes);
         }
 
+        // Under the host's scratch budget, every byte written counted, and given back when the scratch closes.
+        if (_source?.Session.Options.ScratchBudget is { } budget && !budget.TryReserve(bytes))
+        {
+            Interlocked.Add(ref s_spilled, -bytes);
+            throw ScratchExceeded(budget, "spill of a group by", bytes);
+        }
+
         Interlocked.Add(ref _spilledBytes, bytes);
         return await scratch.AppendAsync(Page().AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
     }
@@ -415,7 +422,9 @@ internal sealed partial class GroupCore
     {
         if (_scratch is not null)
         {
-            Interlocked.Add(ref s_spilled, -Interlocked.Read(ref _spilledBytes));
+            long spilled = Interlocked.Read(ref _spilledBytes);
+            Interlocked.Add(ref s_spilled, -spilled);
+            _source?.Session.Options.ScratchBudget?.Release(spilled);
             _scratch.Dispose();
             _scratch = null;
         }
@@ -430,6 +439,15 @@ internal sealed partial class GroupCore
         SubTable empty = NewTable(0);
         return (empty.Keys, empty.Slots);
     }
+
+    /// <summary>
+    /// The exception a query fails with when <paramref name="what"/> asks for <paramref name="bytes"/> of
+    /// scratch more than <paramref name="budget"/> grants.
+    /// </summary>
+    internal static VortexMemoryException ScratchExceeded(ScratchBudget budget, string what, long bytes) => new VortexMemoryException(
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"The {what} asks for {bytes:N0} bytes of scratch more, past its scratch budget of {budget.CeilingBytes:N0} bytes, {budget.ReservedBytes:N0} of which the queries under it hold. Give its session a larger ScratchBudget, a larger QueryMemoryBudget, which spills less, or group by fewer keys at once."));
 
     /// <summary>The bytes free where <paramref name="directory"/> lies, or null when the system does not tell.</summary>
     internal static long? Free(string directory)

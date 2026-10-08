@@ -42,6 +42,9 @@ A `VortexSession` holds what would otherwise be process-wide state, so that a ho
 | `IndexCacheBytes` | 64 MiB | decoded index runs |
 | `MappedFileCacheCount` | 64 | files opened from a path kept mapped once closed, so the next open of one takes over its mapping |
 | `MapFiles` | true | whether a file opened from a path is mapped by its first scan; false reads it positionally, and a file cut short under a scan then fails the read instead of the process |
+| `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their groups' tables and their merges. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
+| `ScratchDirectory` | the system's temporary directory | where a group by writes what its memory budget does not hold, and a sort its runs; never a file system in memory |
+| `ScratchBudget` | none: a tenth of the directory's free space kept | the scratch the session's queries share with every session given the same `ScratchBudget`; past it, `VortexMemoryException`, no file left |
 | `Extensions` | empty | extension types the session reads beyond the editions |
 
 The options are set inside `Create` and frozen when it returns; setting one afterwards throws
@@ -136,6 +139,12 @@ the columnar work, then await what you must, then let the loop move on.
   the engine then decodes into `AlignedMemoryPool.Shared`.
 * Two hosts in one process that want different parallelism or caches want two sessions, not a
   setting changed between calls.
+* **In a container, the free space a disk shows is not the limit.** A Kubernetes pod's writable layer
+  and its `emptyDir` volumes count against its `ephemeral-storage`, which the kubelet enforces by
+  evicting the pod, while the disk under them still shows room. Without a `ScratchBudget`, a group by
+  that spills keeps only a tenth of that free space, and a large one can get its pod evicted. Give
+  its sessions a `ScratchBudget` under the pod's limit, less what the pod writes besides: a query that
+  would pass it fails with `VortexMemoryException` instead, its files gone.
 
 The contracts are in [09-contracts.md](../design/09-contracts.md) §1 and §2, and the session in §2
 of [14-public-api.md](../design/14-public-api.md).
