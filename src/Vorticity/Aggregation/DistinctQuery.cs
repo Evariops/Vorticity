@@ -185,6 +185,20 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     // back when the stream ends.
     private QueryMemory? _memory;
 
+    // What the index wrote to the scratch when the budget held it no more, the core unable to take a key
+    // of its kind. The values of the first run were told as they were met; from it on, the stream tells
+    // none until the scan is done, when the runs come back part by part and each value no told run holds
+    // is told: the part to read next, -1 before, of 2^_bits; the part's values, those of the told run
+    // first, and the next of them to tell.
+    private SpillScope? _spill;
+    private bool _silent;
+    private SpillRun[] _runs = [];
+    private int _part = -1;
+    private int _bits;
+    private GroupKeys? _set;
+    private ArrayShelf? _setShelf;
+    private int _next;
+
     // The core's path: the pass on its own task, on several lanes, each
     // value told as it enters its part's set; the batch delivered, whose store goes back once the next
     // is; the values passed, in the window or not; the arena a batch the window cuts is cut into.
@@ -241,29 +255,206 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 
             (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, []);
             _memory = new QueryMemory(projection.Host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
-            AggregationEngine.Admit(_memory, 1);
+
+            // Under a budget that would cut them, batches of new values a sixteenth of its ceiling at most,
+            // which the index takes past it before it goes to the scratch.
+            spec = AggregationEngine.Batched(spec, _memory, 1, plan.LanesSpill && _streaming < 0 ? AggregationEngine.LaneRowBytes : 0);
+            AggregationEngine.Admit(_memory, 1, spec.Options.BatchRows);
 
             // The statistics' bounds, as a group by takes them: an integer they bound is numbered by its
             // value, in pages, where without them it was hashed, twice as long at a million values
             // A sorted column keeps the index that forgets.
             KeyFacts? facts = _streaming < 0 ? await AggregationEngine.FactsAsync(projection.Host.Source, plan.Keys, _cancellationToken).ConfigureAwait(false) : null;
-            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming, facts: facts, memory: _memory);
+            _spill = plan.LanesSpill ? new SpillScope(projection.Host.Source.Session.Options, _memory) : null;
+            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming, facts: facts, memory: _memory)
+            {
+                Spill = _spill,
+            };
             plan.Watch?.Invoke([_partition]);
             _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
             _inner = projection.Host.Source.BatchesAsync(spec, projection.Metrics).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the values asked for are met the scan is asked for nothing more.
-        while (_met < end && await _inner.MoveNextAsync().ConfigureAwait(false))
+        while (_part < 0 && _met < end && await _inner.MoveNextAsync().ConfigureAwait(false))
         {
-            if (Meet(_inner.Current, end))
+            RecordBatch batch = _inner.Current;
+            if (_partition!.MustEvict(batch.SelectedRows))
+            {
+                // Its values were told as they were met; those met from now on are told at the end.
+                await _partition.EvictAsync(_cancellationToken).ConfigureAwait(false);
+                _silent |= _partition.Evicted;
+            }
+
+            if (_silent)
+            {
+                _partition.Process(batch);
+                continue;
+            }
+
+            if (Meet(batch, end))
             {
                 return true;
             }
         }
 
+        if (_silent && await NextToldAsync(end).ConfigureAwait(false))
+        {
+            return true;
+        }
+
         Release();
         return false;
+    }
+
+    /// <summary>
+    /// Past the scan, the values the spilled index met that no told run holds, part after part: each part's
+    /// values read back, the told run's first, silently, then the others', a value new to the part told as
+    /// it enters, inside the window. As few parts as keep one's values within a quarter of the room the
+    /// budget leaves. False past the last part.
+    /// </summary>
+    private async ValueTask<bool> NextToldAsync(long end)
+    {
+        AggregationPartition partition = _partition!;
+        if (_part < 0)
+        {
+            // The values met since the last run go to the scratch too, untold.
+            await partition.EvictAsync(_cancellationToken).ConfigureAwait(false);
+            _runs = [.. partition.Runs!];
+            long bytes = 0;
+            foreach (SpillRun run in _runs)
+            {
+                bytes += run.Bytes;
+            }
+
+            QueryMemory memory = _memory!;
+            long room = Math.Max(memory.Ceiling / 16, memory.Ceiling - memory.Held);
+            while (_bits < SpillRun.SectionBits && 4 * (bytes >> _bits) > room)
+            {
+                _bits++;
+            }
+
+            _part = 0;
+        }
+
+        while (_met < end)
+        {
+            if (_set is null)
+            {
+                if (_part == 1 << _bits)
+                {
+                    return false;
+                }
+
+                await ReadPartAsync(_part++).ConfigureAwait(false);
+            }
+
+            GroupKeys set = _set!;
+            if (_next == set.Count)
+            {
+                LetPartGo();
+                continue;
+            }
+
+            // The part's values new to it, a batch at a time, numbered as they entered: a run of numbers.
+            int count = Math.Min(set.Count - _next, GroupBatches.BatchRows);
+            long first = _met;
+            _met += count;
+            long low = Math.Max(_query.Skip, first);
+            long high = Math.Min(end, _met);
+            int from = _next;
+            _next += count;
+            if (high <= low)
+            {
+                continue;
+            }
+
+            int told = (int)(high - low);
+            Scratch.Grow(ref _groups, told);
+            for (int i = 0; i < told; i++)
+            {
+                _groups[i] = from + (int)(low - first) + i;
+            }
+
+            StructStore store = Store();
+            store.Truncate(0);
+            AggregationOutcome outcome = new AggregationOutcome(_query.Plan, [], set, []);
+            ResultColumn[] columns = _query.Columns;
+            for (int c = 0; c < columns.Length; c++)
+            {
+                columns[c].Append(outcome, store.Children[c], _groups.AsSpan(0, told));
+            }
+
+            _current?.Dispose();
+            CanonicalArena own = _arena!;
+            own.ResetKeepingBlocks();
+            _current = RecordBatch.Over(own, store.Build(own, told), low - _query.Skip, _current);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Part <paramref name="part"/> of the runs read into a set of its own, from a shelf under the query's
+    /// memory: the told run's values first, silently, then the others'; the values to tell, those past
+    /// the told run's, are the set's last numbers.
+    /// </summary>
+    private async ValueTask ReadPartAsync(int part)
+    {
+        (int first, int past) = SpillRun.Of(part, _bits);
+        _setShelf = new ArrayShelf(_memory!) { Exact = true };
+        GroupKeys set = _partition!.Keys!.ForSpill(_setShelf);
+        _set = set;
+        SpillBuffer buffer = new SpillBuffer(_memory);
+        try
+        {
+            for (int r = 0; r < _runs.Length; r++)
+            {
+                if (r == 1)
+                {
+                    _next = set.Count;
+                }
+
+                SpillRun run = _runs[r];
+                int length = checked((int)(run.Starts[past] - run.Starts[first]));
+                if (length > 0)
+                {
+                    await run.File.ReadAsync(run.Starts[first], buffer.Ensure(length), _cancellationToken).ConfigureAwait(false);
+                    ReadSections(run, first, past, buffer.Span(length), set);
+                }
+            }
+
+            if (_runs.Length == 1)
+            {
+                _next = set.Count;
+            }
+        }
+        finally
+        {
+            buffer.Release();
+        }
+    }
+
+    /// <summary>The values of sections [<paramref name="first"/>, <paramref name="past"/>) of a run, read back into <paramref name="set"/>.</summary>
+    private void ReadSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys set)
+    {
+        SpillReader reader = new SpillReader(bytes);
+        for (int section = first; section < past; section++)
+        {
+            int count = run.Counts[section];
+            Scratch.Grow(ref _open, count);
+            set.ReadKeys(ref reader, _open.AsSpan(0, count));
+        }
+    }
+
+    /// <summary>The part's set let go, with what its shelf held of the query's memory.</summary>
+    private void LetPartGo()
+    {
+        _set = null;
+        _setShelf?.LetGo();
+        _setShelf = null;
+        _next = 0;
     }
 
     public async ValueTask DisposeAsync()
@@ -557,6 +748,8 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        LetPartGo();
+        _spill?.Dispose();
         _memory?.Dispose();
         if (_begun && !_ended)
         {

@@ -100,6 +100,47 @@ public sealed partial class GroupSpillTests
             expected);
     }
 
+    [Theory]
+    [InlineData(200)]
+    [InlineData(50)]
+    [InlineData(10)]
+    public async Task ADistinctOnATextSpillsAndTellsEachValueOnce(int percent)
+    {
+        // The reader's thread holds the index, the core unable to take a text: under the budget, the values
+        // met before its first run are told as they come, the others at the end, each once; a window
+        // takes its stretch of them.
+        (string path, Row[] rows) = await Fixture.Async;
+        HashSet<string> expected = [.. rows.Select(r => r.Name)];
+        QueryMemoryBudget large = new QueryMemoryBudget(1L << 30);
+        await using (VortexSession measure = Session(4, large, Path.GetTempPath()))
+        await using (VortexFile file = await measure.OpenAsync(path, cancellationToken: Ct))
+        {
+            Assert.Equal(expected.Count, (await file.Scan<Row>().Select(r => r.Name).Distinct().ToListAsync(Ct)).Count);
+        }
+
+        string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+        try
+        {
+            QueryMemoryBudget budget = new QueryMemoryBudget(large.PeakBytes / 100 * percent);
+            await using VortexSession session = Session(4, budget, scratch);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<string> read = await file.Scan<Row>().Select(r => r.Name).Distinct().ToListAsync(Ct);
+            Assert.Equal(expected.Count, read.Count);
+            Assert.True(expected.SetEquals(read));
+            List<string> window = await file.Scan<Row>().Select(r => r.Name).Distinct().Skip(100_000).Take(150_000).ToListAsync(Ct);
+            Assert.Equal(150_000, window.Count);
+            Assert.Equal(150_000, window.Distinct().Count());
+            Assert.True(window.All(expected.Contains));
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
     /// <summary>The catalogue's aggregates by a text key, each in a query of its own.</summary>
     public static TheoryData<string> Catalogue => new TheoryData<string>
     {

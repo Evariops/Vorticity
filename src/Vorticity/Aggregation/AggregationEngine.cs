@@ -1006,6 +1006,26 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>
+    /// Whether the partition on the reader's thread of a <c>Distinct</c>, with no core to turn to, writes
+    /// its index to the scratch before its next batch of <paramref name="rows"/> rows: an array it took
+    /// past the budget in the batch before, or what its index would take were the batch all new values,
+    /// which the budget would not grant. From the first call on, its arrays take past the budget within a
+    /// batch rather than fail.
+    /// </summary>
+    internal bool MustEvict(int rows)
+    {
+        if (!CanEvict || Memory is not { } memory || _arrays is not { } arrays)
+        {
+            return false;
+        }
+
+        arrays.Overdraws = true;
+        _spilling = true;
+        _coming = rows;
+        return MemoryPressed();
+    }
+
     /// <summary>The groups of <paramref name="keys"/> placed section by section, and where each section's start, then the end.</summary>
     private static (int[] Placed, int[] Starts) Placed(GroupKeys keys, int count)
     {
@@ -3002,7 +3022,7 @@ internal static class AggregationEngine
     /// group's key, record and states, a text key of a few dozen bytes or a text's extremes. A guess, not a
     /// measure: the batch is cut before its rows are read.
     /// </summary>
-    private const int LaneRowBytes = 128;
+    internal const int LaneRowBytes = 128;
 
     /// <summary>
     /// The pass with its lanes' batches under <paramref name="memory"/>'s budget: what a batch may come to
@@ -3011,7 +3031,7 @@ internal static class AggregationEngine
     /// process's does. Lanes whose tables spill, at <paramref name="spilledRow"/> bytes a row, a sixteenth
     /// of it: a lane folds its batch before it writes its table, and the peak passes the ceiling by that.
     /// </summary>
-    private static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes, int spilledRow = 0)
+    internal static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes, int spilledRow = 0)
     {
         int asked = pass.Options.BatchRows > 0 ? pass.Options.BatchRows : GroupBatches.BatchRows;
         long room = spilledRow > 0 ? memory.Ceiling / 16 / Math.Max(1, lanes) / spilledRow : memory.Ceiling / 4 / Math.Max(1, lanes) / CoreRowBytes;
