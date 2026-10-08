@@ -130,4 +130,11 @@ public enum GroupCoreReason
 
     /// <summary>A lane's memory budget could not let its table grow.</summary>
     Pressure,
+
+    /// <summary>
+    /// A lane's new groups came, past its first rows, at a rate that did not fall, as a key of sessions does,
+    /// where a key drawn from a fixed set of values comes at a falling one: its rows left would have made
+    /// half a million groups or more.
+    /// </summary>
+    Projection,
 }

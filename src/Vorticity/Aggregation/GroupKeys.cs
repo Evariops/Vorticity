@@ -309,6 +309,13 @@ internal abstract class GroupKeys
     internal virtual bool NumberedByValue => false;
 
     /// <summary>
+    /// Whether the keys of groups <paramref name="from"/> to <paramref name="to"/>, as they were met, rise:
+    /// a key in the order of the rows, whose every batch is new groups that the core would take no better.
+    /// False where the keys cannot tell.
+    /// </summary>
+    internal virtual bool Ascending(int from, int to) => false;
+
+    /// <summary>
     /// Whether group <paramref name="group"/>'s key, an integer, lies below <paramref name="bound"/>:
     /// the groups a floor the zones give proves final. False for the null group, and for keys these
     /// do not read as integers.
@@ -1668,6 +1675,24 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>The key of group <paramref name="group"/>; the null group's is the default value.</summary>
     internal TValue KeyAt(int group) => _keys[group];
+
+    internal override bool Ascending(int from, int to)
+    {
+        if (to - from < 2)
+        {
+            return false;
+        }
+
+        for (int g = from + 1; g < to; g++)
+        {
+            if (_keys[g].CompareTo(_keys[g - 1]) <= 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private int Add(TValue value)
     {

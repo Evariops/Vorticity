@@ -913,6 +913,7 @@ Vorticity:     const GroupCoreReason Asked = 1
 Vorticity:     const GroupCoreReason FirstRows = 2
 Vorticity:     const GroupCoreReason None = 0
 Vorticity:     const GroupCoreReason Pressure = 4
+Vorticity:     const GroupCoreReason Projection = 5
 Vorticity:     const GroupCoreReason Spread = 3
 Vorticity:     field int value__
 Vorticity: sealed class Vorticity.GroupKeyPlan : IEquatable<GroupKeyPlan>

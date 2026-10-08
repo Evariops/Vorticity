@@ -1255,6 +1255,9 @@ internal enum CoreReason
 
     /// <summary>A lane's budget could not let its table grow.</summary>
     Pressure,
+
+    /// <summary>A lane's new groups came at a rate that did not fall, which its rows left would take past half a million.</summary>
+    Projection,
 }
 
 /// <summary>Where a group's record and its key lie in an entry of a part's batch.</summary>

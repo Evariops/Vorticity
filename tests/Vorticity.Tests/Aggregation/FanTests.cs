@@ -68,6 +68,54 @@ public sealed partial class FanTests
         }
     }
 
+    [Theory]
+    [InlineData("sessions", GroupCoreReason.Projection)]
+    [InlineData("fixed", GroupCoreReason.None)]
+    public async Task ALaneProjectsItsNewGroupsPastItsFirstRows(string shape, GroupCoreReason expected)
+    {
+        // Sessions of two rows, hashed: half of every batch new groups, which the first rows take for a key
+        // of some 4·10⁴ values, and whose rate does not fall: the lanes turn on their projection. A key of
+        // 10⁵ values hashed in no order brings new groups at a falling rate: nothing turns.
+        Row[] rows = new Row[5_000_000];
+        for (int row = 0; row < rows.Length; row++)
+        {
+            ulong mix = Mix((ulong)row);
+            long key = shape == "sessions" ? (long)(Mix((ulong)row / 2) % (1UL << 40)) * 7 : (long)(mix % 100_000) * 7_919_000_003;
+            rows[row] = new Row(key, (long)((mix >> 50) % 1_000));
+        }
+
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation query = file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
+            query.Plan.CoreLanes = 4;
+            long count = 0;
+            long total = 0;
+            await foreach (KeyTotal group in query.As<KeyTotal>().ToRecordsAsync(Ct))
+            {
+                count += group.Count;
+                total += group.Total;
+            }
+
+            Assert.Equal(rows.Length, count);
+            Assert.Equal(rows.Sum(r => r.Value), total);
+            GroupStatistics grouping = query.Statistics.Grouping!;
+            Assert.Equal(expected, grouping.CoreReason);
+            Assert.Equal(rows.Select(r => r.Key).Distinct().Count(), grouping.Groups);
+            if (expected == GroupCoreReason.Projection)
+            {
+                // Past its first rows and two windows more: three windows of a batch each.
+                Assert.InRange(grouping.TurnedAfterRows, 3 * 65_536, rows.Length / 4);
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     /// <summary>
     /// A quarter of the rows of a thousand values, then 1.5 million values in no order; the other way
     /// round; or a thousand values, then keys hashed over 2⁴⁰ values, which nothing bounds.

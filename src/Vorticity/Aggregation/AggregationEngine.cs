@@ -169,6 +169,7 @@ internal sealed class AggregationPlan
                 CoreReason.Plan => GroupCoreReason.Asked,
                 CoreReason.FirstRows => GroupCoreReason.FirstRows,
                 CoreReason.Spread => GroupCoreReason.Spread,
+                CoreReason.Projection => GroupCoreReason.Projection,
                 _ => GroupCoreReason.Pressure,
             },
             TurnedAfterRows = core?.TurnedAfterRows ?? -1,
@@ -1794,9 +1795,80 @@ internal sealed class AggregationPartition
                 Pressure.Outgrew(CoreReason.FirstRows, _rowsFolded);
                 return true;
             }
+
+            _windowStart = _rowsFolded;
+            _windowGroups = Keys?.Count ?? 0;
+            _rateNewest = _rowsFolded > 0 ? (double)_windowGroups / _rowsFolded : 0;
+            _windows = 1;
+        }
+
+        if (_judged && !_projected && _rowsFolded - _windowStart >= JudgedRows && Projects())
+        {
+            Pressure.Outgrew(CoreReason.Projection, _rowsFolded);
+            return true;
         }
 
         return MemoryPressed();
+    }
+
+    // The projection past the first rows (Projects): where the window of rows it counts began, the groups then,
+    // the rate of new groups of the last three windows, newest first, the windows counted, and whether the
+    // lane judged it for good.
+    private long _windowStart;
+    private int _windowGroups;
+    private double _rateNewest;
+    private double _rateBefore;
+    private double _rateOldest;
+    private int _windows;
+    private bool _projected;
+
+    /// <summary>
+    /// Whether the lane's groups at the end, projected from the rate of its new groups, take the query to the
+    /// core: counted window after window of <see cref="JudgedRows"/> rows, never row by row. A key drawn from a
+    /// fixed set of values brings new groups at a falling rate, e^(−r/K), which the uniform model of its
+    /// first rows already judged (<see cref="EstimatedValues"/>); a key of sessions, a few rows each, at a rate
+    /// that does not fall, which that model takes for a few tens of thousands of values (65 536 rows, 32 768
+    /// groups: 4·10⁴). Past three windows, a rate that has kept four fifths of itself over two windows makes
+    /// the groups held plus the rate times the rows left; past <see cref="TurnValues"/>, with rows left to repay
+    /// emptying the table, twice its groups, the lane turns, once. A key in the order of the rows, every batch
+    /// new groups the core takes no better, never turns (<see cref="GroupKeys.Ascending"/>).
+    /// </summary>
+    private bool Projects()
+    {
+        GroupKeys? keys = Keys;
+        if (keys is not { NumberedByValue: false } || ExpectedRows <= 0)
+        {
+            _projected = true;
+            return false;
+        }
+
+        long rows = _rowsFolded - _windowStart;
+        int added = keys.Count - _windowGroups;
+        _rateOldest = _rateBefore;
+        _rateBefore = _rateNewest;
+        _rateNewest = (double)added / rows;
+        _windowStart = _rowsFolded;
+        _windowGroups = keys.Count;
+        if (++_windows < 3)
+        {
+            return false;
+        }
+
+        // A falling rate is a key of fixed values, which the first rows judged: the lane projects no more.
+        if (_rateNewest < 0.8 * _rateOldest)
+        {
+            _projected = true;
+            return false;
+        }
+
+        long left = ExpectedRows - _rowsFolded;
+        if (keys.Count + (_rateNewest * left) < TurnValues || left < 2L * keys.Count)
+        {
+            return false;
+        }
+
+        _projected = true;
+        return !keys.Ascending(keys.Count - added, keys.Count);
     }
 
     /// <summary>
