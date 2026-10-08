@@ -116,7 +116,9 @@ the last seven days, 999 down to 993: 16960 rows read of a million
 
 Two more keys stream. A column of integers stored nearly in order, the rows of a log appended a
 little late, streams on its zone maps: a group goes out once every block still to read holds keys
-above it. A dataset's clustering key streams over its objects, read in the key's order. The plan
+above it. It does on one lane, under a `Take`, and under a tight memory budget; on several lanes
+without either, the pass blocks, which runs faster there. A dataset's clustering key streams over its
+objects, read in the key's order. The plan
 says which component streams, and [16-queries.md](../design/16-queries.md) §2.3 says when each one
 does.
 
