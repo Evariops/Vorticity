@@ -347,12 +347,13 @@ internal sealed class MergedParts : ResultParts
     private async ValueTask<Built> BuildAsync(int part, CancellationToken cancellationToken)
     {
         (GroupKeys keys, AggregateSlot[] slots, long reserved, long measured) = _merge.Merge(part);
-        long groups = Interlocked.Add(ref _groups, keys.Count);
+        // The groups the reader counts as it takes each part (GroupBatches); the last part merged reads
+        // every part's, each added before its part counted as merged.
+        Interlocked.Add(ref _groups, keys.Count);
         if (Interlocked.Increment(ref _merged) == _merge.Parts)
         {
             LetLanesGo();
-            _plan.LastGroups = groups;
-            _plan.PeakGroups = Math.Max(_plan.PeakGroups, groups);
+            _plan.PeakGroups = Math.Max(_plan.PeakGroups, Interlocked.Read(ref _groups));
             if (_plan.LastRun is { } run)
             {
                 _plan.LastRun = run with { MergeTicks = Stopwatch.GetTimestamp() - _started };
