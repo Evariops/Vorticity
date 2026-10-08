@@ -68,8 +68,8 @@ public enum GroupOrdering
 /// <param name="ReloadedBytes">The bytes of sub-tables the bursts read again.</param>
 /// <param name="Tables">The sub-tables holding the groups at the end.</param>
 /// <param name="TableSplits">The times a sub-table split.</param>
-/// <param name="SpilledParts">The parts written to local scratch, which no budget held.</param>
-/// <param name="SpilledBytes">Their bytes.</param>
+/// <param name="SpilledParts">The parts of the core written to local scratch, which no budget held.</param>
+/// <param name="SpilledBytes">The bytes written to local scratch: the core's parts, or the lanes' runs.</param>
 /// <param name="KeyBlocksByRange">Key blocks grouped by their runs: constant or run-end, one lookup a run.</param>
 /// <param name="KeyBlocksByCode">Key blocks grouped by the codes of their dictionary, one lookup a distinct value.</param>
 /// <param name="KeyBlocksHashed">Key blocks grouped row by row, each value hashed.</param>
@@ -104,6 +104,13 @@ public sealed record GroupStatistics(
     /// start or not at all.
     /// </summary>
     public long TurnedAfterRows { get; init; } = -1;
+
+    /// <summary>
+    /// The runs the lanes wrote their tables to in local scratch, a table each time the budget held one
+    /// no more and the core could not take its groups: a text key, a composite holding one, a text's
+    /// extremes, a distinct count. 0 when nothing spilled.
+    /// </summary>
+    public int SpilledRuns { get; init; }
 }
 
 /// <summary>Why a group by held its groups in the core, each group once, rather than on a table each lane.</summary>

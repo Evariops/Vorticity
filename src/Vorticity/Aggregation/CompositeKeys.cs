@@ -162,6 +162,39 @@ internal sealed class CompositeKeys : GroupKeys
     /// <summary>The hash of group <paramref name="group"/>'s tuple under <see cref="MergeHash.Seed"/>: the table's, unless it took a seed of its own.</summary>
     private ulong HashOf(int group) => _table.Reseeded ? MergeHash.Of(_table.KeyOf(group), MergeHash.Seed) : _table.HashOf(group);
 
+    internal override bool Spills => true;
+
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new CompositeKeys(_parts, shelf);
+
+    internal override long GrowthFor(int more) => _table.GrowthFor(more);
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = HashOf(g);
+        }
+    }
+
+    /// <summary>Each tuple's hash and bytes, its nulls among them: read back, no tuple is hashed again.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            buffer.Write(HashOf(group));
+            buffer.WriteBytes(_table.KeyOf(group));
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            ulong hash = reader.Read<ulong>();
+            groups[i] = GroupOf(reader.Bytes(), hash);
+        }
+    }
+
     internal override int[] Order(bool sorted) => Identity(Count);
 
     internal override Func<int, T> Reader<T>(int component)

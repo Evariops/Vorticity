@@ -190,6 +190,37 @@ internal abstract class AggregateSlot
     internal virtual long Footprint => 0;
 
     /// <summary>
+    /// The bytes the slot's arrays would take more were <paramref name="more"/> rows to come, a new group
+    /// or a new value each at most: what a lane whose table spills asks the budget for before a batch.
+    /// Nothing for a slot whose states lie in the records, which its partition asks.
+    /// </summary>
+    internal virtual long GrowthFor(int more) => 0;
+
+    /// <summary>
+    /// Whether the slot's states go to a lane's spill with its keys and come back: in the records, as
+    /// their bytes, or written apart (<see cref="WriteStates"/>). Not a state with references, a caller's
+    /// aggregator's, which no byte holds.
+    /// </summary>
+    internal virtual bool SpillsStates => StateBytes > 0;
+
+    /// <summary>
+    /// Writes the states of <paramref name="groups"/>, in order, that the slot keeps apart from the
+    /// records: what <see cref="ReadStates"/> reads back. Nothing for a slot whose states lie in records.
+    /// </summary>
+    internal virtual void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+    }
+
+    /// <summary>
+    /// Reads <paramref name="count"/> states written by <see cref="WriteStates"/> into groups 0 to
+    /// <paramref name="count"/> − 1 of the slot, a new one, which then merges them into a part's slot as
+    /// a lane's would. Nothing for a slot whose states lie in records, which its partition reads.
+    /// </summary>
+    internal virtual void ReadStates(ref SpillReader reader, int count)
+    {
+    }
+
+    /// <summary>
     /// Whether the slot spills on its own when its partition's budget holds it no more
     /// (<see cref="SpillAsync"/>): a distinct count over the whole scan, whose set is all that grows.
     /// </summary>

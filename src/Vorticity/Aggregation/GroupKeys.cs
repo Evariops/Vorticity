@@ -220,6 +220,43 @@ internal abstract class GroupKeys
     private static NotSupportedException NotEntries() => new NotSupportedException("These keys do not travel in a part's batches.");
 
     /// <summary>
+    /// Whether the keys go to a lane's spill and come back (<see cref="WriteKeys"/>, <see cref="ReadKeys"/>):
+    /// every index a lane folds rows into; not one that appends, nor the parts of a merge read as one.
+    /// </summary>
+    internal virtual bool Spills => false;
+
+    /// <summary>
+    /// The section of a spill's run each group goes to: the top byte of its key's hash under
+    /// <see cref="MergeHash.Seed"/>, the same for one key in every lane and every table a lane empties,
+    /// as <see cref="Parts"/> cuts by values; the first section for the null group.
+    /// </summary>
+    internal virtual void Sections(Span<byte> sections) => Parts(MergeHash.Seed, 64 - SpillRun.SectionBits, sections);
+
+    /// <summary>
+    /// The hash of each group's key under <see cref="MergeHash.Seed"/>, 0 for the null group: what a key
+    /// of several columns takes its sections from, its columns' combined.
+    /// </summary>
+    internal virtual void Hashes(Span<ulong> hashes) => throw NotSpilled();
+
+    /// <summary>Writes the keys of <paramref name="groups"/>, in order: what <see cref="ReadKeys"/> reads back.</summary>
+    internal virtual void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer) => throw NotSpilled();
+
+    /// <summary>Reads as many keys as <paramref name="groups"/> holds, written by <see cref="WriteKeys"/>, each one's group here into it, added when new.</summary>
+    internal virtual void ReadKeys(ref SpillReader reader, Span<int> groups) => throw NotSpilled();
+
+    /// <summary>An empty index a part of a spill is read back into: hashed, never by value, its arrays from <paramref name="shelf"/>.</summary>
+    internal virtual GroupKeys ForSpill(ArrayShelf? shelf) => Fresh();
+
+    /// <summary>
+    /// The bytes the index's arrays would take more were <paramref name="more"/> new groups to come: what a
+    /// lane whose table spills asks the budget for before a batch, as many new groups as rows at most
+    /// (<see cref="TableGrowth"/>). Twice what it holds when it cannot tell.
+    /// </summary>
+    internal virtual long GrowthFor(int more) => 2 * Footprint;
+
+    private static NotSupportedException NotSpilled() => new NotSupportedException("These keys do not go to a spill.");
+
+    /// <summary>
     /// Readies the indexes of a parallel merge's partitions, this one the first of them, for their
     /// hashes and their merge in parts: what they share is merged once, a composite's indexes of its
     /// columns, so that a key has the same words in every partition. Nothing for a key of one column.
@@ -1342,6 +1379,52 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override int EntryBytes => Unsafe.SizeOf<TValue>();
 
+    internal override bool Spills => !_appending;
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = g == _null ? 0 : EntryKeys.Hash(_keys[g], MergeHash.Seed);
+        }
+    }
+
+    /// <summary>The null group's place among <paramref name="groups"/>, -1 for none, then every key, the null group's as the default value.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        buffer.Write(_null < 0 ? -1 : groups.IndexOf(_null));
+        Span<byte> keys = buffer.Take(groups.Length * Unsafe.SizeOf<TValue>());
+        for (int i = 0; i < groups.Length; i++)
+        {
+            MemoryMarshal.Write(keys[(i * Unsafe.SizeOf<TValue>())..], in _keys[groups[i]]);
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        int nullAt = reader.Read<int>();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            TValue key = reader.Read<TValue>();
+            groups[i] = i == nullAt ? NullGroup() : Lookup(key);
+        }
+    }
+
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new FixedKeys<TValue>(_shape, sorted: false, probeAhead: _probeAhead, shelf: shelf);
+
+    /// <summary>The keys' array, and the index, or numbered by value the pages of the span still to come, a page a new group at most.</summary>
+    internal override long GrowthFor(int more)
+    {
+        long bytes = TableGrowth.Of(Count, more, _keys.Length, _keys.Length, Unsafe.SizeOf<TValue>());
+        if (_pages is null)
+        {
+            return bytes + _index.GrowthFor(more);
+        }
+
+        long left = Math.Max(0, ((long)_pages.Length << PageBits) - _slabsHeld) >> PageBits;
+        return bytes + (Math.Min(more, left) << PageBits) * sizeof(int);
+    }
+
     internal override GroupKeys? Appending() => new FixedKeys<TValue>(_shape, sorted: false, appending: true);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
@@ -1743,6 +1826,50 @@ internal sealed class BytesKeys : GroupKeys
     /// <summary>The hash of group <paramref name="group"/>'s key under <see cref="MergeHash.Seed"/>: the table's, unless it took a seed of its own.</summary>
     private ulong HashOf(int group) => _table.Reseeded ? MergeHash.Of(_table.KeyOf(group), MergeHash.Seed) : _table.HashOf(group);
 
+    internal override bool Spills => true;
+
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new BytesKeys(_shape, sorted: false, shelf);
+
+    internal override long GrowthFor(int more) => _table.GrowthFor(more);
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = g == _null ? 0 : HashOf(g);
+        }
+    }
+
+    /// <summary>The null group's place among <paramref name="groups"/>, -1 for none, then each other key's hash and bytes: read back, no text is hashed again.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        buffer.Write(_null < 0 ? -1 : groups.IndexOf(_null));
+        foreach (int group in groups)
+        {
+            if (group != _null)
+            {
+                buffer.Write(HashOf(group));
+                buffer.WriteBytes(_table.KeyOf(group));
+            }
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        int nullAt = reader.Read<int>();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (i == nullAt)
+            {
+                groups[i] = NullGroup();
+                continue;
+            }
+
+            ulong hash = reader.Read<ulong>();
+            groups[i] = Lookup(reader.Bytes(), hash);
+        }
+    }
+
     internal override int CompareKeys(GroupKeys other, int a, int b, int component)
     {
         BytesKeys right = (BytesKeys)other;
@@ -1948,6 +2075,36 @@ internal sealed class BoolKeys : GroupKeys
         for (int g = 0; g < Count; g++)
         {
             parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, seed) >> shift);
+        }
+    }
+
+    internal override bool Spills => true;
+
+    /// <summary>Three groups at most, held from the start.</summary>
+    internal override long GrowthFor(int more) => 0;
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = _keyOf[g] == 2 ? 0 : MergeHash.Of(_keyOf[g] + 1UL, MergeHash.Seed);
+        }
+    }
+
+    /// <summary>Each key's code: 0 for false, 1 for true, 2 for null.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            buffer.Write(_keyOf[group]);
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            groups[i] = GroupOf(reader.Read<byte>());
         }
     }
 

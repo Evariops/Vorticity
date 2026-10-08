@@ -38,7 +38,7 @@ public sealed partial class WorkCounterTests
         "distinct values of 10^6: result 129508936719, rows 0, lanes 0, lane groups 0, arrays 0 of 0 B, copied 0 B, blocks 0/0/0, merge  parts 0 entries, peak 0 B",
         "count by a text: result 200000, rows 200000, lanes 1, lane groups 49081, arrays 50 of 7730472 B, copied 1833792 B, blocks 0/12/1, merge 0 parts 0 entries, peak 6029368 B",
         "count by a text and an int: result 200000, rows 200000, lanes 1, lane groups 196058, arrays 96 of 21627136 B, copied 3926200 B, blocks 0/0/0, merge 0 parts 0 entries, peak 17038504 B",
-        "least and greatest text by 10^3 values: result 56000, rows 200000, lanes 1, lane groups 1000, arrays 15 of 311232 B, copied 0 B, blocks 0/0/13, merge 0 parts 0 entries, peak 1572864 B",
+        "least and greatest text by 10^3 values: result 56000, rows 200000, lanes 1, lane groups 1000, arrays 21 of 171968 B, copied 0 B, blocks 0/0/13, merge 0 parts 0 entries, peak 1310720 B",
         "distinct users by day: result 299552, rows 300000, lanes 1, lane groups 1, arrays 373 of 2940924 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 2621440 B",
     ];
 

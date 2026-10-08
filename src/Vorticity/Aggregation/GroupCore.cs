@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -310,27 +311,41 @@ internal sealed partial class GroupCore
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory, bool lean)
     {
-        if (!plan.Grouped || sorted || top is not null)
+        if (!plan.Grouped || sorted || top is not null || !Holds(plan, settled, source, facts, out GroupKeys? kind, out GroupRecords? records))
         {
             return null;
-        }
-
-        GroupKeys kind = plan.CreateKeys(sorted: false, CacheFacts(facts));
-        if (kind.EntryBytes == 0)
-        {
-            return null;
-        }
-
-        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out GroupRecords? records);
-        foreach (AggregateSlot slot in slots)
-        {
-            if (slot.StateBytes == 0)
-            {
-                return null;
-            }
         }
 
         return new GroupCore(plan, settled, columns, inputs, source, CacheFacts(facts), kind.ForPart(), records?.Layout, lanes, memory, lean);
+    }
+
+    /// <summary>
+    /// Whether the core can hold the plan's groups: a key that travels in entries, of fixed width, and
+    /// every state in the records. The others, a text key, a composite holding one, a text's extremes, a
+    /// distinct count, only the lanes' tables hold, which spill under pressure.
+    /// </summary>
+    internal static bool Holds(AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts) =>
+        plan.Grouped && Holds(plan, settled, source, facts, out _, out _);
+
+    private static bool Holds(
+        AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts, [NotNullWhen(true)] out GroupKeys? kind, out GroupRecords? records)
+    {
+        records = null;
+        kind = plan.CreateKeys(sorted: false, CacheFacts(facts));
+        if (kind.EntryBytes == 0)
+        {
+            return false;
+        }
+
+        foreach (AggregateSlot slot in AggregationPartition.NewSlots(plan, settled, source, out records))
+        {
+            if (slot.StateBytes == 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

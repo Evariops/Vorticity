@@ -976,6 +976,37 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set.Govern(_shelf);
     }
 
+    /// <summary>A count by group, in pairs; a streaming group by's sets by group never spill, its groups few.</summary>
+    internal override bool SpillsStates => _set is null && _sets is null;
+
+    /// <summary>The counts of the groups, and their pairs, a new pair a row at most.</summary>
+    internal override long GrowthFor(int more) =>
+        _set is not null || _sets is not null ? 0 : TableGrowth.Of(_groups, more, _counts.Length, _counts.Length, sizeof(long)) + _pairs.GrowthFor(more);
+
+    /// <summary>Each group's values, their number first.</summary>
+    internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            int at = buffer.Length;
+            buffer.Write(0);
+            buffer.Patch(at, _pairs.WriteGroup(group, buffer));
+        }
+    }
+
+    internal override void ReadStates(ref SpillReader reader, int count)
+    {
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                Add(group, reader.Read<TValue>());
+            }
+        }
+    }
+
     internal override bool SpillsAlone => _set is not null;
 
     internal override bool Spilled => _runs is not null;

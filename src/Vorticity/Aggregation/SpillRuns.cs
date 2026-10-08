@@ -11,6 +11,38 @@ using Vorticity.Writing;
 namespace Vorticity.Aggregating;
 
 /// <summary>
+/// What a table's arrays would take more if more entries came, a group or a value each: what a lane
+/// whose table spills asks the budget for before a batch, the batch's rows at most, rather than a doubling
+/// of every array it holds, which a table at its size for good never makes.
+/// </summary>
+internal static class TableGrowth
+{
+    /// <summary>
+    /// The bytes of the array that replaces one of <paramref name="length"/> elements of
+    /// <paramref name="elementBytes"/> each, holding <paramref name="count"/> and taking
+    /// <paramref name="more"/>, when they pass the <paramref name="usable"/> elements it fills before it
+    /// doubles; 0 when they do not.
+    /// </summary>
+    internal static long Of(long count, long more, long length, long usable, int elementBytes)
+    {
+        if (count + more <= usable)
+        {
+            return 0;
+        }
+
+        long grown = Math.Max(1, length);
+        long fill = Math.Max(1, usable);
+        while (count + more > fill)
+        {
+            grown *= 2;
+            fill *= 2;
+        }
+
+        return grown * elementBytes;
+    }
+}
+
+/// <summary>
 /// The bytes every spill of the process wrote to its scratch, the core's and the lanes': past a tenth
 /// of the free space their directories leave, a spill fails rather than fill the disk.
 /// </summary>
@@ -65,6 +97,9 @@ internal sealed class SpillScope : IDisposable
 
     /// <summary>The query's memory, which the spill's buffers are counted in.</summary>
     internal QueryMemory Memory { get; }
+
+    /// <summary>The lanes' tables written one at a time: what writing one takes past the budget is given back with it before the next.</summary>
+    internal SemaphoreSlim Writing { get; } = new SemaphoreSlim(1, 1);
 
     /// <summary>The runs written.</summary>
     internal int Runs => Volatile.Read(ref _runs);
@@ -346,6 +381,10 @@ internal sealed class SpillBuffer
         value.CopyTo(Take(value.Length));
     }
 
+    /// <summary>Writes <paramref name="value"/> again at <paramref name="at"/>, written before: a count known once what it counts is written.</summary>
+    internal void Patch<T>(int at, T value)
+        where T : unmanaged => MemoryMarshal.Write(_bytes.AsSpan(at), in value);
+
     /// <summary>The buffer let go, its bytes given back.</summary>
     internal void Release()
     {
@@ -401,4 +440,124 @@ internal ref struct SpillReader(ReadOnlySpan<byte> bytes)
     /// <summary>The next values, copied into <paramref name="into"/>.</summary>
     internal void Read<T>(Span<T> into)
         where T : unmanaged => Bytes(into.Length * Unsafe.SizeOf<T>()).CopyTo(MemoryMarshal.AsBytes(into));
+}
+
+/// <summary>
+/// The parts of a group by whose lanes wrote their tables to the scratch, read back from the runs: a part
+/// is a stretch of every run's sections, each section's groups made into slots of their own and merged
+/// into the part's table as a lane's table merges into a part's. The table grows from a shelf of its own
+/// under the query's memory, each array reserved before it comes: runs that share keys count more
+/// entries than the part holds groups. The files go once the last part is merged.
+/// </summary>
+internal sealed class RunMerge(
+    SpillRun[] runs, GroupKeys kind, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, ScanSource source, QueryMemory memory, SpillScope spill,
+    int bits, int readBytes) : PartSource
+{
+    internal override int Parts => 1 << bits;
+
+    internal override (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (kind.ForSpill(null), AggregationPartition.NewSlots(plan, settled, source));
+
+    internal override async ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, CancellationToken cancellationToken)
+    {
+        (int first, int past) = SpillRun.Of(part, bits);
+
+        // Each array reserved alone, nothing ahead: a quarter of a megabyte ahead a part outweighs the
+        // small parts of a small budget.
+        ArrayShelf shelf = new ArrayShelf(memory) { Exact = true };
+        GroupKeys keys = kind.ForSpill(shelf);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out _, shelf);
+        SpillBuffer? buffer = null;
+        long room = 0;
+        try
+        {
+            buffer = new SpillBuffer(memory);
+            foreach (SpillRun run in runs)
+            {
+                // As many of the run's sections at a time as a read of readBytes takes, one at least.
+                int section = first;
+                while (section < past)
+                {
+                    int end = section + 1;
+                    while (end < past && run.Starts[end + 1] - run.Starts[section] <= readBytes)
+                    {
+                        end++;
+                    }
+
+                    int length = checked((int)(run.Starts[end] - run.Starts[section]));
+                    if (length > 0)
+                    {
+                        await run.File.ReadAsync(run.Starts[section], buffer.Ensure(length), cancellationToken).ConfigureAwait(false);
+                        MergeSections(run, section, end, buffer.Span(length), keys, slots);
+                    }
+
+                    section = end;
+                }
+            }
+
+            buffer.Release();
+            buffer = null;
+
+            // The table as its shelf counts it, and as much again for the batches its builder makes of it.
+            room = shelf.Out;
+            if (!memory.TryGrow(room))
+            {
+                room = 0;
+                throw memory.Exceeded("merge of a spilled group by", keys.Count, shelf.Out);
+            }
+
+            return (keys, slots, shelf.Reserved + room, shelf.Out);
+        }
+        catch
+        {
+            buffer?.Release();
+            shelf.LetGo();
+            memory.Shrink(room);
+            throw;
+        }
+    }
+
+    /// <summary>The groups of sections [<paramref name="first"/>, <paramref name="past"/>) of a run, read back into <paramref name="bytes"/>, merged into the part's table.</summary>
+    private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots)
+    {
+        SpillReader reader = new SpillReader(bytes);
+        int[] map = [];
+        for (int section = first; section < past; section++)
+        {
+            int count = run.Counts[section];
+            if (count == 0)
+            {
+                continue;
+            }
+
+            // The section's keys, each to its group in the part; then its states into slots of their own,
+            // groups 0 on, records first, then what each slot keeps apart; then merged.
+            Scratch.Grow(ref map, count);
+            Span<int> into = map.AsSpan(0, count);
+            keys.ReadKeys(ref reader, into);
+            AggregateSlot[] read = AggregationPartition.NewSlots(plan, settled, source, out GroupRecords? records);
+            records?.Read(ref reader, count);
+            for (int i = 0; i < read.Length; i++)
+            {
+                if (inputs[i] != AggregationPartition.Settled && read[i].StateBytes == 0)
+                {
+                    read[i].ReadStates(ref reader, count);
+                }
+            }
+
+            ReadOnlySpan<int> all = Numbers.Upto(count);
+            for (int i = 0; i < slots.Length; i++)
+            {
+                slots[i].EnsureGroups(keys.Count);
+                if (inputs[i] != AggregationPartition.Settled)
+                {
+                    slots[i].MergeFrom(read[i], all, into);
+                }
+            }
+        }
+    }
+
+    /// <summary>The runs' files closed and gone.</summary>
+    internal override void Release() => spill.Dispose();
+
+    internal override AggregationRun Finished(AggregationRun run) => run.Spilled(spill);
 }

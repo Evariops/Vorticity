@@ -81,6 +81,26 @@ internal sealed class ByteKeyTable
     /// <summary>The number of distinct keys.</summary>
     internal int Count { get; private set; }
 
+    /// <summary>
+    /// The bytes the table would take more were <paramref name="more"/> new keys to come: its slots, at most
+    /// half full, its places and hashes, and the pages their bytes take, at the mean of the keys it holds,
+    /// past what its pages hold.
+    /// </summary>
+    internal long GrowthFor(int more)
+    {
+        long bytes = TableGrowth.Of(Count, more, _slots.Length, _slots.Length / 2, Unsafe.SizeOf<Slot>())
+            + TableGrowth.Of(Count, more, _places.Length, _places.Length, sizeof(uint) + sizeof(ulong));
+        long held = 0;
+        foreach (byte[]? page in _pages)
+        {
+            held += page?.Length ?? 0;
+        }
+
+        long mean = Count > 0 ? (_used / Count) + 1 : 64;
+        long past = _used + (more * mean) - held;
+        return past <= 0 ? bytes : bytes + (((past + PageBytes - 1) >> PageBits) << PageBits);
+    }
+
     /// <summary>Whether a key landed far enough from its own slot for the table to take a seed.</summary>
     internal bool Reseeded => _seed != 0;
 

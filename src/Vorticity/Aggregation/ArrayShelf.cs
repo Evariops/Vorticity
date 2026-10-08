@@ -114,6 +114,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The bytes of the arrays a lane's shelf handed out that its tables hold: what its query's memory counts of them.</summary>
     internal long Out => _out;
 
+    /// <summary>What a lane's shelf holds of its query's memory: the arrays it handed out, and what it reserved ahead of the next.</summary>
+    internal long Reserved => _out + _credit;
+
     /// <summary>The arrays a lane's shelf handed out, every one, as its tables grew: a count of the work a growth costs, which the tests hold.</summary>
     internal long Handed { get; private set; }
 

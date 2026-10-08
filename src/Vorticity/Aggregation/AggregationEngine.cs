@@ -157,7 +157,7 @@ internal sealed class AggregationPlan
             core?.Tables ?? 0,
             core?.Splits ?? 0,
             core?.SpilledParts ?? 0,
-            core?.SpilledBytes ?? 0,
+            (core?.SpilledBytes ?? 0) + run.SpilledBytes,
             LastKeyBlocks.ByRange,
             LastKeyBlocks.ByCode,
             LastKeyBlocks.Hashed,
@@ -172,6 +172,7 @@ internal sealed class AggregationPlan
                 _ => GroupCoreReason.Pressure,
             },
             TurnedAfterRows = core?.TurnedAfterRows ?? -1,
+            SpilledRuns = run.SpilledRuns,
         };
     }
 
@@ -684,6 +685,11 @@ internal sealed class AggregationPartition
     // The source's row the current batch starts at, which a chosen row keeps.
     private long _startRow;
 
+    // What the partition makes its slots from: made again empty once it wrote them to a spill.
+    private readonly AggregationPlan _plan;
+    private readonly AggregateSlot?[] _settledSlots;
+    private readonly ScanSource? _source;
+
     // The component of a composite key that streams, its own index, the component group of each
     // group and of each row of the batch: what tells a group a later row may still join from one
     // no row to come can.
@@ -720,6 +726,9 @@ internal sealed class AggregationPartition
         Memory = memory;
         _arrays = memory is null ? null : new ArrayShelf(memory);
         _turnAt = plan.CoreTurnAt;
+        _plan = plan;
+        _settledSlots = settled;
+        _source = source;
         _columns = columns;
         _inputs = inputs;
         _keyCount = plan.Keys.Length;
@@ -867,6 +876,192 @@ internal sealed class AggregationPartition
         }
 
         _arrays!.Relieved();
+    }
+
+    // The runs the lane wrote its table to, the file they lie in, and what the tables it emptied held:
+    // their key blocks, their groups and their bytes.
+    private List<SpillRun>? _runs;
+    private SpillFile? _file;
+    private (long ByRange, long ByCode, long Hashed) _evictedBlocks;
+    private long _evictedGroups;
+    private long _evictedBytes;
+
+    // Whether the lane found that the core cannot hold the query, its table written to the scratch instead
+    // under pressure; and whether its keys are hashed since, as every table it makes again is.
+    private bool _spilling;
+    private bool _hashed;
+
+    /// <summary>The runs the lane wrote its table to; null when it wrote none.</summary>
+    internal List<SpillRun>? Runs => _runs;
+
+    /// <summary>Whether the lane wrote its table to the scratch: the query's groups come back from the runs at the end.</summary>
+    internal bool Evicted => _runs is not null;
+
+    /// <summary>The groups and the bytes of the tables the lane emptied into its runs: what a group costs a table, which a part read back reserves by.</summary>
+    internal (long Groups, long Bytes) EvictedTables => (_evictedGroups, _evictedBytes);
+
+    /// <summary>The key blocks the lane grouped, by how: its table's, and those of the tables it emptied.</summary>
+    internal (long ByRange, long ByCode, long Hashed) Blocks
+    {
+        get
+        {
+            (long range, long code, long hashed) = Keys?.Blocks ?? default;
+            return (range + _evictedBlocks.ByRange, code + _evictedBlocks.ByCode, hashed + _evictedBlocks.Hashed);
+        }
+    }
+
+    /// <summary>Whether the lane's table can go to a spill: a table that grows, its keys and every state of its slots in bytes.</summary>
+    internal bool CanEvict
+    {
+        get
+        {
+            if (_spill is null || !_plan.LanesSpill || Keys is not { Spills: true } || _streaming >= 0 || Top is not null || _core is not null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < Slots.Length; i++)
+            {
+                if (_inputs[i] != Settled && !Slots[i].SpillsStates)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// The lane's table written to its scratch as a run, in sections, a section the groups whose key's
+    /// hash has its top byte, each group with its key, its record and the states its slots keep apart;
+    /// then let go, what it held of the budget given back, and made again empty from the lane's shelf.
+    /// What moves is states: a group goes once, whatever its rows.
+    /// </summary>
+    internal async ValueTask EvictAsync(CancellationToken cancellationToken)
+    {
+        if (Keys is not { Count: > 0 } keys)
+        {
+            return;
+        }
+
+        QueryMemory memory = Memory!;
+        SpillFile file = _file ??= _spill!.NewFile();
+        int count = keys.Count;
+
+        // One lane writes at a time: what writing takes past the budget, a byte and a number a group
+        // and a page, is one lane's, each given back with its table before the next lane's.
+        SemaphoreSlim gate = _spill!.Writing;
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            // A byte a group for its section, then the groups placed section by section: taken past the
+            // budget, which the table they empty gives back more of right after.
+            long scratch = (long)count * (sizeof(byte) + sizeof(int));
+            memory.Force(scratch);
+            memory.Measure(scratch);
+            SpillRun run = new SpillRun(file);
+            SpillBuffer buffer = new SpillBuffer(memory, Lanes);
+            try
+            {
+                (int[] placed, int[] starts) = Placed(keys, count);
+                for (int section = 0; section < SpillRun.Sections; section++)
+                {
+                    run.Starts[section] = file.Length + buffer.Length;
+                    run.Counts[section] = starts[section + 1] - starts[section];
+                    WriteSection(placed, starts[section], run.Counts[section], buffer);
+                    if (buffer.Full)
+                    {
+                        await file.AppendAsync(buffer.Written, cancellationToken).ConfigureAwait(false);
+                        buffer.Clear();
+                    }
+                }
+
+                run.Starts[SpillRun.Sections] = file.Length + buffer.Length;
+                if (buffer.Length > 0)
+                {
+                    await file.AppendAsync(buffer.Written, cancellationToken).ConfigureAwait(false);
+                    buffer.Clear();
+                }
+            }
+            finally
+            {
+                buffer.Release();
+                memory.LetGo(scratch);
+            }
+
+            (_runs ??= []).Add(run);
+            _spill.Ran(run.Bytes);
+            (long range, long code, long hashed) = keys.Blocks;
+            _evictedBlocks = (_evictedBlocks.ByRange + range, _evictedBlocks.ByCode + code, _evictedBlocks.Hashed + hashed);
+            _evictedGroups += count;
+            _evictedBytes += Footprint;
+            GiveBack();
+            Renew();
+            _arrays?.Relieved();
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    /// <summary>The groups of <paramref name="keys"/> placed section by section, and where each section's start, then the end.</summary>
+    private static (int[] Placed, int[] Starts) Placed(GroupKeys keys, int count)
+    {
+        byte[] sections = new byte[count];
+        keys.Sections(sections);
+        int[] starts = new int[SpillRun.Sections + 1];
+        foreach (byte section in sections)
+        {
+            starts[section + 1]++;
+        }
+
+        for (int section = 0; section < SpillRun.Sections; section++)
+        {
+            starts[section + 1] += starts[section];
+        }
+
+        int[] next = starts[..^1];
+        int[] placed = new int[count];
+        for (int g = 0; g < count; g++)
+        {
+            placed[next[sections[g]]++] = g;
+        }
+
+        return (placed, starts);
+    }
+
+    /// <summary>A section's groups: their keys, then their records, then the states each slot keeps apart, slot after slot.</summary>
+    private void WriteSection(int[] placed, int start, int count, SpillBuffer buffer)
+    {
+        if (count == 0)
+        {
+            return;
+        }
+
+        ReadOnlySpan<int> groups = placed.AsSpan(start, count);
+        Keys!.WriteKeys(groups, buffer);
+        Records?.Write(groups, buffer);
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            if (_inputs[i] != Settled && Slots[i].StateBytes == 0)
+            {
+                Slots[i].WriteStates(groups, buffer);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Empty tables made again from the lane's shelf: the slots as the partition first made them, the keys
+    /// hashed. A key numbered by value would take the pages of its span again after every run.
+    /// </summary>
+    private void Renew()
+    {
+        Slots = NewSlots(_plan, _settledSlots, _source, out GroupRecords? records, _arrays);
+        Records = records;
+        Keys = Keys!.ForSpill(_arrays);
+        _hashed = true;
     }
 
     /// <summary>
@@ -1263,7 +1458,14 @@ internal sealed class AggregationPartition
     /// Whether the lane turns to the core before its next batch: its budget could not
     /// let its table grow once more, or another lane turned.
     /// </summary>
-    internal bool MustTurn => _core is null && Pressure is { } pressure && (pressure.Turned || Pressed());
+    internal bool MustTurn(int rows)
+    {
+        _coming = rows;
+        return _core is null && Pressure is { } pressure && (pressure.Turned || Pressed());
+    }
+
+    // The rows of the batch the lane folds next: as many new groups at most.
+    private int _coming;
 
     /// <summary>
     /// The lane turning to the core, those whose table holds more than the core would cost them, one at a
@@ -1277,6 +1479,30 @@ internal sealed class AggregationPartition
         // past its budget when the core spills, which a lane's table cannot; and but when a lane turned
         // on what its rows showed, where every lane turns while its table is small.
         CorePressure pressure = Pressure!;
+
+        // The core cannot hold the query's groups: what the lane's rows show changes nothing, and its
+        // table goes to the scratch once the budget holds it no more, the lane going on with an empty one.
+        if (pressure.Core is null && CanEvict)
+        {
+            _stayed = true;
+            _spilling = true;
+            if (!MemoryPressed())
+            {
+                return;
+            }
+
+            // A table numbered by value takes the pages of its span as its values come, whatever the
+            // budget: one that holds no group yet is hashed from now on, as each run's next is.
+            if (!_hashed && Keys!.Count == 0)
+            {
+                Keys = Keys.ForSpill(_arrays);
+                _hashed = true;
+            }
+
+            await EvictAsync(cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (pressure.Core is not { } core || (_turnAt is null && !pressure.Outgrown && _arrays!.Out < core.LaneBytes && !(core.Spills && _arrays.Overdrawn)))
         {
             if (_arrays is { Overdrawn: true })
@@ -1449,10 +1675,49 @@ internal sealed class AggregationPartition
             }
         }
 
-        // A doubling and the entries its table empties into, on every lane that still grows one: the
-        // lanes grow together, and each one's doubling past the budget would come at once.
-        return _arrays is { Overdrawn: true }
-            || (Memory is { } memory && !memory.CanGrow(((2 * _arrays!.Out) + QueryMemory.Chunk) * Math.Max(1, Pressure?.Running ?? 1)));
+        return MemoryPressed();
+    }
+
+    /// <summary>
+    /// Whether the budget holds the lane's table no more: an array it took past the budget in the batch
+    /// before, or a doubling and the entries its table empties into the core, on every lane that still
+    /// grows one, that the budget would not grant. The lanes grow together, and each one's doubling past
+    /// the budget would come at once. A lane whose table spills empties it into its scratch a page at a
+    /// time instead, and asks only when its next batch may make its table grow: a table at its size for
+    /// good would otherwise go to the scratch under a budget that holds it twice.
+    /// </summary>
+    private bool MemoryPressed()
+    {
+        if (_arrays is { Overdrawn: true })
+        {
+            return true;
+        }
+
+        if (Memory is not { } memory)
+        {
+            return false;
+        }
+
+        int running = Math.Max(1, Pressure?.Running ?? 1);
+        if (!_spilling)
+        {
+            return !memory.CanGrow(((2 * _arrays!.Out) + QueryMemory.Chunk) * running);
+        }
+
+        long growth = GrowthFor(_coming);
+        return growth > 0 && !memory.CanGrow((growth + SpillBuffer.PageOf(memory, Lanes)) * running);
+    }
+
+    /// <summary>The bytes the lane's table would take more were <paramref name="rows"/> rows to come, as many new groups and values at most.</summary>
+    private long GrowthFor(int rows)
+    {
+        long bytes = (Keys?.GrowthFor(rows) ?? 0) + (Records?.GrowthFor(rows) ?? 0);
+        foreach (AggregateSlot slot in Slots)
+        {
+            bytes += slot.GrowthFor(rows);
+        }
+
+        return bytes;
     }
 
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
@@ -2318,8 +2583,14 @@ internal static class AggregationEngine
             // The lanes' batches under the budget, then each lane's working memory admitted: on fewer
             // lanes when its budget is short.
             int asked = ranges is null ? 1 : Math.Min(degree, ranges.Length);
-            pass = Batched(pass, memory, asked);
-            int lanes = Admit(memory, asked, pass.Options.BatchRows);
+
+            // A query whose groups the lanes' tables alone hold, which spill under pressure: its batches of
+            // new groups, on every lane at once, a sixteenth of the ceiling at most, which is what a lane
+            // takes past the budget before it writes its table. Asked only of a budget that would cut them.
+            int spilledRow = spill is not null && plan.Grouped && !sorted && top is null
+                && memory.Ceiling / 16 / asked / LaneRowBytes < GroupBatches.BatchRows && !GroupCore.Holds(plan, settled, source, facts) ? LaneRowBytes : 0;
+            pass = Batched(pass, memory, asked, spilledRow);
+            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow);
 
             // The core holds the groups once a lane's cache fills: each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
@@ -2401,6 +2672,14 @@ internal static class AggregationEngine
             }
 
             long merging = Stopwatch.GetTimestamp();
+
+            // A lane wrote its table to the scratch, the core unable to hold the groups: every lane's goes
+            // there too, and the result comes back from the runs part by part.
+            if (Array.Exists(partitions, partition => partition.Evicted))
+            {
+                return await SpilledAsync(partitions, plan, settled, inputs, lanes, source, memory, spill!, builder, pass, merging, cancellationToken).ConfigureAwait(false);
+            }
+
             plan.LastKeyBlocks = KeyBlocks(partitions);
 
             // Under pressure: a lane turned during the pass, or the merge of the lanes'
@@ -2525,6 +2804,91 @@ internal static class AggregationEngine
     }
 
     /// <summary>
+    /// The result of a group by whose lanes wrote their tables to the scratch: every lane's table written
+    /// there too, its memory and the lanes' given back, then the parts read back from the runs one at a
+    /// time, the builder making each one's batches. The parts are a power of two of the runs' 256
+    /// sections, as few as keep each part's table and the workers that build ahead within half the room
+    /// the budget leaves; the workers, as many as the lanes but one at most.
+    /// </summary>
+    private static async ValueTask<AggregationOutcome> SpilledAsync(
+        AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int lanes, ScanSource source, QueryMemory memory,
+        SpillScope spill, PartBuilder? builder, ScanSpec pass, long merging, CancellationToken cancellationToken)
+    {
+        if (builder is null)
+        {
+            throw new VortexUnsupportedException(
+                "a spilled group by read whole",
+                ComponentKind.Feature,
+                "This group by's groups went to the scratch, and come back a part at a time; read its result as batches or records rather than whole, or give its session a larger QueryMemoryBudget.");
+        }
+
+        // An index of the lanes' kind, empty: what the parts' tables are made from (GroupKeys.ForSpill).
+        GroupKeys kind = partitions[0].Keys!.Fresh();
+
+        // One lane after the other: each gives back its table before the next takes what writing its own
+        // asks past the budget.
+        foreach (AggregationPartition partition in partitions)
+        {
+            await partition.EvictAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        plan.LastKeyBlocks = KeyBlocks(partitions);
+        long bytes = 0;
+        List<SpillRun> runs = [];
+        foreach (AggregationPartition partition in partitions)
+        {
+            bytes += partition.EvictedTables.Bytes;
+            runs.AddRange(partition.Runs ?? []);
+        }
+
+        long entries = 0;
+        foreach (SpillRun run in runs)
+        {
+            entries += run.Entries(0, SpillRun.Sections);
+        }
+
+        AggregationRun gathered = Gathered(partitions, 0, 0, 0) with { MergeEntries = entries };
+        foreach (AggregationPartition partition in partitions)
+        {
+            partition.LetGo();
+        }
+
+        memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
+
+        // What an entry of a run costs a part's table: its bytes in the runs, times what the lanes' tables
+        // held over what they wrote, their slack and their pages, a fourth at most. Twice that a part, its
+        // table and its builder's batches, the runs' entries counting a key once a run. As few parts as
+        // keep one under half the room the budget leaves, the estimate erring; then as many workers as
+        // that half holds parts at once beside the reader's, each one building and one built and waiting,
+        // none when a part takes it all: the reader merges each part itself.
+        long written = 0;
+        foreach (SpillRun run in runs)
+        {
+            written += run.Bytes;
+        }
+
+        double slack = Math.Clamp((double)bytes / Math.Max(1, written), 1, 4);
+        long perEntry = Math.Max(1, (long)(slack * written / Math.Max(1, entries)));
+        long room = Math.Max(memory.Ceiling / 16, memory.Ceiling - memory.Held);
+        int bits = 0;
+        while (bits < SpillRun.SectionBits && 2 * (entries >> bits) * perEntry > room / 2)
+        {
+            bits++;
+        }
+
+        long part = Math.Max(1, 2 * (entries >> bits) * perEntry);
+        int workers = (int)Math.Clamp(((room / 2 / part) - 1) / 2, 0, Math.Max(0, lanes - 1));
+        int readBytes = (int)Math.Clamp(room / 16 / ((2 * workers) + 1), SpillBuffer.PageOf(memory, workers + 1), 64L << 20);
+        RunMerge merge = new RunMerge([.. runs], kind, plan, settled, inputs, source, memory, spill, bits, readBytes);
+        plan.LastRun = (gathered with { MergeParts = merge.Parts }).Spilled(spill);
+        MergedParts delivery = new MergedParts(merge, builder, Math.Min(workers, merge.Parts), plan, memory, 0, merging, cancellationToken);
+        (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
+        plan.LastGroups = 0;
+        AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, []) { Parts = delivery };
+        return Counted(first, memory, memory.Held);
+    }
+
+    /// <summary>
     /// The groups' order as the merge gives it, or, under <see cref="AggregationPlan.ShuffledOrder"/>, a
     /// copy shuffled by a draw the process's seed and the groups' count make: the same for two identical
     /// queries of a process, and unlike the merge's.
@@ -2560,13 +2924,10 @@ internal static class AggregationEngine
         (long range, long code, long hashed) = (0, 0, 0);
         foreach (AggregationPartition partition in partitions)
         {
-            if (partition.Keys is { } keys)
-            {
-                (long byRange, long byCode, long byHash) = keys.Blocks;
-                range += byRange;
-                code += byCode;
-                hashed += byHash;
-            }
+            (long byRange, long byCode, long byHash) = partition.Blocks;
+            range += byRange;
+            code += byCode;
+            hashed += byHash;
         }
 
         return (range, code, hashed);
@@ -2599,9 +2960,19 @@ internal static class AggregationEngine
     /// the scan sets them, between a sixteenth of a megabyte and a megabyte; a megabyte when the scan
     /// decides.
     /// </summary>
-    internal static int Admit(QueryMemory memory, int lanes, int batchRows = 0)
+    internal static int Admit(QueryMemory memory, int lanes, int batchRows = 0, int spilledRow = 0)
     {
         long laneBytes = Working(batchRows);
+
+        // Their working memory a quarter of the ceiling at most: past it, their tables share the rest so
+        // thinly that each one's batch of new groups outgrows its share, and lanes that spill would
+        // write a run a batch. Lanes whose tables spill, their batches of new groups a sixteenth of it:
+        // what they take past the budget before they write their tables (Batched).
+        while (lanes > 1 && (4 * lanes * laneBytes > memory.Ceiling || 16L * lanes * Math.Max(batchRows, 1_024) * spilledRow > memory.Ceiling))
+        {
+            lanes = Math.Max(1, lanes / 2);
+        }
+
         while (!memory.TryGrow(lanes * laneBytes))
         {
             if (lanes == 1)
@@ -2627,15 +2998,23 @@ internal static class AggregationEngine
     private const int CoreRowBytes = 72;
 
     /// <summary>
+    /// The bytes a row of a lane's batch may come to hold in a table that spills: its scratch, and a new
+    /// group's key, record and states, a text key of a few dozen bytes or a text's extremes. A guess, not a
+    /// measure: the batch is cut before its rows are read.
+    /// </summary>
+    private const int LaneRowBytes = 128;
+
+    /// <summary>
     /// The pass with its lanes' batches under <paramref name="memory"/>'s budget: what a batch may come to
     /// hold on every one of <paramref name="lanes"/> lanes, a quarter of the ceiling at most, in batches
     /// of a power of two from 1 024 rows; the scan's own when the budget leaves them room, as the
-    /// process's does.
+    /// process's does. Lanes whose tables spill, at <paramref name="spilledRow"/> bytes a row, a sixteenth
+    /// of it: a lane folds its batch before it writes its table, and the peak passes the ceiling by that.
     /// </summary>
-    private static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes)
+    private static ScanSpec Batched(ScanSpec pass, QueryMemory memory, int lanes, int spilledRow = 0)
     {
         int asked = pass.Options.BatchRows > 0 ? pass.Options.BatchRows : GroupBatches.BatchRows;
-        long room = memory.Ceiling / 4 / Math.Max(1, lanes) / CoreRowBytes;
+        long room = spilledRow > 0 ? memory.Ceiling / 16 / Math.Max(1, lanes) / spilledRow : memory.Ceiling / 4 / Math.Max(1, lanes) / CoreRowBytes;
         if (room >= asked)
         {
             return pass;
@@ -3453,7 +3832,7 @@ internal static class AggregationEngine
             // rows the core could not take waits for the next table given back: on tasks, never a thread.
             // Its first batch may show the key scattered, before it is folded.
             partition.Judge(batch);
-            if (partition.MustTurn)
+            if (partition.MustTurn(batch.SelectedRows))
             {
                 await partition.TurnAsync(cancellationToken).ConfigureAwait(false);
             }

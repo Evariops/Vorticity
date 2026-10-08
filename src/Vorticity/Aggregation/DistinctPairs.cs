@@ -65,6 +65,10 @@ internal sealed class DistinctPairs<TValue>
     /// <summary>The pairs held.</summary>
     internal int Count => _count;
 
+    /// <summary>The bytes the pairs and their slots, at most half full, would take more were <paramref name="more"/> new pairs to come.</summary>
+    internal long GrowthFor(int more) =>
+        TableGrowth.Of(_count, more, _pairs.Length, _pairs.Length, Unsafe.SizeOf<Pair>()) + TableGrowth.Of(_count, more, _tags.Length, _tags.Length / 2, sizeof(byte) + sizeof(int));
+
     /// <summary>The bytes of the pairs, the slots and the groups' chains, at their capacity, and of the arrays kept for the next <see cref="Keep"/>.</summary>
     internal long Footprint =>
         ((long)(_pairs.Length + _sparePairs.Length) * Unsafe.SizeOf<Pair>())
@@ -203,6 +207,25 @@ internal sealed class DistinctPairs<TValue>
         }
 
         return added;
+    }
+
+    /// <summary>Writes the values of group <paramref name="group"/>, its chain alone read; the values written.</summary>
+    internal int WriteGroup(int group, SpillBuffer buffer)
+    {
+        if (group >= _first.Length)
+        {
+            return 0;
+        }
+
+        int written = 0;
+        Pair[] pairs = _pairs;
+        for (int number = _first[group]; number != 0; number = pairs[number - 1].Next)
+        {
+            buffer.Write(pairs[number - 1].Value);
+            written++;
+        }
+
+        return written;
     }
 
     /// <summary>The group of pair <paramref name="number"/>.</summary>

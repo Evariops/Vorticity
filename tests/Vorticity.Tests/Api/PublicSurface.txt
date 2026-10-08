@@ -973,6 +973,7 @@ Vorticity:     property bool Core { get; init; }
 Vorticity:     property int Lanes { get; init; }
 Vorticity:     property int MergeParts { get; init; }
 Vorticity:     property int SpilledParts { get; init; }
+Vorticity:     property int SpilledRuns { get; init; }
 Vorticity:     property int TableSplits { get; init; }
 Vorticity:     property int Tables { get; init; }
 Vorticity:     property long Bursts { get; init; }

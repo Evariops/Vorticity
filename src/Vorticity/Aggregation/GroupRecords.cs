@@ -47,6 +47,10 @@ internal sealed class GroupRecords
     /// <summary>The groups whose records are made and seeded.</summary>
     internal int Groups => _groups;
 
+    /// <summary>The bytes the records would take more were <paramref name="more"/> new groups to come.</summary>
+    internal long GrowthFor(int more) =>
+        _groups + (long)more <= _capacity ? 0 : (long)Scratch.Capacity(_groups + more, _capacity) * _layout.Stride * sizeof(ulong);
+
     /// <summary>The bytes the records hold, made or not: what they cost.</summary>
     internal long Footprint => (long)_words.Length * sizeof(ulong);
 
@@ -137,6 +141,25 @@ internal sealed class GroupRecords
 
     /// <summary>The words of the records made, the first group's first: what a lane's cache copies into its batches.</summary>
     internal ReadOnlySpan<ulong> Made => _words.AsSpan(_base, _groups * _layout.Stride);
+
+    /// <summary>The records of <paramref name="groups"/>, in order, their words as they lie: a lane's spill.</summary>
+    internal void Write(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        int stride = _layout.Stride;
+        Span<byte> records = buffer.Take(groups.Length * stride * sizeof(ulong));
+        for (int i = 0; i < groups.Length; i++)
+        {
+            MemoryMarshal.AsBytes(_words.AsSpan(_base + (groups[i] * stride), stride)).CopyTo(records[(i * stride * sizeof(ulong))..]);
+        }
+    }
+
+    /// <summary>The records of <paramref name="groups"/> groups <see cref="Write"/> wrote, as groups 0 on: these records' only ones.</summary>
+    internal void Read(ref SpillReader reader, int groups)
+    {
+        _groups = 0;
+        EnsureGroups(groups);
+        reader.Read(_words.AsSpan(_base, groups * _layout.Stride));
+    }
 
     /// <summary>
     /// Reads <paramref name="groups"/> records of <paramref name="words"/>, from word

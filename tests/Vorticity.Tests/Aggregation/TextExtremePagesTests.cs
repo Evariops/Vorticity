@@ -69,9 +69,9 @@ public sealed partial class TextExtremePagesTests
 
     /// <summary>
     /// The slot counts the bytes of its pages as it takes them, its footprint: what the thread
-    /// allocates, the headers of the arrays aside. Values of 104 bytes'
-    /// room for a page and a half fill two pages; a value longer than a quarter of a page takes one of
-    /// its own.
+    /// allocates, the headers of the arrays aside. Values of 104 bytes' room for a page and a half fill
+    /// pages of 4 KiB, then each twice the one before up to a page; a value longer than a quarter of a
+    /// page takes one of its own.
     /// </summary>
     [Fact]
     public void ThePagesAreCountedAsTheyAreTaken()
@@ -93,9 +93,18 @@ public sealed partial class TextExtremePagesTests
         slot.Offer(0, longest);
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        Assert.Equal((2 * Page) + longest.Length, slot.PagedBytes);
-        Assert.Equal(3, slot.Pages);
-        Assert.InRange(allocated - slot.PagedBytes, 0, 256);
+        long paged = 0;
+        int pages = 0;
+        int size = 4_096;
+        for (int left = groups; left > 0; left -= size / 104, size = Math.Min(Page, 2 * size))
+        {
+            paged += size;
+            pages++;
+        }
+
+        Assert.Equal(paged + longest.Length, slot.PagedBytes);
+        Assert.Equal(pages + 1, slot.Pages);
+        Assert.InRange(allocated - slot.PagedBytes, 0, 512);
         Assert.InRange(slot.Footprint - slot.PagedBytes, groups * (sizeof(long) + sizeof(int)), 3 * groups * (sizeof(long) + sizeof(int)));
     }
 
