@@ -101,6 +101,9 @@ internal sealed class SpillScope : IDisposable
     /// <summary>The lanes' tables written one at a time: what writing one takes past the budget is given back with it before the next.</summary>
     internal SemaphoreSlim Writing { get; } = new SemaphoreSlim(1, 1);
 
+    /// <summary>The lanes that retire under pressure, rather than write their tables, while others still run.</summary>
+    internal LaneRetirement Retirement { get; } = new LaneRetirement();
+
     /// <summary>The runs written.</summary>
     internal int Runs => Volatile.Read(ref _runs);
 
@@ -165,6 +168,178 @@ internal sealed class SpillScope : IDisposable
             }
 
             _files.Clear();
+        }
+    }
+}
+
+/// <summary>
+/// A sketch of the distinct keys of a table, HyperLogLog's: 4 096 registers of a byte, each the most
+/// leading zeros its keys' hashes show past the twelve bits that pick it, plus one. Two sketches merge by
+/// their registers' maxima, the union's; an estimate errs by about 1.6 %. What tells, before a lane's
+/// table is merged into another, how many of its keys that one lacks.
+/// </summary>
+internal sealed class KeySketch
+{
+    private const int Bits = 12;
+    private readonly byte[] _registers = new byte[1 << Bits];
+
+    /// <summary>Adds the keys of <paramref name="hashes"/>, their hashes under the merge's seed; a 0, a null group's, left out.</summary>
+    internal void Add(ReadOnlySpan<ulong> hashes)
+    {
+        foreach (ulong hash in hashes)
+        {
+            if (hash == 0)
+            {
+                continue;
+            }
+
+            int register = (int)(hash >> (64 - Bits));
+            byte rank = (byte)(BitOperations.LeadingZeroCount((hash << Bits) | (1UL << (Bits - 1))) + 1);
+            if (rank > _registers[register])
+            {
+                _registers[register] = rank;
+            }
+        }
+    }
+
+    /// <summary>The keys of <paramref name="other"/> added: the union's sketch.</summary>
+    internal void Merge(KeySketch other)
+    {
+        for (int i = 0; i < _registers.Length; i++)
+        {
+            _registers[i] = Math.Max(_registers[i], other._registers[i]);
+        }
+    }
+
+    /// <summary>The distinct keys estimated, of this sketch's and <paramref name="with"/>'s union when given.</summary>
+    internal double Estimate(KeySketch? with = null)
+    {
+        int m = _registers.Length;
+        double sum = 0;
+        int zeros = 0;
+        for (int i = 0; i < m; i++)
+        {
+            int rank = with is null ? _registers[i] : Math.Max(_registers[i], with._registers[i]);
+            sum += Math.ScaleB(1.0, -rank);
+            zeros += rank == 0 ? 1 : 0;
+        }
+
+        double estimate = 0.7213 / (1 + (1.079 / m)) * m * m / sum;
+        return estimate <= 2.5 * m && zeros > 0 ? m * Math.Log((double)m / zeros) : estimate;
+    }
+
+    /// <summary>The sketch of <paramref name="keys"/>, their hashes taken past the budget a moment, as the table they come from is about to be let go.</summary>
+    internal static KeySketch Of(GroupKeys keys, QueryMemory? memory)
+    {
+        KeySketch sketch = new KeySketch();
+        long bytes = (long)keys.Count * sizeof(ulong);
+        memory?.Force(bytes);
+        memory?.Measure(bytes);
+        try
+        {
+            ulong[] hashes = new ulong[keys.Count];
+            keys.Hashes(hashes);
+            sketch.Add(hashes);
+        }
+        finally
+        {
+            memory?.LetGo(bytes);
+        }
+
+        return sketch;
+    }
+}
+
+/// <summary>
+/// The lanes that retire under pressure: a lane whose table the budget holds no more, while others still
+/// run, merges it into the table the retired lanes share and goes on with an empty one, taking no more
+/// ranges past its own. A key every lane meets is then held once, not once a lane, and nothing goes to the
+/// scratch while that table grows by less than the lanes give back. Once the merges show the lanes' keys
+/// apart, half of what they merge or more new to the shared table, merging frees nothing and costs the
+/// lanes that stop: the lanes spill instead.
+/// </summary>
+internal sealed class LaneRetirement
+{
+    /// <summary>The groups merged into the shared table past which what they brought new to it decides whether retiring pays.</summary>
+    private const long Judged = 65_536;
+
+    private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
+    private long _merged;
+    private long _grew;
+
+    // The lanes that still take ranges: the last of them never retires, so that every range is read. And
+    // the sketch of the shared table's keys.
+    private int _takers;
+    private KeySketch? _sketch;
+
+    /// <summary>The table the retired lanes share, a partition no lane folds into; null before the first retires.</summary>
+    internal AggregationPartition? Retired { get; private set; }
+
+    /// <summary>The lanes that retired.</summary>
+    internal int Lanes { get; private set; }
+
+    /// <summary>The pass starts on <paramref name="lanes"/> lanes, each taking ranges.</summary>
+    internal void Begin(int lanes) => _takers = lanes;
+
+    /// <summary>
+    /// <paramref name="lane"/>'s table merged into the shared one, the lane's emptied; the first lane's
+    /// handed over whole. Whether it was, and whether the lane retires: one already
+    /// <paramref name="retiring"/>, or another that takes ranges with it; the last one goes on, its table
+    /// empty. Nothing done when merging no longer pays, or when the shared table's growth for the lane's
+    /// groups is more than the budget grants: the lane writes its table instead.
+    /// </summary>
+    internal async ValueTask<(bool Merged, bool Retires)> TakeAsync(AggregationPartition lane, bool retiring, CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            int count = lane.Keys!.Count;
+            if (_merged >= Judged && 2 * _grew >= _merged)
+            {
+                return (false, false);
+            }
+
+            if (Retired is null)
+            {
+                _sketch = KeySketch.Of(lane.Keys, lane.Memory);
+                Retired = lane.Sibling();
+                lane.HandTo(Retired);
+            }
+            else if (count > 0)
+            {
+                // The keys the shared table lacks, as the sketches tell, a tenth more for their error: what
+                // it grows by. All of the lane's would ask for a doubling where the lanes meet the same keys.
+                AggregationPartition retired = Retired;
+                KeySketch sketch = KeySketch.Of(lane.Keys, lane.Memory);
+                double lacks = Math.Max(0, sketch.Estimate(_sketch) - _sketch!.Estimate());
+                int grows = (int)Math.Min(count, (1.1 * lacks) + 1_024);
+                if (lane.Memory is { } memory && !memory.CanGrow(retired.GrowthFor(grows)))
+                {
+                    return (false, false);
+                }
+
+                int before = retired.Keys!.Count;
+                int[]? numbers = null;
+                retired.MergeFrom(lane, ref numbers);
+                retired.Recount();
+                _sketch.Merge(sketch);
+                _merged += count;
+                _grew += retired.Keys.Count - before;
+                lane.Emptied();
+            }
+
+            bool retires = retiring || _takers > 1;
+            if (!retiring && retires)
+            {
+                Lanes++;
+                _takers--;
+            }
+
+            return (true, retires);
+        }
+        finally
+        {
+            _gate.Release();
         }
     }
 }

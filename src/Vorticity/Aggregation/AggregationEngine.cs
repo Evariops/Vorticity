@@ -317,6 +317,13 @@ internal sealed class AggregationPlan
     internal bool LanesSpill { get; set; } = true;
 
     /// <summary>
+    /// Whether a lane whose table the budget holds no more, while other lanes run, merges it into the table
+    /// the retired lanes share and retires at its range's end, rather than write it to the scratch: on by
+    /// default, off to weigh the two (<see cref="LaneRetirement"/>).
+    /// </summary>
+    internal bool LanesRetire { get; set; } = true;
+
+    /// <summary>
     /// Whether a core, or a merge in parts, with no order nor window over its groups delivers them part
     /// by part, its first batch once its first part is applied or merged: on by default, off for the
     /// bench to weigh it against the delivery whole.
@@ -1072,6 +1079,70 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>Whether the lane retires at its range's end, its table merged into the retired lanes', and takes no more ranges.</summary>
+    internal bool Retiring { get; private set; }
+
+    /// <summary>
+    /// The lane's table, which the budget holds no more while other lanes run: merged into the table the
+    /// retired lanes share, the lane going on with an empty one to its range's end, then retiring
+    /// (<see cref="LaneRetirement"/>); or, when that does not pay or the shared table cannot take it,
+    /// written to the scratch.
+    /// </summary>
+    private async ValueTask RelieveAsync(CancellationToken cancellationToken)
+    {
+        if (_plan.LanesRetire)
+        {
+            (bool merged, bool retires) = await _spill!.Retirement.TakeAsync(this, Retiring, cancellationToken).ConfigureAwait(false);
+            if (merged)
+            {
+                Retiring = retires;
+                return;
+            }
+        }
+
+        await EvictAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The retiring lane at its range's end: what its table holds since merged into the retired lanes', or written to the scratch.</summary>
+    internal async ValueTask RetireAsync(CancellationToken cancellationToken)
+    {
+        if (Keys is { Count: > 0 } && !(await _spill!.Retirement.TakeAsync(this, retiring: true, cancellationToken).ConfigureAwait(false)).Merged)
+        {
+            await EvictAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>A partition of the lane's plan and memory that no lane folds into: the table retired lanes share.</summary>
+    internal AggregationPartition Sibling() =>
+        new AggregationPartition(_plan, _settledSlots, _columns, _inputs, sorted: false, source: _source, memory: Memory) { Spill = _spill, Lanes = Lanes };
+
+    /// <summary>
+    /// The lane's tables handed to <paramref name="retired"/> as they are, with the shelf they grew from
+    /// and what they hold of the query's memory; the lane goes on with empty ones from a shelf of its own.
+    /// </summary>
+    internal void HandTo(AggregationPartition retired)
+    {
+        retired.Keys = Keys;
+        retired.Slots = Slots;
+        retired.Records = Records;
+        retired._arrays = _arrays;
+        retired.Accounted = Accounted;
+        retired.Measured = Measured;
+        retired._hashed = _hashed;
+        _arrays = Memory is { } memory ? new ArrayShelf(memory) { Overdraws = true } : null;
+        Accounted = 0;
+        Measured = 0;
+        Renew();
+    }
+
+    /// <summary>The lane's table let go once another holds its groups, and made again empty.</summary>
+    internal void Emptied()
+    {
+        GiveBack();
+        Renew();
+        _arrays?.Relieved();
+    }
+
     /// <summary>
     /// Empty tables made again from the lane's shelf: the slots as the partition first made them, the keys
     /// hashed. A key numbered by value would take the pages of its span again after every run.
@@ -1519,7 +1590,7 @@ internal sealed class AggregationPartition
                 _hashed = true;
             }
 
-            await EvictAsync(cancellationToken).ConfigureAwait(false);
+            await RelieveAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -1729,7 +1800,7 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>The bytes the lane's table would take more were <paramref name="rows"/> rows to come, as many new groups and values at most.</summary>
-    private long GrowthFor(int rows)
+    internal long GrowthFor(int rows)
     {
         long bytes = (Keys?.GrowthFor(rows) ?? 0) + (Records?.GrowthFor(rows) ?? 0);
         foreach (AggregateSlot slot in Slots)
@@ -2683,6 +2754,8 @@ internal static class AggregationEngine
                     pressure.Lanes = partitions;
                 }
 
+                spill?.Retirement.Begin(lanes);
+
                 plan.Watch?.Invoke(partitions);
 
                 // Lanes that judge their key on their first rows start across the source, unless the
@@ -2693,14 +2766,18 @@ internal static class AggregationEngine
 
             long merging = Stopwatch.GetTimestamp();
 
+            // The lanes that retired under pressure left their groups in a table of their own, merged with
+            // the lanes' at the end.
+            AggregationPartition[] tables = spill?.Retirement.Retired is { } retired ? [.. partitions, retired] : partitions;
+
             // A lane wrote its table to the scratch, the core unable to hold the groups: every lane's goes
             // there too, and the result comes back from the runs part by part.
-            if (Array.Exists(partitions, partition => partition.Evicted))
+            if (Array.Exists(tables, table => table.Evicted))
             {
-                return await SpilledAsync(partitions, plan, settled, inputs, lanes, source, memory, spill!, builder, pass, merging, cancellationToken).ConfigureAwait(false);
+                return await SpilledAsync(partitions, tables, plan, settled, inputs, lanes, source, memory, spill!, builder, pass, merging, cancellationToken).ConfigureAwait(false);
             }
 
-            plan.LastKeyBlocks = KeyBlocks(partitions);
+            plan.LastKeyBlocks = KeyBlocks(tables);
 
             // Under pressure: a lane turned during the pass, or the merge of the lanes'
             // tables in parts would not fit twice over, its estimate falling a few hundred kilobytes short
@@ -2708,10 +2785,10 @@ internal static class AggregationEngine
             // of them, each let go once merged, which takes no more than the largest's growth. Then, if
             // lanes turned, the largest empties its table into the core with the memory the others gave
             // back, and the core ends the query; else the largest holds the result.
-            AggregationPartition[] merged = partitions;
-            if (pressure is not null && partitions.Length > 1 && (pressure.Turned || !memory.CanGrow(2 * MergeAhead(partitions))))
+            AggregationPartition[] merged = tables;
+            if (pressure is not null && tables.Length > 1 && (pressure.Turned || !memory.CanGrow(2 * MergeAhead(tables))))
             {
-                AggregationPartition? largest = MergeUnturned(partitions);
+                AggregationPartition? largest = MergeUnturned(tables);
                 if (pressure.Made is { Engaged: true } pressed)
                 {
                     largest?.TurnAtEnd(pressed);
@@ -2797,7 +2874,7 @@ internal static class AggregationEngine
 
             // The lanes' tables die with the merge, but the one a merge in series kept as the result.
             long result = mergedBytes;
-            foreach (AggregationPartition partition in partitions)
+            foreach (AggregationPartition partition in tables)
             {
                 if (ReferenceEquals(partition.Slots, slots))
                 {
@@ -2831,8 +2908,8 @@ internal static class AggregationEngine
     /// the budget leaves; the workers, as many as the lanes but one at most.
     /// </summary>
     private static async ValueTask<AggregationOutcome> SpilledAsync(
-        AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int lanes, ScanSource source, QueryMemory memory,
-        SpillScope spill, PartBuilder? builder, ScanSpec pass, long merging, CancellationToken cancellationToken)
+        AggregationPartition[] partitions, AggregationPartition[] tables, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int lanes, ScanSource source,
+        QueryMemory memory, SpillScope spill, PartBuilder? builder, ScanSpec pass, long merging, CancellationToken cancellationToken)
     {
         if (builder is null)
         {
@@ -2845,20 +2922,20 @@ internal static class AggregationEngine
         // An index of the lanes' kind, empty: what the parts' tables are made from (GroupKeys.ForSpill).
         GroupKeys kind = partitions[0].Keys!.Fresh();
 
-        // One lane after the other: each gives back its table before the next takes what writing its own
-        // asks past the budget.
-        foreach (AggregationPartition partition in partitions)
+        // One table after the other, the lanes' and the retired lanes': each gives back its table before
+        // the next takes what writing its own asks past the budget.
+        foreach (AggregationPartition table in tables)
         {
-            await partition.EvictAsync(cancellationToken).ConfigureAwait(false);
+            await table.EvictAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        plan.LastKeyBlocks = KeyBlocks(partitions);
+        plan.LastKeyBlocks = KeyBlocks(tables);
         long bytes = 0;
         List<SpillRun> runs = [];
-        foreach (AggregationPartition partition in partitions)
+        foreach (AggregationPartition table in tables)
         {
-            bytes += partition.EvictedTables.Bytes;
-            runs.AddRange(partition.Runs ?? []);
+            bytes += table.EvictedTables.Bytes;
+            runs.AddRange(table.Runs ?? []);
         }
 
         long entries = 0;
@@ -2868,9 +2945,9 @@ internal static class AggregationEngine
         }
 
         AggregationRun gathered = Gathered(partitions, 0, 0, 0) with { MergeEntries = entries };
-        foreach (AggregationPartition partition in partitions)
+        foreach (AggregationPartition table in tables)
         {
-            partition.LetGo();
+            table.LetGo();
         }
 
         memory.LetGo(partitions.Length * Working(pass.Options.BatchRows));
@@ -3936,8 +4013,10 @@ internal static class AggregationEngine
                             await RunPartitionAsync(source, lane with { Rows = ranges[first] }, metrics, partition, token).ConfigureAwait(false);
                         }
 
+                        // A lane that retired under pressure takes no more ranges past its own, the others
+                        // taking them with the memory its table gave back.
                         int at;
-                        while ((at = Interlocked.Increment(ref next[0])) < ranges.Length)
+                        while (!partition.Retiring && (at = Interlocked.Increment(ref next[0])) < ranges.Length)
                         {
                             if (taken is not null && Interlocked.Exchange(ref taken[at], 1) != 0)
                             {
@@ -3950,6 +4029,11 @@ internal static class AggregationEngine
                             }
 
                             await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
+                        }
+
+                        if (partition.Retiring)
+                        {
+                            await partition.RetireAsync(token).ConfigureAwait(false);
                         }
 
                         await partition.EndedAsync(token).ConfigureAwait(false);

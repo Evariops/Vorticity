@@ -100,6 +100,46 @@ public sealed partial class GroupSpillTests
             expected);
     }
 
+    [Fact]
+    public async Task LanesThatEachMeetMostKeysRetireAndWriteNothing()
+    {
+        // The texts, 50 000 values over 1.2M rows, each lane meeting most of them. Under two and a half
+        // times what one lane holds at its peak, the lanes that cannot grow merge into one table and
+        // retire, and nothing goes to the scratch; without that, they spill. At twice it, the lanes'
+        // tables two thirds full and the shared one's doubling pass it: four runs, where they wrote 30.
+        (string path, Row[] rows) = await Fixture.Async;
+        Dictionary<string, TextTotal> expected = rows.GroupBy(r => r.Text).ToDictionary(g => g.Key, g => new TextTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+        Func<VortexFile, Vorticity.Aggregation> query = file => file.Scan<Row>().GroupBy(r => r.Text).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
+        long result = await PeakAsync<TextTotal>(path, query);
+        foreach (bool retire in (bool[])[true, false])
+        {
+            string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
+            try
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(result / 2 * 5);
+                await using VortexSession session = Session(14, budget, scratch);
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Vorticity.Aggregation grouped = query(file);
+                grouped.Plan.LanesRetire = retire;
+                Dictionary<string, TextTotal> read = [];
+                await foreach (TextTotal total in grouped.As<TextTotal>().ToRecordsAsync(Ct))
+                {
+                    read.Add(total.Text, total);
+                }
+
+                Assert.Equal(expected, read);
+                int runs = grouped.Plan.LastRun!.SpilledRuns;
+                Assert.True(retire ? runs == 0 : runs > 0, $"{runs} runs, retiring {retire}");
+                Assert.Equal(0, budget.ReservedBytes);
+                Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+            }
+            finally
+            {
+                Directory.Delete(scratch, recursive: true);
+            }
+        }
+    }
+
     [Theory]
     [InlineData(200)]
     [InlineData(50)]
@@ -659,6 +699,9 @@ public sealed partial class GroupSpillTests
 
     [VortexRecord]
     public partial record struct NamePrice(string Name, double Sum, double? Mean);
+
+    [VortexRecord]
+    public partial record struct TextTotal(string Text, long Count, long Total);
 
     [VortexRecord]
     public partial record struct NameAnswer(string Name, long Value);

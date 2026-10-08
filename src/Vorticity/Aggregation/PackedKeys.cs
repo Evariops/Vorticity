@@ -620,27 +620,37 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
     /// <summary>
     /// By the hash of the columns' values, not of the word: a lane's numbers of its columns' values are
-    /// its own, and each table it empties numbers them again. Each column's hash, 0 for its null, folded
-    /// into the next's.
+    /// its own, and each table it empties numbers them again (<see cref="Hashes"/>).
     /// </summary>
     internal override void Sections(Span<byte> sections)
     {
-        ulong[][] hashes = new ulong[_parts.Length][];
+        ulong[] hashes = new ulong[Count];
+        Hashes(hashes);
+        for (int g = 0; g < Count; g++)
+        {
+            sections[g] = (byte)(hashes[g] >> (64 - SpillRun.SectionBits));
+        }
+    }
+
+    /// <summary>Each column's hash of the group's value, 0 for its null, folded into the next's: the same for one tuple in every lane, whatever its numbers.</summary>
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        ulong[][] parts = new ulong[_parts.Length][];
         for (int p = 0; p < _parts.Length; p++)
         {
-            hashes[p] = new ulong[_parts[p].Count];
-            _parts[p].Hashes(hashes[p]);
+            parts[p] = new ulong[_parts[p].Count];
+            _parts[p].Hashes(parts[p]);
         }
 
         for (int g = 0; g < Count; g++)
         {
-            ulong hash = hashes[0][Id(_keys[g], 0)];
+            ulong hash = parts[0][Id(_keys[g], 0)];
             for (int p = 1; p < _parts.Length; p++)
             {
-                hash = MergeHash.Of(hash, hashes[p][Id(_keys[g], p)], MergeHash.Seed);
+                hash = MergeHash.Of(hash, parts[p][Id(_keys[g], p)], MergeHash.Seed);
             }
 
-            sections[g] = (byte)(hash >> (64 - SpillRun.SectionBits));
+            hashes[g] = hash;
         }
     }
 
