@@ -187,6 +187,24 @@ internal sealed class DistinctPairs<TValue>
         return added;
     }
 
+    /// <summary>Adds the values of group <paramref name="from"/> to <paramref name="set"/>, its chain alone read; the values that were new.</summary>
+    internal int AddTo(DistinctValues<TValue> set, int from)
+    {
+        if (from >= _first.Length)
+        {
+            return 0;
+        }
+
+        int added = 0;
+        Pair[] pairs = _pairs;
+        for (int number = _first[from]; number != 0; number = pairs[number - 1].Next)
+        {
+            added += set.Add(pairs[number - 1].Value) ? 1 : 0;
+        }
+
+        return added;
+    }
+
     /// <summary>The group of pair <paramref name="number"/>.</summary>
     internal int GroupAt(int number) => _pairs[number].Group;
 

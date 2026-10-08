@@ -252,6 +252,20 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     internal bool Drops { get; set; }
 
     /// <summary>
+    /// An array another lane's shelf handed out, which this lane's tables now hold: reserved and
+    /// measured here as if handed out here, before the other gives it back with its tables. Nothing
+    /// for a shelf that is not a lane's.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
+    internal void Adopt<T>(T[] array)
+    {
+        if (Lane && (long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+        {
+            Reserve(_memory!, bytes);
+        }
+    }
+
+    /// <summary>
     /// An array the shelf handed out that nothing will take again, of a length no other asks: it leaves
     /// the query's count, to the next collection, rather than wait on a pile.
     /// </summary>

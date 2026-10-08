@@ -65,6 +65,13 @@ internal sealed class DistinctValues<TValue>
     /// <summary>The shelf the slots grow from from now on.</summary>
     internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
 
+    /// <summary>The set moved to another lane's slot: its slots adopted by <paramref name="shelf"/>, which they grow from from now on.</summary>
+    internal void MoveTo(ArrayShelf? shelf)
+    {
+        shelf?.Adopt(_slots);
+        _shelf = shelf;
+    }
+
     /// <summary>The values held.</summary>
     internal long Count => _count + (_zero ? 1 : 0);
 
@@ -81,6 +88,29 @@ internal sealed class DistinctValues<TValue>
         _slots = [];
         _count = 0;
         _zero = false;
+    }
+
+    /// <summary>Forgets every value, keeping the slots at their length: a set taken again for another group.</summary>
+    internal void Clear()
+    {
+        Array.Clear(_slots);
+        _count = 0;
+        _zero = false;
+    }
+
+    /// <summary>Adds every value held to <paramref name="pairs"/> as group <paramref name="group"/>'s; the pairs that were new.</summary>
+    internal int AddTo(DistinctPairs<TValue> pairs, int group)
+    {
+        int added = _zero && pairs.Add(group, default) ? 1 : 0;
+        foreach (TValue value in _slots)
+        {
+            if (!IsFree(value) && pairs.Add(group, value))
+            {
+                added++;
+            }
+        }
+
+        return added;
     }
 
     /// <summary>Adds <paramref name="value"/>; whether it was new.</summary>

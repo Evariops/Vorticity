@@ -546,6 +546,13 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     // its group and its chain for nothing; null for a slot of groups, which holds pairs.
     private DistinctValues<TValue>? _set;
 
+    // The values of each group in a set of its own, by group, when the statistics bound the key to few
+    // groups (FewGroups); null for pairs. And the sets of the groups a streaming group by let go,
+    // cleared, for those it opens next.
+    private DistinctValues<TValue>?[]? _sets;
+    private DistinctValues<TValue>[] _spares = [];
+    private int _spareCount;
+
     // The values of the uniform column its first rows foretold (Foretell); 0 before.
     private double _universe;
 
@@ -566,6 +573,13 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set = new DistinctValues<TValue>();
         _set.Govern(_shelf);
     }
+
+    /// <summary>
+    /// Each group's values in a set of its own rather than pairs: a value seen before is found at the
+    /// first read, where a pair was found behind a tag and a slot's number, and a value takes its slot
+    /// alone, where a pair took its group and its chain too.
+    /// </summary>
+    internal override void FewGroups() => _sets ??= [];
 
     /// <summary>
     /// The values a uniform column of <see cref="AggregationPartition.EstimatedValues"/> values makes
@@ -605,8 +619,34 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
+        if (_sets is not null && groups > _sets.Length)
+        {
+            Array.Resize(ref _sets, Scratch.Capacity(groups, _sets.Length));
+        }
+
         _pairs.EnsureGroups(groups);
         _groups = Math.Max(_groups, groups);
+    }
+
+    /// <summary>The set of <paramref name="group"/>'s values, made, or taken from those let go, the first time.</summary>
+    private DistinctValues<TValue> SetOf(int group) => _sets![group] ?? NewSet(group);
+
+    private DistinctValues<TValue> NewSet(int group)
+    {
+        DistinctValues<TValue> set;
+        if (_spareCount > 0)
+        {
+            set = _spares[--_spareCount];
+            _spares[_spareCount] = null!;
+        }
+        else
+        {
+            set = new DistinctValues<TValue>();
+            set.Govern(_shelf);
+        }
+
+        _sets![group] = set;
+        return set;
     }
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
@@ -665,6 +705,20 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             {
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), start, end);
+                if (_sets is not null)
+                {
+                    // The range's one set, taken once.
+                    DistinctValues<TValue> set = SetOf(group);
+                    long added = 0;
+                    while (rows.Next(out int row))
+                    {
+                        added += set.Add(values[row]) ? 1 : 0;
+                    }
+
+                    _counts[group] += added;
+                    return;
+                }
+
                 while (rows.Next(out int row))
                 {
                     Add(group, values[row]);
@@ -715,7 +769,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             return;
         }
 
-        if (from.Length == source._groups)
+        if (_sets is null && source._sets is null && from.Length == source._groups)
         {
             _pairs.MergeAll(source._pairs, into, _counts);
             return;
@@ -723,13 +777,44 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
         for (int i = 0; i < from.Length; i++)
         {
-            _counts[into[i]] += _pairs.MergeGroup(source._pairs, from[i], into[i]);
+            _counts[into[i]] += MergeGroup(source, from[i], into[i]);
         }
+    }
+
+    /// <summary>
+    /// The values of group <paramref name="from"/> of <paramref name="source"/> added to group
+    /// <paramref name="into"/>, sets or pairs on either side; the values that were new. A set goes whole
+    /// to a group that holds none yet: a streaming group by's range followed into the one before it, let
+    /// go right after, whose sets would otherwise be built again value by value, every group of every
+    /// range but the first.
+    /// </summary>
+    private long MergeGroup(FixedDistinctSlot<TValue> source, int from, int into)
+    {
+        if (source._sets is { } sets)
+        {
+            if (from >= sets.Length || sets[from] is not { } values)
+            {
+                return 0;
+            }
+
+            if (_sets is { } own && own[into] is null)
+            {
+                sets[from] = null;
+                values.MoveTo(_shelf);
+                own[into] = values;
+                return values.Count;
+            }
+
+            return _sets is not null ? SetOf(into).MergeAll(values) : values.AddTo(_pairs, into);
+        }
+
+        return _sets is not null ? source._pairs.AddTo(SetOf(into), from) : _pairs.MergeGroup(source._pairs, from, into);
     }
 
     internal override long Result(int group) => _counts[group];
 
-    public long Pairs => _set?.Count ?? _pairs.Count;
+    /// <summary>The pairs held; none for a slot of sets by group, which merges in series, group by group, as a streaming group by's ranges follow one another.</summary>
+    public long Pairs => _set?.Count ?? (_sets is not null ? 0 : _pairs.Count);
 
     public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
@@ -886,12 +971,58 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set.Govern(_shelf);
     }
 
-    /// <summary>The (group, value) pairs, or the values of a slot of one group, and the counts.</summary>
-    internal override long Footprint => (_set?.Footprint ?? _pairs.Footprint) + ((long)_counts.Length * sizeof(long));
+    /// <summary>The (group, value) pairs, or the values of a slot of one group, or each group's set and those let go, and the counts.</summary>
+    internal override long Footprint => (_set?.Footprint ?? (_sets is { } sets ? SetBytes(sets) : _pairs.Footprint)) + ((long)_counts.Length * sizeof(long));
+
+    /// <summary>The bytes of the sets of <paramref name="sets"/> and of those let go, at their capacity.</summary>
+    private long SetBytes(DistinctValues<TValue>?[] sets)
+    {
+        long bytes = (long)sets.Length * IntPtr.Size;
+        foreach (DistinctValues<TValue>? set in sets)
+        {
+            bytes += set?.Footprint ?? 0;
+        }
+
+        for (int s = 0; s < _spareCount; s++)
+        {
+            bytes += _spares[s].Footprint;
+        }
+
+        return bytes;
+    }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        _pairs.Keep(groups);
+        if (_sets is { } sets)
+        {
+            // The kept groups' sets move to the front, groups ascending; the others, cleared, wait for
+            // the groups to come, their slots at the length they reached.
+            int kept = 0;
+            for (int g = 0; g < _groups && g < sets.Length; g++)
+            {
+                DistinctValues<TValue>? set = sets[g];
+                sets[g] = null;
+                if (kept < groups.Length && groups[kept] == g)
+                {
+                    sets[kept++] = set;
+                }
+                else if (set is not null)
+                {
+                    set.Clear();
+                    if (_spareCount == _spares.Length)
+                    {
+                        Array.Resize(ref _spares, Math.Max(4, 2 * _spares.Length));
+                    }
+
+                    _spares[_spareCount++] = set;
+                }
+            }
+        }
+        else
+        {
+            _pairs.Keep(groups);
+        }
+
         for (int i = 0; i < groups.Length; i++)
         {
             _counts[i] = _counts[groups[i]];
@@ -939,7 +1070,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
     private void Add(int group, TValue value)
     {
-        if (_set is { } set ? set.Add(value) : _pairs.Add(group, value))
+        if (_set is { } set ? set.Add(value) : _sets is not null ? SetOf(group).Add(value) : _pairs.Add(group, value))
         {
             _counts[group]++;
         }

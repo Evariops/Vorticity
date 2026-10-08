@@ -164,6 +164,15 @@ internal abstract class AggregateSlot
     }
 
     /// <summary>
+    /// Tells the slot, as its partition makes it and before it steps a row, that its group by streams
+    /// and the statistics bound its key to few groups (<see cref="AggregationPartition.FewGroups"/>).
+    /// Nothing for a slot whose states take no other shape for them.
+    /// </summary>
+    internal virtual void FewGroups()
+    {
+    }
+
+    /// <summary>
     /// Reserves, for a slot of group 0 alone (<see cref="Ungrouped"/>), what its first
     /// <paramref name="rows"/> rows foretell for the <paramref name="expected"/> rows its partition
     /// expects, as <paramref name="memory"/> grants it. Nothing for a

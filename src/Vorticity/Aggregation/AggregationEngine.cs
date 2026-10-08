@@ -677,6 +677,13 @@ internal sealed class AggregationPartition
         // shelf, which reserves each array before it comes.
         Slots = NewSlots(plan, settled, source, out GroupRecords? records, _arrays);
         Records = records;
+        if (plan.Grouped && keys is null && streaming >= 0 && Few(facts))
+        {
+            foreach (AggregateSlot slot in Slots)
+            {
+                slot.FewGroups();
+            }
+        }
 
         // The plan's index of the groups, unless the caller brings another: a core's lane bypassing its cache.
         Keys = keys ?? (plan.Grouped ? plan.CreateKeys(sorted, facts, _arrays) : null);
@@ -741,6 +748,44 @@ internal sealed class AggregationPartition
 
     /// <summary>The rows after which a lane judges its key by the groups they made: a batch of the scan's at least.</summary>
     internal const long JudgedRows = 65_536;
+
+    /// <summary>
+    /// The groups, nulls included, the statistics bound the key of a streaming group by to at most for
+    /// its slots to take the shape of few groups (<see cref="AggregateSlot.FewGroups"/>): a distinct
+    /// count's set by group, which costs an object and 32 slots a group where pairs cost none, and which
+    /// the groups a batch closes leave to those it opens. Measured on 2026-10-08, the distinct users of
+    /// each of 365 days over 20M visits took 155 ms in sets at one lane, 221 in pairs. A group by that
+    /// waits for the end of its pass keeps pairs: on a key of 10³ values over 4M rows, a thousand sets a
+    /// lane, each doubling from 32 slots, took ×1.05 the pairs' time at one lane and ×2.2 at fourteen,
+    /// their arrays a third of a gigabyte a query.
+    /// </summary>
+    internal const long FewGroups = 4_096;
+
+    /// <summary>Whether the statistics bound every column of the key, and their product, nulls included, to <see cref="FewGroups"/> at most.</summary>
+    private static bool Few(KeyFacts? facts)
+    {
+        if (facts is not { } known || known.Bounds.Length == 0)
+        {
+            return false;
+        }
+
+        long groups = 1;
+        foreach (KeyBounds? bounds in known.Bounds)
+        {
+            if (bounds is not { } span || span.Max < span.Min || (ulong)(span.Max - span.Min) >= FewGroups)
+            {
+                return false;
+            }
+
+            groups *= span.Max - span.Min + 2;
+            if (groups > FewGroups)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// The rows a lane must have in hand, the source's shared among the lanes, for its key to be judged:

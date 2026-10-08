@@ -180,6 +180,66 @@ public sealed partial class DistinctPairsTests
         }
     }
 
+    [Theory]
+    [InlineData(1, true, false)]
+    [InlineData(4, true, false)]
+    [InlineData(14, true, false)]
+    [InlineData(1, false, false)]
+    [InlineData(4, false, true)]
+    [InlineData(14, false, false)]
+    public async Task AKeyOfFewGroupsCountsEachValueOnceAGroupWhetherItStreamsOrNot(int degree, bool sorted, bool inParts)
+    {
+        // Two hundred keys the statistics bound. Sorted, the group by streams: each group's values in a
+        // set of its own, the sets of the groups a batch closes taken again by those it opens, and the
+        // ranges of several lanes followed one into the other. In no order, pairs, merged in series or by
+        // parts. The value of zero bits, which no slot holds, every NaN and both zeros of a float, which
+        // a count takes as one value each.
+        const int rows = 200_000;
+        Reading[] readings = new Reading[rows];
+        for (int row = 0; row < rows; row++)
+        {
+            ulong mix = (ulong)row * 0x9E37_79B9_7F4A_7C15UL;
+            double real = (row % 89) switch
+            {
+                0 => double.NaN,
+                1 => -0.0,
+                2 => 0.0,
+                _ => (long)((mix >> 12) % 3_000) / 4.0,
+            };
+            readings[row] = new Reading((int)((mix >> 24) % 200), row % 97 == 0 ? 0 : (long)((mix >> 8) % 50_000), real);
+        }
+
+        if (sorted)
+        {
+            Array.Sort(readings, (a, b) => a.Key.CompareTo(b.Key));
+        }
+
+        string path = await WriteAsync(readings);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation query = file.Scan<Reading>()
+                .GroupBy(r => r.Key)
+                .Select(g => (g.Key, g.CountDistinct(x => x.Value), g.CountDistinct(x => x.Real)));
+            if (inParts)
+            {
+                query.Plan.MergeInParts = true;
+                query.Plan.MergeParts = 64;
+            }
+
+            Dictionary<int, KeyReals> got = (await ListAsync(query.As<KeyReals>())).ToDictionary(c => c.Key);
+            Dictionary<int, KeyReals> expected = readings.GroupBy(r => r.Key).ToDictionary(
+                g => g.Key,
+                g => new KeyReals(g.Key, g.Select(r => r.Value).Distinct().Count(), g.Select(r => r.Real).Distinct().Count()));
+            Assert.Equal(expected, got);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static Dictionary<int, KeyCounts> Expected(Row[] rows) =>
         rows.GroupBy(r => r.Key).ToDictionary(
             g => g.Key,
@@ -257,6 +317,12 @@ public sealed partial class DistinctPairsTests
 
     [VortexRecord]
     public partial record struct Visit(int Day, long User, string Name);
+
+    [VortexRecord]
+    public partial record struct Reading(int Key, long Value, double Real);
+
+    [VortexRecord]
+    public partial record struct KeyReals(int Key, long Values, long Reals);
 
     [VortexRecord]
     public partial record struct KeyCounts(int Key, long Values, long Texts);
