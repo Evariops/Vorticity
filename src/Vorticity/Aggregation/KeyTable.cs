@@ -5,7 +5,8 @@ using System.Runtime.InteropServices;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The groups of a fixed-width key, in a table the engine owns: a slot
+/// The groups of a fixed-width key of a word at most (a wider one goes to <see cref="WideKeyTable{TValue}"/>),
+/// in a table the engine owns: a slot
 /// holds a key and its group, a key's home slot is its hash modulo a prime, by the fast modulo the
 /// runtime's dictionary takes. An integer is its own hash, folded to 32 bits, so that keys in a row
 /// land in slots in a row and a regular stride spreads over the prime; a float its bits, one pattern
@@ -463,7 +464,7 @@ internal struct KeyTable<TValue>
     }
 
     /// <summary>The word of <paramref name="store"/> a line of 64 bytes starts at.</summary>
-    private static unsafe int LineStart(ulong[] store)
+    internal static unsafe int LineStart(ulong[] store)
     {
         nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(store));
         return (int)((-address & (GroupRecords.Line - 1)) / sizeof(ulong));
@@ -532,11 +533,11 @@ internal struct KeyTable<TValue>
 
     /// <summary><paramref name="value"/> modulo <paramref name="divisor"/> by a multiplication, as the runtime's dictionary takes it.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint FastMod(uint value, uint divisor, ulong multiplier) =>
+    internal static uint FastMod(uint value, uint divisor, ulong multiplier) =>
         (uint)(((((multiplier * value) >> 32) + 1) * divisor) >> 32);
 
     /// <summary>The least prime at or above <paramref name="least"/>: a stride of keys shares no factor with the slots.</summary>
-    private static int PrimeAtLeast(int least)
+    internal static int PrimeAtLeast(int least)
     {
         for (int candidate = least | 1; candidate < int.MaxValue; candidate += 2)
         {

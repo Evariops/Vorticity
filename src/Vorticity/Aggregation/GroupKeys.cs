@@ -519,7 +519,8 @@ internal static class MergeHash
 
 /// <summary>
 /// A key of one fixed-width column: a table of its own from the storage value to its group
-/// (<see cref="KeyTable{TValue}"/>), and a group for null. An integer key the statistics bound to a
+/// (<see cref="KeyTable{TValue}"/>, or <see cref="WideKeyTable{TValue}"/> for a key wider than a word,
+/// whose slots hold no key), and a group for null. An integer key the statistics bound to a
 /// span of <see cref="DirectValues"/> values, or of up to <see cref="DirectPerRow"/> values a row of
 /// the source, is numbered by its value less the least instead: a table
 /// from the number to its group, in pages allocated as values meet them, so that no row is hashed and
@@ -542,7 +543,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
     private readonly KeyBounds? _bounds;
+
+    // The index of a key of a word at most, of a wider one (Wide): one of them, the other left empty.
     private KeyTable<TValue> _index = new KeyTable<TValue>();
+    private WideKeyTable<TValue> _wide = new WideKeyTable<TValue>();
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
@@ -592,7 +596,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _shelf = shelf;
         if (shelf is not null)
         {
-            _index = new KeyTable<TValue>(shelf);
+            if (Wide)
+            {
+                _wide = new WideKeyTable<TValue>(shelf);
+            }
+            else
+            {
+                _index = new KeyTable<TValue>(shelf);
+            }
         }
 
         if (Integers && bounds is { } known && known.Max >= known.Min)
@@ -622,6 +633,25 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         page.AsSpan().Fill(-1);
         return page;
     }
+
+    /// <summary>
+    /// Whether the key is wider than a word, a decimal, a UUID or a short text's word, its groups in a
+    /// <see cref="WideKeyTable{TValue}"/>, whose slots hold no key: a constant once compiled.
+    /// </summary>
+    private static bool Wide
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Unsafe.SizeOf<TValue>() > sizeof(ulong);
+    }
+
+    /// <summary>The first pass of the index the key's width takes (<see cref="KeyTable{TValue}.FindAtHome"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead, out bool missed) =>
+        Wide ? _wide.FindAtHome(keys, groups, homes, ahead, _keys.AsSpan(0, Count), out missed) : _index.FindAtHome(keys, groups, homes, ahead, out missed);
+
+    /// <summary>The group of <paramref name="value"/> in the index the key's width takes, <paramref name="next"/> when it is new.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int GetOrAdd(TValue value, int next) => Wide ? _wide.GetOrAdd(value, next, _keys) : _index.GetOrAdd(value, next);
 
     /// <summary>Whether the values are integers, which a table of groups can be indexed by.</summary>
     private static readonly bool Integers =
@@ -954,7 +984,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         Span<int> groups = rowGroups.AsSpan(0, rows);
-        _sink ^= _index.FindAtHome(canonical[..rows], groups, _homes, _probeAhead, out bool missed);
+        _sink ^= FindAtHome(canonical[..rows], groups, _homes, _probeAhead, out bool missed);
 
         // Every row found its group, none null: the usual batch once the keys are known.
         if (!missed && validity.IsEmpty)
@@ -1003,7 +1033,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         Span<int> groups = rowGroups.AsSpan(start, rows);
-        _sink ^= _index.FindAtHome(values, groups, _homes, Math.Max(_probeAhead, 0), out bool missed);
+        _sink ^= FindAtHome(values, groups, _homes, Math.Max(_probeAhead, 0), out bool missed);
         if (!missed && validity.IsEmpty)
         {
             return;
@@ -1274,7 +1304,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>The index, the keys of the groups, the pages of the table of groups, the values a batch reads and its homes and rows left.</summary>
     internal override long Footprint =>
-        _index.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
+        (Wide ? _wide.Footprint : _index.Footprint) + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
         + (_slabsHeld * sizeof(int)) + ((long)(_pages?.Length ?? 0) * (IntPtr.Size + sizeof(int)))
         + ((long)(_homes.Length + _left.Length) * sizeof(int));
 
@@ -1313,7 +1343,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         // Keys numbered by value take the index only past the bounds, which exact statistics never leave.
         if (_pages is null)
         {
-            _index.Reserve(groups);
+            if (Wide)
+            {
+                _wide.Reserve(groups);
+            }
+            else
+            {
+                _index.Reserve(groups);
+            }
         }
 
         if (_keys.Length < groups)
@@ -1336,7 +1373,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Release()
     {
-        _index.Release();
+        if (Wide)
+        {
+            _wide.Release();
+        }
+        else
+        {
+            _index.Release();
+        }
+
         _shelf?.Give(_keys);
         _keys = [];
         Count = 0;
@@ -1380,7 +1425,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             _keys[i] = _keys[groups[i]];
         }
 
-        _index.Clear();
+        if (Wide)
+        {
+            _wide.Clear(Count + groups.Length);
+        }
+        else
+        {
+            _index.Clear();
+        }
+
         for (int i = 0; i < groups.Length; i++)
         {
             if (i == nullGroup)
@@ -1395,7 +1448,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
             else
             {
-                _index.GetOrAdd(_keys[i], i);
+                GetOrAdd(_keys[i], i);
             }
         }
 
@@ -1465,7 +1518,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         long bytes = TableGrowth.Of(Count, more, _keys.Length, _keys.Length, Unsafe.SizeOf<TValue>());
         if (_pages is null)
         {
-            return bytes + _index.GrowthFor(more);
+            return bytes + (Wide ? _wide.GrowthFor(more) : _index.GrowthFor(more));
         }
 
         long left = Math.Max(0, ((long)_pages.Length << PageBits) - _slabsHeld) >> PageBits;
@@ -1513,7 +1566,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         groups = groups[..count];
-        _sink ^= _index.FindAtHome(keys, groups, homes, 0, out bool missed);
+        _sink ^= FindAtHome(keys, groups, homes, 0, out bool missed);
         if (!missed)
         {
             return;
@@ -1653,7 +1706,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return Numbered(value, number);
         }
 
-        int group = _index.GetOrAdd(value, Count);
+        int group = GetOrAdd(value, Count);
         if (group == Count)
         {
             Add(value);

@@ -85,12 +85,11 @@ internal sealed class ShortTextKeys : GroupKeys
     private const int Longest = 12;
 
     /// <summary>
-    /// The most groups a table of words holds before it turns into one of bytes: 2¹⁶, 2.6 MB of words and
-    /// slots. A word takes its 16 bytes twice, in the keys and in a slot of 24, where a table of bytes keeps
-    /// a slot of 8 and the bytes themselves: twice the memory at 10⁶ keys (137 MB against 66), and once a
-    /// lane's table no longer fits its share of the cache, slower. Measured on 2026-10-08 against the table
-    /// of bytes, 10⁷ rows: 100 keys ×0.62 at one lane and ×0.81 at fourteen; 10⁵ keys ×0.70 and ×1.26;
-    /// 10⁶ names over 2M rows ×1.10 and ×1.46.
+    /// The most groups a table of words holds before it turns into one of bytes: 4 096. Measured on
+    /// 2026-10-08 against the table of bytes, 10⁷ rows, while a slot held its word, 24 bytes, the word kept
+    /// twice, twice the memory of bytes at 10⁶ keys (137 MB against 66): 100 keys ×0.62 at one lane and
+    /// ×0.81 at fourteen; 10⁵ keys ×0.70 and ×1.26; 10⁶ names over 2M rows ×1.10 and ×1.46. A slot now
+    /// holds the word's hash and its group (<see cref="WideKeyTable{TValue}"/>).
     /// </summary>
     private const int MostWords = 1 << 12;
 
