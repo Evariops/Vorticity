@@ -12,8 +12,7 @@ namespace Vorticity.Aggregating;
 /// <param name="Sorted">Whether each column is sorted, in the key's order.</param>
 /// <param name="Bounds">The values each integer column holds, when the statistics hold them exactly.</param>
 /// <param name="Rows">The rows of the source, which bound what a table of groups by value may span; -1 when unknown.</param>
-/// <param name="Scattered">Whether the key, numbered by value over a wide span, lies scattered over it, as its zones say: what takes the core from the start.</param>
-internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1, bool Scattered = false);
+internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1);
 
 /// <summary>
 /// A key of two to four columns as the numbers its parts have in indexes of their own, packed into

@@ -276,6 +276,9 @@ internal sealed partial class GroupCore
 
     internal AggregationPlan Plan => _plan;
 
+    /// <summary>Why the query's groups went to the core.</summary>
+    internal CoreReason Reason { get; set; } = CoreReason.Plan;
+
     internal AggregateSlot?[] Settled => _settled;
 
     internal ScanSource? Source => _source;
@@ -287,7 +290,7 @@ internal sealed partial class GroupCore
     internal static GroupCore? Of(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory = null) =>
-        (plan.Core || (plan.CoreScattered && facts is { Scattered: true })) && lanes >= (plan.CoreLanes ?? DefaultLanes)
+        plan.Core && lanes >= (plan.CoreLanes ?? DefaultLanes)
             ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory, lean: plan.CoreLean)
             : null;
 
@@ -1173,6 +1176,7 @@ internal sealed partial class GroupCore
             SpilledBytes = SpilledBytes,
             AppliedEntries = Interlocked.Read(ref _applied),
             MadeGroups = Interlocked.Read(ref _made),
+            Reason = Reason,
         };
     }
 }
@@ -1207,6 +1211,25 @@ internal sealed record CoreRun(
 
     /// <summary>The groups those entries made.</summary>
     internal long MadeGroups { get; init; }
+
+    /// <summary>Why the query's groups went to the core.</summary>
+    internal CoreReason Reason { get; init; }
+}
+
+/// <summary>Why a query's groups went to the core.</summary>
+internal enum CoreReason
+{
+    /// <summary>The plan asked for it (<see cref="AggregationPlan.Core"/>), the tests and the bench.</summary>
+    Plan,
+
+    /// <summary>A lane's first rows of a hashed key were nearly all new groups.</summary>
+    FirstRows,
+
+    /// <summary>A lane's first rows of an integer key numbered by value spread over its span as a key in no order spreads.</summary>
+    Spread,
+
+    /// <summary>A lane's budget could not let its table grow.</summary>
+    Pressure,
 }
 
 /// <summary>Where a group's record and its key lie in an entry of a part's batch.</summary>
@@ -1393,14 +1416,26 @@ internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
     private bool _turned;
 
     // Whether the first lane turned on what its rows showed rather than on its budget: the core is
-    // then the one a query takes for its speed, not the lean one that holds memory down.
+    // then the one a query takes for its speed, not the lean one that holds memory down. And what
+    // they showed.
     private bool _outgrown;
+    private CoreReason _reason = CoreReason.Pressure;
 
     /// <summary>
-    /// A lane turns because its rows showed a key the lanes' tables cannot hold well: the
-    /// core, if not made yet, is made for speed rather than lean.
+    /// A lane turns because its rows showed a key the lanes' tables cannot hold well, <paramref name="reason"/>:
+    /// the core, if not made yet, is made for speed rather than lean.
     /// </summary>
-    internal void Outgrew() => Volatile.Write(ref _outgrown, true);
+    internal void Outgrew(CoreReason reason)
+    {
+        lock (_gate)
+        {
+            if (!_outgrown)
+            {
+                _reason = reason;
+                Volatile.Write(ref _outgrown, true);
+            }
+        }
+    }
 
     /// <summary>Whether a lane turned on what its rows showed: every lane then turns, whatever its table holds.</summary>
     internal bool Outgrown => Volatile.Read(ref _outgrown);
@@ -1432,6 +1467,7 @@ internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
                     if (_core is not null)
                     {
                         _core.Pressure = this;
+                        _core.Reason = _reason;
                         _turn = new SemaphoreSlim(1, 1);
                     }
 

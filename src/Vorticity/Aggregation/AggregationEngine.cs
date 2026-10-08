@@ -236,10 +236,13 @@ internal sealed class AggregationPlan
     internal int? CoreTurnAt { get; set; }
 
     /// <summary>
-    /// Whether an integer key numbered by value over <see cref="ScatteredSpan"/> values or more, which
-    /// the zones say lies scattered over its span, takes the core from the start on the core's lanes:
-    /// its lanes' tables would each hold most of its groups, out of the cache. False to leave the core
-    /// to <see cref="Core"/> and to pressure alone.
+    /// Whether an integer key numbered by value over <see cref="ScatteredSpan"/> values or more, which a
+    /// lane's first batch shows scattered over its span, takes the core on the core's lanes before a row
+    /// is folded (<see cref="AggregationPartition.Judge"/>): its lanes' tables would each hold most of
+    /// its groups, out of the cache. A file's zones, which bound each zone's values by their least and
+    /// their greatest, read a key in the order of the rows with a sentinel, an anonymous 0 among growing
+    /// identifiers, as covering its span; and a dataset reads none before its pass. False to leave the
+    /// core to <see cref="Core"/> and to pressure alone.
     /// </summary>
     internal bool CoreScattered { get; set; } = true;
 
@@ -252,7 +255,7 @@ internal sealed class AggregationPlan
     internal bool CoreOnNew { get; set; } = true;
 
     /// <summary>
-    /// The span of values from which a key the zones say scattered takes the core: measured on
+    /// The span of values from which a key its first batch shows scattered takes the core: measured on
     /// 2026-10-07 at fourteen lanes, the core ×0.72 at 10⁶ random keys and ×0.52 at 10⁷, ×2.47 at 10⁵.
     /// </summary>
     internal const long ScatteredSpan = 1_000_000;
@@ -757,6 +760,66 @@ internal sealed class AggregationPartition
     internal const long JudgedRows = 65_536;
 
     /// <summary>
+    /// Whether the lane, one of the core's lanes on an integer key numbered by value over
+    /// <see cref="AggregationPlan.ScatteredSpan"/> values or more, turns to the core when its first batch
+    /// spreads over that span as a key in no order spreads (<see cref="Judge"/>): what the zones say
+    /// before the pass, where a file has no zones that say it and a dataset none it reads.
+    /// </summary>
+    internal bool TurnOnSpread { get; init; }
+
+    /// <summary>
+    /// The share of the bins over its span that values drawn at random would fall in, from which a
+    /// batch's values say the key lies scattered: a key in the order of the rows falls in a few bins, its
+    /// own and the sentinels'; one in no order in about all of them.
+    /// </summary>
+    internal const double SpreadShare = 0.75;
+
+    // Whether the lane's first batch was judged, and showed the key scattered (Judge).
+    private bool _spreadJudged;
+    private bool _spread;
+
+    // The map of the first batch's values over the span, 4 096 bits.
+    private ulong[]? _spreadMap;
+
+    /// <summary>
+    /// Judges the key on the lane's first batch, before a row of it is folded: its selected values
+    /// placed in 4 096 bins over the span, a bit each, and compared to the B (1 − e^(−n/B)) of B bins n
+    /// values drawn at random would fall in. Past <see cref="SpreadShare"/> of them, the lane turns to the
+    /// core with its table empty. Once a lane, a read of its key column and a bit a row; the bins, not the
+    /// values' least and greatest, so that a sentinel adds a bin and no more. Numbered by value, the
+    /// lane's table would otherwise allocate a page of its span for nearly every value of that batch,
+    /// ten million values a span of 2 442 pages, and lay them all out only to empty them.
+    /// </summary>
+    internal void Judge(RecordBatch batch)
+    {
+        if (!TurnOnSpread || _spreadJudged || Keys is not { NumberedByValue: true } keys || batch.RowCount == 0 || batch.SelectedRows == 0)
+        {
+            return;
+        }
+
+        _spreadJudged = true;
+        CanonicalArena arena = batch.Arena;
+        int node = FilterEvaluator.Resolve(arena, batch.RootIndex, _columns[0].Field, batch.RowCount);
+        while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+        {
+            node = arena.GetNode(node).StorageIndex;
+        }
+
+        _spreadMap ??= new ulong[4096 / 64];
+        if (keys.Spread(arena, [node], batch.RowCount, batch.SelectionWords, AggregationPlan.ScatteredSpan, _spreadMap) is not { } spread || spread.Values == 0)
+        {
+            return;
+        }
+
+        double drawn = spread.Bins * -double.ExpM1(-(double)spread.Values / spread.Bins);
+        if (spread.Set >= SpreadShare * drawn)
+        {
+            _spread = true;
+            Pressure!.Outgrew(CoreReason.Spread);
+        }
+    }
+
+    /// <summary>
     /// The groups, nulls included, the statistics bound the key of a streaming group by to at most for
     /// its slots to take the shape of few groups (<see cref="AggregateSlot.FewGroups"/>): a distinct
     /// count's set by group, which costs an object and 32 slots a group where pairs cost none, and which
@@ -1224,6 +1287,13 @@ internal sealed class AggregationPartition
             return _folded++ >= turnAt;
         }
 
+        // A key its first batch showed scattered over a wide span (Judge): the lane turns before it
+        // folds a row, its table empty.
+        if (_spread)
+        {
+            return true;
+        }
+
         // Nearly every one of its first rows a new group, a hashed key of a million values or more: the
         // lane turns to the core while its table is a batch's, which emptying costs
         // little, where turning once the table outgrew the cache paid for it twice.
@@ -1232,7 +1302,7 @@ internal sealed class AggregationPartition
             _judged = true;
             if (Keys is { NumberedByValue: false } keys && EstimatedValues(_rowsFolded, keys.Count) >= TurnValues)
             {
-                Pressure!.Outgrew();
+                Pressure!.Outgrew(CoreReason.FirstRows);
                 return true;
             }
         }
@@ -2103,14 +2173,6 @@ internal static class AggregationEngine
             pass = Batched(pass, memory, asked);
             int lanes = Admit(memory, asked, pass.Options.BatchRows);
 
-            // A key its zones say scattered over a wide span takes the core from the start:
-            // its lanes' tables, out of the cache, would each hold most of its groups.
-            if (!plan.Core && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes) && facts is { } known && !sorted && top is null
-                && await ScatteredAsync(source, plan.Keys, known, metrics, cancellationToken).ConfigureAwait(false))
-            {
-                facts = known with { Scattered = true };
-            }
-
             // The core holds the groups once a lane's cache fills: each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
             core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
@@ -2165,6 +2227,7 @@ internal static class AggregationEngine
                         Pressure = pressure,
                         TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
                             && facts?.Rows is long sourceRows && sourceRows >= lanes * AggregationPartition.LaneRows,
+                        TurnOnSpread = pressure is not null && plan.CoreScattered && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes),
                         ExpectedRows = core is null && top is null && source.RowBound >= 0 ? source.RowBound / lanes : -1,
                     };
                     if (core is { Lean: true })
@@ -2976,45 +3039,6 @@ internal static class AggregationEngine
         return index < statistics.Count && statistics[index].TryGetIsSorted(out bool sorted) && sorted;
     }
 
-    /// <summary>
-    /// Whether the key, one integer column the statistics bound to <see cref="AggregationPlan.ScatteredSpan"/>
-    /// values or more, few enough to be numbered by value, lies scattered over them: its zones cover half
-    /// its span or more on the mean, where keys in the order of the rows cover a few values a zone. The
-    /// zones read once for the file, counted in <paramref name="metrics"/>.
-    /// </summary>
-    private static async ValueTask<bool> ScatteredAsync(ScanSource source, ColumnShape[] keys, KeyFacts facts, ScanMetrics metrics, CancellationToken cancellationToken)
-    {
-        if (keys.Length != 1 || source is not FileScanSource file || facts.Bounds[0] is not { } bounds || bounds.Max < bounds.Min)
-        {
-            return false;
-        }
-
-        ulong span = (ulong)(bounds.Max - bounds.Min) + 1;
-        if (span < AggregationPlan.ScatteredSpan || facts.Rows <= 0 || span > (ulong)(FixedKeys<int>.DirectPerRow * facts.Rows))
-        {
-            return false;
-        }
-
-        if (await Compute.ZonePruningPlan.ZonesAsync(file.File, keys[0].Field, metrics, cancellationToken).ConfigureAwait(false) is not { HasStatistics: true } zones)
-        {
-            return false;
-        }
-
-        double covered = 0;
-        int counted = 0;
-        for (int z = 0; z < zones.ZoneCount; z++)
-        {
-            Compute.ZoneBounds zone = zones.Bounds(z);
-            if (zone.HasMin && zone.HasMax)
-            {
-                covered += (double)(zone.Max.SignedValue - zone.Min.SignedValue + 1) / span;
-                counted++;
-            }
-        }
-
-        return counted > 0 && covered >= 0.5 * counted;
-    }
-
     /// <summary><see cref="Facts"/>, the bounds of a source that reads its structures first, a dataset's.</summary>
     internal static async ValueTask<KeyFacts> FactsAsync(ScanSource source, ColumnShape[] keys, CancellationToken cancellationToken)
     {
@@ -3254,6 +3278,8 @@ internal static class AggregationEngine
         {
             // Under pressure, a lane turns to the core between two batches, and one whose
             // rows the core could not take waits for the next table given back: on tasks, never a thread.
+            // Its first batch may show the key scattered, before it is folded.
+            partition.Judge(batch);
             if (partition.MustTurn)
             {
                 await partition.TurnAsync(cancellationToken).ConfigureAwait(false);

@@ -428,14 +428,14 @@ public sealed partial class GroupCoreTests
     }
 
     /// <summary>The core at sizes that make every batch of rows copy a cache, every deposit burst, every burst split.</summary>
-    // A key its zones say scattered over a span of a million values or more takes the core from the start
-    // on the core's lanes, its answers the lanes' tables'; the same span in the order of the rows, whose
-    // zones each cover a few values, keeps the lanes' tables. The
+    // A key its lanes' first batches show scattered over a span of a million values or more takes the
+    // core before a row is folded, on the core's lanes, its answers the lanes' tables'; the same span in
+    // the order of the rows, whose first batches each cover a few values, keeps the lanes' tables. The
     // core's lanes brought down to two, so that four lanes take the rule on a file of 300 000 rows.
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task AKeyTheZonesSayScatteredTakesTheCoreFromTheStart(bool scattered)
+    public async Task AKeyItsFirstBatchShowsScatteredTakesTheCore(bool scattered)
     {
         const int Count = 300_000;
         Row[] rows = new Row[Count];

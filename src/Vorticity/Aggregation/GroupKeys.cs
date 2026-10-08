@@ -140,6 +140,13 @@ internal abstract class GroupKeys
     internal virtual (long Least, ulong Span)? ValueSpan => null;
 
     /// <summary>
+    /// For an index that numbers its groups by value over a span of <paramref name="least"/> values or
+    /// more: the bins of <paramref name="map"/>, 4 096 bits over the span, that the selected values of a
+    /// batch fall in, the bins the span takes, and the values read; null otherwise. Nothing is grouped.
+    /// </summary>
+    internal virtual (int Set, int Bins, int Values)? Spread(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, ulong least, Span<ulong> map) => null;
+
+    /// <summary>
     /// The part of a merge by value each group's key falls in: the span cut into 2^<paramref name="partBits"/>
     /// runs of numbers, the first part for the null group and for a value past the span.
     /// </summary>
@@ -1108,6 +1115,44 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _slab.AsSpan(start, 1 << PageBits).Fill(-1);
         _pageStarts![at] = start;
         return _pages![at] = _slab;
+    }
+
+    internal override (int Set, int Bins, int Values)? Spread(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, ulong least, Span<ulong> map)
+    {
+        if (_pages is null || _span < least)
+        {
+            return null;
+        }
+
+        // A bin a power of two of values, so that 4 096 of them or fewer cover the span.
+        int shift = Math.Max(0, 64 - System.Numerics.BitOperations.LeadingZeroCount(_span - 1) - 12);
+        int bins = (int)((_span - 1) >> shift) + 1;
+        ReadOnlySpan<TValue> values = FixedReader.Values(arena, nodes[0], _shape.Kind, ref _values, out ReadOnlySpan<ulong> validity);
+        long min = _directMin;
+        ulong span = _span;
+        int read = 0;
+        RowCursor cursor = new RowCursor(selection, 0, rows);
+        while (cursor.Next(out int row))
+        {
+            if (StorageValues.IsValid(validity, row))
+            {
+                ulong number = (ulong)(Integer(values[row]) - min);
+                if (number < span)
+                {
+                    int bin = (int)(number >> shift);
+                    map[bin >> 6] |= 1UL << (bin & 63);
+                    read++;
+                }
+            }
+        }
+
+        int set = 0;
+        foreach (ulong word in map[..((bins + 63) >> 6)])
+        {
+            set += System.Numerics.BitOperations.PopCount(word);
+        }
+
+        return (set, bins, read);
     }
 
     /// <summary>An integer value as a long; an unsigned one past the longs as a negative, which no table holds.</summary>
