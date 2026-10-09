@@ -2,12 +2,16 @@
 # Our group bys against DuckDB's, on the same files: DuckDB through its vortex extension and on a native
 # table already in memory, our side the Native AOT runner, at the same threads.
 #
-#   bench/duckdb.sh [--set hc|db|all] [--rows N] [--db-rows N] [--threads N[,M…]] [--runner <commit>|<dir>]
-#                   [--rounds N] [--rest S]
+#   bench/duckdb.sh [--set hc|db|all] [--only <rows>] [--rows N] [--db-rows N] [--threads N[,M…]]
+#                   [--runner <commit>|<dir>] [--rounds N] [--rest S]
 #
 #   bench/duckdb.sh                                   PR #43's table: 40M rows, 1 and 14 threads
 #   bench/duckdb.sh --set db --db-rows 10000000       db-benchmark's group by at 10^7 rows
 #   bench/duckdb.sh --rows 4000000 --threads 1        a quick look
+#   bench/duckdb.sh --set all --only db-q4,total-k7 --threads 14
+#                                                     the rows a change touches, and no others: the
+#                                                     runner's scenario names without "group-" (total-k3,
+#                                                     range-k6, strided-k7, db-q10…)
 #
 # THE SAME WORK ON BOTH SIDES. Each query is a group by whose result is aggregated once more: DuckDB's outer
 # query sums every column the group by aggregates, and the runner sums the same columns as it reads the
@@ -34,6 +38,7 @@ set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 duckdb="${DUCKDB:-$(command -v duckdb || echo /opt/homebrew/bin/duckdb)}"
 set_name="hc"
+only=""
 rows=40000000
 db_rows=10000000
 threads="1,14"
@@ -42,13 +47,14 @@ rounds=10
 rest=0
 
 usage() {
-    echo "usage: bench/duckdb.sh [--set hc|db|all] [--rows N] [--db-rows N] [--threads N[,M…]] [--runner <commit>|<dir>] [--rounds N] [--rest S]" >&2
+    echo "usage: bench/duckdb.sh [--set hc|db|all] [--only <rows>] [--rows N] [--db-rows N] [--threads N[,M…]] [--runner <commit>|<dir>] [--rounds N] [--rest S]" >&2
     exit 2
 }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --set) set_name="$2"; shift 2 ;;
+        --only) only=",$2,"; shift 2 ;;
         --rows) rows="$2"; shift 2 ;;
         --db-rows) db_rows="$2"; shift 2 ;;
         --threads) threads="$2"; shift 2 ;;
@@ -103,6 +109,17 @@ if [ "$set_name" = "db" ] || [ "$set_name" = "all" ]; then
     queries+=("db q5: sum v1:v3 by id6|group-db-q5|$db|SELECT sum(v1) + sum(v2) + sum(v3) FROM (SELECT Id6, sum(V1) AS v1, sum(V2) AS v2, sum(V3) AS v3 FROM x GROUP BY Id6)")
     queries+=("db q7: max v1 - min v2 by id3|group-db-q7|$db|SELECT sum(r) FROM (SELECT Id3, max(V1) - min(V2) AS r FROM x GROUP BY Id3)")
     queries+=("db q10: sum v3, count by id1:id6|group-db-q10|$db|SELECT sum(v3) + sum(c) FROM (SELECT Id1, Id2, Id3, Id4, Id5, Id6, sum(V3) AS v3, count(*) AS c FROM x GROUP BY Id1, Id2, Id3, Id4, Id5, Id6)")
+fi
+
+# --only keeps the rows it names, by their scenario without "group-".
+if [ -n "$only" ]; then
+    kept_queries=()
+    for entry in "${queries[@]}"; do
+        IFS='|' read -r _ scenario _ _ <<< "$entry"
+        case "$only" in *",${scenario#group-},"*) kept_queries+=("$entry") ;; esac
+    done
+
+    queries=(${kept_queries[@]+"${kept_queries[@]}"})
 fi
 
 [ ${#queries[@]} -gt 0 ] || usage
