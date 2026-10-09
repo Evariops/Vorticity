@@ -2017,9 +2017,19 @@ internal sealed class LaneCore
     /// turning to the core when its budget cannot let the table grow. Its groups counted
     /// by part first, each part's share goes into a batch of its own, exactly its size, deposited whole:
     /// given back as its part applies it, where batches the lanes fill again would stay held to the end.
+    /// A table no larger than a cache goes into the lane's open batches, as its cache's flushes do: the
+    /// table of a lane that turned on its first rows, judged on a sample, made a batch of its own on
+    /// every part, an array of its length that no other batch takes again, 3 600 of them a query at
+    /// fourteen lanes.
     /// </summary>
     internal void Empty(AggregationPartition table)
     {
+        if (table.Keys!.Count <= _core.Capacity)
+        {
+            Flush(table);
+            return;
+        }
+
         Span<int> counts = stackalloc int[GroupCore.PartCount];
         counts.Clear();
         table.Keys!.CountParts(counts, this);
