@@ -258,7 +258,9 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         }
     }
 
-    internal override bool CarriesCount => true;
+    // An exact float sum folds its own pass, its split held to one top (IndexedSum.Fold), rather than carry
+    // a count through IndexedSum.Add, a value at a time.
+    internal override bool CarriesCount => typeof(TState) != typeof(IndexedSum);
 
     internal override bool StepRowsCounted(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot count) => count switch
     {

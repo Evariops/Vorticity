@@ -27,7 +27,7 @@ internal static class FloatSumMicro
 
     internal static int Run(int rounds)
     {
-        Console.WriteLine($"{"float sum",-32} {"rows",11} {"groups",10} {"best ms",10} {"ns/row",8} {"checksum",18}");
+        Console.WriteLine($"{"float sum",-32} {"rows",11} {"groups",10} {"best ms",10} {"ns/row",8} {"ns/group out",13} {"checksum",18}");
         Measure("1e2 groups, one range (q4)", 10_000_000, 100, mixed: false, rounds);
         Measure("1e5 groups, one range (q3)", 10_000_000, 100_000, mixed: false, rounds);
         Measure("1e2 groups, ranges of their own", 10_000_000, 100, mixed: true, rounds);
@@ -50,21 +50,24 @@ internal static class FloatSumMicro
         }
 
         double best = double.MaxValue;
+        double bestOut = double.MaxValue;
         long checksum = 0;
+        int count = groups == 0 ? rows : groups;
         for (int round = 0; round < rounds; round++)
         {
-            (double ms, long sum) = Pass(values, rowGroups, groups == 0 ? rows : groups);
+            (double ms, double outMs, long sum) = Pass(values, rowGroups, count);
             best = Math.Min(best, ms);
+            bestOut = Math.Min(bestOut, outMs);
             checksum = sum;
         }
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"{name,-32} {rows,11:N0} {(groups == 0 ? rows : groups),10:N0} {best,10:F1} {best * 1e6 / rows,8:F2} {checksum,18:X16}"));
+            $"{name,-32} {rows,11:N0} {count,10:N0} {best,10:F1} {best * 1e6 / rows,8:F2} {bestOut * 1e6 / count,13:F2} {checksum,18:X16}"));
     }
 
-    /// <summary>One pass: every batch's values a canonical node of an arena, folded into their groups' sums.</summary>
-    private static (double Ms, long Checksum) Pass(double[] values, int[] rowGroups, int groups)
+    /// <summary>One pass: every batch's values a canonical node of an arena, folded into their groups' sums; then every group's sum read out.</summary>
+    private static (double Ms, double OutMs, long Checksum) Pass(double[] values, int[] rowGroups, int groups)
     {
         GC.Collect();
         RetainingArena arena = new RetainingArena();
@@ -85,14 +88,26 @@ internal static class FloatSumMicro
         }
 
         double ms = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
-        long checksum = 0;
+
+        // Every group's sum read out at once, as the result's batches read them.
+        int[] order = new int[groups];
         for (int group = 0; group < groups; group++)
         {
-            checksum = (checksum * 31) ^ BitConverter.DoubleToInt64Bits(slot.Result(group));
+            order[group] = group;
+        }
+
+        double[] sums = new double[groups];
+        long reading = Stopwatch.GetTimestamp();
+        slot.Results(order, sums);
+        double outMs = Stopwatch.GetElapsedTime(reading).TotalMilliseconds;
+        long checksum = 0;
+        foreach (double sum in sums)
+        {
+            checksum = (checksum * 31) ^ BitConverter.DoubleToInt64Bits(sum);
         }
 
         arena.Reset();
-        return (ms, checksum);
+        return (ms, outMs, checksum);
     }
 
     private static ulong Mix(ulong x)
