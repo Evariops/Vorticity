@@ -468,8 +468,14 @@ internal sealed partial class GroupCore
     /// <summary>Whether slot <paramref name="slot"/> folds rows, and so merges.</summary>
     internal bool Folds(int slot) => _inputs[slot] != AggregationPartition.Settled;
 
-    /// <summary>A group's bytes in a table: its slot at the table's load, its key, its record.</summary>
-    private static long GroupBytes(int keyBytes, int recordBytes) => ((keyBytes + sizeof(int)) * 5L / 3) + keyBytes + recordBytes;
+    /// <summary>
+    /// A group's bytes in a table: its slot at the table's load, its key, its record. A key wider than 16
+    /// bytes is in slots of its hash and its group, 8 bytes four tenths full (<see cref="WideKeyTable{TValue}"/>),
+    /// not in slots that hold it: a tuple of 64 bytes counted so took sub-tables of half the groups they
+    /// held in their bytes.
+    /// </summary>
+    private static long GroupBytes(int keyBytes, int recordBytes) =>
+        (keyBytes > 2 * sizeof(ulong) ? sizeof(ulong) * 10L / 4 : (keyBytes + sizeof(int)) * 5L / 3) + keyBytes + recordBytes;
 
     /// <summary>Marks the core as the query's state: a lane's cache filled.</summary>
     internal void Engage()
