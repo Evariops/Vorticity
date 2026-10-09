@@ -2179,9 +2179,12 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// A slot for each aggregate of the plan, the settled one or a new one, the new ones whose states
-    /// hold no reference sharing <paramref name="records"/>, a record a group.
+    /// hold no reference sharing <paramref name="records"/>, a record a group, laid out as
+    /// <paramref name="layout"/> says when the caller knows it already: a core's, the same for each of
+    /// its sub-tables, whose four objects each made again.
     /// </summary>
-    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records, ArrayShelf? shelf = null)
+    internal static AggregateSlot[] NewSlots(
+        AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records, ArrayShelf? shelf = null, RecordLayout? layout = null)
     {
         AggregateSlot[] slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
@@ -2200,14 +2203,14 @@ internal sealed class AggregationPartition
         }
 
         records = null;
-        if (RecordLayout.Of(slots) is { } layout)
+        if ((layout ?? RecordLayout.Of(slots)) is { } laid)
         {
-            records = new GroupRecords(layout, shelf);
+            records = new GroupRecords(laid, shelf);
             for (int i = 0; i < slots.Length; i++)
             {
-                if (layout.Offsets[i] >= 0)
+                if (laid.Offsets[i] >= 0)
                 {
-                    slots[i].Bind(records, layout.Offsets[i]);
+                    slots[i].Bind(records, laid.Offsets[i]);
                 }
             }
         }

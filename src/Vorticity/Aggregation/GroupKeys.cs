@@ -592,6 +592,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <summary>The span of values a table of groups covers whatever the rows: 2^16, a quarter of a megabyte.</summary>
     internal const long DirectValues = 1 << 16;
 
+    /// <summary>The keys the keys' first array holds, made at the first group.</summary>
+    private const int FirstKeys = 16;
+
     /// <summary>The values a row of the source a table of groups may span past <see cref="DirectValues"/>: four, the budget of a numbering by value.</summary>
     internal const long DirectPerRow = 4;
 
@@ -609,7 +612,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private KeyTable<TValue> _index = new KeyTable<TValue>();
     private WideKeyTable<TValue> _wide = new WideKeyTable<TValue>();
     private bool _compact = CompactAlways;
-    private TValue[] _keys = new TValue[16];
+
+    // The keys, by group: none until the first group, then from the shelf when there is one. Each of a
+    // core's sub-tables made its first array of sixteen at once, outside any shelf: 3 885 arrays a query
+    // of six keys over 4M rows at fourteen lanes, 4 MB on the small object heap.
+    private TValue[] _keys = [];
     private int _null = -1;
     private TValue[] _values = [];
     private ValuesCache<TValue> _entries;
@@ -2362,7 +2369,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         if (Count == _keys.Length)
         {
-            Grow(DoubledUpTo(Count, _doublesUpTo));
+            Grow(Count == 0 ? FirstKeys : DoubledUpTo(Count, _doublesUpTo));
         }
 
         _keys[Count] = value;

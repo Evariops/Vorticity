@@ -116,6 +116,9 @@ internal sealed partial class GroupCore
 
     private readonly AggregationPlan _plan;
     private readonly AggregateSlot?[] _settled;
+
+    // How a record lays its states out, the same for every sub-table.
+    private readonly RecordLayout? _layout;
     private readonly ColumnShape[] _columns;
     private readonly int[] _inputs;
     private readonly ScanSource? _source;
@@ -186,6 +189,7 @@ internal sealed partial class GroupCore
         Kind = kind;
         int keyBytes = kind.EntryBytes;
         Shape = EntryShape.Of(layout, keyBytes);
+        _layout = layout;
         long groupBytes = GroupBytes(keyBytes, (layout?.Stride ?? 0) * sizeof(ulong));
         _groupBytes = groupBytes;
         int entryBytes = Shape.Words * sizeof(ulong);
@@ -578,7 +582,7 @@ internal sealed partial class GroupCore
     /// <summary>A sub-table of a part, empty, holding the groups whose hashes share <paramref name="depth"/> bits past the part's.</summary>
     internal SubTable NewTable(int depth)
     {
-        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out GroupRecords? records, _shelf);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out GroupRecords? records, _shelf, _layout);
         return new SubTable(Kind.ForTable(_shelf), slots, records, depth);
     }
 
