@@ -688,10 +688,28 @@ internal sealed class ShortTextKeys : GroupKeys
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
-        // The keys came from the column the reader checked as it decoded it, as a table of bytes appends them.
+        // The keys came from the column the reader checked as it decoded it, as a table of bytes appends them;
+        // a word is its value's view.
         VarBinStore leaf = (VarBinStore)store.Leaf;
-        Span<byte> buffer = stackalloc byte[16];
         int nullGroup = NullNumber;
+        if (_words is { } words)
+        {
+            foreach (int group in groups)
+            {
+                if (group == nullGroup)
+                {
+                    KeyStores.AppendNull(store);
+                }
+                else
+                {
+                    ref readonly TextWord word = ref words.KeyRef(group);
+                    leaf.AppendInline(word.Low, word.High);
+                }
+            }
+
+            return;
+        }
+
         foreach (int group in groups)
         {
             if (group == nullGroup)
@@ -700,7 +718,7 @@ internal sealed class ShortTextKeys : GroupKeys
             }
             else
             {
-                leaf.AppendValidated(KeyOf(group, buffer));
+                leaf.AppendValidated(_bytes!.KeyOf(group));
             }
         }
     }

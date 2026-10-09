@@ -2325,6 +2325,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <summary>The key of group <paramref name="group"/>; the null group's is the default value.</summary>
     internal TValue KeyAt(int group) => _keys[group];
 
+    /// <summary>The key of <paramref name="group"/> where it lies: a wide one read in place rather than copied.</summary>
+    internal ref readonly TValue KeyRef(int group) => ref _keys[group];
+
     internal override bool Ascending(int from, int to)
     {
         if (to - from < 2)

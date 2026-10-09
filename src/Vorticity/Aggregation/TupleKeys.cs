@@ -208,16 +208,30 @@ internal sealed class TupleLayout
     internal int LongTexts => Volatile.Read(ref _longCount);
 
     /// <summary>The bytes of the text a word holds, through <paramref name="buffer"/> of 16 bytes for a short one.</summary>
-    internal ReadOnlySpan<byte> TextOf(TextWord word, Span<byte> buffer)
+    internal ReadOnlySpan<byte> TextOf(TextWord word, Span<byte> buffer) => IsLong(word) ? LongText(word) : ShortTextKeys.BytesOf(word, buffer);
+
+    /// <summary>Whether a word holds a long text's mark and number rather than a text.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool IsLong(TextWord word) => (uint)word.Low == LongMark;
+
+    /// <summary>
+    /// The long text whose number a word holds. Read without the lock: a text is in the list before its
+    /// number is handed out, and the list a reader sees holds every number below its length, a longer
+    /// one being copied from it before it replaces it; a number past the list read is looked up again
+    /// under the lock.
+    /// </summary>
+    internal byte[] LongText(TextWord word)
     {
-        if ((uint)word.Low != LongMark)
+        int id = (int)(word.Low >> 32);
+        byte[][] longs = Volatile.Read(ref _longs);
+        if ((uint)id < (uint)longs.Length && longs[id] is { } text)
         {
-            return ShortTextKeys.BytesOf(word, buffer);
+            return text;
         }
 
         lock (_gate)
         {
-            return _longs[(int)(word.Low >> 32)];
+            return _longs[id];
         }
     }
 
@@ -413,24 +427,29 @@ internal sealed class TupleKeys : GroupKeys
         }
     }
 
-    /// <summary>Whether column <paramref name="component"/> of <paramref name="tuple"/> is null.</summary>
-    private static bool IsNull(KeyTuple tuple, int component) =>
-        ((Unsafe.Add(ref Unsafe.As<KeyTuple, byte>(ref tuple), TupleLayout.FlagsAt) >> component) & 1) != 0;
+    /// <summary>The bytes of group <paramref name="group"/>'s tuple, where it lies: a tuple copied to be read took a third of q10's output.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ref byte TupleOf(int group) => ref Unsafe.As<KeyTuple, byte>(ref Unsafe.AsRef(in _tuples.KeyRef(group)));
+
+    /// <summary>Whether column <paramref name="component"/> of a tuple is null.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsNull(ref byte tuple, int component) => ((Unsafe.Add(ref tuple, TupleLayout.FlagsAt) >> component) & 1) != 0;
 
     /// <summary>The value of a column of a tuple at byte <paramref name="offset"/>, as its bytes.</summary>
-    private static T Read<T>(KeyTuple tuple, int offset)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static T Read<T>(ref byte tuple, int offset)
         where T : unmanaged =>
-        Unsafe.ReadUnaligned<T>(ref Unsafe.Add(ref Unsafe.As<KeyTuple, byte>(ref tuple), offset));
+        Unsafe.ReadUnaligned<T>(ref Unsafe.Add(ref tuple, offset));
 
     /// <summary>The bytes of text column <paramref name="component"/> of a tuple, through <paramref name="buffer"/> of 16 bytes.</summary>
-    private ReadOnlySpan<byte> TextOf(KeyTuple tuple, int component, Span<byte> buffer) =>
-        _layout.TextOf(Read<TextWord>(tuple, _layout.Offsets[component]), buffer);
+    private ReadOnlySpan<byte> TextOf(ref byte tuple, int component, Span<byte> buffer) =>
+        _layout.TextOf(Read<TextWord>(ref tuple, _layout.Offsets[component]), buffer);
 
     /// <summary>Column <paramref name="component"/> of two tuples, by its type: a text by its bytes, an integer by its value, a null last.</summary>
-    private int Compare(KeyTuple left, KeyTuple right, int component)
+    private int Compare(ref byte left, ref byte right, int component)
     {
-        bool leftNull = IsNull(left, component);
-        bool rightNull = IsNull(right, component);
+        bool leftNull = IsNull(ref left, component);
+        bool rightNull = IsNull(ref right, component);
         if (leftNull || rightNull)
         {
             return leftNull == rightNull ? 0 : leftNull ? 1 : -1;
@@ -441,19 +460,19 @@ internal sealed class TupleKeys : GroupKeys
         {
             Span<byte> a = stackalloc byte[16];
             Span<byte> b = stackalloc byte[16];
-            return TextOf(left, component, a).SequenceCompareTo(TextOf(right, component, b));
+            return TextOf(ref left, component, a).SequenceCompareTo(TextOf(ref right, component, b));
         }
 
         return _layout.Shapes[component].PType switch
         {
-            PType.I8 => Read<sbyte>(left, offset).CompareTo(Read<sbyte>(right, offset)),
-            PType.U8 => Read<byte>(left, offset).CompareTo(Read<byte>(right, offset)),
-            PType.I16 => Read<short>(left, offset).CompareTo(Read<short>(right, offset)),
-            PType.U16 => Read<ushort>(left, offset).CompareTo(Read<ushort>(right, offset)),
-            PType.I32 => Read<int>(left, offset).CompareTo(Read<int>(right, offset)),
-            PType.U32 => Read<uint>(left, offset).CompareTo(Read<uint>(right, offset)),
-            PType.I64 => Read<long>(left, offset).CompareTo(Read<long>(right, offset)),
-            _ => Read<ulong>(left, offset).CompareTo(Read<ulong>(right, offset)),
+            PType.I8 => Read<sbyte>(ref left, offset).CompareTo(Read<sbyte>(ref right, offset)),
+            PType.U8 => Read<byte>(ref left, offset).CompareTo(Read<byte>(ref right, offset)),
+            PType.I16 => Read<short>(ref left, offset).CompareTo(Read<short>(ref right, offset)),
+            PType.U16 => Read<ushort>(ref left, offset).CompareTo(Read<ushort>(ref right, offset)),
+            PType.I32 => Read<int>(ref left, offset).CompareTo(Read<int>(ref right, offset)),
+            PType.U32 => Read<uint>(ref left, offset).CompareTo(Read<uint>(ref right, offset)),
+            PType.I64 => Read<long>(ref left, offset).CompareTo(Read<long>(ref right, offset)),
+            _ => Read<ulong>(ref left, offset).CompareTo(Read<ulong>(ref right, offset)),
         };
     }
 
@@ -543,10 +562,9 @@ internal sealed class TupleKeys : GroupKeys
 
     internal override bool Orders(int component) => true;
 
-    internal override int CompareKeys(int a, int b, int component) => Compare(_tuples.KeyAt(a), _tuples.KeyAt(b), component);
+    internal override int CompareKeys(int a, int b, int component) => Compare(ref TupleOf(a), ref TupleOf(b), component);
 
-    internal override int CompareKeys(GroupKeys other, int a, int b, int component) =>
-        Compare(_tuples.KeyAt(a), ((TupleKeys)other)._tuples.KeyAt(b), component);
+    internal override int CompareKeys(GroupKeys other, int a, int b, int component) => Compare(ref TupleOf(a), ref ((TupleKeys)other).TupleOf(b), component);
 
     internal override Func<int, T> Reader<T>(int component)
     {
@@ -557,8 +575,8 @@ internal sealed class TupleKeys : GroupKeys
             byte[] buffer = new byte[16];
             return group =>
             {
-                KeyTuple tuple = _tuples.KeyAt(group);
-                return IsNull(tuple, component) ? default! : StorageValues.BytesToClr<T>(TextOf(tuple, component, buffer), shape);
+                ref byte tuple = ref TupleOf(group);
+                return IsNull(ref tuple, component) ? default! : StorageValues.BytesToClr<T>(TextOf(ref tuple, component, buffer), shape);
             };
         }
 
@@ -579,8 +597,8 @@ internal sealed class TupleKeys : GroupKeys
         where TValue : unmanaged =>
         group =>
         {
-            KeyTuple tuple = _tuples.KeyAt(group);
-            return IsNull(tuple, component) ? default! : StorageValues.ToClr<TValue, T>(Read<TValue>(tuple, offset), shape);
+            ref byte tuple = ref TupleOf(group);
+            return IsNull(ref tuple, component) ? default! : StorageValues.ToClr<TValue, T>(Read<TValue>(ref tuple, offset), shape);
         };
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
@@ -588,19 +606,26 @@ internal sealed class TupleKeys : GroupKeys
         int offset = _layout.Offsets[component];
         if (_layout.Text(component))
         {
-            // The texts came from the column the reader checked as it decoded it, as a table of bytes appends them.
+            // The texts came from the column the reader checked as it decoded it, as a table of bytes appends
+            // them: a short one its word, which is its view, a long one its bytes.
             VarBinStore leaf = (VarBinStore)store.Leaf;
-            Span<byte> buffer = stackalloc byte[16];
             foreach (int group in groups)
             {
-                KeyTuple tuple = _tuples.KeyAt(group);
-                if (IsNull(tuple, component))
+                ref byte tuple = ref TupleOf(group);
+                if (IsNull(ref tuple, component))
                 {
                     KeyStores.AppendNull(store);
+                    continue;
+                }
+
+                TextWord word = Read<TextWord>(ref tuple, offset);
+                if (TupleLayout.IsLong(word))
+                {
+                    leaf.AppendValidated(_layout.LongText(word));
                 }
                 else
                 {
-                    leaf.AppendValidated(TextOf(tuple, component, buffer));
+                    leaf.AppendInline(word.Low, word.High);
                 }
             }
 
@@ -636,19 +661,25 @@ internal sealed class TupleKeys : GroupKeys
         }
     }
 
+    /// <summary>An integer column's values, read in place in their tuples: into the column's values at once when they are as wide, as <see cref="FixedKeys{TValue}"/> appends its own.</summary>
     private void AppendIntegers<TValue>(int component, int offset, ColumnStore store, ReadOnlySpan<int> groups)
         where TValue : unmanaged
     {
+        FixedStore? leaf = store.Leaf is FixedStore fixedStore && fixedStore.Width == Unsafe.SizeOf<TValue>() ? fixedStore : null;
         foreach (int group in groups)
         {
-            KeyTuple tuple = _tuples.KeyAt(group);
-            if (IsNull(tuple, component))
+            ref byte tuple = ref TupleOf(group);
+            if (IsNull(ref tuple, component))
             {
                 KeyStores.AppendNull(store);
             }
+            else if (leaf is not null)
+            {
+                leaf.Append(Read<TValue>(ref tuple, offset));
+            }
             else
             {
-                KeyStores.AppendFixed(store, Read<TValue>(tuple, offset), StorageKind.Primitive);
+                KeyStores.AppendFixed(store, Read<TValue>(ref tuple, offset), StorageKind.Primitive);
             }
         }
     }

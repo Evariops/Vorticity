@@ -441,6 +441,23 @@ internal sealed unsafe class VarBinStore : ColumnStore
         Count++;
     }
 
+    /// <summary>
+    /// A value of twelve bytes or fewer, read already, as its view: its length in the low 32 bits of
+    /// <paramref name="low"/>, its bytes after, zero past them, the two words a group's key holds it as.
+    /// Copying its bytes out of the word to write them back into a view took a third of the output of
+    /// db-benchmark's q10, three texts in ten million groups.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void AppendInline(ulong low, ulong high)
+    {
+        System.Diagnostics.Debug.Assert((uint)low <= MaxInline, "A view of a longer value points into a data buffer.");
+        EnsureViews();
+        ref byte view = ref _views[(long)Count * ViewSize];
+        Unsafe.WriteUnaligned(ref view, low);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), high);
+        Count++;
+    }
+
     internal void Append(ReadOnlySpan<char> text)
     {
         EnsureData((text.Length + 1) * 3);
