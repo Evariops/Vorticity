@@ -1836,6 +1836,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             _shelf?.Give(_metBits);
             _metBits = null;
         }
+
+        // The scratch of the two passes and of the values widened, from the process's shelf, back to it.
+        Scratch.Return(ref _homes);
+        Scratch.Return(ref _left);
+        Scratch.Return(ref _values);
     }
 
     internal override int NullNumber => _null;

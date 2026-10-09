@@ -500,6 +500,8 @@ internal sealed class TupleKeys : GroupKeys
     {
         _tuples.Release();
         Count = 0;
+        Scratch.Return(ref _block);
+        Scratch.Return(ref _words);
     }
 
     internal override void Reserve(int groups) => _tuples.Reserve(groups);

@@ -1116,6 +1116,8 @@ internal sealed partial class GroupCore
             // thread of it: each worker queues itself behind it after each part.
             await Task.Yield();
         }
+
+        applier.Release();
     }
 
     /// <summary>
@@ -1290,6 +1292,8 @@ internal sealed partial class GroupCore
             cancellationToken.ThrowIfCancellationRequested();
             await ApplyPartAsync(_parts[index], applier, cancellationToken).ConfigureAwait(false);
         }
+
+        applier.Release();
     }
 
     /// <summary>A part's whole stack applied; a part spilled, or one whose budget cannot take its stack's groups once it spills, writes the stack to the scratch instead.</summary>
@@ -1892,6 +1896,14 @@ internal sealed class LaneCore
     /// <summary>What the lane applies a part's stack with: made at its first burst.</summary>
     internal CoreApplier Applier => _applier ??= new CoreApplier(_core, this);
 
+    /// <summary>The lane's applier and the partition it bypassed its cache with given back, the lane's partition let go.</summary>
+    internal void Release()
+    {
+        _applier?.Release();
+        _applier = null;
+        Rows?.Release();
+    }
+
     /// <summary>The partition the lane folds its rows into while it bypasses its cache, a group a row; null before it does.</summary>
     internal AggregationPartition? Rows { get; private set; }
 
@@ -2120,7 +2132,7 @@ internal sealed class CoreApplier
     private readonly AggregateSlot[] _entries;
     private readonly GroupRecords? _view;
     private readonly int _keyBytes;
-    private PartBatch[] _taken = new PartBatch[16];
+    private PartBatch[] _taken = [];
     private int[] _map = [];
     private ulong[] _keys = [];
     private int[] _tableOf = [];
@@ -2160,6 +2172,24 @@ internal sealed class CoreApplier
         }
     }
 
+    /// <summary>The applier's scratch back to the process's shelf, its worker or its lane done with it: the next query's appliers grow into it.</summary>
+    internal void Release()
+    {
+        Scratch.Return(ref _taken);
+        Scratch.Return(ref _map);
+        Scratch.Return(ref _keys);
+        Scratch.Return(ref _tableOf);
+        Scratch.Return(ref _starts);
+        Scratch.Return(ref _next);
+        Scratch.Return(ref _entryAt);
+        Scratch.Return(ref _batchAt);
+        Scratch.Return(ref _bits);
+        Scratch.Return(ref _clear);
+        Scratch.Return(ref _set);
+        Scratch.Return(ref _setEntries);
+        Scratch.Return(ref _setBatches);
+    }
+
     /// <summary>
     /// Applies a stack of batches to the part: every entry's key found or added in its sub-table, its
     /// record merged into its group's, a sub-table at a time; then the sub-tables past their bound
@@ -2174,7 +2204,10 @@ internal sealed class CoreApplier
         {
             if (count == _taken.Length)
             {
-                Array.Resize(ref _taken, count * 2);
+                PartBatch[] grown = ArrayShelf.Retained.Take<PartBatch>(Math.Max(16, count * 2), zeroed: false);
+                _taken.AsSpan(0, count).CopyTo(grown);
+                ArrayShelf.Retained.Give(_taken);
+                _taken = grown;
             }
 
             _taken[count++] = batch;

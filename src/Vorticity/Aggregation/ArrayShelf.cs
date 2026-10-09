@@ -304,9 +304,14 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return;
         }
 
+        // An array of references kept would keep what it points to: the objects of the query that gave it.
         if (PoisonsGiven)
         {
             Poison(array);
+        }
+        else if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+        {
+            Array.Clear(array);
         }
 
         // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.

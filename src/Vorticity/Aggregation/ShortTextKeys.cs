@@ -472,6 +472,7 @@ internal sealed class ShortTextKeys : GroupKeys
     {
         _words?.Release();
         _bytes?.Release();
+        Scratch.Return(ref _block);
     }
 
     /// <summary>Room for <paramref name="groups"/> groups, foretold by a lane's first rows, in the table the keys are in.</summary>

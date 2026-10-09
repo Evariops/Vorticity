@@ -1729,9 +1729,9 @@ internal sealed class AggregationPartition
         Keys?.Release();
         Records?.Release();
 
-        // The partition the lane bypassed its cache with, and a shelf of the partition's own, which hands
-        // what it holds to the process's; a lane's holds nothing.
-        _core?.Rows?.Release();
+        // The lane's side of the core, its applier and the partition it bypassed its cache with, and a
+        // shelf of the partition's own, which hands what it holds to the process's; a lane's holds nothing.
+        _core?.Release();
         _arrays?.Clear();
     }
 
