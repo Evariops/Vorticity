@@ -34,26 +34,28 @@ public sealed partial class GroupedFloatSumTests
 
         List<KeySums> sums = [];
         Scan<KeySums> grouped = file.Scan<Reading>().GroupBy(r => r.Key)
-            .Select(g => (g.Key, g.Sum(r => r.Mixed), g.Sum(r => r.Uniform), g.Average(r => r.Uniform), g.Average(r => r.Mixed)))
+            .Select(g => (g.Key, g.Sum(r => r.Mixed), g.Sum(r => r.Uniform), g.Average(r => r.Uniform), g.Average(r => r.Mixed), g.Sum(r => r.Ranged)))
             .As<KeySums>();
         await foreach (KeySums sum in grouped.ToRecordsAsync(Ct))
         {
             sums.Add(sum);
         }
 
-        Dictionary<int, (IndexedSum Mixed, IndexedSum Uniform)> expected = [];
+        Dictionary<int, (IndexedSum Mixed, IndexedSum Uniform, IndexedSum Ranged)> expected = [];
         foreach (Reading row in rows)
         {
-            (IndexedSum mixed, IndexedSum uniform) = expected.GetValueOrDefault(row.Key);
+            (IndexedSum mixed, IndexedSum uniform, IndexedSum ranged) = expected.GetValueOrDefault(row.Key);
             mixed.Add(row.Mixed);
             uniform.Add(row.Uniform);
-            expected[row.Key] = (mixed, uniform);
+            ranged.Add(row.Ranged);
+            expected[row.Key] = (mixed, uniform, ranged);
         }
 
         Assert.Equal(expected.Count, sums.Count);
         Assert.Equal(
-            expected.OrderBy(e => e.Key).Select(e => (e.Key, Bits(e.Value.Mixed.Value), Bits(e.Value.Uniform.Value), Bits(Mean(e.Value.Uniform)), Bits(Mean(e.Value.Mixed)))),
-            sums.OrderBy(s => s.Key).Select(s => (s.Key, Bits(s.Mixed), Bits(s.Uniform), Bits(s.UniformMean), Bits(s.MixedMean))));
+            expected.OrderBy(e => e.Key).Select(e =>
+                (e.Key, Bits(e.Value.Mixed.Value), Bits(e.Value.Uniform.Value), Bits(Mean(e.Value.Uniform)), Bits(Mean(e.Value.Mixed)), Bits(e.Value.Ranged.Value))),
+            sums.OrderBy(s => s.Key).Select(s => (s.Key, Bits(s.Mixed), Bits(s.Uniform), Bits(s.UniformMean), Bits(s.MixedMean), Bits(s.Ranged))));
     }
 
     [Theory]
@@ -66,14 +68,14 @@ public sealed partial class GroupedFloatSumTests
         await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
 
         List<IdSum> sums = [];
-        await foreach (IdSum sum in file.Scan<Reading>().GroupBy(r => r.Id).Select(g => (g.Key, g.Sum(r => r.Mixed))).As<IdSum>().ToRecordsAsync(Ct))
+        await foreach (IdSum sum in file.Scan<Reading>().GroupBy(r => r.Id).Select(g => (g.Key, g.Sum(r => r.Mixed), g.Sum(r => r.Ranged))).As<IdSum>().ToRecordsAsync(Ct))
         {
             sums.Add(sum);
         }
 
         Assert.Equal(
-            rows.Select(r => (r.Id, Bits(Single(r.Mixed)))),
-            sums.OrderBy(s => s.Id).Select(s => (s.Id, Bits(s.Mixed))));
+            rows.Select(r => (r.Id, Bits(Single(r.Mixed)), Bits(Single(r.Ranged)))),
+            sums.OrderBy(s => s.Id).Select(s => (s.Id, Bits(s.Mixed), Bits(s.Ranged))));
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -113,6 +115,25 @@ public sealed partial class GroupedFloatSumTests
         };
     }
 
+    /// <summary>
+    /// A finite value whose binade the row's group picks among a few, a top apart or less: the groups at
+    /// tops of their own, most windows of a third of the rows within one top, the next third from one
+    /// range of groups to many, the last third every group at one top but a few, with no NaN, no infinity
+    /// and nothing split scaled.
+    /// </summary>
+    private static double RangedOf(int key, int row, Random random)
+    {
+        double value = (random.NextDouble() + 0.5) * (random.Next(4) == 0 ? -1 : 1);
+        int binade = (row / (Rows / 3)) switch
+        {
+            0 => key % 2 == 0 ? 3 : -40,
+            1 => (key % 7 * 15) - 45,
+            _ => key % 50 == 0 ? -60 : 10,
+        };
+
+        return Math.ScaleB(value, binade);
+    }
+
     private static class Fixture
     {
         private static readonly Lazy<Task<(Reading[] Rows, string Path)>> s_written = new Lazy<Task<(Reading[], string)>>(WriteAsync);
@@ -126,7 +147,7 @@ public sealed partial class GroupedFloatSumTests
             for (int row = 0; row < Rows; row++)
             {
                 int key = (int)((uint)(row * 2_654_435_761u) % Groups);
-                rows[row] = new Reading(row, key, MixedOf(key, row, random), random.NextDouble() * 1_000);
+                rows[row] = new Reading(row, key, MixedOf(key, row, random), random.NextDouble() * 1_000, RangedOf(key, row, random));
             }
 
             string directory = Path.Combine(AppContext.BaseDirectory, "grouped-float-sum");
@@ -143,11 +164,11 @@ public sealed partial class GroupedFloatSumTests
     }
 
     [VortexRecord]
-    public partial record struct Reading(int Id, int Key, double Mixed, double Uniform);
+    public partial record struct Reading(int Id, int Key, double Mixed, double Uniform, double Ranged);
 
     [VortexRecord]
-    public partial record struct KeySums(int Key, double Mixed, double Uniform, double? UniformMean, double? MixedMean);
+    public partial record struct KeySums(int Key, double Mixed, double Uniform, double? UniformMean, double? MixedMean, double Ranged);
 
     [VortexRecord]
-    public partial record struct IdSum(int Id, double Mixed);
+    public partial record struct IdSum(int Id, double Mixed, double Ranged);
 }
