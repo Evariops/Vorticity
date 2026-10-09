@@ -96,7 +96,7 @@ public sealed partial class GroupAllocationTests
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
         ("six keys", 1, GroupCoreReason.None, 107_937_792, SixAsync),
-        ("six keys", 4, GroupCoreReason.FirstRows, 4_980_736, SixAsync),
+        ("six keys", 4, GroupCoreReason.FirstRows, 1_900_544, SixAsync),
     ];
 
     [Fact]

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -4112,7 +4111,7 @@ internal static class AggregationEngine
     private static (int[] Placed, int[] Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts, bool byValue)
     {
         int count = keys.Count;
-        byte[] partOf = ArrayPool<byte>.Shared.Rent(count);
+        byte[] partOf = ArrayShelf.Rent<byte>(count);
         try
         {
             if (byValue)
@@ -4145,7 +4144,7 @@ internal static class AggregationEngine
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(partOf);
+            ArrayShelf.Return(partOf);
         }
     }
 

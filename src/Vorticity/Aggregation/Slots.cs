@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -399,7 +398,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// <summary>The bytes of the groups' answers, a run at a time of one part, as <see cref="Results"/> reads them.</summary>
     public void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups)
     {
-        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -421,7 +420,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(local);
+            ArrayShelf.Return(local);
         }
     }
     internal override TResult Result(int group)
@@ -436,7 +435,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// </summary>
     internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
     {
-        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -458,7 +457,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(local);
+            ArrayShelf.Return(local);
         }
     }
 
@@ -471,7 +470,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// <summary>The means a run at a time of one part, as <see cref="Results"/> reads the answers.</summary>
     public void Means(ReadOnlySpan<int> groups, Span<double?> into)
     {
-        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -493,7 +492,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(local);
+            ArrayShelf.Return(local);
         }
     }
 

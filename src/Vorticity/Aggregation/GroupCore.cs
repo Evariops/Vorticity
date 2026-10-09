@@ -519,18 +519,14 @@ internal sealed partial class GroupCore
     {
         Interlocked.Add(ref _batches, SlabBatches);
         ulong[] slab = _shelf.Take<ulong>(SlabBatches * _batchWords, zeroed: false, overdraw: lane.Pressed);
+        PartBatch first = PartBatch.Linked(slab, SlabBatches, _batchWords, _batchEntries);
         lock (_freeGate)
         {
             _slabs.Add(slab);
+            Made(first, SlabBatches);
         }
 
-        PartBatch? next = null;
-        for (int b = SlabBatches - 1; b >= 0; b--)
-        {
-            next = new PartBatch(slab, b * _batchWords, _batchEntries) { Next = next };
-        }
-
-        return next!;
+        return first;
     }
 
     /// <summary>
@@ -542,7 +538,39 @@ internal sealed partial class GroupCore
     {
         ulong[] words = _shelf.Take<ulong>(entries * Shape.Words, zeroed: false, overdraw: true);
         Interlocked.Add(ref _alone, words.Length * sizeof(ulong));
-        return new PartBatch(words, 0, entries) { Alone = true };
+        PartBatch batch = PartBatch.Own(words, entries);
+        lock (_freeGate)
+        {
+            Made(batch, 1);
+        }
+
+        return batch;
+    }
+
+    // The batches the core made, every one, which the process keeps once its slabs go: under _freeGate.
+    private PartBatch[] _batchesMade = [];
+    private int _batchesMadeCount;
+
+    /// <summary>The <paramref name="count"/> batches linked from <paramref name="first"/> counted among those the core made, under <c>_freeGate</c>.</summary>
+    private void Made(PartBatch first, int count)
+    {
+        if (_batchesMadeCount + count > _batchesMade.Length)
+        {
+            PartBatch[] grown = ArrayShelf.Retained.Take<PartBatch>(Aggregating.Scratch.Capacity(_batchesMadeCount + count, _batchesMade.Length), zeroed: false);
+            _batchesMade.AsSpan(0, _batchesMadeCount).CopyTo(grown);
+            ArrayShelf.Retained.Give(_batchesMade);
+            _batchesMade = grown;
+        }
+
+        PartBatch batch = first;
+        for (int b = 0; b < count; b++)
+        {
+            _batchesMade[_batchesMadeCount++] = batch;
+            if (b + 1 < count)
+            {
+                batch = batch.Next!;
+            }
+        }
     }
 
     /// <summary>A batch of its own applied: its array leaves the query's count, to the next collection.</summary>
@@ -924,7 +952,10 @@ internal sealed partial class GroupCore
         return (joined, joinedSlots, bytes, [.. spilled]);
     }
 
-    /// <summary>The slabs of the batches given to the shelf, every batch applied or spilled: no lane fills one again.</summary>
+    /// <summary>
+    /// The slabs of the batches given to the shelf, every batch applied or spilled: no lane fills one
+    /// again; the batches kept by the process for the next queries.
+    /// </summary>
     private void LetSlabs()
     {
         lock (_freeGate)
@@ -936,6 +967,9 @@ internal sealed partial class GroupCore
             }
 
             _slabs.Clear();
+            PartBatch.Keep(_batchesMade.AsSpan(0, _batchesMadeCount));
+            _batchesMadeCount = 0;
+            Aggregating.Scratch.Return(ref _batchesMade);
         }
     }
 
@@ -1440,6 +1474,16 @@ internal readonly record struct EntryShape(int RecordWords, int Words, int KeyOf
 /// </summary>
 internal sealed class PartBatch
 {
+    // The batches cores let go of, linked by Next, for the next query's: a query of a group a row made
+    // one for every 150 or so of its rows, 29 000 on 4M rows of six keys, which lived to its end on
+    // the small object heap, copied by every collection.
+    private static readonly Lock s_gate = new Lock();
+    private static PartBatch? s_kept;
+    private static int s_keptCount;
+
+    /// <summary>The batches the process keeps for the next queries at most: some 6 MB.</summary>
+    private const int MostKept = 1 << 17;
+
     internal PartBatch(ulong[] slab, int start, int capacity)
     {
         Words = slab;
@@ -1448,13 +1492,13 @@ internal sealed class PartBatch
     }
 
     /// <summary>The slab the entries lie in, at <see cref="EntryShape.Words"/> words each from <see cref="Start"/>.</summary>
-    internal ulong[] Words { get; }
+    internal ulong[] Words { get; private set; }
 
     /// <summary>The slab's word the batch's first entry starts at.</summary>
-    internal int Start { get; }
+    internal int Start { get; private set; }
 
     /// <summary>The entries the batch holds at most.</summary>
-    internal int Capacity { get; }
+    internal int Capacity { get; private set; }
 
     /// <summary>The entries it holds.</summary>
     internal int Count;
@@ -1466,7 +1510,105 @@ internal sealed class PartBatch
     /// Whether the batch is an array of its own, a part's share of a lane's table emptied into the core
     /// under pressure: given back to the budget once applied, never filled again.
     /// </summary>
-    internal bool Alone { get; init; }
+    internal bool Alone { get; private set; }
+
+    /// <summary>
+    /// <paramref name="count"/> batches, linked by <see cref="Next"/>, over <paramref name="slab"/>
+    /// from its start, <paramref name="words"/> words and <paramref name="capacity"/> entries each: those
+    /// the process kept first, then new ones.
+    /// </summary>
+    internal static PartBatch Linked(ulong[] slab, int count, int words, int capacity)
+    {
+        PartBatch? kept;
+        lock (s_gate)
+        {
+            kept = s_kept;
+            PartBatch? last = null;
+            int taken = 0;
+            for (PartBatch? batch = kept; batch is not null && taken < count; batch = batch.Next)
+            {
+                last = batch;
+                taken++;
+            }
+
+            s_kept = last?.Next;
+            s_keptCount -= taken;
+            if (last is not null)
+            {
+                last.Next = null;
+            }
+        }
+
+        PartBatch? next = null;
+        for (int b = count - 1; b >= 0; b--)
+        {
+            PartBatch batch;
+            if (kept is not null)
+            {
+                batch = kept;
+                kept = kept.Next;
+                batch.Words = slab;
+                batch.Start = b * words;
+                batch.Capacity = capacity;
+                batch.Count = 0;
+                batch.Alone = false;
+            }
+            else
+            {
+                batch = new PartBatch(slab, b * words, capacity);
+            }
+
+            batch.Next = next;
+            next = batch;
+        }
+
+        return next!;
+    }
+
+    /// <summary>A batch of <paramref name="entries"/> entries in an array of its own, <paramref name="words"/>: one the process kept, or a new one.</summary>
+    internal static PartBatch Own(ulong[] words, int entries)
+    {
+        PartBatch batch = Linked(words, 1, 0, entries);
+        batch.Alone = true;
+        return batch;
+    }
+
+    /// <summary>
+    /// <paramref name="batches"/>, which a query is done with, kept for the next queries as far as the
+    /// process keeps them, nothing of their slabs kept with them.
+    /// </summary>
+    internal static void Keep(ReadOnlySpan<PartBatch> batches)
+    {
+        PartBatch? first = null;
+        PartBatch? last = null;
+        int count = 0;
+        foreach (PartBatch batch in batches)
+        {
+            batch.Words = [];
+            batch.Count = 0;
+            batch.Next = first;
+            first = batch;
+            last ??= batch;
+            count++;
+        }
+
+        if (first is null)
+        {
+            return;
+        }
+
+        lock (s_gate)
+        {
+            if (s_keptCount + count > MostKept)
+            {
+                return;
+            }
+
+            last!.Next = s_kept;
+            s_kept = first;
+            s_keptCount += count;
+        }
+    }
 }
 
 /// <summary>
@@ -2033,14 +2175,14 @@ internal sealed class LaneCore
     /// turning to the core when its budget cannot let the table grow. Its groups counted
     /// by part first, each part's share goes into a batch of its own, exactly its size, deposited whole:
     /// given back as its part applies it, where batches the lanes fill again would stay held to the end.
-    /// A table no larger than a cache goes into the lane's open batches, as its cache's flushes do: the
-    /// table of a lane that turned on its first rows, judged on a sample, made a batch of its own on
-    /// every part, an array of its length that no other batch takes again, 3 600 of them a query at
-    /// fourteen lanes.
+    /// A table no larger than a cache, or than a sample of a lane's first rows, goes into the lane's open
+    /// batches, as its cache's flushes do: the table of a lane that turned on its first rows, judged on
+    /// a sample, made a batch of its own on every part, an array of its length that no other batch
+    /// takes again, 3 600 of them a query at fourteen lanes.
     /// </summary>
     internal void Empty(AggregationPartition table)
     {
-        if (table.Keys!.Count <= _core.Capacity)
+        if (table.Keys!.Count <= Math.Max(_core.Capacity, AggregationPartition.SampledRows))
         {
             Flush(table);
             return;

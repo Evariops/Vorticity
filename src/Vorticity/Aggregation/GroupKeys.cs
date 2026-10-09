@@ -856,7 +856,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return;
         }
 
-        TValue[] keys = System.Buffers.ArrayPool<TValue>.Shared.Rent(groups.Length);
+        TValue[] keys = ArrayShelf.Rent<TValue>(groups.Length);
         try
         {
             Span<TValue> values = keys.AsSpan(0, groups.Length);
@@ -869,7 +869,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
         finally
         {
-            System.Buffers.ArrayPool<TValue>.Shared.Return(keys);
+            ArrayShelf.Return(keys);
         }
     }
 
@@ -891,7 +891,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         int span = (int)(most - least) + 1;
-        int[] places = System.Buffers.ArrayPool<int>.Shared.Rent(span);
+        int[] places = ArrayShelf.Rent<int>(span);
         try
         {
             Span<int> at = places.AsSpan(0, span);
@@ -912,7 +912,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
         finally
         {
-            System.Buffers.ArrayPool<int>.Shared.Return(places);
+            ArrayShelf.Return(places);
         }
 
         return true;

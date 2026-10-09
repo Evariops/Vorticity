@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -123,6 +124,18 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         CollectionSweeper<ArrayShelf>.Register(shelf);
         return shelf;
     }
+
+    /// <summary>
+    /// An array of <paramref name="length"/> elements at least, its power of two from sixteen, from the
+    /// process's shelf, holding whatever it held: the shared array pool's rent, but found again on any
+    /// thread, where the pool kept an array for each thread that gave one back and the next query's,
+    /// on another thread, made a new one.
+    /// </summary>
+    internal static T[] Rent<T>(int length) =>
+        Retained.Take<T>(length <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 16)) : length, zeroed: false);
+
+    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the process's shelf.</summary>
+    internal static void Return<T>(T[] array) => Retained.Give(array);
 
     /// <summary>The bytes the shelf holds.</summary>
     internal long Held
