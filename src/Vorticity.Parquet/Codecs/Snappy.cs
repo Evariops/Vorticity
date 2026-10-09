@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Codecs;
 
@@ -206,7 +207,7 @@ internal static class Snappy
             throw new ArgumentException("The destination is shorter than the longest a compression can take.", nameof(destination));
         }
 
-        int written = WriteVarint(destination, (uint)source.Length);
+        int written = Varint.Write(destination, (uint)source.Length);
         Span<ushort> table = stackalloc ushort[1 << HashBits];
         fixed (byte* input = source)
         fixed (byte* output = destination)
@@ -386,51 +387,24 @@ internal static class Snappy
 
     private static int ReadLength(ReadOnlySpan<byte> source, ref int position)
     {
-        uint value = 0;
-        for (int shift = 0; shift < 35; shift += 7)
+        uint length = Varint.Read32<LengthErrors>(source, ref position);
+        if (length > int.MaxValue)
         {
-            if (position >= source.Length)
-            {
-                ThrowCorrupt();
-            }
-
-            uint part = source[position++];
-            if (shift == 28 && part > 0x0F)
-            {
-                ThrowCorrupt();
-            }
-
-            value |= (part & 0x7F) << shift;
-            if (part < 0x80)
-            {
-                if (value > int.MaxValue)
-                {
-                    ThrowCorrupt();
-                }
-
-                return (int)value;
-            }
+            ThrowCorrupt();
         }
 
-        return ThrowCorrupt<int>();
+        return (int)length;
     }
 
-    private static int WriteVarint(Span<byte> destination, uint value)
+    /// <summary>The preamble's refusals.</summary>
+    private readonly struct LengthErrors : IVarintErrors
     {
-        int count = 0;
-        while (value >= 0x80)
-        {
-            destination[count++] = (byte)(value | 0x80);
-            value >>= 7;
-        }
+        public static ulong Truncated(int position) => ParquetThrow.Format<ulong>("A Snappy page ends inside its length.");
 
-        destination[count++] = (byte)value;
-        return count;
+        public static ulong Malformed(int position, byte value) => ParquetThrow.Format<ulong>("A Snappy page declares a length past 32 bits.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void ThrowCorrupt() => throw new ParquetFormatException("A Snappy page is corrupt: a literal or a copy reaches past its data.");
 
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static T ThrowCorrupt<T>() => throw new ParquetFormatException("A Snappy page is corrupt: its length runs past its data.");
 }

@@ -150,18 +150,10 @@ internal struct ProtoWriter : IDisposable
     /// <summary>Writes a base-128 varint.</summary>
     public void WriteVarint(ulong value)
     {
-        // One capacity check covers the whole varint, so the emit loop is branch-light.
-        EnsureCapacity(ProtoWire.MaxVarintLength);
-        byte[] buffer = _buffer!;
+        // One capacity check covers the whole varint, so its bytes are written unchecked.
+        EnsureCapacity(Varint.MaxLength64);
         int pos = _position;
-        while (value >= 0x80)
-        {
-            buffer[pos++] = (byte)(value | 0x80);
-            value >>= 7;
-        }
-
-        buffer[pos++] = (byte)value;
-        _position = pos;
+        _position = pos + Varint.Write(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buffer!), pos), value);
     }
 
     /// <summary>Appends raw bytes with no tag and no length prefix.</summary>
@@ -358,14 +350,14 @@ internal struct ProtoWriter : IDisposable
     public void WriteSInt32Always(int fieldNumber, int value)
     {
         WriteTag(fieldNumber, ProtoWireType.Varint);
-        WriteVarint(ProtoWire.ZigZagEncode32(value));
+        WriteVarint(Varint.ZigZagEncode32(value));
     }
 
     /// <summary>Writes a ZigZag <c>sint64</c> field even when 0.</summary>
     public void WriteSInt64Always(int fieldNumber, long value)
     {
         WriteTag(fieldNumber, ProtoWireType.Varint);
-        WriteVarint(ProtoWire.ZigZagEncode64(value));
+        WriteVarint(Varint.ZigZagEncode64(value));
     }
 
     /// <summary>Writes a <c>float</c> field even when 0, preserving negative zero and NaN payloads.</summary>
@@ -511,7 +503,7 @@ internal struct ProtoWriter : IDisposable
                 ThrowTooLarge(length);
             }
 
-            int extra = ProtoWire.VarintSize((ulong)length) - 1;
+            int extra = Varint.Size((ulong)length) - 1;
             byte[] buffer = _buffer!;
             if (Limit(buffer) - _position < RecordBytes)
             {

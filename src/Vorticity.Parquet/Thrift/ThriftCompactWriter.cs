@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Text;
+using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Thrift;
 
@@ -80,21 +81,21 @@ internal ref struct ThriftCompactWriter
     internal void WriteI16Field(short id, short value)
     {
         WriteFieldHeader(ThriftType.I16, id);
-        WriteVarint32(ZigZag(value));
+        WriteVarint32(Varint.ZigZagEncode32(value));
     }
 
     /// <summary>Writes an <c>i32</c> or an enum field.</summary>
     internal void WriteI32Field(short id, int value)
     {
         WriteFieldHeader(ThriftType.I32, id);
-        WriteVarint32(ZigZag(value));
+        WriteVarint32(Varint.ZigZagEncode32(value));
     }
 
     /// <summary>Writes an <c>i64</c> field.</summary>
     internal void WriteI64Field(short id, long value)
     {
         WriteFieldHeader(ThriftType.I64, id);
-        WriteVarint64(ZigZag(value));
+        WriteVarint64(Varint.ZigZagEncode64(value));
     }
 
     /// <summary>Writes a <c>double</c> field.</summary>
@@ -106,7 +107,7 @@ internal ref struct ThriftCompactWriter
     }
 
     /// <summary>Writes a <c>binary</c> field.</summary>
-    internal void WriteBinaryField(short id, ReadOnlySpan<byte> value)
+    internal void WriteBinaryField(short id, scoped ReadOnlySpan<byte> value)
     {
         WriteFieldHeader(ThriftType.Binary, id);
         WriteBinaryElement(value);
@@ -158,13 +159,13 @@ internal ref struct ThriftCompactWriter
     internal void WriteBooleanElement(bool value) => WriteRawByte(value ? (byte)1 : (byte)2);
 
     /// <summary>Writes an <c>i32</c> element of a list.</summary>
-    internal void WriteI32Element(int value) => WriteVarint32(ZigZag(value));
+    internal void WriteI32Element(int value) => WriteVarint32(Varint.ZigZagEncode32(value));
 
     /// <summary>Writes an <c>i64</c> element of a list.</summary>
-    internal void WriteI64Element(long value) => WriteVarint64(ZigZag(value));
+    internal void WriteI64Element(long value) => WriteVarint64(Varint.ZigZagEncode64(value));
 
     /// <summary>Writes a <c>binary</c> element of a list.</summary>
-    internal void WriteBinaryElement(ReadOnlySpan<byte> value)
+    internal void WriteBinaryElement(scoped ReadOnlySpan<byte> value)
     {
         WriteVarint32((uint)value.Length);
         value.CopyTo(Reserve(value.Length));
@@ -176,7 +177,8 @@ internal ref struct ThriftCompactWriter
     {
         int length = Encoding.UTF8.GetByteCount(value);
         WriteVarint32((uint)length);
-        _used += Encoding.UTF8.GetBytes(value, Reserve(length));
+        Span<byte> destination = Reserve(length);
+        _used += Encoding.UTF8.GetBytes(value, destination);
     }
 
     /// <summary>Writes a field header, in the short form when the id is 1 to 15 past the previous one.</summary>
@@ -190,7 +192,7 @@ internal ref struct ThriftCompactWriter
         else
         {
             WriteRawByte((byte)type);
-            WriteVarint32(ZigZag(id));
+            WriteVarint32(Varint.ZigZagEncode32(id));
         }
 
         _lastFieldId = id;
@@ -219,37 +221,17 @@ internal ref struct ThriftCompactWriter
         _used++;
     }
 
+    // Reserve may hand the written bytes to the output and start a new span at zero, so the room
+    // is taken before the count it advances is read.
     private void WriteVarint32(uint value)
     {
-        Span<byte> destination = Reserve(5);
-        int count = 0;
-        while (value >= 0x80)
-        {
-            destination[count++] = (byte)(value | 0x80);
-            value >>= 7;
-        }
-
-        destination[count++] = (byte)value;
-        _used += count;
+        Span<byte> destination = Reserve(Varint.MaxLength32);
+        _used += Varint.Write(destination, value);
     }
 
     private void WriteVarint64(ulong value)
     {
-        Span<byte> destination = Reserve(10);
-        int count = 0;
-        while (value >= 0x80)
-        {
-            destination[count++] = (byte)(value | 0x80);
-            value >>= 7;
-        }
-
-        destination[count++] = (byte)value;
-        _used += count;
+        Span<byte> destination = Reserve(Varint.MaxLength64);
+        _used += Varint.Write(destination, value);
     }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ZigZag(int value) => (uint)((value << 1) ^ (value >> 31));
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong ZigZag(long value) => (ulong)((value << 1) ^ (value >> 63));
 }

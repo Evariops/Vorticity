@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Text;
 using Vorticity.IO;
+using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
@@ -660,11 +661,11 @@ internal sealed record IndexDirectory(
     /// <param name="segment">The region.</param>
     internal static int SegmentBytes(IndexSegment segment)
     {
-        int body = 1 + ProtoWire.VarintSize(segment.Offset)
-            + 1 + ProtoWire.VarintSize(segment.Length)
-            + (segment.AlignmentExponent == 0 ? 0 : 1 + ProtoWire.VarintSize(segment.AlignmentExponent))
+        int body = 1 + Varint.Size(segment.Offset)
+            + 1 + Varint.Size(segment.Length)
+            + (segment.AlignmentExponent == 0 ? 0 : 1 + Varint.Size(segment.AlignmentExponent))
             + (segment.Checksum is null ? 0 : 1 + sizeof(ulong));
-        return 1 + ProtoWire.VarintSize((ulong)body) + body;
+        return 1 + Varint.Size((ulong)body) + body;
     }
 
     /// <summary>Writes a region as a <c>Segment</c> message in field <paramref name="field"/>.</summary>

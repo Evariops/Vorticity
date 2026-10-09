@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Thrift;
 
@@ -140,7 +141,7 @@ internal ref struct ThriftCompactReader
     /// <summary>Reads an <c>i16</c>.</summary>
     internal short ReadI16()
     {
-        int value = ZigZag(ReadVarint32());
+        int value = Varint.ZigZagDecode32(ReadVarint32());
         if (value is < short.MinValue or > short.MaxValue)
         {
             ParquetThrow.Format("A Thrift i16 is out of its range.");
@@ -150,10 +151,10 @@ internal ref struct ThriftCompactReader
     }
 
     /// <summary>Reads an <c>i32</c> or an enum.</summary>
-    internal int ReadI32() => ZigZag(ReadVarint32());
+    internal int ReadI32() => Varint.ZigZagDecode32(ReadVarint32());
 
     /// <summary>Reads an <c>i64</c>.</summary>
-    internal long ReadI64() => ZigZag(ReadVarint64());
+    internal long ReadI64() => Varint.ZigZagDecode64(ReadVarint64());
 
     /// <summary>Reads a <c>double</c>.</summary>
     internal double ReadDouble() => BinaryPrimitives.ReadDoubleLittleEndian(Take(8));
@@ -395,57 +396,9 @@ internal ref struct ThriftCompactReader
         return _input.Slice(position, count);
     }
 
-    /// <summary>An unsigned varint of at most five bytes, the fifth holding the top four bits.</summary>
-    private uint ReadVarint32()
-    {
-        uint result = 0;
-        for (int shift = 0; shift < 28; shift += 7)
-        {
-            uint part = ReadRawByte();
-            result |= (part & 0x7F) << shift;
-            if (part < 0x80)
-            {
-                return result;
-            }
-        }
+    private uint ReadVarint32() => Varint.Read32<VarintErrors>(_input, ref _position);
 
-        uint last = ReadRawByte();
-        if (last > 0x0F)
-        {
-            ParquetThrow.Format("A Thrift varint passes 32 bits.");
-        }
-
-        return result | (last << 28);
-    }
-
-    /// <summary>An unsigned varint of at most ten bytes, the tenth holding the top bit.</summary>
-    private ulong ReadVarint64()
-    {
-        ulong result = 0;
-        for (int shift = 0; shift < 63; shift += 7)
-        {
-            ulong part = ReadRawByte();
-            result |= (part & 0x7F) << shift;
-            if (part < 0x80)
-            {
-                return result;
-            }
-        }
-
-        ulong last = ReadRawByte();
-        if (last > 0x01)
-        {
-            ParquetThrow.Format("A Thrift varint passes 64 bits.");
-        }
-
-        return result | (last << 63);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ZigZag(uint value) => (int)(value >> 1) ^ -(int)(value & 1);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long ZigZag(ulong value) => (long)(value >> 1) ^ -(long)(value & 1);
+    private ulong ReadVarint64() => Varint.Read64<VarintErrors>(_input, ref _position);
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -469,5 +422,13 @@ internal ref struct ThriftCompactReader
         internal ThriftType ValueType;
         internal short SavedFieldId;
         internal int Remaining;
+    }
+
+    /// <summary>The compact protocol's refusals of a varint.</summary>
+    private readonly struct VarintErrors : IVarintErrors
+    {
+        public static ulong Truncated(int position) => ParquetThrow.Format<ulong>("A Thrift varint runs past its structure.");
+
+        public static ulong Malformed(int position, byte value) => ParquetThrow.Format<ulong>("A Thrift varint holds more bits than its type.");
     }
 }

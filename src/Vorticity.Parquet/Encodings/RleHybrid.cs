@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Encodings;
 
@@ -268,31 +269,16 @@ internal struct RleHybridDecoder
         _packedIndex += destination.Length;
     }
 
-    /// <summary>An unsigned LEB128 of at most five bytes, the fifth holding the top four bits.</summary>
-    internal static uint ReadVarint(ReadOnlySpan<byte> data, ref int position)
+    /// <summary>A run header: an unsigned varint of at most 32 bits.</summary>
+    internal static uint ReadVarint(ReadOnlySpan<byte> data, ref int position) =>
+        Varint.Read32<RunHeaderErrors>(data, ref position);
+
+    /// <summary>The hybrid's refusals of a run header.</summary>
+    private readonly struct RunHeaderErrors : IVarintErrors
     {
-        uint result = 0;
-        for (int shift = 0; shift < 35; shift += 7)
-        {
-            if (position >= data.Length)
-            {
-                ParquetThrow.Format("A varint runs past its data.");
-            }
+        public static ulong Truncated(int position) => ParquetThrow.Format<ulong>("An RLE/bit-packing run header is truncated.");
 
-            uint part = data[position++];
-            if (shift == 28 && part > 0x0F)
-            {
-                ParquetThrow.Format("A varint passes 32 bits.");
-            }
-
-            result |= (part & 0x7F) << shift;
-            if (part < 0x80)
-            {
-                return result;
-            }
-        }
-
-        return result;
+        public static ulong Malformed(int position, byte value) => ParquetThrow.Format<ulong>("An RLE/bit-packing run header passes 32 bits.");
     }
 }
 
@@ -405,21 +391,6 @@ internal static class RleHybridEncoder
         where T : unmanaged =>
         Unsafe.SizeOf<T>() == 1 ? Unsafe.As<T, byte>(ref value) : Unsafe.As<T, uint>(ref value);
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int VarintLength(uint value) => value < 0x80 ? 1 : value < 0x4000 ? 2 : value < 0x200000 ? 3 : value < 0x10000000 ? 4 : 5;
-
-    private static int WriteVarint(Span<byte> destination, uint value)
-    {
-        int count = 0;
-        while (value >= 0x80)
-        {
-            destination[count++] = (byte)(value | 0x80);
-            value >>= 7;
-        }
-
-        destination[count++] = (byte)value;
-        return count;
-    }
 
     private struct Sizer(int bitWidth) : IRunSink
     {
@@ -428,11 +399,11 @@ internal static class RleHybridEncoder
         public void Packed(int start, int count, bool last)
         {
             int groups = (count + 7) >> 3;
-            Bytes += VarintLength(((uint)groups << 1) | 1) + groups * bitWidth;
+            Bytes += Varint.Size(((uint)groups << 1) | 1) + groups * bitWidth;
         }
 
         public void Repeated(uint value, int count) =>
-            Bytes += VarintLength((uint)count << 1) + ((bitWidth + 7) >> 3);
+            Bytes += Varint.Size((uint)count << 1) + ((bitWidth + 7) >> 3);
     }
 
     private ref struct Writer<T>(ReadOnlySpan<T> values, int bitWidth, Span<byte> destination) : IRunSink
@@ -445,7 +416,7 @@ internal static class RleHybridEncoder
         public void Packed(int start, int count, bool last)
         {
             int groups = (count + 7) >> 3;
-            Written += WriteVarint(_destination[Written..], ((uint)groups << 1) | 1);
+            Written += Varint.Write(_destination[Written..], ((uint)groups << 1) | 1);
             Span<byte> body = _destination.Slice(Written, groups * bitWidth);
             if (Unsafe.SizeOf<T>() == 1)
             {
@@ -466,7 +437,7 @@ internal static class RleHybridEncoder
 
         public void Repeated(uint value, int count)
         {
-            Written += WriteVarint(_destination[Written..], (uint)count << 1);
+            Written += Varint.Write(_destination[Written..], (uint)count << 1);
             int valueBytes = (bitWidth + 7) >> 3;
             Span<byte> buffer = stackalloc byte[4];
             BinaryPrimitives.WriteUInt32LittleEndian(buffer, value);
