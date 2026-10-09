@@ -662,11 +662,11 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | dictionary | by code: a table from code to group, kept while blocks view the same values | one per distinct code met |
 | sorted by the statistics, canonical | runs detected | one per run |
 | canonical, an integer whose statistics bound it within 2¹⁶ values, or within four times the rows | the value less the least numbers its group, in pages of 4 096 numbers allocated as values meet them, in front of the index; the pages carved from slabs of one, two, four, up to sixteen pages; a batch's rows found 4 096 at a time in two passes, each row's page read with no branch on the keys, then the rows left (values met for the first time) in their order, a chunk of new values sending the next through the lookup alone | one per distinct value met |
-| canonical, any other | per row, a row equal to the one before reusing its group; a fixed-width key hashed in two passes, each row's home slot probed as its hash is computed, the rows left looked up in their order, the slots from the start of a line of cache, so that a line of slots is one, the low bits a sample of the keys all leave zero left out of the homes, so that keys at a stride of a power of two lie in a row; a text key 256 rows at a time, their hashes, then every row's home slot, then every candidate's bytes, no row waiting on another, the rows left looked up in their order | one per row |
-| composite of two to four parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
+| canonical, any other | per row, a row equal to the one before reusing its group; a fixed-width key hashed in two passes, each row's home slot probed as its hash is computed, the rows left looked up in their order, the slots from the start of a line of cache, so that a line of slots is one, the low bits a sample of the keys all leave zero left out of the homes, so that keys at a stride of a power of two lie in a row; a short text of 12 bytes at most as a word of 16, its canonical view, homed by rapidhash (a CRC's homes are linear, which no seed separates), until a longer value turns the lane's table into bytes for good, each group keeping its number; a key wider than a word (a decimal, a UUID, a short text's word) past 4 096 groups keeping in its slot its hash and its group, eight slots to a line, four tenths full at most, its key read from the groups' keys where the hash agrees, every slot of a batch read before every candidate's key; a text key 256 rows at a time, their hashes, then every row's home slot, then every candidate's bytes, no row waiting on another, the rows left looked up in their order | one per row |
+| composite of two to eight parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
 | composite of two to four fixed-width parts whose values and nulls fit 64 or 128 bits, none sorted, their spans' product past 2¹⁶ | the parts' values themselves packed into one word, hashed into a table whose slot of four bytes holds the group's number and the hash's bits below the home's, so that a new tuple finds its free slot without reading a word, in one line of memory; a window of 256 rows reads its home slots first, and the words of the groups whose bits agree; the parts written to the result a chunk at a time | one per row |
-| composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶, hashed past it into a table of group numbers, each beside a byte of seven bits of the hash read first | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
-| composite of five parts or more | the tuple encoded into bytes, one hash | one per row |
+| composite of two to eight parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64, 128 or 256 bits; a table indexed by the numbers while their counts' product is under 2¹⁶, hashed past it into a table of group numbers, each beside a byte of seven bits of the hash read first | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
+| composite of nine parts or more | the tuple encoded into bytes, one hash | one per row |
 
 A function of a column (§3) groups as the column does, evaluated per code, per run or per value.
 An aggregate takes a batch's ranges in one call. When they are shorter than its batch has words of
@@ -827,7 +827,9 @@ streams, their window.
 | fourteen lanes, the core | two to three times less than their tables, on the bench's wide keys |
 
 A row of data touches one line of cache of states, whatever its aggregates; a probe of a fixed-width
-key reads its slot, a probe of a text its slot and its bytes. A group is numbered by an `int`, and the
+key reads its slot, of a wider key past 4 096 groups its slot and the key of the group it names, a
+probe of a text its slot and its bytes. A UUID key and a count take ≈ 39 bytes a group at one lane on a million keys,
+where slots that held the key took ≈ 142. A group is numbered by an `int`, and the
 tables double: an open table holds 2²⁹ groups at most, a list 2³⁰, a distinct count's pairs and
 values alike.
 Past that a group by fails with a `VortexUnsupportedException` that says so.
@@ -903,7 +905,8 @@ and the states its slots keep apart, a text's bytes, a distinct count's values. 
 its table emptied in place, its arrays kept. While other lanes run, a pressed lane may first merge its
 table into one that the lanes retiring share and retire at its range's end: a sketch of each table's
 keys, HyperLogLog's on their hashes, tells what the shared table lacks of the lane's, and so what it
-grows by; past what the budget grants, or once half of the groups merged into it came new to it, the
+grows by, a table of keys wider than a word filling to six tenths rather than doubling past the budget;
+past what the budget grants, or once half of the groups merged into it came new to it, the
 lanes' keys apart, the lanes write their own. At the end every table goes to the scratch, and the result comes
 back part by part, as a merge in parts delivers it: a part is a stretch of every run's sections, merged
 into a table that grows from a shelf of its own under the budget, built into batches and let go; as

@@ -28,7 +28,7 @@
 # DuckDB is a workstation dependency, as cargo is for the comparison with Rust: duckdb on the PATH (or
 # DUCKDB), its vortex extension installed (INSTALL vortex). Never in CI. These figures inform; they gate
 # nothing (the plan's steps are judged on their ratchets). A figure for publication is taken on a machine
-# at rest (docs/guide/benchmarks-duckdb.md, later).
+# at rest: docs/guide/benchmarks-duckdb.md.
 set -uo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -5,7 +5,8 @@ using System.Runtime.InteropServices;
 namespace Vorticity.Aggregating;
 
 /// <summary>
-/// The groups of a fixed-width key, in a table the engine owns: a slot
+/// The groups of a fixed-width key of a word at most (a wider one goes to <see cref="WideKeyTable{TValue}"/>),
+/// in a table the engine owns: a slot
 /// holds a key and its group, a key's home slot is its hash modulo a prime, by the fast modulo the
 /// runtime's dictionary takes. An integer is its own hash, folded to 32 bits, so that keys in a row
 /// land in slots in a row and a regular stride spreads over the prime; a float its bits, one pattern
@@ -278,13 +279,27 @@ internal struct KeyTable<TValue>
         }
     }
 
-    /// <summary>Forgets every key, keeping the slots and the seed.</summary>
-    internal void Clear()
+    /// <summary>
+    /// Forgets every key, keeping the slots and the seed, with room for <paramref name="room"/> keys: a table
+    /// about to take as many keys as it held, beside those kept, doubles now, empty, rather than in the
+    /// middle of its next batch (<see cref="WideKeyTable{TValue}.Clear"/>).
+    /// </summary>
+    internal void Clear(int room)
     {
         Array.Clear(_store);
         Array.Clear(_chains);
         _overflowed = 0;
         _count = 0;
+        if (_length > 0 && room > _growAt)
+        {
+            int length = _length;
+            while ((int)(6L * length / 10) < room)
+            {
+                length = PrimeAtLeast(GroupKeys.Doubled(length));
+            }
+
+            Resize(length);
+        }
     }
 
     /// <summary>A key whose home is taken: the rest of the home's line, then the line's chain.</summary>
@@ -437,7 +452,11 @@ internal struct KeyTable<TValue>
         _base = LineStart(_store);
         _length = length;
         _chains = NewArray<int>((length >> WidthShift) + 1);
-        _overflow = NewArray<Entry>(overflowed);
+
+        // Links to place again in an array of their own; none, the array kept, which the next chains
+        // reuse: a cleared table's, else a doubling empty grew it again past the first read.
+        bool kept = overflowed == 0;
+        _overflow = kept ? overflow : NewArray<Entry>(overflowed);
         _overflowed = 0;
         _multiplier = (ulong.MaxValue / (uint)length) + 1;
         _growAt = (int)(6L * length / 10);
@@ -459,11 +478,14 @@ internal struct KeyTable<TValue>
 
         _shelf?.Give(oldStore);
         _shelf?.Give(chains);
-        _shelf?.Give(overflow);
+        if (!kept)
+        {
+            _shelf?.Give(overflow);
+        }
     }
 
     /// <summary>The word of <paramref name="store"/> a line of 64 bytes starts at.</summary>
-    private static unsafe int LineStart(ulong[] store)
+    internal static unsafe int LineStart(ulong[] store)
     {
         nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(store));
         return (int)((-address & (GroupRecords.Line - 1)) / sizeof(ulong));
@@ -532,11 +554,11 @@ internal struct KeyTable<TValue>
 
     /// <summary><paramref name="value"/> modulo <paramref name="divisor"/> by a multiplication, as the runtime's dictionary takes it.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint FastMod(uint value, uint divisor, ulong multiplier) =>
+    internal static uint FastMod(uint value, uint divisor, ulong multiplier) =>
         (uint)(((((multiplier * value) >> 32) + 1) * divisor) >> 32);
 
     /// <summary>The least prime at or above <paramref name="least"/>: a stride of keys shares no factor with the slots.</summary>
-    private static int PrimeAtLeast(int least)
+    internal static int PrimeAtLeast(int least)
     {
         for (int candidate = least | 1; candidate < int.MaxValue; candidate += 2)
         {

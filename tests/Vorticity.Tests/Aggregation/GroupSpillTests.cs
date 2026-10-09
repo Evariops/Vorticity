@@ -56,6 +56,25 @@ public sealed partial class GroupSpillTests
     }
 
     [Theory]
+    [InlineData(1, 10)]
+    [InlineData(4, 50)]
+    [InlineData(14, 10)]
+    public async Task AKeyOfSixPartsSpillsAndEndsExact(int degree, int percent)
+    {
+        // Two texts and four integers, their numbers in a word of 256 bits: each part's values written
+        // by its index, the words packed again as the runs are read back.
+        (_, Row[] rows) = await Fixture.Async;
+        Dictionary<(string, int, int, string, int, long), SixCount> expected = rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value))
+            .ToDictionary(g => g.Key, g => new SixCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
+        await ExactAsync(
+            degree,
+            percent,
+            file => file.Scan<Row>().GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value)).Select(g => (g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count())),
+            (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value),
+            expected);
+    }
+
+    [Theory]
     [MemberData(nameof(Budgets))]
     public async Task ATextsExtremesByAnIntegerSpillAndEndExact(int degree, int percent)
     {
@@ -121,20 +140,24 @@ public sealed partial class GroupSpillTests
     [Fact]
     public async Task LanesThatEachMeetMostKeysRetireAndWriteNothing()
     {
-        // The texts, 50 000 values over 1.2M rows, each lane meeting most of them. Under two and a half
-        // times what one lane holds at its peak, the lanes that cannot grow merge into one table and
-        // retire, and nothing goes to the scratch; without that, they spill. At twice it, the lanes'
-        // tables two thirds full and the shared one's doubling pass it: four runs, where they wrote 30.
+        // The texts, 50 000 values over 1.2M rows, each lane of 14 meeting most of them. Under three, four
+        // and six times what one lane holds at its peak, the lanes that cannot grow merge into one table
+        // and retire, and nothing goes to the scratch; without that, they spill. Measured from 1.5 to 14
+        // times on 2026-10-09: retiring wrote nothing from 2.5 up, 0 to 4 runs at 2 and 22 at 1.5, where
+        // the shared table's doubling did not fit; without it, 25 to 67 runs at every one. A single budget
+        // at 2.5 sat on that edge, and its unit, one lane's peak, moves with what a lane holds beside its
+        // groups. At four, the shared table sat at its growth point as the last lanes merged and went to
+        // the scratch five times, until it filled tighter rather than doubled (WideKeyTable.Squeeze).
         (string path, Row[] rows) = await Fixture.Async;
         Dictionary<string, TextTotal> expected = rows.GroupBy(r => r.Text).ToDictionary(g => g.Key, g => new TextTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
         Func<VortexFile, Vorticity.Aggregation> query = file => file.Scan<Row>().GroupBy(r => r.Text).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
         long result = await PeakAsync<TextTotal>(path, query);
-        foreach (bool retire in (bool[])[true, false])
+        foreach ((int tenths, bool retire) in ((int, bool)[])[(30, true), (40, true), (60, true), (40, false)])
         {
             string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
             try
             {
-                QueryMemoryBudget budget = new QueryMemoryBudget(result / 2 * 5);
+                QueryMemoryBudget budget = new QueryMemoryBudget(result / 10 * tenths);
                 await using VortexSession session = Session(14, budget, scratch);
                 await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
                 Vorticity.Aggregation grouped = query(file);
@@ -147,7 +170,7 @@ public sealed partial class GroupSpillTests
 
                 Assert.Equal(expected, read);
                 int runs = grouped.Plan.LastRun!.SpilledRuns;
-                Assert.True(retire ? runs == 0 : runs > 0, $"{runs} runs, retiring {retire}");
+                Assert.True(retire ? runs == 0 : runs > 0, $"{runs} runs under {tenths} tenths of one lane's peak, retiring {retire}");
                 Assert.Equal(0, budget.ReservedBytes);
                 Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
             }
@@ -751,6 +774,9 @@ public sealed partial class GroupSpillTests
 
     [VortexRecord]
     public partial record struct PairTotal(string Name, int Small, long Count, long Total);
+
+    [VortexRecord]
+    public partial record struct SixCount(string Name, int Key, int Small, string Text, int Wide, long Value, long Count);
 
     [VortexRecord]
     public partial record struct KeyTexts(int Key, string? Least, string? Greatest);

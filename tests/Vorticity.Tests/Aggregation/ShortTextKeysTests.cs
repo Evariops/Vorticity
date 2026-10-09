@@ -13,8 +13,9 @@ namespace Vorticity.Tests.Aggregation;
 
 /// <summary>
 /// A text key of short values groups as words (<see cref="ShortTextKeys"/>): the bytes come back exact at
-/// every length, a longer value or more groups than words hold turn a lane's table into bytes with every
-/// group keeping its number, and lanes of words and lanes of bytes hash, cut, spill and merge alike.
+/// every length, a longer value turns a lane's table into bytes with every group keeping its number, many
+/// words move to slots of a hash and a group, and lanes of words and lanes of bytes hash, cut, spill and
+/// merge alike.
 /// </summary>
 public sealed partial class ShortTextKeysTests
 {
@@ -158,12 +159,31 @@ public sealed partial class ShortTextKeysTests
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
-    public async Task MoreShortKeysThanWordsHoldTurnIntoBytesInTheMiddleOfABlock(int degree)
+    public async Task ManyShortKeysMoveToCompactSlotsInTheMiddleOfABlock(int degree)
     {
         Row[] rows = new Row[200_000];
         for (int row = 0; row < rows.Length; row++)
         {
             rows[row] = new Row($"id{(row * 7919) % 20_000:D8}", row % 10);
+        }
+
+        await ExactAsync(rows, degree, canonical: true);
+    }
+
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(1, true)]
+    [InlineData(4, true)]
+    public async Task NullsInEveryChunkAndALongValuePastTheFirstChunksGroupExact(int degree, bool longValue)
+    {
+        // Words are made and found 4 096 rows at a time: a null in every chunk, read at its row's place in
+        // the block; and a value too long for a word past two chunks, which turns the block, its first
+        // chunks numbered already, into bytes.
+        Row[] rows = new Row[200_000];
+        for (int row = 0; row < rows.Length; row++)
+        {
+            string? text = row % 997 == 0 ? null : longValue && row == 10_000 ? "a value longer than twelve bytes" : $"id{(row * 7919) % 20_000:D8}";
+            rows[row] = new Row(text, row % 10);
         }
 
         await ExactAsync(rows, degree, canonical: true);

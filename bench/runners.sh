@@ -131,6 +131,7 @@ file_of() {
         group-names-*) echo "names-2000000.vortex" ;;
         group-users-*) echo "visits-20000000.vortex" ;;
         group-pairs-*) echo "draws-2000000.vortex" ;;
+        group-db-*) echo "groupby-10000000-100-core2025.10.vortex" ;;
         group-strided-*) echo "spread-strided-4000000.vortex" ;;
         *) echo "spread-random-4000000.vortex" ;;
     esac

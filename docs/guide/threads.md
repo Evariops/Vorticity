@@ -62,10 +62,10 @@ above, or your own `ISegmentSource` ([object-store.md](object-store.md)). A path
 to cache, unless the session sets `MapFiles` to false: the path is then read as a
 `FileSegmentSource` would read it, through both. With the
 cache, a fifth scan of the file made 45 requests and the cache served all 45; over the five scans
-it counted 177 hits and 48 misses, and held 1 431 KiB, the data segments of a 1.5 MB file but for
-the six lying in the tail its open read, which the file serves itself. The concurrent scans missed
-a few more than the 45 segments they ask for: two scans that ask for one at the same moment both
-miss it.
+it counted 121 to 138 hits and 87 to 104 misses in seven runs, and held 1 431 KiB, the data
+segments of a 1.5 MB file but for the six lying in the tail its open read, which the file serves
+itself. The concurrent scans missed more than the 45 segments they ask for: two scans that ask for
+one at the same moment both miss it.
 
 ## What is safe to share
 
@@ -101,16 +101,17 @@ block, once the column holds a quarter of a megabyte of values, and chooses and 
 encodings on the calling thread. The file is the same bytes whatever the degree. A write that
 builds indexes summarizes its columns on one thread.
 
-Measured on the demonstration file, warmed, each variant run in turn, the best of fifteen rounds:
+Measured on the demonstration file, warmed, each variant run in turn, the best of fifteen rounds in a
+process and the median of seven processes (2026-10-09):
 
 | | degree 1 | degree 4 |
 |---|---|---|
-| a scan that counts rows | 0.9 ms | 0.6 ms |
-| `GroupBy(r => r.City)` with an average | 4.4 ms | 1.7 ms |
-| `Where(r => r.Celsius > 20.0).SumAsync(r => r.Celsius)` | 4.0 ms | 1.5 ms |
+| a scan that counts rows | 1.6 ms | 0.9 ms |
+| `GroupBy(r => r.City)` with an average | 4.5 ms | 2.4 ms |
+| `Where(r => r.Celsius > 20.0).SumAsync(r => r.Celsius)` | 3.9 ms | 1.6 ms |
 
 An aggregate keeps one state per chunk and merges them at the end, so its chunks run side by side:
-more than two and a half times faster at four threads. A scan that hands batches to your loop gains little: it still
+about twice as fast at four threads, two and a half times for the filtered sum. A scan that hands batches to your loop gains little: it still
 delivers them one at a time and in file order (checked, at degree 4), and most of its cost here is
 walking 123 blocks. Measure on your own files; the timings vary from run to run on a busy machine,
 and the ratios are what to read.
@@ -121,7 +122,7 @@ and the ratios are what to read.
 decode of the next batch overlaps your work on this one; the scan holds at most that many batches
 more. The batch ahead is decoded on the thread pool, so a scan at the default degree of 1 takes one
 pool thread beside yours; `Prefetch = 0` keeps it on your thread. On a mapped file with a loop that
-works on every value it changed nothing measurable, 4.7 ms, 4.8 ms and 4.7 ms at 0, 1 and 2. It
+works on every value it changed nothing measurable, 6.1 ms at 0, 1 and 2. It
 pays when the source has latency to hide, which a remote one does.
 
 ## Local and remote

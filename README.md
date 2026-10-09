@@ -154,6 +154,7 @@ at the same version as the core.
 | [docs/guide/](docs/guide/README.md) | **Using the library**: pages named by what you are trying to do, each one a program the samples project compiles and runs |
 | [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | Every figure the bench publishes: what this costs against the Rust implementation, and each kernel against its baseline |
 | [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | The sections that compare Vorticity with itself, from an x64 machine, a Zen 4 processor under Windows |
+| [docs/guide/benchmarks-duckdb.md](docs/guide/benchmarks-duckdb.md) | Our group bys against DuckDB's on the same files, through its Vortex reader and from its own table: where we lead and where we trail |
 | [docs/design/](docs/design/README.md) | **Why it is shaped this way**: the design documents, from the scope to the byte layout to the public API |
 
 ## How performance is measured

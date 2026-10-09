@@ -326,7 +326,11 @@ internal sealed class LaneRetirement
                 KeySketch sketch = KeySketch.Of(lane.Keys, lane.Memory);
                 double lacks = Math.Max(0, sketch.Estimate(_sketch) - _sketch!.Estimate());
                 int grows = (int)Math.Min(count, (1.1 * lacks) + 1_024);
-                if (lane.Memory is { } memory && !memory.CanGrow(retired.GrowthFor(lane, grows)))
+
+                // A shared table the budget cannot double fills tighter first: it holds every key past its
+                // growth point, where a spill would write it whole.
+                if (lane.Memory is { } memory && !memory.CanGrow(retired.GrowthFor(lane, grows))
+                    && !(retired.Keys!.Squeeze(grows) && memory.CanGrow(retired.GrowthFor(lane, grows))))
                 {
                     if (retired.Keys!.Count <= count)
                     {
