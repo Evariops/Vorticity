@@ -24,6 +24,7 @@ public sealed class VortexSessionOptions
     private bool _mapFiles = true;
     private QueryMemoryBudget? _memoryBudget;
     private string? _scratchDirectory;
+    private ScratchBudget? _scratchBudget;
     private bool _frozen;
 
     internal VortexSessionOptions()
@@ -187,6 +188,23 @@ public sealed class VortexSessionOptions
     {
         get => _scratchDirectory;
         set => _scratchDirectory = Set(value);
+    }
+
+    /// <summary>
+    /// The scratch the session's queries share with those of every session given the same budget: the
+    /// parts a group by spills and the runs of a sort, in <see cref="ScratchDirectory"/>. Null, the
+    /// default, bounds them by the directory's free space alone, a tenth of it kept.
+    /// </summary>
+    /// <remarks>
+    /// A query that needs more scratch than its budget grants fails with a
+    /// <see cref="VortexMemoryException"/>, its files gone. Give a pod's queries one under its
+    /// <c>ephemeral-storage</c> limit, which the free space of its disk does not show. The budget is
+    /// the host's: disposing the session leaves it to the others.
+    /// </remarks>
+    public ScratchBudget? ScratchBudget
+    {
+        get => _scratchBudget;
+        set => _scratchBudget = Set(value);
     }
 
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>

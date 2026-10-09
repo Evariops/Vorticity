@@ -33,6 +33,7 @@
        the generator writes their readers, ahead of time as the rest. -->
   <ItemGroup>
     <ProjectReference Include="../Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.Scenarios.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
     <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 

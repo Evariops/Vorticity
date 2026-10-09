@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 
 using Vorticity.Aggregating;
 using Vorticity.Bench.Scenarios;
+using Vorticity.Dataset;
 
 namespace Vorticity.Bench.Runner;
 
@@ -23,7 +24,8 @@ namespace Vorticity.Bench.Runner;
 /// <c>first</c> (the hundred smallest keys and their counts), <c>countdistinct</c>, <c>distinct</c>
 /// (the key's distinct values) over an integer key (<c>k3</c>
 /// to <c>k7</c>, <c>tenfold</c>, <c>unique</c>); <c>strided</c>, a count and a sum over the strided
-/// file's long keys; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
+/// file's long keys, and <c>stridedfloor-k7</c>, its floor: the same two columns read and summed, no
+/// key grouped; <c>pairs</c>, a count and a sum by a pair of integers of the draws file
 /// (<c>k100k</c>, 1.8M groups; <c>k4</c>, 4 000); <c>pages</c>, a count by a text of the pages
 /// file (<c>url</c>) or by its UUID (<c>uuid</c>), a million groups each, or the least and greatest
 /// URL by its integer key (<c>texts</c>); and <c>names-name</c>, a
@@ -31,9 +33,12 @@ namespace Vorticity.Bench.Runner;
 /// </para>
 /// <para>
 /// The plan's switches follow, each after a <c>+</c>: <c>core</c> (the core at every degree),
-/// <c>whole</c> (the core's groups delivered whole), <c>capacity=N</c>, <c>alpha=N</c>,
-/// <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>. The degree is
-/// the runner's <c>--threads</c>.
+/// <c>whole</c> (the core's groups delivered whole), <c>tables</c> (the lanes' tables, the core taken
+/// neither from the first batch nor from the first rows), <c>nofan</c> (the lanes all start at the head
+/// of the queue), <c>noretire</c> (lanes under pressure write their tables rather than retire into
+/// one), <c>budget=N</c> (the session's memory budget, in MiB, under which the runner prints its peak),
+/// <c>capacity=N</c>, <c>alpha=N</c>, <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
+/// (the core's ε, in percent). The degree is the runner's <c>--threads</c>.
 /// </para>
 /// </remarks>
 internal static class GroupScenarios
@@ -64,6 +69,43 @@ internal static class GroupScenarios
         if (shape[1] == "strided")
         {
             return StridedKey(shape[2]) is { } stridedKey ? path => StridedAsync(path, stridedKey, configure) : null;
+        }
+
+        if (shape[1] == "stridedfloor" && shape[2] == "k7")
+        {
+            return StridedFloorAsync;
+        }
+
+        if (shape[1] == "total" && shape[2] is "drift" or "zipf")
+        {
+            return shape[2] == "drift" ? path => SkewsAsync(path, static s => s.Drift, configure) : path => SkewsAsync(path, static s => s.Zipf, configure);
+        }
+
+        if (shape[1] == "total" && shape[2] is "rising" or "falling")
+        {
+            return shape[2] == "rising" ? path => PhasesAsync(path, static p => p.Rising, configure) : path => PhasesAsync(path, static p => p.Falling, configure);
+        }
+
+        if (shape[1] == "total" && shape[2] == "session")
+        {
+            return path => SessionsAsync(path, configure);
+        }
+
+        if (shape[1] == "db")
+        {
+            return shape[2] switch
+            {
+                "q1" => path => DbSumByIdAsync(path, configure),
+                "q2" => path => DbSumByTwoIdsAsync(path, configure),
+                "q3" => path => DbSumMeanByIdAsync(path, configure),
+                "q4" => path => DbMeansByIntAsync(path, configure),
+                "q5" => path => DbSumsByIntAsync(path, configure),
+                "q7" => path => DbRangeByIdAsync(path, configure),
+                "q10" => path => DbSumCountBySixAsync(path, configure),
+                "id3" => path => DbSumByTextAsync(path, configure),
+                "id6" => path => DbSumByIntAsync(path, configure),
+                _ => null,
+            };
         }
 
         if (shape[1] == "pages")
@@ -138,6 +180,12 @@ internal static class GroupScenarios
                 plan.CoreLanes = 1;
             },
             "whole" => static plan => plan.CoreParted = false,
+            "tables" => static plan =>
+            {
+                plan.CoreScattered = false;
+                plan.CoreOnNew = false;
+            },
+            "nofan" => static plan => plan.Fan = false,
             "capacity" => plan => plan.CoreCapacity = Valued(value, name),
             "alpha" => plan => plan.CoreAlpha = Valued(value, name),
             "floor" => plan => plan.CoreFloor = Valued(value, name),
@@ -145,8 +193,21 @@ internal static class GroupScenarios
             "batch" => plan => plan.CoreBatchEntries = Valued(value, name),
             "window" => plan => plan.FoldWindow = Valued(value, name),
             "probe" => plan => plan.ProbeAhead = Valued(value, name),
-            _ => throw new ArgumentException($"No switch named '{name}': core, whole, capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N.", nameof(option)),
+            "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
+            "noretire" => static plan => plan.LanesRetire = false,
+            "budget" => Budget(Valued(value, name)),
+            _ => throw new ArgumentException($"No switch named '{name}': core, whole, tables, nofan, noretire, budget=N (MiB), capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
+    }
+
+    /// <summary>The memory budget the runner's session takes, in bytes, a scenario's <c>budget=N</c> in MiB; null for the process's.</summary>
+    internal static long? BudgetBytes { get; private set; }
+
+    /// <summary>The session's budget set to <paramref name="mebibytes"/>: a switch of the session, not of the plan.</summary>
+    private static Action<AggregationPlan> Budget(int mebibytes)
+    {
+        BudgetBytes = (long)mebibytes << 20;
+        return static _ => { };
     }
 
     private static int Valued(int? value, string name) =>
@@ -188,11 +249,18 @@ internal static class GroupScenarios
         string line = string.Create(
             CultureInfo.InvariantCulture,
             $"lanes={run.Lanes.Length} merge_parts={run.MergeParts} merge_us={run.MergeTicks * 1_000_000 / System.Diagnostics.Stopwatch.Frequency} state_bytes={run.StateBytes} groups={s_last.LastGroups}");
+        if (run.SpilledRuns > 0)
+        {
+            line += string.Create(
+                CultureInfo.InvariantCulture,
+                $" spilled_runs={run.SpilledRuns} spilled_bytes={run.SpilledBytes} spill_read_bytes={run.SpillReadBytes} first_spill_share={run.FirstSpillShare:F2}");
+        }
+
         return run.Core is not { } core
             ? line
             : line + string.Create(
                 CultureInfo.InvariantCulture,
-                $" core_alpha={core.Alpha} core_capacity={core.Capacity} flushes={core.Flushes} flushed_groups={core.FlushedGroups} bypassed_rows={core.BypassedRows} bursts={core.Bursts} pending_peak_bytes={core.PendingPeakBytes} reloaded_bytes={core.ReloadedBytes} tables={core.Tables} splits={core.Splits} batch_bytes={core.BatchBytes}");
+                $" core_reason={core.Reason} core_alpha={core.Alpha} core_capacity={core.Capacity} flushes={core.Flushes} flushed_groups={core.FlushedGroups} bypassed_rows={core.BypassedRows} bursts={core.Bursts} pending_peak_bytes={core.PendingPeakBytes} reloaded_bytes={core.ReloadedBytes} tables={core.Tables} splits={core.Splits} batch_bytes={core.BatchBytes}");
     }
 
     /// <summary>The aggregation with the scenario's switches set on its plan.</summary>
@@ -205,17 +273,48 @@ internal static class GroupScenarios
 
     private static async Task<long> TotalAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
     {
-        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        (IAsyncDisposable source, Scan<Spread> scan) = await ScanAsync<Spread>(path);
+        await using IAsyncDisposable closing = source;
         long rows = 0;
-        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Spread>()
+        await foreach (Columns<KeyTotal> groups in Configured(scan
             .GroupBy(key)
             .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
             .As<KeyTotal>())
         {
-            rows += Sum(groups.Column<long>(1).Values);
+            long counted = Sum(groups.Column<long>(1).Values);
+            rows += counted;
+            Checksum += counted + Sum(groups.Column<long>(2).Values);
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The scan of <paramref name="path"/>, a file or a dataset's directory, through the runner's session,
+    /// and what closes it: the bench's datasets are the spread files' rows cut into objects.
+    /// </summary>
+    private static async Task<(IAsyncDisposable Source, Scan<T> Scan)> ScanAsync<T>(string path)
+        where T : IVortexRecord<T>
+    {
+        if (!System.IO.Directory.Exists(path))
+        {
+            VortexFile file = await ScenarioSet.OpenAsync(path);
+            return (file, file.Scan<T>());
+        }
+
+        FileObjectStore store = new FileObjectStore(path);
+        VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = ScenarioSet.Session ?? VortexSession.Default });
+        return (new Closing(dataset, store), dataset.Scan<T>());
+    }
+
+    /// <summary>A dataset and its store, closed in that order.</summary>
+    private sealed class Closing(VortexDataset dataset, FileObjectStore store) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            await dataset.DisposeAsync();
+            await store.DisposeAsync();
+        }
     }
 
     private static async Task<long> FourAsync(string path, Func<Probe<Spread>, Sym<int>> key, Action<AggregationPlan>? configure)
@@ -242,7 +341,9 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Count(), g.Min(s => s.Value), g.Max(s => s.Value))), configure)
             .As<KeyRange>())
         {
-            rows += Sum(groups.Column<long>(1).Values);
+            long counted = Sum(groups.Column<long>(1).Values);
+            rows += counted;
+            Checksum += counted + Sum(groups.Column<long>(2).Values) + Sum(groups.Column<long>(3).Values);
         }
 
         return rows;
@@ -482,16 +583,239 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
             .As<LongKeyTotal>())
         {
+            long counted = Sum(groups.Column<long>(1).Values);
+            rows += counted;
+            Checksum += counted + Sum(groups.Column<long>(2).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// What the scenarios that bench/duckdb.sh runs read of their results, as DuckDB's outer query does:
+    /// every column they aggregate, summed, so that both sides do the same work, and the two answers can
+    /// be held to each other. Kept here, where no compiler drops it; the runner prints it a round.
+    /// </summary>
+    internal static double Checksum { get; private set; }
+
+    /// <summary>db-benchmark's q1: the sum of <c>v1</c> by <c>id1</c>, a text of 100 values.</summary>
+    private static async Task<long> DbSumByIdAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id1).Select(g => (g.Key, g.Sum(r => r.V1))), configure).As<DbTextSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>
+    /// The sum of <c>v1</c> by <c>id3</c>, a text of 12 bytes of N/100 values: beside <see cref="DbSumByIntAsync"/>,
+    /// the same group by over a short text and over a word.
+    /// </summary>
+    private static async Task<long> DbSumByTextAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id3).Select(g => (g.Key, g.Sum(r => r.V1))), configure).As<DbTextSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>The sum of <c>v1</c> by <c>id6</c>, an integer of N/100 values.</summary>
+    private static async Task<long> DbSumByIntAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbIntSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id6).Select(g => (g.Key, g.Sum(r => r.V1))), configure).As<DbIntSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q2: the sum of <c>v1</c> by <c>id1</c> and <c>id2</c>, two texts of 100 values.</summary>
+    private static async Task<long> DbSumByTwoIdsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTwoTextsSum> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => (r.Id1, r.Id2)).Select(g => (g.Key.Id1, g.Key.Id2, g.Sum(r => r.V1))), configure).As<DbTwoTextsSum>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(2).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q3: the sum of <c>v1</c> and the mean of <c>v3</c> by <c>id3</c>, a text of N/100 values.</summary>
+    private static async Task<long> DbSumMeanByIdAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextSumMean> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id3).Select(g => (g.Key, g.Sum(r => r.V1), g.Average(r => r.V3))), configure).As<DbTextSumMean>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values) + Sum(batch.Column<double>(2).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q4: the means of <c>v1</c>, <c>v2</c> and <c>v3</c> by <c>id4</c>, an integer of 100 values.</summary>
+    private static async Task<long> DbMeansByIntAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbIntMeans> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id4).Select(g => (g.Key, g.Average(r => r.V1), g.Average(r => r.V2), g.Average(r => r.V3))), configure).As<DbIntMeans>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<double>(1).Values) + Sum(batch.Column<double>(2).Values) + Sum(batch.Column<double>(3).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q5: the sums of <c>v1</c>, <c>v2</c> and <c>v3</c> by <c>id6</c>, an integer of N/100 values.</summary>
+    private static async Task<long> DbSumsByIntAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbIntSums> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id6).Select(g => (g.Key, g.Sum(r => r.V1), g.Sum(r => r.V2), g.Sum(r => r.V3))), configure).As<DbIntSums>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<long>(1).Values) + Sum(batch.Column<long>(2).Values) + Sum(batch.Column<double>(3).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q7: the largest <c>v1</c> less the least <c>v2</c> by <c>id3</c>, the difference taken as the groups are read.</summary>
+    private static async Task<long> DbRangeByIdAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbTextRange> batch in Configured(file.Scan<GroupByRow>().GroupBy(r => r.Id3).Select(g => (g.Key, g.Max(r => r.V1), g.Min(r => r.V2))), configure).As<DbTextRange>())
+        {
+            groups += batch.RowCount;
+            ReadOnlySpan<int> most = batch.Column<int>(1).Values;
+            ReadOnlySpan<int> least = batch.Column<int>(2).Values;
+            long range = 0;
+            for (int i = 0; i < most.Length; i++)
+            {
+                range += most[i] - least[i];
+            }
+
+            Checksum += range;
+        }
+
+        return groups;
+    }
+
+    /// <summary>db-benchmark's q10: the sum of <c>v3</c> and the rows by all six keys, nearly a group a row.</summary>
+    private static async Task<long> DbSumCountBySixAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long groups = 0;
+        await foreach (Columns<DbSixSumCount> batch in Configured(file.Scan<GroupByRow>()
+            .GroupBy(r => (r.Id1, r.Id2, r.Id3, r.Id4, r.Id5, r.Id6))
+            .Select(g => (g.Key.Id1, g.Key.Id2, g.Key.Id3, g.Key.Id4, g.Key.Id5, g.Key.Id6, g.Sum(r => r.V3), g.Count())), configure).As<DbSixSumCount>())
+        {
+            groups += batch.RowCount;
+            Checksum += Sum(batch.Column<double>(6).Values) + Sum(batch.Column<long>(7).Values);
+        }
+
+        return groups;
+    }
+
+    /// <summary>A count and a sum by the phases file's key that turns from few values to many, or from many to few.</summary>
+    private static async Task<long> PhasesAsync(string path, Func<Probe<Phases>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Phases>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
+            .As<KeyTotal>())
+        {
             rows += Sum(groups.Column<long>(1).Values);
         }
 
         return rows;
     }
 
+    /// <summary>A count and a sum by the phases file's sessions, two consecutive rows each, hashed.</summary>
+    private static async Task<long> SessionsAsync(string path, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<LongKeyTotal> groups in Configured(file.Scan<Phases>()
+            .GroupBy(p => p.Session)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
+            .As<LongKeyTotal>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>A count and a sum by the skews file's hot keys that drift as the rows go, or its Zipf key.</summary>
+    private static async Task<long> SkewsAsync(string path, Func<Probe<Skews>, Sym<int>> key, Action<AggregationPlan>? configure)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long rows = 0;
+        await foreach (Columns<KeyTotal> groups in Configured(file.Scan<Skews>()
+            .GroupBy(key)
+            .Select(g => (g.Key, g.Count(), g.Sum(s => s.Value))), configure)
+            .As<KeyTotal>())
+        {
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The floor under the strided file's group by of 10⁷ keys: the same two columns read and decoded on
+    /// the same lanes, their values summed, no key grouped. What the group by takes past it is its own.
+    /// </summary>
+    private static async Task<long> StridedFloorAsync(string path)
+    {
+        await using VortexFile file = await ScenarioSet.OpenAsync(path);
+        long sum = 0;
+        await foreach (Columns<StridedPair> batch in file.Scan<StridedPair>())
+        {
+            sum += Sum(batch.Column<long>(0).Values) + Sum(batch.Column<long>(1).Values);
+        }
+
+        return sum;
+    }
+
     private static long Sum(ReadOnlySpan<long> values)
     {
         long sum = 0;
         foreach (long value in values)
+        {
+            sum += value;
+        }
+
+        return sum;
+    }
+
+    private static double Sum(ReadOnlySpan<double> values)
+    {
+        double sum = 0;
+        foreach (double value in values)
         {
             sum += value;
         }
@@ -507,6 +831,54 @@ public partial record struct Spread(int K3, int K4, int K5, int K6, int K7, int 
 /// <summary>A row of the bench's strided file: its keys shifted left by 22 bits.</summary>
 [VortexRecord]
 public partial record struct Strided(long K3, long K4, long K5, long K6, long K7, long Value, double Real);
+
+/// <summary>A row of db-benchmark's group by: three text keys, three integer keys, two integers and a float to aggregate.</summary>
+[VortexRecord]
+public partial record struct GroupByRow(string Id1, string Id2, string Id3, int Id4, int Id5, int Id6, int V1, int V2, double V3);
+
+/// <summary>db-benchmark's q1: a text key and a sum.</summary>
+[VortexRecord]
+public partial record struct DbTextSum(string Key, long V1);
+
+/// <summary>An integer key of db-benchmark's rows and a sum.</summary>
+[VortexRecord]
+public partial record struct DbIntSum(int Key, long V1);
+
+/// <summary>db-benchmark's q2: two text keys and a sum.</summary>
+[VortexRecord]
+public partial record struct DbTwoTextsSum(string Id1, string Id2, long V1);
+
+/// <summary>db-benchmark's q3: a text key, a sum and a mean.</summary>
+[VortexRecord]
+public partial record struct DbTextSumMean(string Key, long V1, double? V3);
+
+/// <summary>db-benchmark's q4: an integer key and three means.</summary>
+[VortexRecord]
+public partial record struct DbIntMeans(int Key, double? V1, double? V2, double? V3);
+
+/// <summary>db-benchmark's q5: an integer key and three sums.</summary>
+[VortexRecord]
+public partial record struct DbIntSums(int Key, long V1, long V2, double V3);
+
+/// <summary>db-benchmark's q7: a text key, the largest of one value and the least of another.</summary>
+[VortexRecord]
+public partial record struct DbTextRange(string Key, int? V1, int? V2);
+
+/// <summary>db-benchmark's q10: six keys, a sum and the rows.</summary>
+[VortexRecord]
+public partial record struct DbSixSumCount(string Id1, string Id2, string Id3, int Id4, int Id5, int Id6, double V3, long Count);
+
+/// <summary>A row of the bench's phases file: a key from few values to many, one from many to few, sessions of two rows hashed, a value.</summary>
+[VortexRecord]
+public partial record struct Phases(int Rising, int Falling, long Session, long Value);
+
+/// <summary>A row of the bench's skews file: a key drawn by a Zipf law over a million values, hot keys that drift, a value.</summary>
+[VortexRecord]
+public partial record struct Skews(int Zipf, int Drift, long Value);
+
+/// <summary>The strided file's key of 10⁷ values and its value, alone.</summary>
+[VortexRecord]
+public partial record struct StridedPair(long K7, long Value);
 
 /// <summary>An integer key's rows.</summary>
 [VortexRecord]

@@ -111,7 +111,7 @@ public sealed partial class DistinctValuesTests
             slot.Ungrouped();
             slot.EnsureGroups(1);
             slot.StepRange(Input(arena, column.AsSpan(0, 65_536), 1), 0, 65_536, 0);
-            slot.Foretell(65_536, column.Length, memory: null);
+            slot.Foretell(65_536, column.Length, memory: null, lanes: 1);
             long reserved = slot.Footprint;
             Assert.True(reserved >= DistinctValues<long>.FootprintOf(800_000), $"{reserved} bytes reserved");
 

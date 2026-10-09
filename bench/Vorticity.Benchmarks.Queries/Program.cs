@@ -16,6 +16,7 @@
 //   … -- --tsv runs.tsv                                                                each measure appended as a line, which bench/queries-ab.sh reads
 //   … -- --switch merge                                                                every file's query under both settings of an engine switch, in turns (Switches.cs)
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
+//   … -- --fixture spread-random-20000000-core2025.10                                   that fixture written if it is not yet, its path printed
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -78,7 +79,27 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["readings-16"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: false),
     ["readings-16-deleted"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: true),
     [$"spread-random-{HighCardinality.SmallRows}-16"] = () => Fixtures.SpreadDatasetAsync(HighCardinality.SmallRows, 16),
+    [$"spread-random-{HighCardinality.FullRows}-16"] = () => Fixtures.SpreadDatasetAsync(HighCardinality.FullRows, 16),
+    [$"spread-random-{HighCardinality.FullRows}-core2025.10"] = () => Fixtures.RandomSpreadAsync(HighCardinality.FullRows, VortexEdition.Core20251000),
+    [$"spread-strided-{HighCardinality.FullRows}-core2025.10"] = () => Fixtures.StridedSpreadAsync(HighCardinality.FullRows, VortexEdition.Core20251000),
+    [$"phases-{HighCardinality.FullRows}"] = () => Fixtures.PhasesAsync(HighCardinality.FullRows),
 };
+
+// --fixture NAME: that file written, if it is not yet, and its path printed: what the native runner and
+// bench/duckdb.sh read. Besides the names above, spread-random-N, spread-strided-N and groupby-N-K (db-benchmark's
+// rows, N of them over K groups), each with -core2025.10 for the edition other readers read.
+if (Text(args, "--fixture") is { } fixtureName)
+{
+    Func<ValueTask<string>>? fixture = fixtures.GetValueOrDefault(fixtureName) ?? Patterned(fixtureName);
+    if (fixture is null)
+    {
+        Console.Error.WriteLine($"no fixture named '{fixtureName}': {string.Join(", ", fixtures.Keys)}, spread-random-N, spread-strided-N, groupby-N-K, each with -core2025.10");
+        return 2;
+    }
+
+    Console.WriteLine(await fixture().ConfigureAwait(false));
+    return 0;
+}
 Dictionary<string, string> files = new Dictionary<string, string>(StringComparer.Ordinal);
 (string File, Scenario Scenario)[] scenarios = [.. Scenarios.All(large).Concat(EngineScenarios.All(large)).Concat(HighCardinality.All()).Concat(HandKernels.All())];
 
@@ -321,6 +342,23 @@ static string? Text(string[] args, string name)
 {
     int at = Array.IndexOf(args, name);
     return at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+}
+
+// A fixture named by its rows rather than registered: spread-random-N, spread-strided-N or groupby-N-K, each
+// with -core2025.10 for that edition; null for any other name.
+static Func<ValueTask<string>>? Patterned(string name)
+{
+    const string Older = "-core2025.10";
+    VortexEdition? edition = name.EndsWith(Older, StringComparison.Ordinal) ? VortexEdition.Core20251000 : null;
+    string[] parts = (edition is null ? name : name[..^Older.Length]).Split('-');
+    bool Count(string text, out int value) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value > 0;
+    return parts switch
+    {
+        ["spread", "random", string n] when Count(n, out int rows) => () => Fixtures.RandomSpreadAsync(rows, edition),
+        ["spread", "strided", string n] when Count(n, out int rows) => () => Fixtures.StridedSpreadAsync(rows, edition),
+        ["groupby", string n, string k] when Count(n, out int rows) && Count(k, out int groups) && groups <= rows => () => Fixtures.GroupByAsync(rows, groups, edition),
+        _ => null,
+    };
 }
 
 // A measure as one line of tab-separated fields, appended: the query, its degree, its times, bytes and

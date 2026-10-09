@@ -546,8 +546,20 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     // its group and its chain for nothing; null for a slot of groups, which holds pairs.
     private DistinctValues<TValue>? _set;
 
+    // The values of each group in a set of its own, by group, when the statistics bound the key to few
+    // groups (FewGroups); null for pairs. And the sets of the groups a streaming group by let go,
+    // cleared, for those it opens next.
+    private DistinctValues<TValue>?[]? _sets;
+    private DistinctValues<TValue>[] _spares = [];
+    private int _spareCount;
+
     // The values of the uniform column its first rows foretold (Foretell); 0 before.
     private double _universe;
+
+    // The runs the set of a count over the whole scan went to when its budget held it no more, and the
+    // file they lie in, its lane's; null before the first.
+    private List<SpillRun>? _runs;
+    private SpillFile? _file;
 
     // The shelf the pairs and the counts grow from, under the query's memory.
     private ArrayShelf? _shelf;
@@ -568,12 +580,19 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     }
 
     /// <summary>
+    /// Each group's values in a set of its own rather than pairs: a value seen before is found at the
+    /// first read, where a pair was found behind a tag and a slot's number, and a value takes its slot
+    /// alone, where a pair took its group and its chain too.
+    /// </summary>
+    internal override void FewGroups() => _sets ??= [];
+
+    /// <summary>
     /// The values a uniform column of <see cref="AggregationPartition.EstimatedValues"/> values makes
     /// from <paramref name="expected"/> rows, reserved in the set: grown by doubling, it placed every value
     /// again at each step, and took new memory each time, a fifth of the distinct users of a scan of 20M
     /// visits at one lane, more than a quarter at fourteen.
     /// </summary>
-    internal override void Foretell(long rows, long expected, QueryMemory? memory)
+    internal override void Foretell(long rows, long expected, QueryMemory? memory, int lanes)
     {
         if (_set is not { Count: > 0 } set)
         {
@@ -589,8 +608,8 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             return;
         }
 
-        // Past what the budget grants, the set grows as before.
-        if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count)))
+        // Past what the budget grants every lane at once, the set grows as before.
+        if (memory is not null && !memory.CanGrow(DistinctValues<TValue>.FootprintOf((int)count) * lanes))
         {
             return;
         }
@@ -605,8 +624,34 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
+        if (_sets is not null && groups > _sets.Length)
+        {
+            Array.Resize(ref _sets, Scratch.Capacity(groups, _sets.Length));
+        }
+
         _pairs.EnsureGroups(groups);
         _groups = Math.Max(_groups, groups);
+    }
+
+    /// <summary>The set of <paramref name="group"/>'s values, made, or taken from those let go, the first time.</summary>
+    private DistinctValues<TValue> SetOf(int group) => _sets![group] ?? NewSet(group);
+
+    private DistinctValues<TValue> NewSet(int group)
+    {
+        DistinctValues<TValue> set;
+        if (_spareCount > 0)
+        {
+            set = _spares[--_spareCount];
+            _spares[_spareCount] = null!;
+        }
+        else
+        {
+            set = new DistinctValues<TValue>();
+            set.Govern(_shelf);
+        }
+
+        _sets![group] = set;
+        return set;
     }
 
     internal override void StepRange(in BatchInput input, int start, int end, int group)
@@ -665,6 +710,20 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             {
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), start, end);
+                if (_sets is not null)
+                {
+                    // The range's one set, taken once.
+                    DistinctValues<TValue> set = SetOf(group);
+                    long added = 0;
+                    while (rows.Next(out int row))
+                    {
+                        added += set.Add(values[row]) ? 1 : 0;
+                    }
+
+                    _counts[group] += added;
+                    return;
+                }
+
                 while (rows.Next(out int row))
                 {
                     Add(group, values[row]);
@@ -715,7 +774,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             return;
         }
 
-        if (from.Length == source._groups)
+        if (_sets is null && source._sets is null && from.Length == source._groups)
         {
             _pairs.MergeAll(source._pairs, into, _counts);
             return;
@@ -723,13 +782,44 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
         for (int i = 0; i < from.Length; i++)
         {
-            _counts[into[i]] += _pairs.MergeGroup(source._pairs, from[i], into[i]);
+            _counts[into[i]] += MergeGroup(source, from[i], into[i]);
         }
+    }
+
+    /// <summary>
+    /// The values of group <paramref name="from"/> of <paramref name="source"/> added to group
+    /// <paramref name="into"/>, sets or pairs on either side; the values that were new. A set goes whole
+    /// to a group that holds none yet: a streaming group by's range followed into the one before it, let
+    /// go right after, whose sets would otherwise be built again value by value, every group of every
+    /// range but the first.
+    /// </summary>
+    private long MergeGroup(FixedDistinctSlot<TValue> source, int from, int into)
+    {
+        if (source._sets is { } sets)
+        {
+            if (from >= sets.Length || sets[from] is not { } values)
+            {
+                return 0;
+            }
+
+            if (_sets is { } own && own[into] is null)
+            {
+                sets[from] = null;
+                values.MoveTo(_shelf);
+                own[into] = values;
+                return values.Count;
+            }
+
+            return _sets is not null ? SetOf(into).MergeAll(values) : values.AddTo(_pairs, into);
+        }
+
+        return _sets is not null ? source._pairs.AddTo(SetOf(into), from) : _pairs.MergeGroup(source._pairs, from, into);
     }
 
     internal override long Result(int group) => _counts[group];
 
-    public long Pairs => _set?.Count ?? _pairs.Count;
+    /// <summary>The pairs held; none for a slot of sets by group, which merges in series, group by group, as a streaming group by's ranges follow one another.</summary>
+    public long Pairs => _set?.Count ?? (_sets is not null ? 0 : _pairs.Count);
 
     public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
@@ -886,12 +976,277 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set.Govern(_shelf);
     }
 
-    /// <summary>The (group, value) pairs, or the values of a slot of one group, and the counts.</summary>
-    internal override long Footprint => (_set?.Footprint ?? _pairs.Footprint) + ((long)_counts.Length * sizeof(long));
+    /// <summary>A count by group, in pairs; a streaming group by's sets by group never spill, its groups few.</summary>
+    internal override bool SpillsStates => _set is null && _sets is null;
+
+    /// <summary>The pairs forgotten in place, no spare arrays kept beside them as a streaming group by's keep does.</summary>
+    internal override void Clear()
+    {
+        if (_set is not null || _sets is not null)
+        {
+            Keep([]);
+            return;
+        }
+
+        _pairs.Clear();
+        _counts.AsSpan(0, _groups).Clear();
+        _groups = 0;
+    }
+
+    /// <summary>The counts of the groups, and their pairs, a new pair a row at most.</summary>
+    internal override long GrowthFor(int more) =>
+        _set is not null || _sets is not null ? 0 : TableGrowth.Of(_groups, more, _counts.Length, _counts.Length, sizeof(long)) + _pairs.GrowthFor(more);
+
+    /// <summary>
+    /// The counts of the new groups, and every pair of the other's: a group held here meets values of its
+    /// own there, and its pairs may all be new where its group is not.
+    /// </summary>
+    internal override long GrowthFor(AggregateSlot from, int groups) =>
+        _set is not null || _sets is not null ? 0
+        : TableGrowth.Of(_groups, groups, _counts.Length, _counts.Length, sizeof(long)) + _pairs.GrowthFor((int)((FixedDistinctSlot<TValue>)from).Pairs);
+
+    /// <summary>Each group's values, their number first.</summary>
+    internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            int at = buffer.Length;
+            buffer.Write(0);
+            buffer.Patch(at, _pairs.WriteGroup(group, buffer));
+        }
+    }
+
+    internal override void ReadStates(ref SpillReader reader, int count)
+    {
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                Add(group, reader.Read<TValue>());
+            }
+        }
+    }
+
+    internal override bool SpillsAlone => _set is not null;
+
+    internal override bool Spilled => _runs is not null;
+
+    internal override long GrowthAhead(int rows) => _set?.GrowthFor(rows) ?? 0;
+
+    /// <summary>
+    /// The set's values written to the lane's file as a run, section after section, a section the values
+    /// whose hash has its top byte, walked in the order the set's slots hold them; then the set let go,
+    /// its slots given back, and a new one started.
+    /// </summary>
+    internal override async ValueTask SpillAsync(SpillScope scope, SpillBuffer buffer, CancellationToken cancellationToken)
+    {
+        DistinctValues<TValue> set = _set!;
+        if (set.Count == 0)
+        {
+            return;
+        }
+
+        SpillFile file = _file ??= scope.NewFile();
+        SpillRun run = new SpillRun(file) { Zero = set.HoldsZero };
+        buffer.Clear();
+        for (int section = 0; section < SpillRun.Sections; section++)
+        {
+            run.Starts[section] = file.Length + buffer.Length;
+            int at = -1;
+            while (at != DistinctValues<TValue>.PartDone)
+            {
+                if (buffer.Full)
+                {
+                    await file.AppendAsync(buffer.Written, cancellationToken).ConfigureAwait(false);
+                    buffer.Clear();
+                }
+
+                int copied = set.CopyPart(section, SpillRun.SectionBits, ref at, MemoryMarshal.Cast<byte, TValue>(buffer.Room));
+                buffer.Advance(copied * Unsafe.SizeOf<TValue>());
+                run.Counts[section] += copied;
+            }
+        }
+
+        run.Starts[SpillRun.Sections] = file.Length + buffer.Length;
+        if (buffer.Length > 0)
+        {
+            await file.AppendAsync(buffer.Written, cancellationToken).ConfigureAwait(false);
+            buffer.Clear();
+        }
+
+        (_runs ??= []).Add(run);
+        scope.Ran(run.Bytes);
+        set.Release();
+        _set = new DistinctValues<TValue>();
+        _set.Govern(_shelf);
+    }
+
+    /// <summary>
+    /// The values every lane's runs hold, made distinct part by part, the top bits of their hash: the
+    /// lanes' sets written as runs too first, which gives their memory to the parts. Each part a set of
+    /// its own, sized by what its sections count, which never doubles; as many parts as make one a
+    /// quarter of the room the budget leaves at most, as many at once as half that room holds.
+    /// </summary>
+    internal override async Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, int degree, QueryMemory memory, CancellationToken cancellationToken)
+    {
+        List<SpillRun> runs = [];
+        bool zero = false;
+        long total = 0;
+        SpillBuffer page = new SpillBuffer(memory);
+        try
+        {
+            foreach (AggregateSlot slot in lanes)
+            {
+                FixedDistinctSlot<TValue> lane = (FixedDistinctSlot<TValue>)slot;
+                await lane.SpillAsync(scope, page, cancellationToken).ConfigureAwait(false);
+                foreach (SpillRun run in lane._runs ?? [])
+                {
+                    runs.Add(run);
+                    zero |= run.Zero;
+                    total += run.Entries(0, SpillRun.Sections);
+                }
+            }
+        }
+        finally
+        {
+            page.Release();
+        }
+
+        long room = Math.Max(memory.Ceiling / 16, memory.Ceiling - memory.Held);
+        int bits = 1;
+        while (bits < SpillRun.SectionBits && DistinctValues<TValue>.FootprintOf((int)Math.Min(total >> bits, int.MaxValue / 4)) > room / 4)
+        {
+            bits++;
+        }
+
+        int parts = 1 << bits;
+        long share = DistinctValues<TValue>.FootprintOf((int)Math.Min(total >> bits, int.MaxValue / 4)) + SpillBuffer.PageOf(memory, degree);
+        int workers = (int)Math.Clamp(room / 2 / Math.Max(1, share), 1, Math.Max(1, degree));
+        long[] counts = new long[parts];
+        await SideBySide.RunAsync(
+            parts,
+            async (part, token) =>
+            {
+                (int first, int past) = SpillRun.Of(part, bits);
+                long capacity = 0;
+                foreach (SpillRun run in runs)
+                {
+                    capacity += run.Entries(first, past);
+                }
+
+                // The part's set, as many values as its sections hold at most: it never doubles.
+                int values = (int)Math.Min(capacity, int.MaxValue / 4);
+                long bytes = DistinctValues<TValue>.FootprintOf(values);
+                memory.Hold(bytes, "merge of a spilled distinct count");
+                SpillBuffer buffer = new SpillBuffer(memory, degree);
+                try
+                {
+                    DistinctValues<TValue> distinct = new DistinctValues<TValue>(values, skip: bits);
+                    foreach (SpillRun run in runs)
+                    {
+                        // A page at a time: the run's stretch of the part may be long.
+                        long offset = run.Starts[first];
+                        long end = run.Starts[past];
+                        while (offset < end)
+                        {
+                            int length = (int)Math.Min(buffer.Page, end - offset);
+                            await run.File.ReadAsync(offset, buffer.Ensure(length), token).ConfigureAwait(false);
+                            Add(distinct, buffer.Span(length));
+                            offset += length;
+                        }
+                    }
+
+                    counts[part] = distinct.Count;
+                }
+                finally
+                {
+                    buffer.Release();
+                    memory.LetGo(bytes);
+                }
+            },
+            workers,
+            cancellationToken).ConfigureAwait(false);
+
+        // The value of zero bits, which no section holds, once.
+        long count = zero ? 1 : 0;
+        foreach (long part in counts)
+        {
+            count += part;
+        }
+
+        foreach (AggregateSlot slot in lanes)
+        {
+            FixedDistinctSlot<TValue> lane = (FixedDistinctSlot<TValue>)slot;
+            lane._runs = null;
+            lane._counts[0] = 0;
+        }
+
+        _counts[0] = count;
+    }
+
+    /// <summary>Adds the values of a page read back.</summary>
+    private static void Add(DistinctValues<TValue> distinct, ReadOnlySpan<byte> values)
+    {
+        foreach (TValue value in MemoryMarshal.Cast<byte, TValue>(values))
+        {
+            distinct.Add(value);
+        }
+    }
+
+    /// <summary>The (group, value) pairs, or the values of a slot of one group, or each group's set and those let go, and the counts.</summary>
+    internal override long Footprint => (_set?.Footprint ?? (_sets is { } sets ? SetBytes(sets) : _pairs.Footprint)) + ((long)_counts.Length * sizeof(long));
+
+    /// <summary>The bytes of the sets of <paramref name="sets"/> and of those let go, at their capacity.</summary>
+    private long SetBytes(DistinctValues<TValue>?[] sets)
+    {
+        long bytes = (long)sets.Length * IntPtr.Size;
+        foreach (DistinctValues<TValue>? set in sets)
+        {
+            bytes += set?.Footprint ?? 0;
+        }
+
+        for (int s = 0; s < _spareCount; s++)
+        {
+            bytes += _spares[s].Footprint;
+        }
+
+        return bytes;
+    }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        _pairs.Keep(groups);
+        if (_sets is { } sets)
+        {
+            // The kept groups' sets move to the front, groups ascending; the others, cleared, wait for
+            // the groups to come, their slots at the length they reached.
+            int kept = 0;
+            for (int g = 0; g < _groups && g < sets.Length; g++)
+            {
+                DistinctValues<TValue>? set = sets[g];
+                sets[g] = null;
+                if (kept < groups.Length && groups[kept] == g)
+                {
+                    sets[kept++] = set;
+                }
+                else if (set is not null)
+                {
+                    set.Clear();
+                    if (_spareCount == _spares.Length)
+                    {
+                        Array.Resize(ref _spares, Math.Max(4, 2 * _spares.Length));
+                    }
+
+                    _spares[_spareCount++] = set;
+                }
+            }
+        }
+        else
+        {
+            _pairs.Keep(groups);
+        }
+
         for (int i = 0; i < groups.Length; i++)
         {
             _counts[i] = _counts[groups[i]];
@@ -939,7 +1294,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
 
     private void Add(int group, TValue value)
     {
-        if (_set is { } set ? set.Add(value) : _pairs.Add(group, value))
+        if (_set is { } set ? set.Add(value) : _sets is not null ? SetOf(group).Add(value) : _pairs.Add(group, value))
         {
             _counts[group]++;
         }

@@ -289,6 +289,40 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
     }
 
+    internal override bool Spills => !_appending;
+
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new RawKeys<TWord>(_layout, shelf: shelf);
+
+    /// <summary>The words' array, and the slots, at most half full.</summary>
+    internal override long GrowthFor(int more) =>
+        TableGrowth.Of(Count, more, _keys.Length, _keys.Length, Unsafe.SizeOf<TWord>()) + TableGrowth.Of(Count, more, _slots.Length, _slots.Length / 2, sizeof(uint));
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = EntryKeys.Hash(_keys[g], MergeHash.Seed);
+        }
+    }
+
+    /// <summary>Each tuple's word, its nulls bits of it.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        Span<byte> words = buffer.Take(groups.Length * Unsafe.SizeOf<TWord>());
+        for (int i = 0; i < groups.Length; i++)
+        {
+            MemoryMarshal.Write(words[(i * Unsafe.SizeOf<TWord>())..], in _keys[groups[i]]);
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            groups[i] = Lookup(reader.Read<TWord>());
+        }
+    }
+
     /// <summary>The word: a tuple's nulls are bits of it, so no group is apart from the others.</summary>
     internal override int EntryBytes => Unsafe.SizeOf<TWord>();
 

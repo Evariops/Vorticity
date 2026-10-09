@@ -9,8 +9,9 @@
 # WHAT IT RUNS, and why in this order: the cheap deterministic things first, so a broken build or a
 # blown allocation ceiling costs four seconds rather than forty.
 #
-#   1. the nine ratchet tests    counts and ceilings, deterministic, ~10 s; the ninth is the
-#                                dataset's read budget, asserted through a counting store
+#   1. the ten ratchet tests     counts and ceilings, deterministic, ~10 s; the ninth is the
+#                                dataset's read budget, asserted through a counting store, the
+#                                tenth the work of a group by, counted at one lane
 #   2. --ffi-check               ours and the reference agree on row counts, < 1 s
 #   3. --ratio-check             every ratio against the reference, key order included, ~45 s
 #
@@ -43,7 +44,7 @@ done
 
 ratchets=(PathAllocationTests ScanAllocationTests WriteAllocationTests WrittenSizeTests
           FlatLayoutDecodeCountTests RoundTripCountTests LiveMemoryTests CorpusCoverageTests
-          DatasetBudgetTests)
+          DatasetBudgetTests WorkCounterTests)
 
 failed=()
 step() {

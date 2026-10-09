@@ -11,19 +11,6 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 [08-semantics.md](08-semantics.md)'s, the order of keys [12-index-reads.md](12-index-reads.md)
 §3.4's.
 
-> **Status.** This document describes the target, ahead of the code. Each part lands in the stage
-> below, and this table goes with the last one.
->
-> | stage | what lands | sections |
-> |---|---|---|
-> | 0 ✅ | the measures: time to first batch, peak memory, allocations, a group-by matrix, and their baselines | §13 |
-> | 1 ✅ | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
-> | 2 ✅ | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
-> | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
-> | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
-> | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
-> | 6, short ranges, composite and direct-index keys, the parallel merge, datasets read ahead and side by side, the first batch of a filtered scan, finality from the zone maps, the top-k on the key ✅ | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps; its partitioning among lanes, never written, gives way to stage 7 | §2.5, §2.6, §6, §9 |
-> | 7, high cardinality 🚧 | a group's states in a record ✅, the engine's own key tables ✅, raw-word composites and integers numbered by pages ✅, distinct counts by parts of their pairs ✅, the core (a bounded cache a lane, 256 parts of sub-tables applied by bursts) built as an option ✅, the memory budget and its governor ✅, the core under pressure ✅, the spill and its parts delivered one at a time ✅, delivery part by part, each part built where it is applied ✅, the top-k of many groups in chunks at once ✅, the top-k by an integer's `Max` or `Min` in one pass ✅, the sort in runs of a result and of groups that spilled ✅, the core over a dataset's objects, its integer keys bounded by their summaries ✅, `Distinct` through the core's parts, each value told as it enters its set ✅ | §9.1, §9.4, §9.5, §12, §13 |
 
 ## 1. The shape
 
@@ -168,10 +155,14 @@ smallest bound to come go out, in key order, and the memory is the groups the ov
 The zone maps are read before the pass, for a key of one column of integers as they are stored, a
 timestamp's among them, under no order but the key's ascending; the groups stream when no value
 waits past its own block more than an eighth of the blocks, and go out once the pass has run
-otherwise. Against the blocking pass, a nearly sorted key of a million values over four million
-rows answers first after 2 ms rather than 30, holds a fifteenth of the memory on one lane and a
-third on fourteen, and runs 5 to 23 % longer, the ranges of the lanes followed into one partition in
-the order of the rows.
+otherwise. Each range a lane groups absorbs the few groups the ranges before it left open, and stands
+for them from then on, rather than putting all of its own into them. Against the blocking pass, a nearly
+sorted key of a million values over four million rows answers first after 1 to 2 ms rather than 34,
+holds a fifteenth of the memory on one lane and runs 0.84 of its time there; on fourteen lanes it holds a
+third of the memory and runs 2.1 times as long, its ranges taken in series in the order of the rows
+(12 ms against 5.7), where the blocking pass builds its parts side by side. So on several lanes the pass
+blocks, unless the query asks for a window (`Take`) or its budget is short of 32 bytes for each row of
+the source, where the stream's memory pays; on one lane, it streams.
 
 So, on such a key:
 
@@ -753,6 +744,10 @@ the reader merging and building the next part rather than wait; the lanes' table
 part is merged. A composite's indexes of its columns merge once, first. The pairs of a distinct
 count, chained by group, merge apart: past 65 536, the largest lane's taken as they are and the
 others' cut into parts by the hash of their group and value, four parts a worker, side by side. A
+group by that streams on a key the statistics bound to 4 096 groups at most holds each group's
+values in a set of its own instead, a value found at the first read; the sets of the groups a batch
+closes are cleared for those it opens, and a set a range alone met moves whole into the range it is
+followed into. A
 distinct count with no key holds its values alone, each in its slot, homed by the top bits of its
 hash: a part is a run of every lane's slots, which its worker walks with nothing cut before, its own
 table homing them by the bits below the part's, which they share. A chosen row and a tie keep the
@@ -772,13 +767,33 @@ its answers are the lanes' tables' bits.
 
 **The core.** A second engine holds each group once, on a key of one fixed-width column or of raw
 words (§9.1) whose states all lie in records, at eight lanes and more: when a plan asks for it, or
-from the start when the key is one integer column numbered by value over a million values or more
-that its zones say lies scattered, each zone covering half its span or more on the mean. Its lanes'
-tables would then each hold most of its groups, out of the cache; a key in the order of the rows,
-whose zones each cover a few of its values, and a narrower span keep the lanes' tables. A hashed key,
+when the key is one integer column numbered by value over a million values or more that a lane's
+first batch shows scattered over its span. Before it folds a row, the lane places the batch's values
+in 4 096 bins over the span, a bit each, and turns with its table empty when they fall in three
+quarters or more of the bins as many values drawn at random would. Its lanes' tables would then each
+hold most of its groups, out of the cache; a key in the order of the rows, whose batches each fall in
+a few bins, and a narrower span keep the lanes' tables. The same judgment holds for a file with zone
+maps, one without, and a dataset: a zone's least and greatest values would read a key in the order of
+the rows with a sentinel, 0 among growing identifiers, as covering its span. On a file of an edition
+with no zone maps, ten million keys at fourteen lanes take 77 ms this way, against 154 on the lanes'
+tables and 79 on the same rows with zone maps. A hashed key,
 which nothing bounds before the pass, turns to it once a lane's first batch says half a million values
 or more, the values of a uniform key that made as many groups from as many rows, when the source gives
-each lane 200 000 rows or more: the lanes turn while their tables are a batch's. The key space is cut into 256 parts by the top byte of
+each lane 200 000 rows or more: the lanes turn while their tables are a batch's. Lanes that may turn
+so take their first range i / N of the way through the queue, lane i of N, then the queue's next
+ones, unless the zones settle blocks in the order of the rows: all on the first rows, a key whose
+cardinality changes as the rows go would mislead them together. The first lane whose rows say turn
+turns them all, not most of them: on 2·10⁷ rows at fourteen lanes, a key of 10³ values on its first
+quarter and 10⁷ on the rest takes 65.6 ms against 64.2 for the core asked for; the other way round,
+40.6 against 40.0, where a majority of lanes that met the 10³ values kept the lanes' tables, 59.0. A
+hashed key local in the rows, sessions of two rows, reads as 4·10⁴ values on a lane's first rows; past
+them, a lane counts its new groups a window of 65 536 rows at a time, never a row at a time. A key drawn
+from a fixed set of values brings them at a falling rate, e^(−r/K), which the first rows judged; one whose
+rate, after three windows, has kept four fifths of itself over two is projected linearly, its groups
+plus the rate times its rows left, and past half a million, with rows left of twice its groups to repay
+emptying its table, the lane turns, once. A key whose last window's keys rise, in the order of the rows,
+never does. The sessions take 134 ms this way, against 205 on the lanes' tables and 98 with the core
+asked for; a hundred thousand values at random turn on nothing. The key space is cut into 256 parts by the top byte of
 the merge's hash. Each lane folds its rows into a cache of bounded capacity, a table of the same
 kind; a full cache's groups leave as entries, a record with its key, in batches of the part their key
 falls in, each lane's batches cut from slabs of its own. A part applies its batches into sub-tables
@@ -791,8 +806,8 @@ come from a shelf of the query and go back to the process's, kept within a budge
 collections. On the bench it holds two to three times less than the tables of fourteen lanes, and at
 fourteen lanes takes ×0.69 at a million random keys, ×0.46 at ten million, ×0.64 on ten rows a key;
 but it costs time at one lane, at 10⁵ keys (×2.5) and on keys in the order of the rows (×1.2 to
-×2.6): it is what the governor turns to under pressure (§9.5), and what a scattered wide key takes
-from the start.
+×2.6): it is what the governor turns to under pressure (§9.5), and what a scattered wide key turns to
+from its first batch.
 
 ### 9.5 Memory
 
@@ -831,9 +846,13 @@ parts and the cut of a merge; the scratch a sort, a top or a fetch rents; the gr
 their order until it is delivered. A lane's working memory besides its tables, a batch's scratch and
 its decoding, is admitted with the query, 16 bytes a row of its batches between 64 KiB and a megabyte,
 a megabyte when the scan sets no batch size: a query its budget cannot give every lane starts on half
-as many, down to one. What the queries let go stays in the heap until a collection; when that, or what
-the collector keeps committed past its heap, stands between a reservation and the ceiling, a collection
-that gives it back comes first. A query refused fails with a `VortexMemoryException` that names the
+as many, down to one. Over a source that copies what it reads, a store or positional reads, a lane's
+two splits read ahead of its decode are admitted with it, each the largest split of the layout, which
+a walk of the layout finds before the pass; under a budget short of them, the lanes read one ahead,
+then none, before they are halved, and give them back when the pass ends. A mapping reads in place,
+its reads views of it: nothing more is admitted. What the queries let go stays in the heap until a
+collection; when that, or what the collector keeps committed past its heap, stands between a
+reservation and the ceiling, a collection that gives it back comes first. A query refused fails with a `VortexMemoryException` that names the
 operator, its groups and its bytes, everything it held given back.
 
 **Under pressure**, a group by its lanes' tables outgrow ends in the core rather than failing, on a key
@@ -851,8 +870,8 @@ others that did, in series into the largest, each given back once merged; the la
 that one into the core. A query whose pass fits and whose merge by parts does not merges its tables
 the same way, in series, each given back once merged, and needs no core. Under 70 % of the memory the
 lanes' tables hold at most, fourteen lanes on 10⁵ keys end exact, their peak within 1.4 % of the
-budget; a key of text, and a composite holding one, stay on the lanes' tables, which spill when spilling
-comes.
+budget; a key of text, a composite holding one, a text's extremes and a distinct count stay on the
+lanes' tables, which spill (below).
 
 **The share.** A budget counts the queries that hold memory under it. Past seven eighths of its
 ceiling, a query that would hold more than its share — the ceiling over the active queries — is told
@@ -862,7 +881,9 @@ share, since a query with nothing to give back would fail where it fit.
 **The spill.** When nothing is left to give back, the core writes the parts holding the most, their
 groups and their pending entries, a record and a key each, to a scratch file of the query — in
 `VortexSessionOptions.ScratchDirectory`, the system's temporary directory by default, never a
-`tmpfs`, the process's spills keeping a tenth of its free space — the largest first, until the query
+`tmpfs`, the process's spills keeping a tenth of its free space, and under the host's
+`VortexSessionOptions.ScratchBudget` when it gives one, which the runs of a sort count against too,
+every byte reserved before it is written and given back when the scratch closes — the largest first, until the query
 holds three quarters of its budget; a lane whose rows the core cannot take spills before its next
 batch, on a task. At the end, the parts held in memory are delivered first, then each spilled part
 alone: its runs read back a page at a time and applied into its sub-tables again, which merges the
@@ -871,8 +892,33 @@ again is that share of the groups and a page. Under a budget the pass sizes itse
 batch takes a quarter of the ceiling over the lanes, the core's caches and open batches an eighth, its
 sub-tables split at a 256th, a lane turns once the budget could not take every growing lane's next
 doubling, and the scratch's page is a sixteenth. Under a tenth of what the lanes' tables would hold,
-fourteen lanes on 10⁶ keys end exact within 6 % of the budget. A key of text, a composite holding one
-and a distinct count do not enter the core, and are refused past their budget.
+fourteen lanes on 10⁶ keys end exact within 6 % of the budget.
+
+**The lanes' spill.** The groups the core cannot hold — a key of text or a composite holding one, a
+text's extremes, a distinct count by key — stay on the lanes' tables, which spill themselves. Before a
+batch, a lane asks the budget for what its table would take were the batch all new groups, each array's
+next growth, on every lane at once; past it, the lane's table goes to its scratch as a run, in 256
+sections by the top byte of its keys' hash under the merge's seed, each group with its key, its record
+and the states its slots keep apart, a text's bytes, a distinct count's values. The lane goes on with
+its table emptied in place, its arrays kept. While other lanes run, a pressed lane may first merge its
+table into one that the lanes retiring share and retire at its range's end: a sketch of each table's
+keys, HyperLogLog's on their hashes, tells what the shared table lacks of the lane's, and so what it
+grows by; past what the budget grants, or once half of the groups merged into it came new to it, the
+lanes' keys apart, the lanes write their own. At the end every table goes to the scratch, and the result comes
+back part by part, as a merge in parts delivers it: a part is a stretch of every run's sections, merged
+into a table that grows from a shelf of its own under the budget, built into batches and let go; as
+few parts as keep one within half the room the budget leaves, as many built ahead as that half holds,
+none when one takes it all. A distinct count over the whole scan spills its set alone, by the top
+byte of its values' hash, its parts counted from sets sized by their sections; a `Distinct` on a key the
+core cannot take spills the reader's index, the values met before its first run told as they came, the
+others told at the end, each part read back, the first run's values silently first. Such a query's
+batches of new groups on every lane come to a sixteenth of the ceiling, 128 bytes a row, and lanes
+whose working memory passes a quarter of it start on half as many. A state with references fails the
+query past its budget, typed. On the bench, a count by 10⁶ URLs over 4M rows ends exact at one lane
+in 0.38 s under half of the 90 MB its table holds, writing 7 runs, and in 0.33 s under a tenth,
+writing 62, against 0.20 s with the budget it needs; fourteen lanes, which hold 564 MB in 0.067 s,
+end in 0.29 s under half of it, writing 35 runs, and in 0.30 s under a tenth, writing 160; every peak
+within 6 % of its budget.
 
 **The sort in runs.** An order over groups that spilled sorts them in runs: the groups held in memory,
 then each part spilled as it comes back, pass through the filters before the order, and their rows —
@@ -902,11 +948,7 @@ reader is done with its batches, which the session's pool holds outside any quer
 fourteen lanes, its batches no longer built on the reader's thread alone once the merge is done, a
 million keys took 0.83 of the time and four aggregates 0.68.
 
-Not yet: a comfort budget the host grants, none by default, buying a higher α; a key cursor over a
-result larger than its budget, which a merge of runs cannot seek in; text keys and distinct counts in
-the spill. Every state
-will spill as bytes, a custom state without references with its record; a custom aggregator whose
-state holds references, which no bytes stand for, fails the query instead.
+Not yet: a key cursor over a result larger than its budget, which a merge of runs cannot seek in.
 
 ## 10. Plan and statistics
 
@@ -932,10 +974,15 @@ statistics what happened. Once the result is read, its `ScanStatistics` carry `G
 most held at once, which a streaming group by keeps small, and a core delivering part by part to the
 parts applied and not yet built; `PeakBytes`, the most it held of its memory
 budget; `Lanes` and `MergeParts`; what the core did, `Core`, `CacheEvictions`, `BypassedRows`,
-`Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts` and
-`SpilledBytes`, zero until spilling comes; the key blocks by how they were grouped,
+`Bursts`, `PendingBytes`, `ReloadedBytes`, `Tables` and `TableSplits`; `SpilledParts`, the core's
+parts written to scratch, `SpilledRuns`, the lanes' tables written, and `SpilledBytes`, what either
+wrote, zero until spilling comes; the key blocks by how they were grouped,
 `KeyBlocksByRange` (constant, run-end), `KeyBlocksByCode` and `KeyBlocksHashed`; and
-`TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch. Both are properties
+`TimeToFirstBatch`, the time from the first `MoveNextAsync` to the first batch; `CoreReason`, why the
+core held the groups, asked for, a lane's first rows, its first batch's spread, the projection of its new
+groups past its first rows or the memory budget,
+`None` when the lanes' tables did; and `TurnedAfterRows`, the rows the first lane to turn had folded
+into its own table, 0 on its first batch and -1 when no lane turned. Both are properties
 outside the records' constructors. Nothing of them goes through the scan's own counters, which every
 batch touches.
 
@@ -1000,7 +1047,8 @@ run-end key in 12.3 ms against 13.5, by a dictionary key in 4.0 against 3.2, ove
 in 46 against 34 ms and 103 against 77 MiB, with one bit pattern over every cut of sixteen million
 values where the plain sum gave seven, and the exact sum where the plain one was 1.7 × 10⁻¹⁴ off; a
 pass costing 4.4 ns a row for a fold over a column and 32 ns for a composite group by, which the
-sum's overhead is set against. Stage 0 turns each into a gate.
+sum's overhead is set against. The query bench turns each into a gate, and `WorkCounterTests` holds
+the work of a group by, counted at one lane.
 
 ## 14. From the 0.4 surface
 

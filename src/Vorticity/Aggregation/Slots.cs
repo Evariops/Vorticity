@@ -129,6 +129,13 @@ internal abstract class AggregateSlot
     /// </summary>
     internal abstract void Keep(ReadOnlySpan<int> groups);
 
+    /// <summary>
+    /// Forgets every group's state, the arrays kept at their length: a lane's table emptied into a spill,
+    /// which the next fills to the same size. <see cref="Keep"/> with no group, unless the slot keeps its
+    /// arrays twice over for it.
+    /// </summary>
+    internal virtual void Clear() => Keep([]);
+
     /// <summary>The bytes of a group's state when it lies in the group's record (<see cref="GroupRecords"/>); 0 for a slot that keeps its states apart.</summary>
     internal virtual int StateBytes => 0;
 
@@ -164,12 +171,21 @@ internal abstract class AggregateSlot
     }
 
     /// <summary>
+    /// Tells the slot, as its partition makes it and before it steps a row, that its group by streams
+    /// and the statistics bound its key to few groups (<see cref="AggregationPartition.FewGroups"/>).
+    /// Nothing for a slot whose states take no other shape for them.
+    /// </summary>
+    internal virtual void FewGroups()
+    {
+    }
+
+    /// <summary>
     /// Reserves, for a slot of group 0 alone (<see cref="Ungrouped"/>), what its first
     /// <paramref name="rows"/> rows foretell for the <paramref name="expected"/> rows its partition
-    /// expects, as <paramref name="memory"/> grants it. Nothing for a
-    /// slot whose state does not grow with the values it meets.
+    /// expects, as <paramref name="memory"/> grants it on each of <paramref name="lanes"/> lanes at once,
+    /// which foretell together. Nothing for a slot whose state does not grow with the values it meets.
     /// </summary>
-    internal virtual void Foretell(long rows, long expected, QueryMemory? memory)
+    internal virtual void Foretell(long rows, long expected, QueryMemory? memory, int lanes)
     {
     }
 
@@ -179,6 +195,68 @@ internal abstract class AggregateSlot
     /// a slot whose states all lie in records.
     /// </summary>
     internal virtual long Footprint => 0;
+
+    /// <summary>
+    /// The bytes the slot's arrays would take more were <paramref name="more"/> rows to come, a new group
+    /// or a new value each at most: what a lane whose table spills asks the budget for before a batch.
+    /// Nothing for a slot whose states lie in the records, which its partition asks.
+    /// </summary>
+    internal virtual long GrowthFor(int more) => 0;
+
+    /// <summary>
+    /// The bytes the slot's arrays would take more merging <paramref name="from"/>'s states, the same
+    /// aggregate's of another lane, <paramref name="groups"/> of its groups new here: its growth for the
+    /// new groups, unless its states hold more than a value a group.
+    /// </summary>
+    internal virtual long GrowthFor(AggregateSlot from, int groups) => GrowthFor(groups);
+
+    /// <summary>
+    /// Whether the slot's states go to a lane's spill with its keys and come back: in the records, as
+    /// their bytes, or written apart (<see cref="WriteStates"/>). Not a state with references, a caller's
+    /// aggregator's, which no byte holds.
+    /// </summary>
+    internal virtual bool SpillsStates => StateBytes > 0;
+
+    /// <summary>
+    /// Writes the states of <paramref name="groups"/>, in order, that the slot keeps apart from the
+    /// records: what <see cref="ReadStates"/> reads back. Nothing for a slot whose states lie in records.
+    /// </summary>
+    internal virtual void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+    }
+
+    /// <summary>
+    /// Reads <paramref name="count"/> states written by <see cref="WriteStates"/> into groups 0 to
+    /// <paramref name="count"/> − 1 of the slot, a new one, which then merges them into a part's slot as
+    /// a lane's would. Nothing for a slot whose states lie in records, which its partition reads.
+    /// </summary>
+    internal virtual void ReadStates(ref SpillReader reader, int count)
+    {
+    }
+
+    /// <summary>
+    /// Whether the slot spills on its own when its partition's budget holds it no more
+    /// (<see cref="SpillAsync"/>): a distinct count over the whole scan, whose set is all that grows.
+    /// </summary>
+    internal virtual bool SpillsAlone => false;
+
+    /// <summary>Whether the slot wrote a run on its own (<see cref="SpillsAlone"/>).</summary>
+    internal virtual bool Spilled => false;
+
+    /// <summary>The bytes the slot may take more folding <paramref name="rows"/> rows, a set that would double; 0 when it would not grow (<see cref="SpillsAlone"/>).</summary>
+    internal virtual long GrowthAhead(int rows) => 0;
+
+    /// <summary>The slot's values written to its lane's scratch as a run, the slot emptied and its arrays given back (<see cref="SpillsAlone"/>).</summary>
+    internal virtual ValueTask SpillAsync(SpillScope scope, SpillBuffer buffer, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This aggregate does not spill on its own.");
+
+    /// <summary>
+    /// The answer over every lane's slot of <paramref name="lanes"/>, this one among them, once one of them
+    /// spilled: their runs read back part by part with what each holds still, under
+    /// <paramref name="memory"/>, the answer left in this slot and the others emptied.
+    /// </summary>
+    internal virtual Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, int degree, QueryMemory memory, CancellationToken cancellationToken) =>
+        throw new NotSupportedException("This aggregate does not spill on its own.");
 
     /// <summary>The bytes <paramref name="slots"/> hold, the records they share counted once.</summary>
     internal static long FootprintOf(ReadOnlySpan<AggregateSlot> slots)
@@ -464,6 +542,32 @@ internal static class SideBySide
                     {
                         token.ThrowIfCancellationRequested();
                         work(item);
+                    }
+                },
+                token);
+        }
+
+        await AggregationEngine.GuardedAsync(tasks, failed).ConfigureAwait(false);
+    }
+
+    /// <summary>As <see cref="RunAsync(int, Action{int}, int, CancellationToken)"/>, for work that waits on reads: on tasks, never a thread.</summary>
+    internal static async Task RunAsync(int count, Func<int, CancellationToken, ValueTask> work, int degree, CancellationToken cancellationToken)
+    {
+        int workers = Math.Clamp(degree, 1, Math.Max(1, count));
+        int[] next = [-1];
+        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken token = failed.Token;
+        Task[] tasks = new Task[workers];
+        for (int w = 0; w < workers; w++)
+        {
+            tasks[w] = Task.Run(
+                async () =>
+                {
+                    int item;
+                    while ((item = Interlocked.Increment(ref next[0])) < count)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        await work(item, token).ConfigureAwait(false);
                     }
                 },
                 token);

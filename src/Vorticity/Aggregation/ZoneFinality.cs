@@ -53,16 +53,44 @@ internal sealed class ZoneFinality
             return false;
         }
 
+        bool windowed = query.Take != long.MaxValue;
         foreach (GroupOperator op in query.Operators)
         {
             if (op is GroupOrder order && (order.Keys[0].Field.Component != 0 || order.Keys[0].Descending))
             {
                 return false;
             }
+
+            windowed |= op is GroupWindow;
         }
 
-        return true;
+        return query.Plan.ZonesAtEveryDegree || windowed || Degree(query) == 1 || Pressed(query);
     }
+
+    /// <summary>
+    /// The bytes a row of the source may come to hold in the lanes' tables of a blocking pass: past a budget
+    /// of that many for each row, the stream, which holds the groups its zones overlap, takes ÷3 to ÷15 of
+    /// the memory. On 4M rows of a key late by 2 500, the blocking pass held 80 to 110 MB at fourteen lanes.
+    /// </summary>
+    private const long BlockingRowBytes = 32;
+
+    /// <summary>
+    /// Whether the pass blocks on several lanes and leaves the zones to one lane, a window and a budget
+    /// under pressure: measured on 2026-10-08 after the stream lets its ranges absorb what they leave open,
+    /// the stream took 2.2 times the blocking pass's time at fourteen lanes on 4M rows of a key late by
+    /// 2 500 (13.0 ms against 5.9), past the quarter more that decision F of the plan held the zones to;
+    /// at one lane, 0.84 of it (30.7 against 36.4), its first batch 1.3 ms after the start against 34.
+    /// </summary>
+    private static int Degree(AggregationQuery query)
+    {
+        int degree = query.Host.Spec().Options.DegreeOfParallelism;
+        return degree > 0 ? degree : query.Host.Source.Session.Options.MaxDegreeOfParallelism;
+    }
+
+    /// <summary>Whether the query's budget is short of what a blocking pass's tables may hold: <see cref="BlockingRowBytes"/> a row of the source.</summary>
+    private static bool Pressed(AggregationQuery query) =>
+        query.Host.Source.Session.Options.MemoryBudget is { } budget && query.Host.Source.RowBound is long rows and > 0
+        && budget.CeilingBytes < rows * BlockingRowBytes;
 
     /// <summary>
     /// The floors of a candidate's key, its zone maps read as a filter on it would read them, or null:

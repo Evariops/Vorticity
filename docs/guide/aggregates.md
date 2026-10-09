@@ -395,7 +395,13 @@ dictionary or run-end block included.
   its host. The host can: with `<TieredCompilation>false</TieredCompilation>` in its project, every
   method is optimized on its first call, at the cost of a slower start, and in this sample the
   steady state is then no slower, often faster (13 ms for `GroupBy(City, Day)`, 4.8 for Welford
-  against 6.5). Under Native AOT, nothing is left to warm.
+  against 6.5). Under Native AOT, nothing is left to warm. The cost grows with the lanes: on group
+  bys of a million to ten million keys over 4 to 20 million rows, measured on 2026-10-08, the first
+  three passes at fourteen lanes took 1.6 to 3.8 times what the same code compiled ahead of time
+  took (205 to 218 ms against 76 to 78 from the second pass, for ten million keys). Once warm, at one
+  lane, the tiered code is between 16 % slower and 22 % faster than the native. With tiered
+  compilation off, the first pass pays for compiling everything, three to five times the native one,
+  and the second already runs as fast.
 
 The figures come from one run of the sample on the demonstration file of a million rows, on a
 machine of 14 cores; each timing is the best of three passes.

@@ -22,9 +22,6 @@ namespace Vorticity.Aggregating;
 /// </remarks>
 internal sealed partial class GroupCore
 {
-    // The spills of the process together: what keeps a tenth of their directories' free space.
-    private static long s_spilled;
-
     private readonly SemaphoreSlim _spilling = new SemaphoreSlim(1, 1);
     private RunScratch? _scratch;
     private string? _scratchDirectory;
@@ -243,11 +240,16 @@ internal sealed partial class GroupCore
     {
         RunScratch scratch = Scratch();
         int bytes = entries * Shape.Words * sizeof(ulong);
-        long spilled = Interlocked.Add(ref s_spilled, bytes);
-        if (Free(_scratchDirectory!) is long free && free - bytes < (free + spilled) / 10)
+        if (!SpillSpace.TryClaim(_scratchDirectory!, bytes))
         {
-            Interlocked.Add(ref s_spilled, -bytes);
             throw _memory!.Exceeded("spill of a group by", -1, bytes);
+        }
+
+        // Under the host's scratch budget, every byte written counted, and given back when the scratch closes.
+        if (_source?.Session.Options.ScratchBudget is { } budget && !budget.TryReserve(bytes))
+        {
+            SpillSpace.Release(bytes);
+            throw ScratchExceeded(budget, "spill of a group by", bytes);
         }
 
         Interlocked.Add(ref _spilledBytes, bytes);
@@ -415,7 +417,9 @@ internal sealed partial class GroupCore
     {
         if (_scratch is not null)
         {
-            Interlocked.Add(ref s_spilled, -Interlocked.Read(ref _spilledBytes));
+            long spilled = Interlocked.Read(ref _spilledBytes);
+            SpillSpace.Release(spilled);
+            _source?.Session.Options.ScratchBudget?.Release(spilled);
             _scratch.Dispose();
             _scratch = null;
         }
@@ -430,6 +434,15 @@ internal sealed partial class GroupCore
         SubTable empty = NewTable(0);
         return (empty.Keys, empty.Slots);
     }
+
+    /// <summary>
+    /// The exception a query fails with when <paramref name="what"/> asks for <paramref name="bytes"/> of
+    /// scratch more than <paramref name="budget"/> grants.
+    /// </summary>
+    internal static VortexMemoryException ScratchExceeded(ScratchBudget budget, string what, long bytes) => new VortexMemoryException(
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"The {what} asks for {bytes:N0} bytes of scratch more, past its scratch budget of {budget.CeilingBytes:N0} bytes, {budget.ReservedBytes:N0} of which the queries under it hold. Give its session a larger ScratchBudget, a larger QueryMemoryBudget, which spills less, or group by fewer keys at once."));
 
     /// <summary>The bytes free where <paramref name="directory"/> lies, or null when the system does not tell.</summary>
     internal static long? Free(string directory)

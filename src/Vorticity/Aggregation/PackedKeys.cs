@@ -12,8 +12,7 @@ namespace Vorticity.Aggregating;
 /// <param name="Sorted">Whether each column is sorted, in the key's order.</param>
 /// <param name="Bounds">The values each integer column holds, when the statistics hold them exactly.</param>
 /// <param name="Rows">The rows of the source, which bound what a table of groups by value may span; -1 when unknown.</param>
-/// <param name="Scattered">Whether the key, numbered by value over a wide span, lies scattered over it, as its zones say: what takes the core from the start.</param>
-internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1, bool Scattered = false);
+internal readonly record struct KeyFacts(bool[] Sorted, KeyBounds?[] Bounds, long Rows = -1);
 
 /// <summary>
 /// A key of two to four columns as the numbers its parts have in indexes of their own, packed into
@@ -616,6 +615,97 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     }
 
     internal override GroupKeys ForPart() => new PackedKeys<TKey>(_shapes, _facts, _parts);
+
+    internal override bool Spills => Array.TrueForAll(_parts, part => part.Spills);
+
+    /// <summary>
+    /// By the hash of the columns' values, not of the word: a lane's numbers of its columns' values are
+    /// its own, and each table it empties numbers them again (<see cref="Hashes"/>).
+    /// </summary>
+    internal override void Sections(Span<byte> sections)
+    {
+        ulong[] hashes = new ulong[Count];
+        Hashes(hashes);
+        for (int g = 0; g < Count; g++)
+        {
+            sections[g] = (byte)(hashes[g] >> (64 - SpillRun.SectionBits));
+        }
+    }
+
+    /// <summary>Each column's hash of the group's value, 0 for its null, folded into the next's: the same for one tuple in every lane, whatever its numbers.</summary>
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        ulong[][] parts = new ulong[_parts.Length][];
+        for (int p = 0; p < _parts.Length; p++)
+        {
+            parts[p] = new ulong[_parts[p].Count];
+            _parts[p].Hashes(parts[p]);
+        }
+
+        for (int g = 0; g < Count; g++)
+        {
+            ulong hash = parts[0][Id(_keys[g], 0)];
+            for (int p = 1; p < _parts.Length; p++)
+            {
+                hash = MergeHash.Of(hash, parts[p][Id(_keys[g], p)], MergeHash.Seed);
+            }
+
+            hashes[g] = hash;
+        }
+    }
+
+    /// <summary>Each column's values, a column after the other, as its index writes them.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        Scratch.Grow(ref _partIds, groups.Length);
+        Span<int> ids = _partIds.AsSpan(0, groups.Length);
+        for (int p = 0; p < _parts.Length; p++)
+        {
+            for (int i = 0; i < groups.Length; i++)
+            {
+                ids[i] = Id(_keys[groups[i]], p);
+            }
+
+            _parts[p].WriteKeys(ids, buffer);
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        int count = groups.Length;
+        int[] ids = new int[_parts.Length * count];
+        for (int p = 0; p < _parts.Length; p++)
+        {
+            _parts[p].ReadKeys(ref reader, ids.AsSpan(p * count, count));
+        }
+
+        Span<int> tuple = stackalloc int[_parts.Length];
+        for (int i = 0; i < count; i++)
+        {
+            for (int p = 0; p < _parts.Length; p++)
+            {
+                tuple[p] = ids[(p * count) + i];
+            }
+
+            groups[i] = Lookup(Pack(tuple));
+        }
+    }
+
+    /// <summary>Its columns' indexes hashed too, the statistics' bounds left out: a part holds values from all over each column's span.</summary>
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new PackedKeys<TKey>(_shapes, facts: null, shelf: shelf);
+
+    /// <summary>The words' array, the slots at most half full, and each column's index, a new value a new group at most.</summary>
+    internal override long GrowthFor(int more)
+    {
+        long bytes = TableGrowth.Of(Count, more, _keys.Length, _keys.Length, Unsafe.SizeOf<TKey>())
+            + TableGrowth.Of(Count, more, _tags.Length, _tags.Length / 2, sizeof(byte) + sizeof(int));
+        foreach (GroupKeys part in _parts)
+        {
+            bytes += part.GrowthFor(more);
+        }
+
+        return bytes;
+    }
 
     internal override void Reserve(int groups)
     {

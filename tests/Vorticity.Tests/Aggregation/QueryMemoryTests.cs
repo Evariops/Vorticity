@@ -54,8 +54,10 @@ public sealed partial class QueryMemoryTests
     [Theory]
     [InlineData(1)]
     [InlineData(14)]
-    public async Task ADistinctCountPastItsBudgetFailsAndGivesEverythingBack(int degree)
+    public async Task ADistinctCountPastItsBudgetSpillsAndGivesEverythingBack(int degree)
     {
+        // Its values go to the scratch and come back part by part (LaneSpillTests); a scratch it cannot
+        // write is the refusal.
         string path = await WriteAsync();
         try
         {
@@ -67,7 +69,7 @@ public sealed partial class QueryMemoryTests
             });
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            await Assert.ThrowsAsync<VortexMemoryException>(async () => await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
+            Assert.Equal(Keys, await file.Scan<Row>().CountDistinctAsync(r => r.Key, Ct));
             Assert.Equal(0, budget.ReservedBytes);
         }
         finally
@@ -278,6 +280,91 @@ public sealed partial class QueryMemoryTests
         {
             System.IO.File.Delete(path);
             System.IO.File.Delete(random);
+        }
+    }
+
+    [Theory]
+    [InlineData(64, 4, 2)]
+    [InlineData(20, 4, 1)]
+    [InlineData(16, 4, 0)]
+    [InlineData(15, 2, 2)]
+    [InlineData(5, 1, 2)]
+    [InlineData(1, 1, 0)]
+    public void AdmissionReservesTheReadsAheadAndDropsThemBeforeTheLanes(int mebibytes, int lanes, int ahead)
+    {
+        // Lanes of a megabyte of working memory each, over a source that copies splits of a quarter of a
+        // megabyte: two splits ahead a lane, then one, then none, before the lanes are halved; the lanes
+        // left read two again as far as they fit. A source that reads in place reserves none and reads two.
+        const long Split = 256 * 1024;
+        QueryMemoryBudget budget = new QueryMemoryBudget((long)mebibytes << 20);
+        using (QueryMemory memory = new QueryMemory(budget))
+        {
+            Assert.Equal(lanes, AggregationEngine.Admit(memory, 4, 0, 0, Split, out int admitted));
+            Assert.Equal(ahead, admitted);
+            Assert.Equal(lanes * ((1L << 20) + (ahead * Split)), memory.Held);
+        }
+
+        using (QueryMemory memory = new QueryMemory(new QueryMemoryBudget(64L << 20)))
+        {
+            Assert.Equal(4, AggregationEngine.Admit(memory, 4, 0, 0, splitBytes: 0, out int inPlace));
+            Assert.Equal(2, inPlace);
+            Assert.Equal(4L << 20, memory.Held);
+        }
+
+        Assert.Equal(0, budget.ReservedBytes);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(6)]
+    [InlineData(8)]
+    public async Task AStreamUnderABudgetOneLaneFitsEndsExactAtEveryDegree(int times)
+    {
+        // A sorted key of 40 values, each with 10 000 values of its own: a distinct count by it streams,
+        // on several lanes by ranges side by side, each holding every group of its rows until it goes out,
+        // which no range can spill. Under a few times what one lane holds, the budget admits one lane, which
+        // streams its groups out as they close, or a few ranges; a set the stream takes from a range moves
+        // from one count to the other, and once a range is refused, the rest of the rows stream on one
+        // lane. Under two and three times, the ranges failed; the query ends exact.
+        Row[] rows = new Row[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            rows[row] = new Row(row / 10_000, row);
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "query-memory", $"days-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            long alone = 0;
+            foreach (int degree in new[] { 1, 14 })
+            {
+                QueryMemoryBudget budget = new QueryMemoryBudget(degree == 1 ? 1L << 30 : times * alone);
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.MaxDegreeOfParallelism = degree;
+                    options.MemoryBudget = budget;
+                });
+
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                List<KeyCount> counts = await file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.CountDistinct(x => x.Value))).As<KeyCount>().ToRecordsAsync(Ct).ToListAsync(Ct);
+                Assert.Equal(Enumerable.Range(0, Rows / 10_000).Select(k => new KeyCount(k, 10_000)), counts);
+                Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+                Assert.Equal(0, budget.ReservedBytes);
+                alone = budget.PeakBytes;
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
         }
     }
 
@@ -561,6 +648,9 @@ public sealed partial class QueryMemoryTests
 
     [VortexRecord]
     public partial record struct Row(int Key, long Value);
+
+    [VortexRecord]
+    public partial record struct KeyCount(int Key, long Count);
 
     [VortexRecord]
     public partial record struct Wide(int Key, int Other, long Value, string Name, int Extra);

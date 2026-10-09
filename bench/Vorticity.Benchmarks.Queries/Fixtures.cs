@@ -1,5 +1,7 @@
 using System;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Vorticity.Benchmarks.Queries;
@@ -150,7 +152,7 @@ internal static class Fixtures
     /// over a tenth of the rows, the unique key a permutation of the row numbers spread over the
     /// integers, as identifiers are; stored canonical.
     /// </summary>
-    internal static ValueTask<string> RandomSpreadAsync(int rows) => WriteOnceAsync($"spread-random-{rows}.vortex", rows, canonical: true, row =>
+    internal static ValueTask<string> RandomSpreadAsync(int rows, VortexEdition? edition = null) => WriteOnceAsync($"spread-random-{rows}{Suffix(edition)}.vortex", rows, canonical: true, row =>
     {
         ulong a = Mix((ulong)row);
         ulong b = Mix(a);
@@ -158,7 +160,50 @@ internal static class Fixtures
         return new Spread(
             (int)(a % 1_000), (int)((a >> 32) % 10_000), (int)(b % 100_000), (int)((b >> 32) % 1_000_000), (int)(c % 10_000_000),
             (int)((c >> 32) % (ulong)Math.Max(1, rows / 10)), unchecked((int)((uint)row * 2_654_435_761u)), (long)(Mix(c) % 10_000), Mix(c) % 100_000 / 100.0);
-    });
+    }, edition);
+
+    /// <summary>
+    /// The rows of db-benchmark's group by (its <c>groupby-datagen.R</c>, N rows, K groups, no nulls, not
+    /// sorted), drawn by the same laws from the bench's own stream rather than R's: <c>id1</c> and
+    /// <c>id2</c> among <c>sprintf("id%03d", 1:K)</c>, <c>id3</c> among <c>sprintf("id%010d", 1:(N/K))</c>,
+    /// <c>id4</c> and <c>id5</c> in 1..K, <c>id6</c> in 1..N/K, <c>v1</c> in 1..5, <c>v2</c> in 1..15,
+    /// <c>v3</c> uniform over [0, 100) rounded to six decimals; stored canonical. The same shape as the
+    /// published files, not the same bytes: both sides of a comparison read this file.
+    /// </summary>
+    internal static ValueTask<string> GroupByAsync(int rows, int k, VortexEdition? edition = null)
+    {
+        int many = Math.Max(1, rows / k);
+        string[] few = [.. Enumerable.Range(1, k).Select(i => string.Create(CultureInfo.InvariantCulture, $"id{i:D3}"))];
+        string[] ids = [.. Enumerable.Range(1, many).Select(i => string.Create(CultureInfo.InvariantCulture, $"id{i:D10}"))];
+        return WriteOnceAsync($"groupby-{rows}-{k}{Suffix(edition)}.vortex", rows, canonical: true, row =>
+        {
+            ulong a = Mix((ulong)row);
+            ulong b = Mix(a);
+            ulong c = Mix(b);
+            ulong d = Mix(c);
+            double v3 = Math.Round((Mix(d) >> 11) * (100.0 / (1UL << 53)), 6);
+            return new GroupByRow(
+                few[(int)(a % (ulong)k)], few[(int)((a >> 32) % (ulong)k)], ids[(int)(b % (ulong)many)],
+                (int)((b >> 32) % (ulong)k) + 1, (int)(c % (ulong)k) + 1, (int)((c >> 32) % (ulong)many) + 1,
+                (int)(d % 5) + 1, (int)((d >> 32) % 15) + 1, v3);
+        }, edition);
+    }
+
+    /// <summary>
+    /// What a fixture's name adds for a file written at an older edition: the edition, <c>-core2025.10</c>
+    /// for <see cref="VortexEdition.Core20251000"/>, which has no zone maps and which other readers
+    /// read; nothing for the library's own.
+    /// </summary>
+    internal static string Suffix(VortexEdition? edition)
+    {
+        if (edition is not { } target)
+        {
+            return string.Empty;
+        }
+
+        string name = VortexEditions.Name(target);
+        return "-" + (name.EndsWith(".0", StringComparison.Ordinal) ? name[..^2] : name);
+    }
 
     /// <summary>
     /// The matrix's keys in the order of the rows: each key column the row number modulo its 10ⁿ
@@ -177,7 +222,7 @@ internal static class Fixtures
     /// The matrix's keys at a regular stride, in no order: the random file's keys shifted left by
     /// 22 bits, as identifiers whose sequence field is zero, every one a multiple of 2²²; stored canonical.
     /// </summary>
-    internal static ValueTask<string> StridedSpreadAsync(int rows) => WriteOnceAsync($"spread-strided-{rows}.vortex", rows, canonical: true, row =>
+    internal static ValueTask<string> StridedSpreadAsync(int rows, VortexEdition? edition = null) => WriteOnceAsync($"spread-strided-{rows}{Suffix(edition)}.vortex", rows, canonical: true, row =>
     {
         ulong a = Mix((ulong)row);
         ulong b = Mix(a);
@@ -185,7 +230,7 @@ internal static class Fixtures
         return new Strided(
             (long)(a % 1_000) << 22, (long)((a >> 32) % 10_000) << 22, (long)(b % 100_000) << 22, (long)((b >> 32) % 1_000_000) << 22,
             (long)(c % 10_000_000) << 22, (long)(Mix(c) % 10_000), Mix(c) % 100_000 / 100.0);
-    });
+    }, edition);
 
     /// <summary>
     /// Keys of a skewed popularity: a Zipf law of exponent 1.1 over a million values, drawn by its
@@ -229,6 +274,22 @@ internal static class Fixtures
             string.Create(System.Globalization.CultureInfo.InvariantCulture, $"https://example.com/catalog/item-{a % 1_000_000:D7}/view"),
             new Guid((uint)id, (ushort)(id >> 32), (ushort)(id >> 48), (byte)low, (byte)(low >> 8), (byte)(low >> 16), (byte)(low >> 24), (byte)(low >> 32), (byte)(low >> 40), (byte)(low >> 48), (byte)(low >> 56)),
             (int)(c % 100), (int)((c >> 32) % 1_000_000), (long)(Mix(c) % 1_000));
+    });
+
+    /// <summary>
+    /// Keys whose cardinality changes as the rows go, stored canonical: <c>Rising</c>, 10³ values over the
+    /// first quarter of the rows, then 10⁷; <c>Falling</c>, the other way round; <c>Session</c>, a session
+    /// of two consecutive rows, ten million of them, hashed to 64 bits, which a key of the first rows
+    /// alone reads as few.
+    /// </summary>
+    internal static ValueTask<string> PhasesAsync(int rows) => WriteOnceAsync($"phases-{rows}.vortex", rows, canonical: true, row =>
+    {
+        ulong a = Mix((ulong)row);
+        ulong b = Mix(a);
+        bool early = row < rows / 4;
+        int few = (int)(a % 1_000);
+        int many = (int)(b % 10_000_000);
+        return new Phases(early ? few : many, early ? many : few, (long)Mix((ulong)(row / 2)), (long)((a >> 40) % 1_000));
     });
 
     /// <summary>Visits of ten million users over 365 days, the days in order, a user drawn at random for each; stored canonical.</summary>
@@ -321,7 +382,7 @@ internal static class Fixtures
     }
 
     /// <summary>The file <paramref name="name"/> of <paramref name="rows"/> rows made by <paramref name="row"/>, written on first use; every column canonical when <paramref name="canonical"/>.</summary>
-    private static async ValueTask<string> WriteOnceAsync<T>(string name, int rows, bool canonical, Func<int, T> row)
+    private static async ValueTask<string> WriteOnceAsync<T>(string name, int rows, bool canonical, Func<int, T> row, VortexEdition? edition = null)
         where T : IVortexRecord<T>
     {
         string path = Path.Combine(Directory, name);
@@ -332,6 +393,10 @@ internal static class Fixtures
 
         string partial = path + ".partial";
         VortexWriteOptions options = canonical ? new VortexWriteOptions { Compression = CompressionProfile.None } : new VortexWriteOptions();
+        if (edition is { } target)
+        {
+            options = options with { TargetEdition = target };
+        }
         await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<T>(partial, options))
         {
             T[] block = new T[writer.BlockRows];

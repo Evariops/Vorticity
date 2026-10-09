@@ -137,8 +137,9 @@ public sealed class VortexSchemaException : VortexException
 
 /// <summary>
 /// Thrown when a query needs more memory than its <see cref="QueryMemoryBudget"/> grants, and nothing it
-/// holds can go to disk. The message names the operator, its groups and the bytes it asked for, and
-/// what to change. The query has given back everything it held.
+/// holds can go to disk; or more scratch than its <see cref="ScratchBudget"/> grants, or than its
+/// directory's free space leaves. The message names the operator, its groups and the bytes it asked
+/// for, and what to change. The query has given back everything it held, its scratch files included.
 /// </summary>
 public sealed class VortexMemoryException : VortexException
 {

@@ -114,6 +114,18 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The bytes of the arrays a lane's shelf handed out that its tables hold: what its query's memory counts of them.</summary>
     internal long Out => _out;
 
+    /// <summary>What a lane's shelf holds of its query's memory: the arrays it handed out, and what it reserved ahead of the next.</summary>
+    internal long Reserved => _out + _credit;
+
+    /// <summary>The arrays a lane's shelf handed out, every one, as its tables grew: a count of the work a growth costs, which the tests hold.</summary>
+    internal long Handed { get; private set; }
+
+    /// <summary>The bytes of those arrays.</summary>
+    internal long HandedBytes { get; private set; }
+
+    /// <summary>The bytes a lane's tables copied from an array into the one that replaced it (<see cref="Resize{T}"/>).</summary>
+    internal long CopiedBytes { get; private set; }
+
     /// <summary>The most bytes the shelf keeps on its piles; past it, what it is given goes.</summary>
     internal long Budget => _budget;
 
@@ -125,6 +137,22 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>Whether the shelf took an array past its budget, which turns its lane to the core at the next batch.</summary>
     internal bool Overdrawn { get; private set; }
+
+    /// <summary>The lane gave back what it took past the budget, its tables written to the scratch: it may take past it again.</summary>
+    internal void Relieved() => Overdrawn = false;
+
+    /// <summary>The lane took past the budget what its tables hold apart from the shelf's arrays: it is overdrawn as if the shelf had.</summary>
+    internal void Overdrew() => Overdrawn = true;
+
+    /// <summary>What a lane's shelf reserved ahead of the arrays to come given back: its tables grow no more, but by a merge, which reserves again.</summary>
+    internal void GiveBackAhead()
+    {
+        if (_memory is { } memory && _credit > 0)
+        {
+            memory.Shrink(_credit);
+            _credit = 0;
+        }
+    }
 
     /// <summary>
     /// The pressure the core whose shelf this is was made under: while memory is still
@@ -155,7 +183,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
 
         T[] grown = shelf.Take<T>(length, zeroed: true);
-        array.AsSpan(0, Math.Min(array.Length, length)).CopyTo(grown);
+        int copied = Math.Min(array.Length, length);
+        array.AsSpan(0, copied).CopyTo(grown);
+        if (shelf.Lane)
+        {
+            shelf.CopiedBytes += (long)copied * Unsafe.SizeOf<T>();
+        }
+
         shelf.Give(array);
         array = grown;
     }
@@ -171,11 +205,14 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         if (Lane)
         {
-            if ((long)length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+            long bytes = (long)length * Unsafe.SizeOf<T>();
+            if (bytes >= LeastCounted)
             {
                 Reserve(_memory!, bytes);
             }
 
+            Handed++;
+            HandedBytes += bytes;
             return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
         }
 
@@ -250,6 +287,50 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// delivered.
     /// </summary>
     internal bool Drops { get; set; }
+
+    /// <summary>
+    /// An array this shelf handed out that <paramref name="to"/>'s tables hold from now on, never counted
+    /// twice: between two lanes' shelves of one query, its bytes move from one count to the other and the
+    /// budget is not asked; else out of a lane's count first, then into the other's
+    /// (<see cref="Adopt{T}"/>). Adopted alone, a set a stream took from a range it followed counted twice
+    /// until the range was let go, and asked for more ahead while the range kept its own: the stream
+    /// failed under three times what one lane holds.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the array to <paramref name="to"/>.</exception>
+    internal void Hand<T>(T[] array, ArrayShelf? to)
+    {
+        long bytes = (long)array.Length * Unsafe.SizeOf<T>();
+        if (Lane && to is { Lane: true } && to._memory == _memory)
+        {
+            if (bytes >= LeastCounted)
+            {
+                _out -= bytes;
+                to._out += bytes;
+            }
+
+            return;
+        }
+
+        if (Lane && bytes >= LeastCounted)
+        {
+            Unreserve(_memory!, bytes);
+        }
+
+        to?.Adopt(array);
+    }
+
+    /// <summary>
+    /// An array another lane's shelf handed out, which this lane's tables now hold: reserved and
+    /// measured here as if handed out here. Nothing for a shelf that is not a lane's.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
+    internal void Adopt<T>(T[] array)
+    {
+        if (Lane && (long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+        {
+            Reserve(_memory!, bytes);
+        }
+    }
 
     /// <summary>
     /// An array the shelf handed out that nothing will take again, of a length no other asks: it leaves

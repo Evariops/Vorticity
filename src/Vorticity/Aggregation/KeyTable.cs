@@ -85,6 +85,28 @@ internal struct KeyTable<TValue>
     /// <summary>The keys the table holds.</summary>
     internal readonly int Count => _count;
 
+    /// <summary>
+    /// The bytes the table would take more were <paramref name="more"/> new keys to come: past six tenths
+    /// full it doubles, its store and its chains twice what they hold. Its chains may make it grow sooner.
+    /// </summary>
+    internal readonly long GrowthFor(int more)
+    {
+        // Past three tenths full, a table whose chains hold keys may grow before six tenths.
+        long fills = _overflowed > 0 ? Math.Min(_growAt, 3L * _length / 10) : _growAt;
+        if (_count + (long)more <= fills)
+        {
+            return 0;
+        }
+
+        long bytes = Math.Max(2 * Footprint, (long)FirstSlots * Unsafe.SizeOf<Slot>());
+        for (long fill = Math.Max(1, _growAt) * 2; _count + (long)more > fill; fill *= 2)
+        {
+            bytes *= 2;
+        }
+
+        return bytes;
+    }
+
     /// <summary>Whether a chain grew long enough for the table to take a seed.</summary>
     internal readonly bool Seeded => _seed != 0;
 
@@ -380,7 +402,11 @@ internal struct KeyTable<TValue>
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         uint hash;
-        if (seed != 0)
+        if (typeof(TValue) == typeof(TextWord))
+        {
+            hash = TextWord.Home(low, high, seed);
+        }
+        else if (seed != 0)
         {
             hash = (uint)((Unsafe.SizeOf<TValue>() <= sizeof(ulong) ? MergeHash.Of(low, seed) : MergeHash.Of(low, high, seed)) >> 32);
         }

@@ -68,8 +68,8 @@ public enum GroupOrdering
 /// <param name="ReloadedBytes">The bytes of sub-tables the bursts read again.</param>
 /// <param name="Tables">The sub-tables holding the groups at the end.</param>
 /// <param name="TableSplits">The times a sub-table split.</param>
-/// <param name="SpilledParts">The parts written to local scratch, which no budget held.</param>
-/// <param name="SpilledBytes">Their bytes.</param>
+/// <param name="SpilledParts">The parts of the core written to local scratch, which no budget held.</param>
+/// <param name="SpilledBytes">The bytes written to local scratch: the core's parts, or the lanes' runs.</param>
 /// <param name="KeyBlocksByRange">Key blocks grouped by their runs: constant or run-end, one lookup a run.</param>
 /// <param name="KeyBlocksByCode">Key blocks grouped by the codes of their dictionary, one lookup a distinct value.</param>
 /// <param name="KeyBlocksHashed">Key blocks grouped row by row, each value hashed.</param>
@@ -93,4 +93,48 @@ public sealed record GroupStatistics(
     long KeyBlocksByRange,
     long KeyBlocksByCode,
     long KeyBlocksHashed,
-    TimeSpan TimeToFirstBatch);
+    TimeSpan TimeToFirstBatch)
+{
+    /// <summary>Why the core held the groups; <see cref="GroupCoreReason.None"/> when each lane held a table of its own.</summary>
+    public GroupCoreReason CoreReason { get; init; }
+
+    /// <summary>
+    /// The rows the first lane to turn to the core had folded into its own table when it turned: 0 when
+    /// it turned on its first batch, before folding a row; -1 when no lane turned, the core held from the
+    /// start or not at all.
+    /// </summary>
+    public long TurnedAfterRows { get; init; } = -1;
+
+    /// <summary>
+    /// The runs the lanes wrote their tables to in local scratch, a table each time the budget held one
+    /// no more and the core could not take its groups: a text key, a composite holding one, a text's
+    /// extremes, a distinct count. 0 when nothing spilled.
+    /// </summary>
+    public int SpilledRuns { get; init; }
+}
+
+/// <summary>Why a group by held its groups in the core, each group once, rather than on a table each lane.</summary>
+public enum GroupCoreReason
+{
+    /// <summary>The core did not hold the groups: each lane held a table of the groups it met, merged at the end.</summary>
+    None,
+
+    /// <summary>The query asked for the core.</summary>
+    Asked,
+
+    /// <summary>A lane's first rows of a key hashed by its value were nearly all new groups: a key of half a million values or more.</summary>
+    FirstRows,
+
+    /// <summary>A lane's first batch of an integer key spread over the span the statistics bound it to, as a key in no order spreads.</summary>
+    Spread,
+
+    /// <summary>A lane's memory budget could not let its table grow.</summary>
+    Pressure,
+
+    /// <summary>
+    /// A lane's new groups came, past its first rows, at a rate that did not fall, as a key of sessions does,
+    /// where a key drawn from a fixed set of values comes at a falling one: its rows left would have made
+    /// half a million groups or more.
+    /// </summary>
+    Projection,
+}

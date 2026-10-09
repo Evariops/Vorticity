@@ -231,6 +231,94 @@ public sealed partial class SpillTests
     }
 
     [Theory]
+    [InlineData(1, false)]
+    [InlineData(4, false)]
+    [InlineData(4, true)]
+    public async Task AScratchBudgetTheSpillPassesFailsTheQueryCleanly(int degree, bool ordered)
+    {
+        // A budget of 64 KiB of scratch, which the first part spilled passes, or the first run of the
+        // sort of the groups an order spilled: the typed refusal, no file left, nothing reserved of
+        // either budget.
+        (string path, _) = await WriteAsync();
+        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        try
+        {
+            long peak = await PeakAsync(path, degree);
+            QueryMemoryBudget budget = new QueryMemoryBudget(peak / 5);
+            ScratchBudget room = new ScratchBudget(64 * 1024);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+                options.ScratchBudget = room;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            VortexMemoryException refused = await Assert.ThrowsAsync<VortexMemoryException>(async () =>
+            {
+                if (ordered)
+                {
+                    await file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key).OrderBy(g => g.Sum(x => x.Value)).Select(g => g.Key).ToListAsync(Ct);
+                    return;
+                }
+
+                await foreach (KeySum _ in Sums(file).As<KeySum>().ToRecordsAsync(Ct))
+                {
+                }
+            });
+            Assert.Contains("scratch budget", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Equal(0, room.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AScratchBudgetTheSpillFitsChangesNothing()
+    {
+        (string path, long[] expected) = await WriteAsync();
+        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        try
+        {
+            long peak = await PeakAsync(path, 4);
+            QueryMemoryBudget budget = new QueryMemoryBudget(peak / 10);
+            ScratchBudget room = new ScratchBudget(1L << 30);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+                options.ScratchBudget = room;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation sums = Sums(file);
+            int read = 0;
+            await foreach (KeySum sum in sums.As<KeySum>().ToRecordsAsync(Ct))
+            {
+                Assert.Equal(expected[sum.Key], sum.Sum);
+                read++;
+            }
+
+            Assert.Equal(Keys, read);
+            Assert.True(sums.Statistics.Grouping!.SpilledBytes > 0);
+            Assert.Equal(0, room.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
     [InlineData(1)]
     [InlineData(4)]
     public async Task AnOrderOverASpilledGroupBySortsItsGroupsInRuns(int degree)

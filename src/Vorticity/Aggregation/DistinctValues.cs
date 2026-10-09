@@ -38,6 +38,9 @@ internal sealed class DistinctValues<TValue>
     // The shelf the slots grow from, under the query's memory; null for values nothing counts.
     private ArrayShelf? _shelf;
 
+    // The seeds of the values' hash, the process's, kept here (KeyHash.SeededPair).
+    private readonly KeyHash.PairSeeds _seeds = KeyHash.Seeds;
+
     /// <summary>
     /// Values whose slots take <paramref name="capacity"/> before they double, the top
     /// <paramref name="skip"/> bits of every hash the same: a part's (<see cref="AddPart"/>), whose homes,
@@ -65,6 +68,21 @@ internal sealed class DistinctValues<TValue>
     /// <summary>The shelf the slots grow from from now on.</summary>
     internal void Govern(ArrayShelf? shelf) => _shelf = shelf;
 
+    /// <summary>The set moved to another lane's slot: its slots handed from its shelf to <paramref name="shelf"/>, which they grow from from now on.</summary>
+    internal void MoveTo(ArrayShelf? shelf)
+    {
+        if (_shelf is { } from)
+        {
+            from.Hand(_slots, shelf);
+        }
+        else
+        {
+            shelf?.Adopt(_slots);
+        }
+
+        _shelf = shelf;
+    }
+
     /// <summary>The values held.</summary>
     internal long Count => _count + (_zero ? 1 : 0);
 
@@ -73,6 +91,10 @@ internal sealed class DistinctValues<TValue>
 
     /// <summary>The bytes of the slots, at their capacity.</summary>
     internal long Footprint => (long)_slots.Length * Unsafe.SizeOf<TValue>();
+
+    /// <summary>The bytes of the slots <paramref name="values"/> more values could make it take beside the ones it holds: 0 when they cannot make it double.</summary>
+    internal long GrowthFor(int values) =>
+        (_count + (long)values) * 2 > _slots.Length ? FootprintOf((int)Math.Min(_count + (long)values, int.MaxValue / 4)) : 0;
 
     /// <summary>Gives the slots back to their shelf: the values are let go, and read no more.</summary>
     internal void Release()
@@ -83,7 +105,31 @@ internal sealed class DistinctValues<TValue>
         _zero = false;
     }
 
+    /// <summary>Forgets every value, keeping the slots at their length: a set taken again for another group.</summary>
+    internal void Clear()
+    {
+        Array.Clear(_slots);
+        _count = 0;
+        _zero = false;
+    }
+
+    /// <summary>Adds every value held to <paramref name="pairs"/> as group <paramref name="group"/>'s; the pairs that were new.</summary>
+    internal int AddTo(DistinctPairs<TValue> pairs, int group)
+    {
+        int added = _zero && pairs.Add(group, default) ? 1 : 0;
+        foreach (TValue value in _slots)
+        {
+            if (!IsFree(value) && pairs.Add(group, value))
+            {
+                added++;
+            }
+        }
+
+        return added;
+    }
+
     /// <summary>Adds <paramref name="value"/>; whether it was new.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal bool Add(TValue value)
     {
         value = Canonical(value);
@@ -94,7 +140,7 @@ internal sealed class DistinctValues<TValue>
             return added;
         }
 
-        return Insert(value, Hash(value));
+        return Insert(value, HashOf(value));
     }
 
     /// <summary>Adds every value of <paramref name="other"/>, in the order its slots hold them.</summary>
@@ -105,7 +151,7 @@ internal sealed class DistinctValues<TValue>
         _zero |= other._zero;
         foreach (TValue value in other._slots)
         {
-            if (!IsFree(value) && Insert(value, Hash(value)))
+            if (!IsFree(value) && Insert(value, HashOf(value)))
             {
                 added++;
             }
@@ -145,11 +191,70 @@ internal sealed class DistinctValues<TValue>
         }
     }
 
+    /// <summary>The cursor of <see cref="CopyPart"/> past a part's last value.</summary>
+    internal const int PartDone = int.MaxValue;
+
+    /// <summary>
+    /// Copies the values of part <paramref name="part"/> of <c>2^<paramref name="bits"/></c>, the top bits
+    /// of their hash, into <paramref name="into"/>, as they lie, walked as <see cref="AddPart"/> walks
+    /// them: a run of homes, a stretch of the slots, then the values probing took past it. The set takes
+    /// its homes from the top bits, no <c>skip</c>. The value of zero bits, which no slot holds, is not
+    /// among them. <paramref name="at"/> is the slot to read next, -1 to start, <see cref="PartDone"/>
+    /// once the part is copied: a part copied a page at a time.
+    /// </summary>
+    /// <returns>The values copied.</returns>
+    internal int CopyPart(int part, int bits, ref int at, Span<TValue> into)
+    {
+        TValue[] slots = _slots;
+        int mask = slots.Length - 1;
+        int laneBits = BitOperations.Log2((uint)slots.Length);
+        int from = laneBits >= bits ? part << (laneBits - bits) : part >> (bits - laneBits);
+        int to = laneBits >= bits ? (part + 1) << (laneBits - bits) : from + 1;
+        int shift = 64 - bits;
+        int copied = 0;
+        at = Math.Max(at, from);
+        while (copied < into.Length)
+        {
+            // Within the run of homes a free slot is passed; past it, it ends the part. A table at most
+            // half full leaves one before the walk comes round to the run again.
+            TValue value = slots[at & mask];
+            if (IsFree(value))
+            {
+                if (at >= to)
+                {
+                    at = PartDone;
+                    break;
+                }
+            }
+            else if ((int)(HashOf(value) >> shift) == part)
+            {
+                into[copied++] = value;
+            }
+
+            at++;
+        }
+
+        return copied;
+    }
+
+    /// <summary>Adds to <paramref name="counts"/> the values of each part of <c>2^<paramref name="bits"/></c>, the top bits of their hash; the value of zero bits not among them.</summary>
+    internal void CountParts(int bits, Span<long> counts)
+    {
+        int shift = 64 - bits;
+        foreach (TValue value in _slots)
+        {
+            if (!IsFree(value))
+            {
+                counts[bits == 0 ? 0 : (int)(HashOf(value) >> shift)]++;
+            }
+        }
+    }
+
     /// <summary>Adds <paramref name="value"/>, not the free one, when the top bits past <paramref name="shift"/> of its hash are <paramref name="part"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void AddOfPart(TValue value, int part, int shift)
     {
-        ulong hash = Hash(value);
+        ulong hash = HashOf(value);
         if ((int)(hash >> shift) == part)
         {
             Insert(value, hash);
@@ -157,6 +262,7 @@ internal sealed class DistinctValues<TValue>
     }
 
     /// <summary>Adds <paramref name="value"/>, not the free one, of hash <paramref name="hash"/>; whether it was new.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool Insert(TValue value, ulong hash)
     {
         TValue[] slots = _slots;
@@ -202,7 +308,7 @@ internal sealed class DistinctValues<TValue>
         {
             if (!IsFree(value))
             {
-                int at = Home(Hash(value), shift);
+                int at = Home(HashOf(value), shift);
                 while (!IsFree(slots[at]))
                 {
                     at = (at + 1) & mask;
@@ -229,7 +335,7 @@ internal sealed class DistinctValues<TValue>
         {
             if (!IsFree(_slots[at]))
             {
-                farthest = Math.Max(farthest, (at - Home(Hash(_slots[at]), shift)) & mask);
+                farthest = Math.Max(farthest, (at - Home(HashOf(_slots[at]), shift)) & mask);
             }
         }
 
@@ -256,6 +362,14 @@ internal sealed class DistinctValues<TValue>
     {
         (ulong low, ulong high) = KeyWords.Of(value);
         return KeyHash.Pair(low, high, 0);
+    }
+
+    /// <summary><see cref="Hash"/> under the seeds the set keeps: the same hash, a row at a time.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ulong HashOf(TValue value)
+    {
+        (ulong low, ulong high) = KeyWords.Of(value);
+        return KeyHash.SeededPair(low, high, 0, in _seeds);
     }
 
     /// <summary>A value as the bits it lies in: a float's one pattern a value, every NaN and both zeros made one.</summary>

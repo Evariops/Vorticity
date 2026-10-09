@@ -140,6 +140,13 @@ internal abstract class GroupKeys
     internal virtual (long Least, ulong Span)? ValueSpan => null;
 
     /// <summary>
+    /// For an index that numbers its groups by value over a span of <paramref name="least"/> values or
+    /// more: the bins of <paramref name="map"/>, 4 096 bits over the span, that the selected values of a
+    /// batch fall in, the bins the span takes, and the values read; null otherwise. Nothing is grouped.
+    /// </summary>
+    internal virtual (int Set, int Bins, int Values)? Spread(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, ulong least, Span<ulong> map) => null;
+
+    /// <summary>
     /// The part of a merge by value each group's key falls in: the span cut into 2^<paramref name="partBits"/>
     /// runs of numbers, the first part for the null group and for a value past the span.
     /// </summary>
@@ -213,6 +220,43 @@ internal abstract class GroupKeys
     private static NotSupportedException NotEntries() => new NotSupportedException("These keys do not travel in a part's batches.");
 
     /// <summary>
+    /// Whether the keys go to a lane's spill and come back (<see cref="WriteKeys"/>, <see cref="ReadKeys"/>):
+    /// every index a lane folds rows into; not one that appends, nor the parts of a merge read as one.
+    /// </summary>
+    internal virtual bool Spills => false;
+
+    /// <summary>
+    /// The section of a spill's run each group goes to: the top byte of its key's hash under
+    /// <see cref="MergeHash.Seed"/>, the same for one key in every lane and every table a lane empties,
+    /// as <see cref="Parts"/> cuts by values; the first section for the null group.
+    /// </summary>
+    internal virtual void Sections(Span<byte> sections) => Parts(MergeHash.Seed, 64 - SpillRun.SectionBits, sections);
+
+    /// <summary>
+    /// The hash of each group's key under <see cref="MergeHash.Seed"/>, 0 for the null group: what a key
+    /// of several columns takes its sections from, its columns' combined.
+    /// </summary>
+    internal virtual void Hashes(Span<ulong> hashes) => throw NotSpilled();
+
+    /// <summary>Writes the keys of <paramref name="groups"/>, in order: what <see cref="ReadKeys"/> reads back.</summary>
+    internal virtual void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer) => throw NotSpilled();
+
+    /// <summary>Reads as many keys as <paramref name="groups"/> holds, written by <see cref="WriteKeys"/>, each one's group here into it, added when new.</summary>
+    internal virtual void ReadKeys(ref SpillReader reader, Span<int> groups) => throw NotSpilled();
+
+    /// <summary>An empty index a part of a spill is read back into: hashed, never by value, its arrays from <paramref name="shelf"/>.</summary>
+    internal virtual GroupKeys ForSpill(ArrayShelf? shelf) => Fresh();
+
+    /// <summary>
+    /// The bytes the index's arrays would take more were <paramref name="more"/> new groups to come: what a
+    /// lane whose table spills asks the budget for before a batch, as many new groups as rows at most
+    /// (<see cref="TableGrowth"/>). Twice what it holds when it cannot tell.
+    /// </summary>
+    internal virtual long GrowthFor(int more) => 2 * Footprint;
+
+    private static NotSupportedException NotSpilled() => new NotSupportedException("These keys do not go to a spill.");
+
+    /// <summary>
     /// Readies the indexes of a parallel merge's partitions, this one the first of them, for their
     /// hashes and their merge in parts: what they share is merged once, a composite's indexes of its
     /// columns, so that a key has the same words in every partition. Nothing for a key of one column.
@@ -263,6 +307,13 @@ internal abstract class GroupKeys
     /// rows show.
     /// </summary>
     internal virtual bool NumberedByValue => false;
+
+    /// <summary>
+    /// Whether the keys of groups <paramref name="from"/> to <paramref name="to"/>, as they were met, rise:
+    /// a key in the order of the rows, whose every batch is new groups that the core would take no better.
+    /// False where the keys cannot tell.
+    /// </summary>
+    internal virtual bool Ascending(int from, int to) => false;
 
     /// <summary>
     /// Whether group <paramref name="group"/>'s key, an integer, lies below <paramref name="bound"/>:
@@ -543,6 +594,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             _index = new KeyTable<TValue>(shelf);
         }
+
         if (Integers && bounds is { } known && known.Max >= known.Min)
         {
             // The span counts both ends; a span of every long wraps to none.
@@ -827,6 +879,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         ReadOnlySpan<TValue> canonical = FixedReader.Values(arena, node, kind, ref _values, out ReadOnlySpan<ulong> validity);
+        return AssignValues(canonical, validity, rows, selection, rowGroups, ranges);
+    }
+
+    /// <summary>
+    /// <see cref="Assign"/> over a block's values in canonical form, which a caller may have made: a short
+    /// text key's words (<see cref="ShortTextKeys"/>).
+    /// </summary>
+    internal bool AssignValues(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    {
         if (_sorted)
         {
             Runs(canonical, validity, rows, selection, ranges);
@@ -925,6 +986,36 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         {
             int row = left[i];
             rowGroups[row] = StorageValues.IsValid(validity, row) ? Lookup(canonical[row]) : NullGroup();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="TwoPasses"/> over the rows from <paramref name="start"/> of a block, <paramref name="values"/>
+    /// theirs, every row selected: a short text key's words taken a few thousand rows at a time, so that a
+    /// lane that meets many keys turns into bytes before its table of words grows (<see cref="ShortTextKeys"/>).
+    /// </summary>
+    internal void AssignRange(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, int[] rowGroups)
+    {
+        int rows = values.Length;
+        if (_probeAhead > 0)
+        {
+            Scratch.Grow(ref _homes, rows);
+        }
+
+        Span<int> groups = rowGroups.AsSpan(start, rows);
+        _sink ^= _index.FindAtHome(values, groups, _homes, Math.Max(_probeAhead, 0), out bool missed);
+        if (!missed && validity.IsEmpty)
+        {
+            return;
+        }
+
+        for (int i = 0; i < rows; i++)
+        {
+            bool valid = StorageValues.IsValid(validity, start + i);
+            if (groups[i] < 0 || !valid)
+            {
+                groups[i] = valid ? Lookup(values[i]) : NullGroup();
+            }
         }
     }
 
@@ -1108,6 +1199,44 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _slab.AsSpan(start, 1 << PageBits).Fill(-1);
         _pageStarts![at] = start;
         return _pages![at] = _slab;
+    }
+
+    internal override (int Set, int Bins, int Values)? Spread(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, ulong least, Span<ulong> map)
+    {
+        if (_pages is null || _span < least)
+        {
+            return null;
+        }
+
+        // A bin a power of two of values, so that 4 096 of them or fewer cover the span.
+        int shift = Math.Max(0, 64 - System.Numerics.BitOperations.LeadingZeroCount(_span - 1) - 12);
+        int bins = (int)((_span - 1) >> shift) + 1;
+        ReadOnlySpan<TValue> values = FixedReader.Values(arena, nodes[0], _shape.Kind, ref _values, out ReadOnlySpan<ulong> validity);
+        long min = _directMin;
+        ulong span = _span;
+        int read = 0;
+        RowCursor cursor = new RowCursor(selection, 0, rows);
+        while (cursor.Next(out int row))
+        {
+            if (StorageValues.IsValid(validity, row))
+            {
+                ulong number = (ulong)(Integer(values[row]) - min);
+                if (number < span)
+                {
+                    int bin = (int)(number >> shift);
+                    map[bin >> 6] |= 1UL << (bin & 63);
+                    read++;
+                }
+            }
+        }
+
+        int set = 0;
+        foreach (ulong word in map[..((bins + 63) >> 6)])
+        {
+            set += System.Numerics.BitOperations.PopCount(word);
+        }
+
+        return (set, bins, read);
     }
 
     /// <summary>An integer value as a long; an unsigned one past the longs as a negative, which no table holds.</summary>
@@ -1297,6 +1426,52 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override int EntryBytes => Unsafe.SizeOf<TValue>();
 
+    internal override bool Spills => !_appending;
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = g == _null ? 0 : EntryKeys.Hash(_keys[g], MergeHash.Seed);
+        }
+    }
+
+    /// <summary>The null group's place among <paramref name="groups"/>, -1 for none, then every key, the null group's as the default value.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        buffer.Write(_null < 0 ? -1 : groups.IndexOf(_null));
+        Span<byte> keys = buffer.Take(groups.Length * Unsafe.SizeOf<TValue>());
+        for (int i = 0; i < groups.Length; i++)
+        {
+            MemoryMarshal.Write(keys[(i * Unsafe.SizeOf<TValue>())..], in _keys[groups[i]]);
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        int nullAt = reader.Read<int>();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            TValue key = reader.Read<TValue>();
+            groups[i] = i == nullAt ? NullGroup() : Lookup(key);
+        }
+    }
+
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new FixedKeys<TValue>(_shape, sorted: false, probeAhead: _probeAhead, shelf: shelf);
+
+    /// <summary>The keys' array, and the index, or numbered by value the pages of the span still to come, a page a new group at most.</summary>
+    internal override long GrowthFor(int more)
+    {
+        long bytes = TableGrowth.Of(Count, more, _keys.Length, _keys.Length, Unsafe.SizeOf<TValue>());
+        if (_pages is null)
+        {
+            return bytes + _index.GrowthFor(more);
+        }
+
+        long left = Math.Max(0, ((long)_pages.Length << PageBits) - _slabsHeld) >> PageBits;
+        return bytes + (Math.Min(more, left) << PageBits) * sizeof(int);
+    }
+
     internal override GroupKeys? Appending() => new FixedKeys<TValue>(_shape, sorted: false, appending: true);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
@@ -1465,7 +1640,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return leftValid == StorageValues.IsValid(validity, right) && (!leftValid || values[left].Equals(values[right]));
     }
 
-    private int Lookup(TValue value)
+    /// <summary>The group of <paramref name="value"/>, numbered as it first comes.</summary>
+    internal int Lookup(TValue value)
     {
         if (_appending)
         {
@@ -1486,7 +1662,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return group;
     }
 
-    private int NullGroup()
+    /// <summary>The group of the null key, numbered as it first comes.</summary>
+    internal int NullGroup()
     {
         if (_null < 0)
         {
@@ -1494,6 +1671,27 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return _null;
+    }
+
+    /// <summary>The key of group <paramref name="group"/>; the null group's is the default value.</summary>
+    internal TValue KeyAt(int group) => _keys[group];
+
+    internal override bool Ascending(int from, int to)
+    {
+        if (to - from < 2)
+        {
+            return false;
+        }
+
+        for (int g = from + 1; g < to; g++)
+        {
+            if (_keys[g].CompareTo(_keys[g - 1]) <= 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private int Add(TValue value)
@@ -1698,6 +1896,50 @@ internal sealed class BytesKeys : GroupKeys
     /// <summary>The hash of group <paramref name="group"/>'s key under <see cref="MergeHash.Seed"/>: the table's, unless it took a seed of its own.</summary>
     private ulong HashOf(int group) => _table.Reseeded ? MergeHash.Of(_table.KeyOf(group), MergeHash.Seed) : _table.HashOf(group);
 
+    internal override bool Spills => true;
+
+    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new BytesKeys(_shape, sorted: false, shelf);
+
+    internal override long GrowthFor(int more) => _table.GrowthFor(more);
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = g == _null ? 0 : HashOf(g);
+        }
+    }
+
+    /// <summary>The null group's place among <paramref name="groups"/>, -1 for none, then each other key's hash and bytes: read back, no text is hashed again.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        buffer.Write(_null < 0 ? -1 : groups.IndexOf(_null));
+        foreach (int group in groups)
+        {
+            if (group != _null)
+            {
+                buffer.Write(HashOf(group));
+                buffer.WriteBytes(_table.KeyOf(group));
+            }
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        int nullAt = reader.Read<int>();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (i == nullAt)
+            {
+                groups[i] = NullGroup();
+                continue;
+            }
+
+            ulong hash = reader.Read<ulong>();
+            groups[i] = Lookup(reader.Bytes(), hash);
+        }
+    }
+
     internal override int CompareKeys(GroupKeys other, int a, int b, int component)
     {
         BytesKeys right = (BytesKeys)other;
@@ -1773,7 +2015,10 @@ internal sealed class BytesKeys : GroupKeys
     }
 
     /// <summary>The group of <paramref name="value"/>, its entry in the table, numbered as it first comes.</summary>
-    private int Lookup(ReadOnlySpan<byte> value) => Lookup(value, MergeHash.Of(value, MergeHash.Seed));
+    internal int Lookup(ReadOnlySpan<byte> value) => Lookup(value, MergeHash.Of(value, MergeHash.Seed));
+
+    /// <summary>The bytes of group <paramref name="group"/>'s key; none for the null group.</summary>
+    internal ReadOnlySpan<byte> KeyOf(int group) => _table.KeyOf(group);
 
     /// <summary>As <see cref="Lookup(ReadOnlySpan{byte})"/>, the value's hash under <see cref="MergeHash.Seed"/> known.</summary>
     private int Lookup(ReadOnlySpan<byte> value, ulong hash)
@@ -1823,7 +2068,8 @@ internal sealed class BytesKeys : GroupKeys
         }
     }
 
-    private int NullGroup()
+    /// <summary>The group of the null key, numbered as it first comes.</summary>
+    internal int NullGroup()
     {
         if (_null < 0)
         {
@@ -1903,6 +2149,36 @@ internal sealed class BoolKeys : GroupKeys
         for (int g = 0; g < Count; g++)
         {
             parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, seed) >> shift);
+        }
+    }
+
+    internal override bool Spills => true;
+
+    /// <summary>Three groups at most, held from the start.</summary>
+    internal override long GrowthFor(int more) => 0;
+
+    internal override void Hashes(Span<ulong> hashes)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            hashes[g] = _keyOf[g] == 2 ? 0 : MergeHash.Of(_keyOf[g] + 1UL, MergeHash.Seed);
+        }
+    }
+
+    /// <summary>Each key's code: 0 for false, 1 for true, 2 for null.</summary>
+    internal override void WriteKeys(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            buffer.Write(_keyOf[group]);
+        }
+    }
+
+    internal override void ReadKeys(ref SpillReader reader, Span<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            groups[i] = GroupOf(reader.Read<byte>());
         }
     }
 

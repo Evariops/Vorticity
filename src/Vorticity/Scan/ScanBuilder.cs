@@ -80,14 +80,14 @@ internal sealed class ScanBuilder
     private bool _sinkDecodes;
 
     /// <summary>
-    /// Decodes nothing ahead and reads the next splits of a scan of one lane while it decodes one,
-    /// over a source whose read is a round trip (<see cref="ScanSpec.ReadAhead"/>): a prefetch of
-    /// <see cref="BatchAsyncEnumerable.ReadsAhead"/>, in the field a prefetch is held in, since these
-    /// paths are held to a ceiling in bytes.
+    /// Decodes nothing ahead and reads the next <paramref name="splits"/> splits of a scan of one lane
+    /// while it decodes one, over a source whose read is a round trip (<see cref="ScanSpec.ReadAhead"/>):
+    /// a prefetch of minus that many, in the field a prefetch is held in, since these paths are held to a
+    /// ceiling in bytes.
     /// </summary>
-    internal ScanBuilder WithReadAhead()
+    internal ScanBuilder WithReadAhead(int splits)
     {
-        _prefetch = BatchAsyncEnumerable.ReadsAhead;
+        _prefetch = -splits;
         return this;
     }
 
@@ -624,6 +624,47 @@ internal sealed class ScanBuilder
         ArgumentNullException.ThrowIfNull(metrics);
         _metrics = metrics;
         return this;
+    }
+
+    /// <summary>
+    /// The most bytes one split of this scan asks of its source: the segments it registers, summed, the
+    /// largest over the splits of the plan. A split read ahead holds at most that, over a source that
+    /// copies what it reads. The layout is walked, and nothing is read.
+    /// </summary>
+    internal long LargestSplitBytes()
+    {
+        LayoutTree tree = _file.LayoutTree;
+        ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
+        ScanProjection read = _filter is null ? keep : Union(keep, _filterPaths!);
+        (RowRange rows, _, long cap) = Frame(tree);
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
+        LayoutNode root = tree.Root;
+        LayoutReader reader = LayoutReaderTable.Require(in root);
+        FieldMask mask = read.RootMask;
+        SplitCursor cursor = plan.CreateCursor();
+        IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
+        long largest = 0;
+        try
+        {
+            while (cursor.TryNext(out RowRange split))
+            {
+                reader.RegisterSegments(in root, split, in mask, segments);
+                long bytes = 0;
+                for (int i = 0; i < segments.Count; i++)
+                {
+                    bytes += segments.GetSpec(i).Length;
+                }
+
+                largest = Math.Max(largest, bytes);
+                segments.Release();
+            }
+        }
+        finally
+        {
+            segments.Dispose();
+        }
+
+        return largest;
     }
 
     /// <summary>

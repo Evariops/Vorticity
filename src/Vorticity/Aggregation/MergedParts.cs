@@ -27,11 +27,42 @@ internal abstract class ResultParts
 }
 
 /// <summary>
+/// Where the parts of a result delivered one at a time come from, each merged by whoever takes it from
+/// a queue: the lanes' tables, or the runs they wrote to the scratch.
+/// </summary>
+internal abstract class PartSource
+{
+    private int _taken = -1;
+
+    /// <summary>The parts the merge cuts its groups into.</summary>
+    internal abstract int Parts { get; }
+
+    /// <summary>The next part no one took; <see cref="Parts"/> past the last.</summary>
+    internal int Take() => Math.Min(Interlocked.Increment(ref _taken), Parts);
+
+    /// <summary>An empty result's keys and slots: the first outcome of a merge delivered part by part, which holds no group.</summary>
+    internal abstract (GroupKeys Keys, AggregateSlot[] Slots) Empty();
+
+    /// <summary>
+    /// The part <paramref name="part"/> merged: its keys and slots, and what it reserved and measured of
+    /// the query's memory.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The budget does not grant the part's table.</exception>
+    internal abstract ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, CancellationToken cancellationToken);
+
+    /// <summary>What every part reads let go, once: every part is merged, or none will be.</summary>
+    internal abstract void Release();
+
+    /// <summary>The run's counts once every part is merged, with what the merge itself counted.</summary>
+    internal virtual AggregationRun Finished(AggregationRun run) => run;
+}
+
+/// <summary>
 /// The merge of the lanes' tables in parts (6d1), a part at a time: every partition's groups placed by
 /// part beforehand, then each part merged from every partition into a table of its own, its groups
 /// reserved before they come, taken from a queue by whoever merges next.
 /// </summary>
-internal sealed class PartMerge
+internal sealed class PartMerge : PartSource
 {
     private readonly AggregationPartition[] _partitions;
     private readonly GroupKeys[] _keysOf;
@@ -48,7 +79,6 @@ internal sealed class PartMerge
     private readonly Lock _gate = new Lock();
     private long _doneGroups;
     private long _doneEntries;
-    private int _taken = -1;
 
     internal PartMerge(
         AggregationPartition[] partitions, GroupKeys[] keysOf, int[][] placed, int[][] starts, int parts, AggregationPlan plan, AggregateSlot?[] settled,
@@ -69,25 +99,25 @@ internal sealed class PartMerge
         _perGroup = perGroup;
     }
 
-    /// <summary>The parts the merge cuts its groups into.</summary>
-    internal int Parts { get; }
+    internal override int Parts { get; }
 
-    /// <summary>The partitions merged, whose tables every part reads until the last is merged.</summary>
-    internal AggregationPartition[] Partitions => _partitions;
+    internal override (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (_keysOf[0].ForPart(), AggregationPartition.NewSlots(_plan, _settled, _source));
 
-    /// <summary>The next part no one took; <see cref="Parts"/> past the last.</summary>
-    internal int Take() => Math.Min(Interlocked.Increment(ref _taken), Parts);
-
-    /// <summary>An empty result's keys and slots: the first outcome of a merge delivered part by part, which holds no group.</summary>
-    internal (GroupKeys Keys, AggregateSlot[] Slots) Empty() => (_keysOf[0].ForPart(), AggregationPartition.NewSlots(_plan, _settled, _source));
-
-    /// <summary>The lanes' keys and the places of their groups let go: every part is merged, or none will be.</summary>
-    internal void Release()
+    /// <summary>The lanes' tables let go with what they held of the query's memory, their keys and the places of their groups.</summary>
+    internal override void Release()
     {
+        foreach (AggregationPartition partition in _partitions)
+        {
+            partition.LetGo();
+        }
+
         Array.Clear(_keysOf);
         Array.Clear(_placed);
         Array.Clear(_starts);
     }
+
+    internal override ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, CancellationToken cancellationToken) =>
+        new ValueTask<(GroupKeys, AggregateSlot[], long, long)>(Merge(part));
 
     /// <summary>
     /// The part <paramref name="part"/> merged from every partition: its keys and slots, and what it
@@ -192,7 +222,7 @@ internal sealed class PartMerge
 /// </remarks>
 internal sealed class MergedParts : ResultParts
 {
-    private readonly PartMerge _merge;
+    private readonly PartSource _merge;
     private readonly PartBuilder _builder;
     private readonly AggregationPlan _plan;
     private readonly QueryMemory _memory;
@@ -208,11 +238,12 @@ internal sealed class MergedParts : ResultParts
 
     /// <summary>
     /// The parts of <paramref name="merge"/> merged and built by <paramref name="workers"/> in the
-    /// background, a part each ahead of the reader at most; <paramref name="cut"/> bytes of the query's
-    /// memory, the places of the lanes' groups, given back with the lanes' tables.
+    /// background, a part each ahead of the reader at most, or by the reader alone, a part at a time, with
+    /// none; <paramref name="cut"/> bytes of the query's memory, the places of the lanes' groups, given
+    /// back with the lanes' tables.
     /// </summary>
     internal MergedParts(
-        PartMerge merge, PartBuilder builder, int workers, AggregationPlan plan, QueryMemory memory, long cut, long started, CancellationToken cancellationToken)
+        PartSource merge, PartBuilder builder, int workers, AggregationPlan plan, QueryMemory memory, long cut, long started, CancellationToken cancellationToken)
     {
         _merge = merge;
         _builder = builder;
@@ -346,17 +377,19 @@ internal sealed class MergedParts : ResultParts
     /// </summary>
     private async ValueTask<Built> BuildAsync(int part, CancellationToken cancellationToken)
     {
-        (GroupKeys keys, AggregateSlot[] slots, long reserved, long measured) = _merge.Merge(part);
-        long groups = Interlocked.Add(ref _groups, keys.Count);
+        (GroupKeys keys, AggregateSlot[] slots, long reserved, long measured) = await _merge.MergeAsync(part, cancellationToken).ConfigureAwait(false);
+        // The groups the reader counts as it takes each part (GroupBatches); the last part merged reads
+        // every part's, each added before its part counted as merged.
+        Interlocked.Add(ref _groups, keys.Count);
         if (Interlocked.Increment(ref _merged) == _merge.Parts)
         {
-            LetLanesGo();
-            _plan.LastGroups = groups;
-            _plan.PeakGroups = Math.Max(_plan.PeakGroups, groups);
             if (_plan.LastRun is { } run)
             {
-                _plan.LastRun = run with { MergeTicks = Stopwatch.GetTimestamp() - _started };
+                _plan.LastRun = _merge.Finished(run with { MergeTicks = Stopwatch.GetTimestamp() - _started });
             }
+
+            LetLanesGo();
+            _plan.PeakGroups = Math.Max(_plan.PeakGroups, Interlocked.Read(ref _groups));
         }
 
         Built built = new Built(reserved, measured);
@@ -405,11 +438,6 @@ internal sealed class MergedParts : ResultParts
         if (Interlocked.Exchange(ref _lanesGone, 1) != 0)
         {
             return;
-        }
-
-        foreach (AggregationPartition partition in _merge.Partitions)
-        {
-            partition.LetGo();
         }
 
         _merge.Release();

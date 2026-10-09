@@ -221,6 +221,13 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
     private int _fill = -1;
     private int _used;
 
+    // The bytes of the page the values fill: 4 KiB at first, then twice the one before, up to a page. A
+    // lane's table that goes to the scratch, or a part of one read back, holds a few groups.
+    private int _fillBytes;
+
+    /// <summary>The bytes of the first page the values fill.</summary>
+    private const int FirstPageBytes = 4096;
+
     // The bytes of the pages, and the rooms of the values they hold.
     private long _paged;
     private long _held;
@@ -354,7 +361,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
         {
             _at[i] = _at[groups[i]];
             int length = _lengths[i] = _lengths[groups[i]];
-            held += length < 0 ? 0 : Room(length);
+            held += length < 0 ? 0 : RoomOf(length);
         }
 
         // The groups past them are emptied again when they are made.
@@ -364,6 +371,46 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
 
     internal override TResult Result(int group) =>
         _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(ValueOf(group), _shape);
+
+    internal override bool SpillsStates => true;
+
+    /// <summary>Where each group's value lies, and the pages new values take at the mean of those held, past the last page's room.</summary>
+    internal override long GrowthFor(int more)
+    {
+        long bytes = TableGrowth.Of(_groups, more, _at.Length, _at.Length, sizeof(long) + sizeof(int));
+        long mean = _groups > 0 ? (_held / _groups) + 8 : 16;
+        long past = (more * mean) - (_fill < 0 ? 0 : _fillBytes - _used);
+        return past <= 0 ? bytes : bytes + (((past + PageBytes - 1) / PageBytes) * PageBytes);
+    }
+
+    /// <summary>Each group's value after its length, -1 for a group with none.</summary>
+    internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            if (_lengths[group] < 0)
+            {
+                buffer.Write(-1);
+            }
+            else
+            {
+                buffer.WriteBytes(ValueOf(group));
+            }
+        }
+    }
+
+    internal override void ReadStates(ref SpillReader reader, int count)
+    {
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int length = reader.Read<int>();
+            if (length >= 0)
+            {
+                Offer(group, reader.Bytes(length));
+            }
+        }
+    }
 
     public bool HoldsBytes => true;
 
@@ -404,28 +451,28 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
             }
 
             // In the room of the value it replaces when it fits; that room left behind otherwise.
-            if (value.Length <= Room(length))
+            if (value.Length <= RoomOf(length))
             {
                 long at = _at[group];
                 value.CopyTo(_pages[(int)(at >> 32)].AsSpan((int)at));
-                _held += Room(value.Length) - Room(length);
+                _held += RoomOf(value.Length) - RoomOf(length);
                 _lengths[group] = value.Length;
                 return;
             }
 
-            _held -= Room(length);
+            _held -= RoomOf(length);
             _lengths[group] = -1;
         }
 
         _at[group] = Place(value);
         _lengths[group] = value.Length;
-        _held += Room(value.Length);
+        _held += RoomOf(value.Length);
     }
 
     /// <summary>Copies <paramref name="value"/> to the end of the last page, or to a page of its own when it is long.</summary>
     private long Place(ReadOnlySpan<byte> value)
     {
-        int room = Room(value.Length);
+        int room = RoomOf(value.Length);
         if (room > PageBytes / 4)
         {
             int own = AddPage(room);
@@ -433,7 +480,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
             return (long)own << 32;
         }
 
-        if (_fill < 0 || _used + room > PageBytes)
+        if (_fill < 0 || _used + room > _fillBytes)
         {
             // A page more, unless the pages leave behind more than they hold: they are compacted first.
             if (_paged - _held > _held + PageBytes)
@@ -441,9 +488,10 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
                 Compact();
             }
 
-            if (_fill < 0 || _used + room > PageBytes)
+            if (_fill < 0 || _used + room > _fillBytes)
             {
-                _fill = AddPage(PageBytes);
+                _fillBytes = Math.Min(PageBytes, Math.Max(FirstPageBytes, Math.Max(room, 2 * _fillBytes)));
+                _fill = AddPage(_fillBytes);
                 _used = 0;
             }
         }
@@ -496,7 +544,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
     }
 
     /// <summary>The bytes a value of <paramref name="length"/> takes in a page: whole words, so that a value a little longer still fits.</summary>
-    private static int Room(int length) => (length + 7) & ~7;
+    private static int RoomOf(int length) => (length + 7) & ~7;
 
     private readonly struct Sink : IBytesSink
     {
@@ -589,6 +637,50 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override bool SpillsStates => true;
+
+    /// <summary>The counts and chains of the groups, and the table of pairs and their chains, a new pair a row at most.</summary>
+    internal override long GrowthFor(int more) => GrowthFor(more, more);
+
+    /// <summary>The counts and chains of the new groups, and every pair of the other's, which may all be new where their groups are not.</summary>
+    internal override long GrowthFor(AggregateSlot from, int groups) => GrowthFor(groups, (int)((BytesDistinctSlot)from).Pairs);
+
+    private long GrowthFor(int groups, int pairs) =>
+        TableGrowth.Of(_groups, groups, Math.Min(_counts.Length, _first.Length), Math.Min(_counts.Length, _first.Length), sizeof(long) + sizeof(int))
+        + _seen.GrowthFor(pairs)
+        + TableGrowth.Of(_seen.Count, pairs, _next.Length, _next.Length, sizeof(int));
+
+    /// <summary>Each group's values, their number first, each after its length.</summary>
+    internal override void WriteStates(ReadOnlySpan<int> groups, SpillBuffer buffer)
+    {
+        foreach (int group in groups)
+        {
+            int at = buffer.Length;
+            buffer.Write(0);
+            int values = 0;
+            for (int number = group < _first.Length ? _first[group] : 0; number != 0; number = _next[number - 1])
+            {
+                buffer.WriteBytes(_seen.KeyOf(number - 1)[4..]);
+                values++;
+            }
+
+            buffer.Patch(at, values);
+        }
+    }
+
+    internal override void ReadStates(ref SpillReader reader, int count)
+    {
+        EnsureGroups(count);
+        for (int group = 0; group < count; group++)
+        {
+            int values = reader.Read<int>();
+            for (int v = 0; v < values; v++)
+            {
+                Add(group, reader.Bytes());
+            }
+        }
+    }
 
     public long Pairs => _seen.Count;
 

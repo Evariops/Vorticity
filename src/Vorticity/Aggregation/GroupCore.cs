@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -276,6 +277,15 @@ internal sealed partial class GroupCore
 
     internal AggregationPlan Plan => _plan;
 
+    /// <summary>Why the query's groups went to the core.</summary>
+    internal CoreReason Reason { get; set; } = CoreReason.Plan;
+
+    // The rows the first lane to turn to the core had folded into its own table then; -1 when none turned.
+    private long _turnedAfter = -1;
+
+    /// <summary>A lane turns to the core after folding <paramref name="rows"/> rows into its own table: the first one's count is kept.</summary>
+    internal void TurnedAfter(long rows) => Interlocked.CompareExchange(ref _turnedAfter, rows, -1);
+
     internal AggregateSlot?[] Settled => _settled;
 
     internal ScanSource? Source => _source;
@@ -287,7 +297,7 @@ internal sealed partial class GroupCore
     internal static GroupCore? Of(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory = null) =>
-        (plan.Core || (plan.CoreScattered && facts is { Scattered: true })) && lanes >= (plan.CoreLanes ?? DefaultLanes)
+        plan.Core && lanes >= (plan.CoreLanes ?? DefaultLanes)
             ? Holding(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory, lean: plan.CoreLean)
             : null;
 
@@ -301,27 +311,41 @@ internal sealed partial class GroupCore
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory, bool lean)
     {
-        if (!plan.Grouped || sorted || top is not null)
+        if (!plan.Grouped || sorted || top is not null || !Holds(plan, settled, source, facts, out GroupKeys? kind, out GroupRecords? records))
         {
             return null;
-        }
-
-        GroupKeys kind = plan.CreateKeys(sorted: false, CacheFacts(facts));
-        if (kind.EntryBytes == 0)
-        {
-            return null;
-        }
-
-        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out GroupRecords? records);
-        foreach (AggregateSlot slot in slots)
-        {
-            if (slot.StateBytes == 0)
-            {
-                return null;
-            }
         }
 
         return new GroupCore(plan, settled, columns, inputs, source, CacheFacts(facts), kind.ForPart(), records?.Layout, lanes, memory, lean);
+    }
+
+    /// <summary>
+    /// Whether the core can hold the plan's groups: a key that travels in entries, of fixed width, and
+    /// every state in the records. The others, a text key, a composite holding one, a text's extremes, a
+    /// distinct count, only the lanes' tables hold, which spill under pressure.
+    /// </summary>
+    internal static bool Holds(AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts) =>
+        plan.Grouped && Holds(plan, settled, source, facts, out _, out _);
+
+    private static bool Holds(
+        AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts, [NotNullWhen(true)] out GroupKeys? kind, out GroupRecords? records)
+    {
+        records = null;
+        kind = plan.CreateKeys(sorted: false, CacheFacts(facts));
+        if (kind.EntryBytes == 0)
+        {
+            return false;
+        }
+
+        foreach (AggregateSlot slot in AggregationPartition.NewSlots(plan, settled, source, out records))
+        {
+            if (slot.StateBytes == 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -1171,6 +1195,10 @@ internal sealed partial class GroupCore
         {
             SpilledParts = SpilledParts,
             SpilledBytes = SpilledBytes,
+            AppliedEntries = Interlocked.Read(ref _applied),
+            MadeGroups = Interlocked.Read(ref _made),
+            Reason = Reason,
+            TurnedAfterRows = Interlocked.Read(ref _turnedAfter),
         };
     }
 }
@@ -1199,6 +1227,37 @@ internal sealed record CoreRun(
 
     /// <summary>The bytes it wrote there.</summary>
     internal long SpilledBytes { get; init; }
+
+    /// <summary>The entries the parts applied into their sub-tables, from the lanes' batches and from the scratch.</summary>
+    internal long AppliedEntries { get; init; }
+
+    /// <summary>The groups those entries made.</summary>
+    internal long MadeGroups { get; init; }
+
+    /// <summary>Why the query's groups went to the core.</summary>
+    internal CoreReason Reason { get; init; }
+
+    /// <summary>The rows the first lane to turn to the core had folded into its own table; -1 when no lane turned, the core taken from the start.</summary>
+    internal long TurnedAfterRows { get; init; } = -1;
+}
+
+/// <summary>Why a query's groups went to the core.</summary>
+internal enum CoreReason
+{
+    /// <summary>The plan asked for it (<see cref="AggregationPlan.Core"/>), the tests and the bench.</summary>
+    Plan,
+
+    /// <summary>A lane's first rows of a hashed key were nearly all new groups.</summary>
+    FirstRows,
+
+    /// <summary>A lane's first rows of an integer key numbered by value spread over its span as a key in no order spreads.</summary>
+    Spread,
+
+    /// <summary>A lane's budget could not let its table grow.</summary>
+    Pressure,
+
+    /// <summary>A lane's new groups came at a rate that did not fall, which its rows left would take past half a million.</summary>
+    Projection,
 }
 
 /// <summary>Where a group's record and its key lie in an entry of a part's batch.</summary>
@@ -1385,14 +1444,33 @@ internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
     private bool _turned;
 
     // Whether the first lane turned on what its rows showed rather than on its budget: the core is
-    // then the one a query takes for its speed, not the lean one that holds memory down.
+    // then the one a query takes for its speed, not the lean one that holds memory down. And what
+    // they showed.
     private bool _outgrown;
+    private CoreReason _reason = CoreReason.Pressure;
+
+    // The rows the lane whose rows turned the query had folded into its own table then; -1 before.
+    private long _outgrownAfter = -1;
 
     /// <summary>
-    /// A lane turns because its rows showed a key the lanes' tables cannot hold well: the
-    /// core, if not made yet, is made for speed rather than lean.
+    /// A lane turns because its rows showed a key the lanes' tables cannot hold well, <paramref name="reason"/>,
+    /// <paramref name="rows"/> of them folded: the core, if not made yet, is made for speed rather than
+    /// lean, and every lane turns. The first lane's judgment turns them all, not most lanes': measured on
+    /// 2026-10-08 at fourteen lanes, a key of 10⁷ values on its first quarter of rows and 10³ on the rest
+    /// was ×0.67 on the core, which a majority of lanes that met the 10³ values kept from it.
     /// </summary>
-    internal void Outgrew() => Volatile.Write(ref _outgrown, true);
+    internal void Outgrew(CoreReason reason, long rows)
+    {
+        lock (_gate)
+        {
+            if (!_outgrown)
+            {
+                _reason = reason;
+                _outgrownAfter = rows;
+                Volatile.Write(ref _outgrown, true);
+            }
+        }
+    }
 
     /// <summary>Whether a lane turned on what its rows showed: every lane then turns, whatever its table holds.</summary>
     internal bool Outgrown => Volatile.Read(ref _outgrown);
@@ -1424,6 +1502,12 @@ internal sealed class CorePressure(Func<bool, GroupCore?> make, int lanes)
                     if (_core is not null)
                     {
                         _core.Pressure = this;
+                        _core.Reason = _reason;
+                        if (_outgrownAfter >= 0)
+                        {
+                            _core.TurnedAfter(_outgrownAfter);
+                        }
+
                         _turn = new SemaphoreSlim(1, 1);
                     }
 
