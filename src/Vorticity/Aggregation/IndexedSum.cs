@@ -262,6 +262,15 @@ internal struct IndexedSum
     /// <summary>Folds another sum: the higher top for both, the bins added.</summary>
     internal void Merge(in IndexedSum other)
     {
+        // An empty sum takes the other whole: its count, its top, its infinities and its bins are what the
+        // fold would give, with no shift. Nearly every group of db-benchmark's q10 merges into an empty
+        // one, 9 % of its cycles at fourteen lanes.
+        if (Meta == 0)
+        {
+            this = other;
+            return;
+        }
+
         IndexedSum theirs = other;
         Counted(theirs.Count);
         int mine = Top;
