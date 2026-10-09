@@ -5,6 +5,7 @@ using System.IO.Pipelines;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Columns;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Encodings;
@@ -25,6 +26,9 @@ public sealed partial class ParquetWriterTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    /// <summary>PLAIN pages under ZSTD, for the tests that read a page's values as they lie.</summary>
+    private static readonly ParquetWriteOptions Plain = new() { Profile = CompressionProfile.None, Compression = ParquetCompression.Zstd };
+
     [VortexRecord]
     public partial record struct Reading(int Sensor, long Time, double? Value);
 
@@ -40,7 +44,7 @@ public sealed partial class ParquetWriterTests
             ("name", VortexType.Utf8.Nullable),
             ("flag", VortexType.Bool),
         ];
-        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema))
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, Plain))
         {
             ColumnsBuilder builder = writer.Builder();
             for (int i = 0; i < Rows; i++)
@@ -180,7 +184,7 @@ public sealed partial class ParquetWriterTests
         ];
         Guid guid = Guid.Parse("00112233-4455-6677-8899-aabbccddeeff");
         DateTimeOffset at = new(2026, 10, 9, 12, 30, 15, TimeSpan.Zero);
-        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema))
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, Plain))
         {
             ColumnsBuilder builder = writer.Builder();
             builder.Column<sbyte>(0).Append((sbyte)-5);
@@ -248,7 +252,7 @@ public sealed partial class ParquetWriterTests
     public async Task ClosesRowGroupsOnWholeBlocksAndAFlushKeepsThePartialOne()
     {
         using TempPath path = new();
-        ParquetWriteOptions options = new() { BlockRows = 1_024, RowGroupRows = 4_096, Compression = ParquetCompression.Snappy };
+        ParquetWriteOptions options = new() { BlockRows = 1_024, RowGroupRows = 4_096, Compression = ParquetCompression.Snappy, Profile = CompressionProfile.None };
         VortexSchema schema = [("n", VortexType.Int32)];
         await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, options))
         {
@@ -308,7 +312,7 @@ public sealed partial class ParquetWriterTests
         using TempPath path = new();
         Random random = new(17);
         VortexSchema schema = [("noise", VortexType.Int64), ("same", VortexType.Int64)];
-        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema))
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, Plain))
         {
             ColumnsBuilder builder = writer.Builder();
             for (int i = 0; i < 8_192; i++)
@@ -328,6 +332,109 @@ public sealed partial class ParquetWriterTests
         Assert.Equal(noise.UncompressedPageSize, noise.CompressedPageSize);
         Assert.True(same.IsCompressed);
         Assert.True(same.CompressedPageSize < same.UncompressedPageSize / 8);
+    }
+
+    [Fact]
+    public async Task WritesADictionaryWhileItPaysAndPlainOnceItDoesNot()
+    {
+        const int Rows = 8 * 8_192;
+        using TempPath path = new();
+        VortexSchema schema = [("label", VortexType.Utf8.Nullable), ("unique", VortexType.Int64), ("drifting", VortexType.Int32)];
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            for (int i = 0; i < Rows; i++)
+            {
+                if (i % 11 == 0)
+                {
+                    builder.Column<string?>(0).AppendNull();
+                }
+                else
+                {
+                    builder.Column<string?>(0).Append($"label-{i % 50}");
+                }
+
+                builder.Column<long>(1).Append(i * 7_919L);
+
+                // Ten values over the first two pages, then a new value in every row.
+                builder.Column<int>(2).Append(i < 2 * 8_192 ? i % 10 : i);
+            }
+
+            await writer.WriteAsync(builder, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        WrittenFile file = new(await System.IO.File.ReadAllBytesAsync(path.Value, Ct));
+        const uint PlainBit = 1u << (int)ParquetEncoding.Plain;
+        const uint DictionaryBit = 1u << (int)ParquetEncoding.RleDictionary;
+        const uint LevelsBit = 1u << (int)ParquetEncoding.Rle;
+
+        // The labels repeat: a dictionary page first, then pages of codes.
+        ColumnChunkMetadata label = file.Footer.Chunk(0, 0);
+        Assert.Equal(4L, label.DictionaryPageOffset);
+        Assert.True(label.DataPageOffset > label.DictionaryPageOffset);
+        Assert.Equal(PlainBit | DictionaryBit | LevelsBit, label.Encodings);
+        Assert.All(file.Pages(0, 0), page => Assert.Equal(ParquetEncoding.RleDictionary, file.Header(page).Encoding));
+
+        // Values that never repeat take no dictionary.
+        ColumnChunkMetadata unique = file.Footer.Chunk(0, 1);
+        Assert.Equal(-1L, unique.DictionaryPageOffset);
+        Assert.Equal(PlainBit, unique.Encodings);
+
+        // A dictionary while the values repeat, and while what they saved pays for the values that do
+        // not: PLAIN from the page where it stops paying, and never codes again.
+        ColumnChunkMetadata drifting = file.Footer.Chunk(0, 2);
+        Assert.True(drifting.DictionaryPageOffset > 0);
+        Assert.Equal(PlainBit | DictionaryBit, drifting.Encodings);
+        ParquetEncoding[] encodings = Array.ConvertAll(file.Pages(0, 2), page => file.Header(page).Encoding);
+        Assert.Equal([ParquetEncoding.RleDictionary, ParquetEncoding.RleDictionary], encodings[..2]);
+        Assert.Equal(ParquetEncoding.Plain, encodings[^1]);
+        int plain = Array.IndexOf(encodings, ParquetEncoding.Plain);
+        Assert.All(encodings[plain..], encoding => Assert.Equal(ParquetEncoding.Plain, encoding));
+
+        await using ParquetFile parquet = await ParquetFile.OpenAsync(path.Value, Ct);
+        long row = 0;
+        await foreach (RecordBatch batch in parquet.Scan().ToBatchesAsync(Ct))
+        {
+            using (batch)
+            {
+                BinaryColumn labels = batch.Column("label"u8).AsBinary();
+                ReadOnlySpan<long> uniques = batch.Column("unique"u8).AsPrimitive<long>().Values;
+                ReadOnlySpan<int> drifts = batch.Column("drifting"u8).AsPrimitive<int>().Values;
+                for (int r = 0; r < batch.RowCount; r++, row++)
+                {
+                    Assert.Equal(row % 11 == 0 ? null : $"label-{row % 50}", labels.GetString(r));
+                    Assert.Equal(row * 7_919L, uniques[r]);
+                    Assert.Equal(row < 2 * 8_192 ? (int)(row % 10) : (int)row, drifts[r]);
+                }
+            }
+        }
+
+        Assert.Equal(Rows, row);
+    }
+
+    [Fact]
+    public async Task WritesNoDictionaryUnderTheProfileWithoutEncodings()
+    {
+        using TempPath path = new();
+        VortexSchema schema = [("label", VortexType.Utf8)];
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, new ParquetWriteOptions { Profile = CompressionProfile.None }))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            for (int i = 0; i < 10_000; i++)
+            {
+                builder.Column<string>(0).Append($"label-{i % 3}");
+            }
+
+            await writer.WriteAsync(builder, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        WrittenFile file = new(await System.IO.File.ReadAllBytesAsync(path.Value, Ct));
+        ColumnChunkMetadata label = file.Footer.Chunk(0, 0);
+        Assert.Equal(-1L, label.DictionaryPageOffset);
+        Assert.Equal(CompressionCodec.Uncompressed, label.Codec);
+        Assert.Equal(1u << (int)ParquetEncoding.Plain, label.Encodings);
     }
 
     [Fact]

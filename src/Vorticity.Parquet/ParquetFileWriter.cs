@@ -92,7 +92,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _sink = sink;
         _filePipe = filePipe;
         _callerPipe = callerPipe;
-        _codec = (CompressionCodec)options.Compression;
+        _codec = (CompressionCodec)options.ResolvedCompression;
         int level = options.ResolvedLevel;
         if (_codec == CompressionCodec.Zstd)
         {
@@ -104,7 +104,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _columns = new ColumnChunkWriter[map.Columns.Length];
         for (int i = 0; i < _columns.Length; i++)
         {
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, session.Options.EnginePool);
+            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Dictionaries, session.Options.EnginePool);
         }
 
         _nodes = new int[_columns.Length];

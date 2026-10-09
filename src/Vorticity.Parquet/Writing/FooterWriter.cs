@@ -152,14 +152,33 @@ internal static class FooterWriter
         writer.WriteI64Field(5, chunk.Rows);
         writer.WriteI64Field(6, chunk.UncompressedSize);
         writer.WriteI64Field(7, chunk.CompressedSize);
-        writer.WriteI64Field(9, chunk.Offset);
+        writer.WriteI64Field(9, chunk.DataPageOffset);
+        if (chunk.DictionaryPageOffset >= 0)
+        {
+            writer.WriteI64Field(11, chunk.DictionaryPageOffset);
+        }
+
         WriteStatistics(ref writer, chunk);
-        writer.WriteListField(13, ThriftType.Struct, 1);
-        short stats = writer.BeginStruct();
-        writer.WriteI32Field(1, (int)PageType.DataPageV2);
-        writer.WriteI32Field(2, (int)ParquetEncoding.Plain);
-        writer.WriteI32Field(3, chunk.Pages.Length);
-        writer.EndStruct(stats);
+
+        // How many pages of each kind and encoding: what tells a reader every data page is codes.
+        bool dictionary = chunk.DictionaryPageOffset >= 0;
+        int kinds = (dictionary ? 1 : 0) + (chunk.DictionaryPages > 0 ? 1 : 0) + (chunk.PlainPages > 0 ? 1 : 0);
+        writer.WriteListField(13, ThriftType.Struct, kinds);
+        if (dictionary)
+        {
+            WriteEncodingStats(ref writer, PageType.DictionaryPage, ParquetEncoding.Plain, 1);
+        }
+
+        if (chunk.DictionaryPages > 0)
+        {
+            WriteEncodingStats(ref writer, PageType.DataPageV2, ParquetEncoding.RleDictionary, chunk.DictionaryPages);
+        }
+
+        if (chunk.PlainPages > 0)
+        {
+            WriteEncodingStats(ref writer, PageType.DataPageV2, ParquetEncoding.Plain, chunk.PlainPages);
+        }
+
         writer.EndStruct(metadata);
         if (written.OffsetIndexOffset >= 0)
         {
@@ -167,6 +186,15 @@ internal static class FooterWriter
             writer.WriteI32Field(5, written.OffsetIndexLength);
         }
 
+        writer.EndStruct(saved);
+    }
+
+    private static void WriteEncodingStats(ref ThriftCompactWriter writer, PageType type, ParquetEncoding encoding, int count)
+    {
+        short saved = writer.BeginStruct();
+        writer.WriteI32Field(1, (int)type);
+        writer.WriteI32Field(2, (int)encoding);
+        writer.WriteI32Field(3, count);
         writer.EndStruct(saved);
     }
 

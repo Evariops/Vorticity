@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
@@ -77,6 +78,10 @@ internal sealed class ColumnChunkReader : IDisposable
     private long _rowsLeft;
     private long _rowsUnread;
     private Page? _page;
+
+    /// <summary>The chunk's dictionary, decoded once as a page of one slot per entry.</summary>
+    private Page? _dictionary;
+
     private VortexBuffer[] _gathered = new VortexBuffer[4];
 
     internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, AlignedBufferPool pool, long cap)
@@ -183,6 +188,13 @@ internal sealed class ColumnChunkReader : IDisposable
             _page = null;
         }
 
+        if (_dictionary is { } dictionary)
+        {
+            dictionary.Release();
+            _free.Push(dictionary);
+            _dictionary = null;
+        }
+
         _chunk = default;
     }
 
@@ -261,15 +273,20 @@ internal sealed class ColumnChunkReader : IDisposable
             }
             else if (_views)
             {
-                if (buffers == _gathered.Length)
+                // Pages whose views point into one buffer, the dictionary's, share its entry.
+                int bufferBase = buffers > 0 && Same(_gathered[buffers - 1], page.Data) ? buffers - 1 : buffers;
+                if (bufferBase == buffers)
                 {
-                    Array.Resize(ref _gathered, buffers * 2);
+                    if (buffers == _gathered.Length)
+                    {
+                        Array.Resize(ref _gathered, buffers * 2);
+                    }
+
+                    _gathered[buffers++] = page.Data;
                 }
 
-                _gathered[buffers] = page.Data;
                 CanonicalConcat.RebaseInto(
-                    from.Slice(page.Read * _slot, take * _slot), into.Slice(done * _slot, take * _slot), take, buffers, 1, 0);
-                buffers++;
+                    from.Slice(page.Read * _slot, take * _slot), into.Slice(done * _slot, take * _slot), take, bufferBase, 1, 0);
             }
             else
             {
@@ -348,8 +365,8 @@ internal sealed class ColumnChunkReader : IDisposable
                 case PageType.DataPage:
                     return DecodeV1(context, header, at);
                 case PageType.DictionaryPage:
-                    throw new ParquetUnsupportedException("RLE_DICTIONARY", ParquetComponentKind.Encoding,
-                        $"The column '{Name}' is dictionary-encoded, which this version of the reader does not decode yet.");
+                    _dictionary = DecodeDictionary(context, header, at);
+                    continue;
                 default:
                     // An index page, or a kind a later version of the standard adds: not data.
                     continue;
@@ -388,7 +405,7 @@ internal sealed class ColumnChunkReader : IDisposable
                 Cap(size);
                 NativeSegmentOwner owner = _pool.Rent(size, 64);
                 PageCodecs.Decompress(_codec, stored.Span, owner.WritableSpan, context.Zstd);
-                Values(page, owner.Buffer, owner, valid);
+                Decode(page, header.Encoding, owner.Buffer, owner, valid);
             }
             else
             {
@@ -397,7 +414,7 @@ internal sealed class ColumnChunkReader : IDisposable
                     ParquetThrow.Format($"An uncompressed page of '{Name}' holds {stored.Length} bytes of values where its header declares {size}.");
                 }
 
-                Values(page, stored, null, valid);
+                Decode(page, header.Encoding, stored, null, valid);
             }
 
             return page;
@@ -459,7 +476,7 @@ internal sealed class ColumnChunkReader : IDisposable
                 position = sizeof(int) + length;
             }
 
-            Values(page, body.Slice(position, body.Length - position), owner, valid);
+            Decode(page, header.Encoding, body.Slice(position, body.Length - position), owner, valid);
             return page;
         }
         catch
@@ -813,12 +830,174 @@ internal sealed class ColumnChunkReader : IDisposable
 
     private void RequireEncoding(ParquetEncoding encoding)
     {
-        if (encoding != ParquetEncoding.Plain)
+        if (encoding is not (ParquetEncoding.Plain or ParquetEncoding.RleDictionary or ParquetEncoding.PlainDictionary))
         {
             throw new ParquetUnsupportedException(encoding.ToString(), ParquetComponentKind.Encoding,
-                $"A page of '{Name}' is {encoding}; this version of the reader decodes PLAIN pages.");
+                $"A page of '{Name}' is {encoding}; this version of the reader decodes PLAIN and dictionary pages.");
         }
     }
+
+    /// <summary>A page's values by their encoding: PLAIN, or codes into the chunk's dictionary.</summary>
+    private void Decode(Page page, ParquetEncoding encoding, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    {
+        if (encoding == ParquetEncoding.Plain)
+        {
+            Values(page, values, owner, valid);
+            return;
+        }
+
+        try
+        {
+            Codes(page, values.Span, valid);
+        }
+        finally
+        {
+            owner?.Dispose();
+        }
+    }
+
+    /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
+    private Page DecodeDictionary(ScanContext context, in PageHeader header, int at)
+    {
+        if (_dictionary is not null)
+        {
+            ParquetThrow.Format($"The column chunk of '{Name}' holds a second dictionary page.");
+        }
+
+        if (header.Encoding is not (ParquetEncoding.Plain or ParquetEncoding.PlainDictionary))
+        {
+            throw new ParquetUnsupportedException(header.Encoding.ToString(), ParquetComponentKind.Encoding,
+                $"The dictionary page of '{Name}' is {header.Encoding}; the standard writes a dictionary PLAIN.");
+        }
+
+        Page page = Rent(header.ValueCount);
+        try
+        {
+            int size = header.UncompressedPageSize;
+            VortexBuffer body = _chunk.Slice(at, header.CompressedPageSize);
+            if (_codec != CompressionCodec.Uncompressed)
+            {
+                // A dictionary page has no flag that keeps it out of the codec: it is always compressed.
+                Cap(size);
+                NativeSegmentOwner owner = _pool.Rent(size, 64);
+                PageCodecs.Decompress(_codec, body.Span, owner.WritableSpan, context.Zstd);
+                Values(page, owner.Buffer, owner, header.ValueCount);
+            }
+            else
+            {
+                if (body.Length != size)
+                {
+                    ParquetThrow.Format($"The dictionary page of '{Name}' holds {body.Length} bytes where its header declares {size}.");
+                }
+
+                Values(page, body, null, header.ValueCount);
+            }
+
+            return page;
+        }
+        catch
+        {
+            page.Release();
+            _free.Push(page);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// A dictionary-encoded page: its codes, behind their width, decoded and gathered from the
+    /// chunk's dictionary into one slot per row, every code checked against the dictionary's size.
+    /// </summary>
+    private void Codes(Page page, ReadOnlySpan<byte> source, int valid)
+    {
+        Page dictionary = _dictionary ?? ParquetThrow.Format<Page>($"A page of '{Name}' is dictionary-encoded and its chunk holds no dictionary page before it.");
+        int rows = page.Rows;
+        if (valid == 0)
+        {
+            // Every row is null: zeroed slots, nothing to gather.
+            Slots(page, _slot == 0 ? CanonicalSupport.BitmapByteCount(rows) : rows * _slot).WritableSpan.Clear();
+            page.Data = dictionary.Data;
+            return;
+        }
+
+        if (source.IsEmpty || source[0] > 32)
+        {
+            ParquetThrow.Format($"A dictionary-encoded page of '{Name}' lacks its codes' width, or declares one past 32 bits.");
+        }
+
+        int width = source[0];
+        NativeSegmentOwner codes = _pool.Rent(valid * sizeof(uint), 64);
+        NativeSegmentOwner? dense = null;
+        try
+        {
+            Span<uint> span = MemoryMarshal.Cast<byte, uint>(codes.WritableSpan)[..valid];
+            if (width == 0)
+            {
+                span.Clear();
+            }
+            else
+            {
+                new RleHybridDecoder(width).Read(source[1..], span);
+            }
+
+            if (_slot == 0)
+            {
+                // Booleans: a bit per entry, gathered a bit at a time.
+                NativeSegmentOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
+                Span<byte> into = bits.WritableSpan;
+                into.Clear();
+                ReadOnlySpan<byte> entries = dictionary.Values.Span;
+                Span<byte> gathered = page.Validity is null ? into : (dense = _pool.Rent(CanonicalSupport.BitmapByteCount(valid), 64)).WritableSpan;
+                gathered.Clear();
+                for (int i = 0; i < valid; i++)
+                {
+                    uint code = span[i];
+                    if (code >= (uint)dictionary.Rows)
+                    {
+                        ParquetThrow.Format($"A code of '{Name}', {code}, passes its dictionary's {dictionary.Rows} entries.");
+                    }
+
+                    if (CanonicalSupport.BitAt(entries, (int)code))
+                    {
+                        CanonicalSupport.SetBit(gathered, i);
+                    }
+                }
+
+                if (page.Validity is not null)
+                {
+                    SpreadBits(gathered, page.Validity.Buffer.Span, into, rows);
+                }
+
+                return;
+            }
+
+            ReadOnlySpan<byte> codeBytes = MemoryMarshal.AsBytes((ReadOnlySpan<uint>)span);
+            NativeSegmentOwner slots = Slots(page, rows * _slot);
+            Span<byte> target = page.Validity is null ? slots.WritableSpan : (dense = _pool.Rent(valid * _slot, 64)).WritableSpan;
+            int bad = RowKernels.Gather(codeBytes, PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, target[..(valid * _slot)], valid);
+            if (bad >= 0)
+            {
+                ParquetThrow.Format($"A code of '{Name}', {span[bad]}, passes its dictionary's {dictionary.Rows} entries.");
+            }
+
+            if (page.Validity is not null)
+            {
+                Span<byte> into = slots.WritableSpan;
+                into.Clear();
+                ValidRows.Spread(target[..(valid * _slot)], into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _slot, Encoding);
+            }
+
+            // Gathered views point into the dictionary's bytes, which the chunk keeps.
+            page.Data = dictionary.Data;
+        }
+        finally
+        {
+            codes.Dispose();
+            dense?.Dispose();
+        }
+    }
+
+    private static bool Same(VortexBuffer a, VortexBuffer b) =>
+        a.Length == b.Length && Unsafe.AreSame(ref MemoryMarshal.GetReference(a.Span), ref MemoryMarshal.GetReference(b.Span));
 
     private void Cap(long bytes)
     {

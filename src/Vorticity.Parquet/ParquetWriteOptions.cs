@@ -46,12 +46,23 @@ public sealed record ParquetWriteOptions
     /// </summary>
     public long RowGroupBytes { get; init; } = 256L << 20;
 
-    /// <summary>The codec of every page. <see cref="ParquetCompression.Zstd"/> by default.</summary>
-    public ParquetCompression Compression { get; init; } = ParquetCompression.Zstd;
+    /// <summary>
+    /// What the writer optimises for. <see cref="CompressionProfile.Auto"/>, the default, and
+    /// <see cref="CompressionProfile.Fastest"/> and <see cref="CompressionProfile.Smallest"/> write a
+    /// dictionary where it pays; <see cref="CompressionProfile.None"/> writes PLAIN pages alone.
+    /// </summary>
+    public CompressionProfile Profile { get; init; } = CompressionProfile.Auto;
 
     /// <summary>
-    /// The codec's level, for the codecs that take one; 0 for the codec's default: 3 for ZSTD, 4 for
-    /// BROTLI and 6 for GZIP.
+    /// The codec of every page; null for the profile's: ZSTD under <see cref="CompressionProfile.Auto"/>
+    /// and <see cref="CompressionProfile.Smallest"/>, LZ4_RAW under <see cref="CompressionProfile.Fastest"/>,
+    /// none under <see cref="CompressionProfile.None"/>.
+    /// </summary>
+    public ParquetCompression? Compression { get; init; }
+
+    /// <summary>
+    /// The codec's level, for the codecs that take one; 0 for the codec's default: 3 for ZSTD, 19
+    /// under <see cref="CompressionProfile.Smallest"/>, 4 for BROTLI and 6 for GZIP.
     /// </summary>
     public int CompressionLevel { get; init; }
 
@@ -68,12 +79,17 @@ public sealed record ParquetWriteOptions
         }
 
         ArgumentOutOfRangeException.ThrowIfLessThan(RowGroupBytes, 1, nameof(RowGroupBytes));
-        if (!Enum.IsDefined(Compression))
+        if (!Enum.IsDefined(Profile))
         {
-            throw new ArgumentOutOfRangeException(nameof(Compression), Compression, "Not a codec this library writes.");
+            throw new ArgumentOutOfRangeException(nameof(Profile), Profile, "Not a profile.");
         }
 
-        (int least, int most) = Compression switch
+        if (Compression is { } codec && !Enum.IsDefined(codec))
+        {
+            throw new ArgumentOutOfRangeException(nameof(Compression), codec, "Not a codec this library writes.");
+        }
+
+        (int least, int most) = ResolvedCompression switch
         {
             ParquetCompression.Zstd => (ZstdCompressor.MinLevel, ZstdCompressor.MaxLevel),
             ParquetCompression.Brotli => (0, 11),
@@ -85,18 +101,29 @@ public sealed record ParquetWriteOptions
             throw new ArgumentOutOfRangeException(
                 nameof(CompressionLevel),
                 CompressionLevel,
-                most == 0 ? $"{Compression} takes no level." : $"{Compression} takes a level from {least} to {most}.");
+                most == 0 ? $"{ResolvedCompression} takes no level." : $"{ResolvedCompression} takes a level from {least} to {most}.");
         }
     }
 
-    /// <summary>The level the pages are compressed at: the one asked for, or the codec's default.</summary>
-    internal int ResolvedLevel => CompressionLevel != 0 ? CompressionLevel : Compression switch
+    /// <summary>The codec of the pages: the one asked for, or the profile's.</summary>
+    internal ParquetCompression ResolvedCompression => Compression ?? Profile switch
     {
-        ParquetCompression.Zstd => ZstdCompressor.DefaultLevel,
+        CompressionProfile.Fastest => ParquetCompression.Lz4Raw,
+        CompressionProfile.None => ParquetCompression.Uncompressed,
+        _ => ParquetCompression.Zstd,
+    };
+
+    /// <summary>The level the pages are compressed at: the one asked for, or the codec's default.</summary>
+    internal int ResolvedLevel => CompressionLevel != 0 ? CompressionLevel : ResolvedCompression switch
+    {
+        ParquetCompression.Zstd => Profile == CompressionProfile.Smallest ? 19 : ZstdCompressor.DefaultLevel,
         ParquetCompression.Brotli => 4,
         ParquetCompression.Gzip => 6,
         _ => 0,
     };
+
+    /// <summary>Whether the profile writes a dictionary where it pays.</summary>
+    internal bool Dictionaries => Profile != CompressionProfile.None;
 }
 
 /// <summary>What a Parquet writer wrote.</summary>

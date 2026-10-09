@@ -117,6 +117,9 @@ internal sealed class DistinctTable
     /// <summary>Per code, the chunk-relative row where it first occurred.</summary>
     internal ReadOnlySpan<int> FirstRows => _firstRows.AsSpan(0, _distinct);
 
+    /// <summary>The code the null took, or -1 while no null was probed: a format that gives a null no code leaves it out.</summary>
+    internal int NullCode => _nullCode;
+
     /// <summary>
     /// A table for the column <paramref name="node"/> is an instance of, or <see langword="null"/>
     /// for a kind that has no row equality and is offered no dictionary.

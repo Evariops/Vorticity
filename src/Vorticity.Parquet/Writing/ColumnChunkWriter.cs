@@ -27,10 +27,19 @@ namespace Vorticity.Parquet.Writing;
 /// <remarks>
 /// <para>
 /// Staging is the page's own form: the values of the rows that hold one, packed as PLAIN stores
-/// them, and the validity as a bitmap, so closing a page encodes nothing more than its levels. A
-/// page closes at every block of <see cref="WriteColumn"/>'s writer's block rows counted from the
-/// file's first row, the same rows in every column, which is the grid a reader of this file reads
-/// a batch per page on.
+/// them, and the validity as a bitmap. A page closes at every block of the writer's block rows
+/// counted from the file's first row, the same rows in every column, which is the grid a reader of
+/// this file reads a batch per page on.
+/// </para>
+/// <para>
+/// A column of values a dictionary serves — integers of four bytes or more, floats, decimals, text
+/// and binary — is probed into the core's distinct table as its rows are staged, its new values
+/// appended to the dictionary in their PLAIN form as they first occur. A page is then its codes,
+/// RLE_DICTIONARY, while the dictionary holds: while it stays under
+/// <see cref="DictionaryPageBytes"/> and the chunk's codes and dictionary take fewer bytes than the
+/// values they stand for. Once it does not, that page and the chunk's later ones are PLAIN, and the
+/// dictionary page, written first in the chunk when the row group closes, holds the values coded so
+/// far.
 /// </para>
 /// <para>
 /// A page is a v2 data page: its definition levels uncompressed before its values, the values
@@ -40,6 +49,9 @@ namespace Vorticity.Parquet.Writing;
 /// </remarks>
 internal sealed class ColumnChunkWriter : IDisposable
 {
+    /// <summary>The most bytes a dictionary page may hold: past them, the chunk's later pages are PLAIN.</summary>
+    internal const int DictionaryPageBytes = 1 << 20;
+
     private readonly WriteColumn _column;
     private readonly CompressionCodec _codec;
     private readonly int _level;
@@ -55,6 +67,42 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The page's validity as the words the compressing kernel takes, a block's worth.</summary>
     private readonly ulong[] _mask;
     private readonly List<PageLocation> _pages = [];
+
+    /// <summary>Whether the column's values are of a kind a dictionary serves.</summary>
+    private readonly bool _eligible;
+
+    /// <summary>The dictionary's values in their PLAIN form, in code order, the null left out.</summary>
+    private readonly PooledBytes _entries;
+
+    /// <summary>A page's codes, RLE/bit-packed behind their width.</summary>
+    private readonly PooledBytes _codes;
+
+    /// <summary>The dictionary page, written ahead of the data pages when the chunk closes.</summary>
+    private readonly PooledBytes _dictionaryPage;
+
+    private readonly uint[] _pageCodes;
+    private int[] _firstOccurrences = [];
+    private DistinctTable? _table;
+
+    /// <summary>Whether the chunk's pages are still dictionary-encoded.</summary>
+    private bool _dictionary;
+
+    /// <summary>Where the page's codes start in the table's, or -1 when its rows were not probed.</summary>
+    private int _pageFirstCode = -1;
+
+    /// <summary>The dictionary's entries, the null not counted.</summary>
+    private int _entryCount;
+
+    /// <summary>The entries the dictionary pages written so far reference, and their PLAIN bytes.</summary>
+    private int _frozenEntries;
+    private int _frozenBytes;
+
+    private int _dictionaryPages;
+    private int _plainPages;
+
+    /// <summary>The codes the chunk's dictionary pages took, and the PLAIN bytes they stand for.</summary>
+    private long _codeBytes;
+    private long _plainBytes;
     private int _pageRows;
     private int _pageValues;
     private int _boolBits;
@@ -63,7 +111,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkUncompressed;
     private Bounds _chunkBounds;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, AlignedBufferPool pool)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, bool dictionaries, AlignedBufferPool pool)
     {
         _column = column;
         _codec = codec;
@@ -74,20 +122,33 @@ internal sealed class ColumnChunkWriter : IDisposable
         _levels = new PooledBytes(pool);
         _compressed = new PooledBytes(pool);
         _chunk = new ChunkBytes(pool);
+        _entries = new PooledBytes(pool);
+        _codes = new PooledBytes(pool);
+        _dictionaryPage = new PooledBytes(pool);
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _levelBytes = new byte[blockRows];
         _mask = new ulong[(blockRows + 63) >> 6];
+        _pageCodes = new uint[blockRows];
         _chunkBounds = Bounds.Empty;
+        _eligible = dictionaries && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
+        _dictionary = _eligible;
     }
 
     internal WriteColumn Column => _column;
 
     /// <summary>The bytes of the pages closed so far, waiting for the row group to close.</summary>
-    internal long BufferedBytes => _chunk.Length + _values.Length;
+    internal long BufferedBytes => _chunk.Length + _values.Length + _entries.Length;
 
-    /// <summary>Hands the closed chunk's bytes to <paramref name="sink"/>, between <see cref="Close"/> and <see cref="Reset"/>.</summary>
-    internal ValueTask WriteChunkAsync(ISegmentSink sink, CancellationToken cancellationToken) =>
-        _chunk.WriteToAsync(sink, cancellationToken);
+    /// <summary>Hands the closed chunk's bytes to <paramref name="sink"/>, between <see cref="Close"/> and <see cref="Reset"/>: its dictionary page first.</summary>
+    internal async ValueTask WriteChunkAsync(ISegmentSink sink, CancellationToken cancellationToken)
+    {
+        if (_dictionaryPage.Length > 0)
+        {
+            await sink.WriteAsync(_dictionaryPage.Written, cancellationToken).ConfigureAwait(false);
+        }
+
+        await _chunk.WriteToAsync(sink, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>Appends <paramref name="count"/> rows of <paramref name="node"/> from <paramref name="start"/>, closing pages as blocks fill.</summary>
     internal void Append(CanonicalArena arena, int node, int start, int count)
@@ -130,16 +191,40 @@ internal sealed class ColumnChunkWriter : IDisposable
         Bounds bounds = Bounds.Of(_column.Domain, body, _pageValues);
         _chunkBounds = _chunkBounds.Merge(bounds);
 
+        ParquetEncoding encoding = ParquetEncoding.Plain;
+        if (_dictionary && _pageFirstCode >= 0)
+        {
+            switch (EncodeCodes(rows, body.Length))
+            {
+                case Coding.Codes:
+                    body = _codes.WrittenSpan;
+                    encoding = ParquetEncoding.RleDictionary;
+                    _frozenEntries = _entryCount;
+                    _frozenBytes = _entries.Length;
+                    break;
+                case Coding.Fallback:
+                    _dictionary = false;
+                    break;
+            }
+        }
+
+        if (encoding == ParquetEncoding.Plain)
+        {
+            _plainPages++;
+        }
+        else
+        {
+            _dictionaryPages++;
+        }
+
         bool compressed = _codec != CompressionCodec.Uncompressed;
         ReadOnlySpan<byte> stored = body;
         if (compressed)
         {
-            _compressed.Clear();
-            Span<byte> destination = _compressed.GetSpan(PageCodecs.MaxCompressedLength(_codec, body.Length));
-            int size = PageCodecs.Compress(_codec, _level, body, destination, _zstd);
-            if (size <= body.Length - body.Length / 8)
+            ReadOnlySpan<byte> squeezed = Compress(body);
+            if (squeezed.Length <= body.Length - body.Length / 8)
             {
-                stored = destination[..size];
+                stored = squeezed;
             }
             else
             {
@@ -155,7 +240,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             ValueCount = rows,
             NullCount = nulls,
             RowCount = rows,
-            Encoding = ParquetEncoding.Plain,
+            Encoding = encoding,
             DefinitionLevelsLength = _levels.Length,
             RepetitionLevelsLength = 0,
             IsCompressed = compressed || _codec == CompressionCodec.Uncompressed,
@@ -176,6 +261,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _pageRows = 0;
         _pageValues = 0;
         _boolBits = 0;
+        _pageFirstCode = -1;
         _values.Clear();
         Array.Clear(_validity);
     }
@@ -197,14 +283,26 @@ internal sealed class ColumnChunkWriter : IDisposable
             ClosePage();
         }
 
+        WriteDictionaryPage();
+        long dictionary = _dictionaryPage.Length;
         PageLocation[] pages = new PageLocation[_pages.Count];
         for (int i = 0; i < pages.Length; i++)
         {
             PageLocation page = _pages[i];
-            pages[i] = page with { Offset = offset + page.Offset };
+            pages[i] = page with { Offset = offset + dictionary + page.Offset };
         }
 
-        uint encodings = 1u << (int)ParquetEncoding.Plain;
+        uint encodings = 0;
+        if (_plainPages > 0 || dictionary > 0)
+        {
+            encodings |= 1u << (int)ParquetEncoding.Plain;
+        }
+
+        if (_dictionaryPages > 0)
+        {
+            encodings |= 1u << (int)ParquetEncoding.RleDictionary;
+        }
+
         if (_column.Nullable)
         {
             encodings |= 1u << (int)ParquetEncoding.Rle;
@@ -212,13 +310,17 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         return new ChunkResult(
             offset,
+            offset + dictionary,
+            dictionary > 0 ? offset : -1,
             _chunkRows,
             _chunkNulls,
             _chunkUncompressed,
-            _chunk.Length,
+            _chunk.Length + dictionary,
             encodings,
             _chunkBounds,
-            pages);
+            pages,
+            _dictionaryPages,
+            _plainPages);
     }
 
     /// <summary>Forgets the closed chunk, keeping the buffers for the next row group's.</summary>
@@ -230,10 +332,41 @@ internal sealed class ColumnChunkWriter : IDisposable
         _chunkNulls = 0;
         _chunkUncompressed = 0;
         _chunkBounds = Bounds.Empty;
+        _table?.Reset();
+        _entries.Clear();
+        _dictionaryPage.Clear();
+        _entryCount = 0;
+        _frozenEntries = 0;
+        _frozenBytes = 0;
+        _dictionaryPages = 0;
+        _plainPages = 0;
+        _codeBytes = 0;
+        _plainBytes = 0;
+        _dictionary = _eligible;
+
+        // A page carried into the next row group was probed into the table just reset: it is PLAIN.
+        _pageFirstCode = -1;
+    }
+
+    public void Dispose()
+    {
+        _values.Dispose();
+        _levels.Dispose();
+        _compressed.Dispose();
+        _chunk.Dispose();
+        _entries.Dispose();
+        _codes.Dispose();
+        _dictionaryPage.Dispose();
+        _table?.Reset();
     }
 
     private void Stage(CanonicalArena arena, int index, int start, int count)
     {
+        if (_pageRows == 0)
+        {
+            _pageFirstCode = _dictionary ? _table?.Rows ?? 0 : -1;
+        }
+
         CanonicalNode node = arena.GetNode(index);
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         int values;
@@ -260,17 +393,170 @@ internal sealed class ColumnChunkWriter : IDisposable
             values = count;
         }
 
+        if (_dictionary && _pageFirstCode >= 0)
+        {
+            Probe(arena, index, start, count);
+        }
+
         if (values > 0)
         {
-            StageValues(arena, node, start, count, values);
+            StageValues(arena, node, start, count, values, _values);
         }
 
         _pageRows += count;
         _pageValues += values;
     }
 
-    /// <summary>The values of the rows that hold one, in their PLAIN form, appended to the page's.</summary>
-    private void StageValues(CanonicalArena arena, CanonicalNode node, int start, int count, int values)
+    /// <summary>
+    /// Probes the rows into the chunk's distinct table and appends the values that first occur
+    /// among them to the dictionary, in code order, the null left out.
+    /// </summary>
+    private void Probe(CanonicalArena arena, int index, int start, int count)
+    {
+        CanonicalNode node = arena.GetNode(index);
+        DistinctTable? table = _table ??= DistinctTable.For(node);
+        if (table is null)
+        {
+            _dictionary = false;
+            _pageFirstCode = -1;
+            return;
+        }
+
+        int rowsBefore = table.Rows;
+        int distinctBefore = table.Distinct;
+        table.Probe(arena, node, start, count);
+        if (table.Abandoned)
+        {
+            _dictionary = false;
+            _pageFirstCode = -1;
+            return;
+        }
+
+        int distinct = table.Distinct;
+        if (distinct == distinctBefore)
+        {
+            return;
+        }
+
+        int nullCode = table.NullCode;
+        ReadOnlySpan<int> first = table.FirstRows;
+        if (_firstOccurrences.Length < distinct - distinctBefore)
+        {
+            _firstOccurrences = new int[Math.Max(distinct - distinctBefore, _firstOccurrences.Length * 2)];
+        }
+
+        int found = 0;
+        for (int code = distinctBefore; code < distinct; code++)
+        {
+            if (code != nullCode)
+            {
+                _firstOccurrences[found++] = start + (first[code] - rowsBefore);
+            }
+        }
+
+        if (found > 0)
+        {
+            int entries = CanonicalFilter.Apply(arena, index, _firstOccurrences.AsSpan(0, found));
+            StageValues(arena, arena.GetNode(entries), 0, found, found, _entries);
+            _entryCount += found;
+        }
+    }
+
+    /// <summary>
+    /// The page as codes into the dictionary, when the dictionary stays under its bound and the
+    /// chunk's codes and dictionary take fewer bytes than the <paramref name="plain"/> values of its
+    /// pages so far.
+    /// </summary>
+    private Coding EncodeCodes(int rows, int plain)
+    {
+        DistinctTable table = _table!;
+        ReadOnlySpan<int> codes = table.Codes.Slice(_pageFirstCode, rows);
+        int nullCode = table.NullCode;
+        int count = 0;
+        for (int row = 0; row < rows; row++)
+        {
+            if (_column.Nullable && !CanonicalSupport.BitAt(_validity, row))
+            {
+                continue;
+            }
+
+            int code = codes[row];
+            _pageCodes[count++] = (uint)(nullCode >= 0 && code > nullCode ? code - 1 : code);
+        }
+
+        if (count == 0)
+        {
+            // A page of nulls has no value for either encoding to weigh.
+            return Coding.Plain;
+        }
+
+        if (_entries.Length > DictionaryPageBytes)
+        {
+            return Coding.Fallback;
+        }
+
+        int width = Math.Max(1, 32 - BitOperations.LeadingZeroCount((uint)(_entryCount - 1)));
+        ReadOnlySpan<uint> pageCodes = _pageCodes.AsSpan(0, count);
+        int size = 1 + RleHybridEncoder.Size(pageCodes, width);
+
+        // The dictionary pays while the chunk's codes and the dictionary page together take fewer
+        // bytes than the values they stand for: a column of values that seldom repeat stops here,
+        // its dictionary as large as its values.
+        if (_entries.Length + _codeBytes + size >= _plainBytes + plain)
+        {
+            return Coding.Fallback;
+        }
+
+        _codeBytes += size;
+        _plainBytes += plain;
+
+        _codes.Clear();
+        Span<byte> into = _codes.Reserve(size);
+        into[0] = (byte)width;
+        RleHybridEncoder.Encode(pageCodes, width, into[1..]);
+        return Coding.Codes;
+    }
+
+    /// <summary>The dictionary page, when a data page used the dictionary: the values coded until the last such page.</summary>
+    private void WriteDictionaryPage()
+    {
+        _dictionaryPage.Clear();
+        if (_dictionaryPages == 0)
+        {
+            return;
+        }
+
+        ReadOnlySpan<byte> values = _entries.WrittenSpan[.._frozenBytes];
+
+        // A dictionary page has no flag that says it is stored as it is: under a codec it is
+        // compressed whatever it saves.
+        ReadOnlySpan<byte> stored = _codec == CompressionCodec.Uncompressed ? values : Compress(values);
+        PageHeader header = new()
+        {
+            Type = PageType.DictionaryPage,
+            UncompressedPageSize = values.Length,
+            CompressedPageSize = stored.Length,
+            ValueCount = _frozenEntries,
+            Encoding = ParquetEncoding.Plain,
+        };
+
+        ThriftCompactWriter writer = new(_dictionaryPage);
+        header.Write(ref writer, default);
+        writer.Flush();
+        _chunkUncompressed += _dictionaryPage.Length + values.Length;
+        _dictionaryPage.Write(stored);
+    }
+
+    private ReadOnlySpan<byte> Compress(ReadOnlySpan<byte> body)
+    {
+        _compressed.Clear();
+        Span<byte> destination = _compressed.GetSpan(PageCodecs.MaxCompressedLength(_codec, body.Length));
+        int size = PageCodecs.Compress(_codec, _level, body, destination, _zstd);
+        return destination[..size];
+    }
+
+    /// <summary>The values of the rows that hold one, in their PLAIN form, appended to <paramref name="target"/>.</summary>
+    private void StageValues(CanonicalArena arena, CanonicalNode node, int start, int count, int values, PooledBytes target)
     {
         bool dense = values == count;
         int first = _pageRows;
@@ -282,7 +568,7 @@ internal sealed class ColumnChunkWriter : IDisposable
                 StageBits(node, start, count, dense, first);
                 return;
             case ValueConversion.ByteArray:
-                StageBytes(node, start, count, dense, first);
+                StageBytes(node, start, count, dense, first, target);
                 return;
             case ValueConversion.Same:
                 int width = _column.ValueWidth;
@@ -294,16 +580,16 @@ internal sealed class ColumnChunkWriter : IDisposable
                 ReadOnlySpan<byte> source = all.Slice(start * width, count * width);
                 if (dense)
                 {
-                    _values.Write(source);
+                    target.Write(source);
                 }
                 else
                 {
-                    Compact(source, width, first, count, _values.Reserve(values * width));
+                    Compact(source, width, first, count, target.Reserve(values * width));
                 }
 
                 return;
             default:
-                StageConverted(node, start, count, dense, first, values);
+                StageConverted(node, start, count, dense, first, values, target);
                 return;
         }
     }
@@ -392,7 +678,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
     }
 
-    private void StageBytes(CanonicalNode node, int start, int count, bool dense, int first)
+    private void StageBytes(CanonicalNode node, int start, int count, bool dense, int first, PooledBytes target)
     {
         ViewValues views = new(node);
         for (int row = 0; row < count; row++)
@@ -403,16 +689,16 @@ internal sealed class ColumnChunkWriter : IDisposable
             }
 
             ReadOnlySpan<byte> value = views.At(start + row);
-            Span<byte> destination = _values.Reserve(4 + value.Length);
+            Span<byte> destination = target.Reserve(4 + value.Length);
             BinaryPrimitives.WriteInt32LittleEndian(destination, value.Length);
             value.CopyTo(destination[4..]);
         }
     }
 
-    private void StageConverted(CanonicalNode node, int start, int count, bool dense, int first, int values)
+    private void StageConverted(CanonicalNode node, int start, int count, bool dense, int first, int values, PooledBytes target)
     {
         int width = _column.ValueWidth;
-        Span<byte> destination = _values.Reserve(values * width);
+        Span<byte> destination = target.Reserve(values * width);
         int at = 0;
         switch (_column.Conversion)
         {
@@ -456,17 +742,17 @@ internal sealed class ColumnChunkWriter : IDisposable
                     byte sign = (value[^1] & 0x80) != 0 ? (byte)0xFF : (byte)0;
                     wide.Fill(sign);
                     value.CopyTo(wide);
-                    Span<byte> target = destination.Slice(at, width);
+                    Span<byte> into = destination.Slice(at, width);
                     if (_column.Conversion == ValueConversion.DecimalToBigEndian)
                     {
                         for (int b = 0; b < width; b++)
                         {
-                            target[b] = wide[width - 1 - b];
+                            into[b] = wide[width - 1 - b];
                         }
                     }
                     else
                     {
-                        wide[..width].CopyTo(target);
+                        wide[..width].CopyTo(into);
                     }
 
                     at += width;
@@ -476,26 +762,46 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
     }
 
-
-    public void Dispose()
+    /// <summary>What a page's codes come to.</summary>
+    private enum Coding : byte
     {
-        _values.Dispose();
-        _levels.Dispose();
-        _compressed.Dispose();
-        _chunk.Dispose();
+        /// <summary>The page is its codes.</summary>
+        Codes,
+
+        /// <summary>This page is PLAIN, and the chunk's later pages may still be codes.</summary>
+        Plain,
+
+        /// <summary>The dictionary stops here: this page and the chunk's later ones are PLAIN.</summary>
+        Fallback,
     }
 }
 
 /// <summary>A closed column chunk: where it goes, and what its metadata says of it.</summary>
+/// <param name="Offset">Where the chunk starts: its dictionary page, or its first data page.</param>
+/// <param name="DataPageOffset">Where its first data page starts.</param>
+/// <param name="DictionaryPageOffset">Where its dictionary page starts, or -1.</param>
+/// <param name="Rows">Its rows.</param>
+/// <param name="Nulls">Its null rows.</param>
+/// <param name="UncompressedSize">Its pages' bytes, headers included, before compression.</param>
+/// <param name="CompressedSize">Its bytes in the file.</param>
+/// <param name="Encodings">The encodings its pages use, a bit per encoding.</param>
+/// <param name="Bounds">Its least and greatest values, where its domain has them.</param>
+/// <param name="Pages">Where each data page lies, for the offset index.</param>
+/// <param name="DictionaryPages">The data pages that are codes into the dictionary.</param>
+/// <param name="PlainPages">The data pages that are PLAIN.</param>
 internal sealed record ChunkResult(
     long Offset,
+    long DataPageOffset,
+    long DictionaryPageOffset,
     long Rows,
     long Nulls,
     long UncompressedSize,
     long CompressedSize,
     uint Encodings,
     Bounds Bounds,
-    PageLocation[] Pages);
+    PageLocation[] Pages,
+    int DictionaryPages,
+    int PlainPages);
 
 /// <summary>A column's least and greatest values, compared in its domain, as the PLAIN bytes statistics hold.</summary>
 internal readonly record struct Bounds(bool Present, StatisticsDomain Domain, long Min, long Max)
