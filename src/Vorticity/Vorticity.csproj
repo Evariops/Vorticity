@@ -10,12 +10,13 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
-  <!-- The two satellites reach into the engine (arenas, the k-way merge, object sources, row
-       encoding over decoded nodes) and ship at the same version as the core. vxdump does not: it is
-       the proof that the public surface is enough for a tool. -->
+  <!-- The satellites reach into the engine (arenas, the k-way merge, object sources, row encoding
+       over decoded nodes, the scan source a Parquet file plugs into) and ship at the same version as
+       the core. vxdump does not: it is the proof that the public surface is enough for a tool. -->
   <ItemGroup>
     <InternalsVisibleTo Include="Vorticity.RowEncoding" />
     <InternalsVisibleTo Include="Vorticity.Dataset" />
+    <InternalsVisibleTo Include="Vorticity.Parquet" />
     <InternalsVisibleTo Include="Vorticity.Tests" />
     <InternalsVisibleTo Include="Vorticity.Conformance" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />

@@ -3,6 +3,7 @@
     <Project Path="src/Vorticity/Vorticity.csproj" />
     <Project Path="src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
     <Project Path="src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
+    <Project Path="src/Vorticity.Parquet/Vorticity.Parquet.csproj" />
     <Project Path="src/Vorticity.Generators/Vorticity.Generators.csproj" />
     <Project Path="src/Vorticity.Zstd/Vorticity.Zstd.csproj" />
   </Folder>
