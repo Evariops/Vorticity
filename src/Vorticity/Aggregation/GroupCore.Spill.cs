@@ -133,6 +133,8 @@ internal sealed partial class GroupCore
         {
             foreach (SubTable table in taken)
             {
+                // A paged part's values no entry met are no groups to write (SubTable.CopyEntries).
+                table.DropUnmet();
                 int from = 0;
                 while (from < table.Keys.Count)
                 {

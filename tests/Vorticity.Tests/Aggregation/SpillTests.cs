@@ -69,6 +69,70 @@ public sealed partial class SpillTests
     }
 
     [Fact]
+    public async Task APagedCoreSpillsTheValuesItMetAlone()
+    {
+        // Two million values, one in two met, over eight million rows, at fourteen lanes: the core pages
+        // the key under a budget three times its pages, which its pending entries pass, and its parts go
+        // to the scratch, then come back into their pages, the values no entry met dropped.
+        const int span = 2_000_000;
+        Row[] rows = new Row[8_000_000];
+        for (int row = 0; row < rows.Length; row++)
+        {
+            rows[row] = new Row((int)(((ulong)row * 0x9E37_79B9_7F4A_7C15UL >> 24) % (span / 2)) * 2, row % 100);
+        }
+
+        // Both ends of the span met, so that the statistics bound the key to all of it.
+        rows[0] = new Row(0, 0);
+        rows[1] = new Row(span - 1, 0);
+        Dictionary<int, long> expected = [];
+        foreach (Row row in rows)
+        {
+            expected[row.Key] = expected.GetValueOrDefault(row.Key) + row.Value;
+        }
+
+        string path = Path.Combine(AppContext.BaseDirectory, "spill", $"paged-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        {
+            await writer.WriteAsync<Row>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        string scratch = Directory.CreateTempSubdirectory("vorticity-spill-").FullName;
+        try
+        {
+            // A value's page takes its record, its key and a number: 16 bytes.
+            QueryMemoryBudget budget = new QueryMemoryBudget(3L * span * 16);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 14;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation sums = file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Sum(x => x.Value)));
+            sums.Plan.Core = true;
+            Dictionary<int, long> read = [];
+            await foreach (KeySum sum in sums.As<KeySum>().ToRecordsAsync(Ct))
+            {
+                read.Add(sum.Key, sum.Sum);
+            }
+
+            Assert.Equal(expected, read);
+            CoreRun run = sums.Plan.LastRun!.Core!;
+            Assert.True(run.Splits == 0 && run.SpilledParts > 0, $"{run}, {run.SpilledParts} parts spilled");
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task TwoQueriesSpillAtOnceAndBothEndExact()
     {
         (string path, long[] expected) = await WriteAsync();

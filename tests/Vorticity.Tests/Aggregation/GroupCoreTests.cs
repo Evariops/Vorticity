@@ -20,14 +20,18 @@ public sealed partial class GroupCoreTests
     private const int Rows = 60_000;
 
     [Theory]
-    [InlineData(1, 0.0)]
-    [InlineData(1, 1.0)]
-    [InlineData(2, 1.0)]
-    [InlineData(14, 0.0)]
-    [InlineData(14, 1.0)]
-    public async Task EveryStateInARecordComesOutTheSame(int degree, double bypass)
+    [InlineData(1, 0.0, false)]
+    [InlineData(1, 1.0, false)]
+    [InlineData(2, 1.0, false)]
+    [InlineData(14, 0.0, false)]
+    [InlineData(14, 1.0, false)]
+    [InlineData(1, 0.0, true)]
+    [InlineData(2, 1.0, true)]
+    [InlineData(14, 1.0, true)]
+    public async Task EveryStateInARecordComesOutTheSame(int degree, double bypass, bool pages)
     {
-        // Batches enough for a lane to fill its cache, measure it, then bypass it.
+        // Batches enough for a lane to fill its cache, measure it, then bypass it. Nine thousand keys
+        // over four times as many rows, which the core pages, or holds in sub-tables of hashes.
         Row[] rows = Rows_(keys: 9_000, count: 4 * Rows);
         string path = await WriteAsync(rows);
         try
@@ -39,15 +43,17 @@ public sealed partial class GroupCoreTests
             {
                 Tiny(plan);
                 plan.CoreBypass = bypass;
+                plan.CorePages = pages;
             });
 
             Dictionary<int, KeyStats> held = ByKey(await ListAsync(core.As<KeyStats>()));
             Assert.Equal(reference, held);
 
-            // The caches copied, the parts burst and split; bypassed, or never. At fourteen lanes a lane
-            // may take a single batch, before its cache has filled, as the queue hands them out.
+            // The caches copied, the parts burst, the sub-tables of hashes split, the pages never;
+            // bypassed, or never. At fourteen lanes a lane may take a single batch, before its cache has
+            // filled, as the queue hands them out.
             CoreRun run = core.Plan.LastRun!.Core!;
-            Assert.True(run.Flushes > 0 && run.Bursts > 0 && run.Splits > 0, run.ToString());
+            Assert.True(run.Flushes > 0 && run.Bursts > 0 && (pages ? run.Splits == 0 : run.Splits > 0), run.ToString());
             Assert.True(bypass > 0 ? run.BypassedRows > 0 || degree > 2 : run.BypassedRows == 0, run.ToString());
 
             // Delivered part by part, every group once, a part let go before the next; and whole, as
@@ -59,6 +65,7 @@ public sealed partial class GroupCoreTests
                 Tiny(plan);
                 plan.CoreBypass = bypass;
                 plan.CoreParted = false;
+                plan.CorePages = pages;
             });
 
             Assert.Equal(reference, ByKey(await ListAsync(whole.As<KeyStats>())));

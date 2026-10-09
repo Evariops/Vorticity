@@ -330,7 +330,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TWord>(_keys.AsSpan(0, Count), -1, records, lane);
 
-    internal override void CountParts(Span<int> counts) => EntryKeys.CountParts<TWord>(_keys.AsSpan(0, Count), -1, counts);
+    internal override void CountParts(Span<int> counts, LaneCore lane) => EntryKeys.CountParts<TWord>(_keys.AsSpan(0, Count), -1, counts, lane);
 
     internal override int CopyEntries(ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written) =>
         EntryKeys.Copy<TWord>(_keys.AsSpan(0, Count), -1, records, shape, from, entries, out written);

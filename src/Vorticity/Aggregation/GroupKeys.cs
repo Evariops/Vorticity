@@ -181,6 +181,18 @@ internal abstract class GroupKeys
     /// <summary>An empty index a sub-table of the core holds its groups in, its arrays taken from and given back to <paramref name="shelf"/>.</summary>
     internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
 
+    /// <summary>
+    /// An empty index of a part of a core that pages its key, its arrays from <paramref name="shelf"/>: the
+    /// part's pages side by side, <paramref name="pages"/> in their order, each of 2^<paramref name="bits"/>
+    /// values from <paramref name="least"/> plus its number shifted by them, <paramref name="slots"/> each
+    /// page's place among its part's.
+    /// </summary>
+    internal virtual GroupKeys ForPages(long least, int bits, int[] slots, long[] pages, ArrayShelf shelf) =>
+        throw new NotSupportedException("Only keys numbered by value are paged.");
+
+    /// <summary>The groups some row met: <see cref="Count"/>, less the values of a span numbered whole that none did yet.</summary>
+    internal virtual int MetGroups => Count;
+
     /// <summary>Gives the index's arrays back to its shelf, if it has one: a sub-table split, whose groups another holds. The index is empty after.</summary>
     internal virtual void Release()
     {
@@ -217,13 +229,14 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// Copies every group but the null one into an entry of the lane's batch of the part its key falls
-    /// in, the top bits of its hash under <see cref="MergeHash.Seed"/> as <see cref="Parts"/> cuts: the
-    /// group's record, read from <paramref name="records"/>, then its key.
+    /// in (<see cref="LaneCore.PartOf"/>), the top bits of its hash under <see cref="MergeHash.Seed"/> as
+    /// <see cref="Parts"/> cuts, or of its page's in a core that pages it: the group's record, read from
+    /// <paramref name="records"/>, then its key.
     /// </summary>
     internal virtual void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => throw NotEntries();
 
-    /// <summary>Counts every group but the null one by the part <see cref="Scatter"/> copies it to.</summary>
-    internal virtual void CountParts(Span<int> counts) => throw NotEntries();
+    /// <summary>Counts every group but the null one by the part <see cref="Scatter"/> copies it to in <paramref name="lane"/>'s core.</summary>
+    internal virtual void CountParts(Span<int> counts, LaneCore lane) => throw NotEntries();
 
     /// <summary>
     /// The groups from <paramref name="from"/> on, but the null one, copied into entries of
@@ -632,6 +645,18 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // value its number; -1 when the keys number values as they first come.
     private int _unmet = -1;
 
+    // A part of a core that pages its key (ForPages): its pages side by side, a value's number its page's
+    // place among them then its place in the page. The bits of a page, each page's place among its
+    // part's, the core's, and the part's pages in that order; null for a span in one piece.
+    private readonly int _mapBits;
+    private readonly int[]? _mapSlots;
+    private readonly long[]? _mapPages;
+
+    // A paged core's part numbered whole: a bit a number, set once an entry met its value, where a group's
+    // number is its group and needs no table; null before NumberWhole, and once the part's unmet values are
+    // dropped, when its keys are final.
+    private ulong[]? _metBits;
+
     // Every key a group of its own, no table looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
     private readonly bool _appending;
     private readonly ArrayShelf? _shelf;
@@ -670,6 +695,55 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
         }
     }
+
+    /// <summary>
+    /// A part of a core that pages its key (<see cref="GroupKeys.ForPages"/>): the part's pages side by
+    /// side, numbered by value, from <paramref name="least"/>, 2^<paramref name="bits"/> values a page,
+    /// <paramref name="slots"/> each page's place among its part's, <paramref name="pages"/> the part's.
+    /// </summary>
+    private FixedKeys(ColumnShape shape, long least, int bits, int[] slots, long[] pages, ArrayShelf shelf)
+        : this(shape, sorted: false, shelf: shelf)
+    {
+        ulong span = (ulong)pages.Length << bits;
+        _pages = new int[(int)((span + PageMask) >> PageBits)][];
+        _pages.AsSpan().Fill(Unmet);
+        _pageStarts = new int[_pages.Length];
+        _directMin = least;
+        _span = span;
+        _mapBits = bits;
+        _mapSlots = slots;
+        _mapPages = pages;
+    }
+
+    /// <summary>
+    /// The number of <paramref name="integer"/> in a part of a core that pages its key: its page's place
+    /// among the part's, then its place in the page; false for a value of another part's page or past the
+    /// span, which exact statistics never give.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool Mapped(long integer, out ulong number)
+    {
+        long offset = integer - _directMin;
+        long page = offset >> _mapBits;
+        number = 0;
+        if ((ulong)page >= (ulong)_mapSlots!.Length)
+        {
+            return false;
+        }
+
+        int slot = _mapSlots[page];
+        if ((uint)slot >= (uint)_mapPages!.Length || _mapPages[slot] != page)
+        {
+            return false;
+        }
+
+        number = ((ulong)slot << _mapBits) | (ulong)(offset & ((1L << _mapBits) - 1));
+        return true;
+    }
+
+    /// <summary>The value numbered <paramref name="number"/> in the span, in one piece or in a paged core's part's pages.</summary>
+    private long ValueOf(ulong number) =>
+        _mapPages is null ? _directMin + (long)number : _directMin + (_mapPages[(int)(number >> _mapBits)] << _mapBits) + (long)(number & ((1UL << _mapBits) - 1));
 
     /// <summary>
     /// The page of the table of groups every number reads until its own is allocated: no value met, -1
@@ -1017,7 +1091,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return true;
         }
 
-        if (_pages is not null)
+        // A paged core's part is merged into, never assigned rows: its span is not in one piece.
+        if (_pages is not null && _mapSlots is null)
         {
             if (_probeAhead >= 0 && selection.IsEmpty)
             {
@@ -1318,8 +1393,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// <returns>Whether the keys number the span whole.</returns>
     internal override bool NumberWhole(long groupBytes)
     {
+        // A paged core's part holds its pages whatever their bytes: the span's density chose them.
         if (_pages is null || _sorted || _appending || Count != 0
-            || (long)_span * (groupBytes + Unsafe.SizeOf<TValue>() + sizeof(int)) > WholeBytes)
+            || (_mapSlots is null && (long)_span * (groupBytes + Unsafe.SizeOf<TValue>() + sizeof(int)) > WholeBytes))
         {
             return false;
         }
@@ -1332,7 +1408,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
         for (int number = 0; number < span; number++)
         {
-            _keys[number] = FromInteger(_directMin + number);
+            _keys[number] = FromInteger(ValueOf((ulong)number));
+        }
+
+        if (_mapSlots is not null)
+        {
+            int words = (span + 63) >> 6;
+            _metBits = _shelf?.Take<ulong>(words, zeroed: true) ?? new ulong[words];
         }
 
         Count = span;
@@ -1354,25 +1436,42 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return null;
         }
 
+        // The groups are still the span's numbers in order, which the keep that follows reads once (KeepNumbered).
+        _numbered = true;
+
         int[] met = new int[Count - unmet];
         int kept = 0;
         int span = (int)_span;
-        for (int at = 0; at < _pages!.Length; at++)
+        if (_metBits is { } bits)
         {
-            int[] slab = _pages[at];
-            if (slab == Unmet)
+            // A paged core's part: its bits, a word at a time.
+            for (int w = 0; w < bits.Length; w++)
             {
-                continue;
-            }
-
-            int start = _pageStarts![at];
-            int first = at << PageBits;
-            int numbers = Math.Min(1 << PageBits, span - first);
-            for (int n = 0; n < numbers; n++)
-            {
-                if (slab[start + n] >= 0)
+                for (ulong word = bits[w]; word != 0; word &= word - 1)
                 {
-                    met[kept++] = first + n;
+                    met[kept++] = (w << 6) + BitOperations.TrailingZeroCount(word);
+                }
+            }
+        }
+        else
+        {
+            for (int at = 0; at < _pages!.Length; at++)
+            {
+                int[] slab = _pages[at];
+                if (slab == Unmet)
+                {
+                    continue;
+                }
+
+                int start = _pageStarts![at];
+                int first = at << PageBits;
+                int numbers = Math.Min(1 << PageBits, span - first);
+                for (int n = 0; n < numbers; n++)
+                {
+                    if (slab[start + n] >= 0)
+                    {
+                        met[kept++] = first + n;
+                    }
                 }
             }
         }
@@ -1524,6 +1623,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return false;
         }
 
+        if (_mapSlots is not null)
+        {
+            return Mapped(Integer(value), out number);
+        }
+
         number = (ulong)(Integer(value) - _directMin);
         return number < _span;
     }
@@ -1539,12 +1643,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal override long Footprint =>
         _index.Footprint + _wide.Footprint + ((long)(_keys.Length + _values.Length) * Unsafe.SizeOf<TValue>())
         + (_slabsHeld * sizeof(int)) + ((long)(_pages?.Length ?? 0) * (IntPtr.Size + sizeof(int)))
-        + ((long)(_homes.Length + _left.Length) * sizeof(int));
+        + ((long)(_homes.Length + _left.Length) * sizeof(int)) + ((long)(_metBits?.Length ?? 0) * sizeof(ulong));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
     internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
 
-    internal override (long Least, ulong Span)? ValueSpan => _pages is null ? null : (_directMin, _span);
+    internal override (long Least, ulong Span)? ValueSpan => _pages is null || _mapSlots is not null ? null : (_directMin, _span);
 
     /// <summary>The bits of a number below its part's in a merge by value: the span cut into 2^<paramref name="partBits"/> runs of a power of two each.</summary>
     private int ValuePartShift(int partBits) => Math.Max(0, 64 - System.Numerics.BitOperations.LeadingZeroCount(_span - 1) - partBits);
@@ -1642,6 +1746,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Count = 0;
         _null = -1;
         _unmet = -1;
+        if (_metBits is not null)
+        {
+            _shelf?.Give(_metBits);
+            _metBits = null;
+        }
     }
 
     internal override int NullNumber => _null;
@@ -1671,6 +1780,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     private void Keep(ReadOnlySpan<int> groups, int room)
     {
+        if (_numbered)
+        {
+            KeepNumbered(groups, room);
+            return;
+        }
+
         // The table of groups forgets every group's number, then learns the kept ones' new ones; a
         // value it holds is in no index. A span numbered whole is numbered as values come from then on.
         _unmet = -1;
@@ -1716,6 +1831,83 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             {
                 int page = (int)(number >> PageBits);
                 _pages![page][_pageStarts![page] + ((int)number & PageMask)] = i;
+            }
+            else
+            {
+                GetOrAdd(_keys[i], i);
+            }
+        }
+
+        _null = nullGroup;
+        Count = groups.Length;
+        Renumbered();
+    }
+
+    // Whether the groups are the numbers of a span numbered whole, in order, the groups past it after them,
+    // and Met just listed those some row met: the keep that follows reads the table of groups once.
+    private bool _numbered;
+
+    /// <summary>
+    /// The keep that follows <see cref="Met"/>: the groups kept, the numbers met in order then the groups
+    /// past the span. A met number's entry in the table of groups is its rank among them, read in order,
+    /// with no lookup; the keys move down, and those past the span are found again in the index.
+    /// </summary>
+    private void KeepNumbered(ReadOnlySpan<int> groups, int room)
+    {
+        _numbered = false;
+        int span = (int)_span;
+        int rank = 0;
+        if (_metBits is not null)
+        {
+            // A paged core's part: no table of groups to follow the keep, its keys final from now on.
+            while (rank < groups.Length && groups[rank] < span)
+            {
+                rank++;
+            }
+
+            _shelf?.Give(_metBits);
+            _metBits = null;
+        }
+
+        for (int at = 0; _mapSlots is null && at < _pages!.Length; at++)
+        {
+            int[] slab = _pages[at];
+            if (slab == Unmet)
+            {
+                continue;
+            }
+
+            int first = at << PageBits;
+            Span<int> numbers = slab.AsSpan(_pageStarts![at], Math.Min(1 << PageBits, span - first));
+            for (int n = 0; n < numbers.Length; n++)
+            {
+                if (numbers[n] >= 0)
+                {
+                    numbers[n] = rank++;
+                }
+            }
+        }
+
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _keys[i] = _keys[groups[i]];
+        }
+
+        if (Compact)
+        {
+            _wide.Clear(room);
+        }
+        else
+        {
+            _index.Clear(room);
+        }
+
+        int nullGroup = -1;
+        for (int i = rank; i < groups.Length; i++)
+        {
+            if (groups[i] == _null)
+            {
+                nullGroup = i;
             }
             else
             {
@@ -1800,7 +1992,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
 
-    internal override void CountParts(Span<int> counts) => EntryKeys.CountParts<TValue>(_keys.AsSpan(0, Count), _null, counts);
+    internal override void CountParts(Span<int> counts, LaneCore lane) => EntryKeys.CountParts<TValue>(_keys.AsSpan(0, Count), _null, counts, lane);
+
+    internal override GroupKeys ForPages(long least, int bits, int[] slots, long[] pages, ArrayShelf shelf) =>
+        new FixedKeys<TValue>(_shape, least, bits, slots, pages, shelf);
+
+    internal override int MetGroups => _unmet >= 0 ? Count - _unmet : Count;
 
     internal override int CopyEntries(ReadOnlySpan<ulong> records, EntryShape shape, int from, Span<ulong> entries, out int written) =>
         EntryKeys.Copy<TValue>(_keys.AsSpan(0, Count), _null, records, shape, from, entries, out written);
@@ -1818,6 +2015,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal override void GroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, Span<ulong> scratch)
     {
         int count = entries.Length;
+        if (_unmet >= 0 && _mapSlots is { } slots)
+        {
+            PagedGroupsOf(batch, shape, entries, groups, slots);
+            return;
+        }
+
         if (_pages is not null || _appending)
         {
             for (int i = 0; i < count; i++)
@@ -1851,6 +2054,53 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
         }
     }
+
+    /// <summary>
+    /// <see cref="GroupsOf"/> for a paged core's part, numbered whole: an entry's group is its number, its
+    /// page's place among the part's then its place in the page, read off its value with no call, its bit
+    /// set; one past the span looked up.
+    /// </summary>
+    private void PagedGroupsOf(PartBatch batch, EntryShape shape, ReadOnlySpan<int> entries, Span<int> groups, int[] slots)
+    {
+        long least = _directMin;
+        int bits = _mapBits;
+        long mask = (1L << bits) - 1;
+        long[] pages = _mapPages!;
+        ulong[] met = _metBits!;
+        for (int i = 0; i < entries.Length; i++)
+        {
+            TValue key = EntryKeys.KeyAt<TValue>(batch, shape, entries[i]);
+            long offset = Integer(key) - least;
+            long page = offset >> bits;
+            int slot = (ulong)page < (ulong)slots.Length ? slots[page] : -1;
+            if ((uint)slot < (uint)pages.Length && pages[slot] == page)
+            {
+                int number = (slot << bits) | (int)(offset & mask);
+                ref ulong word = ref met[number >> 6];
+                _unmet -= (int)((~word >> number) & 1);
+                word |= 1UL << number;
+                groups[i] = number;
+            }
+            else
+            {
+                groups[i] = Lookup(key);
+            }
+        }
+    }
+
+    /// <summary>The group of a number in a paged core's part numbered whole: the number itself, its bit set, counted met the first time.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private int MeetBit(ulong number)
+    {
+        ref ulong word = ref _metBits![(int)(number >> 6)];
+        _unmet -= (int)((~word >> (int)number) & 1);
+        word |= 1UL << (int)number;
+        return (int)number;
+    }
+
+    /// <summary>A value looked up in a paged core's part once its unmet values are dropped, which nothing does: its keys are final.</summary>
+    private static InvalidOperationException FinalPart() =>
+        new InvalidOperationException("A part of a paged core is looked up once its unmet values are dropped: its groups are final.");
 
     internal override int CompareKeys(GroupKeys other, int a, int b, int component)
     {
@@ -1974,6 +2224,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
         if (DirectSlot(value, out ulong number))
         {
+            if (_mapSlots is not null)
+            {
+                return _metBits is not null ? MeetBit(number) : throw FinalPart();
+            }
+
             return Numbered(value, number);
         }
 

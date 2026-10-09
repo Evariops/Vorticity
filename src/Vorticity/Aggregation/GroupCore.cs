@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -164,7 +165,7 @@ internal sealed partial class GroupCore
 
     private GroupCore(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource? source, KeyFacts? facts, GroupKeys kind, RecordLayout? layout, int lanes,
-        QueryMemory? memory, bool lean)
+        QueryMemory? memory, bool lean, (long Least, ulong Span)? values = null)
     {
         _plan = plan;
         _settled = settled;
@@ -223,8 +224,89 @@ internal sealed partial class GroupCore
         LaneBytes = ((long)PartCount * _batchWords * sizeof(ulong)) + (Capacity * groupBytes);
         for (int p = 0; p < PartCount; p++)
         {
-            _parts[p] = new CorePart();
+            _parts[p] = new CorePart { Index = p };
         }
+
+        // Paged: the span cut into pages of 2^PageBits values, each page in the part its hash names, a
+        // part's pages side by side in one sub-table numbered whole. Never for the core the governor
+        // turns to, which holds as little past its groups as it can, nor under a budget that would not
+        // hold the span's records twice over: a part's sub-table is made whole at its first entry.
+        long perValue = ((layout?.Stride ?? 0) * sizeof(ulong)) + keyBytes + sizeof(int);
+        if (values is { } span && !lean && span.Span <= int.MaxValue && (memory is null || memory.Ceiling / 2 >= perValue * (long)span.Span))
+        {
+            _pageLeast = span.Least;
+            int pages = (int)((span.Span + (1UL << PageBits) - 1) >> PageBits);
+            _pageSlots = new int[pages];
+            Span<int> counts = stackalloc int[PartCount];
+            counts.Clear();
+            for (int page = 0; page < pages; page++)
+            {
+                _pageSlots[page] = counts[PageHome(page)]++;
+            }
+
+            _partPages = new long[PartCount][];
+            for (int p = 0; p < PartCount; p++)
+            {
+                _partPages[p] = new long[counts[p]];
+            }
+
+            for (int page = 0; page < pages; page++)
+            {
+                _partPages[PageHome(page)][_pageSlots[page]] = page;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The bits of a page's values in a core that pages its key: 256 values, a few hundred pages a part
+    /// at ten million keys, whose shares of the span differ by a few percent.
+    /// </summary>
+    internal const int PageBits = 8;
+
+    // A key the core pages (Paged): the least value of its span, each page's place among its part's
+    // pages, and each part's pages in that order; null for a core of hashes.
+    private readonly long _pageLeast;
+    private readonly int[]? _pageSlots;
+    private readonly long[][]? _partPages;
+
+    /// <summary>The part a page of the span is in: the top bits of the hash of its number.</summary>
+    internal static int PageHome(long page) => (int)(MergeHash.Of((ulong)page, MergeHash.Seed) >> PartShift);
+
+    /// <summary>
+    /// Whether the core pages its key: a key numbered by value over a span no wider than the rows. A
+    /// part is then the pages the hashes of their numbers name, side by side in one sub-table numbered
+    /// whole: an entry's group is read off its value, no hash, no probe, no growth, no split; the values
+    /// no entry met are dropped before anything reads the groups.
+    /// </summary>
+    internal bool Paged => _pageSlots is not null;
+
+    /// <summary>The least value of the span a paged core's pages cut.</summary>
+    internal long PageLeast => _pageLeast;
+
+    /// <summary>
+    /// A part's first sub-table: its pages side by side, numbered whole, in a paged core; else one of
+    /// hashes made at once for the groups <paramref name="entries"/> entries may hold, which would
+    /// otherwise double some ten times, rehashing, through the part's first bursts.
+    /// </summary>
+    internal SubTable FirstTable(CorePart part, int entries)
+    {
+        if (Paged)
+        {
+            return NewPagedTable(part.Index);
+        }
+
+        SubTable first = NewTable(0);
+        first.Reserve((int)Math.Min(entries, _tableGroups));
+        return first;
+    }
+
+    /// <summary>The sub-table of a part of a paged core: the part's pages side by side, numbered whole.</summary>
+    private SubTable NewPagedTable(int part)
+    {
+        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out GroupRecords? records, _shelf);
+        GroupKeys keys = Kind.ForPages(_pageLeast, PageBits, _pageSlots!, _partPages![part], _shelf);
+        keys.NumberWhole((long)(records?.Layout.Stride ?? 0) * sizeof(ulong));
+        return new SubTable(keys, slots, records, MostDepth);
     }
 
     /// <summary>An empty index of the keys' kind, called for what it does on entries.</summary>
@@ -316,7 +398,11 @@ internal sealed partial class GroupCore
             return null;
         }
 
-        return new GroupCore(plan, settled, columns, inputs, source, CacheFacts(facts), kind.ForPart(), records?.Layout, lanes, memory, lean);
+        // A key numbered by value over a span no wider than the rows, whose pages its values fill: the core
+        // pages it. A sparser one keeps sub-tables of hashes, which hold the groups met alone.
+        (long Least, ulong Span)? values = plan.CorePages && plan.Emitter is null && facts?.Rows is long rows and > 0
+            && plan.CreateKeys(sorted: false, facts).ValueSpan is { } span && span.Span <= (ulong)rows ? span : null;
+        return new GroupCore(plan, settled, columns, inputs, source, CacheFacts(facts), kind.ForPart(), records?.Layout, lanes, memory, lean, values);
     }
 
     /// <summary>
@@ -759,6 +845,7 @@ internal sealed partial class GroupCore
 
             foreach (SubTable table in part.Tables)
             {
+                table.DropUnmet();
                 keys.Add(table.Keys);
                 slots.Add(table.Slots);
                 bytes += table.Footprint;
@@ -1014,6 +1101,7 @@ internal sealed partial class GroupCore
         List<AggregateSlot[]> slots = [];
         foreach (SubTable table in part.Tables)
         {
+            table.DropUnmet();
             keys.Add(table.Keys);
             slots.Add(table.Slots);
         }
@@ -1314,17 +1402,40 @@ internal sealed class PartBatch
     internal bool Alone { get; init; }
 }
 
-/// <summary>A part's groups whose hashes share the bits of its places in the part's directory: their keys and their records, final.</summary>
+/// <summary>
+/// A part's groups whose hashes share the bits of its places in the part's directory, or, in a core that
+/// pages its key, the values of the part's pages: their keys and their records, final.
+/// </summary>
 internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecords? records, int depth)
 {
     internal GroupKeys Keys { get; } = keys;
 
     internal AggregateSlot[] Slots { get; } = slots;
 
-    /// <summary>The bits of the hash past the part's its groups share.</summary>
+    /// <summary>The bits of the hash past the part's its groups share; <see cref="GroupCore.MostDepth"/> for a paged part's, which never splits.</summary>
     internal int Depth { get; } = depth;
 
     internal long Footprint => Keys.Footprint + AggregateSlot.FootprintOf(Slots);
+
+    /// <summary>
+    /// A paged part's values no entry met, dropped, keys and states, before anything reads its groups:
+    /// the part delivered, read as one, or written to the scratch. Its keys number values as they come
+    /// from then on.
+    /// </summary>
+    internal void DropUnmet()
+    {
+        if (Keys.Met() is not { } met)
+        {
+            return;
+        }
+
+        Keys.Keep(met);
+        records?.Keep(met);
+        foreach (AggregateSlot slot in Slots)
+        {
+            slot.Keep(met);
+        }
+    }
 
     /// <summary>Makes room for <paramref name="groups"/> groups at once: keys and records.</summary>
     internal void Reserve(int groups)
@@ -1340,10 +1451,16 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
         records?.Release();
     }
 
-    /// <summary>The groups from <paramref name="from"/> on copied into entries of <paramref name="shape"/>, as many as <paramref name="entries"/> holds.</summary>
+    /// <summary>
+    /// The groups from <paramref name="from"/> on copied into entries of <paramref name="shape"/>, as many as
+    /// <paramref name="entries"/> holds: a paged part's values no entry met dropped first, which no run holds.
+    /// </summary>
     /// <returns>The group to copy next.</returns>
-    internal int CopyEntries(EntryShape shape, int from, Span<ulong> entries, out int written) =>
-        Keys.CopyEntries(records is null ? default : records.Made, shape, from, entries, out written);
+    internal int CopyEntries(EntryShape shape, int from, Span<ulong> entries, out int written)
+    {
+        DropUnmet();
+        return Keys.CopyEntries(records is null ? default : records.Made, shape, from, entries, out written);
+    }
 }
 
 /// <summary>A part's groups written to the query's scratch as it was spilled: their entries, one after the other, from <paramref name="Offset"/>.</summary>
@@ -1399,6 +1516,9 @@ internal sealed class CorePart
 
     /// <summary>The groups of the sub-tables, as the last application left them.</summary>
     internal int Groups;
+
+    /// <summary>The part's place among the core's, which its pages' hashes name in a paged core.</summary>
+    internal int Index { get; init; }
 
     /// <summary>
     /// The part's groups written to the scratch, one run each time it was spilled; null for a
@@ -1665,10 +1785,28 @@ internal sealed class LaneCore
         _core = core;
         Shape = core.Shape;
         _entryWords = Shape.Words;
+        _pageLeast = core.PageLeast;
+        _pageBits = core.Paged ? GroupCore.PageBits : -1;
     }
+
+    // The core's pages, when it pages its key: the least value of the span and the bits of a page; -1
+    // bits for a core of hashes.
+    private readonly long _pageLeast;
+    private readonly int _pageBits;
 
     /// <summary>The core the lane's side belongs to.</summary>
     internal GroupCore Core => _core;
+
+    /// <summary>
+    /// The part an entry of <paramref name="key"/> goes to: the top bits of the key's hash under
+    /// <see cref="MergeHash.Seed"/>, or in a core that pages its key, of its page's.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int PartOf<TKey>(TKey key)
+        where TKey : unmanaged =>
+        _pageBits < 0
+            ? (int)(EntryKeys.Hash(key, MergeHash.Seed) >> GroupCore.PartShift)
+            : (int)(MergeHash.Of((ulong)((EntryKeys.Integer(key) - _pageLeast) >> _pageBits), MergeHash.Seed) >> GroupCore.PartShift);
 
     internal EntryShape Shape { get; }
 
@@ -1825,7 +1963,7 @@ internal sealed class LaneCore
     {
         Span<int> counts = stackalloc int[GroupCore.PartCount];
         counts.Clear();
-        table.Keys!.CountParts(counts);
+        table.Keys!.CountParts(counts, this);
         for (int p = 0; p < counts.Length; p++)
         {
             if (counts[p] > 0)
@@ -1973,12 +2111,11 @@ internal sealed class CoreApplier
         if (entries > 0)
         {
             // A part's first sub-table made at once for the groups its first entries may hold: it
-            // would otherwise double some ten times, rehashing, through its first bursts.
+            // would otherwise double some ten times, rehashing, through its first bursts. A paged part's
+            // is its pages, whole.
             if (part.Tables.Count == 0)
             {
-                SubTable first = _core.NewTable(0);
-                first.Reserve((int)Math.Min(entries, _core.TableGroups));
-                part.Tables.Add(first);
+                part.Tables.Add(_core.FirstTable(part, entries));
             }
 
             // A split appends its upper half: the sub-tables cut here are the first ones. Only the end
@@ -1990,8 +2127,7 @@ internal sealed class CoreApplier
                 _core.Presplit(part, entries, this);
             }
 
-            int tables = part.Tables.Count;
-            Cut(part, count, entries);
+            int tables = Cut(part, count, entries);
             _emitting = _core.Emitter is not null && !part.Silent;
             for (int t = 0; t < tables; t++)
             {
@@ -2006,10 +2142,11 @@ internal sealed class CoreApplier
                 _core.Emitter!.Flush(this);
             }
 
+            // A page counts the values its entries met, not those it numbers ahead of them.
             int groups = 0;
             foreach (SubTable table in part.Tables)
             {
-                groups += table.Keys.Count;
+                groups += table.Keys.MetGroups;
             }
 
             Volatile.Write(ref part.Groups, groups);
@@ -2051,11 +2188,12 @@ internal sealed class CoreApplier
     /// the batch and the entry at each place, from each sub-table's start. A part of one sub-table takes
     /// its entries as they come.
     /// </summary>
-    private void Cut(CorePart part, int count, int entries)
+    /// <returns>The part's sub-tables.</returns>
+    private int Cut(CorePart part, int count, int entries)
     {
-        int tables = part.Tables.Count;
         Scratch.Grow(ref _entryAt, entries);
         Scratch.Grow(ref _batchAt, entries);
+        int tables = part.Tables.Count;
         Scratch.Grow(ref _starts, tables + 1);
         Span<int> starts = _starts.AsSpan(0, tables + 1);
         starts.Clear();
@@ -2073,7 +2211,7 @@ internal sealed class CoreApplier
             }
 
             starts[1] = entries;
-            return;
+            return tables;
         }
 
         int shift = GroupCore.PartShift - part.Depth;
@@ -2117,6 +2255,8 @@ internal sealed class CoreApplier
 
             at += length;
         }
+
+        return tables;
     }
 
     /// <summary>
@@ -2269,7 +2409,6 @@ internal static class EntryKeys
         EntryShape shape = lane.Shape;
         int stride = shape.RecordWords;
         nint keyOffset = shape.KeyOffset;
-        ulong seed = MergeHash.Seed;
         if (records.Length < keys.Length * stride)
         {
             throw new InvalidOperationException("A cache's records are fewer than its groups.");
@@ -2284,7 +2423,7 @@ internal static class EntryKeys
             }
 
             TKey key = keys[g];
-            ref ulong entry = ref lane.Entry((int)(Hash(key, seed) >> GroupCore.PartShift));
+            ref ulong entry = ref lane.Entry(lane.PartOf(key));
             ref ulong record = ref Unsafe.Add(ref first, (nint)g * stride);
             for (int w = 0; w < stride; w++)
             {
@@ -2331,19 +2470,32 @@ internal static class EntryKeys
         return g;
     }
 
-    /// <summary>Counts each key but group <paramref name="skip"/>'s by its part, as <see cref="Scatter"/> would place it.</summary>
-    internal static void CountParts<TKey>(ReadOnlySpan<TKey> keys, int skip, Span<int> counts)
+    /// <summary>Counts each key but group <paramref name="skip"/>'s by its part, as <see cref="Scatter"/> would place it in <paramref name="lane"/>'s core.</summary>
+    internal static void CountParts<TKey>(ReadOnlySpan<TKey> keys, int skip, Span<int> counts, LaneCore lane)
         where TKey : unmanaged
     {
-        ulong seed = MergeHash.Seed;
         for (int g = 0; g < keys.Length; g++)
         {
             if (g != skip)
             {
-                counts[(int)(Hash(keys[g], seed) >> GroupCore.PartShift)]++;
+                counts[lane.PartOf(keys[g])]++;
             }
         }
     }
+
+    /// <summary>An integer key as a long, as <see cref="FixedKeys{TValue}"/> numbers it by value; an unsigned one past the longs as a negative.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static long Integer<TKey>(TKey key)
+        where TKey : unmanaged =>
+        typeof(TKey) == typeof(sbyte) ? Unsafe.BitCast<TKey, sbyte>(key)
+        : typeof(TKey) == typeof(short) ? Unsafe.BitCast<TKey, short>(key)
+        : typeof(TKey) == typeof(int) ? Unsafe.BitCast<TKey, int>(key)
+        : typeof(TKey) == typeof(long) ? Unsafe.BitCast<TKey, long>(key)
+        : typeof(TKey) == typeof(byte) ? Unsafe.BitCast<TKey, byte>(key)
+        : typeof(TKey) == typeof(ushort) ? Unsafe.BitCast<TKey, ushort>(key)
+        : typeof(TKey) == typeof(uint) ? Unsafe.BitCast<TKey, uint>(key)
+        : typeof(TKey) == typeof(ulong) ? (long)Unsafe.BitCast<TKey, ulong>(key)
+        : throw new NotSupportedException("Only integer keys are numbered by value.");
 
     /// <summary>The bits of each entry's key's hash from <paramref name="shift"/> up, under <paramref name="mask"/>.</summary>
     internal static void TablesOf<TKey>(PartBatch batch, EntryShape shape, int shift, int mask, Span<int> tables)

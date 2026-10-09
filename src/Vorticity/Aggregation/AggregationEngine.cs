@@ -388,6 +388,13 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool NumberWhole { get; set; } = true;
 
+    /// <summary>
+    /// Whether the core pages a key numbered by value over a span no wider than the rows
+    /// (<see cref="GroupCore.Paged"/>): false for sub-tables of hashes, the switch the tests and the bench
+    /// compare them with.
+    /// </summary>
+    internal bool CorePages { get; set; } = true;
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
