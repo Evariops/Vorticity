@@ -484,7 +484,7 @@ internal sealed class TupleKeys : GroupKeys
 
     internal override GroupKeys ForSpill(ArrayShelf? shelf) => Wrap(_tuples.ForSpill(shelf));
 
-    internal override GroupKeys? Appending() => _tuples.Appending() is { } appending ? Wrap(appending) : null;
+    internal override GroupKeys? Appending(ArrayShelf? shelf) => _tuples.Appending(shelf) is { } appending ? Wrap(appending) : null;
 
     internal override long Footprint => _tuples.Footprint + ((long)_block.Length * TupleLayout.Bytes) + ((long)_words.Length * TupleLayout.WordBytes);
 

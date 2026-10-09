@@ -448,9 +448,16 @@ internal sealed partial class GroupCore
     internal AggregationPartition Cache(QueryMemory? memory) =>
         new AggregationPartition(_plan, _settled, _columns, _inputs, sorted: false, source: _source, facts: _facts, memory: memory);
 
-    /// <summary>A partition that folds each row of a batch into a group of its own, which a lane bypassing its cache flushes after each batch.</summary>
-    internal AggregationPartition RowPartition() =>
-        new AggregationPartition(_plan, _settled, _columns, _inputs, sorted: false, source: _source, keys: Kind.Appending());
+    /// <summary>
+    /// A partition that folds each row of a batch into a group of its own, which a lane bypassing its cache
+    /// flushes after each batch. Counted by no query's memory, as it always was; its arrays from a shelf
+    /// of its own, which takes them from the process's and hands them back when the partition is let go.
+    /// </summary>
+    internal AggregationPartition RowPartition()
+    {
+        ArrayShelf arrays = new ArrayShelf();
+        return new AggregationPartition(_plan, _settled, _columns, _inputs, sorted: false, source: _source, keys: Kind.Appending(arrays), arrays: arrays);
+    }
 
     /// <summary>Counts rows a lane folded apart from its cache.</summary>
     internal void Bypassed(int rows) => Interlocked.Add(ref _bypassed, rows);

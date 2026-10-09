@@ -326,7 +326,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The word: a tuple's nulls are bits of it, so no group is apart from the others.</summary>
     internal override int EntryBytes => Unsafe.SizeOf<TWord>();
 
-    internal override GroupKeys? Appending() => new RawKeys<TWord>(_layout, appending: true);
+    internal override GroupKeys? Appending(ArrayShelf? shelf) => new RawKeys<TWord>(_layout, appending: true, shelf: shelf);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TWord>(_keys.AsSpan(0, Count), -1, records, lane);
 

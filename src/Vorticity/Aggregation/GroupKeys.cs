@@ -222,10 +222,10 @@ internal abstract class GroupKeys
     /// <summary>
     /// An index of the same kind that looks no key up: each row's key a group of its own, but a row
     /// whose key is the row before's, a run's or a code's; the null group one. What a lane folds its
-    /// rows into when its cache finds too few of its keys, the bypass.
-    /// Null for a key that does not travel in batches.
+    /// rows into when its cache finds too few of its keys, the bypass; its arrays from
+    /// <paramref name="shelf"/>. Null for a key that does not travel in batches.
     /// </summary>
-    internal virtual GroupKeys? Appending() => null;
+    internal virtual GroupKeys? Appending(ArrayShelf? shelf) => null;
 
     /// <summary>
     /// Copies every group but the null one into an entry of the lane's batch of the part its key falls
@@ -2066,7 +2066,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return bytes + (Math.Min(more, left) << PageBits) * sizeof(int);
     }
 
-    internal override GroupKeys? Appending() => new FixedKeys<TValue>(_shape, sorted: false, appending: true);
+    internal override GroupKeys? Appending(ArrayShelf? shelf) => new FixedKeys<TValue>(_shape, sorted: false, appending: true, shelf: shelf);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TValue>(_keys.AsSpan(0, Count), _null, records, lane);
 

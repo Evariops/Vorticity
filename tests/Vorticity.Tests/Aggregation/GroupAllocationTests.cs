@@ -52,34 +52,45 @@ public sealed partial class GroupAllocationTests
     /// query's bytes on every thread.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// At one lane a ceiling is the floor rounded up to 512 bytes; at four, the lanes' schedule moves
     /// the core's splits and batches by a few hundred kilobytes from one run to the next, so a ceiling
-    /// is the floor and 2 % (1 % for six keys at one lane), rounded up to 64 KiB.
+    /// is the floor and 2 %, rounded up to 64 KiB (1 % for the one-lane axes whose floor moves too).
+    /// </para>
+    /// <para>
+    /// Measured without the shuffle of every result's order the tests make: 3 to 4 MB less on the
+    /// core's axes. A lane's arrays come from the process's shelf and go back to it, as they grow and
+    /// when its tables die, its cache's and the partition it bypasses it with, where they were left to
+    /// the next collection: the core's axes 8 to 17 times lower; a lane alone's a quarter to two fifths
+    /// lower, the rest its table, which is the result; and the group of each row is no longer rented
+    /// from the shared array pool, whose array kept by one thread the lane of the next query, on
+    /// another, did not find.
+    /// </para>
     /// </remarks>
     private static readonly (string Axis, int Lanes, GroupCoreReason Path, long Ceiling, Func<VortexFile, int, Task<(long Rows, GroupCoreReason Path)>> Query)[] Axes =
     [
         // A thousand integers numbered by their value, a table a lane.
-        ("small integers", 1, GroupCoreReason.None, 360_448, SmallAsync),
-        ("small integers", 4, GroupCoreReason.None, 561_152, SmallAsync),
+        ("small integers", 1, GroupCoreReason.None, 355_840, SmallAsync),
+        ("small integers", 4, GroupCoreReason.None, 495_616, SmallAsync),
 
         // A thousand short texts, hashed as their words.
-        ("short texts", 1, GroupCoreReason.None, 521_728, NamesAsync),
-        ("short texts", 4, GroupCoreReason.None, 1_159_168, NamesAsync),
+        ("short texts", 1, GroupCoreReason.None, 434_176, NamesAsync),
+        ("short texts", 4, GroupCoreReason.None, 536_576, NamesAsync),
 
         // A long integer a row, hashed: at four lanes, a lane's first rows are all new groups.
-        ("hashed integers", 1, GroupCoreReason.None, 82_157_056, WideAsync),
+        ("hashed integers", 1, GroupCoreReason.None, 58_998_272, WideAsync),
         //
         // On this axis and the core's two others, each part is built in an order its shelf lends: 3 to
         // 4 MB less, four bytes a group.
-        ("hashed integers", 4, GroupCoreReason.FirstRows, 48_758_784, WideAsync),
+        ("hashed integers", 4, GroupCoreReason.FirstRows, 4_063_232, WideAsync),
 
         // Integers in no order over a span of 2·10⁶, the one the statistics bound them to: the core by pages.
-        ("spread integers", 1, GroupCoreReason.None, 58_423_808, DenseAsync),
-        ("spread integers", 4, GroupCoreReason.Spread, 29_949_952, DenseAsync),
+        ("spread integers", 1, GroupCoreReason.None, 34_865_152, DenseAsync),
+        ("spread integers", 4, GroupCoreReason.Spread, 2_883_584, DenseAsync),
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
-        ("six keys", 1, GroupCoreReason.None, 165_806_080, SixAsync),
-        ("six keys", 4, GroupCoreReason.FirstRows, 115_867_648, SixAsync),
+        ("six keys", 1, GroupCoreReason.None, 107_937_792, SixAsync),
+        ("six keys", 4, GroupCoreReason.FirstRows, 6_815_744, SixAsync),
     ];
 
     [Fact]
@@ -93,6 +104,22 @@ public sealed partial class GroupAllocationTests
             .Append(WarmUp.ToString(CultureInfo.InvariantCulture))
             .Append('\n');
 
+        // The tests shuffle every result's order (ShuffledOrder), a copy of it a part, which a query
+        // outside them never makes: measured without, as alone in its collection nothing else runs.
+        bool shuffled = AggregationPlan.ShuffledOrder;
+        AggregationPlan.ShuffledOrder = false;
+        try
+        {
+            await MeasureAsync(path, report);
+        }
+        finally
+        {
+            AggregationPlan.ShuffledOrder = shuffled;
+        }
+    }
+
+    private static async Task MeasureAsync(string path, StringBuilder report)
+    {
         List<string> failures = [];
         foreach ((string axis, int lanes, GroupCoreReason expected, long ceiling, Func<VortexFile, int, Task<(long Rows, GroupCoreReason Path)>> query) in Axes)
         {

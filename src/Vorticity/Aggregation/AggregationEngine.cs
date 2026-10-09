@@ -797,12 +797,16 @@ internal sealed class AggregationPartition
     private int _settledEnd;
     private ZoneSettling.Scratch? _settledScratch;
 
+    /// <summary>
+    /// A partition of <paramref name="plan"/>'s groups: under <paramref name="memory"/>, its arrays from a
+    /// lane's shelf, or from <paramref name="arrays"/>, a shelf of its own counted by no query.
+    /// </summary>
     internal AggregationPartition(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyFacts? facts = null,
-        GroupKeys? keys = null, QueryMemory? memory = null)
+        GroupKeys? keys = null, QueryMemory? memory = null, ArrayShelf? arrays = null)
     {
         Memory = memory;
-        _arrays = memory is null ? null : new ArrayShelf(memory);
+        _arrays = arrays ?? (memory is null ? null : new ArrayShelf(memory));
         _turnAt = plan.CoreTurnAt;
         _plan = plan;
         _settledSlots = settled;
@@ -1658,24 +1662,24 @@ internal sealed class AggregationPartition
     internal long Footprint => (Keys?.Footprint ?? 0) + (_componentKeys?.Footprint ?? 0) + AggregateSlot.FootprintOf(Slots);
 
     /// <summary>
-    /// Room for the group of each of <paramref name="rows"/> rows, the one held before given back: rented
-    /// cleared, as a new array starts, since a row a selection leaves out keeps what the array held, and
-    /// another query's groups would be past this one's.
+    /// Room for the group of each of <paramref name="rows"/> rows, the one held before given back: taken
+    /// from the process's shelf a power of two long, cleared, as a new array starts, since a row a
+    /// selection leaves out keeps what the array held, and another query's groups would be past this
+    /// one's. The shared array pool kept an array for each thread that gave one back, which the lane of
+    /// the next query, on another thread, did not find: half a megabyte a query at fourteen lanes.
     /// </summary>
     private void RentRowGroups(int rows)
     {
         GiveBackRowGroups();
-        int[] rented = ArrayPool<int>.Shared.Rent(rows);
-        Array.Clear(rented);
-        _rowGroups = rented;
+        _rowGroups = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(rows, 16)), zeroed: true);
     }
 
-    /// <summary>The groups of the rows given back to the shared pool, once nothing folds into the partition.</summary>
+    /// <summary>The groups of the rows given back to the process's shelf, once nothing folds into the partition.</summary>
     private void GiveBackRowGroups()
     {
         if (_rowGroups.Length > 0)
         {
-            ArrayPool<int>.Shared.Return(_rowGroups);
+            ArrayShelf.Retained.Give(_rowGroups);
             _rowGroups = [];
         }
     }
@@ -1690,6 +1694,7 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void Release()
     {
+        ReturnArrays();
         Keys = null;
         Slots = [];
         Records = null;
@@ -1702,14 +1707,32 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
-    /// Lets the partition's tables go and gives back what it held of its query's memory, the arrays
-    /// left to the next collection: a range a stream followed into the
-    /// partition before it, whose groups now live there.
+    /// Lets the partition's tables go and gives back what it held of its query's memory: a range a
+    /// stream followed into the partition before it, whose groups now live there.
     /// </summary>
     internal void LetGo()
     {
+        ReturnArrays();
         GiveBack();
         Release();
+    }
+
+    /// <summary>
+    /// The arrays of the partition's keys and records back to the shelf they came from, a lane's, which
+    /// hands them to the process's for the next table of their length, this query's or the next one's:
+    /// a lane's tables were left to the next collection, every query growing its own again. Before what
+    /// the partition held of its query's memory is given back, the shelf counting each out; its tables
+    /// are empty after.
+    /// </summary>
+    private void ReturnArrays()
+    {
+        Keys?.Release();
+        Records?.Release();
+
+        // The partition the lane bypassed its cache with, and a shelf of the partition's own, which hands
+        // what it holds to the process's; a lane's holds nothing.
+        _core?.Rows?.Release();
+        _arrays?.Clear();
     }
 
     /// <summary>What the partition's tables held of its query's memory given back, the tables themselves left to the next collection.</summary>
@@ -1767,6 +1790,7 @@ internal sealed class AggregationPartition
         }
         int[]? numbers = null;
         cache.MergeFrom(this, ref numbers, apart: null);
+        ReturnArrays();
         GiveBack();
         lane.Turning = false;
         Keys = cache.Keys;
