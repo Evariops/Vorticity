@@ -33,6 +33,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private readonly ParquetFile _file;
     private readonly RowRange? _rows;
 
+    /// <summary>Per row group, whether the scan reads it: the plan's, which statistics may have pruned.</summary>
+    private readonly bool[] _read;
+
     /// <summary>The column each reader reads.</summary>
     private readonly int[] _leaves;
     private readonly DType _struct;
@@ -59,10 +62,11 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private long _groupRead;
     private bool _anticipated;
 
-    internal ParquetBatches(ParquetFile file, ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken)
+    internal ParquetBatches(ParquetFile file, ScanSpec spec, int[]? columns, bool[] groups, ScanCounters metrics, CancellationToken cancellationToken)
     {
         _file = file;
         _rows = spec.Rows;
+        _read = groups;
         _metrics = metrics;
         _cancellationToken = cancellationToken;
         _batchRows = spec.Options.BatchRows is > 0 and < BatchRows ? spec.Options.BatchRows : BatchRows;
@@ -132,6 +136,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             _nodes[i] = _nested[i] is { } nested ? nested.Read(_context, rows) : _readers[_flat[i]].Read(_context, rows);
         }
 
+        // A batch is a block: what a pruned one is not.
+        _metrics.AddBlocksDecoded(1);
         CanonicalArena arena = _context.Canonical;
         int root = arena.AddStruct(_struct, rows, Validity.NonNullable, _nodes);
         _current = RecordBatch.Over(arena, root, _groupStart + _groupRead, _current);
@@ -173,7 +179,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
             group = footer.RowGroups[_rowGroup];
         }
-        while (group.RowCount == 0 || (_rows is { } range && (group.FirstRow >= range.End || group.FirstRow + group.RowCount <= range.Start)));
+        while (!_read[_rowGroup] || group.RowCount == 0 || (_rows is { } range && (group.FirstRow >= range.End || group.FirstRow + group.RowCount <= range.Start)));
 
         if (!_anticipated)
         {

@@ -28,13 +28,24 @@ internal abstract class StreamScanSource : ScanSource
     /// root a struct of the schema's columns that <paramref name="columns"/> names, in the schema's
     /// order, or of every column when it is null or <see cref="ReadsColumns"/> is false.
     /// </summary>
-    /// <param name="spec">The scan: a source may leave out the rows before and past its <see cref="ScanSpec.Rows"/>, and no other.</param>
+    /// <param name="spec">
+    /// The scan: a source may leave out the rows before and past its <see cref="ScanSpec.Rows"/>,
+    /// and the rows it proves its <see cref="ScanSpec.Filter"/> does not select, and no other.
+    /// </param>
     /// <param name="columns">The columns the scan reads, ascending: those it delivers and those its filter reads; null for every column.</param>
     /// <param name="metrics">The scan's counts, for what the source reads.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     private protected abstract IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken);
 
-    /// <summary>Whether <see cref="Stream"/> delivers the columns it is asked for alone, rather than every column whatever it is asked.</summary>
+    /// <summary>
+    /// The source's batches of <paramref name="part"/> alone, a part of its rows the source described
+    /// itself: what a count reads of the rows its statistics did not decide. The whole stream unless
+    /// the source knows parts.
+    /// </summary>
+    private protected virtual IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, object part, CancellationToken cancellationToken) =>
+        Stream(spec, columns, metrics, cancellationToken);
+
+    /// <summary>Whether <see cref="Stream(ScanSpec, int[], ScanCounters, CancellationToken)"/> delivers the columns it is asked for alone, rather than every column whatever it is asked.</summary>
     private protected virtual bool ReadsColumns => false;
 
     /// <summary>What the source is, as a refusal names it: "result", "Parquet file".</summary>
@@ -42,10 +53,14 @@ internal abstract class StreamScanSource : ScanSource
 
     internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) => new Batches(this, spec, metrics);
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    internal override ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
+        CountAsync(spec, metrics, part: null, cancellationToken);
+
+    /// <summary>The rows <paramref name="spec"/> selects of those the source streams: of <paramref name="part"/> alone, when it is given.</summary>
+    private protected async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, object? part, CancellationToken cancellationToken)
     {
         long count = 0;
-        await foreach (RecordBatch batch in SelectedAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        await foreach (RecordBatch batch in SelectedAsync(spec, metrics, part).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             count += batch.SelectedRows;
         }
@@ -160,8 +175,8 @@ internal abstract class StreamScanSource : ScanSource
     }
 
     /// <summary>The batches of <paramref name="spec"/> left whole, with a selection of the rows kept: what a count or an extreme reads.</summary>
-    private Batches SelectedAsync(ScanSpec spec, ScanCounters metrics) =>
-        new Batches(this, spec with { Options = spec.Options with { Compact = false } }, metrics);
+    private Batches SelectedAsync(ScanSpec spec, ScanCounters metrics, object? part = null) =>
+        new Batches(this, spec with { Options = spec.Options with { Compact = false } }, metrics, part);
 
     /// <summary>
     /// The columns a spec reads, ascending: those it projects, and the top-level column of every path
@@ -212,8 +227,8 @@ internal abstract class StreamScanSource : ScanSource
         return columns;
     }
 
-    /// <summary>The batches a spec asks of the source.</summary>
-    private sealed class Batches(StreamScanSource source, ScanSpec spec, ScanCounters metrics) : IAsyncEnumerable<RecordBatch>
+    /// <summary>The batches a spec asks of the source: of a part of its rows, when one is given.</summary>
+    private sealed class Batches(StreamScanSource source, ScanSpec spec, ScanCounters metrics, object? part = null) : IAsyncEnumerable<RecordBatch>
     {
         public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
         {
@@ -223,7 +238,9 @@ internal abstract class StreamScanSource : ScanSource
             }
 
             int[]? columns = source.ColumnsOf(spec);
-            IAsyncEnumerator<RecordBatch> stream = source.Stream(spec, columns, metrics, cancellationToken);
+            IAsyncEnumerator<RecordBatch> stream = part is null
+                ? source.Stream(spec, columns, metrics, cancellationToken)
+                : source.Stream(spec, columns, metrics, part, cancellationToken);
 
             // An order the source does not arrive in is a sort of the rows kept, held whole.
             return spec.OrderPath is null
@@ -417,7 +434,13 @@ internal abstract class StreamScanSource : ScanSource
 
             if (_spec.Take is { } take)
             {
-                // The positions asked for, sorted: those of this batch are a run of them.
+                // The positions asked for, sorted: those of this batch are a run of them, after those
+                // of any rows the source left out, which its filter does not select.
+                while (_taken < take.Length && take[_taken] < start)
+                {
+                    _taken++;
+                }
+
                 int first = _taken;
                 while (_taken < take.Length && take[_taken] < start + rows)
                 {

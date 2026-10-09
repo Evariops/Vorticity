@@ -1,0 +1,132 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Xunit;
+
+namespace Vorticity.Parquet.Tests;
+
+/// <summary>
+/// The row groups a scan's filter cannot select, proven by the footer's statistics, neither read
+/// nor decoded; those whose count the statistics prove, counted without a read; and the same rows
+/// whether the scan prunes or not.
+/// </summary>
+public sealed partial class PruningTests : IDisposable
+{
+    private const int Rows = 100_000;
+    private const int GroupRows = 8_192;
+
+    private readonly string _path = Path.Combine(Path.GetTempPath(), $"vorticity-pruning-{Guid.NewGuid():N}.parquet");
+
+    [VortexRecord]
+    public partial record struct Event(long Id, int Bucket, double? Value, string Name);
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    public void Dispose() => System.IO.File.Delete(_path);
+
+    [Fact]
+    public async Task ReadsNoRowGroupItsStatisticsRuleOut()
+    {
+        await using ParquetFile file = await OpenAsync();
+        Scan<Event> scan = file.Scan<Event>().Where(e => e.Id >= 90_000);
+        List<Event> rows = await ReadAsync(scan);
+        Assert.Equal(Rows - 90_000, rows.Count);
+        Assert.All(rows, e => Assert.True(e.Id >= 90_000));
+
+        // The ids climb: every row group below 90 000 is ruled out, ten of them.
+        ScanPlan plan = await file.Scan<Event>().Where(e => e.Id >= 90_000).ExplainAsync(Ct);
+        int blocks = (Rows + GroupRows - 1) / GroupRows;
+        Assert.Equal(blocks, plan.Blocks);
+        Assert.Equal(10, plan.Pruning.Sum(step => step.BlocksPruned));
+        Assert.Equal(plan.Blocks, plan.LiveBlocks + plan.Pruning.Sum(step => step.BlocksPruned));
+        Assert.Equal(plan.Blocks - plan.LiveBlocks, scan.Metrics.BlocksPruned);
+        Assert.Equal(plan.LiveBlocks, scan.Metrics.BlocksDecoded);
+        Assert.Equal(plan.Segments, scan.Metrics.Requests);
+    }
+
+    [Fact]
+    public async Task CountsFromTheStatisticsTheRowGroupsTheyDecide()
+    {
+        await using ParquetFile file = await OpenAsync();
+
+        // From 16 384 on, every row group is whole: pruned below, proven above, nothing read.
+        Scan<Event> scan = file.Scan<Event>().Where(e => e.Id >= 16_384);
+        Assert.Equal(Rows - 16_384, await scan.CountAsync(Ct));
+        Assert.Equal(0, scan.Metrics.Requests);
+        ScanPlan plan = await file.Scan<Event>().Where(e => e.Id >= 16_384).ExplainAsync(Ct);
+        Assert.True(plan.Count.Exact);
+        Assert.Equal(Rows - 16_384, plan.Count.Rows);
+        Assert.Equal(0, plan.Count.Decoded);
+
+        // A bound inside a row group: that one is read, the others are not.
+        Scan<Event> partial = file.Scan<Event>().Where(e => e.Id >= 20_000);
+        Assert.Equal(Rows - 20_000, await partial.CountAsync(Ct));
+        Assert.Equal(1, partial.Metrics.BlocksDecoded);
+        Assert.True(await file.Scan<Event>().Where(e => e.Id >= 20_000).AnyAsync(Ct));
+        Assert.False(await file.Scan<Event>().Where(e => e.Id > Rows).AnyAsync(Ct));
+    }
+
+    [Fact]
+    public async Task TakesTheRowsAskedForPastRowGroupsItPruned()
+    {
+        await using ParquetFile file = await OpenAsync();
+        List<Event> rows = await ReadAsync(file.Scan<Event>().Rows(5, 16_390, 60_000, 99_999).Where(e => e.Id >= 50_000));
+        Assert.Equal([60_000L, 99_999L], rows.Select(e => e.Id));
+    }
+
+    [Fact]
+    public async Task SelectsTheSameRowsWhetherItPrunesOrNot()
+    {
+        await using ParquetFile file = await OpenAsync();
+        Func<Probe<Event>, Predicate>[] filters =
+        [
+            e => e.Id < 1_000,
+            e => e.Id >= 40_000 & e.Id < 41_000,
+            e => e.Bucket == 3,
+            e => e.Id > 99_999,
+            e => e.Id.In(5, 50_000, 99_998),
+            e => !(e.Id < 95_000),
+            e => e.Value.IsNull & e.Id > 98_000,
+            e => e.Id < 10 | e.Id > 99_990,
+        ];
+        foreach (Func<Probe<Event>, Predicate> filter in filters)
+        {
+            List<Event> pruned = await ReadAsync(file.Scan<Event>().Where(filter));
+            List<Event> whole = await ReadAsync(file.Scan<Event>().Where(filter).With(new ScanOptions { UseStatistics = false }));
+            Assert.Equal(whole, pruned);
+            Assert.Equal(whole.Count, await file.Scan<Event>().Where(filter).CountAsync(Ct));
+        }
+    }
+
+    private async Task<ParquetFile> OpenAsync()
+    {
+        Event[] rows = new Event[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            rows[i] = new Event(i, i % 10, i % 7 == 0 ? null : i * 0.5, $"name {i % 100}");
+        }
+
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Event>(
+            _path, new ParquetWriteOptions { RowGroupRows = GroupRows, BlockRows = GroupRows }))
+        {
+            await writer.WriteAsync<Event>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        return await ParquetFile.OpenAsync(_path, Ct);
+    }
+
+    private static async Task<List<Event>> ReadAsync(Scan<Event> scan)
+    {
+        List<Event> rows = [];
+        await foreach (Event row in scan.ToRecordsAsync(Ct))
+        {
+            rows.Add(row);
+        }
+
+        return rows;
+    }
+}

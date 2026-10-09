@@ -13,8 +13,9 @@ namespace Vorticity.Parquet.Reading;
 /// scan's filter, rows and projection applied to each as they arrive.
 /// </summary>
 /// <remarks>
-/// Nothing is pruned yet: every row group the scan's rows reach is read. A count that asks only for
-/// rows is the footer's, read with no request.
+/// A row group the footer's statistics prove the filter selects no row of is not read; one they
+/// prove the count of is counted without being read. A count that asks only for rows is the
+/// footer's, read with no request.
 /// </remarks>
 internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
 {
@@ -30,38 +31,97 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
 
     private protected override bool ReadsColumns => true;
 
-    internal override ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing)
         {
-            return new ValueTask<long>(0);
+            return 0;
         }
 
         // Without a filter or chosen rows, the count is the footer's.
-        return spec.Filter is null && spec.Take is null
-            ? new ValueTask<long>(spec.Rows is { } range ? Math.Max(0, Math.Min(range.End, file.RowCount) - Math.Max(range.Start, 0)) : file.RowCount)
-            : base.CountAsync(spec, metrics, cancellationToken);
-    }
-
-    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
-    {
-        // Every row group the rows reach, every chunk of the columns read: a block is a batch.
-        ParquetFooter footer = file.Footer;
-        long rows = 0;
-        int blocks = 0;
-        int segments = 0;
-        long bytes = 0;
-        int[] leaves = Leaves(spec);
-        for (int group = 0; group < footer.RowGroups.Length; group++)
+        if (spec.Filter is null && spec.Take is null)
         {
-            RowGroupEntry entry = footer.RowGroups[group];
-            if (entry.RowCount == 0 || (spec.Rows is { } range && (entry.FirstRow >= range.End || entry.FirstRow + entry.RowCount <= range.Start)))
+            return spec.Rows is { } range ? Math.Max(0, Math.Min(range.End, file.RowCount) - Math.Max(range.Start, 0)) : file.RowCount;
+        }
+
+        // The row groups the statistics count are not read; the others are, alone.
+        RowGroupPlan plan = RowGroupPlan.For(file, spec);
+        metrics.AddBlocksPruned(plan.PrunedBlocks);
+        long count = 0;
+        bool[] undecided = new bool[plan.Read.Length];
+        bool any = false;
+        for (int group = 0; group < undecided.Length; group++)
+        {
+            if (!plan.Read[group])
             {
                 continue;
             }
 
+            if (plan.Proven[group] >= 0)
+            {
+                count += plan.Proven[group];
+                metrics.AddSplitProven();
+            }
+            else
+            {
+                undecided[group] = true;
+                any = true;
+            }
+        }
+
+        return any ? count + await CountAsync(spec, metrics, undecided, cancellationToken).ConfigureAwait(false) : count;
+    }
+
+    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    {
+        if (!spec.MatchesNothing && spec.Filter is not null)
+        {
+            // A row group the statistics prove holds a match answers without a read.
+            RowGroupPlan plan = RowGroupPlan.For(file, spec);
+            foreach (long proven in plan.Proven)
+            {
+                if (proven > 0)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return await base.AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    {
+        // Every row group the plan reads, every chunk of the columns read: a block is a batch.
+        ParquetFooter footer = file.Footer;
+        RowGroupPlan plan = RowGroupPlan.For(file, spec);
+        long rows = 0;
+        int segments = 0;
+        long bytes = 0;
+        int proven = 0;
+        long provenRows = 0;
+        int decoded = 0;
+        int[] leaves = Leaves(spec);
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            if (!plan.Read[group])
+            {
+                continue;
+            }
+
+            RowGroupEntry entry = footer.RowGroups[group];
+            int blocks = (int)((entry.RowCount + ParquetBatches.BatchRows - 1) / ParquetBatches.BatchRows);
             rows += entry.RowCount;
-            blocks += (int)((entry.RowCount + ParquetBatches.BatchRows - 1) / ParquetBatches.BatchRows);
+            if (plan.Proven[group] >= 0)
+            {
+                proven += blocks;
+                provenRows += plan.Proven[group];
+            }
+            else
+            {
+                decoded += blocks;
+            }
+
             foreach (int leaf in leaves)
             {
                 bytes += file.ChunkRange(footer.Chunk(group, leaf)).Length;
@@ -69,14 +129,28 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             }
         }
 
-        bool exact = spec.Filter is null && spec.Take is null;
+        int live = plan.Blocks - plan.PrunedBlocks;
+        ImmutableArray<PruningStep> pruning = spec.Filter is not null && spec.Options.UseStatistics
+            ? [new PruningStep("row group statistics", plan.PrunedBlocks, 0, 0)]
+            : ImmutableArray<PruningStep>.Empty;
+        bool unfiltered = spec.Filter is null && spec.Take is null;
+        CountPlan count = unfiltered
+            ? new CountPlan(true, rows, 0, 0, 0)
+            : new CountPlan(decoded == 0, decoded == 0 ? provenRows : 0, plan.PrunedBlocks, proven, decoded);
         return new ValueTask<ScanPlan>(new ScanPlan(
-            rows, blocks, blocks, segments, bytes, !spec.MatchesNothing, ImmutableArray<PruningStep>.Empty,
-            new CountPlan(exact, exact ? rows : 0, 0, 0, exact ? 0 : blocks), null));
+            rows, plan.Blocks, live, segments, bytes, !spec.MatchesNothing && (live > 0 || plan.Blocks == 0), pruning, count, null));
     }
 
-    private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken) =>
-        new ParquetBatches(file, spec, columns, metrics, cancellationToken);
+    private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken)
+    {
+        RowGroupPlan plan = RowGroupPlan.For(file, spec);
+        metrics.AddBlocksPruned(plan.PrunedBlocks);
+        return new ParquetBatches(file, spec, columns, plan.Read, metrics, cancellationToken);
+    }
+
+    /// <summary>The batches of the row groups <paramref name="part"/> marks: a count's, of those its statistics did not decide.</summary>
+    private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, object part, CancellationToken cancellationToken) =>
+        new ParquetBatches(file, spec, columns, (bool[])part, metrics, cancellationToken);
 
     /// <summary>The leaves of the columns a spec reads.</summary>
     private int[] Leaves(ScanSpec spec)
