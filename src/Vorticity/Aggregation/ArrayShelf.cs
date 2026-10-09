@@ -37,17 +37,29 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     private const long Ahead = 256 * 1024;
 
+    /// <summary>The bytes from which an array lies on the large object heap.</summary>
+    private const long LargeBytes = 85_000;
+
+    /// <summary>The piles a shelf keeps once emptied: past them, a pile its budget empties goes.</summary>
+    private const int MostPiles = 4096;
+
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<(Type Type, int Length), Pile> _piles = [];
     private readonly ArrayShelf? _parent;
+
+    // What the shelf keeps of large arrays, and apart of small ones: a small array missed is allocated on
+    // the small object heap, whose collections stop every lane and copy what lives there; a large one,
+    // a page fault. The bytes it holds, and of them the small arrays'.
     private readonly long _budget;
+    private readonly long _smallBudget;
     private long _held;
+    private long _heldSmall;
     private bool _used;
 
-    // The piles from the one taken from or given to most recently to the one least recently, linked:
-    // past its budget, the shelf lets go of the oldest first.
-    private Pile? _newest;
-    private Pile? _oldest;
+    // The piles of each kind from the one taken from or given to most recently to the one least
+    // recently, linked: past its budget, the shelf lets go of the oldest first.
+    private PileOrder _large;
+    private PileOrder _small;
 
     // A shelf under a query's memory; for a lane's, the bytes of the arrays it handed out that its
     // tables hold, and what it reserved ahead of the next ones.
@@ -57,7 +69,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>A query's shelf, which takes from the process's when it holds nothing of a length, and hands it what it holds at the end.</summary>
     internal ArrayShelf()
-        : this(Retained, long.MaxValue)
+        : this(Retained, long.MaxValue, long.MaxValue)
     {
     }
 
@@ -68,7 +80,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// exact, each taken under no lock of its own: the lanes that apply bursts meet on it.
     /// </summary>
     internal ArrayShelf(QueryMemory memory, bool pooled)
-        : this(Retained, pooled ? long.MaxValue : 0) => _memory = memory;
+        : this(Retained, pooled ? long.MaxValue : 0, pooled ? long.MaxValue : 0) => _memory = memory;
 
     /// <summary>
     /// A lane's shelf under its query's memory: an array it
@@ -80,7 +92,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// and it takes no lock but the process's shelf's.
     /// </summary>
     internal ArrayShelf(QueryMemory memory)
-        : this(parent: null, budget: 0) => _memory = memory;
+        : this(parent: null, budget: 0, smallBudget: 0) => _memory = memory;
 
     /// <summary>Whether the shelf is a lane's: under a query's memory, with no pile and no process's shelf behind it.</summary>
     private bool Lane => _memory is not null && _parent is null;
@@ -88,23 +100,26 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The query's memory the shelf counts its arrays under: its run's; null for a shelf that counts nothing.</summary>
     internal QueryMemory? Memory => _memory;
 
-    private ArrayShelf(ArrayShelf? parent, long budget)
+    private ArrayShelf(ArrayShelf? parent, long budget, long smallBudget)
     {
         _parent = parent;
         _budget = budget;
+        _smallBudget = smallBudget;
     }
 
     /// <summary>
-    /// The process's shelf: what queries left, up to a quarter of a gigabyte or a sixteenth of the
-    /// memory the process may use, whichever is less, for the next query not to touch fresh memory
-    /// again. Swept after collections: emptied when no query took from it since the last, or when the
-    /// machine's memory load is high.
+    /// The process's shelf: what queries left, for the next query not to touch fresh memory again: of
+    /// large arrays, up to a quarter of a gigabyte or a sixteenth of the memory the process may use,
+    /// whichever is less; of small ones, a quarter of that again, apart, so that a query whose large
+    /// arrays its budget does not hold still finds its small ones. Swept after collections: emptied when
+    /// no query took from it since the last, or when the machine's memory load is high.
     /// </summary>
     internal static ArrayShelf Retained { get; } = NewRetained();
 
     private static ArrayShelf NewRetained()
     {
-        ArrayShelf shelf = new ArrayShelf(parent: null, Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16));
+        long budget = Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16);
+        ArrayShelf shelf = new ArrayShelf(parent: null, budget, budget / 4);
         CollectionSweeper<ArrayShelf>.Register(shelf);
         return shelf;
     }
@@ -136,8 +151,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The bytes a lane's tables copied from an array into the one that replaced it (<see cref="Resize{T}"/>).</summary>
     internal long CopiedBytes { get; private set; }
 
-    /// <summary>The most bytes the shelf keeps on its piles; past it, what it is given goes.</summary>
-    internal long Budget => _budget;
+    /// <summary>The most bytes the shelf keeps on its piles, its large arrays' and its small ones'; past it, what it is given goes.</summary>
+    internal long Budget => _budget > long.MaxValue - _smallBudget ? long.MaxValue : _budget + _smallBudget;
 
     /// <summary>
     /// Whether a lane's shelf takes an array its budget refuses all the same, counted past the ceiling:
@@ -236,7 +251,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
                 if (pile.Arrays.Count > 0)
                 {
                     found = pile.Arrays.Pop();
-                    _held -= (long)length * pile.ElementBytes;
+                    Hold(pile, -pile.Bytes);
                 }
             }
         }
@@ -488,7 +503,6 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return true;
         }
 
-        long bytes = (long)length * elementBytes;
         lock (_gate)
         {
             if (!_piles.TryGetValue((type, length), out Pile? pile))
@@ -498,25 +512,39 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             }
 
             Touch(pile);
-            if (_held + bytes > _budget && (bytes > _budget || !Evict(_held + bytes - _budget, pile)))
+            long budget = pile.Small ? _smallBudget : _budget;
+            long held = pile.Small ? _heldSmall : _held - _heldSmall;
+            if (held + pile.Bytes > budget && (pile.Bytes > budget || !Evict(held + pile.Bytes - budget, pile)))
             {
                 return false;
             }
 
             pile.Arrays.Push(array);
-            _held += bytes;
+            Hold(pile, pile.Bytes);
             return true;
         }
     }
 
+    /// <summary>The bytes the shelf holds moved by <paramref name="bytes"/>, an array of <paramref name="pile"/>'s taken or given.</summary>
+    private void Hold(Pile pile, long bytes)
+    {
+        _held += bytes;
+        if (pile.Small)
+        {
+            _heldSmall += bytes;
+        }
+    }
+
     /// <summary>
-    /// Lets go of <paramref name="bytes"/> at least of the arrays on the piles taken from or given to least
-    /// recently, never <paramref name="kept"/>'s, under the lock: whether it could. A pile emptied goes,
-    /// so that the lengths a process once met do not pile up.
+    /// Lets go of <paramref name="bytes"/> at least of the arrays on the piles of <paramref name="kept"/>'s
+    /// kind taken from or given to least recently, never <paramref name="kept"/>'s, under the lock:
+    /// whether it could. Past <see cref="MostPiles"/>, a pile emptied goes, so that the lengths a process
+    /// once met do not pile up; short of them it stays, its next array a push.
     /// </summary>
     private bool Evict(long bytes, Pile kept)
     {
-        Pile? pile = _oldest;
+        ref PileOrder order = ref OrderOf(kept);
+        Pile? pile = order.Oldest;
         while (bytes > 0 && pile is not null)
         {
             Pile? newer = pile.Newer;
@@ -524,14 +552,14 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             {
                 while (bytes > 0 && pile.Arrays.Count > 0)
                 {
-                    long freed = (long)pile.Arrays.Pop().Length * pile.ElementBytes;
-                    _held -= freed;
-                    bytes -= freed;
+                    pile.Arrays.Pop();
+                    Hold(pile, -pile.Bytes);
+                    bytes -= pile.Bytes;
                 }
 
-                if (pile.Arrays.Count == 0)
+                if (pile.Arrays.Count == 0 && _piles.Count > MostPiles)
                 {
-                    Unlink(pile);
+                    Unlink(ref order, pile);
                     _piles.Remove(pile.Key);
                 }
             }
@@ -542,44 +570,48 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         return bytes <= 0;
     }
 
-    /// <summary>Makes <paramref name="pile"/> the one used most recently, under the lock.</summary>
+    /// <summary>The order of the piles of <paramref name="pile"/>'s kind.</summary>
+    private ref PileOrder OrderOf(Pile pile) => ref pile.Small ? ref _small : ref _large;
+
+    /// <summary>Makes <paramref name="pile"/> the one of its kind used most recently, under the lock.</summary>
     private void Touch(Pile pile)
     {
-        if (_newest == pile)
+        ref PileOrder order = ref OrderOf(pile);
+        if (order.Newest == pile)
         {
             return;
         }
 
-        Unlink(pile);
-        pile.Older = _newest;
-        if (_newest is not null)
+        Unlink(ref order, pile);
+        pile.Older = order.Newest;
+        if (order.Newest is not null)
         {
-            _newest.Newer = pile;
+            order.Newest.Newer = pile;
         }
 
-        _newest = pile;
-        _oldest ??= pile;
+        order.Newest = pile;
+        order.Oldest ??= pile;
     }
 
-    /// <summary>Takes <paramref name="pile"/> out of the piles' order, under the lock; nothing for one not in it.</summary>
-    private void Unlink(Pile pile)
+    /// <summary>Takes <paramref name="pile"/> out of <paramref name="order"/>, under the lock; nothing for one not in it.</summary>
+    private static void Unlink(ref PileOrder order, Pile pile)
     {
         if (pile.Newer is { } newer)
         {
             newer.Older = pile.Older;
         }
-        else if (_newest == pile)
+        else if (order.Newest == pile)
         {
-            _newest = pile.Older;
+            order.Newest = pile.Older;
         }
 
         if (pile.Older is { } older)
         {
             older.Newer = pile.Newer;
         }
-        else if (_oldest == pile)
+        else if (order.Oldest == pile)
         {
-            _oldest = pile.Newer;
+            order.Oldest = pile.Newer;
         }
 
         pile.Newer = null;
@@ -590,9 +622,10 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private void Empty()
     {
         _piles.Clear();
-        _newest = null;
-        _oldest = null;
+        _large = default;
+        _small = default;
         _held = 0;
+        _heldSmall = 0;
     }
 
     /// <summary>After a collection: the process's shelf emptied when no query took from it since the last sweep, or under a high memory load.</summary>
@@ -611,6 +644,13 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
     }
 
+    /// <summary>The newest and the oldest pile of a kind, linked through them.</summary>
+    private struct PileOrder
+    {
+        internal Pile? Newest;
+        internal Pile? Oldest;
+    }
+
     /// <summary>The arrays of one type and length, and the bytes of an element.</summary>
     private sealed class Pile((Type Type, int Length) key, int elementBytes)
     {
@@ -619,6 +659,12 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         internal Stack<Array> Arrays { get; } = new Stack<Array>();
 
         internal int ElementBytes { get; } = elementBytes;
+
+        /// <summary>The bytes of each of its arrays.</summary>
+        internal long Bytes { get; } = (long)key.Length * elementBytes;
+
+        /// <summary>Whether its arrays lie on the small object heap.</summary>
+        internal bool Small => Bytes < LargeBytes;
 
         /// <summary>The pile used next more recently, null for the newest.</summary>
         internal Pile? Newer { get; set; }
