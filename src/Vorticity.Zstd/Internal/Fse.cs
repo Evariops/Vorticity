@@ -158,6 +158,9 @@ internal static class Fse
         ip += (bitCount + 7) >> 3;
         return ip;
 
+        // Inlined: as a call, it took the reader's position, count and bits by reference, which kept
+        // them in memory for the whole description.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void Advance(ReadOnlySpan<byte> header, int end, ref int ip, ref int bitCount, out uint bitStream)
         {
             if (ip <= end - 7 || ip + (bitCount >> 3) <= end - 4)

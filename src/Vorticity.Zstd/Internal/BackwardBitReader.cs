@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -171,6 +172,73 @@ internal ref struct BackwardBitReader
         _bitsConsumed -= bytes * 8;
         _container = BinaryPrimitives.ReadUInt64LittleEndian(_source.Slice(_position));
         return status;
+    }
+
+    /// <summary>
+    /// Decodes <paramref name="length"/> symbols of a single-symbol Huffman table (entries of
+    /// <see cref="HuffmanTable"/>: the code length in the low byte, the symbol in the high byte),
+    /// each looked up with the next <paramref name="tableLog"/> bits, the stream reloaded before any
+    /// symbol once more than 64 - <see cref="HuffmanTable.MaxTableLog"/> of its bits are consumed:
+    /// the reloads of <see cref="Reload"/>, at the same symbols, its statuses ignored.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The reader's state is held in locals for the loop: through the reader, every symbol would read
+    /// and write it in memory. A reload eight bytes or more from the start takes the loop's own path;
+    /// any other goes through <see cref="Reload"/>.
+    /// </para>
+    /// <para>
+    /// The symbols form one chain, each code's length deciding where the next starts. So the chain
+    /// runs on the container shifted past the consumed bits, which a symbol shifts by its entry (whose
+    /// low six bits are the code's length): a shift, the lookup, a shift. The count of consumed bits,
+    /// which only the reloads read, follows on the side. Until 64 bits are consumed the shifted
+    /// container is the reader's container shifted by that count; past that, the stream has
+    /// overflowed and fails its end check whatever the symbols read.
+    /// </para>
+    /// </remarks>
+    public void DecodeHuffmanSymbols(ref ushort table, int tableLog, ref byte output, nint length)
+    {
+        ulong container = _container;
+        int consumed = _bitsConsumed;
+        int position = _position;
+        ulong bits = container << (consumed & 63);
+        bits = consumed >= 64 ? 0 : bits;
+        ref byte source = ref MemoryMarshal.GetReference(_source);
+        int shift = (64 - tableLog) & 63;
+        for (nint i = 0; i < length; i++)
+        {
+            if (consumed > 64 - HuffmanTable.MaxTableLog)
+            {
+                if ((consumed <= 64) & (position >= sizeof(ulong)))
+                {
+                    position -= consumed >> 3;
+                    consumed &= 7;
+                    container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref source, position));
+                }
+                else
+                {
+                    _container = container;
+                    _bitsConsumed = consumed;
+                    _position = position;
+                    Reload();
+                    container = _container;
+                    consumed = _bitsConsumed;
+                    position = _position;
+                }
+
+                bits = container << (consumed & 63);
+                bits = consumed >= 64 ? 0 : bits;
+            }
+
+            uint entry = Unsafe.Add(ref table, (nint)(bits >> shift));
+            Unsafe.Add(ref output, i) = (byte)(entry >> 8);
+            bits <<= (int)entry;
+            consumed += (int)(entry & 0xFF);
+        }
+
+        _container = container;
+        _bitsConsumed = consumed;
+        _position = position;
     }
 
     /// <summary>libzstd's <c>BIT_reloadDStreamFast</c>: refuses to come within eight bytes of the start.</summary>

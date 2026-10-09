@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Zstd.Internal;
 
 namespace Vorticity.Zstd;
@@ -190,9 +191,16 @@ public sealed partial class ZstdDecompressor
             state.HistoryLength = history.Length;
             ref byte frameStart = ref MemoryMarshal.GetReference(destination);
             nint fastRoom = Math.Min((nint)blockStart + blockSizeMax, destination.Length - WildCopyOverlength);
-            ExecuteSequencesFast(
-                ref state, ref frameStart, ref Unsafe.Add(ref frameStart, Math.Max(fastRoom, Unsafe.ByteOffset(ref frameStart, ref state.Dst))),
-                ref Unsafe.Add(ref MemoryMarshal.GetReference(literals), literalCount));
+            ref byte fastLimit = ref Unsafe.Add(ref frameStart, Math.Max(fastRoom, Unsafe.ByteOffset(ref frameStart, ref state.Dst)));
+            ref byte litEnd = ref Unsafe.Add(ref MemoryMarshal.GetReference(literals), literalCount);
+            if (X86Base.IsSupported)
+            {
+                ExecuteSequencesFastX64(ref state, ref frameStart, ref fastLimit, ref litEnd);
+            }
+            else
+            {
+                ExecuteSequencesFast(ref state, ref frameStart, ref fastLimit, ref litEnd);
+            }
         }
 
         return ExecuteSequencesCareful(ref state, literals, literalCount, destination, blockStart, blockSizeMax, history);
@@ -1010,7 +1018,8 @@ public sealed partial class ZstdDecompressor
         Debug.Assert(offset is > 0 and < 16);
         Vector128<byte> source = Unsafe.ReadUnaligned<Vector128<byte>>(ref match);
         Vector128<byte> indices = Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref MemoryMarshal.GetReference(PatternIndices), (nint)offset * 16));
-        Vector128<byte> pattern = Vector128.Shuffle(source, indices);
+        // The indices are all below 16: the native shuffle (tbl, pshufb) needs no masking of the others.
+        Vector128<byte> pattern = Vector128.ShuffleNative(source, indices);
         nint step = PatternStep[(int)offset];
         nint i = 0;
         do
