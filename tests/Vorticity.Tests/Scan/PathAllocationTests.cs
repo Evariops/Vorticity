@@ -45,6 +45,7 @@ using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Xunit;
 
@@ -132,13 +133,43 @@ public sealed class PathAllocationTests
     private const int Runs = 10;
 
     /// <summary>
-    /// What the runtime's own file handle weighs on Windows beyond the platform the ceilings were
-    /// measured on: every axis opens one file, and every axis, the footer-only one included, reads
-    /// 24 bytes more there. The handle is the one allocation of an open that differs by platform:
-    /// Windows' <c>SafeFileHandle</c> carries its file type, its cached length and its thread-pool
-    /// binding, 80 bytes. The library allocates the same bytes on both.
+    /// What an open of <paramref name="file"/> allocates on Windows beyond the platforms the ceilings
+    /// were measured on, which open every file from a handle.
     /// </summary>
-    private static readonly long HandleAllowance = OperatingSystem.IsWindows() ? 24 : 0;
+    /// <remarks>
+    /// <para>
+    /// A file opened from a handle: 24 bytes. Windows' <c>SafeFileHandle</c> carries its file type,
+    /// its cached length and its thread-pool binding, 80 bytes; the library allocates the same bytes
+    /// around it.
+    /// </para>
+    /// <para>
+    /// A file the session keeps mapped, which Windows 11 24H2 reopens by its name, with no handle
+    /// (<see cref="FileInode.TryGetByName"/>): at most 40 bytes. Without a handle the tail is read as
+    /// slices of the mapping rather than into pooled buffers: a tail read in one go, as the main
+    /// file's, is one owner where the other open had none, 16 bytes over a handle's open there; a
+    /// footer past the first read, as the map file's, costs less by name, the handle's open then
+    /// allocating the larger buffer. Every axis that scans the main file reopens it so once its
+    /// warm-ups have mapped it; the footer-only one does when an earlier test left it mapped; a file
+    /// the open reads whole is never mapped. So the allowance is asked after the warm-ups, of the
+    /// state the measured runs found.
+    /// </para>
+    /// </remarks>
+    private static long WindowsAllowance(string file)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return 0;
+        }
+
+        if (VortexSession.Default.Mappings is { } mappings && FileInode.TryGetByName(file, out FileInode identity, out long length)
+            && mappings.TryTake(identity, length) is { } kept)
+        {
+            kept.Release();
+            return 40;
+        }
+
+        return 24;
+    }
 
     /// <summary>Samples taken at each end of the retention check, of which the minimum counts.</summary>
     private const int Samples = 3;
@@ -350,8 +381,9 @@ public sealed class PathAllocationTests
         List<string> over = [];
         foreach ((string axis, string file, long measured, Func<string, ValueTask<long>> path) in Axes)
         {
-            long ceiling = measured + HandleAllowance;
-            long floor = Floor(path, Corpus.Path(file));
+            string resolved = Corpus.Path(file);
+            long floor = Floor(path, resolved);
+            long ceiling = measured + WindowsAllowance(resolved);
             long headroom = ceiling - floor;
             report.Append("    ")
                 .Append(axis.PadRight(32))
