@@ -92,6 +92,11 @@ internal static class Program
         long[] workMicros = new long[repeat];
         long[] allocated = new long[repeat];
         ProcessCounters[] spent = new ProcessCounters[repeat];
+
+        // The collections of each generation a round called, and the time they held every thread: the
+        // stops a lane cannot work through.
+        int[] collections = new int[repeat * 3];
+        long[] pausedMicros = new long[repeat];
         long before = AllocatedSoFar();
         for (int round = 0; round < repeat; round++)
         {
@@ -99,11 +104,19 @@ internal static class Program
             // is the work, and the process start is a property of the build that the parent times
             // apart. The processor's counters are read outside the timed span, on every thread of the
             // process: what the round cost the machine beside how long it took.
+            int gen0 = GC.CollectionCount(0);
+            int gen1 = GC.CollectionCount(1);
+            int gen2 = GC.CollectionCount(2);
+            TimeSpan paused = GC.GetTotalPauseDuration();
             ProcessCounters counted = ProcessCost.ReadCounters();
             long started = Stopwatch.GetTimestamp();
             delivered[round] = await scenario(args[2]).ConfigureAwait(false);
             workMicros[round] = (long)(Stopwatch.GetElapsedTime(started).TotalMilliseconds * 1000);
             spent[round] = ProcessCost.ReadCounters().Since(counted);
+            pausedMicros[round] = (long)(GC.GetTotalPauseDuration() - paused).TotalMicroseconds;
+            collections[(3 * round) + 0] = GC.CollectionCount(0) - gen0;
+            collections[(3 * round) + 1] = GC.CollectionCount(1) - gen1;
+            collections[(3 * round) + 2] = GC.CollectionCount(2) - gen2;
             long after = AllocatedSoFar();
             allocated[round] = after - before;
             before = after;
@@ -115,7 +128,7 @@ internal static class Program
             {
                 Console.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"round={round} rows={delivered[round]} work_us={workMicros[round]} allocated_bytes={allocated[round]} cpu_us={spent[round].CpuNanoseconds / 1000} instructions={spent[round].Instructions} cycles={spent[round].Cycles}"));
+                    $"round={round} rows={delivered[round]} work_us={workMicros[round]} allocated_bytes={allocated[round]} cpu_us={spent[round].CpuNanoseconds / 1000} instructions={spent[round].Instructions} cycles={spent[round].Cycles} gc={collections[3 * round]}/{collections[(3 * round) + 1]}/{collections[(3 * round) + 2]} gc_paused_us={pausedMicros[round]}"));
             }
         }
 
