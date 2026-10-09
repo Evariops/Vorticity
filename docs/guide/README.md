@@ -111,3 +111,4 @@ VX0002 for the row encoding, which a project acknowledges before it builds.
 | [how-it-works.md](how-it-works.md) | the shape of the library in two pages, and where to read further |
 | [benchmarks.md](benchmarks.md) | every figure the bench publishes: what this costs against the Rust implementation, and each kernel against its baseline |
 | [benchmarks-x64.md](benchmarks-x64.md) | the sections that compare Vorticity with itself, from an x64 machine, a Zen 4 processor under Windows |
+| [benchmarks-duckdb.md](benchmarks-duckdb.md) | our group bys against DuckDB's on the same files, through its Vortex reader and from its own table: where we lead and where we trail |

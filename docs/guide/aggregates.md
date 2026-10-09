@@ -13,7 +13,7 @@ public partial record struct Summary(double? Min, double? Max, long Rows, long C
 ```
 
 ```
-AggAsync, four answers             2.3 ms  min 10.1, max 49.9, 100000 rows, 8 cities; 1 blocks decoded
+AggAsync, four answers             1.9 ms  min 10.1, max 49.9, 100000 rows, 8 cities; 1 blocks decoded
 ```
 
 ## Several answers in one pass
@@ -192,7 +192,7 @@ public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanM
 ```
 
 ```
-GroupBy(StartedAt, by hour)        0.8 ms  24 hours; 5 blocks decoded
+GroupBy(StartedAt, by hour)        0.7 ms  24 hours; 5 blocks decoded
   2026-09-02 02:00 Paris  1200 visits, mean 29400 ms
   2026-09-02 03:00 Paris  1200 visits, mean 30600 ms
   ...
@@ -304,18 +304,17 @@ what makes the parallel run correct. `T` is the column's storage primitive, exac
 What the encoded steps are worth, against `CanonicalWelford<T>`, the same fold with `Step` only:
 
 ```
-Welford(Celsius), encoded          4.8 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
-Welford(Celsius), canonical        4.8 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
-Welford(Day), encoded              0.3 ms  1000000 values, mean 499.5000, variance 83333.3333, 1 blocks decoded
-Welford(Day), canonical            4.4 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
+Welford(Celsius), encoded          6.7 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+Welford(Celsius), canonical        6.6 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+Welford(Day), encoded              0.2 ms  1000000 values, mean 499.5000, variance 83333.3333, 0 blocks decoded
+Welford(Day), canonical            3.8 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
 ```
 
 `Day` is stored as runs: `StepRunEnd` sees 1 121 runs instead of a million values, more than ten
 times faster. `Celsius` is a dictionary whose distinct values include the null, and such a block is
 handed to `Step` decoded, so the two are equal ([encoded-forms.md](encoded-forms.md)).
 `BlocksDecoded` counts the blocks where a column reached the canonical form: every block of
-`Celsius`, and of `Day` only the one block the reader delivers canonical, the other 122 going to
-`StepRunEnd` as runs.
+`Celsius`, and none of `Day`, every block going to `StepRunEnd` as runs.
 
 ## On more cores
 
@@ -325,14 +324,14 @@ await using VortexFile shared = await parallel.OpenAsync(path);
 ```
 
 ```
-GroupBy(City, Day), degree 1      32.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
-GroupBy(City, Day), degree 14      9.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
-Welford(Celsius), degree 14        1.3 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+GroupBy(City, Day), degree 1      19.2 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
+GroupBy(City, Day), degree 14      6.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
+Welford(Celsius), degree 14        1.5 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
 ```
 
 Parallelism is the session's, 1 by default: a library does not take a host's cores without being
 asked. With it, chunks aggregate concurrently, one state per group per chunk, and `Merge` joins
-them: the same answers, 3.5 times faster for the composite group by on 14 cores, 3.7 times for the
+them: the same answers, 3 times faster for the composite group by on 14 cores, 4.5 times for the
 Welford fold. A group by whose key streams streams on every lane too: ranges of rows are grouped
 side by side and each follows the one before it in the order of the rows, so the groups still come
 out in key order as they close, the first ones once the first block is grouped, and the memory is
@@ -390,12 +389,12 @@ dictionary or run-end block included.
   with the canonical form instead ([native-aot.md](native-aot.md)).
 * **The first passes of a process run on code the JIT has not optimized yet.** Tiered compilation
   starts every method unoptimized and recompiles the ones called often, so the best of three passes
-  of a query on one lane takes about half as long again as its steady state: 15 to 16 ms against
-  10 for `GroupBy(City)`, 23 against 16 for `GroupBy(City, Day)`. A library cannot choose this for
-  its host. The host can: with `<TieredCompilation>false</TieredCompilation>` in its project, every
-  method is optimized on its first call, at the cost of a slower start, and in this sample the
-  steady state is then no slower, often faster (13 ms for `GroupBy(City, Day)`, 4.8 for Welford
-  against 6.5). Under Native AOT, nothing is left to warm. The cost grows with the lanes: on group
+  of a query on one lane takes a fifth to half as long again as with every method optimized from
+  the start: 12.4 ms against 10.2 for `GroupBy(City)`, 19.2 against 12.7 for `GroupBy(City, Day)`.
+  A library cannot choose this for its host. The host can: with
+  `<TieredCompilation>false</TieredCompilation>` in its project, every method is optimized on its
+  first call, at the cost of a slower start, and in this sample the passes are then those 10.2 and
+  12.7 ms, and 4.8 for Welford against 6.7. Under Native AOT, nothing is left to warm. The cost grows with the lanes: on group
   bys of a million to ten million keys over 4 to 20 million rows, measured on 2026-10-08, the first
   three passes at fourteen lanes took 1.6 to 3.8 times what the same code compiled ahead of time
   took (205 to 218 ms against 76 to 78 from the second pass, for ten million keys). Once warm, at one
@@ -403,8 +402,9 @@ dictionary or run-end block included.
   compilation off, the first pass pays for compiling everything, three to five times the native one,
   and the second already runs as fast.
 
-The figures come from one run of the sample on the demonstration file of a million rows, on a
-machine of 14 cores; each timing is the best of three passes.
+The figures come from the sample on the demonstration file of a million rows, on a machine of 14
+cores: each timing is the best of three passes in a process, and the median of seven processes
+(2026-10-09); from one process to the next they vary by a fifth or more.
 
 ## Run it
 

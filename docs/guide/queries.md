@@ -85,7 +85,7 @@ List<DurationVisits> shortest = await ToListAsync(visits.Scan<Visit>()
 ```
 
 ```
-the five shortest durations, 0 to 4 ms, in 0.88 ms; every one of the 90000 durations in 4.37 ms
+the five shortest durations, 0 to 4 ms, in 1.05 ms; every one of the 90000 durations in 3.67 ms
 ```
 
 ## Groups that go out as they close
@@ -99,7 +99,7 @@ await foreach (long rows in readings.Scan<Reading>().GroupBy(r => r.Day).Select(
 ```
 
 ```
-GroupBy(Day): the first of 1000 groups after 0.07 ms and 1 batch(es), all of them after 0.28 ms
+GroupBy(Day): the first of 1000 groups after 0.07 ms and 1 batch(es), all of them after 0.30 ms
 ```
 
 Under a descending order of such a key and a `Take`, the chunks are read from the last one back,
@@ -146,8 +146,8 @@ does.
 * **The first passes of a process run on code the JIT has not optimized yet**: see the last point of
   [aggregates.md](aggregates.md#watch-out).
 
-The figures come from one run of the sample on the demonstration files, on a machine of 14 cores;
-each timing is the best of three passes.
+The figures come from the sample on the demonstration files, on a machine of 14 cores: each timing
+is the best of three passes in a process, and the median of seven processes (2026-10-09).
 
 ## Run it
 
