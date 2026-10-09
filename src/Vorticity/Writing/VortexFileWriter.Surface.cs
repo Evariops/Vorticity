@@ -202,32 +202,14 @@ public sealed partial class VortexFileWriter
 
         int[] members = MembersOf<TRecord>();
         CanonicalArena scratch = Scratch();
-        int[] fields = ArrayPool<int>.Shared.Rent(members.Length);
         try
         {
-            for (int column = 0; column < members.Length; column++)
-            {
-                int node = columns.ColumnNode(members[column]);
-                RequireFits(columns.Arena.GetNode(node).DType, _schema.GetField(column), $"Member '{TRecord.Schema[members[column]].Name}' of {typeof(TRecord).Name}");
-                fields[column] = scratch.ReferenceFrom(columns.Arena, node);
-            }
-
-            int root = scratch.AddStruct(_schema, columns.RowCount, Validity.NonNullable, fields.AsSpan(0, members.Length));
-            if (!columns.SelectionWords.IsEmpty)
-            {
-                root = Selected(scratch, root, columns.SelectionWords);
-            }
-
-            return PassAsync(scratch, root, cancellationToken);
+            return PassAsync(scratch, BatchIntake.Columns(scratch, columns, members, _schema), cancellationToken);
         }
         catch
         {
             scratch.Reset();
             throw;
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(fields);
         }
     }
 
@@ -283,7 +265,7 @@ public sealed partial class VortexFileWriter
     {
         ThrowIfDone();
         cancellationToken.ThrowIfCancellationRequested();
-        RequireFits(batch.Arena.GetNode(batch.Node).DType, _schema, "The batch");
+        BatchIntake.RequireFits(batch.Arena.GetNode(batch.Node).DType, _schema, "The batch");
         return batch.SelectionWords.IsEmpty
             ? PassThroughAsync(batch.Arena, batch.Node, cancellationToken)
             : PassSelectedAsync(batch.Arena, batch.Node, batch.SelectionWords, cancellationToken);
@@ -299,7 +281,7 @@ public sealed partial class VortexFileWriter
         ArgumentNullException.ThrowIfNull(batch);
         ThrowIfDone();
         cancellationToken.ThrowIfCancellationRequested();
-        RequireFits(batch.DType, _schema, "The batch");
+        BatchIntake.RequireFits(batch.DType, _schema, "The batch");
         return batch.SelectionWords.IsEmpty
             ? PassThroughAsync(batch.Arena, batch.RootIndex, cancellationToken)
             : PassSelectedAsync(batch.Arena, batch.RootIndex, batch.SelectionWords, cancellationToken);
@@ -650,7 +632,7 @@ public sealed partial class VortexFileWriter
         CanonicalArena scratch = Scratch();
         try
         {
-            return PassAsync(scratch, Selected(scratch, scratch.ReferenceFrom(arena, root), selection), cancellationToken);
+            return PassAsync(scratch, BatchIntake.Selected(scratch, scratch.ReferenceFrom(arena, root), selection), cancellationToken);
         }
         catch
         {
@@ -672,119 +654,17 @@ public sealed partial class VortexFileWriter
         }
     }
 
-    /// <summary>The rows of <paramref name="node"/> a selection keeps, gathered into <paramref name="scratch"/>.</summary>
-    private static int Selected(CanonicalArena scratch, int node, ReadOnlySpan<ulong> words)
-    {
-        int count = 0;
-        foreach (ulong word in words)
-        {
-            count += BitOperations.PopCount(word);
-        }
-
-        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
-        try
-        {
-            int n = 0;
-            for (int w = 0; w < words.Length; w++)
-            {
-                ulong word = words[w];
-                while (word != 0)
-                {
-                    indices[n++] = (w << 6) + BitOperations.TrailingZeroCount(word);
-                    word &= word - 1;
-                }
-            }
-
-            return CanonicalFilter.Apply(scratch, node, indices.AsSpan(0, n));
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(indices);
-        }
-    }
-
     /// <summary>Per column of the file, the member of <typeparamref name="TRecord"/> that holds it.</summary>
     private int[] MembersOf<TRecord>()
         where TRecord : IVortexRecord<TRecord>
     {
-        if (_membersOf == typeof(TRecord))
+        if (_membersOf != typeof(TRecord))
         {
-            return _members!;
+            _members = BatchIntake.Members<TRecord>(Schema);
+            _membersOf = typeof(TRecord);
         }
 
-        VortexSchema record = TRecord.Schema;
-        int[]? map = WriteBinding.Map(typeof(TRecord), record, Schema.FieldArray);
-        int[] members = new int[_fieldCount];
-        Array.Fill(members, -1);
-        for (int member = 0; member < record.Count; member++)
-        {
-            members[map is null ? member : map[member]] = member;
-        }
-
-        int missing = Array.IndexOf(members, -1);
-        if (missing >= 0)
-        {
-            throw new VortexSchemaException(
-                $"Column '{Schema[missing].Name}' of the file has no member of {typeof(TRecord).Name}; a record written as columns covers every column.");
-        }
-
-        _membersOf = typeof(TRecord);
-        _members = members;
-        return members;
-    }
-
-    /// <summary>Refuses a column that is not of the file's type: a pass-through writes the file's own types, a non-nullable column into a nullable one aside.</summary>
-    private static void RequireFits(DType value, DType column, string what)
-    {
-        if (!Fits(value, column))
-        {
-            throw new VortexSchemaException(
-                $"{what} is {VortexTypes.FromDType(value)}, and the file holds {VortexTypes.FromDType(column)} there.");
-        }
-    }
-
-    private static bool Fits(DType value, DType column)
-    {
-        if (value.Kind != column.Kind || (value.IsNullable && !column.IsNullable))
-        {
-            return false;
-        }
-
-        switch (column.Kind)
-        {
-            case DTypeKind.Primitive:
-                return value.PType == column.PType;
-            case DTypeKind.Decimal:
-                return value.Precision == column.Precision && value.Scale == column.Scale;
-            case DTypeKind.List:
-                return Fits(value.ElementType, column.ElementType);
-            case DTypeKind.FixedSizeList:
-                return value.FixedSize == column.FixedSize && Fits(value.ElementType, column.ElementType);
-            case DTypeKind.Extension:
-                return value.ExtensionIdUtf8.SequenceEqual(column.ExtensionIdUtf8)
-                    && value.ExtensionMetadata.SequenceEqual(column.ExtensionMetadata)
-                    && Fits(value.StorageType, column.StorageType);
-            case DTypeKind.Struct:
-            case DTypeKind.Union:
-                if (value.FieldCount != column.FieldCount)
-                {
-                    return false;
-                }
-
-                for (int i = 0; i < column.FieldCount; i++)
-                {
-                    if (!Fits(value.GetField(i), column.GetField(i)))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
-            case DTypeKind.Map:
-                return Fits(value.KeyType, column.KeyType) && Fits(value.ValueType, column.ValueType);
-            default:
-                return true;
-        }
+        return _members!;
     }
 
     private StructStore Root()
