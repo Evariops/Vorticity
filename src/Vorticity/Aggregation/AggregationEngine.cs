@@ -1318,6 +1318,11 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void Judge(RecordBatch batch)
     {
+        if (TurnOnNew && !_sampled && batch.SelectedRows > 0)
+        {
+            JudgeSample(batch);
+        }
+
         if (!TurnOnSpread || _spreadJudged || Keys is not { NumberedByValue: true } keys || batch.RowCount == 0 || batch.SelectedRows == 0)
         {
             return;
@@ -1341,6 +1346,80 @@ internal sealed class AggregationPartition
         if (spread.Set >= SpreadShare * drawn)
         {
             Pressure!.Outgrew(CoreReason.Spread, _rowsFolded);
+        }
+    }
+
+    /// <summary>The rows of a lane's first batch whose keys judge a hashed key before the batch is folded (<see cref="JudgeSample"/>).</summary>
+    internal const int SampledRows = 8_192;
+
+    // Whether the lane judged its key on a sample of its first batch (JudgeSample).
+    private bool _sampled;
+
+    /// <summary>
+    /// Judges a hashed key on the lane's first batch, before a row of it is folded: the groups its first
+    /// <see cref="SampledRows"/> rows make in the lane's own table, no value folded, and the values of a
+    /// uniform key that makes as many (<see cref="EstimatedValues"/>). Past <see cref="TurnValues"/>, every
+    /// lane turns to the core with its table nearly empty, those groups' states still empty. Folded first,
+    /// the batch grew each lane's table to its rows, nearly all new, its arrays doubled some fourteen times,
+    /// then emptied into the core and dropped: 400 of the 490 MB a hashed key of 3.3M values over 4M rows
+    /// allocated a query at fourteen lanes (2026-10-09). A key of fewer values keeps its table, the batch's
+    /// rows finding there the groups the sample made, and is judged on its first rows as before. 8 192 rows
+    /// tell 10⁵ values from 10⁶: about 335 repeats against 34.
+    /// </summary>
+    private void JudgeSample(RecordBatch batch)
+    {
+        _sampled = true;
+        int rows = batch.RowCount;
+        if (rows < SampledRows || Keys is not { NumberedByValue: false, Count: 0, EntryBytes: > 0 } keys || Pressure is not { Outgrown: false } pressure)
+        {
+            return;
+        }
+
+        // The rows a filter keeps among the first ones: a filter that keeps few leaves the key to its first rows.
+        ReadOnlySpan<ulong> selection = batch.SelectionWords;
+        int sampled = SampledRows;
+        if (!selection.IsEmpty)
+        {
+            selection = selection[..(SampledRows >> 6)];
+            sampled = 0;
+            foreach (ulong word in selection)
+            {
+                sampled += BitOperations.PopCount(word);
+            }
+
+            if (sampled < SampledRows / 2)
+            {
+                return;
+            }
+        }
+
+        CanonicalArena arena = batch.Arena;
+        for (int c = 0; c < _keyCount; c++)
+        {
+            int node = FilterEvaluator.Resolve(arena, batch.RootIndex, _columns[c].Field, rows);
+            while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+            {
+                node = arena.GetNode(node).StorageIndex;
+            }
+
+            _nodes[c] = node;
+        }
+
+        if (_rowGroups.Length < SampledRows)
+        {
+            RentRowGroups(SampledRows);
+        }
+
+        _ranges.Clear();
+        keys.Assign(arena, _nodes.AsSpan(0, _keyCount), SampledRows, selection, _rowGroups, _ranges);
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            Slots[i].EnsureGroups(keys.Count);
+        }
+
+        if (EstimatedValues(sampled, keys.Count) >= TurnValues)
+        {
+            pressure.Outgrew(CoreReason.FirstRows, _rowsFolded);
         }
     }
 

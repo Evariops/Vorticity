@@ -12,7 +12,7 @@ namespace Vorticity.Tests.Aggregation;
 /// A key whose cardinality changes as the rows go: a quarter of the rows of few values, then many, or
 /// the other way round. The lanes start across the source, lane i at i / N of its ranges, and the first
 /// lane whose rows show many values turns the query to the core: an integer key on its first batch's
-/// spread, a hashed one on its first rows' new groups. Few values then many turns on the lanes that
+/// spread, a hashed one on the groups a sample of its first batch makes. Few values then many turns on the lanes that
 /// start past the first quarter, which without the fan may all start in it; many then few turns on the
 /// first lane, fan or not. The statistics say why and when.
 /// </summary>
@@ -58,9 +58,9 @@ public sealed partial class FanTests
 
             Assert.Equal(expected, grouping.CoreReason);
 
-            // The first batch's spread turns a lane before it folds a row; the first rows' new groups,
-            // once it has folded them.
-            Assert.True(expected == GroupCoreReason.Spread ? grouping.TurnedAfterRows == 0 : grouping.TurnedAfterRows > 0, $"turned after {grouping.TurnedAfterRows} rows");
+            // The first batch turns a lane before it folds a row: an integer key by its spread, a hashed one
+            // by the groups a sample of its rows makes.
+            Assert.True(grouping.TurnedAfterRows == 0, $"turned after {grouping.TurnedAfterRows} rows");
         }
         finally
         {
