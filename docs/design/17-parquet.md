@@ -1,0 +1,665 @@
+# Parquet
+
+`Vorticity.Parquet` reads and writes Apache Parquet files. This page does not restate the format:
+the standard is the [Apache Parquet format][pf] at release 2.14.0, its metadata serialized with the
+[Thrift compact protocol][compact], and the rules below that rest on them link to the text they
+rest on. What this page holds is what the standard leaves to an implementation: where the package sits,
+how it reads and writes without copying, the kernels it is built on, what it decides where the
+standard is silent or inconsistent, and the tests that hold each promise.
+
+**Written before the code.** Each decision here is what the code will be held to; changing one
+changes this page first.
+
+**No other Parquet implementation is a reference.** Correctness is anchored in the standard's text
+and in oracles this repository owns (§9), speed in baselines it owns (§10). No other
+implementation's code, files or behaviour is consulted or compared against, and where the standard
+is silent, §3.2 decides from the standard's own text. What is claimed is conformance to the text as
+written; interoperability with other readers is not measured.
+
+## 1. Principles
+
+1. **A byte is read where it lies.** A page of a mapped file is decoded in place, and a value the
+   format lays out as the arena wants it — plain fixed-width values, plain booleans, the bodies of
+   binary values, a dictionary's values — becomes a view, not a copy (§5.5).
+2. **Decompressed once, into its final place.** A page's values decompress straight into the buffer
+   that becomes the column wherever the page allows it, and a dictionary decompresses and decodes
+   once per column chunk, whatever the batches that read it (§5.4).
+3. **What is pruned is neither read nor decoded.** Row group statistics, the page index, Bloom
+   filters and dictionaries refine one row selection, cheapest first; the pages outside it are not
+   requested, and the columns the filter does not name are decoded only for the rows it keeps
+   (§5.3).
+4. **Encoded forms survive.** A dictionary column reaches an aggregate as codes and values, a long
+   run of one code as a run, a batch of one value as a constant (§5.5).
+5. **The writer writes for the reader.** Pages cut at the same rows in every column, data pages v2,
+   uncompressed pages aligned, a page index and exact statistics always: a file this writer makes is
+   read with every view of principle 1 and every pruning of principle 3 (§6.1).
+6. **Nothing per value but the work.** No allocation per batch, no dispatch per value, kernels
+   generic over the physical type and vectorized with a scalar twin, a footer indexed without an
+   allocation per field (§5.2, §7).
+7. **Parallel when asked, the same answer at any degree.** Row groups and their parts decode on the
+   session's lanes and pages compress on the writer's threads; batches come in row order, and a file
+   is the same bytes at every degree (§5.8, §6.4).
+8. **Untrusted bytes, bounded work.** Every length, offset, count and width a file gives is checked
+   before it is used, against caps that are constants (§8).
+
+| question | decision | § |
+|---|---|---|
+| where it sits | a satellite of the core, as `Vorticity.Dataset` is: a Parquet file is one more `ScanSource`, so `Scan<TRecord>`, every query and every sink run over it unchanged | 2 |
+| what a page decodes into | the core's canonical arena, the nodes a Vortex block decodes into | 5.5 |
+| the pages it writes | data pages v2, on a grid of 8 192 rows shared by every column | 6.1 |
+| the encodings it writes | chosen per page by exact formulas from one statistics pass, as the core's writer chooses | 6.2 |
+| the codecs | ZSTD through `Vorticity.Zstd`; SNAPPY and LZ4_RAW written here; GZIP and BROTLI through the base class library; neither LZ4 nor LZO, whose formats the standard does not give | 6.4, 3.2 |
+| the gaps in the standard | sixteen, each decided | 3.2 |
+
+## 2. Where it sits
+
+`src/Vorticity.Parquet` is a satellite of the core, as `Vorticity.Dataset` is: it references
+`Vorticity`, which grants it its internals, and through it `Vorticity.Zstd` and `System.IO.Hashing`;
+nothing else. It targets `net11.0`, is compatible with trimming and Native AOT, and is marked
+`[Experimental("VX0003")]` until its surface settles, as the dataset and the row encoding are.
+
+The core already reads from more than one kind of source. A scan compiles to a `ScanSpec` and asks a
+`ScanSource` for its batches, counts, extremes and plan; `Vorticity.Dataset` supplies one over every
+object of a version. A Parquet file is one more, `ParquetScanSource`, and everything above that seam
+runs over it unchanged — `Scan<TRecord>`, the tool scan, `Where`, `Select`, `GroupBy`, the
+aggregates, every sink — as does every consumer of a scan, a Vortex writer among them:
+
+```csharp
+await using ParquetFile parquet = await ParquetFile.OpenAsync("hits.parquet");
+await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Hit>("hits.vortex");
+await writer.WriteAsync(parquet.Scan<Hit>());
+await writer.CompleteAsync();
+```
+
+| taken from the core | for |
+|---|---|
+| `VortexSession` | the aligned pool, mapping and the mapped-file cache, `MaxConcurrentReads`, the degree of parallelism |
+| `ISegmentSource` and its three sources | reads, coalescing and leases; a mapped file read in place ([03-architecture.md](03-architecture.md) §3.5) |
+| the canonical arena | the nodes a page decodes into: `Primitive`, `Decimal`, `Bool`, `VarBinView`, `ListView`, `Struct`, `Extension`, `Constant`, `Dictionary`, `RunEnd` |
+| the batch surface | `Columns<TRecord>`, `Column<T>`, `BatchView`, `RecordBatch`, their lifetimes, and `Values` aligned on 64 bytes |
+| the engine | filter evaluation, aggregates, group by, projections, ordering, `ScanPlan` and `ScanMetrics` |
+| the writer's inputs | `ColumnsBuilder` and `ColumnBuilder<T>`, records, `RecordBatch`, any scan; `CompressionProfile` |
+| primitives | `SplitBlockBloom`, which with XXH64 is Parquet's split-block filter bit for bit, and its sizing ([10-indexes.md](10-indexes.md) §4.1); the ALP exponent search; `Int256`; `Crc32` and `XxHash64` of `System.IO.Hashing` |
+
+| added here | holds |
+|---|---|
+| `Thrift/` | the compact protocol, read in place and written forward |
+| `Metadata/` | the footer's index and its lazy views; the schema compiled to leaves and levels |
+| `Pages/` | page headers, decompression into place, checksums |
+| `Encodings/` | every encoding of the standard, decoded and encoded |
+| `Codecs/` | SNAPPY and LZ4_RAW; adapters to `Vorticity.Zstd` and to the base class library's GZIP and Brotli |
+| `Levels/` | definition and repetition levels, to and from the arena's validity and list offsets |
+| `Reading/` | `ParquetScanSource`: the planner, the pruning cascade, the column cursors |
+| `Writing/` | the writer, one column writer per leaf, the page index, the Bloom filters, the footer |
+
+`Thrift/`, `Metadata/`, `Pages/`, `Encodings/` and `Codecs/` work on spans and know nothing of the
+arena: they are tested alone, and could become a package of their own without a change.
+
+**Why not a Parquet library of its own**, with its own reader, batches and surface: it would be a
+second engine to keep equal to the first — I/O, arenas, filters, aggregates, records — for nothing
+the seam does not already give, and Parquet would lose every query.
+
+The surface follows the rules of [14-public-api.md](14-public-api.md). In outline, its names open to
+review: `ParquetFile.OpenAsync`, from a path or any `ISegmentSource`, on a session; its `Schema`, a
+`VortexSchema`; `RowCount`; `Metadata`, for inspection (row groups, column chunks, encodings,
+codecs, statistics, field ids, key-value metadata, what this build supports); `Scan<TRecord>()` and
+`Scan(columns)`. `ParquetFileWriter`, over a path or a `PipeWriter`, typed by a record or a schema,
+with `Builder()`, `WriteAsync`, `FlushAsync`, which closes a row group, `CompleteAsync`, which
+returns a `ParquetWriteReport`, and `Abandon()`. `ParquetOpenOptions` and `ParquetWriteOptions`.
+The session gains `OpenParquetAsync` and `CreateParquetWriter` as extension members. A malformed
+file throws `ParquetFormatException`, and an unsupported component `ParquetUnsupportedException`,
+which names its kind and its id as the standard spells it. Both derive from `VortexException`, the
+base of every exception the library throws on purpose, beside the core's `VortexFormatException`
+and `VortexUnsupportedException`, which are sealed and whose messages speak of Vortex components
+and editions: a Parquet file makes the promise a Vortex file makes, with its own two types.
+
+## 3. The standard
+
+### 3.1 What is referenced
+
+A source that has releases is pinned to its latest. Moving a pin is reviewed against §3.2 and
+against every decision that cites the text it changes.
+
+| source | pin | governs |
+|---|---|---|
+| [Apache Parquet format][pf] | 2.14.0, commit `04d56f291f` | everything below: [README.md][readme] (layout, levels, data pages, checksums), [parquet.thrift][thrift] (every structure), [Encodings.md][enc], [AlpEncoding.md][alp], [Compression.md][comp], [LogicalTypes.md][lt], [PageIndex.md][pi], [BloomFilter.md][bloom], [Encryption.md][crypt], [VariantEncoding.md][var], [VariantShredding.md][shred], [Geospatial.md][geo], [BinaryProtocolExtensions.md][ext], and [CONTRIBUTING.md][contrib] for what a new feature may break |
+| [Thrift compact protocol][compact] | Thrift 0.25.0, commit `27e8a425ff` | the bytes of every structure of `parquet.thrift` |
+| [RFC 1952][rfc1952], [RFC 7932][rfc7932], [RFC 8878][rfc8878] | — | GZIP, BROTLI, ZSTD |
+| [Snappy format][snappy] | snappy 1.3.1 | SNAPPY |
+| [LZ4 block format][lz4] | lz4 1.10.0 | LZ4_RAW |
+| [xxHash specification][xxh] | 0.1.1 | the Bloom filter's XXH64 |
+| IEEE 754-2008 §5.10 and §5.12.2 | — | total order of floats; the correctly rounded constants of ALP |
+| NIST SP 800-38D and 800-38A | — | AES-GCM and AES-CTR of modular encryption |
+| Melnik et al., *Dremel*, VLDB 2010; Afroozeh, Kuffo and Boncz, *ALP*, SIGMOD 2024 | — | levels; ALP's parameter search |
+
+### 3.2 Where the standard is silent or inconsistent
+
+Each is a place where a plausible guess reads wrong values rather than failing. Each is decided
+once, from the standard's own text, and held by a test.
+
+| # | the standard | left open | decision |
+|---|---|---|---|
+| 1 | INT96 is ordered by [its last 4 bytes, the "days", then its first 8, the "nanos"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L1143-L1153), and [PLAIN stores it as 12 bytes](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encodings.md#L63) | the epoch of the days and the meaning of the instant | read as its 12 bytes, an extension `parquet.int96` over `FixedSizeList<u8, 12>`, whose accessors split the two fields the ordering names; no conversion to a timestamp, since no epoch is given. Never written. Its statistics are used only under `INT96_TIMESTAMP_ORDER` |
+| 2 | an RLE run's value takes ["round-up-to-next-byte(bit-width)"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encodings.md#L112) bytes | their order | little-endian, as every multi-byte value of PLAIN; a width over 32 bits is malformed |
+| 3 | a DELTA_BINARY_PACKED miniblock is ["a list of bit-packed ints"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encodings.md#L235-L236) | the order of the bits | least significant bit first, the order of the RLE/bit-packing hybrid, which the section names as the similar encoding and ALP names for its own packing |
+| 4 | the Bloom filter hashes ["a column value using plain encoding"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L798-L805) | whether a BYTE_ARRAY's length prefix is hashed, and what one BOOLEAN's plain encoding is | the value's bytes without the prefix, as statistics encode a value ["except that variable-length byte arrays do not include a length prefix"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L303-L304); no filter is written or probed for BOOLEAN. A float is hashed by its bits: a probe for zero probes both zeros, and NaN is never probed. These are the core's own filter's rules ([10-indexes.md](10-indexes.md) §4.1) |
+| 5 | ALP's decode is normative, [two multiplications by correctly rounded constants](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/AlpEncoding.md#L256-L265) | in which precision a FLOAT vector multiplies, and how its integer becomes a float | binary32 throughout: the integer converted with round-to-nearest-even, then two binary32 multiplications by binary32 constants, never fused; DOUBLE the same in binary64. The writer checks every value against this decode. The constants are held by a test against exact rational rounding, never trusted to a compiler's parsing of a literal |
+| 6 | a column chunk names its leaf by ["Path in schema"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L916-L917) | whether the root's name is part of it | the names from the root's child to the leaf; a chunk is matched to its leaf by position, which [the order of `RowGroup.columns`](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L1050-L1053) fixes, and a path that disagrees refuses the file |
+| 7 | an extension's header is [`08 FF FF 01`](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/BinaryProtocolExtensions.md#L37-L43), field 32767 as a plain ULEB128, while the compact protocol [zigzags a long-form field id](https://github.com/apache/thrift/blob/27e8a425ffb498e190df3a12e239326bf5ba9ed6/doc/specs/thrift-compact-protocol.md#L207-L216), under which those bytes are field −16384 | which is meant | both read as an unknown binary field and are skipped; the writer writes the protocol's form, `08 FE FF 03`, for the one extension it emits (§6.5) |
+| 8 | LZ4 has ["an additional undocumented framing scheme"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Compression.md#L78-L87); LZO is ["based on or interoperable with the LZO compression library"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Compression.md#L65-L68) | the bytes of either | neither is read nor written; a page in either refuses, naming the codec |
+| 9 | ["no agreed upon consensus"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L1408-L1416) on what version 2 of a file is | — | write 1; read 1 and 2 alike; any other version is unsupported |
+| 10 | a chunk's ["Number of values in this column"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L922-L923) beside a page's ["including NULLs"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L700-L707) | what is counted in a nested column | level entries, nulls and empty lists included; the pages' counts sum to the chunk's |
+| 11 | `IndexPageHeader` is [a `TODO`](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L722-L724) | the index page | skipped, as is every page type the reader does not know |
+| 12 | a boolean element of a list is [1 for true and 2 for false](https://github.com/apache/thrift/blob/27e8a425ffb498e190df3a12e239326bf5ba9ed6/doc/specs/thrift-compact-protocol.md#L125-L127) | any other byte | 1 is true, 2 and 0 are false, any other value is malformed |
+| 13 | a value past an `INT(8)` or `INT(16)` annotation [is undefined](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/LogicalTypes.md#L113-L116) | — | refused as malformed when it is narrowed; never written |
+| 14 | DECIMAL's order is given [for fixed lengths](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/LogicalTypes.md#L244-L251) | a BYTE_ARRAY decimal's | compared sign-extended to the longer of the two lengths |
+| 15 | a truncated bound ["must still be valid values within the column's logical type"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L295-L301) | how to cut a STRING | at a code point boundary, an upper bound raising its last code point past the surrogates, so that both stay UTF-8; a bound that cannot be raised is written whole |
+| 16 | a page's ordinal in the encryption AAD is ["2-byte short"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encryption.md#L254-L259) | a chunk of more than 32 767 pages | its low 16 bits, little-endian, on read; the writer encrypts no column chunk of more than 32 767 pages |
+
+Two more are not gaps but choices the standard leaves to a writer, and are §6's: a page whose
+values do not shrink is stored uncompressed in a compressed chunk, which
+[`is_compressed`](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L774-L779)
+allows in a v2 page; and a ZSTD page may hold several frames, which the reader accepts and the
+writer never makes, as GZIP pages [may hold several members](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Compression.md#L61-L63).
+
+## 4. Types
+
+### 4.1 Reading
+
+A `LogicalType` wins over a `ConvertedType`, and a file with only the latter reads through the
+standard's backward-compatibility tables. A logical type the reader does not know, or one on a
+physical type it does not allow, is ignored with the column's order, and the column reads as its
+physical type ([LogicalTypes.md][lt], *Unsupported Logical Types*).
+
+| Parquet | dtype | from the page |
+|---|---|---|
+| BOOLEAN | `Bool` | a view of a plain page: its bits are a validity-style bitmap already |
+| INT32, INT64 | `i32`, `i64` | a view |
+| INT32 with `INT(8)` or `INT(16)`, signed or not | `i8`, `i16`, `u8`, `u16` | narrowed, checked (§3.2 #13) |
+| INT32 with unsigned `INT(32)`, INT64 with unsigned `INT(64)` | `u32`, `u64` | a view |
+| INT96 | `parquet.int96` over `FixedSizeList<u8, 12>` | a view (§3.2 #1) |
+| FLOAT, DOUBLE | `f32`, `f64` | a view |
+| FIXED_LEN_BYTE_ARRAY(2) with `FLOAT16` | `f16` | a view: the same little-endian bytes |
+| BYTE_ARRAY | `Binary` | views over the page |
+| BYTE_ARRAY with `STRING`, `ENUM`, `JSON` | `Utf8` | views over the page, validated |
+| BYTE_ARRAY with `BSON` | `Binary` | views over the page |
+| FIXED_LEN_BYTE_ARRAY(n) | `FixedSizeList<u8, n>` | a view; binds as `ReadOnlyMemory<byte>` |
+| FIXED_LEN_BYTE_ARRAY(16) with `UUID` | `vortex.uuid` | a view: both are the big-endian bytes |
+| FIXED_LEN_BYTE_ARRAY(12) with `INTERVAL` | `parquet.interval` over `FixedSizeList<u8, 12>` | a view |
+| `DECIMAL` on INT32, INT64 | `Decimal(p, s)` over `i32`, `i64` | a view |
+| `DECIMAL` on FIXED_LEN_BYTE_ARRAY, BYTE_ARRAY | `Decimal(p, s)` over the width its precision selects ([07-dotnet-mapping.md](07-dotnet-mapping.md) §2) | reversed to little-endian and sign-extended; above 76 digits, unsupported |
+| `DATE` | `vortex.date` over `i32` | a view |
+| `TIME` | `vortex.time` over `i32` or `i64`, its unit | a view |
+| `TIMESTAMP` | `vortex.timestamp`, its unit, zone `UTC` when adjusted to UTC and none otherwise | a view |
+| `UNKNOWN` | `Null` | nothing |
+| a group | `Struct`, its validity from the definition levels | levels |
+| `LIST`, and a repeated field outside `LIST` and `MAP` | `List` of the element, the latter a required list of required elements | levels |
+| `MAP` | `Map`, a list view of key-value entries as the core holds one | levels |
+| `VARIANT`, `GEOMETRY`, `GEOGRAPHY`, `FILE` | phase 3 (§11): a variant column, binary with its CRS and edges, a struct | — |
+
+A file this writer made carries its Vortex schema in its key-value metadata (§6.1). When that schema
+agrees with the Parquet schema leaf by leaf, it restores what Parquet cannot say — a time zone's
+name, a fixed-size list of other than bytes, an extension's id — and is ignored otherwise. Field ids
+are kept and shown by `Metadata`.
+
+### 4.2 Writing
+
+| dtype | Parquet |
+|---|---|
+| `Bool` | BOOLEAN |
+| `i8`, `i16`, `i32`; `u8`, `u16`, `u32` | INT32 with `INT(8, 16, 32)`, signed or not |
+| `i64`; `u64` | INT64; INT64 with unsigned `INT(64)` |
+| `f16`, `f32`, `f64` | FIXED_LEN_BYTE_ARRAY(2) with `FLOAT16`, FLOAT, DOUBLE |
+| `Decimal(p, s)` | INT32 up to 9 digits, INT64 up to 18, then FIXED_LEN_BYTE_ARRAY of the fewest bytes, big-endian |
+| `Utf8`; `Binary` | BYTE_ARRAY with `STRING`; BYTE_ARRAY |
+| `FixedSizeList<u8, n>` of non-null bytes | FIXED_LEN_BYTE_ARRAY(n) |
+| `vortex.uuid`, `vortex.date`, `vortex.time`, `vortex.timestamp` | `UUID`, `DATE`, `TIME`, `TIMESTAMP` adjusted to UTC when the dtype has a zone |
+| `Struct`; `List`, other fixed-size lists; the map | a group; the three-level `LIST`; the three-level `MAP` |
+| `Null` | INT32 with `UNKNOWN` |
+| `parquet.interval` | FIXED_LEN_BYTE_ARRAY(12) with the `INTERVAL` converted type |
+| `parquet.int96` | refused: INT96 is deprecated |
+| a union | unsupported |
+
+Every annotation is written as a `LogicalType` and, where one corresponds, as its `ConvertedType`
+too, as the standard requires of a writer; a local `TIME` or `TIMESTAMP` takes the legacy
+annotation as the standard's forward-compatibility tables say. `INTERVAL` is the one annotation
+written as a `ConvertedType` alone: its `LogicalType` is reserved and has no definition.
+
+## 5. Reading
+
+### 5.1 The open
+
+The open reads the tail as the core's open does: the last 8 KiB of a local file positionally, else
+64 KiB, or the whole file when it is smaller. The last eight bytes give the footer's length and the
+magic; `PARE`, an encrypted footer, is unsupported until phase 3. A footer the tail does not cover
+costs one more read, of exactly its bytes. The magic at offset 0 is checked when the read already
+covers it or the file is mapped, and not at the price of a request.
+
+The footer is then **indexed, not materialized**. One pass over `FileMetaData` compiles the schema —
+leaves, paths, levels, physical and logical types, column orders — and records where each row group
+begins and its row count; it allocates in proportion to the schema and the row groups, never to their
+product. A row group's column chunks are indexed the first time a scan needs that row group: one walk
+over its columns, recording where each `ColumnChunk` and `ColumnMetaData` begins, published once on
+the file, which is thread-safe as a `VortexFile` is. Statistics, encodings, offsets and the page
+index's locations are decoded from those positions when a plan asks for them. A file of a thousand
+columns and a thousand row groups opens without decoding a million column chunks.
+
+### 5.2 Thrift, in place
+
+The reader is a `ref struct` over the footer's bytes. A field header decodes in its short or long
+form; `i16`, `i32` and `i64` are zigzag varints of at most 3, 5 and 10 bytes, longer or overflowing
+ones refused;
+`binary` and `string` are slices of the input, never copies; a list's size is bounded by the bytes
+that remain, since no element takes less than one, which is what keeps a forged size from sizing an
+allocation. Unknown fields are skipped by their wire type, with an explicit stack of at most 64
+levels rather than recursion; field 32767, the standard's extension slot, is one of them. A known
+field with an unexpected wire type, a missing required field and a union with two members are
+malformed; an unknown value of `Encoding`, `CompressionCodec` or `PageType` is kept as a number and
+refused only by the page that needs it; an unknown `ConvertedType` or `LogicalType` member drops the
+annotation.
+
+The writer writes fields in ascending order, in the short form whenever the delta allows, into the
+sink's memory.
+
+### 5.3 The plan: pruning and I/O
+
+A split is a row group, or, when the row group is larger than the scan's split target and has an
+offset index, a range of its rows cut at page boundaries, so that a file of one row group still
+spreads over the lanes. Each split's rows are refined into a **row selection** by the structures, in
+the core's order — cheapest first, stopping when nothing is left:
+
+1. **Row group statistics**, already in the footer.
+2. **The page index**: `ColumnIndex` and `OffsetIndex` of the predicate's columns, one coalesced
+   read for every chunk the scan keeps, and most often inside the tail the open read. Pages whose
+   bounds rule the predicate out drop their rows from the selection.
+3. **Bloom filters**, for equality and `In` only: one read per chunk and column.
+4. **The dictionary**, when the chunk's `encoding_stats` show every data page dictionary-encoded:
+   the predicate is evaluated once per distinct value, and a chunk none of whose values matches is
+   dropped. Its page is the one read the chunk would have needed anyway.
+
+A statistic prunes only where the standard makes it a bound:
+
+| the column | min and max are used |
+|---|---|
+| a column order this build knows, on a logical type it knows | `min_value` and `max_value` as bounds, exact only when `is_min_value_exact` or `is_max_value_exact` says so |
+| no `column_orders` in the footer | not at all: the standard leaves their meaning undefined |
+| the legacy `min` and `max` | only without `min_value` and `max_value`, and on a signed order: INT32 and INT64 without an unsigned annotation, FLOAT and DOUBLE |
+| FLOAT, DOUBLE or FLOAT16 under the type order | a NaN bound is ignored; a minimum of +0 admits −0 and a maximum of −0 admits +0; NaN is known absent only from a `nan_count` of 0 |
+| FLOAT, DOUBLE or FLOAT16 under the IEEE 754 total order | as bounds in that order; a NaN bound says that every non-null value it covers is NaN |
+| INT96 | only under `INT96_TIMESTAMP_ORDER` |
+| `INTERVAL`, `GEOMETRY`, `GEOGRAPHY`, `LIST`, `MAP`, `VARIANT`, `FILE`, an unknown logical type | never |
+| `null_count` | only when present: an absent count is not 0 |
+
+Then the I/O. Per split, every range the selection needs is registered in one batch read of the
+`ISegmentSource`, which coalesces it: the pages of the selection when the column has an offset index,
+the column chunk otherwise, read in windows so that a large chunk does not delay the first batch.
+Each range is requested at most once per scan, and the plan counts in the same units as the
+execution, so the core's gates hold unchanged ([14-public-api.md](14-public-api.md) §9). The
+predicate's columns are decoded first for each batch; the other columns are decoded only for the
+rows the filter keeps — a skipped run of a page is stepped over, not decoded, where its encoding
+lets it be: plain values by arithmetic, RLE runs by their lengths, whole pages by the offset index.
+
+### 5.4 Pages: decompression into place
+
+A page header is parsed from the lease, and its `crc` checked when
+`ParquetOpenOptions.VerifyChecksums` asks for it: a check touches every byte a view would not, so it
+is opt-in, as the core's `VerifyStatistics` is. `uncompressed_page_size` is held to the
+decompression cap before anything is allocated, and the decompressed size must equal it exactly.
+
+Where the bytes go is decided by the page:
+
+| page | where its values decompress |
+|---|---|
+| uncompressed, on a mapped file | nowhere: read in place |
+| v2, plain fixed-width, no null, inside the batch | straight into the column's buffer, at the batch's offset |
+| v2, any other | into a page buffer the decode reads, and the data buffer of the views it makes |
+| v1 | the whole page into a page buffer: its levels sit inside the compressed bytes |
+| the dictionary page | once per column chunk, into a buffer the split keeps |
+
+A v2 page's levels are never decompressed: the standard keeps them outside the compressed section.
+Every buffer comes from the session's pool, 64-byte aligned, with 64 bytes of slack past its end, so
+a kernel may load a whole vector past the last value. A page read in place from a mapped file has
+slack of its own, since a valid file holds its footer and eight more bytes after its last page; a
+page that ends less than 64 bytes before the end of the file is decoded on the kernels' exact path.
+
+### 5.5 Decoding into the arena
+
+A page decodes into the canonical nodes a Vortex block decodes into, so that what follows the decode
+cannot tell the two formats apart:
+
+| encoding | node | what is done per value |
+|---|---|---|
+| PLAIN, fixed width | `Primitive`, `Decimal`, an extension's storage, `FixedSizeList` | nothing: a view, when the page has no null; else an expand to the rows' slots |
+| PLAIN, BOOLEAN | `Bool` | nothing: a view at a bit offset, when the page has no null |
+| PLAIN, BYTE_ARRAY | `VarBinView` over the page | a 16-byte view per value; values of up to 12 bytes inlined in it, longer ones left in the page |
+| RLE, BOOLEAN | `Bool` | runs expanded to bits |
+| RLE_DICTIONARY, PLAIN_DICTIONARY | `Dictionary`: the codes, over the chunk's values node | codes unpacked; the values decoded once per chunk and shared by every batch |
+| DELTA_BINARY_PACKED | `Primitive` | unpack, add, prefix sum |
+| DELTA_LENGTH_BYTE_ARRAY | `VarBinView` over the page | views from the lengths' prefix sum; the bodies are contiguous and stay in the page |
+| DELTA_BYTE_ARRAY | `VarBinView` over a heap the decode writes | each value rebuilt from the previous one's prefix |
+| BYTE_STREAM_SPLIT | `Primitive`, `FixedSizeList` | the streams interleaved |
+| ALP | `Primitive` | unpack, add, two multiplications, exceptions patched |
+
+**Encoded delivery**, when the scan asks for it as the core's aggregates do: a dictionary column is
+delivered as `Dictionary` and never gathered, so a group by groups by code and never touches a
+string; a page whose codes are a few long runs as `RunEnd`; a batch that is one code and no null as
+`Constant`. Otherwise the core canonicalizes on access, as it does for a Vortex file.
+
+**Alignment.** `Values` is 64-byte aligned by contract; a view of a page is only as aligned as the
+page, and the core copies an unaligned one once, on its first read. Every page this writer stores
+uncompressed starts its values on a 64-byte boundary of the file (§6.5), so on its files `Values` is
+the mapping itself.
+
+**Text.** `STRING`, `ENUM` and `JSON` values are validated as UTF-8 when decoded: a dictionary's
+values once per chunk, a delta-length or delta heap once whole plus a check that no value starts
+inside a sequence, plain values one by one.
+
+### 5.6 Levels and nesting
+
+Each leaf's maximum definition and repetition levels, and the level at which each of its ancestors
+becomes defined and repeats, are compiled at the open.
+
+- **A flat required column** has no levels to read.
+- **A flat optional column**, maximum definition level 1, gets its validity straight from the
+  RLE/bit-packing hybrid: a bit-packed run of width 1 is already a least-significant-bit-first
+  bitmap, copied with a shift; an RLE run fills whole words; the non-null count is a population
+  count.
+- **A nested column** is assembled in one pass over its repetition and definition levels: list
+  offsets and sizes per repeated ancestor, validity per optional one, the leaf's values dense. The
+  structure an ancestor shares between several leaves is built from the first projected leaf and
+  checked against each other leaf's levels by a vector comparison; a disagreement refuses the file,
+  since list offsets are what memory safety rests on.
+- Legacy two-level lists and unannotated repeated fields read by the five backward-compatibility
+  rules of [LogicalTypes.md][lt], and `MAP_KEY_VALUE` as `MAP`.
+
+A batch of a nested column ends on a row: where the repetition level is 0.
+
+### 5.7 Batches
+
+A batch holds the same rows in every column, as the core requires, 8 192 by default. On a file this
+writer made, every column's pages lie on that grid (§6.1), so a batch is one page of each column and
+each of its buffers is the page's own: the mapping for a plain page stored uncompressed, the
+decompression's destination otherwise. On any other file, a batch's rows are cut on the same grid and
+a page decodes or decompresses straight into the batch's buffers at their offsets; a column whose
+values for one batch come from two pages copies them once into one buffer, since a column's values
+are one span.
+
+A batch is borrowed, valid until the next `MoveNextAsync`; its buffers belong to the batch's arena or
+to the split's context, which holds the dictionaries and the page buffers views point into. An owned
+`RecordBatch` copies once, as for a Vortex file.
+
+### 5.8 Parallelism
+
+The degree is the session's or the scan's, 1 unless set ([09-contracts.md](09-contracts.md) §2).
+Splits decode side by side, each on a context and arenas of its own, nothing shared, and batches are
+delivered in row order by the core's machinery; a large row group is cut into splits at its page
+boundaries so that it spreads. Within a split, the pages of a column are decompressed ahead of their
+decode within the read-ahead window. The answers are the same bits at every degree.
+
+### 5.9 Answers from the footer
+
+A count without a filter is `FileMetaData.num_rows`, with no read after the open. With a filter, a
+row group the statistics prove entirely inside the predicate — exact bounds, no null — counts its
+`num_rows` without a decode, one proven outside counts nothing, and only the others are read. A
+minimum or a maximum comes from the statistics when every row group's bound is exact, and from the
+data otherwise.
+
+## 6. Writing
+
+### 6.1 The files it writes
+
+| | |
+|---|---|
+| version and magic | 1 and `PAR1` |
+| row groups | whole blocks, `RowGroupRows` 1 048 576 by default; a row group closes sooner when its buffered pages reach `RowGroupBytes`, 256 MiB, and at `FlushAsync` |
+| pages | data pages v2, rows never split; a page is one block of `BlockRows`, 8 192 counted from the file's first row in every column, or a power-of-two fraction of one, down to 1 024 rows, when a block's page would pass `PageBytes`, 1 MiB; below that, a page is cut by bytes and leaves the grid for that column alone |
+| dictionary | at most one page per column chunk, first, as the standard requires |
+| page index | an `OffsetIndex` for every column chunk; a `ColumnIndex` wherever bounds are defined |
+| statistics | `min_value` and `max_value` with their exactness, `null_count` always, `nan_count` for floats; byte arrays bounded at `StatisticsBoundBytes`, 64 (§3.2 #15); neither the legacy `min` and `max` nor statistics in page headers, which readers of the page index ignore ([PageIndex.md][pi]) |
+| column orders | `TYPE_ORDER`; `IEEE_754_TOTAL_ORDER` for FLOAT, DOUBLE and FLOAT16, as the standard recommends |
+| size statistics | the byte arrays' unencoded bytes and the level histograms, per chunk and per page |
+| key-value metadata | `vorticity.schema`: the Vortex dtype the file was written from, its FlatBuffers bytes in base64 (§4.1), and the caller's own pairs |
+| `created_by` | `Vorticity.Parquet version <version> (build <commit>)`, the form the standard asks for |
+| Bloom filters | by `BloomFilters`, off by default: per column, a false-positive rate, sized from the chunk's exact distinct count when the dictionary table ran, else from its rows, by the core's sizing; written after the row groups, before the page index |
+| checksums | a `crc` on every page when `WriteChecksums` asks for it, off by default |
+| never written | INT96, PLAIN_DICTIONARY, BIT_PACKED, LZ4, LZO, a `ConvertedType` without its `LogicalType` but `INTERVAL`'s, two-level lists, data pages v1 unless `DataPageVersion.V1` is asked for |
+
+**Why one grid in every column.** The standard lets each column cut its pages anywhere. Cutting them
+at the same rows makes a batch one page per column, a decompression the column's own buffer, an
+`OffsetIndex` the same in every column, and the page index a mask of blocks as the core's zone maps
+are; a column of wide values pays with more pages, a narrow one with smaller ones.
+
+**Why v2.** Its levels are outside the compressed bytes, so a reader decompresses values straight
+into place and counts nulls without decompressing; it never splits a row; and `is_compressed` lets a
+page that does not shrink stay as it is. A v1 page offers none of the three.
+
+The file is a function of the sequence of batches and the options: no seed, no sample, the same bytes
+at every degree.
+
+### 6.2 One pass per block
+
+The writer is the core's ([11-write-strategy.md](11-write-strategy.md)) with Parquet's wire forms: a
+value is read twice and copied never between its arrival and its page. The statistics pass reads each
+block once, on the caller's memory, and keeps what the bounds need — minimum and maximum, NaN skipped
+and the two zeros told apart by their bits, null and NaN counts, level histograms, byte totals — and
+what the choice needs: distinct values through the chunk's table, runs, deltas and their widths per
+miniblock of 32, common prefixes between neighbouring byte arrays. Every candidate's cost is then an
+exact formula of those statistics, the encoder's own planning, so that a cost is the bytes the encoder
+writes; a trial runs only where no formula exists, as BYTE_STREAM_SPLIT does, whose worth is what a
+codec makes of it.
+
+A column chunk keeps one distinct table, codes assigned as rows arrive. While the dictionary holds —
+it wins on the formulas and its page stays under `DictionaryPageBytes`, 1 MiB — the chunk's pages are
+RLE_DICTIONARY; once it stops holding, the rest of the chunk's pages take the best other encoding,
+and the dictionary page holds the values coded so far. A column remembers its plan from one row group
+to the next and re-prices only that plan while its bytes stay within 5 % of the prediction, as the
+core's plan memory does.
+
+### 6.3 Encodings
+
+| column | candidates |
+|---|---|
+| BOOLEAN | PLAIN; RLE when runs make it smaller |
+| INT32, INT64 | PLAIN, RLE_DICTIONARY, DELTA_BINARY_PACKED; BYTE_STREAM_SPLIT under a codec, by trial |
+| FLOAT, DOUBLE | PLAIN, RLE_DICTIONARY; BYTE_STREAM_SPLIT under a codec, by trial; ALP when `Alp` is enabled, by trial |
+| BYTE_ARRAY | PLAIN, RLE_DICTIONARY, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY |
+| FIXED_LEN_BYTE_ARRAY | PLAIN, RLE_DICTIONARY, DELTA_BYTE_ARRAY; BYTE_STREAM_SPLIT under a codec, by trial |
+| levels | the RLE/bit-packing hybrid, the only encoding v2 allows |
+
+ALP stays behind an option while the standard marks it Preview, as the standard recommends of a
+writer. `CompressionProfile` changes the arithmetic, not the pass: `Auto` weighs bytes against decode
+speed, `Smallest` prices by bytes after compression and runs every trial, `Fastest` writes PLAIN and
+dictionaries, `None` writes PLAIN. A column can be pinned to an encoding by path, as the core's hints
+pin a scheme.
+
+### 6.4 Compression
+
+A column chunk has one codec, ZSTD at level 3 under `Auto`, LZ4_RAW under `Fastest`, ZSTD at level
+19 under `Smallest`, none under `None`; a column may name its own. A v2 page whose values do not
+shrink by an eighth is stored with `is_compressed` false, so its reader skips the codec; a dictionary
+page, which has no such flag, takes the chunk's codec. ZSTD goes through `Vorticity.Zstd`, one frame
+per page. SNAPPY and LZ4_RAW are this package's own, each a valid stream of its format by its own
+deterministic algorithm, with no claim to match another compressor's bytes. GZIP and BROTLI go
+through `System.IO.Compression`; its GZIP stream allocates per page, which the allocation gates name
+as the one exception.
+
+Pages are compressed on the writer's threads at a degree above one, each into a buffer of its own,
+and assembled in order: the bytes do not depend on the degree.
+
+### 6.5 Pages out without copies
+
+A page is a header, then, for v2, its levels, then its values; the pieces live in pooled buffers
+until their row group is complete, since a column chunk must be contiguous and every column of the
+row group arrives together. Over a path, the row group goes out in one vectored positional write,
+`RandomAccess.WriteAsync` with the list of buffers: a page is never copied once it is compressed.
+Over a caller's `PipeWriter`, it is copied once, into the pipe's memory.
+
+**Uncompressed pages are aligned.** When a page's values are stored uncompressed, its header ends
+with field 32767, the extension slot the standard reserves in every structure
+([BinaryProtocolExtensions.md][ext]), carrying a 16-byte identifier of this writer, as the standard
+requires of an extension, and padding sized so that the values start on a 64-byte boundary of the
+file. Every reader skips the field. It costs 21 to 84 bytes per uncompressed page and buys a reader
+of the file its values in place; `AlignUncompressedPages` turns it off.
+
+### 6.6 Row groups, memory and order on disk
+
+A writer holds the open block of each column, each chunk's distinct table while it runs, and the
+compressed pages of the row group being written, which `RowGroupBytes` bounds; nothing per row. The
+file is laid out as: the magic; the row groups, each its column chunks in schema order, each its
+dictionary page then its data pages; the Bloom filters; every `ColumnIndex`, then every
+`OffsetIndex`, by row group then column, so that a reader's index reads coalesce; the footer, its
+length and the magic. `Abandon()` gives the file up as the core's writer does: a new file is deleted,
+a caller's pipe completed with an error.
+
+## 7. Kernels
+
+Each is generic over its physical type and specialized by the compiler, vectorized with `Vector128`
+everywhere and wider vectors where the hardware has them, and has a scalar twin that the suite runs
+again with hardware intrinsics disabled and compares bit for bit
+([03-architecture.md](03-architecture.md) §1).
+
+| kernel | serves | vector form |
+|---|---|---|
+| unpack, least significant bit first, widths 0 to 64 | hybrid runs, dictionary codes, delta miniblocks, ALP | AVX-512 VBMI: a byte permute gathers the bytes each value spans, then shift and mask, a register of values a step; elsewhere a byte shuffle (`PSHUFB`, `TBL`) and a variable shift; one table per width, chosen once per run |
+| pack | every bit-packed output | the inverse |
+| RLE runs | levels, codes, booleans | broadcast stores |
+| levels to validity | maximum definition level 1 | bit-packed runs copied as bitmaps with a shift, RLE runs filled by words, population count |
+| levels to offsets and validity | nesting | comparison masks per level, positions compressed out of them, prefix sums |
+| expand | dense values to the rows' slots | a mask-driven expand, `VPEXPAND` where the runtime exposes it, shuffle tables otherwise |
+| delta decode | DELTA_BINARY_PACKED, the lengths of the delta byte arrays | unpack, add the minimum delta, an in-register prefix sum with a carried lane, wrapping |
+| delta encode | the same | deltas by a shifted subtraction, minimum and width by reductions and a leading-zero count |
+| stream split | BYTE_STREAM_SPLIT | byte interleaves (`PUNPCK`, `ZIP`) for 2, 4 and 8 streams, a VBMI permute; the inverse to encode |
+| ALP | FLOAT, DOUBLE | unpack, add the frame, convert (`VCVTQQ2PD` under AVX-512DQ), two multiplications never fused, exceptions patched |
+| plain byte arrays | PLAIN BYTE_ARRAY | serial, since each length gives the next value's place; unrolled, values inlined into views by 16-byte loads within the slack |
+| big-endian decimals | DECIMAL on fixed and variable byte arrays | a byte-reversing shuffle and a sign extension |
+| checked narrowing | `INT(8)`, `INT(16)` | a range comparison folded into the pack |
+| dictionary gather | materializing a dictionary column | gathers of 4 and 8 bytes, views by pairs of 8 |
+| UTF-8 | text | `System.Text.Unicode.Utf8.IsValid` |
+| SNAPPY, LZ4_RAW | the codecs | copies as overlapping 16-byte stores within the slack, short match offsets by pattern shuffles; encoders by a hash table, greedy, LZ4's end-of-block rules kept |
+| checksums, hashes | CRC32, XXH64, the split-block filter | `System.IO.Hashing`; the core's `SplitBlockBloom` |
+
+**What the core's ALP brings, and what it does not.** The exponent and factor search and the
+rounding are the paper's, shared with `vortex.alp`. The layout, the frame of reference and the
+packing order are Parquet's, and so are the constants, which §3.2 #5 holds to exact rounding.
+
+## 8. Untrusted input
+
+A file is untrusted input, under the core's threat model ([09-contracts.md](09-contracts.md) §4):
+malformed bytes produce `ParquetFormatException` or `ParquetUnsupportedException` and nothing else;
+well-formed bytes that lie may produce wrong answers. The fields fall into the core's three classes
+([08-semantics.md](08-semantics.md) §5):
+
+| class | Parquet fields | handling |
+|---|---|---|
+| I: memory depends on it | footer length; every offset and size; Thrift lengths and list sizes; schema `num_children`; page sizes, decompressed sizes; RLE run lengths; bit widths; dictionary codes; DELTA headers; byte array lengths; ALP headers, offsets, exception positions; BYTE_STREAM_SPLIT lengths; levels against their maxima; nested structure shared between leaves | checked always, before use |
+| II: only correctness depends on it | statistics, the page index's bounds, Bloom filters, `encoding_stats`, a dictionary's `is_sorted`, `sorting_columns` | believed; checked by `VerifyStatistics` |
+| III: hints | `total_byte_size`, `total_uncompressed_size`, `distinct_count`, size statistics | never a correctness input |
+
+| cap | value |
+|---|---|
+| footer | `MaxFooterBytes`, 256 MiB, and inside the file |
+| Thrift nesting, schema depth | 64 |
+| a Thrift list | no more elements than bytes left |
+| a page decompressed | the core's decompression cap, 256 MiB by default |
+| an RLE or bit-packed run | no more values than the page has left |
+| a dictionary code | below the dictionary's size |
+| a DELTA_BINARY_PACKED block | a multiple of 128 values, miniblocks of a multiple of 32, widths within the type, its value count the page's |
+| an ALP page | vectors of 2^3 to 2^15, exponents up to 10 and 18, factors up to the exponent, widths up to 32 and 64, offsets inside the page |
+
+The fuzzer of [04-conformance.md](04-conformance.md) §5 gains a Parquet target: structure-aware
+mutations of Thrift (varints, field headers, list sizes, unions), of page headers and of each
+encoding's header, decompression bombs, and Class I fields set to plausible extremes.
+
+## 9. Correctness without an external reference
+
+| layer | question | holds |
+|---|---|---|
+| the standard's examples | do we write and read the bytes the standard's own examples show? | the varint `DF 89 03` of the compact protocol; the hybrid's and the legacy packing's 0 to 7 at width 3; both DELTA_BINARY_PACKED examples' arithmetic; `Hello`, `World`, `Foobar`, `ABCDEF`; `axis`, `axle`, `babble`, `babyhood`; the stream-split example; ALP's 31-byte vector. Each test cites its line |
+| transcriptions | does the fast path compute what the standard says? | one deliberately plain decoder and encoder per encoding and codec, written from the standard alone, value by value, and never changed to agree with the fast path, which must match it bit for bit on random inputs at every width and at the edges: 0, 1, 7, 8, 9, 31 to 33, 127 to 129, 1 023 to 1 025, 8 191 to 8 193 values |
+| round trips | does what we write read back? | every physical and logical type, nullability, nesting to depth four, every encoding forced, every codec, v1 and v2, page and row group sizes swept; floats compared by their bits |
+| metamorphic | does an option change a value? | the same rows under every writer option read back identical; pruning on and off, every degree, every split target return the same rows; every degree writes the same bytes |
+| Vortex as oracle | do two formats agree on the same rows? | rows written as Vortex, whose writer the Rust reference cross-checks, and as Parquet read back equal; a Parquet file rewritten as Vortex and back keeps every value |
+| the file's own metadata | does a file's content agree with what it says of itself? | for any Parquet file, ours or found: exact statistics recomputed, size statistics' byte totals and level histograms recomputed, the page index's null pages, null counts, bounds and boundary order, row and value counts summed, checksums when present, no false negative in a Bloom filter, a sorted dictionary or sorting columns when claimed. A tool runs it on any file, which is how files from the real world are read without a reference |
+| fuzzing | does malformed input escape a clean failure? | §8 |
+
+## 10. The performance contract
+
+| promise | gate |
+|---|---|
+| nothing allocated per batch | allocations counted across a full scan after a warm-up batch, for every encoding and codec but GZIP |
+| a plain page without nulls is its column | on a mapped file of this writer, every `Values` of an uncompressed plain page lies inside the mapping; a v2 compressed plain page decompresses into the column's buffer, and a counter of copies stays at 0 |
+| a page is decompressed once per scan | decompressions equal the pages read |
+| a pruned page is neither read nor decoded | `Requests` and `BytesRequested` equal the plan's; pages decoded equal live pages |
+| a range is requested at most once per scan | `Requests` equals the plan's distinct ranges |
+| what the footer answers reads nothing more | no request after the open for a count, and for a minimum or a maximum under exact statistics |
+| the open is the schema and the row groups, not their product | the open's allocations on a footer of 1 000 columns by 1 000 row groups under a ceiling that does not grow with their product |
+| the first batch waits for its pages, not its row group | the time to first batch flat over row groups sixteen times apart, locally and over the HTTP source with latency |
+| no dispatch per value | `PerRowDispatchTests` extended to the package |
+| every kernel has a scalar twin | the package's kernel tests in `tests/scalar-pass.txt` |
+| Native AOT | an inspection tool published ahead of time and run over the test files |
+| a file is the same bytes at every degree | written at degrees 1, 2, 4 and 8 and compared |
+| the writer allocates per file, not per row | a ceiling per written file and per column of a wide schema |
+
+The ratchets are counted as the core's are ([05-benchmarks.md](05-benchmarks.md) §5): a ceiling only
+comes down. Speed is measured against baselines this repository owns:
+
+- **each kernel** against its scalar twin, and a copy kernel against `memcpy` of its output, on
+  BenchmarkDotNet;
+- **the format's cost in one engine**: the core report's actions — open, scan, project, the narrow and
+  wide filters, take, write — on the same table written once as Parquet and once as Vortex by this
+  repository's writers, read by the same engine; the ratio informs and gates nothing;
+- **regressions**, as the ratio of two kept runners across commits (`bench/runners.sh`);
+- **real files**, read from the data disk under §9's metadata oracle: throughput, allocations, and the
+  oracle's verdict.
+
+## 11. Phases
+
+1. **Read.** The compact protocol, the open, the schema with nesting; PLAIN, the hybrid, both
+   dictionaries, the three delta encodings, BYTE_STREAM_SPLIT, and BIT_PACKED for old files;
+   UNCOMPRESSED, SNAPPY, GZIP, ZSTD, LZ4_RAW and BROTLI; pages v1 and v2; pruning by statistics, page
+   index, Bloom filter and dictionary; `ParquetScanSource` and the type mapping; checksums on request.
+2. **Write.** §6, but ALP and encryption.
+3. **The rest of the standard.** ALP in both directions, the writer's behind its option while the
+   standard says Preview; `VARIANT`, unshredded then shredded, through the core's Parquet variant
+   decoding; `GEOMETRY` and `GEOGRAPHY` with their bounding-box statistics; `FILE`; modular encryption,
+   `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1` with AES in counter mode over `Aes.EncryptEcb`,
+   keys from a resolver the caller gives; ordered reads on declared `sorting_columns`.
+
+LZ4 and LZO are in no phase: the standard gives neither format (§3.2 #8).
+
+## 12. Deliberately not done
+
+| approach | why not |
+|---|---|
+| a Parquet library with an engine of its own | a second engine to keep equal to the core's, while the core's `ScanSource` already takes another kind of file |
+| depending on a Parquet or Arrow library | the founding constraint ([03-architecture.md](03-architecture.md) §1) |
+| reading column data from another file through `file_path` | the standard says such use ["is not considered part of the Parquet specification"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L992-L1010) |
+| `_metadata` summary files | never specified, for the same reason |
+| statistics in page headers | readers of the page index do not use them |
+| data pages v1 by default | levels inside the compressed bytes and rows split across pages: no decompression into place, no common grid |
+| checksums verified by default | a check reads every byte a view would not |
+| a footer in another encoding | not in the standard; the extensions page shows one only as an example |
+| matching another compressor's bytes | a codec's format admits many valid streams; ours are deterministic, which is what a test needs |
+
+[pf]: https://github.com/apache/parquet-format/tree/04d56f291ff963e98bc37ab8100e2fc133ff583c
+[readme]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/README.md
+[thrift]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift
+[enc]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encodings.md
+[alp]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/AlpEncoding.md
+[comp]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Compression.md
+[lt]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/LogicalTypes.md
+[pi]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/PageIndex.md
+[bloom]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/BloomFilter.md
+[crypt]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encryption.md
+[var]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantEncoding.md
+[shred]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md
+[geo]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Geospatial.md
+[ext]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/BinaryProtocolExtensions.md
+[contrib]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/CONTRIBUTING.md
+[compact]: https://github.com/apache/thrift/blob/27e8a425ffb498e190df3a12e239326bf5ba9ed6/doc/specs/thrift-compact-protocol.md
+[rfc1952]: https://www.rfc-editor.org/rfc/rfc1952
+[rfc7932]: https://www.rfc-editor.org/rfc/rfc7932
+[rfc8878]: https://www.rfc-editor.org/rfc/rfc8878
+[snappy]: https://github.com/google/snappy/blob/1.3.1/format_description.txt
+[lz4]: https://github.com/lz4/lz4/blob/v1.10.0/doc/lz4_Block_format.md
+[xxh]: https://github.com/Cyan4973/xxHash/blob/v0.7.0/doc/xxhash_spec.md
