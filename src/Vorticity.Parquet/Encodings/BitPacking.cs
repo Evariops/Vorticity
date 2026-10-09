@@ -233,6 +233,64 @@ internal static class BitPacking
     }
 
     /// <summary>
+    /// Unpacks <c>destination.Length</c> deltas of <paramref name="bitWidth"/> bits, 1 to 57, and
+    /// writes their running sum from <paramref name="last"/>, each delta raised by
+    /// <paramref name="minimum"/>, wrapping: DELTA_BINARY_PACKED's INT64 miniblock in one pass, no
+    /// delta stored between the unpack and the sum. Returns the last value written.
+    /// </summary>
+    /// <remarks>
+    /// A value starts at most 7 bits into its first byte, so one 64-bit load holds it wherever eight
+    /// bytes remain; a caller that passes the rest of its page keeps every value but the page's last
+    /// few on that load.
+    /// </remarks>
+    internal static ulong UnpackSum64(ReadOnlySpan<byte> source, int bitWidth, ulong minimum, ulong last, Span<long> destination)
+    {
+        int count = destination.Length;
+        if ((uint)(bitWidth - 1) > 56)
+        {
+            ThrowWidth(bitWidth, 57);
+        }
+
+        if (source.Length < PackedBytes(count, bitWidth))
+        {
+            ParquetThrow.Truncated("bit-packed run");
+        }
+
+        ulong mask = (1UL << bitWidth) - 1;
+        ref byte input = ref MemoryMarshal.GetReference(source);
+        ref long output = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        if (BitConverter.IsLittleEndian)
+        {
+            long limit = source.Length - 8;
+            for (; i < count; i++)
+            {
+                long bit = (long)i * bitWidth;
+                long at = bit >> 3;
+                if (at > limit)
+                {
+                    break;
+                }
+
+                ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, (nint)at));
+                last += minimum + ((word >> (int)(bit & 7)) & mask);
+                Unsafe.Add(ref output, i) = (long)last;
+            }
+        }
+
+        Span<byte> padded = stackalloc byte[8];
+        for (; i < count; i++)
+        {
+            long bit = (long)i * bitWidth;
+            ulong word = Word(source, (int)(bit >> 3), padded);
+            last += minimum + ((word >> (int)(bit & 7)) & mask);
+            Unsafe.Add(ref output, i) = (long)last;
+        }
+
+        return last;
+    }
+
+    /// <summary>
     /// Packs <c>values</c>, each below 2^<paramref name="bitWidth"/>, into
     /// <see cref="PackedBytes"/> bytes of <paramref name="destination"/>; the last byte's unused
     /// bits are zero.

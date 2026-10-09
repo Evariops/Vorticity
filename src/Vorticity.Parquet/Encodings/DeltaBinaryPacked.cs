@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Encodings;
@@ -78,9 +80,26 @@ internal static class DeltaBinaryPacked
         }
 
         int perMiniblock = header.BlockValues / header.Miniblocks;
-        uint[]? rented = perMiniblock > 256 ? ArrayPool<uint>.Shared.Rent(perMiniblock) : null;
-        Span<uint> deltas = rented ?? stackalloc uint[256];
-        try
+        if (perMiniblock <= 256)
+        {
+            return Blocks32(data, destination, header, stackalloc uint[256]);
+        }
+
+        // A miniblock longer than writers cut: its deltas in a rented array, which a decode that
+        // throws leaves to the collector.
+        uint[] rented = ArrayPool<uint>.Shared.Rent(perMiniblock);
+        int length = Blocks32(data, destination, header, rented);
+        ArrayPool<uint>.Shared.Return(rented);
+        return length;
+    }
+
+    /// <summary>
+    /// The blocks of an INT32 encoding. No handler surrounds the loop, so that the running value
+    /// stays in a register rather than being written through to the frame at every add.
+    /// </summary>
+    private static int Blocks32(ReadOnlySpan<byte> data, Span<int> destination, Header header, Span<uint> deltas)
+    {
+        int perMiniblock = header.BlockValues / header.Miniblocks;
         {
             int position = header.Length;
             uint last = (uint)header.First;
@@ -98,29 +117,43 @@ internal static class DeltaBinaryPacked
                         ParquetThrow.Format($"A DELTA_BINARY_PACKED miniblock of INT32 values is {width} bits wide.");
                     }
 
-                    ReadOnlySpan<byte> packed = Take(data, ref position, perMiniblock / 8 * width);
-                    int take = Math.Min(perMiniblock, header.Count - done);
-                    Span<uint> block = deltas[..take];
-                    BitPacking.Unpack32(packed, width, block);
-                    Span<int> into = destination.Slice(done, take);
-                    for (int i = 0; i < block.Length; i++)
+                    int bytes = perMiniblock / 8 * width;
+                    if (bytes > data.Length - position)
                     {
-                        last += minimum + block[i];
-                        into[i] = (int)last;
+                        ParquetThrow.Truncated("DELTA_BINARY_PACKED block");
                     }
 
+                    int take = Math.Min(perMiniblock, header.Count - done);
+                    ref int into = ref MemoryMarshal.GetReference(destination.Slice(done, take));
+                    if (width == 0)
+                    {
+                        // Every delta is the minimum: a progression.
+                        for (int i = 0; i < take; i++)
+                        {
+                            last += minimum;
+                            Unsafe.Add(ref into, i) = (int)last;
+                        }
+                    }
+                    else
+                    {
+                        // The kernel is given the rest of the page, so that its wide loads stay on
+                        // their fast path past the miniblock's last byte.
+                        Span<uint> block = deltas[..take];
+                        BitPacking.Unpack32(data[position..], width, block);
+                        ref uint delta = ref MemoryMarshal.GetReference(block);
+                        for (int i = 0; i < take; i++)
+                        {
+                            last += minimum + Unsafe.Add(ref delta, i);
+                            Unsafe.Add(ref into, i) = (int)last;
+                        }
+                    }
+
+                    position += bytes;
                     done += take;
                 }
             }
 
             return position;
-        }
-        finally
-        {
-            if (rented is not null)
-            {
-                ArrayPool<uint>.Shared.Return(rented);
-            }
         }
     }
 
@@ -136,9 +169,21 @@ internal static class DeltaBinaryPacked
         }
 
         int perMiniblock = header.BlockValues / header.Miniblocks;
-        ulong[]? rented = perMiniblock > 256 ? ArrayPool<ulong>.Shared.Rent(perMiniblock) : null;
-        Span<ulong> deltas = rented ?? stackalloc ulong[256];
-        try
+        if (perMiniblock <= 256)
+        {
+            return Blocks64(data, destination, header, stackalloc ulong[256]);
+        }
+
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(perMiniblock);
+        int length = Blocks64(data, destination, header, rented);
+        ArrayPool<ulong>.Shared.Return(rented);
+        return length;
+    }
+
+    /// <summary>The blocks of an INT64 encoding, as <see cref="Blocks32"/> walks an INT32 one's.</summary>
+    private static int Blocks64(ReadOnlySpan<byte> data, Span<long> destination, Header header, Span<ulong> deltas)
+    {
+        int perMiniblock = header.BlockValues / header.Miniblocks;
         {
             int position = header.Length;
             ulong last = (ulong)header.First;
@@ -156,29 +201,49 @@ internal static class DeltaBinaryPacked
                         ParquetThrow.Format($"A DELTA_BINARY_PACKED miniblock of INT64 values is {width} bits wide.");
                     }
 
-                    ReadOnlySpan<byte> packed = Take(data, ref position, perMiniblock / 8 * width);
-                    int take = Math.Min(perMiniblock, header.Count - done);
-                    Span<ulong> block = deltas[..take];
-                    BitPacking.Unpack64(packed, width, block);
-                    Span<long> into = destination.Slice(done, take);
-                    for (int i = 0; i < block.Length; i++)
+                    int bytes = perMiniblock / 8 * width;
+                    if (bytes > data.Length - position)
                     {
-                        last += minimum + block[i];
-                        into[i] = (long)last;
+                        ParquetThrow.Truncated("DELTA_BINARY_PACKED block");
                     }
 
+                    int take = Math.Min(perMiniblock, header.Count - done);
+                    Span<long> into = destination.Slice(done, take);
+                    if (width == 0)
+                    {
+                        // Every delta is the minimum: a progression.
+                        ref long first = ref MemoryMarshal.GetReference(into);
+                        for (int i = 0; i < take; i++)
+                        {
+                            last += minimum;
+                            Unsafe.Add(ref first, i) = (long)last;
+                        }
+                    }
+                    else if (width <= 57)
+                    {
+                        // Unpacked and summed in one pass, over the rest of the page so that every
+                        // load but the page's last few is one 64-bit word.
+                        last = BitPacking.UnpackSum64(data[position..], width, minimum, last, into);
+                    }
+                    else
+                    {
+                        Span<ulong> block = deltas[..take];
+                        BitPacking.Unpack64(data[position..], width, block);
+                        ref ulong delta = ref MemoryMarshal.GetReference(block);
+                        ref long first = ref MemoryMarshal.GetReference(into);
+                        for (int i = 0; i < take; i++)
+                        {
+                            last += minimum + Unsafe.Add(ref delta, i);
+                            Unsafe.Add(ref first, i) = (long)last;
+                        }
+                    }
+
+                    position += bytes;
                     done += take;
                 }
             }
 
             return position;
-        }
-        finally
-        {
-            if (rented is not null)
-            {
-                ArrayPool<ulong>.Shared.Return(rented);
-            }
         }
     }
 
