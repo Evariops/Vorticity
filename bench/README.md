@@ -279,9 +279,11 @@ and say which change in the commit message.
 
 **A new reference binary is carried, not recalibrated.** Both gates record the fingerprint of the
 `vxbench` build their tables were set under (`CalibratedShim`) and refuse to gate under another: a
-ratio through a different denominator is a number about the rebuild. After rebuilding
-`tools/vxbench-rs` — a new `vortex` pin, a new toolchain, a changed entry point — keep the previous
-build and carry the tables over:
+ratio through a different denominator is a number about the rebuild. Another machine builds another
+binary, and its ratios are its own: there `--ratio-check --out` and `--throughput --take --out` (or
+`--write`) measure every axis or file for that machine's page and hold none to a reference. After
+rebuilding `tools/vxbench-rs` — a new `vortex` pin, a new toolchain, a changed entry point — keep
+the previous build and carry the tables over:
 
 ```
 dotnet run -c Release PROJ -- --ratio-check --recalibrate 3 --rebase-from <previous libvxbench.dylib>

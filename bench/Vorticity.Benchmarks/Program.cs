@@ -533,7 +533,9 @@ internal static class Program
                                                        by what the binary moved the ratio
                                      --lanes N         adds `full scan, N lanes`, threads pinned
                                      --out <page>      the axes as the page's section, after a
-                                                       check of every axis
+                                                       check of every axis; under a reference
+                                                       binary the references do not name, every
+                                                       axis measured and none held
           --throughput [family…]   57 encodings at a million rows, ~55 s
                                      --check           hold each ratio to its ceiling. Refused
                                                        with a family filter: a short run is +32%

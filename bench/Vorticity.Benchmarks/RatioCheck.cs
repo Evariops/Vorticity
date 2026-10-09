@@ -681,7 +681,15 @@ internal static class RatioCheck
             : string.Equals(running, CalibratedShim, StringComparison.Ordinal)
                 ? $"  reference binary: {running}, the one the references were calibrated against"
                 : $"  reference binary: {running}, but the references were calibrated against {CalibratedShim}");
-        if (CalibratedShim is not null && !string.Equals(running, CalibratedShim, StringComparison.Ordinal))
+
+        // The references are the calibrating machine's: another machine builds another binary, and
+        // its ratios are its own. Its page is still measured, every axis of it, and held to nothing.
+        bool held = CalibratedShim is null || string.Equals(running, CalibratedShim, StringComparison.Ordinal);
+        if (!held && Page is not null)
+        {
+            Console.Out.WriteLine("  for the page only: no axis is held to references set under another binary");
+        }
+        else if (!held)
         {
             Console.Error.WriteLine(
                 $"REFUSED: the references were calibrated against reference binary {CalibratedShim} and " +
@@ -711,7 +719,11 @@ internal static class RatioCheck
             Interval ratio = m.Ratio;
             string columns;
             string verdict = string.Empty;
-            if (!References.TryGetValue(axis.Name, out Reference entry))
+            if (!held)
+            {
+                columns = "         --       --";
+            }
+            else if (!References.TryGetValue(axis.Name, out Reference entry))
             {
                 unreferenced.Add(string.Create(
                     CultureInfo.InvariantCulture,
@@ -798,10 +810,12 @@ internal static class RatioCheck
         }
 
         Console.Out.WriteLine(
-            over == 0
-                ? "Every axis is inside its ceiling."
-                : $"{over} axis/axes above ceiling. A ratio only moves when the code moves: " +
-                  "find the change, do not raise the ceiling.");
+            !held
+                ? "No axis was held to a ceiling: this run writes the page and gates nothing."
+                : over == 0
+                    ? "Every axis is inside its ceiling."
+                    : $"{over} axis/axes above ceiling. A ratio only moves when the code moves: " +
+                      "find the change, do not raise the ceiling.");
         if (Page is not null)
         {
             await ResultsPage.WriteAsync(Page, [("in-process", Section(measured, running))]).ConfigureAwait(false);
