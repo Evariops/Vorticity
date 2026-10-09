@@ -10,7 +10,8 @@
 #                   kept, with a manifest of each original's size and SHA-256: the originals would weigh
 #                   tens of megabytes. The seeds below make them the same bytes on every machine.
 #
-# Needs curl, tar and a C compiler (CC, or cc); runs on macOS and Linux. CI runs it before the tests,
+# Needs curl, tar and a C compiler (CC, or cc); runs on macOS and Linux, and on Windows from Git Bash
+# with a GNU-compatible clang as CC (llvm-mingw). CI runs it before the tests,
 # which fail there without the data, and skip elsewhere.
 set -euo pipefail
 

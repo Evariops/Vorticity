@@ -42,10 +42,10 @@ internal sealed unsafe class LibzstdMt
         _errorName = (delegate* unmanaged<nuint, nint>)NativeLibrary.GetExport(library, "ZSTD_getErrorName");
     }
 
-    /// <summary>The library, loaded once; null when tools/native-ref/out/libzstd_mt.dylib is missing.</summary>
+    /// <summary>The library, loaded once; null when tools/native-ref/out/libzstd_mt (build.sh mt) is missing.</summary>
     public static LibzstdMt? Instance { get; } = Load();
 
-    public static string LibraryPath => Path.Combine(RepositoryRoot(), "tools", "native-ref", "out", "libzstd_mt.dylib");
+    public static string LibraryPath => Path.Combine(RepositoryRoot(), "tools", "native-ref", "out", "libzstd_mt" + (OperatingSystem.IsWindows() ? ".dll" : OperatingSystem.IsMacOS() ? ".dylib" : ".so"));
 
     private static LibzstdMt? Load() =>
         File.Exists(LibraryPath) && NativeLibrary.TryLoad(LibraryPath, out nint library) ? new LibzstdMt(library) : null;

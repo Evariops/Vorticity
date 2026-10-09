@@ -23,7 +23,7 @@ namespace Vorticity.Zstd.Perf;
 /// frames byte for byte, and give the content back from them.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --corpus silesia,github,github-dict [--levels 1,3,19] [--seconds S] [--only zstd]
+/// Usage: <c>Vorticity.Zstd.Perf --corpus silesia,github,github-dict [--levels 1,3,19] [--seconds S] [--only zstd] [--directions decompression]
 /// [--results file.tsv] [--markdown file.md]</c>, or <c>Vorticity.Zstd.Perf --corpus-report file.tsv [--markdown file.md]</c>
 /// to render results already measured. <c>silesia</c> is silesia.tar, the twelve files in one frame,
 /// as lzbench reads it; <c>github</c> the 500 records, a frame each, on one context;
@@ -63,8 +63,9 @@ internal static class Corpus
         }
     }
 
-    public static int Run(string[] sets, string? levels, string? seconds, string? only, string? results, string? markdown)
+    public static int Run(string[] sets, string? levels, string? seconds, string? only, string? results, string? markdown, string? directions = null)
     {
+        Compresses = directions is null || directions.Split(',').Contains("compression");
         int[] levelList = levels?.Split(',').Select(l => int.Parse(l, CultureInfo.InvariantCulture)).ToArray() ?? DefaultLevels;
         double budget = seconds is null ? 5 : double.Parse(seconds, CultureInfo.InvariantCulture);
         NativeReference? native = NativeReference.TryLoad();
@@ -179,6 +180,9 @@ internal static class Corpus
     /// every other candidate must write too; then the decoding of those frames, whose first round
     /// checks that every candidate gives the content back.
     /// </summary>
+    /// <summary>Whether compression is timed: <c>--directions decompression</c> leaves it out, the frames written once.</summary>
+    private static bool Compresses { get; set; } = true;
+
     private static List<Row> Measure(DataSet set, int level, List<Candidate> candidates, double budget)
     {
         int records = set.Offsets.Length - 1;
@@ -200,7 +204,13 @@ internal static class Corpus
         int count = candidates.Count;
 
         bool[] compressionDiffers = new bool[count];
-        double[] compression = Time(candidates, budget, (c, round) =>
+        if (!Compresses)
+        {
+            // Decompression alone: libzstd's frames, written once, untimed.
+            Pass(candidates[0].Compress, set.Content, set.Offsets, reference, bounds, sizes);
+        }
+
+        double[] compression = !Compresses ? new double[count] : Time(candidates, budget, (c, round) =>
         {
             if (round > 0)
             {
@@ -255,7 +265,7 @@ internal static class Corpus
 
         double ratio = (double)set.Content.Length / frames.Length;
         var rows = new List<Row>();
-        for (int c = 0; c < count; c++)
+        for (int c = 0; c < count && Compresses; c++)
         {
             rows.Add(new Row(set.Name, set.Label, set.Title, level, ratio, "compression", candidates[c].Name, candidates[c].Label,
                 set.Content.Length / compression[c] / 1e6, compressionDiffers[c]));
@@ -459,6 +469,24 @@ internal static class Corpus
                 return new DataSet(name, "silesia.tar", $"the Silesia corpus as one tar, {tar.Length:N0} bytes, one frame", tar, [0, tar.Length], null);
             }
 
+            case "silesia-sample":
+            {
+                // 1 MiB every 16 MiB of silesia.tar, as one frame: its kinds of data, text, binaries,
+                // images and databases, in a frame that compresses in a fraction of the time, for the
+                // micro-benchmarks and the profiler.
+                byte[] tar = SilesiaTar(Path.Combine(directory, "silesia.zip"));
+                const int Slice = 1 << 20;
+                const int Stride = 16 << 20;
+                using var sample = new MemoryStream();
+                for (int at = 0; at + Slice <= tar.Length; at += Stride)
+                {
+                    sample.Write(tar, at, Slice);
+                }
+
+                byte[] content = sample.ToArray();
+                return new DataSet(name, "silesia sample", $"1 MiB every 16 MiB of silesia.tar, {content.Length:N0} bytes, one frame", content, [0, content.Length], null);
+            }
+
             case "github":
             case "github-dict":
             {
@@ -481,7 +509,7 @@ internal static class Corpus
             }
 
             default:
-                throw new ArgumentException("unknown corpus " + name + " (silesia, github, github-dict, github.tar, github.tar-dict)", nameof(name));
+                throw new ArgumentException("unknown corpus " + name + " (silesia, silesia-sample, github, github-dict, github.tar, github.tar-dict)", nameof(name));
         }
     }
 
