@@ -269,8 +269,14 @@ internal sealed partial class GroupCore
     private readonly int[]? _pageSlots;
     private readonly long[][]? _partPages;
 
-    /// <summary>The part a page of the span is in: the top bits of the hash of its number.</summary>
-    internal static int PageHome(long page) => (int)(MergeHash.Of((ulong)page, MergeHash.Seed) >> PartShift);
+    /// <summary>
+    /// The part a page of the span is in: the top bits of its number, offset by <see cref="MergeHash.Seed"/>,
+    /// times the golden ratio's odd constant, which spreads pages in order over every part. One
+    /// multiplication where the two of a mix cost k7's lanes 7 % of their cycles at fourteen lanes, its
+    /// rows copied into their parts' batches.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int PageHome(long page) => (int)((((ulong)page + MergeHash.Seed) * 0x9E37_79B9_7F4A_7C15UL) >> PartShift);
 
     /// <summary>
     /// Whether the core pages its key: a key numbered by value over a span no wider than the rows. A
@@ -1806,7 +1812,7 @@ internal sealed class LaneCore
         where TKey : unmanaged =>
         _pageBits < 0
             ? (int)(EntryKeys.Hash(key, MergeHash.Seed) >> GroupCore.PartShift)
-            : (int)(MergeHash.Of((ulong)((EntryKeys.Integer(key) - _pageLeast) >> _pageBits), MergeHash.Seed) >> GroupCore.PartShift);
+            : GroupCore.PageHome((EntryKeys.Integer(key) - _pageLeast) >> _pageBits);
 
     internal EntryShape Shape { get; }
 
