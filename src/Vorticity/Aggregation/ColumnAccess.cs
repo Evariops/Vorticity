@@ -444,6 +444,53 @@ internal readonly ref struct BytesBlock
         return true;
     }
 
+    /// <summary>
+    /// The words of rows <paramref name="start"/> on, as many as <paramref name="words"/> holds, every row
+    /// valid, as <see cref="TryWord"/> makes each: the view's sixteen bytes, those past the value zeroed by a
+    /// mask its length picks. False when a value is longer than 12 bytes, which the words cannot hold.
+    /// </summary>
+    /// <remarks>
+    /// No branch on a row: the longest length is kept and judged once. Row by row through
+    /// <see cref="TryWord"/>, two branches a row and the validity's test took a sixth of the cycles of a sum
+    /// by a hundred short texts (2026-10-09).
+    /// </remarks>
+    internal bool TryWords(int start, Span<TextWord> words)
+    {
+        ReadOnlySpan<byte> views = _views.Slice(start * ViewSize, words.Length * ViewSize);
+        ref byte view = ref MemoryMarshal.GetReference(views);
+        ref TextWord word = ref MemoryMarshal.GetReference(words);
+        ref ulong lows = ref MemoryMarshal.GetReference(LowMasks);
+        ref ulong highs = ref MemoryMarshal.GetReference(HighMasks);
+        uint longest = 0;
+        for (int i = 0; i < words.Length; i++)
+        {
+            ref byte at = ref Unsafe.Add(ref view, i * ViewSize);
+            ulong low = Unsafe.ReadUnaligned<ulong>(ref at);
+            ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref at, 8));
+            uint size = (uint)low;
+            longest = Math.Max(longest, size);
+            nint masked = (nint)Math.Min(size, (uint)MaxInline);
+            Unsafe.Add(ref word, i) = new TextWord(low & Unsafe.Add(ref lows, masked), high & Unsafe.Add(ref highs, masked));
+        }
+
+        return longest <= MaxInline;
+    }
+
+    // By length, from 0 to 12: the bits of a word's low half, then of its high half, that its length and its
+    // bytes take, 32 then 8 a byte.
+    private static ReadOnlySpan<ulong> LowMasks =>
+    [
+        0x0000_0000_FFFF_FFFFUL, 0x0000_00FF_FFFF_FFFFUL, 0x0000_FFFF_FFFF_FFFFUL, 0x00FF_FFFF_FFFF_FFFFUL,
+        ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
+        ulong.MaxValue, ulong.MaxValue,
+    ];
+
+    private static ReadOnlySpan<ulong> HighMasks =>
+    [
+        0, 0, 0, 0, 0, 0xFFUL, 0xFFFFUL, 0xFF_FFFFUL, 0xFFFF_FFFFUL, 0xFF_FFFF_FFFFUL, 0xFFFF_FFFF_FFFFUL,
+        0xFF_FFFF_FFFF_FFFFUL, ulong.MaxValue,
+    ];
+
     /// <summary>Data buffer <paramref name="buffer"/> of the block, which row <paramref name="row"/> names.</summary>
     private ReadOnlySpan<byte> Data(int row, uint buffer)
     {

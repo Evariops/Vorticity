@@ -198,6 +198,7 @@ internal struct KeyTable<TValue>
 
         // The table's fields in locals: a store to the homes could alias them for all the JIT knows.
         ulong seed = _seed;
+        ulong prepared = Prepared(seed);
         ulong multiplier = _multiplier;
         uint length = (uint)slots.Length;
         int shift = _shift;
@@ -211,11 +212,31 @@ internal struct KeyTable<TValue>
         {
             // No read ahead: each home probed as it is computed, none stored to be read back; with no
             // bit left out, a loop without the shift, a cycle a row.
-            if (shift == 0)
+            if (shift == 0 && Width == 2)
+            {
+                // A line of two slots, a key of 16 bytes: the key its home's neighbour took is found here
+                // too, both slots compared and the group taken by masks, rather than in the search. Its
+                // home alone sent a hundred short texts' rows to the search one time in five, re-hashed
+                // there, a sixth of the cycles of a sum by them (2026-10-09). The last line of a table of a
+                // prime number of slots holds one: its home is then compared twice.
+                uint last = length - 1;
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    uint at = HomeOf(keys[i], seed, prepared, multiplier, length, 0);
+                    ref Slot home = ref Unsafe.Add(ref first, (nint)at);
+                    ref Slot next = ref Unsafe.Add(ref first, (nint)Math.Min(at ^ 1, last));
+                    int here = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
+                    int there = Unsafe.BitCast<bool, byte>(next.Key.Equals(keys[i]));
+                    int group = ((home.Group & -here) | (next.Group & -there)) - 1;
+                    groups[i] = group;
+                    any |= group;
+                }
+            }
+            else if (shift == 0)
             {
                 for (int i = 0; i < keys.Length; i++)
                 {
-                    ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, multiplier, length, 0));
+                    ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, prepared, multiplier, length, 0));
                     int match = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
                     int group = (home.Group & -match) - 1;
                     groups[i] = group;
@@ -226,7 +247,7 @@ internal struct KeyTable<TValue>
             {
                 for (int i = 0; i < keys.Length; i++)
                 {
-                    ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, multiplier, length, shift));
+                    ref Slot home = ref Unsafe.Add(ref first, (nint)HomeOf(keys[i], seed, prepared, multiplier, length, shift));
                     int match = Unsafe.BitCast<bool, byte>(home.Key.Equals(keys[i]));
                     int group = (home.Group & -match) - 1;
                     groups[i] = group;
@@ -241,7 +262,7 @@ internal struct KeyTable<TValue>
         homes = homes[..keys.Length];
         for (int i = 0; i < keys.Length; i++)
         {
-            homes[i] = HomeOf(keys[i], seed, multiplier, length, shift);
+            homes[i] = HomeOf(keys[i], seed, prepared, multiplier, length, shift);
         }
 
         int sink = 0;
@@ -409,17 +430,21 @@ internal struct KeyTable<TValue>
 
     /// <summary>The slot <paramref name="key"/> starts from: its folded bits, mixed under the seed once there is one, modulo the slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private readonly uint Home(TValue key) => HomeOf(key, _seed, _multiplier, (uint)_length, _shift);
+    private readonly uint Home(TValue key) => HomeOf(key, _seed, Prepared(_seed), _multiplier, (uint)_length, _shift);
 
-    /// <summary>As <see cref="Home"/>, the table's seed, multiplier, length and shift given.</summary>
+    /// <summary>The seed a short text's word is homed by, prepared once (<see cref="TextWord.Prepared"/>); the seed itself for any other key.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint HomeOf(TValue key, ulong seed, ulong multiplier, uint length, int shift)
+    private static ulong Prepared(ulong seed) => typeof(TValue) == typeof(TextWord) ? TextWord.Prepared(seed) : seed;
+
+    /// <summary>As <see cref="Home"/>, the table's seed, its preparation (<see cref="Prepared"/>), multiplier, length and shift given.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint HomeOf(TValue key, ulong seed, ulong prepared, ulong multiplier, uint length, int shift)
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         uint hash;
         if (typeof(TValue) == typeof(TextWord))
         {
-            hash = TextWord.Home(low, high, seed);
+            hash = TextWord.HomePrepared(low, high, prepared);
         }
         else if (seed != 0)
         {

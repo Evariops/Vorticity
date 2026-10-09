@@ -26,7 +26,13 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
         High = high;
     }
 
-    public bool Equals(TextWord other) => Low == other.Low && High == other.High;
+    /// <remarks>
+    /// Both words at once, with no branch: the first passes of the key tables compare a row's word with a
+    /// slot's and take the group or none by a mask, and a <c>&amp;&amp;</c> compiled to a branch on the low
+    /// word, mispredicted at every key that is not in its home slot (2026-10-09, the disassembly of
+    /// <see cref="KeyTable{TValue}.FindAtHome"/>).
+    /// </remarks>
+    public bool Equals(TextWord other) => ((Low ^ other.Low) | (High ^ other.High)) == 0;
 
     public override bool Equals(object? obj) => obj is TextWord other && Equals(other);
 
@@ -57,12 +63,23 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static uint Home(ulong low, ulong high, ulong seed)
+    internal static uint Home(ulong low, ulong high, ulong seed) => HomePrepared(low, high, Prepared(seed));
+
+    /// <summary>
+    /// <see cref="Home"/> of a seed already prepared by <see cref="Prepared"/>: a table's first pass prepares
+    /// it once a batch, where preparing it at every row cost a test and four instructions of the constant a
+    /// row, in the loop the native compiler left it in (2026-10-09).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint HomePrepared(ulong low, ulong high, ulong prepared)
     {
-        ulong prepared = seed == 0 ? Unseeded : seed ^ Mix(seed ^ Secret2, Secret1) ^ 16;
         ulong upper = Math.BigMul(low ^ Secret1, high ^ prepared, out ulong lower);
         return (uint)(Mix(lower ^ Secret7, upper ^ Secret1 ^ 16) >> 32);
     }
+
+    /// <summary>The seed as rapidhash prepares it, the length of 16 folded in: <c>seed ^ mix(seed ^ secret[2], secret[1]) ^ 16</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Prepared(ulong seed) => seed == 0 ? Unseeded : seed ^ Mix(seed ^ Secret2, Secret1) ^ 16;
 
     // rapidhash's secrets (V3) its path for 16 bytes reads.
     private const ulong Secret1 = 0x8bb84b93962eacc9UL;
@@ -233,6 +250,11 @@ internal sealed class ShortTextKeys : GroupKeys
     /// <summary>The words of rows <paramref name="start"/> to <paramref name="end"/> into the block's scratch from its start; false at the first value too long for one.</summary>
     private bool FillWords(BytesBlock canonical, ReadOnlySpan<ulong> validity, int start, int end)
     {
+        if (validity.IsEmpty)
+        {
+            return canonical.TryWords(start, _block.AsSpan(0, end - start));
+        }
+
         TextWord[] block = _block;
         for (int row = start; row < end; row++)
         {

@@ -210,6 +210,7 @@ internal struct WideKeyTable<TValue>
 
         groups = groups[..keys.Length];
         ulong seed = _seed;
+        ulong prepared = Prepared(seed);
         ulong multiplier = _multiplier;
         uint length = (uint)slots.Length;
         ref Slot first = ref MemoryMarshal.GetReference(slots);
@@ -223,7 +224,7 @@ internal struct WideKeyTable<TValue>
             // 0.86 of one loop's time, measured on 2026-10-08.
             for (int i = 0; i < keys.Length; i++)
             {
-                uint hash = HashOf(keys[i], seed);
+                uint hash = HashOf(keys[i], seed, prepared);
                 ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hash, length, multiplier));
                 groups[i] = (home.Group & -Unsafe.BitCast<bool, byte>(home.Hash == hash)) - 1;
             }
@@ -244,7 +245,7 @@ internal struct WideKeyTable<TValue>
         hashes = hashes[..keys.Length];
         for (int i = 0; i < keys.Length; i++)
         {
-            hashes[i] = HashOf(keys[i], seed);
+            hashes[i] = HashOf(keys[i], seed, prepared);
         }
 
         int sink = 0;
@@ -442,12 +443,20 @@ internal struct WideKeyTable<TValue>
     /// rapidhash (<see cref="TextWord.Home"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint HashOf(TValue key, ulong seed)
+    private static uint HashOf(TValue key, ulong seed) => HashOf(key, seed, Prepared(seed));
+
+    /// <summary>The seed a short text's word is homed by, prepared once a batch (<see cref="TextWord.Prepared"/>); the seed itself for any other key.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Prepared(ulong seed) => typeof(TValue) == typeof(TextWord) ? TextWord.Prepared(seed) : seed;
+
+    /// <summary>As <see cref="HashOf(TValue, ulong)"/>, the seed already prepared.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint HashOf(TValue key, ulong seed, ulong prepared)
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         if (typeof(TValue) == typeof(TextWord))
         {
-            return TextWord.Home(low, high, seed);
+            return TextWord.HomePrepared(low, high, prepared);
         }
 
         if (seed != 0)
