@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -81,8 +82,10 @@ internal static unsafe partial class DoubleFastMatchFinder
     /// libzstd tests a candidate as <c>read(safe) == read(ip) &amp;&amp; safe == candidate</c>, the
     /// safe address dummy bytes for a candidate below the window: the second test is the window test.
     /// Here a candidate below the window is read at the window's start instead, which is in the
-    /// source, and the two tests are one condition, combined with <c>&amp;</c> into one chain of
-    /// compares: no select, no branch on the window.
+    /// source, and the two tests are one condition: on Arm64 combined with <c>&amp;</c> into one chain
+    /// of compares, no select, no branch on the window; on x64, which has no conditional compare and
+    /// would combine them with <c>setcc</c>, two compares and branches that it fuses, the window's
+    /// taken only when the bytes match, as libzstd's.
     /// </para>
     /// <para>
     /// The values the search loop uses are locals; those it does not are in <see cref="Cold"/>, read
@@ -101,6 +104,7 @@ internal static unsafe partial class DoubleFastMatchFinder
         uint endIndex = (uint)(istart - @base + (nint)size);
         nuint prefixLowestIndex = state.LowestPrefixIndex(endIndex);
         byte* ilimit = istart + size - HashReadSize;
+        byte* windowStart = @base + prefixLowestIndex;
 
         Cold cold = default;
         Expose(&cold);
@@ -175,7 +179,9 @@ internal static unsafe partial class DoubleFastMatchFinder
             // when the candidate is ip itself: compared with ip, it is not a test the JIT hoists and
             // keeps in a register.
             byte* repeat = ip - offset1;
-            if ((Read32(repeat + 1) == (uint)(ipBytes >> 8)) & (repeat != ip))
+            if (X86Base.IsSupported
+                ? Read32(repeat + 1) == (uint)(ipBytes >> 8) && repeat != ip
+                : (Read32(repeat + 1) == (uint)(ipBytes >> 8)) & (repeat != ip))
             {
                 cold.Current = current;
                 matchLength = Count(ip + 1 + 4, repeat + 1 + 4, cold.End) + 4;
@@ -193,8 +199,11 @@ internal static unsafe partial class DoubleFastMatchFinder
             hashLong1 = Hash8.Hash(ip1Bytes, hashLogLong);
 
             // A long match at ip. A candidate below the window is read at its start: see the remarks.
-            match = @base + ClampToWindow(indexLong0, prefixLowestIndex);
-            if ((Read64(match) == ipBytes) & (indexLong0 >= prefixLowestIndex))
+            nint distanceLong0 = (nint)(indexLong0 - prefixLowestIndex);
+            match = X86Base.IsSupported ? InWindow(windowStart, distanceLong0) : @base + ClampToWindow(indexLong0, prefixLowestIndex);
+            if (X86Base.IsSupported
+                ? Read64(match) == ipBytes && distanceLong0 >= 0
+                : (Read64(match) == ipBytes) & (indexLong0 >= prefixLowestIndex))
             {
                 cold.Current = current;
                 matchLength = Count(ip + 8, match + 8, cold.End) + 8;
@@ -205,8 +214,11 @@ internal static unsafe partial class DoubleFastMatchFinder
             indexLong1 = hashLong[hashLong1];
 
             // A short match at ip.
-            match = @base + ClampToWindow(indexShort0, prefixLowestIndex);
-            if ((Read32(match) == (uint)ipBytes) & (indexShort0 >= prefixLowestIndex))
+            nint distanceShort0 = (nint)(indexShort0 - prefixLowestIndex);
+            match = X86Base.IsSupported ? InWindow(windowStart, distanceShort0) : @base + ClampToWindow(indexShort0, prefixLowestIndex);
+            if (X86Base.IsSupported
+                ? Read32(match) == (uint)ipBytes && distanceShort0 >= 0
+                : (Read32(match) == (uint)ipBytes) & (indexShort0 >= prefixLowestIndex))
             {
                 cold.Current = current;
                 goto SearchNextLong;

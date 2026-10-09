@@ -41,7 +41,7 @@ internal sealed unsafe class LibzstdOracle
 
     private static LibzstdOracle? Load()
     {
-        string path = Path.Combine(TestData.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref.dylib");
+        string path = Path.Combine(TestData.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref" + (OperatingSystem.IsWindows() ? ".dll" : OperatingSystem.IsMacOS() ? ".dylib" : ".so"));
         return File.Exists(path) && NativeLibrary.TryLoad(path, out nint library) ? new LibzstdOracle(library) : null;
     }
 

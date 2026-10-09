@@ -39,15 +39,6 @@ internal sealed unsafe class FseCTable
     public ushort* StateTable { get; }
 
     public FseSymbolTransform* Symbols { get; }
-
-    /// <summary>libzstd's <c>memcpy</c> of a table: the parts the table uses.</summary>
-    public void CopyFrom(FseCTable other)
-    {
-        TableLog = other.TableLog;
-        MaxSymbolValue = other.MaxSymbolValue;
-        Unsafe.CopyBlockUnaligned(StateTable, other.StateTable, (uint)((1 << other.TableLog) * sizeof(ushort)));
-        Unsafe.CopyBlockUnaligned(Symbols, other.Symbols, (uint)((other.MaxSymbolValue + 1) * sizeof(FseSymbolTransform)));
-    }
 }
 
 /// <summary>An encoding state: libzstd's <c>FSE_CState_t</c>.</summary>

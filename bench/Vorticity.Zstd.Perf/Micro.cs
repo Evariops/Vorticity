@@ -13,15 +13,14 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|compress|ncompress|cmatch|nmatch|compressab|cmatchab|centropy|cliterals|chist|csequences
-/// [--frames a,b] [--repeat N] [--pcprofile file]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
+/// Usage: <c>Vorticity.Zstd.Perf --micro decode|ndecode|ccorpus|nccorpus|nx1|nx2|tables|ncount|tree|weights|x1|x2|x2build|compress|ncompress|cmatch|nmatch|compressab|cmatchab|centropy|cliterals|chist|csequences
+/// [--frames a,b] [--repeat N] [--pcprofile file] [--pcfunc name] [--pccaller name]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
 /// timed loops' program counters (see <see cref="PcSampler"/>). Prints the median time
-/// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz);
+/// of one operation, and its cycles at the clock the timed thread runs at, measured (see <see cref="Ghz"/>);
 /// <c>compressab</c> and <c>cmatchab</c> time both sides of <see cref="AbSwitch"/> on one compressor.
 /// </remarks>
 internal static class Micro
 {
-    private const double Ghz = 4.44;
 
     private sealed record Table(SequenceCode Code, short[] Norm, int TableLog, byte[] Description);
 
@@ -45,6 +44,18 @@ internal static class Micro
             if (what is "dcorpus" or "ndcorpus" or "dcorpusab")
             {
                 DecodeCorpus(what, name);
+                continue;
+            }
+
+            if (what is "ccorpus" or "nccorpus")
+            {
+                CompressCorpus(what, name);
+                continue;
+            }
+
+            if (what is "decode" or "ndecode")
+            {
+                DecodeFrame(what, name);
                 continue;
             }
 
@@ -111,6 +122,38 @@ internal static class Micro
                             }
 
                             table.DecodeFourStreams(l.Streams, output.AsSpan(0, l.Size), useDouble);
+                        }
+                    });
+                    break;
+                }
+
+                case "nx1":
+                case "nx2":
+                {
+                    // The same four-stream sections, decoded by libzstd: HUF_readDTableX1 or X2 on
+                    // each tree, then HUF_decompress4X_usingDTable (its assembly loops on x86-64).
+                    NativeReference.HuffmanReference huffman = (NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath)).Huffman
+                        ?? throw new InvalidOperationException("the reference does not export HUF_decompress4X_usingDTable");
+                    bool x2 = what == "nx2";
+                    var output = new byte[128 << 10];
+                    int symbols = 0;
+                    foreach (Literals l in blocks.Sections)
+                    {
+                        symbols += l.Size;
+                    }
+
+                    Report(name, $"{blocks.Sections.Count} sections, {symbols} symbols (libzstd {what[1..]})", blocks.Sections.Count, symbols, () =>
+                    {
+                        byte[]? current = null;
+                        foreach (Literals l in blocks.Sections)
+                        {
+                            if (!ReferenceEquals(l.Tree, current))
+                            {
+                                huffman.ReadTree(l.Tree, x2);
+                                current = l.Tree;
+                            }
+
+                            huffman.DecodeFourStreams(l.Streams, output.AsSpan(0, l.Size));
                         }
                     });
                     break;
@@ -256,7 +299,7 @@ internal static class Micro
                 }
 
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, compressab, cmatchab, centropy, cliterals, chist, csequences, dcorpus, ndcorpus, dcorpusab");
+                    Console.WriteLine($"unknown micro-benchmark {what}: decode, ndecode, ccorpus, nccorpus, nx1, nx2, tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, compressab, cmatchab, centropy, cliterals, chist, csequences, dcorpus, ndcorpus, dcorpusab");
                     return 1;
             }
         }
@@ -324,6 +367,113 @@ internal static class Micro
         }
     }
 
+    /// <summary>
+    /// The compression of a corpus of <see cref="Corpus"/> (<c>--frames github-dict-L3</c>: the set, then
+    /// the level), every record a frame of its own, on one compressor: Vorticity.Zstd (ccorpus) or
+    /// libzstd (nccorpus). Per frame, and per byte of content.
+    /// </summary>
+    private static void CompressCorpus(string what, string name)
+    {
+        int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
+        int level = int.Parse(name.AsSpan(dash + 2), CultureInfo.InvariantCulture);
+        (byte[] content, int[] offsets, byte[]? dictionary) = Corpus.LoadSet(name[..dash]);
+        int records = offsets.Length - 1;
+        byte[] frames = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length) + (records * 64)];
+        SpanCodec compress;
+        if (what == "nccorpus")
+        {
+            NativeReference native = NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath);
+            compress = dictionary is null ? (s, d) => native.Compress(s, d, level) : native.CompressorWith(dictionary, level);
+        }
+        else
+        {
+            var compressor = dictionary is null ? new ZstdCompressor(level) : new ZstdCompressor(level, dictionary);
+            compress = (s, d) => compressor.Compress(s, d, out _, out int written) == OperationStatus.Done ? written : -1;
+        }
+
+        void Body()
+        {
+            int at = 0;
+            for (int i = 0; i < records; i++)
+            {
+                at += compress(content.AsSpan(offsets[i], offsets[i + 1] - offsets[i]), frames.AsSpan(at));
+            }
+        }
+
+        Body();
+        string title = $"{(what == "nccorpus" ? "libzstd " : string.Empty)}compression, {records} frames, {content.Length} bytes, per frame";
+        Report(name, title, records, content.Length, Body);
+    }
+
+    /// <summary>
+    /// The decoding of one benchmark frame, whole, by Vorticity.Zstd (decode) or libzstd (ndecode):
+    /// per sequence, and per byte of content.
+    /// </summary>
+    private static void DecodeFrame(string what, string name)
+    {
+        byte[] frame = BenchFrames.Load(name);
+        byte[] output = new byte[BenchFrames.ContentSize(frame)];
+        SpanCodec decode;
+        if (what == "ndecode")
+        {
+            NativeReference native = NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath);
+            PcSampler.Libraries.Add((NativeReference.LibraryPath, "_ZSTD_versionNumber", native.VersionAddress));
+            decode = native.Decompress;
+        }
+        else
+        {
+            var decompressor = new ZstdDecompressor();
+            decode = (s, d) => decompressor.Decompress(s, d, out _, out int written) == OperationStatus.Done ? written : -1;
+        }
+
+        if (decode(frame, output) != output.Length)
+        {
+            throw new InvalidOperationException(what + " failed on " + name);
+        }
+
+        int sequences = Math.Max(1, CountSequences(frame));
+        Report(name, $"{(what == "ndecode" ? "libzstd " : string.Empty)}decoding, {frame.Length} -> {output.Length} bytes, {sequences} sequences, per sequence",
+            sequences, output.Length, () => decode(frame, output));
+    }
+
+    /// <summary>
+    /// The clock the timed thread runs at, in GHz: a chain of dependent additions, one a cycle on
+    /// any core, timed. Measured once; the cycle columns use it.
+    /// </summary>
+    private static double Ghz => s_ghz ??= MeasureClock();
+
+    private static double? s_ghz;
+
+    private static double MeasureClock()
+    {
+        const long Iterations = 20_000_000;
+        ulong step = (ulong)Environment.TickCount64 | 1;
+        double best = 0;
+        for (int round = 0; round < 5; round++)
+        {
+            long start = Stopwatch.GetTimestamp();
+            ulong x = AddChain(step, step, Iterations);
+            double seconds = Stopwatch.GetElapsedTime(start).TotalSeconds;
+            GC.KeepAlive(x);
+            best = Math.Max(best, Iterations * 16 / seconds / 1e9);
+        }
+
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"clock: {best:F2} GHz (a chain of dependent additions)"));
+        return best;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static ulong AddChain(ulong x, ulong y, long n)
+    {
+        for (long i = 0; i < n; i++)
+        {
+            x += y; x += y; x += y; x += y; x += y; x += y; x += y; x += y;
+            x += y; x += y; x += y; x += y; x += y; x += y; x += y; x += y;
+        }
+
+        return x;
+    }
+
     /// <summary>The histogram of each block's literals, as literals compression counts them.</summary>
     private static unsafe uint HistogramsOnly(List<ZstdCompressor.BlockRecord> records)
     {
@@ -362,6 +512,7 @@ internal static class Micro
         }
 
         var samples = new double[101];
+        PcSampler.Label = $"{frame} {what}";
         using (PcSampler.Start())
         {
             for (int s = 0; s < samples.Length; s++)
@@ -403,6 +554,7 @@ internal static class Micro
 
         var before = new double[101];
         var after = new double[101];
+        PcSampler.Label = $"{frame} {what}";
         using (PcSampler.Start())
         {
             for (int s = 0; s < before.Length; s++)

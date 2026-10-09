@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -470,7 +471,15 @@ internal sealed unsafe class LongDistanceMatcher
                 candidates[n].Split = split;
                 candidates[n].Hash = hash;
                 candidates[n].Checksum = (uint)(xxhash >> 32);
-                touched += table[(nuint)hash << bucketSizeLog];
+                // The bucket on its way: a prefetch on x64, as libzstd's; a read kept in _touched elsewhere.
+                if (Sse.IsSupported)
+                {
+                    Sse.Prefetch0(table + ((nuint)hash << bucketSizeLog));
+                }
+                else
+                {
+                    touched += table[(nuint)hash << bucketSizeLog];
+                }
             }
 
             for (uint n = 0; n < splitCount; n++)

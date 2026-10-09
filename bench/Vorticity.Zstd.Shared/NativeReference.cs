@@ -50,6 +50,11 @@ internal sealed unsafe class NativeReference
         _context = create();
         _compressionContext = createCompression();
         _sequencesContext = createCompression();
+        if (NativeLibrary.TryGetExport(library, "HUF_decompress4X_usingDTable", out _)
+            && NativeLibrary.TryGetExport(library, "HUF_readDTableX2_wksp", out _))
+        {
+            Huffman = new HuffmanReference(library, _isError);
+        }
     }
 
     /// <summary>Where <c>ZSTD_versionNumber</c> is loaded: the library's slide, for a profiler.</summary>
@@ -59,10 +64,13 @@ internal sealed unsafe class NativeReference
     public static string LibraryPath =>
         Environment.GetEnvironmentVariable("VORTICITY_ZSTD_LIBZSTD") is { Length: > 0 } path
             ? path
-            : Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref.dylib");
+            : Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref" + LibrarySuffix);
+
+    /// <summary>The extension of a shared library here: tools/native-ref builds dylibs on macOS, DLLs on Windows.</summary>
+    private static string LibrarySuffix => OperatingSystem.IsWindows() ? ".dll" : OperatingSystem.IsMacOS() ? ".dylib" : ".so";
 
     /// <summary>The same library built with threads (build.sh mt): zstdmt.</summary>
-    public static string ThreadedLibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_mt.dylib");
+    public static string ThreadedLibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_mt" + LibrarySuffix);
 
     /// <summary>The reference library, or null when tools/native-ref/build.sh has not been run.</summary>
     public static NativeReference? TryLoad() => TryLoad(LibraryPath);
@@ -72,6 +80,62 @@ internal sealed unsafe class NativeReference
 
     private static NativeReference? TryLoad(string path) =>
         File.Exists(path) && NativeLibrary.TryLoad(path, out nint library) ? new NativeReference(library) : null;
+
+    /// <summary>
+    /// libzstd's literals decoding alone, for the micro-benchmarks: <c>HUF_readDTableX1_wksp</c> or
+    /// <c>HUF_readDTableX2_wksp</c> on a tree description, then <c>HUF_decompress4X_usingDTable</c> on
+    /// four streams. Exported by the DLLs a GNU-compatible compiler builds (every symbol is); null
+    /// where the library does not export them.
+    /// </summary>
+    public HuffmanReference? Huffman { get; }
+
+    /// <summary>See <see cref="Huffman"/>.</summary>
+    internal sealed class HuffmanReference
+    {
+        private const int TableLogMax = 12;
+        private const int Bmi2 = 1;
+
+        private readonly delegate* unmanaged<uint*, byte*, nuint, void*, nuint, int, nuint> _readX1;
+        private readonly delegate* unmanaged<uint*, byte*, nuint, void*, nuint, int, nuint> _readX2;
+        private readonly delegate* unmanaged<byte*, nuint, byte*, nuint, uint*, int, nuint> _decompress4X;
+        private readonly delegate* unmanaged<nuint, uint> _isError;
+        private readonly uint[] _table = new uint[1 + (1 << TableLogMax)];
+        private readonly uint[] _workspace = new uint[4096];
+
+        public HuffmanReference(nint library, delegate* unmanaged<nuint, uint> isError)
+        {
+            _readX1 = (delegate* unmanaged<uint*, byte*, nuint, void*, nuint, int, nuint>)NativeLibrary.GetExport(library, "HUF_readDTableX1_wksp");
+            _readX2 = (delegate* unmanaged<uint*, byte*, nuint, void*, nuint, int, nuint>)NativeLibrary.GetExport(library, "HUF_readDTableX2_wksp");
+            _decompress4X = (delegate* unmanaged<byte*, nuint, byte*, nuint, uint*, int, nuint>)NativeLibrary.GetExport(library, "HUF_decompress4X_usingDTable");
+            _isError = isError;
+        }
+
+        /// <summary>Reads a tree into the table, for X2 the double-symbol one: the tree's size, or -1.</summary>
+        public int ReadTree(ReadOnlySpan<byte> tree, bool x2)
+        {
+            // HUF_CREATE_STATIC_DTABLEX1 and X2: the table's largest log in the description word.
+            _table[0] = (uint)(x2 ? TableLogMax : TableLogMax - 1) * 0x01000001u;
+            fixed (uint* table = _table)
+            fixed (uint* workspace = _workspace)
+            fixed (byte* src = tree)
+            {
+                nuint result = (x2 ? _readX2 : _readX1)(table, src, (nuint)tree.Length, workspace, (nuint)(_workspace.Length * 4), Bmi2);
+                return _isError(result) != 0 ? -1 : (int)result;
+            }
+        }
+
+        /// <summary>Decodes four streams with the table last read: the size written, or -1.</summary>
+        public int DecodeFourStreams(ReadOnlySpan<byte> streams, Span<byte> output)
+        {
+            fixed (uint* table = _table)
+            fixed (byte* src = streams)
+            fixed (byte* dst = output)
+            {
+                nuint result = _decompress4X(dst, (nuint)output.Length, src, (nuint)streams.Length, table, Bmi2);
+                return _isError(result) != 0 ? -1 : (int)result;
+            }
+        }
+    }
 
     /// <summary><c>ZSTD_decompressDCtx</c>: the decoded size, or -1 on an error.</summary>
     public int Decompress(ReadOnlySpan<byte> source, Span<byte> destination)

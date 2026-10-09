@@ -16,8 +16,10 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd,libzstd-ref] [--ab] [--dump dir] [--no-check] [--no-pair]
-/// [--pmu default|EV1,EV2] [--compress]</c>; <c>--pmu</c> counts hardware events per decode and sequence (under sudo); <c>--ab</c>
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd,libzstd-ref] [--ab] [--dump dir] [--no-check] [--no-pair | --pair]
+/// [--pmu default|EV1,EV2] [--compress] [--core N]</c>; <c>--pmu</c> counts hardware events per decode and sequence (macOS, under
+/// sudo); <c>--core N</c> keeps the timed thread on logical processor N (Windows, where the process and
+/// the thread also run at a high priority, as macOS's user-interactive QoS); <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). <c>--compress</c> times compression instead: each frame's content, at the
 /// level its name gives (3 for the reference). Before timing,
@@ -30,8 +32,19 @@ public static class Program
 
     private sealed record Candidate(string Name, Func<byte[], byte[], int> Decode);
 
+    private const int ThreadPriorityHighest = 2;
+
     [DllImport("libSystem.dylib")]
     private static extern int pthread_set_qos_class_self_np(int qosClass, int relativePriority);
+
+    [DllImport("kernel32.dll")]
+    private static extern nint GetCurrentThread();
+
+    [DllImport("kernel32.dll")]
+    private static extern bool SetThreadPriority(nint thread, int priority);
+
+    [DllImport("kernel32.dll")]
+    private static extern nuint SetThreadAffinityMask(nint thread, nuint mask);
 
     public static int Main(string[] args)
     {
@@ -40,6 +53,17 @@ public static class Program
         if (OperatingSystem.IsMacOS())
         {
             _ = pthread_set_qos_class_self_np(QosClassUserInteractive, 0);
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            // The same on Windows: the process and the timed thread at a high priority, and with
+            // --core N the thread kept on logical processor N, which no migration then disturbs.
+            Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+            _ = SetThreadPriority(GetCurrentThread(), ThreadPriorityHighest);
+            if (Option(args, "--core") is string core)
+            {
+                _ = SetThreadAffinityMask(GetCurrentThread(), (nuint)1 << int.Parse(core, CultureInfo.InvariantCulture));
+            }
         }
 
         string[] frames = Option(args, "--frames")?.Split(',') ?? BenchFrames.Names;
@@ -59,7 +83,7 @@ public static class Program
         {
             // zstd's own benchmark data, level by level: bench/zstd-corpus.sh downloads it.
             return Corpus.Run(corpora.Split(','), Option(args, "--levels"), Option(args, "--seconds"), Option(args, "--only"),
-                Option(args, "--results"), Option(args, "--markdown"));
+                Option(args, "--results"), Option(args, "--markdown"), Option(args, "--directions"));
         }
 
         if (Option(args, "--corpus-report") is string results)
@@ -70,6 +94,8 @@ public static class Program
         if (Option(args, "--micro") is string micro)
         {
             PcSampler.Path = Option(args, "--pcprofile");
+            PcSampler.Function = Option(args, "--pcfunc");
+            PcSampler.Callers = Option(args, "--pccaller");
             return Micro.Run(micro, frames, int.Parse(Option(args, "--repeat") ?? "1", CultureInfo.InvariantCulture));
         }
 
@@ -115,8 +141,13 @@ public static class Program
             return 0;
         }
 
-        // --no-pair: one block at a time, to measure what pairing them brings.
-        var zstd = new ZstdDecompressor { PairsBlocks = !args.Contains("--no-pair") };
+        // --no-pair: one block at a time, --pair: two, to measure what pairing them brings; by
+        // default, as the decoder chooses for the machine.
+        var zstd = new ZstdDecompressor();
+        if (args.Contains("--no-pair") || args.Contains("--pair"))
+        {
+            zstd.PairsBlocks = args.Contains("--pair");
+        }
         var platform = new ZstandardDecoder();
         NativeReference? native = NativeReference.TryLoad();
 

@@ -38,13 +38,6 @@ internal sealed unsafe class HuffmanCTable
 
     public int MaxSymbolValue;
 
-    public void CopyFrom(HuffmanCTable other)
-    {
-        TableLog = other.TableLog;
-        MaxSymbolValue = other.MaxSymbolValue;
-        Unsafe.CopyBlockUnaligned(Elements, other.Elements, HuffmanTable.MaxSymbols * sizeof(ulong));
-    }
-
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int NbBits(ulong element) => (int)(element & 0xFF);
 }
@@ -58,7 +51,7 @@ internal sealed unsafe class HuffmanWorkspace
     /// </summary>
     public const int StreamCapacity = (((FrameFormat.MaxBlockSize / 4) * HuffmanTable.MaxTableLog) / 8) + 64;
 
-    /// <summary>libzstd's <c>table->CTable</c>: the new tree.</summary>
+    /// <summary>The trees the search of the optimal depth tries; the new tree is built into a block state's table.</summary>
     public readonly HuffmanCTable Table = new();
 
     /// <summary>The encoding table of the tree's weights.</summary>
@@ -123,29 +116,50 @@ internal static unsafe class HuffmanEncoder
     /// libzstd's <c>HUF_sort</c>: the symbols by decreasing count, equal counts by increasing symbol
     /// except in the buckets the quicksort orders.
     /// </summary>
+    /// <remarks>
+    /// The running totals and the symbols without count are in registers: in the table, each total
+    /// was a load of the entry just stored, and each symbol without count an increment of the same
+    /// entry, one store forwarded to the next load after another (clang keeps libzstd's totals in a
+    /// register; the JIT does not).
+    /// </remarks>
     private static void Sort(Node* nodes, uint* count, uint maxSymbolValue, RankPosition* rankPosition)
     {
         uint maxSymbolValue1 = maxSymbolValue + 1;
         Unsafe.InitBlockUnaligned(rankPosition, 0, (uint)(sizeof(RankPosition) * RankPositionTableSize));
-        for (uint n = 0; n < maxSymbolValue1; n++)
-        {
-            rankPosition[BucketIndex(count[n])].Base++;
-        }
-
-        for (int n = RankPositionTableSize - 1; n > 0; n--)
-        {
-            rankPosition[n - 1].Base += rankPosition[n].Base;
-            rankPosition[n - 1].Current = rankPosition[n - 1].Base;
-        }
-
+        uint zeros = 0;
         for (uint n = 0; n < maxSymbolValue1; n++)
         {
             uint c = count[n];
-            uint r = BucketIndex(c) + 1;
-            uint position = rankPosition[r].Current++;
+            if (c == 0)
+            {
+                zeros++;
+            }
+            else
+            {
+                rankPosition[BucketIndex(c)].Base++;
+            }
+        }
+
+        rankPosition[0].Base = (ushort)zeros;
+        uint total = rankPosition[RankPositionTableSize - 1].Base;
+        for (int n = RankPositionTableSize - 1; n > 0; n--)
+        {
+            total += rankPosition[n - 1].Base;
+            rankPosition[n - 1].Base = (ushort)total;
+            rankPosition[n - 1].Current = (ushort)total;
+        }
+
+        // The symbols without count go to bucket 0's place, rankPosition[1], in order.
+        uint zeroPosition = rankPosition[1].Current;
+        for (uint n = 0; n < maxSymbolValue1; n++)
+        {
+            uint c = count[n];
+            uint position = c == 0 ? zeroPosition++ : rankPosition[BucketIndex(c) + 1].Current++;
             nodes[position].Count = c;
             nodes[position].Symbol = (byte)n;
         }
+
+        rankPosition[1].Current = (ushort)zeroPosition;
 
         for (int n = RankPositionDistinctCountCutoff; n < RankPositionTableSize - 1; n++)
         {
@@ -955,15 +969,15 @@ internal static unsafe class HuffmanEncoder
     /// Huffman-coded with the previous tree or a new one, whichever the heuristics prefer.
     /// </summary>
     /// <remarks>
-    /// <paramref name="previous"/> is <c>nextHuf->CTable</c>, a copy of the previous block's tree,
-    /// replaced by the new one when that one is used. <paramref name="repeat"/> says on entry whether
-    /// the previous tree may serve, and on return whether it did (<see cref="HuffmanRepeat.None"/>
-    /// otherwise).
+    /// <paramref name="previous"/> is the previous block's tree. A new one is built into
+    /// <paramref name="fresh"/>, a table the previous state does not use, which the block's state
+    /// takes when the new tree is used. <paramref name="repeat"/> says on entry whether the previous
+    /// tree may serve, and on return whether it did (<see cref="HuffmanRepeat.None"/> otherwise).
     /// </remarks>
     /// <returns>The size of the section after the literals header, 0 when not compressible, 1 for one repeated byte.</returns>
     public static nuint Compress(
-        byte* destination, nuint capacity, byte* source, nuint size, bool singleStream, HuffmanCTable previous, HuffmanWorkspace workspace,
-        ref HuffmanRepeat repeat, bool preferRepeat, bool optimalDepth, bool suspectUncompressible)
+        byte* destination, nuint capacity, byte* source, nuint size, bool singleStream, HuffmanCTable previous, HuffmanCTable fresh,
+        HuffmanWorkspace workspace, ref HuffmanRepeat repeat, bool preferRepeat, bool optimalDepth, bool suspectUncompressible)
     {
         const int SuspectIncompressibleSampleSize = 4096;
         const int SuspectIncompressibleSampleRatio = 10;
@@ -1016,11 +1030,10 @@ internal static unsafe class HuffmanEncoder
             return CompressWithTable(destination, op, end, source, size, singleStream, previous, workspace);
         }
 
-        HuffmanCTable table = workspace.Table;
         uint huffLog = OptimalTableLog(LiteralsTableLog, size, maxSymbolValue, workspace, count, optimalDepth);
-        huffLog = BuildCTable(table, count, maxSymbolValue, huffLog);
+        huffLog = BuildCTable(fresh, count, maxSymbolValue, huffLog);
 
-        nuint headerSize = WriteCTable(op, capacity, table, maxSymbolValue, huffLog, workspace.Weights);
+        nuint headerSize = WriteCTable(op, capacity, fresh, maxSymbolValue, huffLog, workspace.Weights);
         if (headerSize == 0)
         {
             // libzstd's error, which its caller turns into raw literals.
@@ -1031,7 +1044,7 @@ internal static unsafe class HuffmanEncoder
         {
             // The previous tree, unless the new one saves more than its description.
             nuint oldSize = EstimateCompressedSize(previous, count, maxSymbolValue);
-            nuint newSize = EstimateCompressedSize(table, count, maxSymbolValue);
+            nuint newSize = EstimateCompressedSize(fresh, count, maxSymbolValue);
             if (oldSize <= headerSize + newSize || headerSize + 12 >= size)
             {
                 return CompressWithTable(destination, op, end, source, size, singleStream, previous, workspace);
@@ -1045,7 +1058,6 @@ internal static unsafe class HuffmanEncoder
 
         op += headerSize;
         repeat = HuffmanRepeat.None;
-        previous.CopyFrom(table);
-        return CompressWithTable(destination, op, end, source, size, singleStream, table, workspace);
+        return CompressWithTable(destination, op, end, source, size, singleStream, fresh, workspace);
     }
 }

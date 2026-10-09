@@ -37,8 +37,8 @@ public sealed class PairEquivalenceTests
             if (!decoders.TryGetValue(dictionary ?? Array.Empty<byte>(), out var pair))
             {
                 pair = dictionary is null
-                    ? (new ZstdDecompressor(), new ZstdDecompressor { PairsBlocks = false })
-                    : (new ZstdDecompressor(dictionary), new ZstdDecompressor(dictionary) { PairsBlocks = false });
+                    ? (new ZstdDecompressor { PairsBlocks = true }, new ZstdDecompressor { PairsBlocks = false })
+                    : (new ZstdDecompressor(dictionary) { PairsBlocks = true }, new ZstdDecompressor(dictionary) { PairsBlocks = false });
                 decoders.Add(dictionary ?? Array.Empty<byte>(), pair);
             }
 

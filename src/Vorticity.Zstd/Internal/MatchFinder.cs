@@ -344,6 +344,15 @@ internal static unsafe class MatchFinder
         return index - (nuint)(below & (below >> 63));
     }
 
+    /// <summary>
+    /// x64's form of <see cref="ClampToWindow(nuint, nuint)"/>: a candidate's address from the
+    /// window's start and its signed distance past it, the start when the distance is negative. A
+    /// shift and a bit clear (andn), where the clamp takes eight instructions on x64, which has no
+    /// operand shifted in passing as Arm64's and; the distance's sign is then the window test.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static byte* InWindow(byte* windowStart, nint distance) => windowStart + (distance & ~(distance >> 63));
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint Read32(byte* p) => Unsafe.ReadUnaligned<uint>(p);
 

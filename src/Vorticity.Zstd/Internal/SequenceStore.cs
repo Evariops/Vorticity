@@ -4,13 +4,15 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Zstd.Internal;
 
 /// <summary>
 /// One sequence of a block, as its encoding wants it: libzstd's <c>SeqDef</c> and what
 /// <c>ZSTD_seqToCodes</c> derives from it, computed when the match finder stores the sequence (see
-/// <see cref="SequenceStore.StoreOnly(ref SequenceRecord*, uint*, nuint, uint, nuint)"/>).
+/// <see cref="SequenceStore.StoreCoded(ref SequenceRecord*, uint*, nuint, uint, nuint)"/>), or on x64
+/// once the block's sequences are found (<see cref="SequenceStore.ComputeCodes"/>).
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct SequenceRecord
@@ -35,8 +37,10 @@ internal struct SequenceRecord
 /// </summary>
 /// <remarks>
 /// <para>
-/// The codes are computed as each sequence is stored, rather than in passes of their own as libzstd
-/// does: the match finders wait on their loads and mispredictions, and have the issue slots to spare.
+/// On Arm64 the codes are computed as each sequence is stored, rather than in passes of their own as
+/// libzstd does: the match finders wait on their loads and mispredictions, and have the issue slots to
+/// spare. On x64 they do not have the registers: the codes are computed in one pass once the block's
+/// sequences are found (see <see cref="DefersCodes"/>).
 /// Computed from the full lengths, a length over 16 bits gets the largest code and its low 16 bits
 /// as extra bits, which is what libzstd's long-length fix-up gives.
 /// </para>
@@ -140,22 +144,86 @@ internal sealed unsafe class SequenceStore
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_storeSeqOnly</c>, and its codes: those of the two lengths from tables below 64
-    /// and 128, from their logarithms above (libzstd's <c>ZSTD_LLcode</c>, <c>ZSTD_MLcode</c>), the
-    /// offset's from its logarithm; the extra bits gathered in the stream's order; the codes counted.
+    /// Whether the match finders store a sequence as its two lengths and its offset alone, as libzstd
+    /// does, its codes computed once the block is found (<see cref="ComputeCodes"/>): on x64. Computed
+    /// as each sequence is stored, the codes take some forty instructions and a dozen values the
+    /// match finders have no registers left for on x64, which spill them; in a pass of their own,
+    /// they take a loop that holds them all. Arm64, with its 31 registers, computes them as it stores.
+    /// </summary>
+    public static bool DefersCodes => X86Base.IsSupported;
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_storeSeqOnly</c>: with its codes (<see cref="StoreCoded"/>), or, where
+    /// <see cref="DefersCodes"/>, the lengths in the place of the extra bits and the offset in its
+    /// own, <see cref="ComputeCodes"/> to complete them.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void StoreOnly(ref SequenceRecord* sequence, uint* counts, nuint litLength, uint offBase, nuint matchLength)
     {
-        Debug.Assert(matchLength >= 3 && litLength <= FrameFormat.MaxBlockSize);
+        if (DefersCodes)
+        {
+            sequence->Extras = (ulong)litLength | ((ulong)matchLength << 32);
+            sequence->OffBase = offBase;
+            sequence++;
+            return;
+        }
+
+        StoreCoded(ref sequence, counts, litLength, offBase, matchLength);
+    }
+
+    /// <summary>
+    /// The codes of the sequences stored since the store was reset, where <see cref="DefersCodes"/>:
+    /// each record completed from its lengths and offset, its codes counted. Called once the block's
+    /// sequences are found, before anything reads them.
+    /// </summary>
+    public void ComputeCodes()
+    {
+        if (!DefersCodes)
+        {
+            return;
+        }
+
+        uint* counts = Counts;
+        SequenceRecord* record = SequencesStart;
+        SequenceRecord* end = Sequences;
+        while (record < end)
+        {
+            ulong lengths = record->Extras;
+            StoreCoded(ref record, counts, (nuint)(uint)lengths, record->OffBase, (nuint)(lengths >> 32));
+        }
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_storeSeqOnly</c>, and its codes: those of the two lengths from tables below 64
+    /// and 128, from their logarithms above (libzstd's <c>ZSTD_LLcode</c>, <c>ZSTD_MLcode</c>), the
+    /// offset's from its logarithm; the extra bits gathered in the stream's order; the codes counted.
+    /// </summary>
+    /// <remarks>
+    /// On x64 an entry is read as its two bytes, the code and the bits (an entry split took four
+    /// instructions), the extra bits are kept with <c>bzhi</c> (a mask took three), and the offset's
+    /// logarithm, of a value never 0, without the guard against 0.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void StoreCoded(ref SequenceRecord* sequence, uint* counts, nuint litLength, uint offBase, nuint matchLength)
+    {
+        Debug.Assert(matchLength >= 3 && litLength <= FrameFormat.MaxBlockSize && offBase != 0);
         nuint matchLengthBase = matchLength - 3;
         nuint llCode;
         nuint llBits;
         if (litLength < 64)
         {
-            nuint entry = ((ushort*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(LiteralLengthCodeTable)))[litLength];
-            llCode = entry & 0x3F;
-            llBits = entry >> 8;
+            ushort* table = (ushort*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(LiteralLengthCodeTable));
+            if (X86Base.IsSupported)
+            {
+                llCode = ((byte*)(table + litLength))[0];
+                llBits = ((byte*)(table + litLength))[1];
+            }
+            else
+            {
+                nuint entry = table[litLength];
+                llCode = entry & 0x3F;
+                llBits = entry >> 8;
+            }
         }
         else
         {
@@ -167,9 +235,18 @@ internal sealed unsafe class SequenceStore
         nuint mlBits;
         if (matchLengthBase < 128)
         {
-            nuint entry = ((ushort*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(MatchLengthCodeTable)))[matchLengthBase];
-            mlCode = entry & 0x3F;
-            mlBits = entry >> 8;
+            ushort* table = (ushort*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(MatchLengthCodeTable));
+            if (X86Base.IsSupported)
+            {
+                mlCode = ((byte*)(table + matchLengthBase))[0];
+                mlBits = ((byte*)(table + matchLengthBase))[1];
+            }
+            else
+            {
+                nuint entry = table[matchLengthBase];
+                mlCode = entry & 0x3F;
+                mlBits = entry >> 8;
+            }
         }
         else
         {
@@ -177,9 +254,11 @@ internal sealed unsafe class SequenceStore
             mlCode = mlBits + 36;
         }
 
-        nuint ofCode = (nuint)(uint)BitOperations.Log2(offBase);
-        ulong extras = ((ulong)litLength & ~(ulong.MaxValue << (int)llBits))
-            | (((ulong)matchLengthBase & ~(ulong.MaxValue << (int)mlBits)) << (int)llBits)
+        nuint ofCode = X86Base.IsSupported
+            ? (nuint)(uint)(31 ^ BitOperations.LeadingZeroCount(offBase))
+            : (nuint)(uint)BitOperations.Log2(offBase);
+        ulong extras = LowBits(litLength, llBits)
+            | (LowBits(matchLengthBase, mlBits) << (int)llBits)
             | ((ulong)(offBase ^ (1u << (int)ofCode)) << (int)(llBits + mlBits));
 
         // The codes at their places in the common arrays, which index the counts as they are.
@@ -193,6 +272,11 @@ internal sealed unsafe class SequenceStore
         counts[mlIndex]++;
         sequence++;
     }
+
+    /// <summary>The low <paramref name="count"/> bits of <paramref name="value"/>, below 64.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong LowBits(nuint value, nuint count) =>
+        Bmi2.X64.IsSupported ? Bmi2.X64.ZeroHighBits(value, count) : value & ~(ulong.MaxValue << (int)count);
 
     /// <summary>The whole store, as a section the entropy coding takes.</summary>
     public SequenceSection Whole => new(LiteralsStart, LiteralCount, SequencesStart, SequenceCount, Counts);
@@ -226,7 +310,7 @@ internal sealed unsafe class SequenceStore
         nuint matchLength = MatchLengthOf(record);
         uint* scratch = stackalloc uint[AllCodes];
         SequenceRecord* sequence = record;
-        StoreOnly(ref sequence, scratch, literalLength, offBase, matchLength);
+        StoreCoded(ref sequence, scratch, literalLength, offBase, matchLength);
     }
 
     /// <summary>The codes of <paramref name="count"/> records counted into <paramref name="counts"/>, cleared first.</summary>

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Zstd.Internal;
 
 namespace Vorticity.Zstd;
@@ -55,8 +56,12 @@ public sealed partial class ZstdDecompressor
     /// <summary>The ulongs a step of the pair loop writes: A's record, then B's, each lengths then offset.</summary>
     private const int RecordStride = 4;
 
-    /// <summary>Whether blocks are decoded in pairs; tests turn it off to compare with one at a time.</summary>
-    internal bool PairsBlocks { get; set; } = true;
+    /// <summary>
+    /// Whether blocks are decoded in pairs; tests set it to compare with one at a time. Not on x64,
+    /// whose 15 registers cannot hold two chains: the JIT spills them, and the fused loop (see
+    /// <see cref="ExecuteSequencesFastX64"/>) decodes the same blocks one at a time 1.2 to 1.3 times as fast.
+    /// </summary>
+    internal bool PairsBlocks { get; set; } = !X86Base.IsSupported;
 
     /// <summary>The sequences decoded side by side so far, for the tests.</summary>
     internal long PairedSequences { get; private set; }

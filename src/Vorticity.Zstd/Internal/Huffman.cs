@@ -457,8 +457,20 @@ internal sealed class HuffmanTable
 
     /// <summary>
     /// The rounds of <see cref="DecodeFourStreamsFast"/>: a method of its own that calls nothing, so
-    /// that the twelve values of the four streams stay in registers, none of them living past it.
+    /// that the values of the four streams stay in registers, none of them living past it.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Each stream's next entry is read as soon as its container is shifted, as libzstd's assembly
+    /// does (<see cref="Next"/>): read where its symbol is written, after the three other streams'
+    /// work, the lookup started later, and the rounds took 3.0 cycles a symbol on x64 where they now
+    /// take 2.5, libzstd's.
+    /// </para>
+    /// <para>
+    /// The four outputs move together, a quarter apart: the second and the fourth are written at that
+    /// distance from the first and the third, a register less for the entries read ahead.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void RunFourStreams(ref FourStreams s, ref ushort table, int shift, ref byte input, ref byte oend)
     {
@@ -471,13 +483,13 @@ internal sealed class HuffmanTable
         ref byte ip2 = ref s.Ip2;
         ref byte ip3 = ref s.Ip3;
         ref byte op0 = ref s.Op0;
-        ref byte op1 = ref s.Op1;
         ref byte op2 = ref s.Op2;
-        ref byte op3 = ref s.Op3;
+        nint quarter = Unsafe.ByteOffset(ref s.Op0, ref s.Op1);
+        Debug.Assert(Unsafe.ByteOffset(ref s.Op2, ref s.Op3) == quarter && Unsafe.ByteOffset(ref s.Op1, ref s.Op2) == quarter);
 
         while (true)
         {
-            nint outputRounds = Unsafe.ByteOffset(ref op3, ref oend) / 5;
+            nint outputRounds = Unsafe.ByteOffset(ref Unsafe.Add(ref op2, quarter), ref oend) / 5;
             nint inputRounds = Unsafe.ByteOffset(ref input, ref ip0) / 7;
             nint rounds = Math.Min(outputRounds, inputRounds);
             if (rounds == 0
@@ -488,39 +500,45 @@ internal sealed class HuffmanTable
                 break;
             }
 
-            ref byte olimit = ref Unsafe.Add(ref op3, rounds * 5);
+            ref byte olimit = ref Unsafe.Add(ref op0, rounds * 5);
+            nint entry0 = Unsafe.Add(ref table, (nint)(bits0 >> shift));
+            nint entry1 = Unsafe.Add(ref table, (nint)(bits1 >> shift));
+            nint entry2 = Unsafe.Add(ref table, (nint)(bits2 >> shift));
+            nint entry3 = Unsafe.Add(ref table, (nint)(bits3 >> shift));
             do
             {
-                Symbol(ref table, shift, ref bits0, ref op0, 0);
-                Symbol(ref table, shift, ref bits1, ref op1, 0);
-                Symbol(ref table, shift, ref bits2, ref op2, 0);
-                Symbol(ref table, shift, ref bits3, ref op3, 0);
-                Symbol(ref table, shift, ref bits0, ref op0, 1);
-                Symbol(ref table, shift, ref bits1, ref op1, 1);
-                Symbol(ref table, shift, ref bits2, ref op2, 1);
-                Symbol(ref table, shift, ref bits3, ref op3, 1);
-                Symbol(ref table, shift, ref bits0, ref op0, 2);
-                Symbol(ref table, shift, ref bits1, ref op1, 2);
-                Symbol(ref table, shift, ref bits2, ref op2, 2);
-                Symbol(ref table, shift, ref bits3, ref op3, 2);
-                Symbol(ref table, shift, ref bits0, ref op0, 3);
-                Symbol(ref table, shift, ref bits1, ref op1, 3);
-                Symbol(ref table, shift, ref bits2, ref op2, 3);
-                Symbol(ref table, shift, ref bits3, ref op3, 3);
-                Symbol(ref table, shift, ref bits0, ref op0, 4);
-                Symbol(ref table, shift, ref bits1, ref op1, 4);
-                Symbol(ref table, shift, ref bits2, ref op2, 4);
-                Symbol(ref table, shift, ref bits3, ref op3, 4);
+                Next(ref table, shift, ref bits0, ref entry0, ref op0, 0);
+                Next(ref table, shift, ref bits1, ref entry1, ref op0, quarter);
+                Next(ref table, shift, ref bits2, ref entry2, ref op2, 0);
+                Next(ref table, shift, ref bits3, ref entry3, ref op2, quarter);
+                Next(ref table, shift, ref bits0, ref entry0, ref op0, 1);
+                Next(ref table, shift, ref bits1, ref entry1, ref op0, quarter + 1);
+                Next(ref table, shift, ref bits2, ref entry2, ref op2, 1);
+                Next(ref table, shift, ref bits3, ref entry3, ref op2, quarter + 1);
+                Next(ref table, shift, ref bits0, ref entry0, ref op0, 2);
+                Next(ref table, shift, ref bits1, ref entry1, ref op0, quarter + 2);
+                Next(ref table, shift, ref bits2, ref entry2, ref op2, 2);
+                Next(ref table, shift, ref bits3, ref entry3, ref op2, quarter + 2);
+                Next(ref table, shift, ref bits0, ref entry0, ref op0, 3);
+                Next(ref table, shift, ref bits1, ref entry1, ref op0, quarter + 3);
+                Next(ref table, shift, ref bits2, ref entry2, ref op2, 3);
+                Next(ref table, shift, ref bits3, ref entry3, ref op2, quarter + 3);
+                Last(ref bits0, entry0, ref op0, 4);
+                Last(ref bits1, entry1, ref op0, quarter + 4);
+                Last(ref bits2, entry2, ref op2, 4);
+                Last(ref bits3, entry3, ref op2, quarter + 4);
                 ip0 = ref ReloadFast(ref bits0, ref ip0);
-                op0 = ref Unsafe.Add(ref op0, 5);
+                entry0 = Unsafe.Add(ref table, (nint)(bits0 >> shift));
                 ip1 = ref ReloadFast(ref bits1, ref ip1);
-                op1 = ref Unsafe.Add(ref op1, 5);
+                entry1 = Unsafe.Add(ref table, (nint)(bits1 >> shift));
                 ip2 = ref ReloadFast(ref bits2, ref ip2);
-                op2 = ref Unsafe.Add(ref op2, 5);
+                entry2 = Unsafe.Add(ref table, (nint)(bits2 >> shift));
                 ip3 = ref ReloadFast(ref bits3, ref ip3);
-                op3 = ref Unsafe.Add(ref op3, 5);
+                entry3 = Unsafe.Add(ref table, (nint)(bits3 >> shift));
+                op0 = ref Unsafe.Add(ref op0, 5);
+                op2 = ref Unsafe.Add(ref op2, 5);
             }
-            while (Unsafe.IsAddressLessThan(ref op3, ref olimit));
+            while (Unsafe.IsAddressLessThan(ref op0, ref olimit));
         }
 
         s.Bits0 = bits0;
@@ -532,9 +550,9 @@ internal sealed class HuffmanTable
         s.Ip2 = ref ip2;
         s.Ip3 = ref ip3;
         s.Op0 = ref op0;
-        s.Op1 = ref op1;
+        s.Op1 = ref Unsafe.Add(ref op0, quarter);
         s.Op2 = ref op2;
-        s.Op3 = ref op3;
+        s.Op3 = ref Unsafe.Add(ref op2, quarter);
     }
 
     /// <summary>
@@ -544,7 +562,8 @@ internal sealed class HuffmanTable
     /// <remarks>
     /// A round takes at most 5 x 11 bits from each stream, as the single-symbol rounds, and writes at
     /// most ten bytes to each: the rounds are capped by what the most filled quarter has left, and
-    /// recounted when they run out.
+    /// recounted when they run out. The entries are read ahead as in <see cref="RunFourStreams"/>
+    /// (1.63 cycles a symbol before, 1.51 after; libzstd's assembly, 1.38).
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void RunFourStreamsDouble(
@@ -577,32 +596,40 @@ internal sealed class HuffmanTable
                 break;
             }
 
+            ulong entry0 = Unsafe.Add(ref table, (nint)(bits0 >> (64 - DoubleLog)));
+            ulong entry1 = Unsafe.Add(ref table, (nint)(bits1 >> (64 - DoubleLog)));
+            ulong entry2 = Unsafe.Add(ref table, (nint)(bits2 >> (64 - DoubleLog)));
+            ulong entry3 = Unsafe.Add(ref table, (nint)(bits3 >> (64 - DoubleLog)));
             do
             {
-                op0 = ref Pair(ref table, ref bits0, ref op0);
-                op1 = ref Pair(ref table, ref bits1, ref op1);
-                op2 = ref Pair(ref table, ref bits2, ref op2);
-                op3 = ref Pair(ref table, ref bits3, ref op3);
-                op0 = ref Pair(ref table, ref bits0, ref op0);
-                op1 = ref Pair(ref table, ref bits1, ref op1);
-                op2 = ref Pair(ref table, ref bits2, ref op2);
-                op3 = ref Pair(ref table, ref bits3, ref op3);
-                op0 = ref Pair(ref table, ref bits0, ref op0);
-                op1 = ref Pair(ref table, ref bits1, ref op1);
-                op2 = ref Pair(ref table, ref bits2, ref op2);
-                op3 = ref Pair(ref table, ref bits3, ref op3);
-                op0 = ref Pair(ref table, ref bits0, ref op0);
-                op1 = ref Pair(ref table, ref bits1, ref op1);
-                op2 = ref Pair(ref table, ref bits2, ref op2);
-                op3 = ref Pair(ref table, ref bits3, ref op3);
-                op0 = ref Pair(ref table, ref bits0, ref op0);
-                op1 = ref Pair(ref table, ref bits1, ref op1);
-                op2 = ref Pair(ref table, ref bits2, ref op2);
-                op3 = ref Pair(ref table, ref bits3, ref op3);
+                op0 = ref PairNext(ref table, ref bits0, ref entry0, ref op0);
+                op1 = ref PairNext(ref table, ref bits1, ref entry1, ref op1);
+                op2 = ref PairNext(ref table, ref bits2, ref entry2, ref op2);
+                op3 = ref PairNext(ref table, ref bits3, ref entry3, ref op3);
+                op0 = ref PairNext(ref table, ref bits0, ref entry0, ref op0);
+                op1 = ref PairNext(ref table, ref bits1, ref entry1, ref op1);
+                op2 = ref PairNext(ref table, ref bits2, ref entry2, ref op2);
+                op3 = ref PairNext(ref table, ref bits3, ref entry3, ref op3);
+                op0 = ref PairNext(ref table, ref bits0, ref entry0, ref op0);
+                op1 = ref PairNext(ref table, ref bits1, ref entry1, ref op1);
+                op2 = ref PairNext(ref table, ref bits2, ref entry2, ref op2);
+                op3 = ref PairNext(ref table, ref bits3, ref entry3, ref op3);
+                op0 = ref PairNext(ref table, ref bits0, ref entry0, ref op0);
+                op1 = ref PairNext(ref table, ref bits1, ref entry1, ref op1);
+                op2 = ref PairNext(ref table, ref bits2, ref entry2, ref op2);
+                op3 = ref PairNext(ref table, ref bits3, ref entry3, ref op3);
+                op0 = ref PairLast(ref bits0, entry0, ref op0);
+                op1 = ref PairLast(ref bits1, entry1, ref op1);
+                op2 = ref PairLast(ref bits2, entry2, ref op2);
+                op3 = ref PairLast(ref bits3, entry3, ref op3);
                 ip0 = ref ReloadFast(ref bits0, ref ip0);
+                entry0 = Unsafe.Add(ref table, (nint)(bits0 >> (64 - DoubleLog)));
                 ip1 = ref ReloadFast(ref bits1, ref ip1);
+                entry1 = Unsafe.Add(ref table, (nint)(bits1 >> (64 - DoubleLog)));
                 ip2 = ref ReloadFast(ref bits2, ref ip2);
+                entry2 = Unsafe.Add(ref table, (nint)(bits2 >> (64 - DoubleLog)));
                 ip3 = ref ReloadFast(ref bits3, ref ip3);
+                entry3 = Unsafe.Add(ref table, (nint)(bits3 >> (64 - DoubleLog)));
             }
             while (--rounds > 0);
         }
@@ -621,11 +648,24 @@ internal sealed class HuffmanTable
         s.Op3 = ref op3;
     }
 
-    /// <summary>One lookup of the double-symbol table: both bytes written, the output moved by the count.</summary>
+    /// <summary>
+    /// One lookup of the double-symbol table, its entry read ahead as <see cref="Next"/>: both bytes
+    /// written, the output moved by the count, the next entry read.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ref byte Pair(scoped ref uint table, scoped ref ulong bits, ref byte op)
+    private static ref byte PairNext(scoped ref uint table, scoped ref ulong bits, scoped ref ulong entry, ref byte op)
     {
-        ulong entry = Unsafe.Add(ref table, (nint)(bits >> (64 - DoubleLog)));
+        Unsafe.WriteUnaligned(ref op, (ushort)(entry >> 8));
+        bits <<= (int)entry;
+        ref byte next = ref Unsafe.Add(ref op, (nint)(entry >> 30));
+        entry = Unsafe.Add(ref table, (nint)(bits >> (64 - DoubleLog)));
+        return ref next;
+    }
+
+    /// <summary>The last lookup of a round, as <see cref="Last"/>: the stream reloads first.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref byte PairLast(scoped ref ulong bits, ulong entry, ref byte op)
+    {
         Unsafe.WriteUnaligned(ref op, (ushort)(entry >> 8));
         bits <<= (int)entry;
         return ref Unsafe.Add(ref op, (nint)(entry >> 30));
@@ -745,11 +785,20 @@ internal sealed class HuffmanTable
         return (Unsafe.ReadUnaligned<ulong>(ref ip) | 1) << consumed;
     }
 
+    /// <summary>The symbol of an entry read ahead: the bits it takes skipped, its byte written, the next entry read.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Symbol(ref ushort table, int shift, ref ulong bits, ref byte op, int k)
+    private static void Next(ref ushort table, int shift, ref ulong bits, ref nint entry, ref byte op, nint k)
     {
-        int entry = Unsafe.Add(ref table, (nint)(bits >> shift));
-        bits <<= entry;
+        bits <<= (int)entry;
+        Unsafe.Add(ref op, k) = (byte)(entry >> 8);
+        entry = Unsafe.Add(ref table, (nint)(bits >> shift));
+    }
+
+    /// <summary>The last symbol of a round: no entry read ahead, the stream reloads first.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Last(ref ulong bits, nint entry, ref byte op, nint k)
+    {
+        bits <<= (int)entry;
         Unsafe.Add(ref op, k) = (byte)(entry >> 8);
     }
 
@@ -767,21 +816,9 @@ internal sealed class HuffmanTable
     }
 
     /// <summary>Decodes one symbol per entry until <paramref name="output"/> is full.</summary>
-    private void DecodeStream(ref BackwardBitReader bits, Span<byte> output)
-    {
-        ushort[] entries = Entries;
-        int tableLog = TableLog;
-        for (int i = 0; i < output.Length; i++)
-        {
-            // A reload leaves at least 57 bits while the stream has them; a code takes at most 12.
-            if (bits.BitsConsumed > 64 - MaxTableLog)
-            {
-                bits.Reload();
-            }
-
-            ushort entry = entries[bits.PeekBitsFast(tableLog)];
-            output[i] = (byte)(entry >> 8);
-            bits.SkipBits(entry & 0xFF);
-        }
-    }
+    private void DecodeStream(ref BackwardBitReader bits, Span<byte> output) =>
+        // A reload leaves at least 57 bits while the stream has them; a code takes at most 12. An
+        // entry index is below 2^TableLog: no bounds to check.
+        bits.DecodeHuffmanSymbols(
+            ref MemoryMarshal.GetArrayDataReference(Entries), TableLog, ref MemoryMarshal.GetReference(output), output.Length);
 }

@@ -227,6 +227,17 @@ dotnet publish bench/Vorticity.Zstd.Perf -c Release -o artifacts/perf
 artifacts/perf/Vorticity.Zstd.Perf --corpus silesia,github,github-dict --results corpus.tsv --markdown corpus.md
 ```
 
+On Windows x64, from Git Bash, the reference is built with a GNU-compatible clang such as
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw): MSVC builds neither zstd's assembly Huffman
+decoder nor its BMI2 dispatch, which libzstd has wherever a GNU-compatible compiler builds it.
+`--core N` keeps the timed thread on one logical processor:
+
+```sh
+CC=<llvm-mingw>/bin/clang tools/native-ref/build.sh && bench/zstd-corpus.sh
+dotnet publish bench/Vorticity.Zstd.Perf -c Release -o artifacts/perf
+artifacts/perf/Vorticity.Zstd.Perf --core 2 --corpus silesia,github,github-dict --results corpus.tsv --markdown corpus.md
+```
+
 ## Testing
 
 Correctness is checked against libzstd itself:
@@ -256,8 +267,10 @@ dotnet test
 
 The SDK version is pinned in `global.json`. `testdata.sh` downloads the zstd 1.5.7 sources once, checks
 their SHA-256, builds zstd's `decodecorpus` with the system C compiler and writes the test data; it
-runs on macOS and Linux. The native reference that `tools/native-ref/build.sh` builds is needed only
-for the multithreaded-compression tests and for the benchmarks; that script targets macOS.
+runs on macOS and Linux, and on Windows from Git Bash with a GNU-compatible clang as `CC`. The
+native reference that `tools/native-ref/build.sh` builds is needed only for the
+multithreaded-compression tests and for the benchmarks: dylibs on macOS, DLLs on Windows (with the
+same `CC`), shared objects elsewhere.
 
 ## Repository layout
 

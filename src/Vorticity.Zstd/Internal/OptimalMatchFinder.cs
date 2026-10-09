@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics.X86;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -1161,7 +1162,9 @@ internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
             // current > repIndex >= dictLimit, by an intentional overflow that discards 0 and -1.
             if (repOffset - 1 < current - dictLimit)
             {
-                if ((repIndex >= windowLow) & (ReadMinMatch(ip, minMatch) == ReadMinMatch(ip - repOffset, minMatch)))
+                if (X86Base.IsSupported
+                    ? repIndex >= windowLow && ReadMinMatch(ip, minMatch) == ReadMinMatch(ip - repOffset, minMatch)
+                    : (repIndex >= windowLow) & (ReadMinMatch(ip, minMatch) == ReadMinMatch(ip - repOffset, minMatch)))
                 {
                     repLength = Count(ip + minMatch, ip + minMatch - repOffset, end) + minMatch;
                 }
@@ -1195,7 +1198,7 @@ internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
                 matches[count].OffBase = repCode - ll0 + 1;
                 matches[count].Length = (uint)repLength;
                 count++;
-                if ((repLength > sufficientLength) | (ip + repLength == end))
+                if (X86Base.IsSupported ? repLength > sufficientLength || ip + repLength == end : (repLength > sufficientLength) | (ip + repLength == end))
                 {
                     return count;
                 }
@@ -1206,7 +1209,9 @@ internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
         if ((TLength.MinLength == 3) && (bestLength < 3))
         {
             uint matchIndex3 = InsertAndFindFirstIndexHash3(ref state, ref nextToUpdate3, ip);
-            if ((matchIndex3 >= matchLow) & (current - matchIndex3 < (1 << 18)))
+            if (X86Base.IsSupported
+                ? matchIndex3 >= matchLow && current - matchIndex3 < (1 << 18)
+                : (matchIndex3 >= matchLow) & (current - matchIndex3 < (1 << 18)))
             {
                 nuint length = TDictionary.Mode != ExtDictionary.Value || matchIndex3 >= dictLimit
                     ? Count(ip, @base + matchIndex3, end)
@@ -1217,7 +1222,7 @@ internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
                     matches[0].OffBase = OffsetToOffBase(current - matchIndex3);
                     matches[0].Length = (uint)length;
                     count = 1;
-                    if ((length > sufficientLength) | (ip + length == end))
+                    if (X86Base.IsSupported ? length > sufficientLength || ip + length == end : (length > sufficientLength) | (ip + length == end))
                     {
                         // The longest possible: ip is not inserted.
                         state.NextToUpdate = current + 1;
@@ -1292,7 +1297,7 @@ internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
                 matches[count].OffBase = OffsetToOffBase((uint)(current - matchIndex));
                 matches[count].Length = (uint)matchLength;
                 count++;
-                if ((matchLength > OptNum) | (ip + matchLength == end))
+                if (X86Base.IsSupported ? matchLength > OptNum || ip + matchLength == end : (matchLength > OptNum) | (ip + matchLength == end))
                 {
                     // Dropped, to keep the tree consistent; the attached dictionary is not searched.
                     if (TDictionary.Mode == AttachedDictionary.Value)
@@ -1391,7 +1396,7 @@ internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
                 matches[count].OffBase = OffsetToOffBase(current - matchIndex);
                 matches[count].Length = (uint)matchLength;
                 count++;
-                if ((matchLength > OptNum) | (ip + matchLength == end))
+                if (X86Base.IsSupported ? matchLength > OptNum || ip + matchLength == end : (matchLength > OptNum) | (ip + matchLength == end))
                 {
                     break;
                 }
