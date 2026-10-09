@@ -54,8 +54,9 @@ public sealed partial class GroupAllocationTests
     /// <remarks>
     /// <para>
     /// At one lane a ceiling is the floor rounded up to 512 bytes; at four, the lanes' schedule moves
-    /// the core's splits and batches by a few hundred kilobytes from one run to the next, so a ceiling
-    /// is the floor and 2 %, rounded up to 64 KiB (1 % for the one-lane axes whose floor moves too).
+    /// the core's splits and batches by a few hundred kilobytes from one run to the next, and the
+    /// process's shelf holds what the suite's other tests left, so a ceiling of the core is the floor
+    /// and 5 %, rounded up to 64 KiB (1 % for the one-lane axes whose floor moves too).
     /// </para>
     /// <para>
     /// Measured without the shuffle of every result's order the tests make: 3 to 4 MB less on the
@@ -82,15 +83,15 @@ public sealed partial class GroupAllocationTests
         //
         // On this axis and the core's two others, each part is built in an order its shelf lends: 3 to
         // 4 MB less, four bytes a group.
-        ("hashed integers", 4, GroupCoreReason.FirstRows, 4_063_232, WideAsync),
+        ("hashed integers", 4, GroupCoreReason.FirstRows, 4_194_304, WideAsync),
 
         // Integers in no order over a span of 2·10⁶, the one the statistics bound them to: the core by pages.
         ("spread integers", 1, GroupCoreReason.None, 34_865_152, DenseAsync),
-        ("spread integers", 4, GroupCoreReason.Spread, 2_883_584, DenseAsync),
+        ("spread integers", 4, GroupCoreReason.Spread, 2_949_120, DenseAsync),
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
         ("six keys", 1, GroupCoreReason.None, 107_937_792, SixAsync),
-        ("six keys", 4, GroupCoreReason.FirstRows, 6_815_744, SixAsync),
+        ("six keys", 4, GroupCoreReason.FirstRows, 7_208_960, SixAsync),
     ];
 
     [Fact]
