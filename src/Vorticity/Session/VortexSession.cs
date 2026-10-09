@@ -523,7 +523,7 @@ public sealed class VortexSession : IAsyncDisposable
             : given with { IndexCacheBytes = Options.IndexCacheBytes };
     }
 
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+    internal void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 
     private static VortexSession CreateDefault()
     {
