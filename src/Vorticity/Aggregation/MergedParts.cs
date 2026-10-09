@@ -424,10 +424,16 @@ internal sealed class MergedParts : ResultParts
         }
 
         Built built = new Built(reserved, measured);
+
+        // The part's order lent by the process's shelf, which counts nothing, as the order the part made
+        // did not; given back once the part is built.
+        int count = keys.Count;
+        int[] order = AggregationEngine.LentOrder(ArrayShelf.Retained, count);
         try
         {
-            AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(keys.Order(sorted: false))) { Memory = _memory };
+            AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(order, count), count) { Memory = _memory };
             built.Result = await _builder.BuildAsync(outcome, cancellationToken).ConfigureAwait(false);
+            ArrayShelf.Retained.Give(order);
             return built;
         }
         catch

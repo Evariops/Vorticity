@@ -68,15 +68,18 @@ public sealed partial class GroupAllocationTests
 
         // A long integer a row, hashed: at four lanes, a lane's first rows are all new groups.
         ("hashed integers", 1, GroupCoreReason.None, 82_157_056, WideAsync),
-        ("hashed integers", 4, GroupCoreReason.FirstRows, 51_249_152, WideAsync),
+        //
+        // On this axis and the core's two others, each part is built in an order its shelf lends: 3 to
+        // 4 MB less, four bytes a group.
+        ("hashed integers", 4, GroupCoreReason.FirstRows, 48_758_784, WideAsync),
 
         // Integers in no order over a span of 2·10⁶, the one the statistics bound them to: the core by pages.
         ("spread integers", 1, GroupCoreReason.None, 58_423_808, DenseAsync),
-        ("spread integers", 4, GroupCoreReason.Spread, 34_275_328, DenseAsync),
+        ("spread integers", 4, GroupCoreReason.Spread, 29_949_952, DenseAsync),
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
         ("six keys", 1, GroupCoreReason.None, 165_806_080, SixAsync),
-        ("six keys", 4, GroupCoreReason.FirstRows, 120_389_632, SixAsync),
+        ("six keys", 4, GroupCoreReason.FirstRows, 115_867_648, SixAsync),
     ];
 
     [Fact]

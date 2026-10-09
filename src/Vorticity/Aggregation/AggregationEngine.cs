@@ -621,13 +621,15 @@ internal sealed class AggregationOutcome
     // The means read from the slots of sums, by the sum's slot, made on the first read.
     private AggregateSlot?[]? _views;
 
-    internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order)
+    /// <summary>The groups of <paramref name="keys"/> in their states, delivered in the first <paramref name="count"/> of <paramref name="order"/>, every one by default.</summary>
+    internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order, int count = -1)
     {
         _plan = plan;
         _slots = slots;
         Keys = keys;
         Order = order;
-        _chosen = new ChosenValues[plan.Chosen.Length];
+        Count = count < 0 ? order.Length : count;
+        _chosen = plan.Chosen.Length == 0 ? [] : new ChosenValues[plan.Chosen.Length];
         for (int c = 0; c < _chosen.Length; c++)
         {
             _chosen[c] = plan.Chosen[c].CreateValues();
@@ -658,8 +660,14 @@ internal sealed class AggregationOutcome
 
     internal GroupKeys? Keys { get; }
 
-    /// <summary>The groups in delivery order; the one group of a scalar aggregation.</summary>
+    /// <summary>
+    /// The groups in delivery order, its first <see cref="Count"/>; the one group of a scalar aggregation.
+    /// An order lent by a shelf is longer.
+    /// </summary>
     internal int[] Order { get; }
+
+    /// <summary>The groups delivered: the first ones of <see cref="Order"/>.</summary>
+    internal int Count { get; }
 
     internal AggregateSlot SlotOf(IAggregateNode node)
     {
@@ -3543,16 +3551,42 @@ internal static class AggregationEngine
     /// copy shuffled by a draw the process's seed and the groups' count make: the same for two identical
     /// queries of a process, and unlike the merge's.
     /// </summary>
-    internal static int[] Shuffled(int[] order)
+    internal static int[] Shuffled(int[] order) => Shuffled(order, order.Length);
+
+    /// <summary><see cref="Shuffled(int[])"/> of the first <paramref name="count"/> groups of an order a shelf lent, longer than they are: a copy of them alone.</summary>
+    internal static int[] Shuffled(int[] order, int count)
     {
-        if (!AggregationPlan.ShuffledOrder || order.Length < 2)
+        if (!AggregationPlan.ShuffledOrder || count < 2)
         {
             return order;
         }
 
-        int[] shuffled = [.. order];
-        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)order.Length))).Shuffle(shuffled);
+        int[] shuffled = order.AsSpan(0, count).ToArray();
+        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)count))).Shuffle(shuffled);
         return shuffled;
+    }
+
+    /// <summary>
+    /// The groups 0 to <paramref name="count"/> less one in their order, in an array of
+    /// <paramref name="shelf"/>'s a power of two long, so that the parts of a query take the same
+    /// arrays again, and the next query those its shelf handed to the process's: given back once the
+    /// groups are built into their batches. Taken past the budget when it must: it is held only while
+    /// its part is built, and the part's keys and states hold several times its bytes.
+    /// </summary>
+    internal static int[] LentOrder(ArrayShelf shelf, int count)
+    {
+        if (count == 0)
+        {
+            return [];
+        }
+
+        int[] order = shelf.Take<int>(Scratch.Capacity(count, 0), zeroed: false, overdraw: true);
+        for (int g = 0; g < count; g++)
+        {
+            order[g] = g;
+        }
+
+        return order;
     }
 
     /// <summary>
@@ -3563,7 +3597,7 @@ internal static class AggregationEngine
     {
         memory.Keep(bytes + ((long)outcome.Order.Length * sizeof(int)));
         outcome.Memory = memory;
-        outcome.Plan.LastGroups = outcome.Order.Length;
+        outcome.Plan.LastGroups = outcome.Count;
         outcome.Plan.LastPeakBytes = memory.Peak;
         return outcome;
     }

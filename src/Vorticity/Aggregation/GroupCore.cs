@@ -1115,14 +1115,30 @@ internal sealed partial class GroupCore
     {
         (GroupKeys keys, AggregateSlot[] slots) = Joined(part);
         Held(keys.Count);
+        int count = keys.Count;
+        int[] order = AggregationEngine.LentOrder(_shelf, count);
+        bool built = false;
         try
         {
-            AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(keys.Order(sorted: false))) { Memory = _memory };
-            return await builder.BuildAsync(outcome, cancellationToken).ConfigureAwait(false);
+            AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(order, count), count) { Memory = _memory };
+            PartResult result = await builder.BuildAsync(outcome, cancellationToken).ConfigureAwait(false);
+            built = true;
+            return result;
         }
         finally
         {
-            Held(-keys.Count);
+            Held(-count);
+
+            // An order whose build failed may still be read by a ranking the build started: let go, not lent again.
+            if (built)
+            {
+                _shelf.Give(order);
+            }
+            else
+            {
+                _shelf.Drop(order);
+            }
+
             Let(part);
         }
     }
