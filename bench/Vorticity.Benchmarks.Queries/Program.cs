@@ -59,6 +59,12 @@ if (Text(args, "--micro") == "words")
     return WordMicro.Run(rounds);
 }
 
+// --micro floatsum: a grouped exact float sum alone, in memory (FloatSumMicro.cs).
+if (Text(args, "--micro") == "floatsum")
+{
+    return FloatSumMicro.Run(rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {
