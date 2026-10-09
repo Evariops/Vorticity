@@ -58,7 +58,12 @@ public sealed class QueryMemoryBudget
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(ceilingBytes);
     }
 
-    private QueryMemoryBudget(long ceilingBytes, QueryMemoryBudget? process)
+    /// <summary>
+    /// A budget under <paramref name="process"/> rather than the process's own, or the process's own when
+    /// null. Internal for the tests: a parent of a fixed ceiling holds two budgets under it as the
+    /// process does, without the process's ceiling, which moves with what the rest of the process holds.
+    /// </summary>
+    internal QueryMemoryBudget(long ceilingBytes, QueryMemoryBudget? process)
     {
         _ceiling = ceilingBytes;
         _process = process;

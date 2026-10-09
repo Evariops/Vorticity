@@ -21,18 +21,23 @@ public sealed partial class SharedBudgetTests
     public void TwoBudgetsWhoseCeilingsPassTheProcesssHoldUnderIt()
     {
         // Each budget's ceiling is the whole of what the process leaves its queries: together they pass
-        // it, and the process's own count refuses what would pass it, whichever budget asks.
-        long process = QueryMemoryBudget.Process.CeilingBytes;
-        QueryMemoryBudget first = new QueryMemoryBudget(process);
-        QueryMemoryBudget second = new QueryMemoryBudget(process);
+        // it, and the process's own count refuses what would pass it, whichever budget asks. A parent of
+        // a fixed ceiling stands for the process: the process's own moves with what the rest of it
+        // holds, and under the full suite, read while the heap held other tests' garbage, the collection
+        // the process's budget runs before it refuses gave back more than a quarter of it, and the
+        // second budget's reservation passed (2026-10-09).
+        long ceiling = 64L << 20;
+        QueryMemoryBudget process = new QueryMemoryBudget(ceiling);
+        QueryMemoryBudget first = new QueryMemoryBudget(ceiling, process);
+        QueryMemoryBudget second = new QueryMemoryBudget(ceiling, process);
         QueryMemory one = new QueryMemory(first);
         QueryMemory other = new QueryMemory(second);
         try
         {
-            Assert.True(one.TryGrow(process / 2));
-            Assert.False(other.TryGrow(process / 2 + (process / 4)));
+            Assert.True(one.TryGrow(ceiling / 2));
+            Assert.False(other.TryGrow(ceiling / 2 + (ceiling / 4)));
             Assert.Equal(0, second.ReservedBytes);
-            Assert.True(other.TryGrow(process / 4));
+            Assert.True(other.TryGrow(ceiling / 4));
         }
         finally
         {
@@ -42,6 +47,7 @@ public sealed partial class SharedBudgetTests
 
         Assert.Equal(0, first.ReservedBytes);
         Assert.Equal(0, second.ReservedBytes);
+        Assert.Equal(0, process.ReservedBytes);
     }
 
     [Fact]
