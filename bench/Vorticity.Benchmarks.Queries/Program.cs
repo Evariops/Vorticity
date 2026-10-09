@@ -53,6 +53,12 @@ if (Text(args, "--micro") == "keys")
     return KeyMicro.Run(rounds);
 }
 
+// --micro words: a short text key's groups found alone, in memory (WordMicro.cs).
+if (Text(args, "--micro") == "words")
+{
+    return WordMicro.Run(rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {
