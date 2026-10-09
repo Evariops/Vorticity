@@ -4,8 +4,11 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Encodings;
@@ -45,7 +48,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly PooledBytes _values;
     private readonly PooledBytes _levels;
     private readonly PooledBytes _compressed;
-    private readonly PooledBytes _chunk;
+    private readonly ChunkBytes _chunk;
     private readonly byte[] _validity;
     private readonly byte[] _levelBytes;
 
@@ -60,7 +63,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkUncompressed;
     private Bounds _chunkBounds;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, MemoryPool<byte> pool)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, AlignedBufferPool pool)
     {
         _column = column;
         _codec = codec;
@@ -70,7 +73,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _values = new PooledBytes(pool);
         _levels = new PooledBytes(pool);
         _compressed = new PooledBytes(pool);
-        _chunk = new PooledBytes(pool);
+        _chunk = new ChunkBytes(pool);
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _levelBytes = new byte[blockRows];
         _mask = new ulong[(blockRows + 63) >> 6];
@@ -82,8 +85,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The bytes of the pages closed so far, waiting for the row group to close.</summary>
     internal long BufferedBytes => _chunk.Length + _values.Length;
 
-    /// <summary>The closed chunk's bytes, from <see cref="Close"/> to <see cref="Reset"/>.</summary>
-    internal ReadOnlyMemory<byte> Bytes => _chunk.Written;
+    /// <summary>Hands the closed chunk's bytes to <paramref name="sink"/>, between <see cref="Close"/> and <see cref="Reset"/>.</summary>
+    internal ValueTask WriteChunkAsync(ISegmentSink sink, CancellationToken cancellationToken) =>
+        _chunk.WriteToAsync(sink, cancellationToken);
 
     /// <summary>Appends <paramref name="count"/> rows of <paramref name="node"/> from <paramref name="start"/>, closing pages as blocks fill.</summary>
     internal void Append(CanonicalArena arena, int node, int start, int count)
@@ -157,14 +161,14 @@ internal sealed class ColumnChunkWriter : IDisposable
             IsCompressed = compressed || _codec == CompressionCodec.Uncompressed,
         };
 
-        int pageStart = _chunk.Length;
+        long pageStart = _chunk.Length;
         ThriftCompactWriter writer = new(_chunk);
         header.Write(ref writer, default);
         writer.Flush();
-        int headerLength = _chunk.Length - pageStart;
+        int headerLength = (int)(_chunk.Length - pageStart);
         _chunk.Write(_levels.WrittenSpan);
         _chunk.Write(stored);
-        _pages.Add(new PageLocation(pageStart, _chunk.Length - pageStart, _chunkRows));
+        _pages.Add(new PageLocation(pageStart, (int)(_chunk.Length - pageStart), _chunkRows));
         _chunkUncompressed += headerLength + header.UncompressedPageSize;
         _chunkRows += rows;
         _chunkNulls += nulls;
@@ -178,8 +182,8 @@ internal sealed class ColumnChunkWriter : IDisposable
 
     /// <summary>
     /// The chunk's pages and what its metadata says of them, the chunk starting at
-    /// <paramref name="offset"/> in the file; the caller writes <see cref="Bytes"/> there and then
-    /// calls <see cref="Reset"/>.
+    /// <paramref name="offset"/> in the file; the caller writes it there with
+    /// <see cref="WriteChunkAsync"/> and then calls <see cref="Reset"/>.
     /// </summary>
     /// <param name="offset">Where the chunk goes in the file.</param>
     /// <param name="partial">

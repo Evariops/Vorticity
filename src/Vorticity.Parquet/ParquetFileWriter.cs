@@ -104,7 +104,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _columns = new ColumnChunkWriter[map.Columns.Length];
         for (int i = 0; i < _columns.Length; i++)
         {
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, session.Options.MemoryPool);
+            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, session.Options.EnginePool);
         }
 
         _nodes = new int[_columns.Length];
@@ -522,7 +522,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             ColumnChunkWriter column = _columns[c];
             ChunkResult chunk = column.Close(_sink.Position, partial);
             Debug.Assert(chunk.Rows == rows, "Every column closes the same rows.");
-            await _sink.WriteAsync(column.Bytes, cancellationToken).ConfigureAwait(false);
+            await column.WriteChunkAsync(_sink, cancellationToken).ConfigureAwait(false);
             column.Reset();
             chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = _codec };
         }
@@ -546,7 +546,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
     private async ValueTask WriteTailAsync(CancellationToken cancellationToken)
     {
-        using PooledBytes tail = new(_session.Options.MemoryPool);
+        using PooledBytes tail = new(_session.Options.EnginePool);
         WriteTail(tail, _sink.Position);
         await _sink.WriteAsync(tail.Written, cancellationToken).ConfigureAwait(false);
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);

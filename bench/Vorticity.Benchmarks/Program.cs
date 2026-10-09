@@ -475,6 +475,7 @@ internal static class Program
                 typeof(Program).Assembly,
                 typeof(VortexFile).Assembly,
                 typeof(Vorticity.RowEncoding.RowSortField).Assembly,
+                typeof(Vorticity.Parquet.ParquetFileWriter).Assembly,
             }
             .DistinctBy(a => a.GetName().Name, StringComparer.Ordinal)
             .Where(a => a.GetCustomAttribute<DebuggableAttribute>() is { IsJITOptimizerDisabled: true })
