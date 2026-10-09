@@ -1174,16 +1174,34 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
 
             int missed = 0;
-            for (int i = 0; i < values.Length; i++)
+            if (pages.Length == 1)
             {
-                ulong number = (ulong)(Integer(values[i]) - min);
-                bool inside = number < span;
-                ulong at = inside ? number : 0;
-                int page = (int)(at >> PageBits);
-                int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[page]), starts[page] + ((int)at & PageMask));
-                group = inside ? group : -1;
-                groups[i] = group;
-                missed |= group;
+                // A span of one page, a few thousand values: its numbers read from the page itself, taken once
+                // a chunk, where the page and its start read again at every row made a chain of three loads.
+                ref int numbers = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[0]), starts[0]);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    ulong number = (ulong)(Integer(values[i]) - min);
+                    bool inside = number < span;
+                    int group = Unsafe.Add(ref numbers, (nint)(inside ? number : 0));
+                    group = inside ? group : -1;
+                    groups[i] = group;
+                    missed |= group;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < values.Length; i++)
+                {
+                    ulong number = (ulong)(Integer(values[i]) - min);
+                    bool inside = number < span;
+                    ulong at = inside ? number : 0;
+                    int page = (int)(at >> PageBits);
+                    int group = Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(pages[page]), starts[page] + ((int)at & PageMask));
+                    group = inside ? group : -1;
+                    groups[i] = group;
+                    missed |= group;
+                }
             }
 
             // Every row found its group, none null: the usual chunk once the values are known.

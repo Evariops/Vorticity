@@ -23,6 +23,8 @@ internal static class KeyMicro
     internal static int Run(int rounds)
     {
         Console.WriteLine($"{"keys",-28} {"rows",11} {"groups",10} {"bounds ms",10} {"hashed ms",10} {"ratio",7}");
+        Measure("random 1e2", 20_000_000, row => (int)((Mix(Mix((ulong)row)) >> 32) % 100), rounds);
+        Measure("random 1e3", 20_000_000, row => (int)((Mix(Mix((ulong)row)) >> 32) % 1_000), rounds);
         Measure("random 1e6", 20_000_000, row => (int)((Mix(Mix((ulong)row)) >> 32) % 1_000_000), rounds);
         Measure("random 1e7", 20_000_000, row => (int)(Mix(Mix(Mix((ulong)row))) % 10_000_000), rounds);
         Measure("tenfold", 20_000_000, row => (int)((Mix(Mix(Mix((ulong)row))) >> 32) % 2_000_000), rounds);
