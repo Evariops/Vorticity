@@ -1,13 +1,13 @@
-// What writing a table costs as Parquet, under each codec, against writing it as Vortex.
+// What a table costs as Parquet, under each codec, against the same table as Vortex: written, then
+// read back by the same engine.
 //
 // A million rows of the four shapes a table mostly holds -- a key that climbs, a measure with a
-// seventh of its rows null, a label of a thousand values, a flag -- filled into the writer's builder
-// from arrays made once, and written to a pipe that counts the bytes and drops them, so that the
-// disk is not what is measured. Each format's rows cost the same to append; what differs is what
-// the writer does with them: Parquet stages PLAIN pages and compresses them, Vortex chooses an
-// encoding per chunk. The bytes each format wrote are printed at setup, beside the times.
+// seventh of its rows null, a label of a thousand values, a flag -- filled into a writer's builder
+// from arrays made once. The write goes to a pipe that counts the bytes and drops them, so that the
+// disk is not what is measured; the scans read a file written once at setup, opened by each call,
+// through the tool scan both formats share. The bytes each format wrote are printed at setup.
 using System;
-using System.Buffers;
+using System.IO;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,21 +23,7 @@ namespace Vorticity.Benchmarks;
 [BenchmarkCategory(BenchmarkConfig.Path)]
 public class ParquetWriteBenchmarks
 {
-    private const int Rows = 1 << 20;
-
-    private static readonly VortexSchema Schema =
-    [
-        ("id", VortexType.Int64),
-        ("value", VortexType.Float64.Nullable),
-        ("label", VortexType.Utf8),
-        ("flag", VortexType.Bool),
-    ];
-
-    private readonly long[] _ids = new long[Rows];
-    private readonly double[] _values = new double[Rows];
-    private readonly ulong[] _valid = new ulong[Rows / 64];
-    private readonly string[] _labels = new string[Rows];
-    private readonly bool[] _flags = new bool[Rows];
+    private readonly ParquetTable _table = new();
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
     [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd")]
@@ -46,75 +32,16 @@ public class ParquetWriteBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        Random random = new(42);
-        string[] distinct = new string[1_000];
-        for (int i = 0; i < distinct.Length; i++)
-        {
-            distinct[i] = $"label-{i:D4}";
-        }
-
-        for (int i = 0; i < Rows; i++)
-        {
-            _ids[i] = 1_000_000 + i * 3L;
-            _values[i] = Math.Round(random.NextDouble() * 1_000, 2);
-            if (i % 7 != 0)
-            {
-                _valid[i >> 6] |= 1UL << (i & 63);
-            }
-
-            _labels[i] = distinct[random.Next(distinct.Length)];
-            _flags[i] = random.Next(4) == 0;
-        }
-
-        long bytes = WriteAsync().AsTask().GetAwaiter().GetResult();
+        long bytes = Write().AsTask().GetAwaiter().GetResult();
         Console.WriteLine($"// {Format}: {bytes:N0} bytes");
     }
 
     [Benchmark(Description = "write 1M rows")]
-    public ValueTask<long> Write() => WriteAsync();
-
-    private async ValueTask<long> WriteAsync()
+    public async ValueTask<long> Write()
     {
         DiscardingPipe pipe = new();
-        if (Format == "vortex")
-        {
-            await using VortexFileWriter writer = VortexSession.Default.CreateWriter(pipe, Schema);
-            Fill(writer.Builder());
-            await writer.WriteAsync(writer.Builder(), CancellationToken.None);
-            await writer.CompleteAsync(CancellationToken.None);
-        }
-        else
-        {
-            ParquetCompression compression = Format switch
-            {
-                "parquet-none" => ParquetCompression.Uncompressed,
-                "parquet-snappy" => ParquetCompression.Snappy,
-                _ => ParquetCompression.Zstd,
-            };
-            await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(pipe, Schema, new ParquetWriteOptions { Compression = compression });
-            Fill(writer.Builder());
-            await writer.WriteAsync(writer.Builder(), CancellationToken.None);
-            await writer.CompleteAsync(CancellationToken.None);
-        }
-
+        await _table.WriteAsync(Format, pipe).ConfigureAwait(false);
         return pipe.Written;
-    }
-
-    private void Fill(ColumnsBuilder builder)
-    {
-        builder.Column<long>(0).Append(_ids);
-        builder.Column<double?>(1).Append(_values, _valid);
-        ColumnBuilder<string> labels = builder.Column<string>(2);
-        foreach (string label in _labels)
-        {
-            labels.Append(label);
-        }
-
-        ColumnBuilder<bool> flags = builder.Column<bool>(3);
-        foreach (bool flag in _flags)
-        {
-            flags.Append(flag);
-        }
     }
 
     /// <summary>A pipe that counts what it is given and keeps none of it.</summary>
@@ -146,6 +73,155 @@ public class ParquetWriteBenchmarks
 
         public override void Complete(Exception? exception = null)
         {
+        }
+    }
+}
+
+/// <summary>The same million rows read back from Parquet under each codec, and from Vortex.</summary>
+[Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Path)]
+public class ParquetScanBenchmarks
+{
+    private string _path = string.Empty;
+
+    /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd")]
+    public string Format { get; set; } = "vortex";
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        _path = Path.Combine(Path.GetTempPath(), $"vorticity-bench-{Format}-{Environment.ProcessId}.{(Format == "vortex" ? "vortex" : "parquet")}");
+        using (FileStream stream = new(_path, FileMode.Create))
+        {
+            PipeWriter pipe = PipeWriter.Create(stream);
+            new ParquetTable().WriteAsync(Format, pipe).AsTask().GetAwaiter().GetResult();
+        }
+
+        Console.WriteLine($"// {Format}: {new FileInfo(_path).Length:N0} bytes");
+    }
+
+    [GlobalCleanup]
+    public void Cleanup() => System.IO.File.Delete(_path);
+
+    [Benchmark(Description = "scan every column")]
+    public async Task<long> Scan()
+    {
+        long rows = 0;
+        if (Format == "vortex")
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+            await foreach (BatchView batch in file.Scan())
+            {
+                rows += batch.RowCount;
+            }
+        }
+        else
+        {
+            await using ParquetFile file = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+            await foreach (BatchView batch in file.Scan())
+            {
+                rows += batch.RowCount;
+            }
+        }
+
+        return rows;
+    }
+
+    [Benchmark(Description = "filter value > 900")]
+    public async Task<long> Filter()
+    {
+        if (Format == "vortex")
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+            return await file.Scan("id").Where($"value > {900.0}").CountAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await using ParquetFile parquet = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+        return await parquet.Scan("id").Where($"value > {900.0}").CountAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+}
+
+/// <summary>The rows both classes write: generated once, the same for every format.</summary>
+internal sealed class ParquetTable
+{
+    private const int Rows = 1 << 20;
+
+    private static readonly VortexSchema Schema =
+    [
+        ("id", VortexType.Int64),
+        ("value", VortexType.Float64.Nullable),
+        ("label", VortexType.Utf8),
+        ("flag", VortexType.Bool),
+    ];
+
+    private readonly long[] _ids = new long[Rows];
+    private readonly double[] _values = new double[Rows];
+    private readonly ulong[] _valid = new ulong[Rows / 64];
+    private readonly string[] _labels = new string[Rows];
+    private readonly bool[] _flags = new bool[Rows];
+
+    internal ParquetTable()
+    {
+        Random random = new(42);
+        string[] distinct = new string[1_000];
+        for (int i = 0; i < distinct.Length; i++)
+        {
+            distinct[i] = $"label-{i:D4}";
+        }
+
+        for (int i = 0; i < Rows; i++)
+        {
+            _ids[i] = 1_000_000 + i * 3L;
+            _values[i] = Math.Round(random.NextDouble() * 1_000, 2);
+            if (i % 7 != 0)
+            {
+                _valid[i >> 6] |= 1UL << (i & 63);
+            }
+
+            _labels[i] = distinct[random.Next(distinct.Length)];
+            _flags[i] = random.Next(4) == 0;
+        }
+    }
+
+    /// <summary>Writes the rows to <paramref name="pipe"/> as <paramref name="format"/>, completing the pipe.</summary>
+    internal async ValueTask WriteAsync(string format, PipeWriter pipe)
+    {
+        if (format == "vortex")
+        {
+            await using VortexFileWriter writer = VortexSession.Default.CreateWriter(pipe, Schema);
+            Fill(writer.Builder());
+            await writer.WriteAsync(writer.Builder(), CancellationToken.None).ConfigureAwait(false);
+            await writer.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
+            return;
+        }
+
+        ParquetCompression compression = format switch
+        {
+            "parquet-none" => ParquetCompression.Uncompressed,
+            "parquet-snappy" => ParquetCompression.Snappy,
+            _ => ParquetCompression.Zstd,
+        };
+        await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter(pipe, Schema, new ParquetWriteOptions { Compression = compression });
+        Fill(parquet.Builder());
+        await parquet.WriteAsync(parquet.Builder(), CancellationToken.None).ConfigureAwait(false);
+        await parquet.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    private void Fill(ColumnsBuilder builder)
+    {
+        builder.Column<long>(0).Append(_ids);
+        builder.Column<double?>(1).Append(_values, _valid);
+        ColumnBuilder<string> labels = builder.Column<string>(2);
+        foreach (string label in _labels)
+        {
+            labels.Append(label);
+        }
+
+        ColumnBuilder<bool> flags = builder.Column<bool>(3);
+        foreach (bool flag in _flags)
+        {
+            flags.Append(flag);
         }
     }
 }
