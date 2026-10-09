@@ -753,6 +753,25 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
+    internal override void ReserveAllNew(int groups)
+    {
+        _doublesUpTo = groups;
+        if (_keys.Length < groups / 2)
+        {
+            Array.Resize(ref _keys, groups / 2);
+        }
+
+        int slots = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(32, groups * 2));
+        if (_hashed.Length < slots)
+        {
+            Rehash(slots);
+        }
+    }
+
+    // The length the words' array doubles to at most, once a lane reserved the room of first rows all
+    // new (ReserveAllNew).
+    private int _doublesUpTo = int.MaxValue;
+
     internal override int CompareKeys(GroupKeys other, int a, int b, int component) =>
         _parts[component].CompareKeys(Id(_keys[a], component), Id(((PackedKeys<TKey>)other)._keys[b], component), 0);
 
@@ -875,7 +894,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         if (Count == _keys.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _keys, Doubled(Count));
+            ArrayShelf.Resize(_shelf, ref _keys, DoubledUpTo(Count, _doublesUpTo));
         }
 
         int added = Count++;
