@@ -209,7 +209,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         _plan.Clear();
         _dense = default;
+        _zeros = default;
         _denseBuffers = 0;
+        _batchPage = null;
         Entries = 0;
         ValueCount = 0;
         _chunk = default;
@@ -1401,6 +1403,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
         /// <summary>The entries batches have read.</summary>
         internal int EntriesRead;
 
+        /// <summary>A nested column's rows that start in the page past what batches have read.</summary>
+        internal int RowsUnread;
+
         /// <summary>A nested column's levels, a byte per entry: the repetition levels, then the definition levels.</summary>
         internal NativeSegmentOwner? Levels;
 
@@ -1442,6 +1447,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Nulls = 0;
             Entries = 0;
             EntriesRead = 0;
+            RowsUnread = 0;
         }
     }
 }

@@ -144,7 +144,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _rowValidity = column.Nullable && !column.Nested;
         if (column.Nested)
         {
-            _shredder = new Shredder();
+            _shredder = new Shredder(pool);
             _repetitionLevels = new PooledBytes(pool);
             _definitionLevels = new PooledBytes(pool);
         }
@@ -241,8 +241,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         {
             Span<byte> levels = _levelBytes.AsSpan(0, rows);
             BitPacking.Unpack8(_validity, 1, levels);
-            int size = RleHybridEncoder.Size(levels, 1);
-            RleHybridEncoder.Encode(levels, 1, _levels.Reserve(size));
+            _levels.Truncate(RleHybridEncoder.Encode(levels, 1, _levels.Reserve(RleHybridEncoder.MaxSize(rows, 1))));
         }
 
         Fit(_pageRows);
@@ -345,9 +344,11 @@ internal sealed class ColumnChunkWriter : IDisposable
             return 0;
         }
 
+        // Encoded once into room for the most it can take, and cut to what it took.
         int width = 32 - BitOperations.LeadingZeroCount((uint)max);
-        int size = RleHybridEncoder.Size(levels, width);
-        RleHybridEncoder.Encode(levels, width, _levels.Reserve(size));
+        int before = _levels.Length;
+        int size = RleHybridEncoder.Encode(levels, width, _levels.Reserve(RleHybridEncoder.MaxSize(levels.Length, width)));
+        _levels.Truncate(before + size);
         return size;
     }
 
@@ -389,7 +390,7 @@ internal sealed class ColumnChunkWriter : IDisposable
                 _definitionLevels!.Write(shredder.Definition);
             }
 
-            _pageEntries = checked(_pageEntries + shredder.Entries);
+            _pageEntries = checked(_pageEntries + shredder.Count);
             int values = shredder.Values;
             if (values > 0)
             {
@@ -524,6 +525,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _encoded.Dispose();
         _data.Dispose();
         _repetitionLevels?.Dispose();
+        _shredder?.Dispose();
         _definitionLevels?.Dispose();
         _table?.Reset();
     }

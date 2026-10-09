@@ -137,17 +137,13 @@ internal sealed class NestedFieldReader
         ParquetField field = part.Field;
         ReadOnlySpan<byte> rep = levels.Repetition;
         ReadOnlySpan<byte> def = levels.Definition;
-
-        // A context that passes every entry: the column repeats no deeper than it, and nothing above
-        // the field may be null or empty.
-        bool every = repetition >= levels.Column.MaxRepetitionLevel && definition == 0;
         int bitmapBytes = CanonicalSupport.BitmapByteCount(length);
         switch (field.Shape)
         {
             case FieldShape.Leaf:
             {
                 VortexBuffer present = Bitmap(context, bitmapBytes, out Span<byte> bits);
-                int valid = Mark(rep, def, repetition, definition, field.DefinedAt, bits, length, every, levels);
+                int valid = Mark(rep, def, repetition, definition, field.DefinedAt, bits, length, levels);
                 RequireValid(field, valid, length);
                 return part.Reader!.LeafNode(context, length, present, valid);
             }
@@ -158,7 +154,7 @@ internal sealed class NestedFieldReader
                 if (part.Type.IsNullable || field.RefusesNull)
                 {
                     VortexBuffer present = Bitmap(context, bitmapBytes, out Span<byte> bits);
-                    int valid = Mark(rep, def, repetition, definition, field.DefinedAt, bits, length, every, levels);
+                    int valid = Mark(rep, def, repetition, definition, field.DefinedAt, bits, length, levels);
                     RequireValid(field, valid, length);
                     validity = Of(arena, part.Type, present, valid, length);
                 }
@@ -175,8 +171,8 @@ internal sealed class NestedFieldReader
             default:
             {
                 int offsetBytes = checked(length * sizeof(int));
-                VortexBuffer offsets = CanonicalSupport.Allocate(context.Decode, Math.Max(offsetBytes, 1), 64, out Span<byte> offsetSpan).Slice(0, offsetBytes);
-                VortexBuffer sizes = CanonicalSupport.Allocate(context.Decode, Math.Max(offsetBytes, 1), 64, out Span<byte> sizeSpan).Slice(0, offsetBytes);
+                VortexBuffer offsets = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(offsetBytes, 1), 64, out Span<byte> offsetSpan).Slice(0, offsetBytes);
+                VortexBuffer sizes = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(offsetBytes, 1), 64, out Span<byte> sizeSpan).Slice(0, offsetBytes);
                 VortexBuffer present = default;
                 Span<byte> bits = default;
                 if (part.Type.IsNullable)
@@ -185,7 +181,7 @@ internal sealed class NestedFieldReader
                 }
 
                 int total = Lists(
-                    rep, def, repetition, definition, field, bits,
+                    context, rep, def, repetition, definition, field, bits,
                     MemoryMarshal.Cast<byte, int>(offsetSpan[..offsetBytes]),
                     MemoryMarshal.Cast<byte, int>(sizeSpan[..offsetBytes]),
                     length, out int valid, levels);
@@ -208,10 +204,10 @@ internal sealed class NestedFieldReader
         }
     }
 
-    /// <summary>A zeroed bitmap of the arena's.</summary>
+    /// <summary>A bitmap of the arena's, every byte of which the kernel that marks it writes.</summary>
     private static VortexBuffer Bitmap(ScanContext context, int bytes, out Span<byte> bits)
     {
-        VortexBuffer buffer = CanonicalSupport.Allocate(context.Decode, Math.Max(bytes, 1), 64, out bits).Slice(0, bytes);
+        VortexBuffer buffer = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(bytes, 1), 64, out bits).Slice(0, bytes);
         bits = bits[..bytes];
         return buffer;
     }
@@ -235,115 +231,40 @@ internal sealed class NestedFieldReader
     /// exactly <paramref name="length"/> slots.
     /// </summary>
     private static int Mark(
-        ReadOnlySpan<byte> rep, ReadOnlySpan<byte> def, int repetition, int definition, int definedAt, Span<byte> present, int length, bool every, ColumnChunkReader levels)
+        ReadOnlySpan<byte> rep, ReadOnlySpan<byte> def, int repetition, int definition, int definedAt, Span<byte> present, int length, ColumnChunkReader levels)
     {
-        if (every)
+        int slots = LevelKernels.Slots(rep, def, repetition, definition, definedAt, present, length, out int valid);
+        if (slots != length)
         {
-            if (def.Length != length)
-            {
-                Disagree(levels, def.Length, length);
-            }
-
-            return LevelKernels.AtLeast(def, definedAt, present);
-        }
-
-        int slot = 0;
-        int valid = 0;
-        for (int e = 0; e < def.Length; e++)
-        {
-            int d = def[e];
-            if (rep[e] > repetition || d < definition)
-            {
-                continue;
-            }
-
-            if (slot == length)
-            {
-                Disagree(levels, slot + 1, length);
-            }
-
-            if (d >= definedAt)
-            {
-                present[slot >> 3] |= (byte)(1 << (slot & 7));
-                valid++;
-            }
-
-            slot++;
-        }
-
-        if (slot != length)
-        {
-            Disagree(levels, slot, length);
+            Disagree(levels, slots, length);
         }
 
         return valid;
     }
 
     /// <summary>
-    /// Walks a list's or a map's slots: each one's validity into <paramref name="present"/> when it
-    /// is not empty, and its offset and its count of elements; the elements of every slot.
+    /// A list's or a map's slots: each one's validity into <paramref name="present"/> when it is
+    /// given, and its offset and its count of elements; the elements of every slot.
     /// </summary>
     private static int Lists(
-        ReadOnlySpan<byte> rep, ReadOnlySpan<byte> def, int repetition, int definition, ParquetField field,
+        ScanContext context, ReadOnlySpan<byte> rep, ReadOnlySpan<byte> def, int repetition, int definition, ParquetField field,
         Span<byte> present, Span<int> offsets, Span<int> sizes, int length, out int valid, ColumnChunkReader levels)
     {
-        int definedAt = field.DefinedAt;
-        int repeatedAt = field.RepeatedAt;
-        int elementsAt = field.ElementsAt;
-        bool mark = !present.IsEmpty;
-        int slot = -1;
-        bool open = false;
-        int total = 0;
-        valid = 0;
-        for (int e = 0; e < def.Length; e++)
+        // The kernel's scratch, two ints per entry, is the batch's: it goes when the batch does.
+        int bytes = checked(2 * def.Length * sizeof(int));
+        context.Canonical.AllocateUninitialized(Math.Max(bytes, 1), 64, out Span<byte> scratch);
+        int slots = LevelKernels.Lists(
+            rep, def, repetition, definition, field.DefinedAt, field.RepeatedAt, field.ElementsAt, present, offsets, sizes,
+            MemoryMarshal.Cast<byte, int>(scratch[..bytes]),
+            out valid, out int total, out bool stray);
+        if (slots != length)
         {
-            int r = rep[e];
-            int d = def[e];
-            if (r <= repetition)
-            {
-                // A value of the holder starts: a slot of the list's, unless the holder is null or empty.
-                open = d >= definition;
-                if (!open)
-                {
-                    continue;
-                }
-
-                if (++slot == length)
-                {
-                    Disagree(levels, slot + 1, length);
-                }
-
-                if (d >= definedAt)
-                {
-                    if (mark)
-                    {
-                        present[slot >> 3] |= (byte)(1 << (slot & 7));
-                    }
-
-                    valid++;
-                }
-
-                int size = d >= elementsAt ? 1 : 0;
-                offsets[slot] = total;
-                sizes[slot] = size;
-                total += size;
-            }
-            else if (r == repeatedAt)
-            {
-                // Another element of the slot's list, which must hold one already.
-                if (!open || d < elementsAt)
-                {
-                    ParquetThrow.Format($"An entry of '{levels.Column.DottedPath}' repeats a list that holds no element.");
-                }
-
-                sizes[slot]++;
-                total++;
-            }
+            Disagree(levels, slots, length);
         }
 
-        if (slot + 1 != length)
+        if (stray)
         {
-            Disagree(levels, slot + 1, length);
+            ParquetThrow.Format($"An entry of '{levels.Column.DottedPath}' repeats a list that holds no element.");
         }
 
         return total;

@@ -58,11 +58,24 @@ internal sealed partial class ColumnChunkReader
     /// <summary>The values of the batch read last: its entries whose definition level is the column's maximum.</summary>
     internal int ValueCount { get; private set; }
 
+    /// <summary>Zeros, a batch's of the arena: the levels of a column that does not repeat, or that is required at every level.</summary>
+    private VortexBuffer _zeros;
+
+    /// <summary>The page whose levels the batch read last are, from <see cref="_batchFrom"/>, when it took one page's entries; else null, and they are in <see cref="_levels"/>.</summary>
+    private Page? _batchPage;
+    private int _batchFrom;
+
     /// <summary>The repetition level of each entry of the batch read last.</summary>
-    internal ReadOnlySpan<byte> Repetition => _levels is null ? default : _levels.WritableSpan[..Entries];
+    internal ReadOnlySpan<byte> Repetition =>
+        _leaf.MaxRepetitionLevel == 0 ? _zeros.Span
+        : _batchPage is { } page ? page.Repetition(true).Slice(_batchFrom, Entries)
+        : _levels!.WritableSpan[..Entries];
 
     /// <summary>The definition level of each entry of the batch read last.</summary>
-    internal ReadOnlySpan<byte> Definition => _levels is null ? default : _levels.WritableSpan.Slice(Entries, Entries);
+    internal ReadOnlySpan<byte> Definition =>
+        _leaf.MaxDefinitionLevel == 0 ? _zeros.Span
+        : _batchPage is { } page ? page.Definition(true).Slice(_batchFrom, Entries)
+        : _levels!.WritableSpan.Slice(Entries, Entries);
 
     /// <summary>Reads the entries of the next <paramref name="rows"/> rows: their levels and their values.</summary>
     internal void ReadNested(ScanContext context, int rows)
@@ -85,29 +98,23 @@ internal sealed partial class ColumnChunkReader
         while (page is not null)
         {
             int from = page.EntriesRead;
-            int cut = from;
+            int cut;
             if (repeats)
             {
-                // A row starts at each entry of repetition level zero; the one past the batch's last
-                // row ends the batch.
-                ReadOnlySpan<byte> repetition = page.Repetition(true);
-                while (cut < page.Entries)
+                // A row starts at each entry of repetition level zero, and the one past the batch's
+                // last row ends the batch: a page whose rows the batch takes whole is not searched.
+                int need = rows - started;
+                if (need >= page.RowsUnread)
                 {
-                    int next = repetition[cut..].IndexOf((byte)0);
-                    if (next < 0)
-                    {
-                        cut = page.Entries;
-                        break;
-                    }
-
-                    cut += next;
-                    if (started == rows)
-                    {
-                        break;
-                    }
-
-                    started++;
-                    cut++;
+                    cut = page.Entries;
+                    started += page.RowsUnread;
+                    page.RowsUnread = 0;
+                }
+                else
+                {
+                    cut = from + LevelKernels.NthZero(page.Repetition(true)[from..page.Entries], need);
+                    started = rows;
+                    page.RowsUnread -= need;
                 }
             }
             else
@@ -116,12 +123,16 @@ internal sealed partial class ColumnChunkReader
                 started += cut - from;
             }
 
-            int taken = _form == LeafForm.Null ? 0
-                : optional ? page.Definition(true)[from..cut].Count(defined)
-                : cut - from;
-            _plan.Add(new Segment(page, from, cut, taken));
-            entries += cut - from;
-            values += taken;
+            if (cut > from)
+            {
+                int taken = _form == LeafForm.Null ? 0
+                    : optional ? page.Definition(true)[from..cut].Count(defined)
+                    : cut - from;
+                _plan.Add(new Segment(page, from, cut, taken));
+                entries += cut - from;
+                values += taken;
+            }
+
             if (cut < page.Entries)
             {
                 break;
@@ -204,18 +215,33 @@ internal sealed partial class ColumnChunkReader
     }
 
     /// <summary>
-    /// Copies the planned entries' levels into the block the assembler walks, and their values into
-    /// the arena, or takes them where they lie when they are one page's every value.
+    /// The planned entries' levels and values: a page's own when the batch takes its entries from one
+    /// page, its values too when they are all the page's; else copied, the levels into the block the
+    /// assembler walks, the values into the arena.
     /// </summary>
     private void Gather(ScanContext context, int entries, int values, bool repeats, bool optional)
     {
-        Span<byte> levels = LevelScratch(2 * entries);
-        Span<byte> repetition = levels[..entries];
-        Span<byte> definition = levels.Slice(entries, entries);
+        // A column that does not repeat starts a row at every entry, and one that is required
+        // everywhere reaches its maximum, zero, at every entry: the levels it has not are zeros.
+        if (!repeats || !optional)
+        {
+            _zeros = CanonicalSupport.Allocate(context.Decode, Math.Max(entries, 1), 64, out _).Slice(0, entries);
+        }
+
+        Entries = entries;
+        ValueCount = values;
+        _denseBuffers = 0;
+        _batchPage = null;
+        if (_plan.Count == 0)
+        {
+            _dense = default;
+            return;
+        }
+
         Segment first = _plan[0];
-        bool whole = _plan.Count == 1 && first.Page.Read == 0 && first.Values == first.Page.Rows;
+        bool single = _plan.Count == 1;
+        bool whole = single && first.Page.Read == 0 && first.Values == first.Page.Rows;
         Span<byte> into = default;
-        int buffers = 0;
         if (_form == LeafForm.Null)
         {
             _dense = default;
@@ -226,27 +252,43 @@ internal sealed partial class ColumnChunkReader
             if (_views)
             {
                 _gathered[0] = first.Page.Data;
-                buffers = 1;
+                _denseBuffers = 1;
             }
         }
         else
         {
+            // Every byte is copied over: bits, values, and views rebased.
             int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(values) : checked(values * _slot);
-            _dense = CanonicalSupport.Allocate(context.Decode, Math.Max(bytes, 1), 64, out into).Slice(0, bytes);
+            _dense = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(bytes, 1), 64, out into).Slice(0, bytes);
+        }
+
+        Span<byte> repetition = default;
+        Span<byte> definition = default;
+        if (single)
+        {
+            _batchPage = first.Page;
+            _batchFrom = first.From;
+        }
+        else
+        {
+            Span<byte> levels = LevelScratch(2 * entries);
+            repetition = levels[..entries];
+            definition = levels.Slice(entries, entries);
         }
 
         int at = 0;
         int done = 0;
+        int buffers = _denseBuffers;
         foreach (Segment segment in _plan)
         {
             Page page = segment.Page;
             int length = segment.To - segment.From;
-            if (repeats)
+            if (!single && repeats)
             {
                 page.Repetition(true).Slice(segment.From, length).CopyTo(repetition[at..]);
             }
 
-            if (optional)
+            if (!single && optional)
             {
                 page.Definition(true).Slice(segment.From, length).CopyTo(definition[at..]);
             }
@@ -262,21 +304,7 @@ internal sealed partial class ColumnChunkReader
             done += segment.Values;
         }
 
-        // A column that does not repeat starts a row at every entry, and one that is required
-        // everywhere reaches its maximum, zero, at every entry.
-        if (!repeats)
-        {
-            repetition.Clear();
-        }
-
-        if (!optional)
-        {
-            definition.Clear();
-        }
-
         _plan.Clear();
-        Entries = entries;
-        ValueCount = values;
         _denseBuffers = buffers;
     }
 
@@ -417,6 +445,7 @@ internal sealed partial class ColumnChunkReader
         _rowsUnread -= rows;
         _pastFirstPage = true;
         page.Rows = _form == LeafForm.Null ? 0 : valid;
+        page.RowsUnread = rows;
         return valid;
     }
 

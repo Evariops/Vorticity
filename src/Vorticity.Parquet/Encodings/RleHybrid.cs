@@ -1,6 +1,9 @@
 using System;
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Serialization;
 
@@ -307,9 +310,21 @@ internal static class RleHybridEncoder
     internal static int Size(ReadOnlySpan<byte> values, int bitWidth)
     {
         Sizer sizer = new(bitWidth);
-        Plan(values, bitWidth, ref sizer);
+        PlanBytes(values, bitWidth, ref sizer);
         return sizer.Bytes;
     }
+
+    /// <summary>
+    /// The most bytes <c>Encode</c> writes for <paramref name="count"/> values of
+    /// <paramref name="bitWidth"/>, what a caller reserves to encode once rather than price first.
+    /// </summary>
+    /// <remarks>
+    /// The packed runs hold at most one group more than the values fill, since only the last one is
+    /// padded; a repeated run, of at least eight values, costs at most a header and four bytes; and
+    /// a packed run's header follows each of them, and the first.
+    /// </remarks>
+    internal static int MaxSize(int count, int bitWidth) =>
+        checked((((count >> 3) + 1) * (bitWidth + Varint.MaxLength32 + Varint.MaxLength32 + sizeof(uint))) + Varint.MaxLength32);
 
     /// <summary>Encodes <paramref name="values"/>, each below 2^<paramref name="bitWidth"/>, returning the bytes written.</summary>
     internal static int Encode(ReadOnlySpan<uint> values, int bitWidth, Span<byte> destination)
@@ -323,7 +338,7 @@ internal static class RleHybridEncoder
     internal static int Encode(ReadOnlySpan<byte> values, int bitWidth, Span<byte> destination)
     {
         Writer<byte> writer = new(values, bitWidth, destination);
-        Plan(values, bitWidth, ref writer);
+        PlanBytes(values, bitWidth, ref writer);
         return writer.Written;
     }
 
@@ -384,6 +399,91 @@ internal static class RleHybridEncoder
         {
             sink.Packed(pending, count - pending, last: true);
         }
+    }
+
+    /// <summary>
+    /// The plan of byte-wide values, levels, as <see cref="Plan"/> makes it, its runs found where
+    /// neighbours differ, thirty-two pairs compared at a time. A run that is to repeat is at least
+    /// <see cref="MinimumRun"/> long; when that is past 32, only the run that ends at a block's first
+    /// change and the one that starts at its last can be, and the changes between are not visited.
+    /// </summary>
+    private static void PlanBytes<TSink>(ReadOnlySpan<byte> values, int bitWidth, ref TSink sink)
+        where TSink : struct, IRunSink, allows ref struct
+    {
+        int minimum = MinimumRun(bitWidth);
+        int count = values.Length;
+        int pending = 0;
+        int start = 0;
+        int i = 1;
+        ref byte input = ref MemoryMarshal.GetReference(values);
+        if (Vector256.IsHardwareAccelerated)
+        {
+            bool longRuns = minimum > Vector256<byte>.Count;
+            for (; i <= count - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            {
+                // Bit k: the value at i + k differs from the one before it.
+                uint changes = ~Vector256.Equals(Vector256.LoadUnsafe(ref input, (nuint)i), Vector256.LoadUnsafe(ref input, (nuint)(i - 1))).ExtractMostSignificantBits();
+                if (changes == 0)
+                {
+                    continue;
+                }
+
+                if (longRuns)
+                {
+                    Close(values, start, i + BitOperations.TrailingZeroCount(changes), minimum, ref pending, ref sink);
+                    start = i + 31 - BitOperations.LeadingZeroCount(changes);
+                    continue;
+                }
+
+                for (; changes != 0; changes &= changes - 1)
+                {
+                    int end = i + BitOperations.TrailingZeroCount(changes);
+                    Close(values, start, end, minimum, ref pending, ref sink);
+                    start = end;
+                }
+            }
+        }
+
+        for (; i < count; i++)
+        {
+            if (values[i] != values[i - 1])
+            {
+                Close(values, start, i, minimum, ref pending, ref sink);
+                start = i;
+            }
+        }
+
+        Close(values, start, count, minimum, ref pending, ref sink);
+        if (pending < count)
+        {
+            sink.Packed(pending, count - pending, last: true);
+        }
+    }
+
+    /// <summary>The run of equal values from <paramref name="start"/> to <paramref name="end"/>: repeated where it pays, the values before it packed.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Close<TSink>(ReadOnlySpan<byte> values, int start, int end, int minimum, ref int pending, ref TSink sink)
+        where TSink : struct, IRunSink, allows ref struct
+    {
+        int length = end - start;
+        if (length < minimum)
+        {
+            return;
+        }
+
+        int borrow = (8 - ((start - pending) & 7)) & 7;
+        if (length - borrow < minimum)
+        {
+            return;
+        }
+
+        if (start + borrow > pending)
+        {
+            sink.Packed(pending, start + borrow - pending, last: false);
+        }
+
+        sink.Repeated(values[start], length - borrow);
+        pending = end;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

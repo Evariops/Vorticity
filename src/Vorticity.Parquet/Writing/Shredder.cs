@@ -1,6 +1,10 @@
 using System;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Parquet.Writing;
@@ -22,21 +26,18 @@ namespace Vorticity.Parquet.Writing;
 /// <para>
 /// The values are the leaf's rows of the entries that reach it, in entry order: a range of the leaf
 /// when its lists lie back to back, as a list's elements mostly do, which the column writer then
-/// stages without gathering them.
+/// stages without gathering them. The entries live in blocks of the engine's pool, kept from one
+/// block of rows to the next and given back when the writer is.
 /// </para>
 /// </remarks>
-internal sealed class Shredder
+internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
 {
-    private byte[] _repetition = new byte[1024];
-    private byte[] _definition = new byte[1024];
-    private int[] _rows = new int[1024];
-    private byte[] _nextRepetition = new byte[1024];
-    private byte[] _nextDefinition = new byte[1024];
-    private int[] _nextRows = new int[1024];
-    private int[] _valueRows = new int[1024];
+    private Entries _current = new(pool);
+    private Entries _next = new(pool);
+    private NativeSegmentOwner? _valueBlock;
 
     /// <summary>The entries of the rows shredded last.</summary>
-    internal int Entries { get; private set; }
+    internal int Count { get; private set; }
 
     /// <summary>The entries among them that hold a value.</summary>
     internal int Values { get; private set; }
@@ -47,25 +48,26 @@ internal sealed class Shredder
     /// <summary>Whether the values' rows are a range of the leaf, from <see cref="ValueRows"/>' first.</summary>
     internal bool Contiguous { get; private set; }
 
-    internal ReadOnlySpan<byte> Repetition => _repetition.AsSpan(0, Entries);
+    internal ReadOnlySpan<byte> Repetition => _current.Repetition[..Count];
 
-    internal ReadOnlySpan<byte> Definition => _definition.AsSpan(0, Entries);
+    internal ReadOnlySpan<byte> Definition => _current.Definition[..Count];
 
-    /// <summary>The leaf's row of each value, in entry order.</summary>
-    internal ReadOnlySpan<int> ValueRows => _valueRows.AsSpan(0, Values);
+    /// <summary>The leaf's row of each value, in entry order; only the first, when they are a range.</summary>
+    internal ReadOnlySpan<int> ValueRows => MemoryMarshal.Cast<byte, int>(_valueBlock!.WritableSpan)[..(Contiguous ? Math.Min(Values, 1) : Values)];
 
     /// <summary>Shreds <paramref name="count"/> rows of <paramref name="node"/>, the column's top-level field, from <paramref name="start"/>.</summary>
     internal void Shred(CanonicalArena arena, int node, int start, int count, WriteColumn column)
     {
-        Grow(ref _repetition, ref _definition, ref _rows, count);
+        _current.Ensure(count);
+        Span<int> rows = _current.Rows;
         for (int i = 0; i < count; i++)
         {
-            _rows[i] = start + i;
+            rows[i] = start + i;
         }
 
-        _repetition.AsSpan(0, count).Clear();
-        _definition.AsSpan(0, count).Clear();
-        Entries = count;
+        _current.Repetition[..count].Clear();
+        _current.Definition[..count].Clear();
+        Count = count;
         int current = node;
         foreach (ShredStep step in column.Steps)
         {
@@ -94,14 +96,22 @@ internal sealed class Shredder
         Collect();
     }
 
+    public void Dispose()
+    {
+        _current.Dispose();
+        _next.Dispose();
+        _valueBlock?.Dispose();
+        _valueBlock = null;
+    }
+
     /// <summary>
     /// The field at <paramref name="node"/>, for every entry that reaches it: where it is null the
     /// entry stops, else it reaches <paramref name="definedAt"/>.
     /// </summary>
     private void Define(CanonicalArena arena, CanonicalNode node, bool nullable, int definedAt, WriteColumn column)
     {
-        Span<int> rows = _rows.AsSpan(0, Entries);
-        Span<byte> definition = _definition.AsSpan(0, Entries);
+        Span<int> rows = _current.Rows[..Count];
+        Span<byte> definition = _current.Definition[..Count];
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         if (mask.AllValid)
         {
@@ -147,30 +157,61 @@ internal sealed class Shredder
 
     /// <summary>
     /// Replaces every entry at a list's row with an entry per element, or stops it where the list is
-    /// empty; the list's elements' node.
+    /// empty; the list's elements' node. The offsets and sizes are read at their own width, the
+    /// common widths specialized so that no read dispatches on it.
     /// </summary>
     private int Expand(CanonicalArena arena, CanonicalNode list, ShredStep step)
     {
-        bool fixedSize = list.Kind == CanonicalKind.FixedSizeList;
-        if (!fixedSize && list.Kind != CanonicalKind.ListView)
+        int elements;
+        if (list.Kind == CanonicalKind.FixedSizeList)
+        {
+            elements = EncodedForms.Canonical(arena, list.ElementsIndex);
+            Expand(new FixedShape((int)list.FixedSize), arena.GetNode(elements).Length, step);
+            return elements;
+        }
+
+        if (list.Kind != CanonicalKind.ListView)
         {
             ArraysThrow.Kind(list.Kind, "ListView or FixedSizeList");
         }
 
-        int elements = EncodedForms.Canonical(arena, list.ElementsIndex);
-        long elementCount = arena.GetNode(elements).Length;
-        int size = fixedSize ? (int)list.FixedSize : 0;
-        ReadOnlySpan<byte> offsets = fixedSize ? default : list.Offsets.Span;
-        ReadOnlySpan<byte> sizes = fixedSize ? default : list.Sizes.Span;
-        PType offsetType = fixedSize ? default : list.OffsetPType;
-        PType sizeType = fixedSize ? default : list.SizePType;
+        elements = EncodedForms.Canonical(arena, list.ElementsIndex);
+        long count = arena.GetNode(elements).Length;
+        ReadOnlySpan<byte> offsets = list.Offsets.Span;
+        ReadOnlySpan<byte> sizes = list.Sizes.Span;
+        switch ((list.OffsetPType, list.SizePType))
+        {
+            case (PType.I32, PType.I32):
+                Expand(new ViewShape<int>(offsets, sizes), count, step);
+                break;
+            case (PType.I64, PType.I64):
+                Expand(new ViewShape<long>(offsets, sizes), count, step);
+                break;
+            case (PType.U32, PType.U32):
+                Expand(new ViewShape<uint>(offsets, sizes), count, step);
+                break;
+            case (PType.U64, PType.U64):
+                Expand(new ViewShape<ulong>(offsets, sizes), count, step);
+                break;
+            default:
+                Expand(new AnyShape(offsets, list.OffsetPType, sizes, list.SizePType), count, step);
+                break;
+        }
+
+        return elements;
+    }
+
+    private void Expand<TShape>(TShape shape, long elementCount, ShredStep step)
+        where TShape : IListShape, allows ref struct
+    {
+        Span<int> rows = _current.Rows[..Count];
 
         // A first pass counts the entries the lists make, so that the second writes them in place.
         long total = 0;
-        for (int i = 0; i < Entries; i++)
+        for (int i = 0; i < rows.Length; i++)
         {
-            int row = _rows[i];
-            long length = row < 0 ? 0 : fixedSize ? size : CanonicalSupport.ReadInteger(sizes, sizeType, row);
+            int row = rows[i];
+            long length = row < 0 ? 0 : shape.Length(row);
             total += length > 0 ? length : 1;
         }
 
@@ -179,19 +220,26 @@ internal sealed class Shredder
             ArraysThrow.Format($"Lists of {total} elements do not fit a batch's entries.");
         }
 
-        Grow(ref _nextRepetition, ref _nextDefinition, ref _nextRows, (int)total);
+        // The first pass sized the next entries exactly: the second writes them without a check per
+        // element, each list's bounds checked once against its elements' node.
+        _next.Ensure((int)total);
+        ReadOnlySpan<byte> repetition = _current.Repetition;
+        ReadOnlySpan<byte> definition = _current.Definition;
+        ref byte nextRepetition = ref MemoryMarshal.GetReference(_next.Repetition);
+        ref byte nextDefinition = ref MemoryMarshal.GetReference(_next.Definition);
+        ref int nextRows = ref MemoryMarshal.GetReference(_next.Rows);
         byte repeatedAt = (byte)step.RepeatedAt;
         byte elementsAt = (byte)step.ElementsAt;
-        int at = 0;
-        for (int i = 0; i < Entries; i++)
+        nint at = 0;
+        for (int i = 0; i < rows.Length; i++)
         {
-            int row = _rows[i];
+            int row = rows[i];
             long length = 0;
             long first = 0;
             if (row >= 0)
             {
-                length = fixedSize ? size : CanonicalSupport.ReadInteger(sizes, sizeType, row);
-                first = fixedSize ? (long)row * size : CanonicalSupport.ReadInteger(offsets, offsetType, row);
+                length = shape.Length(row);
+                first = shape.First(row);
                 if (length < 0 || first < 0 || first + length > elementCount)
                 {
                     ArraysThrow.Format($"A list's elements at {first}, {length} of them, lie outside its {elementCount}.");
@@ -200,64 +248,159 @@ internal sealed class Shredder
 
             if (length == 0)
             {
-                _nextRepetition[at] = _repetition[i];
-                _nextDefinition[at] = _definition[i];
-                _nextRows[at++] = -1;
+                Unsafe.Add(ref nextRepetition, at) = repetition[i];
+                Unsafe.Add(ref nextDefinition, at) = definition[i];
+                Unsafe.Add(ref nextRows, at) = -1;
+                at++;
                 continue;
             }
 
-            _nextRepetition[at] = _repetition[i];
-            _nextDefinition[at] = elementsAt;
-            _nextRows[at++] = (int)first;
-            for (int k = 1; k < length; k++)
+            Unsafe.Add(ref nextRepetition, at) = repetition[i];
+            Unsafe.Add(ref nextDefinition, at) = elementsAt;
+            int elementRow = (int)first;
+            Unsafe.Add(ref nextRows, at) = elementRow;
+            for (nint k = 1; k < (nint)length; k++)
             {
-                _nextRepetition[at] = repeatedAt;
-                _nextDefinition[at] = elementsAt;
-                _nextRows[at++] = (int)(first + k);
+                Unsafe.Add(ref nextRepetition, at + k) = repeatedAt;
+                Unsafe.Add(ref nextDefinition, at + k) = elementsAt;
+                Unsafe.Add(ref nextRows, at + k) = elementRow + (int)k;
             }
+
+            at += (nint)length;
         }
 
-        (_repetition, _nextRepetition) = (_nextRepetition, _repetition);
-        (_definition, _nextDefinition) = (_nextDefinition, _definition);
-        (_rows, _nextRows) = (_nextRows, _rows);
-        Entries = at;
-        return elements;
+        (_current, _next) = (_next, _current);
+        Count = (int)at;
     }
 
-    /// <summary>The leaf's rows of the entries that reach it, and whether they are a range.</summary>
+    /// <summary>
+    /// The leaf's rows of the entries that reach it, and whether they are a range: a first pass
+    /// finds out, and only rows that are not a range are written out, which a range needs but its first.
+    /// </summary>
     private void Collect()
     {
-        if (_valueRows.Length < Entries)
-        {
-            _valueRows = new int[Math.Max(Entries, _valueRows.Length * 2)];
-        }
-
-        int values = 0;
+        ReadOnlySpan<int> rows = _current.Rows[..Count];
+        int found = 0;
+        int first = -1;
+        int next = 0;
         bool contiguous = true;
-        for (int i = 0; i < Entries; i++)
+        for (int i = 0; i < rows.Length; i++)
         {
-            int row = _rows[i];
+            int row = rows[i];
             if (row >= 0)
             {
-                contiguous &= values == 0 || row == _valueRows[values - 1] + 1;
-                _valueRows[values++] = row;
+                if (found == 0)
+                {
+                    first = row;
+                    next = row;
+                }
+
+                contiguous &= row == next;
+                next = row + 1;
+                found++;
             }
         }
 
-        Values = values;
-        Contiguous = contiguous;
-    }
-
-    private static void Grow(ref byte[] repetition, ref byte[] definition, ref int[] rows, int count)
-    {
-        if (rows.Length >= count)
+        int bytes = Math.Max(contiguous ? 1 : found, 1) * sizeof(int);
+        if (_valueBlock is null || _valueBlock.Length < bytes)
         {
+            int size = Math.Max(bytes, 2 * (_valueBlock?.Length ?? 2048));
+            _valueBlock?.Dispose();
+            _valueBlock = null;
+            _valueBlock = pool.Rent(size, 64);
+        }
+
+        Span<int> values = MemoryMarshal.Cast<byte, int>(_valueBlock.WritableSpan);
+        Values = found;
+        Contiguous = contiguous;
+        if (contiguous)
+        {
+            values[0] = first;
             return;
         }
 
-        int size = Math.Max(count, rows.Length * 2);
-        repetition = new byte[size];
-        definition = new byte[size];
-        rows = new int[size];
+        int at = 0;
+        foreach (int row in rows)
+        {
+            if (row >= 0)
+            {
+                values[at++] = row;
+            }
+        }
+    }
+
+    /// <summary>A list's elements at a row: how many, and from which of its elements' node.</summary>
+    private interface IListShape
+    {
+        long Length(int row);
+
+        long First(int row);
+    }
+
+    /// <summary>A list view's offsets and sizes, both of <typeparamref name="T"/>.</summary>
+    private readonly ref struct ViewShape<T>(ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> sizes) : IListShape
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        private readonly ReadOnlySpan<T> _offsets = MemoryMarshal.Cast<byte, T>(offsets);
+        private readonly ReadOnlySpan<T> _sizes = MemoryMarshal.Cast<byte, T>(sizes);
+
+        public long Length(int row) => long.CreateTruncating(_sizes[row]);
+
+        public long First(int row) => long.CreateTruncating(_offsets[row]);
+    }
+
+    /// <summary>A list view's offsets and sizes of any two integer types.</summary>
+    private readonly ref struct AnyShape(ReadOnlySpan<byte> offsets, PType offsetType, ReadOnlySpan<byte> sizes, PType sizeType) : IListShape
+    {
+        private readonly ReadOnlySpan<byte> _offsets = offsets;
+        private readonly ReadOnlySpan<byte> _sizes = sizes;
+
+        public long Length(int row) => CanonicalSupport.ReadInteger(_sizes, sizeType, row);
+
+        public long First(int row) => CanonicalSupport.ReadInteger(_offsets, offsetType, row);
+    }
+
+    /// <summary>A fixed-size list's: every row the same number of elements, back to back.</summary>
+    private readonly struct FixedShape(int size) : IListShape
+    {
+        public long Length(int row) => size;
+
+        public long First(int row) => (long)row * size;
+    }
+
+    /// <summary>Entries' levels and rows, in one block of the pool: repetition levels, definition levels, rows.</summary>
+    private sealed class Entries(AlignedBufferPool pool) : IDisposable
+    {
+        private NativeSegmentOwner? _block;
+        private int _capacity;
+
+        internal Span<byte> Repetition => _block is null ? default : _block.WritableSpan[.._capacity];
+
+        internal Span<byte> Definition => _block is null ? default : _block.WritableSpan.Slice(_capacity, _capacity);
+
+        internal Span<int> Rows => _block is null ? default : MemoryMarshal.Cast<byte, int>(_block.WritableSpan.Slice(2 * _capacity, _capacity * sizeof(int)));
+
+        /// <summary>Room for <paramref name="count"/> entries, what was there not kept.</summary>
+        internal void Ensure(int count)
+        {
+            if (count <= _capacity)
+            {
+                return;
+            }
+
+            // A multiple of 64, so that the rows after the two levels start aligned.
+            int capacity = (Math.Max(count, Math.Max(2 * _capacity, 1024)) + 63) & ~63;
+            _block?.Dispose();
+            _block = null;
+            _block = pool.Rent(checked(capacity * (2 + sizeof(int))), 64);
+            _capacity = capacity;
+        }
+
+        public void Dispose()
+        {
+            _block?.Dispose();
+            _block = null;
+            _capacity = 0;
+        }
     }
 }

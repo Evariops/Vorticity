@@ -36,6 +36,33 @@ public sealed class RleHybridTests
         return values;
     }
 
+    /// <summary>Runs of one value each, of every length from 1 to 80, none broken.</summary>
+    private static uint[] CleanRuns(Random random, int count, int width)
+    {
+        uint[] values = new uint[count];
+        uint limit = width == 32 ? uint.MaxValue : (1u << width) - 1;
+        int i = 0;
+        uint previous = 0;
+        while (i < count)
+        {
+            int run = random.Next(1, 81);
+            uint value = width == 0 ? 0 : (uint)random.NextInt64(0, (long)limit + 1);
+            if (width > 0 && value == previous)
+            {
+                value = (value + 1) & limit;
+            }
+
+            for (int k = 0; k < run && i < count; k++)
+            {
+                values[i++] = value;
+            }
+
+            previous = value;
+        }
+
+        return values;
+    }
+
     [Fact]
     public void TheGrammarsBytesDecode()
     {
@@ -74,6 +101,32 @@ public sealed class RleHybridTests
                 RleHybridDecoder decoder = new(width);
                 decoder.Read(data.AsSpan(0, written), read);
                 Assert.Equal(values, read);
+            }
+        }
+    }
+
+    [Fact]
+    public void LevelsPlanAsTheirValuesDo()
+    {
+        // The byte plan finds its runs by vector comparisons, the general one value by value: the
+        // bytes must be the same, at every width, for runs of every length about the minimum.
+        Random random = new(9);
+        foreach (int count in (int[])[0, 1, 7, 8, 9, 31, 32, 33, 63, 64, 65, 100, 1_000, 8_192, 30_000])
+        {
+            for (int width = 0; width <= 8; width++)
+            {
+                for (int trial = 0; trial < 8; trial++)
+                {
+                    uint[] wide = trial < 4 ? Runs(random, count, width) : CleanRuns(random, count, width);
+                    byte[] values = Array.ConvertAll(wide, v => (byte)v);
+                    byte[] fromBytes = new byte[RleHybridEncoder.MaxSize(count, width)];
+                    byte[] fromWords = new byte[RleHybridEncoder.MaxSize(count, width)];
+                    int byteSize = RleHybridEncoder.Encode(values, width, fromBytes);
+                    int wordSize = RleHybridEncoder.Encode(wide, width, fromWords);
+                    Assert.Equal(wordSize, byteSize);
+                    Assert.Equal(fromWords.AsSpan(0, wordSize).ToArray(), fromBytes.AsSpan(0, byteSize).ToArray());
+                    Assert.Equal(byteSize, RleHybridEncoder.Size(values, width));
+                }
             }
         }
     }
