@@ -44,8 +44,7 @@ and the arguments below, which rewrite that section of this page and leave the o
 ## On x64
 
 [Benchmarks on x64](benchmarks-x64.md) is this page's twin on an AMD Ryzen 9 7950X (Zen 4,
-AVX-512) under Windows 11: the sections that compare Vorticity with itself. Its sections that
-compare Vorticity with Rust are not measured on x64.
+AVX-512) under Windows 11, every section measured there, against a Rust built on that machine.
 
 <!-- results: scenarios -->
 ## Reading and writing a table, process against process
@@ -950,7 +949,7 @@ reference profile on that class, the one to quote a small difference from.
   faults where the copy cost it a read, which on the per-encoding corpus makes its scans of `fsst`
   and `alp` 7 and 10 % slower, and moves the others by less.
 * **x64 on this page.** Every figure here is from one arm64 machine; [Benchmarks on
-  x64](benchmarks-x64.md) has the sections that compare Vorticity with itself from one x64 machine.
+  x64](benchmarks-x64.md) has the same sections from one x64 machine.
   CI builds and tests on x64 and arm64 and runs no benchmark.
 * **Your data and your machine.** A handful of tables and one machine: a column the compressor likes
   less, or a filter the zone maps cannot prune, moves these numbers more than either implementation
