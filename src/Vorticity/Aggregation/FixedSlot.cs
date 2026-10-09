@@ -293,6 +293,55 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         return true;
     }
 
+    internal override bool StepRowsPaired(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot twin, in BatchInput twinInput)
+    {
+        if (twin is not FixedSlot<TValue, TState, TOp, TResult> other || RuntimeHelpers.IsReferenceOrContainsReferences<TState>()
+            || Bound is not { } records || !ReferenceEquals(records, other.Bound) || !input.Selection.IsEmpty || !twinInput.Selection.IsEmpty
+            || FixedReader.EncodingOf(input.Arena, input.Node, _kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary
+            || FixedReader.EncodingOf(twinInput.Arena, twinInput.Node, other._kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, _kind, out ReadOnlySpan<ulong> valid);
+        ReadOnlySpan<TValue> twinValues = other._values.Of(twinInput.Arena, twinInput.Batch, twinInput.Node, other._kind, out ReadOnlySpan<ulong> twinValid);
+        if (!_rows.And(input, input.Selection, valid).IsEmpty || !other._rows.And(twinInput, twinInput.Selection, twinValid).IsEmpty)
+        {
+            return false;
+        }
+
+        // Both states in one record: a row's group read once, its record reached once, each value read
+        // from its own column.
+        TOp op = _op;
+        TOp twinOp = other._op;
+        StateView<TState> states = States;
+        nint state = states.Offset;
+        nint twinState = other.States.Offset;
+        ref int groupOf = ref MemoryMarshal.GetReference(groups);
+        ref TValue valueOf = ref MemoryMarshal.GetReference(values);
+        ref TValue twinOf = ref MemoryMarshal.GetReference(twinValues);
+        if (input.Settled)
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                twinOp.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, twinState)), Unsafe.Add(ref twinOf, row));
+            }
+        }
+        else
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                twinOp.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, twinState)), Unsafe.Add(ref twinOf, row));
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>
     /// A run-end or a constant column folds a range as a weighted value per run it overlaps, where
     /// its rows would expand the column first: ranges however short. A dictionary or a canonical

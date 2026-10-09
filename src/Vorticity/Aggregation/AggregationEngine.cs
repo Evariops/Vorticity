@@ -2464,12 +2464,25 @@ internal sealed class AggregationPartition
                     Slots[first].StepRows(Input(number, arena, first, rows, selection).Window(start, end), rowGroups);
                 }
 
+                // A slot and its twin, the same aggregate over another column, fold in one pass when they can.
+                ulong paired = 0;
                 for (int i = 0; i < Slots.Length; i++)
                 {
-                    if (i != first && Folds(i) && !(carried && (i == count || i == carrier)))
+                    if (i == first || !Folds(i) || (carried && (i == count || i == carrier)) || (i < 64 && ((paired >> i) & 1) != 0))
                     {
-                        Slots[i].StepRows(Input(number, arena, i, rows, selection).Window(start, end), rowGroups);
+                        continue;
                     }
+
+                    BatchInput input = Input(number, arena, i, rows, selection).Window(start, end);
+                    int twin = TwinOf(i);
+                    if (twin >= 0 && twin != first && Folds(twin) && !(carried && (twin == count || twin == carrier))
+                        && Slots[i].StepRowsPaired(input, rowGroups, Slots[twin], Input(number, arena, twin, rows, selection).Window(start, end)))
+                    {
+                        paired |= 1UL << twin;
+                        continue;
+                    }
+
+                    Slots[i].StepRows(input, rowGroups);
                 }
             }
 
@@ -2756,6 +2769,46 @@ internal sealed class AggregationPartition
 
     /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>
     private bool Folds(int slot) => _filterOf[slot] < 0 || !_masks!.KeepsNone(_filterOf[slot]);
+
+    // Each slot's twin (TwinOf), made at the first batch.
+    private int[]? _twins;
+
+    /// <summary>
+    /// The slot that folds in <paramref name="slot"/>'s pass (<see cref="AggregateSlot.StepRowsPaired"/>), or
+    /// -1: the next one of the same type, the same aggregate over another column, both unfiltered, their
+    /// states in the same records, among the first 64 slots; each slot the twin of one at most.
+    /// </summary>
+    private int TwinOf(int slot)
+    {
+        if (_twins is null)
+        {
+            int[] twins = new int[Slots.Length];
+            twins.AsSpan().Fill(-1);
+            ulong taken = 0;
+            for (int i = 0; i < Math.Min(Slots.Length, 64); i++)
+            {
+                if (((taken >> i) & 1) != 0 || _inputs[i] == Settled || _filterOf[i] >= 0 || Slots[i].Bound is not { } records)
+                {
+                    continue;
+                }
+
+                for (int j = i + 1; j < Math.Min(Slots.Length, 64); j++)
+                {
+                    if (((taken >> j) & 1) == 0 && _inputs[j] != Settled && _filterOf[j] < 0 && Slots[j].GetType() == Slots[i].GetType()
+                        && ReferenceEquals(Slots[j].Bound, records))
+                    {
+                        twins[i] = j;
+                        taken |= (1UL << i) | (1UL << j);
+                        break;
+                    }
+                }
+            }
+
+            _twins = twins;
+        }
+
+        return _twins[slot];
+    }
 
     /// <summary>
     /// The slot of a count of rows in the records, unfiltered, and the fixed slot that can carry it in its

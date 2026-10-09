@@ -92,6 +92,14 @@ internal abstract class AggregateSlot
     internal virtual bool CarriesCount => false;
 
     /// <summary>
+    /// As <see cref="StepRows"/>, <paramref name="twin"/>'s rows folded in the same pass, a slot of the
+    /// same aggregate over another column, its states in the same records: a row's group read and its
+    /// record reached once for both, when every row of the window is selected and none is null on either
+    /// side. False when it cannot, nothing folded.
+    /// </summary>
+    internal virtual bool StepRowsPaired(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot twin, in BatchInput twinInput) => false;
+
+    /// <summary>
     /// Whether <see cref="StepRanges"/> folds ranges of a few rows of <paramref name="input"/> for
     /// less than a group per row: in one call, its column's form read once, and in less work per
     /// range than its rows would cost. Otherwise ranges that short are folded row by row.
