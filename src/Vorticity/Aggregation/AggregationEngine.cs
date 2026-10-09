@@ -381,6 +381,13 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool MergeByValue { get; set; } = true;
 
+    /// <summary>
+    /// Whether a lane's key numbered by value over a span whose groups fit the private cache numbers it
+    /// whole (<see cref="GroupKeys.NumberWhole"/>): false to number values as they first come, the switch
+    /// the tests compare them with.
+    /// </summary>
+    internal bool NumberWhole { get; set; } = true;
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
@@ -968,6 +975,7 @@ internal sealed class AggregationPartition
     /// </summary>
     internal async ValueTask EvictAsync(CancellationToken cancellationToken)
     {
+        DropUnmet();
         if (Keys is not { Count: > 0 } keys)
         {
             return;
@@ -1645,6 +1653,7 @@ internal sealed class AggregationPartition
         // A lane whose table holds less than the core would cost it keeps its table, but for one already
         // past its budget when the core spills, which a lane's table cannot; and but when a lane turned
         // on what its rows showed, where every lane turns while its table is small.
+        DropUnmet();
         CorePressure pressure = Pressure!;
 
         // The core cannot hold the query's groups: what the lane's rows show changes nothing, and its
@@ -2127,6 +2136,49 @@ internal sealed class AggregationPartition
     /// <summary>The first groups of an order on the key the query takes, which the partition keeps alone as it goes; null to keep every group.</summary>
     internal KeyTop? Top { get; init; }
 
+    /// <summary>
+    /// Whether a key numbered by value may number its span whole (<see cref="GroupKeys.NumberWhole"/>): a
+    /// lane of a group by's pass, whose groups no one reads before its rows are folded but through
+    /// <see cref="DropUnmet"/>; never with a top, the core or a key that streams.
+    /// </summary>
+    internal bool NumbersWhole { get; init; }
+
+    // Whether the partition judged at its first batch whether its key numbers its span whole.
+    private bool _wholeJudged;
+
+    /// <summary>
+    /// The bytes of a group's record, or -1 when a slot keeps its states apart. The groups no row met are
+    /// dropped by a keep, which moves the records within their array, but a set of values a group to
+    /// arrays beside the old: a distinct count by a thousand values numbered whole, three in ten never
+    /// met, held 47 MB at its peak at one lane rather than 29.
+    /// </summary>
+    private long RecordBytes()
+    {
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            if (_inputs[i] != Settled && Slots[i].StateBytes == 0)
+            {
+                return -1;
+            }
+        }
+
+        return (long)(Records?.Layout.Stride ?? 0) * sizeof(ulong);
+    }
+
+    /// <summary>
+    /// The groups of a span numbered whole that no row met, dropped, keys and states: before anyone else
+    /// reads the partition's groups, at the end of its lane, or when it turns to the core or writes its
+    /// table to the scratch. Its key numbers values as they first come from then on.
+    /// </summary>
+    internal void DropUnmet()
+    {
+        if (Keys?.Met() is { } met)
+        {
+            Keep(met);
+            GroupsAtEnd = met.Length;
+        }
+    }
+
     /// <summary>The groups the partition held at most since its top last counted them.</summary>
     internal int PeakGroups { get; set; }
 
@@ -2340,6 +2392,17 @@ internal sealed class AggregationPartition
             }
 
             return;
+        }
+
+        // A key numbered by value over a span whose records fit the private cache numbers it whole from
+        // the first row: a row's group is its value less the least once every value is met.
+        if (NumbersWhole && !_wholeJudged)
+        {
+            _wholeJudged = true;
+            if (Top is null && _core is null && _componentKeys is null && RecordBytes() is long bytes and >= 0)
+            {
+                Keys.NumberWhole(bytes);
+            }
         }
 
         Scratch.Grow(ref _rowGroups, rows);
@@ -2968,6 +3031,7 @@ internal static class AggregationEngine
                 AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
                 {
                     Top = top,
+                    NumbersWhole = plan.NumberWhole,
                     Core = core?.Lane(),
                     Pressure = pressure,
                     Spill = spill,
@@ -2987,6 +3051,7 @@ internal static class AggregationEngine
                 partitions = [only];
                 plan.Watch?.Invoke(partitions);
                 await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
+                only.DropUnmet();
             }
             else
             {
@@ -2998,6 +3063,7 @@ internal static class AggregationEngine
                     partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
                     {
                         Top = top is { FirstMet: true } ? null : top,
+                        NumbersWhole = plan.NumberWhole,
                         Core = core?.Lane(),
                         Pressure = pressure,
                         TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
@@ -4334,6 +4400,7 @@ internal static class AggregationEngine
                             await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
                         }
 
+                        partition.DropUnmet();
                         if (partition.Retiring)
                         {
                             await partition.RetireAsync(token).ConfigureAwait(false);

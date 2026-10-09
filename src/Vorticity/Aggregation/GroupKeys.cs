@@ -150,6 +150,19 @@ internal abstract class GroupKeys
     internal virtual (long Least, ulong Span)? ValueSpan => null;
 
     /// <summary>
+    /// For an index that numbers its groups by value, before a row is assigned: each value of the span a
+    /// group from the start, its number, when the span's groups at <paramref name="groupBytes"/> of
+    /// states each fit the private cache (<see cref="FixedKeys{TValue}.NumberWhole"/>); false otherwise.
+    /// </summary>
+    internal virtual bool NumberWhole(long groupBytes) => false;
+
+    /// <summary>
+    /// The groups an index that numbered its span whole keeps once the rows are folded, the values no
+    /// row met left out; null when it keeps them all. It numbers values as they first come from then on.
+    /// </summary>
+    internal virtual int[]? Met() => null;
+
+    /// <summary>
     /// For an index that numbers its groups by value over a span of <paramref name="least"/> values or
     /// more: the bins of <paramref name="map"/>, 4 096 bits over the span, that the selected values of a
     /// batch fall in, the bins the span takes, and the values read; null otherwise. Nothing is grouped.
@@ -614,6 +627,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     // Whether the last chunk of rows met mostly values for the first time: the next goes by the lookup alone (DirectTwoPasses).
     private bool _directNew;
+
+    // Numbering the span whole (NumberWhole): the values of the span no row met yet, the group of each
+    // value its number; -1 when the keys number values as they first come.
+    private int _unmet = -1;
 
     // Every key a group of its own, no table looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
     private readonly bool _appending;
@@ -1174,7 +1191,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             }
 
             int missed = 0;
-            if (pages.Length == 1)
+            if (_unmet == 0)
+            {
+                missed = Numbers(values, groups, min, span);
+            }
+            else if (pages.Length == 1)
             {
                 // A span of one page, a few thousand values: its numbers read from the page itself, taken once
                 // a chunk, where the page and its start read again at every row made a chain of three loads.
@@ -1249,7 +1270,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
     }
 
-    /// <summary>The group of a value within the bounds, by its number: added when it is new, its page allocated at the first value it holds.</summary>
+    /// <summary>
+    /// The group of a value within the bounds, by its number: added when it is new, its page allocated at
+    /// the first value it holds; numbering the span whole, the number itself, the value met.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int Numbered(TValue value, ulong number)
     {
@@ -1263,11 +1287,152 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         ref int group = ref slab[_pageStarts![at] + ((int)number & PageMask)];
         if (group < 0)
         {
-            group = Add(value);
+            group = _unmet >= 0 ? Meet(number) : Add(value);
         }
 
         return group;
     }
+
+    /// <summary>A value of the span met for the first time while the keys number it whole: its group is its number.</summary>
+    private int Meet(ulong number)
+    {
+        _unmet--;
+        return (int)number;
+    }
+
+    /// <summary>
+    /// The bytes a span numbered whole may take at most, its groups' states, keys and numbers: 1 MiB, the
+    /// private second level of cache of a current core, which <see cref="AggregationPartition"/>'s windows
+    /// take as the line past which records leave it.
+    /// </summary>
+    internal const long WholeBytes = 1 << 20;
+
+    /// <summary>
+    /// Numbers the span whole before a row is assigned, when its groups, at
+    /// <paramref name="groupBytes"/> of states each, fit <see cref="WholeBytes"/>: each value of the span
+    /// is a group from the start, its number, whether a row holds it or not, a null's group and the
+    /// values past the bounds after them. The pages tell the values met from the others; once every one
+    /// is met, a row's group is its number, read with no page (<see cref="Numbers"/>). The groups no row
+    /// met are dropped once the rows are folded (<see cref="Met"/>).
+    /// </summary>
+    /// <returns>Whether the keys number the span whole.</returns>
+    internal override bool NumberWhole(long groupBytes)
+    {
+        if (_pages is null || _sorted || _appending || Count != 0
+            || (long)_span * (groupBytes + Unsafe.SizeOf<TValue>() + sizeof(int)) > WholeBytes)
+        {
+            return false;
+        }
+
+        int span = (int)_span;
+        if (_keys.Length < span)
+        {
+            Grow(span);
+        }
+
+        for (int number = 0; number < span; number++)
+        {
+            _keys[number] = FromInteger(_directMin + number);
+        }
+
+        Count = span;
+        _unmet = span;
+        return true;
+    }
+
+    /// <summary>
+    /// The groups a span numbered whole keeps once its rows are folded: the values a row met, in their
+    /// order, then a null's group and the values past the bounds; null when every value was met, or the
+    /// span is not numbered whole. The keys number values as they first come from then on.
+    /// </summary>
+    internal override int[]? Met()
+    {
+        int unmet = _unmet;
+        _unmet = -1;
+        if (unmet <= 0)
+        {
+            return null;
+        }
+
+        int[] met = new int[Count - unmet];
+        int kept = 0;
+        int span = (int)_span;
+        for (int at = 0; at < _pages!.Length; at++)
+        {
+            int[] slab = _pages[at];
+            if (slab == Unmet)
+            {
+                continue;
+            }
+
+            int start = _pageStarts![at];
+            int first = at << PageBits;
+            int numbers = Math.Min(1 << PageBits, span - first);
+            for (int n = 0; n < numbers; n++)
+            {
+                if (slab[start + n] >= 0)
+                {
+                    met[kept++] = first + n;
+                }
+            }
+        }
+
+        for (int group = span; group < Count; group++)
+        {
+            met[kept++] = group;
+        }
+
+        return met;
+    }
+
+    /// <summary>The first pass of a chunk once every value of a span numbered whole is met: a row's group is its number, -1 past the bounds.</summary>
+    /// <returns>The groups or-ed together: negative when a row is left for the lookup.</returns>
+    private static int Numbers(ReadOnlySpan<TValue> values, Span<int> groups, long min, ulong span)
+    {
+        int left = 0;
+        int i = 0;
+        ref int group = ref MemoryMarshal.GetReference(groups);
+        if (Vector.IsHardwareAccelerated && Unsafe.SizeOf<TValue>() == sizeof(int) && values.Length >= Vector<int>.Count)
+        {
+            // Four bytes, an int or a uint: the number less the least wraps as the value does, and the span
+            // never does, so that one comparison of the difference as unsigned tells a value within it.
+            ref int value = ref Unsafe.As<TValue, int>(ref MemoryMarshal.GetReference(values));
+            Vector<int> least = new Vector<int>((int)min);
+            Vector<uint> width = new Vector<uint>((uint)span);
+            Vector<int> lefts = Vector<int>.Zero;
+            for (; i <= values.Length - Vector<int>.Count; i += Vector<int>.Count)
+            {
+                Vector<int> number = Vector.LoadUnsafe(ref value, (nuint)i) - least;
+                Vector<int> numbered = number | Vector.AsVectorInt32(Vector.GreaterThanOrEqual(Vector.AsVectorUInt32(number), width));
+                numbered.StoreUnsafe(ref group, (nuint)i);
+                lefts |= numbered;
+            }
+
+            left = Vector.LessThanAny(lefts, Vector<int>.Zero) ? -1 : 0;
+        }
+
+        for (; i < values.Length; i++)
+        {
+            ulong number = (ulong)(Integer(values[i]) - min);
+            int numbered = number < span ? (int)number : -1;
+            Unsafe.Add(ref group, i) = numbered;
+            left |= numbered;
+        }
+
+        return left;
+    }
+
+    /// <summary>The value of <paramref name="integer"/> as a key, the inverse of <see cref="Integer"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TValue FromInteger(long integer) =>
+        typeof(TValue) == typeof(sbyte) ? Unsafe.BitCast<sbyte, TValue>((sbyte)integer)
+        : typeof(TValue) == typeof(short) ? Unsafe.BitCast<short, TValue>((short)integer)
+        : typeof(TValue) == typeof(int) ? Unsafe.BitCast<int, TValue>((int)integer)
+        : typeof(TValue) == typeof(long) ? Unsafe.BitCast<long, TValue>(integer)
+        : typeof(TValue) == typeof(byte) ? Unsafe.BitCast<byte, TValue>((byte)integer)
+        : typeof(TValue) == typeof(ushort) ? Unsafe.BitCast<ushort, TValue>((ushort)integer)
+        : typeof(TValue) == typeof(uint) ? Unsafe.BitCast<uint, TValue>((uint)integer)
+        : Unsafe.BitCast<ulong, TValue>((ulong)integer);
 
     /// <summary>The most pages a slab holds: 256 KiB.</summary>
     private const int MostSlabPages = 16;
@@ -1476,6 +1641,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         _keys = [];
         Count = 0;
         _null = -1;
+        _unmet = -1;
     }
 
     internal override int NullNumber => _null;
@@ -1506,13 +1672,20 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private void Keep(ReadOnlySpan<int> groups, int room)
     {
         // The table of groups forgets every group's number, then learns the kept ones' new ones; a
-        // value it holds is in no index.
+        // value it holds is in no index. A span numbered whole is numbered as values come from then on.
+        _unmet = -1;
         for (int g = 0; g < Count; g++)
         {
-            if (g != _null && DirectSlot(_keys[g], out ulong number))
+            if (g == _null || !DirectSlot(_keys[g], out ulong number))
             {
-                int page = (int)(number >> PageBits);
-                _pages![page][_pageStarts![page] + ((int)number & PageMask)] = -1;
+                continue;
+            }
+
+            // A value of a span numbered whole that no row met may lie in a page never allocated.
+            int page = (int)(number >> PageBits);
+            if (_pages![page] != Unmet)
+            {
+                _pages[page][_pageStarts![page] + ((int)number & PageMask)] = -1;
             }
         }
 

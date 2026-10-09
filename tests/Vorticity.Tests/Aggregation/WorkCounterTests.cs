@@ -29,7 +29,7 @@ public sealed partial class WorkCounterTests
     /// <summary>The counts at one lane, a line a query, as <see cref="Line"/> writes them.</summary>
     private static readonly string[] Expected =
     [
-        "count and sum by 10^3 values: result 1501672601, rows 300000, lanes 1, lane groups 1000, arrays 8 of 40888 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 1310720 B",
+        "count and sum by 10^3 values: result 1501672601, rows 300000, lanes 1, lane groups 1000, arrays 3 of 36824 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 1310720 B",
         "count and sum by 10^5 values: result 1501672601, rows 300000, lanes 1, lane groups 95013, arrays 19 of 3653560 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 4177976 B",
         "count and sum by 10^6 values: result 1501672601, rows 300000, lanes 1, lane groups 259343, arrays 35 of 12566512 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 12566640 B",
         "count and sum by an ordered key: result 1501672601, rows 300000, lanes 1, lane groups 1, arrays 51 of 3720508 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 3606448 B",
