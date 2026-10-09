@@ -104,7 +104,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _columns = new ColumnChunkWriter[map.Columns.Length];
         for (int i = 0; i < _columns.Length; i++)
         {
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Dictionaries, session.Options.EnginePool);
+            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool);
         }
 
         _nodes = new int[_columns.Length];

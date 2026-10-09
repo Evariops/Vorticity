@@ -48,8 +48,10 @@ public sealed record ParquetWriteOptions
 
     /// <summary>
     /// What the writer optimises for. <see cref="CompressionProfile.Auto"/>, the default, and
-    /// <see cref="CompressionProfile.Fastest"/> and <see cref="CompressionProfile.Smallest"/> write a
-    /// dictionary where it pays; <see cref="CompressionProfile.None"/> writes PLAIN pages alone.
+    /// <see cref="CompressionProfile.Smallest"/> write a dictionary where it pays, and otherwise the
+    /// encoding of each page that saves the most: DELTA_BINARY_PACKED, the byte array deltas,
+    /// BYTE_STREAM_SPLIT by trial, RLE for booleans. <see cref="CompressionProfile.Fastest"/> writes
+    /// dictionaries and PLAIN; <see cref="CompressionProfile.None"/> writes PLAIN pages alone.
     /// </summary>
     public CompressionProfile Profile { get; init; } = CompressionProfile.Auto;
 
@@ -122,8 +124,6 @@ public sealed record ParquetWriteOptions
         _ => 0,
     };
 
-    /// <summary>Whether the profile writes a dictionary where it pays.</summary>
-    internal bool Dictionaries => Profile != CompressionProfile.None;
 }
 
 /// <summary>What a Parquet writer wrote.</summary>

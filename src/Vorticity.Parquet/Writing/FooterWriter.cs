@@ -162,21 +162,24 @@ internal static class FooterWriter
 
         // How many pages of each kind and encoding: what tells a reader every data page is codes.
         bool dictionary = chunk.DictionaryPageOffset >= 0;
-        int kinds = (dictionary ? 1 : 0) + (chunk.DictionaryPages > 0 ? 1 : 0) + (chunk.PlainPages > 0 ? 1 : 0);
+        int kinds = dictionary ? 1 : 0;
+        foreach (int pages in chunk.PagesByEncoding)
+        {
+            kinds += pages > 0 ? 1 : 0;
+        }
+
         writer.WriteListField(13, ThriftType.Struct, kinds);
         if (dictionary)
         {
             WriteEncodingStats(ref writer, PageType.DictionaryPage, ParquetEncoding.Plain, 1);
         }
 
-        if (chunk.DictionaryPages > 0)
+        for (int encoding = 0; encoding < chunk.PagesByEncoding.Length; encoding++)
         {
-            WriteEncodingStats(ref writer, PageType.DataPageV2, ParquetEncoding.RleDictionary, chunk.DictionaryPages);
-        }
-
-        if (chunk.PlainPages > 0)
-        {
-            WriteEncodingStats(ref writer, PageType.DataPageV2, ParquetEncoding.Plain, chunk.PlainPages);
+            if (chunk.PagesByEncoding[encoding] > 0)
+            {
+                WriteEncodingStats(ref writer, PageType.DataPageV2, (ParquetEncoding)encoding, chunk.PagesByEncoding[encoding]);
+            }
         }
 
         writer.EndStruct(metadata);

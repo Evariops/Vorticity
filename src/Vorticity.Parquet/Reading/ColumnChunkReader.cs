@@ -452,12 +452,18 @@ internal sealed class ColumnChunkReader : IDisposable
             // The levels of a v1 page are inside its bytes: each behind its length when RLE.
             int position = 0;
             int valid = rows;
-            if (_leaf.MaxDefinitionLevel > 0)
+            if (_leaf.MaxDefinitionLevel > 0 && header.DefinitionLevelEncoding == ParquetEncoding.BitPacked)
+            {
+                // The deprecated packing of older files: no length before it, its bytes the levels'.
+                position = LegacyBitPacked.Bytes(rows, 1);
+                valid = LegacyLevels(page, body.Span, rows);
+            }
+            else if (_leaf.MaxDefinitionLevel > 0)
             {
                 if (header.DefinitionLevelEncoding != ParquetEncoding.Rle)
                 {
                     throw new ParquetUnsupportedException(header.DefinitionLevelEncoding.ToString(), ParquetComponentKind.Encoding,
-                        $"The definition levels of '{Name}' are {header.DefinitionLevelEncoding}; this version of the reader reads RLE levels.");
+                        $"The definition levels of '{Name}' are {header.DefinitionLevelEncoding}; the standard writes them RLE or BIT_PACKED.");
                 }
 
                 ReadOnlySpan<byte> span = body.Span;
@@ -485,6 +491,22 @@ internal sealed class ColumnChunkReader : IDisposable
             _free.Push(page);
             throw;
         }
+    }
+
+    /// <summary>A v1 page's levels in the deprecated BIT_PACKED encoding, into its validity; the rows that hold a value.</summary>
+    private int LegacyLevels(Page page, ReadOnlySpan<byte> levels, int rows)
+    {
+        NativeSegmentOwner bits = _pool.Rent(CanonicalSupport.BitmapByteCount(rows), 64);
+        int valid = LegacyBitPacked.ReadBits(levels, rows, bits.WritableSpan);
+        if (valid == rows)
+        {
+            bits.Dispose();
+            return rows;
+        }
+
+        page.Validity = bits;
+        page.Nulls = rows - valid;
+        return valid;
     }
 
     /// <summary>Decodes a page's definition levels into its validity; the rows that hold a value.</summary>
@@ -830,29 +852,267 @@ internal sealed class ColumnChunkReader : IDisposable
 
     private void RequireEncoding(ParquetEncoding encoding)
     {
-        if (encoding is not (ParquetEncoding.Plain or ParquetEncoding.RleDictionary or ParquetEncoding.PlainDictionary))
+        bool fits = encoding switch
+        {
+            ParquetEncoding.Plain or ParquetEncoding.RleDictionary or ParquetEncoding.PlainDictionary => true,
+            ParquetEncoding.DeltaBinaryPacked => _form is LeafForm.Fixed or LeafForm.Narrowed && _leaf.Physical is PhysicalType.Int32 or PhysicalType.Int64,
+            ParquetEncoding.DeltaLengthByteArray => _views,
+            ParquetEncoding.DeltaByteArray => _views || _form == LeafForm.FixedBytes,
+            ParquetEncoding.ByteStreamSplit => _form is LeafForm.Fixed or LeafForm.Float16 or LeafForm.FixedBytes,
+            ParquetEncoding.Rle => _form == LeafForm.Bool,
+            _ => false,
+        };
+        if (!fits)
         {
             throw new ParquetUnsupportedException(encoding.ToString(), ParquetComponentKind.Encoding,
-                $"A page of '{Name}' is {encoding}; this version of the reader decodes PLAIN and dictionary pages.");
+                $"A page of '{Name}', a {_leaf.Physical} column, is {encoding}, which this reader does not decode for it.");
         }
     }
 
-    /// <summary>A page's values by their encoding: PLAIN, or codes into the chunk's dictionary.</summary>
+    /// <summary>A page's values by their encoding, the page taking <paramref name="owner"/> when its values stay where they lie.</summary>
     private void Decode(Page page, ParquetEncoding encoding, VortexBuffer values, NativeSegmentOwner? owner, int valid)
     {
-        if (encoding == ParquetEncoding.Plain)
+        switch (encoding)
         {
-            Values(page, values, owner, valid);
-            return;
+            case ParquetEncoding.Plain:
+                Values(page, values, owner, valid);
+                return;
+            case ParquetEncoding.DeltaLengthByteArray:
+                Lengths(page, values, owner, valid);
+                return;
         }
 
         try
         {
-            Codes(page, values.Span, valid);
+            switch (encoding)
+            {
+                case ParquetEncoding.DeltaBinaryPacked:
+                    Deltas(page, values.Span, valid);
+                    break;
+                case ParquetEncoding.DeltaByteArray:
+                    Prefixed(page, values.Span, valid);
+                    break;
+                case ParquetEncoding.ByteStreamSplit:
+                    Streams(page, values.Span, valid);
+                    break;
+                case ParquetEncoding.Rle:
+                    Runs(page, values.Span, valid);
+                    break;
+                default:
+                    Codes(page, values.Span, valid);
+                    break;
+            }
         }
         finally
         {
             owner?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A DELTA_BINARY_PACKED page of INT32 or INT64 values: decoded straight into the page's slots
+    /// when it has no null and the column's width is the type's, else densely and then placed.
+    /// </summary>
+    private void Deltas(Page page, ReadOnlySpan<byte> source, int valid)
+    {
+        int rows = page.Rows;
+        bool wide = _leaf.Physical == PhysicalType.Int64;
+        int width = wide ? sizeof(long) : sizeof(int);
+        if (page.Validity is null && _form == LeafForm.Fixed && _slot == width)
+        {
+            Span<byte> slots = Slots(page, rows * width).WritableSpan;
+            if (wide)
+            {
+                DeltaBinaryPacked.Decode64(source, MemoryMarshal.Cast<byte, long>(slots)[..rows]);
+            }
+            else
+            {
+                DeltaBinaryPacked.Decode32(source, MemoryMarshal.Cast<byte, int>(slots)[..rows]);
+            }
+
+            return;
+        }
+
+        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * width, 64);
+        try
+        {
+            Span<byte> values = dense.WritableSpan[..(valid * width)];
+            if (wide)
+            {
+                DeltaBinaryPacked.Decode64(source, MemoryMarshal.Cast<byte, long>(values));
+            }
+            else
+            {
+                DeltaBinaryPacked.Decode32(source, MemoryMarshal.Cast<byte, int>(values));
+            }
+
+            if (_form == LeafForm.Narrowed)
+            {
+                Narrow(page, values, valid);
+            }
+            else
+            {
+                Place(page, values, valid);
+            }
+        }
+        finally
+        {
+            dense.Dispose();
+        }
+    }
+
+    /// <summary>A DELTA_LENGTH_BYTE_ARRAY page cut into views over its own bytes, which the page keeps.</summary>
+    private void Lengths(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    {
+        NativeSegmentOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int), 64);
+        try
+        {
+            Span<int> span = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan)[..valid];
+            int start = DeltaByteArrays.DecodeLengths(values.Span, span);
+            VortexBuffer heap = values.Slice(start, values.Length - start);
+            CutViews(page, span, heap, valid);
+            page.Data = heap;
+            page.DataOwner = owner;
+            owner = null;
+        }
+        finally
+        {
+            lengths.Dispose();
+            owner?.Dispose();
+        }
+    }
+
+    /// <summary>A DELTA_BYTE_ARRAY page rebuilt, each value from the one before it, into a heap the page keeps.</summary>
+    private void Prefixed(Page page, ReadOnlySpan<byte> source, int valid)
+    {
+        NativeSegmentOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int) * 3, 64);
+        NativeSegmentOwner? heap = null;
+        try
+        {
+            Span<int> all = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan);
+            Span<int> prefixes = all[..valid];
+            Span<int> suffixes = all.Slice(valid, valid);
+            Span<int> rebuilt = all.Slice(2 * valid, valid);
+            long total = DeltaByteArrays.DecodePrefixes(source, prefixes, suffixes, out int suffixStart);
+            Cap(total);
+            heap = _pool.Rent((int)Math.Max(total, 1), 64);
+            DeltaByteArrays.Rebuild(source[suffixStart..], prefixes, suffixes, heap.WritableSpan, rebuilt);
+            if (_views)
+            {
+                CutViews(page, rebuilt, heap.Buffer.Slice(0, (int)total), valid);
+                page.Data = heap.Buffer.Slice(0, (int)total);
+                page.DataOwner = heap;
+                heap = null;
+                return;
+            }
+
+            // FIXED_LEN_BYTE_ARRAY: every value rebuilt is the type's length, back to back.
+            if (total != (long)valid * _width)
+            {
+                ParquetThrow.Format($"A DELTA_BYTE_ARRAY page of '{Name}' rebuilds {total} bytes for {valid} values of {_width}.");
+            }
+
+            Place(page, heap.WritableSpan[..(int)total], valid);
+        }
+        finally
+        {
+            lengths.Dispose();
+            heap?.Dispose();
+        }
+    }
+
+    /// <summary>A BYTE_STREAM_SPLIT page gathered back into values of the column's width.</summary>
+    private void Streams(Page page, ReadOnlySpan<byte> source, int valid)
+    {
+        if (source.Length != (long)valid * _width)
+        {
+            ParquetThrow.Format($"A BYTE_STREAM_SPLIT page of '{Name}' holds {source.Length} bytes for {valid} values of {_width}.");
+        }
+
+        int rows = page.Rows;
+        if (page.Validity is null)
+        {
+            ByteStreamSplit.Decode(source, _width, Slots(page, rows * _width).WritableSpan);
+            return;
+        }
+
+        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * _width, 64);
+        try
+        {
+            Span<byte> values = dense.WritableSpan[..(valid * _width)];
+            ByteStreamSplit.Decode(source, _width, values);
+            Place(page, values, valid);
+        }
+        finally
+        {
+            dense.Dispose();
+        }
+    }
+
+    /// <summary>An RLE page of booleans: the hybrid behind its four-byte length, at a width of one bit.</summary>
+    private void Runs(Page page, ReadOnlySpan<byte> source, int valid)
+    {
+        if (source.Length < sizeof(int))
+        {
+            ParquetThrow.Truncated("RLE boolean page");
+        }
+
+        int length = BinaryPrimitives.ReadInt32LittleEndian(source);
+        if (length < 0 || length > source.Length - sizeof(int))
+        {
+            ParquetThrow.Format($"An RLE boolean page of '{Name}' declares {length} bytes where it holds {source.Length - sizeof(int)}.");
+        }
+
+        int rows = page.Rows;
+        ReadOnlySpan<byte> runs = source.Slice(sizeof(int), length);
+        if (page.Validity is null)
+        {
+            Span<byte> bits = Slots(page, CanonicalSupport.BitmapByteCount(rows)).WritableSpan;
+            new RleHybridDecoder(1).ReadBits(runs, bits, 0, rows);
+            return;
+        }
+
+        NativeSegmentOwner dense = _pool.Rent(CanonicalSupport.BitmapByteCount(Math.Max(valid, 1)), 64);
+        try
+        {
+            new RleHybridDecoder(1).ReadBits(runs, dense.WritableSpan, 0, valid);
+            NativeSegmentOwner bits = Slots(page, CanonicalSupport.BitmapByteCount(rows));
+            SpreadBits(dense.WritableSpan, page.Validity.Buffer.Span, bits.WritableSpan, rows);
+        }
+        finally
+        {
+            dense.Dispose();
+        }
+    }
+
+    /// <summary>Views over <paramref name="heap"/> cut by <paramref name="lengths"/>, a text column's checked as UTF-8, spread over the page's rows.</summary>
+    private void CutViews(Page page, ReadOnlySpan<int> lengths, VortexBuffer heap, int valid)
+    {
+        int rows = page.Rows;
+        NativeSegmentOwner views = Slots(page, rows * CanonicalSupport.ViewSize);
+        Span<byte> into = views.WritableSpan;
+        NativeSegmentOwner? dense = page.Validity is null ? null : _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
+        try
+        {
+            Span<byte> cut = dense is null ? into : dense.WritableSpan[..(valid * CanonicalSupport.ViewSize)];
+            try
+            {
+                ViewKernels.BuildFromLengths(MemoryMarshal.AsBytes(lengths), PType.I32, default, heap.Span, cut, valid, requireUtf8: _form == LeafForm.Utf8);
+            }
+            catch (VortexFormatException invalid)
+            {
+                throw new ParquetFormatException($"A value of the text column '{Name}' is not UTF-8.", invalid);
+            }
+
+            if (dense is not null)
+            {
+                into.Clear();
+                ValidRows.Spread(cut, into, ValidityMask.Bitmap(page.Validity!.Buffer.Span, 0), rows, CanonicalSupport.ViewSize, Encoding);
+            }
+        }
+        finally
+        {
+            dense?.Dispose();
         }
     }
 

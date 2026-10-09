@@ -97,8 +97,21 @@ internal sealed class ColumnChunkWriter : IDisposable
     private int _frozenEntries;
     private int _frozenBytes;
 
-    private int _dictionaryPages;
-    private int _plainPages;
+    /// <summary>Whether a PLAIN page may take another encoding where it pays: under Auto and Smallest.</summary>
+    private readonly bool _encodings;
+
+    /// <summary>A page encoded otherwise than PLAIN, and a byte array page's values without their lengths.</summary>
+    private readonly PooledBytes _encoded;
+    private readonly PooledBytes _data;
+    private readonly int[] _lengths;
+    private readonly int[] _prefixes;
+    private readonly int[] _suffixes;
+
+    /// <summary>Per encoding, the chunk's data pages that took it.</summary>
+    private readonly int[] _pagesBy = new int[16];
+
+    /// <summary>Whether a float column's pages split their bytes into streams: decided by a trial on the chunk's first PLAIN page.</summary>
+    private bool? _split;
 
     /// <summary>The codes the chunk's dictionary pages took, and the PLAIN bytes they stand for.</summary>
     private long _codeBytes;
@@ -111,7 +124,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkUncompressed;
     private Bounds _chunkBounds;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, bool dictionaries, AlignedBufferPool pool)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool)
     {
         _column = column;
         _codec = codec;
@@ -130,7 +143,13 @@ internal sealed class ColumnChunkWriter : IDisposable
         _mask = new ulong[(blockRows + 63) >> 6];
         _pageCodes = new uint[blockRows];
         _chunkBounds = Bounds.Empty;
-        _eligible = dictionaries && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
+        _eligible = profile != CompressionProfile.None && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
+        _encodings = profile is CompressionProfile.Auto or CompressionProfile.Smallest;
+        _encoded = new PooledBytes(pool);
+        _data = new PooledBytes(pool);
+        _lengths = new int[blockRows];
+        _prefixes = new int[blockRows];
+        _suffixes = new int[blockRows];
         _dictionary = _eligible;
     }
 
@@ -208,14 +227,12 @@ internal sealed class ColumnChunkWriter : IDisposable
             }
         }
 
-        if (encoding == ParquetEncoding.Plain)
+        if (encoding == ParquetEncoding.Plain && _encodings && _pageValues > 0)
         {
-            _plainPages++;
+            encoding = Choose(ref body);
         }
-        else
-        {
-            _dictionaryPages++;
-        }
+
+        _pagesBy[(int)encoding]++;
 
         bool compressed = _codec != CompressionCodec.Uncompressed;
         ReadOnlySpan<byte> stored = body;
@@ -292,15 +309,13 @@ internal sealed class ColumnChunkWriter : IDisposable
             pages[i] = page with { Offset = offset + dictionary + page.Offset };
         }
 
-        uint encodings = 0;
-        if (_plainPages > 0 || dictionary > 0)
+        uint encodings = dictionary > 0 ? 1u << (int)ParquetEncoding.Plain : 0;
+        for (int encoding = 0; encoding < _pagesBy.Length; encoding++)
         {
-            encodings |= 1u << (int)ParquetEncoding.Plain;
-        }
-
-        if (_dictionaryPages > 0)
-        {
-            encodings |= 1u << (int)ParquetEncoding.RleDictionary;
+            if (_pagesBy[encoding] > 0)
+            {
+                encodings |= 1u << encoding;
+            }
         }
 
         if (_column.Nullable)
@@ -319,8 +334,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             encodings,
             _chunkBounds,
             pages,
-            _dictionaryPages,
-            _plainPages);
+            (int[])_pagesBy.Clone());
     }
 
     /// <summary>Forgets the closed chunk, keeping the buffers for the next row group's.</summary>
@@ -338,8 +352,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         _entryCount = 0;
         _frozenEntries = 0;
         _frozenBytes = 0;
-        _dictionaryPages = 0;
-        _plainPages = 0;
+        Array.Clear(_pagesBy);
+        _split = null;
         _codeBytes = 0;
         _plainBytes = 0;
         _dictionary = _eligible;
@@ -357,6 +371,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         _entries.Dispose();
         _codes.Dispose();
         _dictionaryPage.Dispose();
+        _encoded.Dispose();
+        _data.Dispose();
         _table?.Reset();
     }
 
@@ -517,11 +533,148 @@ internal sealed class ColumnChunkWriter : IDisposable
         return Coding.Codes;
     }
 
+    /// <summary>
+    /// The encoding a PLAIN page takes where another pays, <paramref name="body"/> then its bytes:
+    /// DELTA_BINARY_PACKED for integers, priced exactly; BYTE_STREAM_SPLIT for floats under a codec,
+    /// by a trial on the chunk's first page; the delta encodings of byte arrays, priced exactly; RLE
+    /// for booleans. An encoding is taken when it saves an eighth of the bytes, which pays for its
+    /// slower decode, but for a byte array's lengths, which always do.
+    /// </summary>
+    private ParquetEncoding Choose(ref ReadOnlySpan<byte> body)
+    {
+        switch (_column.Physical)
+        {
+            case PhysicalType.Int32:
+            {
+                ReadOnlySpan<int> values = MemoryMarshal.Cast<byte, int>(body);
+                int size = DeltaBinaryPacked.Size32(values);
+                if (size > body.Length - (body.Length / 8))
+                {
+                    return ParquetEncoding.Plain;
+                }
+
+                _encoded.Clear();
+                DeltaBinaryPacked.Encode32(values, _encoded.Reserve(size));
+                body = _encoded.WrittenSpan;
+                return ParquetEncoding.DeltaBinaryPacked;
+            }
+
+            case PhysicalType.Int64:
+            {
+                ReadOnlySpan<long> values = MemoryMarshal.Cast<byte, long>(body);
+                int size = DeltaBinaryPacked.Size64(values);
+                if (size > body.Length - (body.Length / 8))
+                {
+                    return ParquetEncoding.Plain;
+                }
+
+                _encoded.Clear();
+                DeltaBinaryPacked.Encode64(values, _encoded.Reserve(size));
+                body = _encoded.WrittenSpan;
+                return ParquetEncoding.DeltaBinaryPacked;
+            }
+
+            case PhysicalType.Float:
+            case PhysicalType.Double:
+            {
+                if (_codec == CompressionCodec.Uncompressed || _split == false)
+                {
+                    return ParquetEncoding.Plain;
+                }
+
+                int width = _column.Physical == PhysicalType.Float ? sizeof(float) : sizeof(double);
+                _encoded.Clear();
+                ByteStreamSplit.Encode(body, width, _encoded.Reserve(body.Length));
+                if (_split is null)
+                {
+                    // The trial: what the codec makes of either form of the chunk's first page.
+                    int plain = Compress(body).Length;
+                    int split = Compress(_encoded.WrittenSpan).Length;
+                    _split = split <= plain - (plain / 8);
+                    if (_split == false)
+                    {
+                        return ParquetEncoding.Plain;
+                    }
+                }
+
+                body = _encoded.WrittenSpan;
+                return ParquetEncoding.ByteStreamSplit;
+            }
+
+            case PhysicalType.ByteArray when _column.Conversion == ValueConversion.ByteArray:
+                return ChooseBytes(ref body);
+
+            case PhysicalType.Boolean:
+            {
+                Span<byte> values = _levelBytes.AsSpan(0, _pageValues);
+                BitPacking.Unpack8(body, 1, values);
+                int size = sizeof(int) + RleHybridEncoder.Size(values, 1);
+                if (size >= body.Length)
+                {
+                    return ParquetEncoding.Plain;
+                }
+
+                _encoded.Clear();
+                Span<byte> into = _encoded.Reserve(size);
+                BinaryPrimitives.WriteInt32LittleEndian(into, size - sizeof(int));
+                RleHybridEncoder.Encode(values, 1, into[sizeof(int)..]);
+                body = _encoded.WrittenSpan;
+                return ParquetEncoding.Rle;
+            }
+
+            default:
+                return ParquetEncoding.Plain;
+        }
+    }
+
+    /// <summary>
+    /// A byte array page's encoding: DELTA_LENGTH_BYTE_ARRAY, its lengths delta-encoded ahead of its
+    /// bytes, which the standard prefers to PLAIN, or DELTA_BYTE_ARRAY when the prefixes values share
+    /// save an eighth more, its rebuild costing a copy per value on read.
+    /// </summary>
+    private ParquetEncoding ChooseBytes(ref ReadOnlySpan<byte> body)
+    {
+        int count = _pageValues;
+        Span<int> lengths = _lengths.AsSpan(0, count);
+        _data.Clear();
+        int at = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int length = BinaryPrimitives.ReadInt32LittleEndian(body[at..]);
+            lengths[i] = length;
+            _data.Write(body.Slice(at + sizeof(int), length));
+            at += sizeof(int) + length;
+        }
+
+        ReadOnlySpan<byte> data = _data.WrittenSpan;
+        int byLength = DeltaByteArrays.SizeLengths(lengths, data.Length);
+        Span<int> prefixes = _prefixes.AsSpan(0, count);
+        Span<int> suffixes = _suffixes.AsSpan(0, count);
+        int rest = DeltaByteArrays.Prefixes(data, lengths, prefixes, suffixes);
+        int byPrefix = DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest);
+        _encoded.Clear();
+        if (byPrefix <= byLength - (byLength / 8))
+        {
+            DeltaByteArrays.EncodePrefixes(data, lengths, prefixes, suffixes, _encoded.Reserve(byPrefix));
+            body = _encoded.WrittenSpan;
+            return ParquetEncoding.DeltaByteArray;
+        }
+
+        if (byLength >= body.Length)
+        {
+            return ParquetEncoding.Plain;
+        }
+
+        DeltaByteArrays.EncodeLengths(lengths, data, _encoded.Reserve(byLength));
+        body = _encoded.WrittenSpan;
+        return ParquetEncoding.DeltaLengthByteArray;
+    }
+
     /// <summary>The dictionary page, when a data page used the dictionary: the values coded until the last such page.</summary>
     private void WriteDictionaryPage()
     {
         _dictionaryPage.Clear();
-        if (_dictionaryPages == 0)
+        if (_pagesBy[(int)ParquetEncoding.RleDictionary] == 0)
         {
             return;
         }
@@ -787,8 +940,7 @@ internal sealed class ColumnChunkWriter : IDisposable
 /// <param name="Encodings">The encodings its pages use, a bit per encoding.</param>
 /// <param name="Bounds">Its least and greatest values, where its domain has them.</param>
 /// <param name="Pages">Where each data page lies, for the offset index.</param>
-/// <param name="DictionaryPages">The data pages that are codes into the dictionary.</param>
-/// <param name="PlainPages">The data pages that are PLAIN.</param>
+/// <param name="PagesByEncoding">Per encoding, the data pages that took it.</param>
 internal sealed record ChunkResult(
     long Offset,
     long DataPageOffset,
@@ -800,8 +952,7 @@ internal sealed record ChunkResult(
     uint Encodings,
     Bounds Bounds,
     PageLocation[] Pages,
-    int DictionaryPages,
-    int PlainPages);
+    int[] PagesByEncoding);
 
 /// <summary>A column's least and greatest values, compared in its domain, as the PLAIN bytes statistics hold.</summary>
 internal readonly record struct Bounds(bool Present, StatisticsDomain Domain, long Min, long Max)

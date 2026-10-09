@@ -340,7 +340,10 @@ public sealed partial class ParquetWriterTests
         const int Rows = 8 * 8_192;
         using TempPath path = new();
         VortexSchema schema = [("label", VortexType.Utf8.Nullable), ("unique", VortexType.Int64), ("drifting", VortexType.Int32)];
-        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema))
+
+        // Dictionaries and PLAIN alone, so that a page that is not codes is PLAIN.
+        ParquetWriteOptions options = new() { Profile = CompressionProfile.Fastest, Compression = ParquetCompression.Zstd };
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, options))
         {
             ColumnsBuilder builder = writer.Builder();
             for (int i = 0; i < Rows; i++)
@@ -406,6 +409,110 @@ public sealed partial class ParquetWriterTests
                     Assert.Equal(row % 11 == 0 ? null : $"label-{row % 50}", labels.GetString(r));
                     Assert.Equal(row * 7_919L, uniques[r]);
                     Assert.Equal(row < 2 * 8_192 ? (int)(row % 10) : (int)row, drifts[r]);
+                }
+            }
+        }
+
+        Assert.Equal(Rows, row);
+    }
+
+    [Fact]
+    public async Task TakesTheEncodingThatPaysForEachPage()
+    {
+        const int Rows = 3 * 8_192;
+        using TempPath path = new();
+        VortexSchema schema =
+        [
+            ("id", VortexType.Int64),
+            ("small", VortexType.Int32.Nullable),
+            ("noise", VortexType.Int64),
+            ("measure", VortexType.Float64),
+            ("url", VortexType.Utf8),
+            ("blob", VortexType.Binary),
+            ("flag", VortexType.Bool),
+            ("random", VortexType.Bool),
+        ];
+        Random random = new(3);
+        string[] urls = new string[Rows];
+        byte[][] blobs = new byte[Rows][];
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            for (int i = 0; i < Rows; i++)
+            {
+                builder.Column<long>(0).Append(1_000_000_000L + i);
+                if (i % 10 == 0)
+                {
+                    builder.Column<int?>(1).AppendNull();
+                }
+                else
+                {
+                    builder.Column<int?>(1).Append(i * 3);
+                }
+
+                builder.Column<long>(2).Append(random.NextInt64());
+                // A smooth measure: its exponent and high bytes repeat, which a split hands the codec.
+                builder.Column<double>(3).Append(20.0 + (5.0 * Math.Sin(i / 500.0)));
+
+                // Every value its own, sorted, so that neighbours share long prefixes.
+                urls[i] = $"https://example.org/catalogue/section-{i / 1_000:D3}/item-{i:D6}";
+                builder.Column<string>(4).Append(urls[i]);
+                blobs[i] = new byte[random.Next(0, 30)];
+                random.NextBytes(blobs[i]);
+                builder.Column<ReadOnlyMemory<byte>>(5).Append(blobs[i]);
+                builder.Column<bool>(6).Append(i % 1_000 < 900);
+                builder.Column<bool>(7).Append(random.Next(2) == 0);
+            }
+
+            await writer.WriteAsync(builder, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        WrittenFile file = new(await System.IO.File.ReadAllBytesAsync(path.Value, Ct));
+        ParquetEncoding Encoding(int column) => file.Header(file.Pages(0, column)[0]).Encoding;
+        Assert.Equal(ParquetEncoding.DeltaBinaryPacked, Encoding(0));
+        Assert.Equal(ParquetEncoding.DeltaBinaryPacked, Encoding(1));
+        Assert.Equal(ParquetEncoding.Plain, Encoding(2));
+        Assert.Equal(ParquetEncoding.ByteStreamSplit, Encoding(3));
+        Assert.Equal(ParquetEncoding.DeltaByteArray, Encoding(4));
+        Assert.Equal(ParquetEncoding.DeltaLengthByteArray, Encoding(5));
+        Assert.Equal(ParquetEncoding.Rle, Encoding(6));
+        Assert.Equal(ParquetEncoding.Plain, Encoding(7));
+
+        // Every encoding reads back to the rows written.
+        await using ParquetFile parquet = await ParquetFile.OpenAsync(path.Value, Ct);
+        random = new Random(3);
+        long row = 0;
+        await foreach (RecordBatch batch in parquet.Scan().ToBatchesAsync(Ct))
+        {
+            using (batch)
+            {
+                ReadOnlySpan<long> ids = batch.Column("id"u8).AsPrimitive<long>().Values;
+                VortexColumn small = batch.Column("small"u8);
+                ReadOnlySpan<int> smalls = small.AsPrimitive<int>().Values;
+                ReadOnlySpan<long> noise = batch.Column("noise"u8).AsPrimitive<long>().Values;
+                ReadOnlySpan<double> measures = batch.Column("measure"u8).AsPrimitive<double>().Values;
+                BinaryColumn url = batch.Column("url"u8).AsBinary();
+                BinaryColumn blob = batch.Column("blob"u8).AsBinary();
+                BoolColumn flag = batch.Column("flag"u8).AsBool();
+                BoolColumn coin = batch.Column("random"u8).AsBool();
+                for (int r = 0; r < batch.RowCount; r++, row++)
+                {
+                    Assert.Equal(1_000_000_000L + row, ids[r]);
+                    Assert.Equal(row % 10 != 0, small.IsValid(r));
+                    if (row % 10 != 0)
+                    {
+                        Assert.Equal((int)row * 3, smalls[r]);
+                    }
+
+                    Assert.Equal(random.NextInt64(), noise[r]);
+                    Assert.Equal(20.0 + (5.0 * Math.Sin(row / 500.0)), measures[r]);
+                    Assert.Equal(urls[row], url.GetString(r));
+                    Assert.True(blob.GetSpan(r).SequenceEqual(blobs[row]));
+                    random.Next(0, 30);
+                    random.NextBytes(new byte[blobs[row].Length]);
+                    Assert.Equal(row % 1_000 < 900, flag[r]);
+                    Assert.Equal(random.Next(2) == 0, coin[r]);
                 }
             }
         }
