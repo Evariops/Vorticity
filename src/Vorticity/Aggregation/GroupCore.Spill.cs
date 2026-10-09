@@ -59,6 +59,9 @@ internal sealed partial class GroupCore
             QueryMemory memory = _memory!;
             do
             {
+                // A query that failed leaves what it held, and a part a failed burst emptied counted still
+                // pending: the loop would take it again and again, nothing given back, the lane never done.
+                cancellationToken.ThrowIfCancellationRequested();
                 if (Largest() is not { } part)
                 {
                     break;

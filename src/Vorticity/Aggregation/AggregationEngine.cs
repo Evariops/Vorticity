@@ -813,7 +813,17 @@ internal sealed class AggregationPartition
     internal LaneCore? Core
     {
         get => _core;
-        init => _core = value;
+        init
+        {
+            // A lane on a core that spills takes past its budget in the middle of a batch, its cache
+            // growing: its next deposit finds no room, and the core spills its largest part before the
+            // lane's next batch. Refused, the lane failed the query when it met the budget first.
+            _core = value;
+            if (_arrays is not null && value is not null && value.Core.Spills)
+            {
+                _arrays.Overdraws = true;
+            }
+        }
     }
 
     /// <summary>
