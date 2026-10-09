@@ -92,6 +92,9 @@ public sealed class NestedReaderTests
         Assert.Contains("repeats a list that holds no element", refused.Message);
     }
 
+    /// <summary>The Document file, its pages v1 and a row cut across two of them.</summary>
+    internal static byte[] DocumentBytes() => Document(Layout.RowsAcrossPages).ToBytes();
+
     public enum Layout
     {
         V1,

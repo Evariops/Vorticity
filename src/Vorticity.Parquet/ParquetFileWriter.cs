@@ -470,8 +470,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         for (int c = 0; c < _columns.Length; c++)
         {
             WriteColumn column = _columns[c].Column;
+            // A nested column is given its top-level field, which it shreds down to its leaf.
             int node = EncodedForms.Canonical(arena, arena.GetNode(root).GetFieldIndex(column.Field));
-            if (column.ThroughStorage)
+            if (column.ThroughStorage && !column.Nested)
             {
                 node = EncodedForms.Canonical(arena, arena.GetNode(node).StorageIndex);
             }

@@ -42,9 +42,39 @@ internal enum ValueConversion : byte
     Null,
 }
 
-/// <summary>A column as the writer writes it: its place in the schema, its Parquet types and the conversion of its values.</summary>
-internal sealed class WriteColumn
+/// <summary>How a step of a nested column's path goes down to the field below it.</summary>
+internal enum ShredKind : byte
 {
+    /// <summary>To a struct's field, the struct's rows its own.</summary>
+    Struct,
+
+    /// <summary>To a list's elements: its offsets and sizes say which.</summary>
+    List,
+
+    /// <summary>To a fixed-size list's elements: every row the same number of them, back to back.</summary>
+    FixedList,
+
+    /// <summary>To a map's keys or its values: its entries, a list's, then their key or value.</summary>
+    Map,
+}
+
+/// <summary>
+/// A field above a nested column, from the top-level one down: whether it may be null, the levels
+/// it defines, and the way to the next field down.
+/// </summary>
+/// <param name="Kind">How the step goes down.</param>
+/// <param name="Child">A struct's field, or 0 for a map's key and 1 for its value.</param>
+/// <param name="Nullable">Whether the field may be null.</param>
+/// <param name="DefinedAt">The definition level from which the field is not null.</param>
+/// <param name="RepeatedAt">A list's or a map's repetition level: where a new element starts.</param>
+/// <param name="ElementsAt">The definition level from which a list or a map holds an element.</param>
+internal readonly record struct ShredStep(ShredKind Kind, int Child, bool Nullable, int DefinedAt, int RepeatedAt, int ElementsAt);
+
+/// <summary>A column as the writer writes it: its place in the schema, its Parquet types and the conversion of its values.</summary>
+internal sealed record WriteColumn
+{
+    private readonly int _maxDefinitionLevel = -1;
+
     internal required string Name { get; init; }
 
     internal required string[] Path { get; init; }
@@ -87,7 +117,19 @@ internal sealed class WriteColumn
     /// <summary>How min and max compare: as signed or unsigned integers, as floats, or bytewise.</summary>
     internal StatisticsDomain Domain { get; init; }
 
-    internal int MaxDefinitionLevel => Nullable ? 1 : 0;
+    /// <summary>The fields above a nested column, from the top-level one down; empty for a top-level column.</summary>
+    internal ShredStep[] Steps { get; init; } = [];
+
+    /// <summary>Whether the column sits under a struct, a list or a map, and is written by its levels.</summary>
+    internal bool Nested => Steps.Length > 0;
+
+    internal int MaxDefinitionLevel
+    {
+        get => _maxDefinitionLevel >= 0 ? _maxDefinitionLevel : Nullable ? 1 : 0;
+        init => _maxDefinitionLevel = value;
+    }
+
+    internal int MaxRepetitionLevel { get; init; }
 }
 
 /// <summary>How a column's bounds compare.</summary>
@@ -119,6 +161,13 @@ internal sealed class WriteSchema
     internal WriteColumn[] Columns { get; }
 
     /// <summary>Maps <paramref name="schema"/>, a struct of columns.</summary>
+    /// <remarks>
+    /// A struct is a group of its fields. A list is the standard's three-level structure, an
+    /// optional or required group annotated <c>LIST</c> around a repeated group <c>list</c> around
+    /// the <c>element</c>; a fixed-size list of other than bytes is one too, its size not kept. A
+    /// map is a group annotated <c>MAP</c> around a repeated group <c>key_value</c> of a required
+    /// <c>key</c> and the <c>value</c>.
+    /// </remarks>
     internal static WriteSchema Map(VortexSchema schema)
     {
         List<SchemaElement> elements = [];
@@ -135,26 +184,115 @@ internal sealed class WriteSchema
         for (int i = 0; i < schema.Count; i++)
         {
             VortexField field = schema[i];
-            WriteColumn column = Leaf(field.Name, i, field.Type);
-            columns.Add(column);
-            elements.Add(new SchemaElement
-            {
-                Name = column.Name,
-                HasType = true,
-                Type = column.Physical,
-                TypeLength = column.TypeLength,
-                HasRepetition = true,
-                Repetition = column.Nullable ? FieldRepetition.Optional : FieldRepetition.Required,
-                ChildCount = -1,
-                ConvertedType = column.ConvertedType,
-                Scale = column.Scale,
-                Precision = column.Precision,
-                LogicalType = column.Logical,
-            });
+            Field(field.Name, field.Type, i, new Place([field.Name], [], 0, 0), elements, columns);
         }
 
         return new WriteSchema(elements.ToArray(), columns.ToArray());
     }
+
+    /// <summary>Where a field is written: its path, the fields above it, and the levels they define.</summary>
+    private readonly record struct Place(string[] Path, ShredStep[] Steps, int Definition, int Repetition);
+
+    /// <summary>Adds the elements of the field <paramref name="name"/> of <paramref name="type"/>, depth first, and its columns.</summary>
+    private static void Field(string name, VortexType type, int field, Place place, List<SchemaElement> elements, List<WriteColumn> columns)
+    {
+        bool nullable = type.IsNullable;
+        int definedAt = place.Definition + (nullable ? 1 : 0);
+        FieldRepetition repetition = nullable ? FieldRepetition.Optional : FieldRepetition.Required;
+        switch (type.Kind)
+        {
+            case VortexTypeKind.Struct:
+                ReadOnlySpan<VortexField> fields = type.Fields;
+                if (fields.Length == 0)
+                {
+                    throw new ParquetUnsupportedException("STRUCT", ParquetComponentKind.Feature,
+                        $"The struct '{name}' has no field, and a Parquet group needs one to carry its rows.");
+                }
+
+                elements.Add(Group(name, repetition, fields.Length, default, -1));
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    ShredStep step = new(ShredKind.Struct, i, nullable, definedAt, 0, 0);
+                    Field(fields[i].Name, fields[i].Type, field, new Place([.. place.Path, fields[i].Name], [.. place.Steps, step], definedAt, place.Repetition), elements, columns);
+                }
+
+                return;
+
+            case VortexTypeKind.List:
+            case VortexTypeKind.FixedSizeList when !IsBytes(type):
+            {
+                elements.Add(Group(name, repetition, 1, Logical(LogicalTypeKind.List), (int)Metadata.ConvertedType.List));
+                elements.Add(Group("list", FieldRepetition.Repeated, 1, default, -1));
+                ShredKind kind = type.Kind == VortexTypeKind.List ? ShredKind.List : ShredKind.FixedList;
+                ShredStep step = new(kind, 0, nullable, definedAt, place.Repetition + 1, definedAt + 1);
+                Place element = new([.. place.Path, "list", "element"], [.. place.Steps, step], definedAt + 1, place.Repetition + 1);
+                Field("element", type.ElementType!, field, element, elements, columns);
+                return;
+            }
+
+            case VortexTypeKind.Map:
+            {
+                elements.Add(Group(name, repetition, 1, Logical(LogicalTypeKind.Map), (int)Metadata.ConvertedType.Map));
+                elements.Add(Group("key_value", FieldRepetition.Repeated, 2, default, -1));
+                ReadOnlySpan<VortexField> entry = type.Fields;
+                for (int i = 0; i < 2; i++)
+                {
+                    ShredStep step = new(ShredKind.Map, i, nullable, definedAt, place.Repetition + 1, definedAt + 1);
+                    Place child = new([.. place.Path, "key_value", entry[i].Name], [.. place.Steps, step], definedAt + 1, place.Repetition + 1);
+                    Field(entry[i].Name, entry[i].Type, field, child, elements, columns);
+                }
+
+                return;
+            }
+
+            default:
+                WriteColumn column = Leaf(name, field, type);
+                if (place.Steps.Length > 0)
+                {
+                    column = column with
+                    {
+                        Path = place.Path,
+                        Steps = place.Steps,
+                        MaxDefinitionLevel = definedAt,
+                        MaxRepetitionLevel = place.Repetition,
+                    };
+                }
+
+                columns.Add(column);
+                elements.Add(new SchemaElement
+                {
+                    Name = column.Name,
+                    HasType = true,
+                    Type = column.Physical,
+                    TypeLength = column.TypeLength,
+                    HasRepetition = true,
+                    Repetition = column.Nullable ? FieldRepetition.Optional : FieldRepetition.Required,
+                    ChildCount = -1,
+                    ConvertedType = column.ConvertedType,
+                    Scale = column.Scale,
+                    Precision = column.Precision,
+                    LogicalType = column.Logical,
+                });
+                return;
+        }
+    }
+
+    private static SchemaElement Group(string name, FieldRepetition repetition, int children, LogicalTypeInfo logical, int converted) => new()
+    {
+        Name = name,
+        HasRepetition = true,
+        Repetition = repetition,
+        ChildCount = children,
+        TypeLength = -1,
+        ConvertedType = converted,
+        Scale = -1,
+        Precision = -1,
+        LogicalType = logical,
+    };
+
+    /// <summary>Whether a fixed-size list is of bytes that may not be null: a FIXED_LEN_BYTE_ARRAY.</summary>
+    private static bool IsBytes(VortexType type) =>
+        type.ElementType is { Kind: VortexTypeKind.Primitive, IsNullable: false } element && element.PrimitiveType == PType.U8;
 
     private static WriteColumn Leaf(string name, int field, VortexType type)
     {
@@ -182,7 +320,7 @@ internal sealed class WriteSchema
                 };
             case VortexTypeKind.Binary:
                 return new WriteColumn { Name = name, Path = path, Field = field, Physical = PhysicalType.ByteArray, Nullable = nullable, Conversion = ValueConversion.ByteArray };
-            case VortexTypeKind.FixedSizeList when type.ElementType is { Kind: VortexTypeKind.Primitive, IsNullable: false } element && element.PrimitiveType == PType.U8:
+            case VortexTypeKind.FixedSizeList when IsBytes(type):
                 return new WriteColumn
                 {
                     Name = name, Path = path, Field = field, Physical = PhysicalType.FixedLenByteArray, TypeLength = type.FixedSize, Nullable = nullable,
@@ -192,7 +330,7 @@ internal sealed class WriteSchema
                 return Extension(name, path, field, type, nullable);
             default:
                 throw new ParquetUnsupportedException(type.Kind.ToString(), ParquetComponentKind.Feature,
-                    $"The column '{name}' is a {type.Kind}; this version of the writer writes flat columns only.");
+                    $"The column '{name}' is a {type.Kind}, which has no Parquet type to be written as.");
         }
     }
 

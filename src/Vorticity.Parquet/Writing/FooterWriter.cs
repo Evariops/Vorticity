@@ -149,7 +149,7 @@ internal static class FooterWriter
         }
 
         writer.WriteI32Field(4, (int)written.Codec);
-        writer.WriteI64Field(5, chunk.Rows);
+        writer.WriteI64Field(5, chunk.Entries);
         writer.WriteI64Field(6, chunk.UncompressedSize);
         writer.WriteI64Field(7, chunk.CompressedSize);
         writer.WriteI64Field(9, chunk.DataPageOffset);

@@ -62,7 +62,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly PooledBytes _compressed;
     private readonly ChunkBytes _chunk;
     private readonly byte[] _validity;
-    private readonly byte[] _levelBytes;
+    private byte[] _levelBytes;
 
     /// <summary>The page's validity as the words the compressing kernel takes, a block's worth.</summary>
     private readonly ulong[] _mask;
@@ -80,7 +80,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The dictionary page, written ahead of the data pages when the chunk closes.</summary>
     private readonly PooledBytes _dictionaryPage;
 
-    private readonly uint[] _pageCodes;
+    private uint[] _pageCodes;
     private int[] _firstOccurrences = [];
     private DistinctTable? _table;
 
@@ -103,9 +103,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>A page encoded otherwise than PLAIN, and a byte array page's values without their lengths.</summary>
     private readonly PooledBytes _encoded;
     private readonly PooledBytes _data;
-    private readonly int[] _lengths;
-    private readonly int[] _prefixes;
-    private readonly int[] _suffixes;
+    private int[] _lengths;
+    private int[] _prefixes;
+    private int[] _suffixes;
 
     /// <summary>Per encoding, the chunk's data pages that took it.</summary>
     private readonly int[] _pagesBy = new int[16];
@@ -120,12 +120,35 @@ internal sealed class ColumnChunkWriter : IDisposable
     private int _pageValues;
     private int _boolBits;
     private long _chunkRows;
+    private long _chunkEntries;
     private long _chunkNulls;
     private long _chunkUncompressed;
     private Bounds _chunkBounds;
 
+    /// <summary>Whether the staged rows carry a validity bitmap: a flat column's that may be null.</summary>
+    private readonly bool _rowValidity;
+
+    /// <summary>A nested column's shredding of its top-level field's rows into entries.</summary>
+    private readonly Shredder? _shredder;
+
+    /// <summary>A nested column's page's levels, a byte per entry.</summary>
+    private readonly PooledBytes? _repetitionLevels;
+    private readonly PooledBytes? _definitionLevels;
+
+    /// <summary>A nested column's page's rows and entries; its values are what <see cref="_pageRows"/> counts.</summary>
+    private int _pageNestedRows;
+    private int _pageEntries;
+
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool)
     {
+        _rowValidity = column.Nullable && !column.Nested;
+        if (column.Nested)
+        {
+            _shredder = new Shredder();
+            _repetitionLevels = new PooledBytes(pool);
+            _definitionLevels = new PooledBytes(pool);
+        }
+
         _column = column;
         _codec = codec;
         _level = level;
@@ -169,9 +192,18 @@ internal sealed class ColumnChunkWriter : IDisposable
         await _chunk.WriteToAsync(sink, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Appends <paramref name="count"/> rows of <paramref name="node"/> from <paramref name="start"/>, closing pages as blocks fill.</summary>
+    /// <summary>
+    /// Appends <paramref name="count"/> rows of <paramref name="node"/> from <paramref name="start"/>,
+    /// closing pages as blocks fill: the column's own node, or a nested column's top-level field's.
+    /// </summary>
     internal void Append(CanonicalArena arena, int node, int start, int count)
     {
+        if (_shredder is not null)
+        {
+            AppendNested(arena, node, start, count);
+            return;
+        }
+
         while (count > 0)
         {
             int take = Math.Min(count, _blockRows - _pageRows);
@@ -188,21 +220,32 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>Closes the page being staged, if it holds a row: at the end of a row group.</summary>
     internal void ClosePage()
     {
-        if (_pageRows == 0)
+        bool nested = _shredder is not null;
+        int rows = nested ? _pageNestedRows : _pageRows;
+        if (rows == 0)
         {
             return;
         }
 
-        int rows = _pageRows;
-        int nulls = rows - _pageValues;
+        int entries = nested ? _pageEntries : rows;
+        int nulls = entries - _pageValues;
         _levels.Clear();
-        if (_column.Nullable)
+        int repetitionLength = 0;
+        if (nested)
+        {
+            // The repetition levels, then the definition levels, each at the width of its maximum.
+            repetitionLength = Levels(_repetitionLevels!.WrittenSpan, _column.MaxRepetitionLevel);
+            Levels(_definitionLevels!.WrittenSpan, _column.MaxDefinitionLevel);
+        }
+        else if (_column.Nullable)
         {
             Span<byte> levels = _levelBytes.AsSpan(0, rows);
             BitPacking.Unpack8(_validity, 1, levels);
             int size = RleHybridEncoder.Size(levels, 1);
             RleHybridEncoder.Encode(levels, 1, _levels.Reserve(size));
         }
+
+        Fit(_pageRows);
 
         ReadOnlySpan<byte> body = _column.Conversion == ValueConversion.Bool
             ? _values.WrittenSpan[..((_boolBits + 7) / 8)]
@@ -213,7 +256,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         ParquetEncoding encoding = ParquetEncoding.Plain;
         if (_dictionary && _pageFirstCode >= 0)
         {
-            switch (EncodeCodes(rows, body.Length))
+            switch (EncodeCodes(_pageRows, body.Length))
             {
                 case Coding.Codes:
                     body = _codes.WrittenSpan;
@@ -254,12 +297,12 @@ internal sealed class ColumnChunkWriter : IDisposable
             Type = PageType.DataPageV2,
             UncompressedPageSize = _levels.Length + body.Length,
             CompressedPageSize = _levels.Length + stored.Length,
-            ValueCount = rows,
+            ValueCount = entries,
             NullCount = nulls,
             RowCount = rows,
             Encoding = encoding,
-            DefinitionLevelsLength = _levels.Length,
-            RepetitionLevelsLength = 0,
+            DefinitionLevelsLength = _levels.Length - repetitionLength,
+            RepetitionLevelsLength = repetitionLength,
             IsCompressed = compressed || _codec == CompressionCodec.Uncompressed,
         };
 
@@ -273,6 +316,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _pages.Add(new PageLocation(pageStart, (int)(_chunk.Length - pageStart), _chunkRows));
         _chunkUncompressed += headerLength + header.UncompressedPageSize;
         _chunkRows += rows;
+        _chunkEntries += entries;
         _chunkNulls += nulls;
 
         _pageRows = 0;
@@ -280,7 +324,111 @@ internal sealed class ColumnChunkWriter : IDisposable
         _boolBits = 0;
         _pageFirstCode = -1;
         _values.Clear();
-        Array.Clear(_validity);
+        if (nested)
+        {
+            _pageNestedRows = 0;
+            _pageEntries = 0;
+            _repetitionLevels!.Clear();
+            _definitionLevels!.Clear();
+        }
+        else
+        {
+            Array.Clear(_validity);
+        }
+    }
+
+    /// <summary>A nested page's levels of one kind, RLE at the width of their maximum, after those already in the page's; their bytes.</summary>
+    private int Levels(ReadOnlySpan<byte> levels, int max)
+    {
+        if (max == 0)
+        {
+            return 0;
+        }
+
+        int width = 32 - BitOperations.LeadingZeroCount((uint)max);
+        int size = RleHybridEncoder.Size(levels, width);
+        RleHybridEncoder.Encode(levels, width, _levels.Reserve(size));
+        return size;
+    }
+
+    /// <summary>Grows the arrays a page's values are encoded through to hold <paramref name="count"/>: a nested page holds more values than rows.</summary>
+    private void Fit(int count)
+    {
+        if (_pageCodes.Length >= count)
+        {
+            return;
+        }
+
+        int size = Math.Max(count, _pageCodes.Length * 2);
+        _pageCodes = new uint[size];
+        _lengths = new int[size];
+        _prefixes = new int[size];
+        _suffixes = new int[size];
+        _levelBytes = new byte[size];
+    }
+
+    /// <summary>
+    /// Appends a nested column's rows: each block's worth shredded into entries, whose levels the
+    /// page takes and whose values it stages densely, a range of the leaf where they lie back to
+    /// back and gathered where they do not.
+    /// </summary>
+    private void AppendNested(CanonicalArena arena, int node, int start, int count)
+    {
+        Shredder shredder = _shredder!;
+        while (count > 0)
+        {
+            int take = Math.Min(count, _blockRows - _pageNestedRows);
+            shredder.Shred(arena, node, start, take, _column);
+            if (_column.MaxRepetitionLevel > 0)
+            {
+                _repetitionLevels!.Write(shredder.Repetition);
+            }
+
+            if (_column.MaxDefinitionLevel > 0)
+            {
+                _definitionLevels!.Write(shredder.Definition);
+            }
+
+            _pageEntries = checked(_pageEntries + shredder.Entries);
+            int values = shredder.Values;
+            if (values > 0)
+            {
+                if (shredder.Contiguous)
+                {
+                    StageDense(arena, shredder.Leaf, shredder.ValueRows[0], values);
+                }
+                else
+                {
+                    StageDense(arena, CanonicalFilter.Apply(arena, shredder.Leaf, shredder.ValueRows), 0, values);
+                }
+            }
+
+            _pageNestedRows += take;
+            start += take;
+            count -= take;
+            if (_pageNestedRows == _blockRows)
+            {
+                ClosePage();
+            }
+        }
+    }
+
+    /// <summary>Stages <paramref name="count"/> rows of <paramref name="index"/> from <paramref name="start"/>, every one a value: a nested page's.</summary>
+    private void StageDense(CanonicalArena arena, int index, int start, int count)
+    {
+        if (_pageRows == 0)
+        {
+            _pageFirstCode = _dictionary ? _table?.Rows ?? 0 : -1;
+        }
+
+        if (_dictionary && _pageFirstCode >= 0)
+        {
+            Probe(arena, index, start, count);
+        }
+
+        StageValues(arena, arena.GetNode(index), start, count, count, _values);
+        _pageRows += count;
+        _pageValues += count;
     }
 
     /// <summary>
@@ -318,7 +466,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             }
         }
 
-        if (_column.Nullable)
+        if (_column.MaxDefinitionLevel > 0 || _column.MaxRepetitionLevel > 0)
         {
             encodings |= 1u << (int)ParquetEncoding.Rle;
         }
@@ -328,6 +476,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             offset + dictionary,
             dictionary > 0 ? offset : -1,
             _chunkRows,
+            _chunkEntries,
             _chunkNulls,
             _chunkUncompressed,
             _chunk.Length + dictionary,
@@ -343,6 +492,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _chunk.Clear();
         _pages.Clear();
         _chunkRows = 0;
+        _chunkEntries = 0;
         _chunkNulls = 0;
         _chunkUncompressed = 0;
         _chunkBounds = Bounds.Empty;
@@ -373,6 +523,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         _dictionaryPage.Dispose();
         _encoded.Dispose();
         _data.Dispose();
+        _repetitionLevels?.Dispose();
+        _definitionLevels?.Dispose();
         _table?.Reset();
     }
 
@@ -491,7 +643,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         int count = 0;
         for (int row = 0; row < rows; row++)
         {
-            if (_column.Nullable && !CanonicalSupport.BitAt(_validity, row))
+            if (_rowValidity && !CanonicalSupport.BitAt(_validity, row))
             {
                 continue;
             }
@@ -934,7 +1086,8 @@ internal sealed class ColumnChunkWriter : IDisposable
 /// <param name="DataPageOffset">Where its first data page starts.</param>
 /// <param name="DictionaryPageOffset">Where its dictionary page starts, or -1.</param>
 /// <param name="Rows">Its rows.</param>
-/// <param name="Nulls">Its null rows.</param>
+/// <param name="Entries">Its entries, the values its levels count: its rows, unless it is nested.</param>
+/// <param name="Nulls">Its entries without a value.</param>
 /// <param name="UncompressedSize">Its pages' bytes, headers included, before compression.</param>
 /// <param name="CompressedSize">Its bytes in the file.</param>
 /// <param name="Encodings">The encodings its pages use, a bit per encoding.</param>
@@ -946,6 +1099,7 @@ internal sealed record ChunkResult(
     long DataPageOffset,
     long DictionaryPageOffset,
     long Rows,
+    long Entries,
     long Nulls,
     long UncompressedSize,
     long CompressedSize,
