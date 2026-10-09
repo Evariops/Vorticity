@@ -1112,6 +1112,28 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return false;
         }
 
+        // Appending, every row selected and none null: the batch's values taken whole, a group a row in
+        // their order, where a lookup a row cost a call and an add, a sixth of k7's cycles at fourteen
+        // lanes as they bypassed their caches. A row whose key is the row before's makes a group of its
+        // own too, which the core merges.
+        if (_appending && selection.IsEmpty && validity.IsEmpty)
+        {
+            int first = Count;
+            if (_keys.Length < first + rows)
+            {
+                Grow(Math.Max(first + rows, DoubledUpTo(_keys.Length, _doublesUpTo)));
+            }
+
+            canonical[..rows].CopyTo(_keys.AsSpan(first));
+            for (int i = 0; i < rows; i++)
+            {
+                rowGroups[i] = first + i;
+            }
+
+            Count = first + rows;
+            return false;
+        }
+
         RowCursor selected = new RowCursor(selection, 0, rows);
         bool hasLast = false;
         TValue last = default;
