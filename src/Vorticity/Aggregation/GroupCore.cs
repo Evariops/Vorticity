@@ -627,8 +627,31 @@ internal sealed partial class GroupCore
     /// <summary>The most a part's application of <paramref name="pending"/> entries may take: a group an entry, twice over for a doubling, and a split's two halves.</summary>
     private long Growth(long pending) => (2 * pending * _groupBytes) + (2 * _tableBytes);
 
-    /// <summary>The entries pending past which a part is applied: its floor, or α times its groups.</summary>
-    private long Threshold(CorePart part) => Math.Max(Floor, (long)Alpha * Volatile.Read(ref part.Groups));
+    /// <summary>
+    /// The entries pending past which a part is applied: its floor, or α times its groups; none while a
+    /// burst reduces nothing (<see cref="Defers"/>).
+    /// </summary>
+    private long Threshold(CorePart part) => Defers ? long.MaxValue : Math.Max(Floor, (long)Alpha * Volatile.Read(ref part.Groups));
+
+    /// <summary>The entries the query applies before it judges whether its bursts reduce: a few parts' floors.</summary>
+    private const long JudgedEntries = 4L * DefaultFloor;
+
+    /// <summary>
+    /// Whether the parts wait for the end rather than burst: past the query's first applications, an entry
+    /// applied made a group nine times in ten or more, and the budget could still grant half its ceiling.
+    /// Such a burst only moves entries into sub-tables that split at the end, their groups moved again:
+    /// ten million keys over forty million rows at fourteen lanes took 205 ms with no burst against 273,
+    /// their peak 1.30 GB against 1.57 (2026-10-09). A million keys, each forty times, reduce: they burst.
+    /// </summary>
+    private bool Defers
+    {
+        get
+        {
+            long applied = Interlocked.Read(ref _applied);
+            return applied >= JudgedEntries && Interlocked.Read(ref _made) * 4 >= applied * 3
+                && (_memory is null || _memory.CanGrow(_memory.Ceiling / 2));
+        }
+    }
 
     /// <summary>Applies the part's stack while the lock is free and the count past the threshold.</summary>
     private void Burst(CorePart part, CoreApplier applier)
