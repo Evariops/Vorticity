@@ -19,7 +19,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <InternalsVisibleTo Include="Vorticity.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Parquet.Tests" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks.Runner" />
   </ItemGroup>

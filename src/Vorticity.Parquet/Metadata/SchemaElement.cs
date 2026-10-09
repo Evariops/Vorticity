@@ -10,7 +10,7 @@ internal struct LogicalTypeInfo
     internal LogicalTypeKind Kind;
 
     /// <summary>A <c>TIME</c>'s or a <c>TIMESTAMP</c>'s unit.</summary>
-    internal TimeUnit Unit;
+    internal ParquetTimeUnit Unit;
 
     /// <summary>Whether a <c>TIME</c> or a <c>TIMESTAMP</c> is normalized to UTC.</summary>
     internal bool IsAdjustedToUtc;
@@ -171,15 +171,15 @@ internal struct LogicalTypeInfo
         }
     }
 
-    private static TimeUnit ReadTimeUnit(ref ThriftCompactReader reader)
+    private static ParquetTimeUnit ReadTimeUnit(ref ThriftCompactReader reader)
     {
-        TimeUnit unit = 0;
+        ParquetTimeUnit unit = 0;
         short saved = reader.EnterStruct();
         while (reader.ReadFieldHeader(out ThriftType type, out short id))
         {
             if (id is >= 1 and <= 3 && type == ThriftType.Struct)
             {
-                unit = (TimeUnit)id;
+                unit = (ParquetTimeUnit)id;
             }
 
             reader.Skip(type);

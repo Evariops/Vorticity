@@ -26,5 +26,6 @@
     <Project Path="tests/Vorticity.Conformance/Vorticity.Conformance.csproj" />
     <Project Path="tests/Vorticity.Fuzz/Vorticity.Fuzz.csproj" />
     <Project Path="tests/Vorticity.Zstd.Tests/Vorticity.Zstd.Tests.csproj" />
+    <Project Path="tests/Vorticity.Parquet.Tests/Vorticity.Parquet.Tests.csproj" />
   </Folder>
 </Solution>

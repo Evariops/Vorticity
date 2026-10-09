@@ -5,7 +5,7 @@ using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Thrift;
 using Xunit;
 
-namespace Vorticity.Tests.Parquet;
+namespace Vorticity.Parquet.Tests;
 
 /// <summary>
 /// The compact protocol as Parquet uses it: the bytes the standards' own examples show, every type

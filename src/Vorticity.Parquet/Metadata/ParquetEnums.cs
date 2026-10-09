@@ -120,8 +120,8 @@ internal enum LogicalTypeKind : byte
     Unrecognized = 255,
 }
 
-/// <summary>The unit of a <c>TIME</c> or <c>TIMESTAMP</c>, the members of <c>TimeUnit</c>.</summary>
-internal enum TimeUnit : byte
+/// <summary>The unit of a <c>TIME</c> or <c>TIMESTAMP</c>, the members of the Thrift <c>TimeUnit</c> union.</summary>
+internal enum ParquetTimeUnit : byte
 {
     Millis = 1,
     Micros = 2,
