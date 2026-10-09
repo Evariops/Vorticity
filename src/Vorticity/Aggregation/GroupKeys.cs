@@ -608,7 +608,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     // groups one whose slots hold a hash and a group (Condense), the other then left empty.
     private KeyTable<TValue> _index = new KeyTable<TValue>();
     private WideKeyTable<TValue> _wide = new WideKeyTable<TValue>();
-    private bool _compact;
+    private bool _compact = CompactAlways;
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
@@ -780,6 +780,18 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => Wide && _compact;
+    }
+
+    /// <summary>
+    /// Whether the groups are in the table of a hash and a group from the first: a key wider than 16 bytes,
+    /// a tuple of values (<see cref="TupleKeys"/>). In slots that held it, more than a line each, the core's
+    /// sub-tables, a few thousand groups each, compared whole keys at every probe: 22 % of q10's cycles at
+    /// fourteen lanes, which took ×0.80 the time without them (2026-10-09).
+    /// </summary>
+    private static bool CompactAlways
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => Unsafe.SizeOf<TValue>() > 2 * sizeof(ulong);
     }
 
     /// <summary>The first pass of the index the groups are in (<see cref="KeyTable{TValue}.FindAtHome"/>).</summary>
@@ -1804,7 +1816,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         if (Wide)
         {
             _wide.Release();
-            _compact = false;
+            _compact = CompactAlways;
         }
 
         _shelf?.Give(_keys);
