@@ -722,6 +722,11 @@ internal sealed class AggregationPartition
     private readonly int[] _filterOf;
     private readonly FilterMasks? _masks;
     private readonly GroupRanges _ranges = new GroupRanges();
+
+    // The group of each row of a batch, rented from the shared pool and given back with the partition's
+    // groups (Release): a lane's of 512 KB, made anew by every lane of every query, were 89 % of what a
+    // count and a sum by 10³ keys allocated at fourteen lanes, 7.3 of 8.2 MB a query. The lane's admission
+    // counts it (a batch's scratch).
     private int[] _rowGroups = [];
     private long _batch;
 
@@ -1566,6 +1571,29 @@ internal sealed class AggregationPartition
     internal long Footprint => (Keys?.Footprint ?? 0) + (_componentKeys?.Footprint ?? 0) + AggregateSlot.FootprintOf(Slots);
 
     /// <summary>
+    /// Room for the group of each of <paramref name="rows"/> rows, the one held before given back: rented
+    /// cleared, as a new array starts, since a row a selection leaves out keeps what the array held, and
+    /// another query's groups would be past this one's.
+    /// </summary>
+    private void RentRowGroups(int rows)
+    {
+        GiveBackRowGroups();
+        int[] rented = ArrayPool<int>.Shared.Rent(rows);
+        Array.Clear(rented);
+        _rowGroups = rented;
+    }
+
+    /// <summary>The groups of the rows given back to the shared pool, once nothing folds into the partition.</summary>
+    private void GiveBackRowGroups()
+    {
+        if (_rowGroups.Length > 0)
+        {
+            ArrayPool<int>.Shared.Return(_rowGroups);
+            _rowGroups = [];
+        }
+    }
+
+    /// <summary>
     /// Drops the partition's groups, its keys, states and scratch, once another holds them: a lane's
     /// tables die with the merge, whatever still holds the partition. Frames of the pass do: a
     /// blocking group by goes out in continuations of the lane or the merge worker that finished
@@ -1578,7 +1606,7 @@ internal sealed class AggregationPartition
         Keys = null;
         Slots = [];
         Records = null;
-        _rowGroups = [];
+        GiveBackRowGroups();
         _narrowed = [];
         _componentOf = [];
         _componentRows = [];
@@ -2457,7 +2485,11 @@ internal sealed class AggregationPartition
             }
         }
 
-        Scratch.Grow(ref _rowGroups, rows);
+        if (_rowGroups.Length < rows)
+        {
+            RentRowGroups(rows);
+        }
+
         _ranges.Clear();
         int before = Keys.Count;
         bool ranged = Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges);
