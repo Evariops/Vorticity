@@ -452,7 +452,8 @@ internal readonly ref struct BytesBlock
     /// <remarks>
     /// No branch on a row: the longest length is kept and judged once. Row by row through
     /// <see cref="TryWord"/>, two branches a row and the validity's test took a sixth of the cycles of a sum
-    /// by a hundred short texts (2026-10-09).
+    /// by a hundred short texts (2026-10-09). A view a vector, its mask made of the two halves read from
+    /// the tables, ran 5 % slower than these two words a view (`--micro words`, the same day).
     /// </remarks>
     internal bool TryWords(int start, Span<TextWord> words)
     {

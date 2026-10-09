@@ -63,6 +63,9 @@ internal struct KeyTable<TValue>
     private int _shift;
     private int _count;
     private int _growAt;
+
+    // Whether the table was cleared to keep some groups, a stream's or a cache's: it then fills to six tenths (Clear).
+    private bool _carried;
     private readonly ArrayShelf? _shelf;
 
     public KeyTable()
@@ -87,8 +90,9 @@ internal struct KeyTable<TValue>
     internal readonly int Count => _count;
 
     /// <summary>
-    /// The bytes the table would take more were <paramref name="more"/> new keys to come: past six tenths
-    /// full it doubles, its store and its chains twice what they hold. Its chains may make it grow sooner.
+    /// The bytes the table would take more were <paramref name="more"/> new keys to come: past its fill (six
+    /// tenths, a quarter for a short text's small table, <see cref="Roomy"/>) it doubles, its store and its
+    /// chains twice what they hold. Its chains may make it grow sooner.
     /// </summary>
     internal readonly long GrowthFor(int more)
     {
@@ -294,11 +298,39 @@ internal struct KeyTable<TValue>
     internal void Reserve(int keys)
     {
         long slots = ((10L * keys) / 6) + 1;
+        if (!_carried && Roomy(slots))
+        {
+            slots = (4L * keys) + 1;
+        }
+
         if (slots > _length)
         {
             Resize(PrimeAtLeast((int)Math.Min(int.MaxValue / 2, slots)));
         }
     }
+
+    /// <summary>
+    /// The slots a short text's table holds a quarter of at most, where any other holds six tenths: a
+    /// hundred and twenty-eight keys. Past it, a table grows by the same primes as before, a quarter full
+    /// sooner, and lands on the length six tenths would have given it: up to 8 192 slots, a stream of sorted
+    /// names grew its table once more after its first read, where its reads allocate nothing
+    /// (AllocationContractTests, 2026-10-09).
+    /// </summary>
+    private const int RoomySlots = 512;
+
+    /// <summary>
+    /// Whether a table of <paramref name="slots"/> slots fills to a quarter only: a short text's, while it is
+    /// small. Six tenths full, a hundred texts lay a tenth of their keys in the chains, past a full line,
+    /// each of their rows sent to the search (2026-10-09); a quarter full, few.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Roomy(long slots) => typeof(TValue) == typeof(TextWord) && slots <= RoomySlots;
+
+    /// <summary>
+    /// The keys a table of <paramref name="length"/> slots holds before it doubles: a quarter of a small
+    /// short text's table, six tenths of any other, and of every table cleared to keep groups (<see cref="Clear"/>).
+    /// </summary>
+    private readonly int FillOf(int length) => !_carried && Roomy(length) ? length / 4 : (int)(6L * length / 10);
 
     /// <summary>
     /// Forgets every key, keeping the slots and the seed, with room for <paramref name="room"/> keys: a table
@@ -311,10 +343,20 @@ internal struct KeyTable<TValue>
         Array.Clear(_chains);
         _overflowed = 0;
         _count = 0;
+
+        // A table cleared to keep some groups, a stream's from batch to batch or a cache's, fills to six tenths
+        // from then on: a quarter full, a stream of sorted names grew its table once more after its first
+        // read, where its reads allocate nothing (AllocationContractTests, 2026-10-09).
+        if (!_carried)
+        {
+            _carried = true;
+            _growAt = FillOf(_length);
+        }
+
         if (_length > 0 && room > _growAt)
         {
             int length = _length;
-            while ((int)(6L * length / 10) < room)
+            while (FillOf(length) < room)
             {
                 length = PrimeAtLeast(GroupKeys.Doubled(length));
             }
@@ -460,8 +502,18 @@ internal struct KeyTable<TValue>
             hash = (uint)(folded ^ (folded >> 32));
         }
 
-        return FastMod(hash, length, multiplier);
+        return SlotOf(hash, length, multiplier);
     }
+
+    /// <summary>
+    /// The slot of <paramref name="hash"/> among <paramref name="length"/>: a short text's word, mixed by
+    /// rapidhash, by the high half of the hash times the length (Lemire's fast range), one multiplication;
+    /// any other key by the hash modulo the prime length (<see cref="FastMod"/>), two, which keeps integers
+    /// in a row in slots in a row.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint SlotOf(uint hash, uint length, ulong multiplier) =>
+        typeof(TValue) == typeof(TextWord) ? (uint)(((ulong)hash * length) >> 32) : FastMod(hash, length, multiplier);
 
     /// <summary>Places every key again in <paramref name="length"/> slots, a prime, under the seed the table has.</summary>
     private void Resize(int length)
@@ -484,7 +536,7 @@ internal struct KeyTable<TValue>
         _overflow = kept ? overflow : NewArray<Entry>(overflowed);
         _overflowed = 0;
         _multiplier = (ulong.MaxValue / (uint)length) + 1;
-        _growAt = (int)(6L * length / 10);
+        _growAt = FillOf(length);
 
         // The low bits no key has set, left out of the homes; under a seed, every bit goes to the mix.
         _shift = Shift(old, overflow.AsSpan(0, overflowed));

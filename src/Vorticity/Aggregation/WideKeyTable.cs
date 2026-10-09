@@ -167,7 +167,7 @@ internal struct WideKeyTable<TValue>
         if (slots.Length != 0)
         {
             uint hash = HashOf(key, _seed);
-            ref Slot slot = ref slots[(int)KeyTable<TValue>.FastMod(hash, (uint)slots.Length, _multiplier)];
+            ref Slot slot = ref slots[(int)KeyTable<TValue>.SlotOf(hash, (uint)slots.Length, _multiplier)];
             if (slot.Group != 0)
             {
                 if (slot.Hash == hash && keys[slot.Group - 1].Equals(key))
@@ -225,7 +225,7 @@ internal struct WideKeyTable<TValue>
             for (int i = 0; i < keys.Length; i++)
             {
                 uint hash = HashOf(keys[i], seed, prepared);
-                ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hash, length, multiplier));
+                ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hash, length, multiplier));
                 groups[i] = (home.Group & -Unsafe.BitCast<bool, byte>(home.Hash == hash)) - 1;
             }
 
@@ -252,7 +252,7 @@ internal struct WideKeyTable<TValue>
         int row = 0;
         for (int touched = keys.Length - ahead; row < touched; row++)
         {
-            sink ^= Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hashes[row + ahead], length, multiplier)).Group;
+            sink ^= Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hashes[row + ahead], length, multiplier)).Group;
             int group = Found(ref first, ref firstKey, hashes[row], keys[row], length, multiplier);
             groups[row] = group;
             any |= group;
@@ -276,7 +276,7 @@ internal struct WideKeyTable<TValue>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int Found(ref Slot first, ref TValue firstKey, uint hash, TValue key, uint length, ulong multiplier)
     {
-        ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hash, length, multiplier));
+        ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hash, length, multiplier));
         int candidate = (home.Group & -Unsafe.BitCast<bool, byte>(home.Hash == hash)) - 1;
         int same = Unsafe.BitCast<bool, byte>(Unsafe.Add(ref firstKey, (nint)(uint)(candidate & ~(candidate >> 31))).Equals(key));
         return ((candidate + 1) & -same) - 1;
@@ -350,7 +350,7 @@ internal struct WideKeyTable<TValue>
 
         Span<Slot> slots = Slots;
         uint hash = HashOf(key, _seed);
-        uint at = KeyTable<TValue>.FastMod(hash, (uint)slots.Length, _multiplier);
+        uint at = KeyTable<TValue>.SlotOf(hash, (uint)slots.Length, _multiplier);
         uint first = at & ~(uint)(Width - 1);
         uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
         uint probe = at;
@@ -516,7 +516,7 @@ internal struct WideKeyTable<TValue>
     private void Place(uint hash, int group)
     {
         Span<Slot> slots = Slots;
-        uint at = KeyTable<TValue>.FastMod(hash, (uint)slots.Length, _multiplier);
+        uint at = KeyTable<TValue>.SlotOf(hash, (uint)slots.Length, _multiplier);
         uint first = at & ~(uint)(Width - 1);
         uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
         uint probe = at;
