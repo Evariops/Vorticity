@@ -38,8 +38,10 @@
 #   (8). The pairs and the interval are printed: a clear answer stops at three;
 # - canaries: before and after each scenario, two fixed runs of the before runner, the file kept mapped
 #   (a scan of one lane, group-stridedfloor-k7, and a count and sum of 10^3 keys on 14 lanes). Their
-#   first values of the session are the standard; a scenario framed by a canary more than 5 % off is
-#   run again once, and marked if it still is;
+#   first values of the session are the standard; a scenario framed by a canary more than 5 % off whose
+#   pairs did not hold the target is run again once, and marked if a canary is still off. Pairs that
+#   held it shared whatever the machine did: a whole scenario replayed for them, under a video call that
+#   kept every canary off, doubled a session (2026-10-09);
 # - controls, user-level, never sudo: another process above 50 % of a core holds a scenario back (30 s
 #   at most), one above 20 % is noted; swap that grows during a scenario has it run again once; the
 #   free memory, the power source and the load are noted;
@@ -369,6 +371,7 @@ case "$1" in
                     # Pairs, ABBA, until the interval of the median ratio is within the target.
                     ratios=()
                     pair=0
+                    held=0
                     while :; do
                         pair=$((pair + 1))
                         log="$out/$name-$(basename "$file")-$threads-$attempt-$pair"
@@ -382,11 +385,15 @@ case "$1" in
 
                         ratios+=("$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.5f", a / b }')")
                         [ "$pair" -ge "$alternations" ] || continue
-                        [ "$pair" -ge "$most" ] && break
-                        awk -v target="$target" "$stats"' BEGIN {
+                        if awk -v target="$target" "$stats"' BEGIN {
                             n = ARGC - 1; for (i = 0; i < n; i++) r[i] = ARGV[i + 1] + 0
                             interval(r, n); m = median(r, n)
-                            exit (100 * (high - low) / 2 / m <= target) ? 0 : 1 }' "${ratios[@]}" && break
+                            exit (100 * (high - low) / 2 / m <= target) ? 0 : 1 }' "${ratios[@]}"; then
+                            held=1
+                            break
+                        fi
+
+                        [ "$pair" -ge "$most" ] && break
                     done
 
                     if [ "$canary" -eq 1 ]; then
@@ -396,7 +403,9 @@ case "$1" in
                     control after "$label" "$threads" 0
                     grew=0
                     awk -v a="${swap_before:-0}" -v b="$(swap_used)" 'BEGIN { exit (b > a + 1) ? 0 : 1 }' && grew=1
-                    if { [ "$off" -eq 1 ] || [ "$grew" -eq 1 ]; } && [ "$attempt" -eq 1 ]; then
+                    # A canary off asks for the scenario again only when its pairs did not hold the target
+                    # anyway: the pairs share what the machine did, and a tight interval already says so.
+                    if { { [ "$off" -eq 1 ] && [ "$held" -eq 0 ]; } || [ "$grew" -eq 1 ]; } && [ "$attempt" -eq 1 ]; then
                         printf 'replay\t%s\t%s\t%s\t%s\tcanary off %s, swap grew %s\n' "$(now)" "$label" "$threads" "$attempt" "$off" "$grew" >> "$tsv"
                         continue
                     fi
