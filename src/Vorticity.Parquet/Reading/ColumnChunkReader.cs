@@ -20,16 +20,18 @@ using Vorticity.Types.Numerics;
 namespace Vorticity.Parquet.Reading;
 
 /// <summary>
-/// One flat column's chunk in the row group being read: its pages parsed in place, each decoded
-/// whole into buffers of the engine's pool, and cut into the nodes of the batches the scan asks for.
+/// One column's chunk in the row group being read: its pages parsed in place, each decoded whole
+/// into buffers of the engine's pool, and cut into the nodes of the batches the scan asks for.
 /// </summary>
 /// <remarks>
 /// <para>
-/// A page decodes into what its canonical node holds: a validity bitmap from its definition levels,
-/// none when it has no null, and one slot per row for its values, a null row's slot zero — the
-/// values themselves when the page has no null, the decompression's destination when it was
-/// compressed. A batch that is one whole page, every batch of a file this package wrote, is the
-/// page's own buffers; any other batch copies its rows out of the pages it spans into its arena.
+/// A flat column's page decodes into what its canonical node holds: a validity bitmap from its
+/// definition levels, none when it has no null, and one slot per row for its values, a null row's
+/// slot zero — the values themselves when the page has no null, the decompression's destination
+/// when it was compressed. A batch that is one whole page, every batch of a file this package
+/// wrote, is the page's own buffers; any other batch copies its rows out of the pages it spans
+/// into its arena. A column under a list, a map or a struct is read by its levels instead, as
+/// <c>ColumnChunkReader.Nested.cs</c> describes.
 /// </para>
 /// <para>
 /// A page's buffers stay with the reader until the batch after the last one that read them is asked
@@ -37,7 +39,7 @@ namespace Vorticity.Parquet.Reading;
 /// a byte array's views may point into, stay until the row group ends.
 /// </para>
 /// </remarks>
-internal sealed class ColumnChunkReader : IDisposable
+internal sealed partial class ColumnChunkReader : IDisposable
 {
     private const string Encoding = "parquet.plain";
 
@@ -84,14 +86,23 @@ internal sealed class ColumnChunkReader : IDisposable
 
     private VortexBuffer[] _gathered = new VortexBuffer[4];
 
-    internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, AlignedBufferPool pool, long cap)
+    /// <summary>A reader of <paramref name="leaf"/>'s chunks.</summary>
+    /// <param name="leaf">The column.</param>
+    /// <param name="type">The column's dtype where it sits in the schema read.</param>
+    /// <param name="validityType">The dtype of a validity bitmap's node.</param>
+    /// <param name="pool">The pool pages decode into.</param>
+    /// <param name="cap">The most bytes a page may decode to.</param>
+    /// <param name="nested">Whether the column is read by its levels, for the field above it to assemble.</param>
+    internal ColumnChunkReader(ParquetColumn leaf, DType type, DType validityType, AlignedBufferPool pool, long cap, bool nested = false)
     {
-        if (leaf.MaxRepetitionLevel > 0 || leaf.MaxDefinitionLevel > 1)
+        if (!nested && (leaf.MaxRepetitionLevel > 0 || leaf.MaxDefinitionLevel > 1))
         {
-            throw new ParquetUnsupportedException(string.Join('.', leaf.Path), ParquetComponentKind.Feature,
-                $"The column '{string.Join('.', leaf.Path)}' is nested; this version of the reader reads flat columns only.");
+            ParquetThrow.Format($"The column '{string.Join('.', leaf.Path)}' is nested and read as a flat one.");
         }
 
+        _nested = nested;
+        _repetitionWidth = 32 - BitOperations.LeadingZeroCount((uint)leaf.MaxRepetitionLevel);
+        _definitionWidth = 32 - BitOperations.LeadingZeroCount((uint)leaf.MaxDefinitionLevel);
         _leaf = leaf;
         _form = leaf.Form;
         _type = type;
@@ -143,6 +154,7 @@ internal sealed class ColumnChunkReader : IDisposable
         _position = 0;
         _rowsLeft = rows;
         _rowsUnread = rows;
+        _pastFirstPage = false;
     }
 
     /// <summary>The next <paramref name="rows"/> rows, as a node of <paramref name="context"/>'s arena.</summary>
@@ -195,10 +207,20 @@ internal sealed class ColumnChunkReader : IDisposable
             _dictionary = null;
         }
 
+        _plan.Clear();
+        _dense = default;
+        _denseBuffers = 0;
+        Entries = 0;
+        ValueCount = 0;
         _chunk = default;
     }
 
-    public void Dispose() => Release();
+    public void Dispose()
+    {
+        Release();
+        _levels?.Dispose();
+        _levels = null;
+    }
 
     private void Retire()
     {
@@ -266,33 +288,7 @@ internal sealed class ColumnChunkReader : IDisposable
                 }
             }
 
-            ReadOnlySpan<byte> from = page.Values.Span;
-            if (_slot == 0)
-            {
-                BitmapKernels.CopyRange(from, page.Read, into, done, take);
-            }
-            else if (_views)
-            {
-                // Pages whose views point into one buffer, the dictionary's, share its entry.
-                int bufferBase = buffers > 0 && Same(_gathered[buffers - 1], page.Data) ? buffers - 1 : buffers;
-                if (bufferBase == buffers)
-                {
-                    if (buffers == _gathered.Length)
-                    {
-                        Array.Resize(ref _gathered, buffers * 2);
-                    }
-
-                    _gathered[buffers++] = page.Data;
-                }
-
-                CanonicalConcat.RebaseInto(
-                    from.Slice(page.Read * _slot, take * _slot), into.Slice(done * _slot, take * _slot), take, bufferBase, 1, 0);
-            }
-            else
-            {
-                from.Slice(page.Read * _slot, take * _slot).CopyTo(into[(done * _slot)..]);
-            }
-
+            CopySlots(page, take, into, done, ref buffers);
             page.Read += take;
             done += take;
             if (page.Read == page.Rows)
@@ -310,6 +306,41 @@ internal sealed class ColumnChunkReader : IDisposable
         }
 
         return Node(context.Canonical, rows, validity, values, _gathered.AsSpan(0, buffers));
+    }
+
+    /// <summary>
+    /// Copies <paramref name="take"/> slots of <paramref name="page"/> from its read position into
+    /// <paramref name="into"/> from slot <paramref name="done"/>: bits, values, or views rebased onto
+    /// the gathered buffers, which the page's joins unless it is the one before it.
+    /// </summary>
+    private void CopySlots(Page page, int take, Span<byte> into, int done, ref int buffers)
+    {
+        ReadOnlySpan<byte> from = page.Values.Span;
+        if (_slot == 0)
+        {
+            BitmapKernels.CopyRange(from, page.Read, into, done, take);
+        }
+        else if (_views)
+        {
+            // Pages whose views point into one buffer, the dictionary's, share its entry.
+            int bufferBase = buffers > 0 && Same(_gathered[buffers - 1], page.Data) ? buffers - 1 : buffers;
+            if (bufferBase == buffers)
+            {
+                if (buffers == _gathered.Length)
+                {
+                    Array.Resize(ref _gathered, buffers * 2);
+                }
+
+                _gathered[buffers++] = page.Data;
+            }
+
+            CanonicalConcat.RebaseInto(
+                from.Slice(page.Read * _slot, take * _slot), into.Slice(done * _slot, take * _slot), take, bufferBase, 1, 0);
+        }
+        else
+        {
+            from.Slice(page.Read * _slot, take * _slot).CopyTo(into[(done * _slot)..]);
+        }
     }
 
     /// <summary>The node of the column's type over <paramref name="values"/>.</summary>
@@ -340,14 +371,18 @@ internal sealed class ColumnChunkReader : IDisposable
     }
 
     /// <summary>Parses pages until a data page, which it decodes whole.</summary>
-    private Page NextPage(ScanContext context)
+    private Page NextPage(ScanContext context) =>
+        TryNextPage(context) ?? ParquetThrow.Format<Page>($"The column chunk of '{Name}' ends before its rows do.");
+
+    /// <summary>Parses pages until a data page, which it decodes whole, or the chunk's end.</summary>
+    private Page? TryNextPage(ScanContext context)
     {
         while (true)
         {
             ReadOnlySpan<byte> rest = _chunk.Span[_position..];
             if (rest.IsEmpty)
             {
-                ParquetThrow.Format($"The column chunk of '{Name}' ends before its rows do.");
+                return null;
             }
 
             PageHeader header = PageHeader.Read(rest);
@@ -376,12 +411,6 @@ internal sealed class ColumnChunkReader : IDisposable
 
     private Page DecodeV2(ScanContext context, in PageHeader header, int at)
     {
-        int rows = Rows(header.RowCount);
-        if (header.ValueCount != rows)
-        {
-            ParquetThrow.Format($"A page of the flat column '{Name}' holds {header.ValueCount} values for {rows} rows.");
-        }
-
         // A flat column's repetition levels say nothing, and a required one's definition levels
         // neither: some writers write them anyway, and they are stepped over.
         int levels = header.RepetitionLevelsLength + header.DefinitionLevelsLength;
@@ -390,15 +419,34 @@ internal sealed class ColumnChunkReader : IDisposable
             ParquetThrow.Format($"A page of '{Name}' declares levels its bytes do not hold.");
         }
 
-        Page page = Rent(rows);
+        Page page = Rent(0);
         try
         {
-            int valid = _leaf.MaxDefinitionLevel == 0
-                ? rows
-                : Levels(page, _chunk.Slice(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
-            if (header.NullCount != rows - valid)
+            int valid;
+            if (_nested)
             {
-                ParquetThrow.Format($"A page of '{Name}' declares {header.NullCount} nulls where its levels hold {rows - valid}.");
+                valid = NestedLevelsV2(page, header, at);
+                if (_form == LeafForm.Null)
+                {
+                    return page;
+                }
+            }
+            else
+            {
+                int rows = Rows(header.RowCount);
+                if (header.ValueCount != rows)
+                {
+                    ParquetThrow.Format($"A page of the flat column '{Name}' holds {header.ValueCount} values for {rows} rows.");
+                }
+
+                page.Rows = rows;
+                valid = _leaf.MaxDefinitionLevel == 0
+                    ? rows
+                    : Levels(page, _chunk.Slice(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
+                if (header.NullCount != rows - valid)
+                {
+                    ParquetThrow.Format($"A page of '{Name}' declares {header.NullCount} nulls where its levels hold {rows - valid}.");
+                }
             }
 
             RequireEncoding(header.Encoding);
@@ -439,14 +487,17 @@ internal sealed class ColumnChunkReader : IDisposable
 
     private Page DecodeV1(ScanContext context, in PageHeader header, int at)
     {
-        int rows = Rows(header.ValueCount);
-        Page page = Rent(rows);
+        Page page = Rent(0);
+        NativeSegmentOwner? owner = null;
         try
         {
-            RequireEncoding(header.Encoding);
+            if (_form != LeafForm.Null)
+            {
+                RequireEncoding(header.Encoding);
+            }
+
             int size = header.UncompressedPageSize;
             VortexBuffer body = _chunk.Slice(at, header.CompressedPageSize);
-            NativeSegmentOwner? owner = null;
             if (_codec != CompressionCodec.Uncompressed)
             {
                 Cap(size);
@@ -459,48 +510,87 @@ internal sealed class ColumnChunkReader : IDisposable
                 ParquetThrow.Format($"An uncompressed page of '{Name}' holds {body.Length} bytes where its header declares {size}.");
             }
 
-            // The levels of a v1 page are inside its bytes: each behind its length when RLE.
-            int position = 0;
-            int valid = rows;
-            if (_leaf.MaxDefinitionLevel > 0 && header.DefinitionLevelEncoding == ParquetEncoding.BitPacked)
+            int position;
+            int valid;
+            if (_nested)
             {
-                // The deprecated packing of older files: no length before it, its bytes the levels'.
-                position = LegacyBitPacked.Bytes(rows, 1);
-                valid = LegacyLevels(page, body.Span, rows);
+                valid = NestedLevelsV1(page, header, body.Span, out position);
+                if (_form == LeafForm.Null)
+                {
+                    owner?.Dispose();
+                    return page;
+                }
             }
-            else if (_leaf.MaxDefinitionLevel > 0)
+            else
             {
-                if (header.DefinitionLevelEncoding != ParquetEncoding.Rle)
-                {
-                    throw new ParquetUnsupportedException(header.DefinitionLevelEncoding.ToString(), ParquetComponentKind.Encoding,
-                        $"The definition levels of '{Name}' are {header.DefinitionLevelEncoding}; the standard writes them RLE or BIT_PACKED.");
-                }
-
-                ReadOnlySpan<byte> span = body.Span;
-                if (span.Length < sizeof(int))
-                {
-                    ParquetThrow.Format($"A page of '{Name}' ends inside the length of its levels.");
-                }
-
-                int length = BinaryPrimitives.ReadInt32LittleEndian(span);
-                if (length < 0 || length > span.Length - sizeof(int))
-                {
-                    ParquetThrow.Format($"A page of '{Name}' declares levels past its bytes.");
-                }
-
-                valid = Levels(page, span.Slice(sizeof(int), length), rows);
-                position = sizeof(int) + length;
+                valid = FlatLevelsV1(page, header, body.Span, out position);
             }
 
-            Decode(page, header.Encoding, body.Slice(position, body.Length - position), owner, valid);
+            // The page's values take the decompression's block: it keeps it or gives it back.
+            NativeSegmentOwner? values = owner;
+            owner = null;
+            Decode(page, header.Encoding, body.Slice(position, body.Length - position), values, valid);
             return page;
         }
         catch
         {
+            owner?.Dispose();
             page.Release();
             _free.Push(page);
             throw;
         }
+    }
+
+    /// <summary>A flat column's v1 page: its rows, and the definition levels inside its bytes; the rows that hold a value.</summary>
+    private int FlatLevelsV1(Page page, in PageHeader header, ReadOnlySpan<byte> body, out int position)
+    {
+        int rows = Rows(header.ValueCount);
+        page.Rows = rows;
+
+        // The levels of a v1 page are inside its bytes: each behind its length when RLE.
+        position = 0;
+        if (_leaf.MaxDefinitionLevel == 0)
+        {
+            return rows;
+        }
+
+        if (header.DefinitionLevelEncoding == ParquetEncoding.BitPacked)
+        {
+            // The deprecated packing of older files: no length before it, its bytes the levels'.
+            position = LegacyBitPacked.Bytes(rows, 1);
+            return LegacyLevels(page, body, rows);
+        }
+
+        ReadOnlySpan<byte> levels = RleLevels(body, header.DefinitionLevelEncoding, "definition", ref position);
+        return Levels(page, levels, rows);
+    }
+
+    /// <summary>
+    /// A v1 page's run of RLE levels at <paramref name="position"/>: the hybrid behind its four-byte
+    /// length, which the position steps past.
+    /// </summary>
+    private ReadOnlySpan<byte> RleLevels(ReadOnlySpan<byte> body, ParquetEncoding encoding, string kind, ref int position)
+    {
+        if (encoding != ParquetEncoding.Rle)
+        {
+            throw new ParquetUnsupportedException(encoding.ToString(), ParquetComponentKind.Encoding,
+                $"The {kind} levels of '{Name}' are {encoding}; the standard writes them RLE or BIT_PACKED.");
+        }
+
+        if (body.Length - position < sizeof(int))
+        {
+            ParquetThrow.Format($"A page of '{Name}' ends inside the length of its {kind} levels.");
+        }
+
+        int length = BinaryPrimitives.ReadInt32LittleEndian(body[position..]);
+        if (length < 0 || length > body.Length - position - sizeof(int))
+        {
+            ParquetThrow.Format($"A page of '{Name}' declares {kind} levels past its bytes.");
+        }
+
+        ReadOnlySpan<byte> levels = body.Slice(position + sizeof(int), length);
+        position += sizeof(int) + length;
+        return levels;
     }
 
     /// <summary>A v1 page's levels in the deprecated BIT_PACKED encoding, into its validity; the rows that hold a value.</summary>
@@ -868,7 +958,8 @@ internal sealed class ColumnChunkReader : IDisposable
             ParquetEncoding.DeltaBinaryPacked => _form is LeafForm.Fixed or LeafForm.Narrowed && _leaf.Physical is PhysicalType.Int32 or PhysicalType.Int64,
             ParquetEncoding.DeltaLengthByteArray => _views,
             ParquetEncoding.DeltaByteArray => _views || _form == LeafForm.FixedBytes,
-            ParquetEncoding.ByteStreamSplit => _form is LeafForm.Fixed or LeafForm.Float16 or LeafForm.FixedBytes,
+            ParquetEncoding.ByteStreamSplit => _form is LeafForm.Fixed or LeafForm.Float16 or LeafForm.FixedBytes or LeafForm.Narrowed
+                || (_form == LeafForm.BigEndianDecimal && _width > 0),
             ParquetEncoding.Rle => _form == LeafForm.Bool,
             _ => false,
         };
@@ -1031,7 +1122,11 @@ internal sealed class ColumnChunkReader : IDisposable
         }
     }
 
-    /// <summary>A BYTE_STREAM_SPLIT page gathered back into values of the column's width.</summary>
+    /// <summary>
+    /// A BYTE_STREAM_SPLIT page gathered back into values of the column's physical width: straight
+    /// into the page's slots when it has no null and the column keeps that width, else densely and
+    /// then placed, narrowed or widened.
+    /// </summary>
     private void Streams(Page page, ReadOnlySpan<byte> source, int valid)
     {
         if (source.Length != (long)valid * _width)
@@ -1040,7 +1135,8 @@ internal sealed class ColumnChunkReader : IDisposable
         }
 
         int rows = page.Rows;
-        if (page.Validity is null)
+        bool kept = _form is not (LeafForm.Narrowed or LeafForm.BigEndianDecimal);
+        if (page.Validity is null && kept)
         {
             ByteStreamSplit.Decode(source, _width, Slots(page, rows * _width).WritableSpan);
             return;
@@ -1051,7 +1147,18 @@ internal sealed class ColumnChunkReader : IDisposable
         {
             Span<byte> values = dense.WritableSpan[..(valid * _width)];
             ByteStreamSplit.Decode(source, _width, values);
-            Place(page, values, valid);
+            if (_form == LeafForm.Narrowed)
+            {
+                Narrow(page, values, valid);
+            }
+            else if (_form == LeafForm.BigEndianDecimal)
+            {
+                Widen(page, values, valid);
+            }
+            else
+            {
+                Place(page, values, valid);
+            }
         }
         finally
         {
@@ -1278,11 +1385,24 @@ internal sealed class ColumnChunkReader : IDisposable
     }
 
     /// <summary>A page decoded whole, and how many of its rows batches have read.</summary>
+    /// <remarks>
+    /// A nested column's page counts its values as rows, one slot each and no validity, and its
+    /// entries apart: their levels, a byte per entry, repetition then definition.
+    /// </remarks>
     private sealed class Page
     {
         internal int Rows;
         internal int Read;
         internal int Nulls;
+
+        /// <summary>A nested column's entries: the levels the page holds, values or not.</summary>
+        internal int Entries;
+
+        /// <summary>The entries batches have read.</summary>
+        internal int EntriesRead;
+
+        /// <summary>A nested column's levels, a byte per entry: the repetition levels, then the definition levels.</summary>
+        internal NativeSegmentOwner? Levels;
 
         /// <summary>The validity bitmap, when the page holds a null.</summary>
         internal NativeSegmentOwner? Validity;
@@ -1299,19 +1419,29 @@ internal sealed class ColumnChunkReader : IDisposable
         /// <summary>A byte array page's bytes, which its views point into.</summary>
         internal VortexBuffer Data;
 
+        /// <summary>The repetition level of each entry; empty when the column does not repeat.</summary>
+        internal ReadOnlySpan<byte> Repetition(bool repeats) => repeats ? Levels!.WritableSpan[..Entries] : default;
+
+        /// <summary>The definition level of each entry; empty when every entry is defined.</summary>
+        internal ReadOnlySpan<byte> Definition(bool optional) => optional ? Levels!.WritableSpan.Slice(Entries, Entries) : default;
+
         internal void Release()
         {
             Validity?.Dispose();
             Slots?.Dispose();
             DataOwner?.Dispose();
+            Levels?.Dispose();
             Validity = null;
             Slots = null;
             DataOwner = null;
+            Levels = null;
             Values = default;
             Data = default;
             Rows = 0;
             Read = 0;
             Nulls = 0;
+            Entries = 0;
+            EntriesRead = 0;
         }
     }
 }

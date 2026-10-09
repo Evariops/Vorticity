@@ -22,7 +22,8 @@ namespace Vorticity.Parquet.Reading;
 /// <remarks>
 /// A batch holds <see cref="BatchRows"/> rows, or fewer at the end of a row group, which a batch never
 /// crosses: on a file this package wrote, that is one page of every column. The batches go through
-/// one context, whose arena holds what a batch copies and whose caps bound what it decodes.
+/// one context, whose arena holds what a batch copies and whose caps bound what it decodes. A field
+/// of lists, maps or structs is read by every column under it, and assembled from their levels.
 /// </remarks>
 internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 {
@@ -31,6 +32,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     private readonly ParquetFile _file;
     private readonly RowRange? _rows;
+
+    /// <summary>The column each reader reads.</summary>
     private readonly int[] _leaves;
     private readonly DType _struct;
     private readonly ScanCounters _metrics;
@@ -38,7 +41,15 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private readonly int _batchRows;
     private readonly ScanContext _context;
     private readonly SegmentRequestSet _chunks = new();
+
+    /// <summary>Every column the scan reads: a flat field's own, and those under a nested field.</summary>
     private readonly ColumnChunkReader[] _readers;
+
+    /// <summary>A field's assembler when it nests, else null.</summary>
+    private readonly NestedFieldReader?[] _nested;
+
+    /// <summary>A flat field's reader.</summary>
+    private readonly int[] _flat;
     private readonly int[] _slots;
     private readonly int[] _nodes;
     private RecordBatch? _current;
@@ -58,32 +69,45 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         ParquetSchema schema = file.Compiled;
         int[] fields = columns ?? Every(schema.Fields.Length);
         VortexField[] read = new VortexField[fields.Length];
-        _leaves = new int[fields.Length];
         for (int i = 0; i < fields.Length; i++)
         {
             ParquetField field = schema.Fields[fields[i]];
-            if (field.Column < 0)
-            {
-                throw new ParquetUnsupportedException(field.Name, ParquetComponentKind.Feature,
-                    $"The column '{field.Name}' is nested; this version of the reader reads flat columns only.");
-            }
-
             read[i] = new VortexField(field.Name, field.Type);
-            _leaves[i] = field.Column;
         }
 
         DTypeArena types = new();
         _struct = VortexTypes.ToDType(VortexSchema.Create(read), types);
         DType validity = types.Bool(Nullability.NonNullable);
         long cap = file.Options.MaxDecompressedSize;
+        AlignedBufferPool pool = file.Session.Options.EnginePool;
         _context = new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = cap });
-        _readers = new ColumnChunkReader[fields.Length];
-        for (int i = 0; i < _readers.Length; i++)
+        List<ColumnChunkReader> readers = [];
+        _nested = new NestedFieldReader?[fields.Length];
+        _flat = new int[fields.Length];
+        for (int i = 0; i < fields.Length; i++)
         {
-            _readers[i] = new ColumnChunkReader(schema.Columns[_leaves[i]], _struct.GetField(i), validity, file.Session.Options.EnginePool, cap);
+            ParquetField field = schema.Fields[fields[i]];
+            if (field.Column >= 0)
+            {
+                _flat[i] = readers.Count;
+                readers.Add(new ColumnChunkReader(schema.Columns[field.Column], _struct.GetField(i), validity, pool, cap));
+            }
+            else
+            {
+                NestedFieldReader nested = new(field, _struct.GetField(i), schema, types, validity, pool, cap);
+                _nested[i] = nested;
+                readers.AddRange(nested.Readers);
+            }
         }
 
-        _slots = new int[fields.Length];
+        _readers = readers.ToArray();
+        _leaves = new int[_readers.Length];
+        for (int i = 0; i < _readers.Length; i++)
+        {
+            _leaves[i] = _readers[i].Column.Ordinal;
+        }
+
+        _slots = new int[_readers.Length];
         _nodes = new int[fields.Length];
     }
 
@@ -103,9 +127,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         int rows = (int)Math.Min(_batchRows, _groupRows - _groupRead);
-        for (int i = 0; i < _readers.Length; i++)
+        for (int i = 0; i < _nodes.Length; i++)
         {
-            _nodes[i] = _readers[i].Read(_context, rows);
+            _nodes[i] = _nested[i] is { } nested ? nested.Read(_context, rows) : _readers[_flat[i]].Read(_context, rows);
         }
 
         CanonicalArena arena = _context.Canonical;

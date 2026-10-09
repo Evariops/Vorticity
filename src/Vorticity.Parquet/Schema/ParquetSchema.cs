@@ -118,6 +118,12 @@ internal sealed class ParquetField
 
     internal int LeafCount { get; init; }
 
+    /// <summary>
+    /// Whether the field reads as not null though its file lets it be: a map's key some writers made
+    /// optional, whose null the read refuses where it meets one.
+    /// </summary>
+    internal bool RefusesNull { get; set; }
+
     internal bool IsNullable => Type.IsNullable;
 }
 
@@ -821,13 +827,11 @@ internal sealed class ParquetSchema
                 ParquetThrow.Format($"The MAP '{name}' does not hold a repeated group of a key and a value.");
             }
 
+            // The standard requires the key, and some writers made it optional: it reads as required,
+            // and a null key is refused where the read meets one.
             int keyIndex = entryNode.FirstChild;
-            if (elements[keyIndex].Repetition != FieldRepetition.Required)
-            {
-                ParquetThrow.Format($"The MAP '{name}' has a key that may be null.");
-            }
-
             ParquetField key = Type(keyIndex, "key", nullable: false);
+            key.RefusesNull = elements[keyIndex].Repetition != FieldRepetition.Required;
             ParquetField value;
             if (entryNode.ChildCount == 2)
             {

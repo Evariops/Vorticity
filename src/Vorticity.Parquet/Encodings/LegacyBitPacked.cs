@@ -40,4 +40,40 @@ internal static class LegacyBitPacked
 
         return set;
     }
+
+    /// <summary>
+    /// Decodes <c>levels.Length</c> levels of <paramref name="width"/> bits, at most 8, each read from
+    /// its most significant bit, into a byte each.
+    /// </summary>
+    /// <exception cref="ParquetFormatException">The data holds fewer levels.</exception>
+    internal static void ReadLevels(ReadOnlySpan<byte> data, int width, Span<byte> levels)
+    {
+        if ((uint)width > 8)
+        {
+            ParquetThrow.Format($"BIT_PACKED levels of {width} bits do not fit a byte.");
+        }
+
+        if (data.Length < Bytes(levels.Length, width))
+        {
+            ParquetThrow.Truncated("BIT_PACKED levels");
+        }
+
+        // A window of the stream's next bits, its oldest at the top: a byte enters at the bottom
+        // when fewer bits than a level are left in it.
+        uint window = 0;
+        int held = 0;
+        int next = 0;
+        uint mask = (1u << width) - 1;
+        for (int i = 0; i < levels.Length; i++)
+        {
+            if (held < width)
+            {
+                window = (window << 8) | data[next++];
+                held += 8;
+            }
+
+            held -= width;
+            levels[i] = (byte)((window >> held) & mask);
+        }
+    }
 }
