@@ -12,9 +12,9 @@ not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
 
 **The sections that compare Vorticity with Rust are not measured on x64**: each says which
 arguments write it. The sections that compare Vorticity with itself are: the encodings column by
-column, the advice, and the kernels against their baselines, measured with each scan pass
-taking over the mapping the previous one left, where [the benchmark page](benchmarks.md) maps the
-file anew at every call. The kernel tables' speedups are computed from the Mean column of their run.
+column, the advice, and the kernels against their baselines, each scan mapping its file anew, as on
+[the benchmark page](benchmarks.md). The kernel tables' speedups are computed from the Mean column
+of their run.
 
 * **The two sides.** Vorticity as a Native AOT binary built for the machine's instruction set,
   with the workstation garbage collector, where a section says so, and on the JIT otherwise. Vortex
@@ -85,7 +85,8 @@ on an x64 machine.
 One column of 10,000,000 rows per file, written under each compression profile and each hint that
 applies to it, then opened and read. A **scan** decodes every value to its plain form and reads it
 once; a **take** reads 1,000 rows spread over the file. Each figure is the median of 3 passes after
-1 warm-up, the file in the page cache; a write is net of generating its rows. **Crosses at** is the
+1 warm-up, the file in the page cache and mapped anew by each pass, so that a larger file pays for its
+pages on every read; a write is net of generating its rows. **Crosses at** is the
 storage throughput at which a configuration and `Auto` read the column whole in the same time,
 counting its bytes at that throughput and then its scan: below it the smaller file reads faster
 end to end, above it the faster decode does. What the figures mean for a choice is in
@@ -100,27 +101,27 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| a sequence | Sequence x77 | 0.00 | 26 | 2.8 | 1.19 |  |
-| sorted runs of 1 000 | RunEnd x77 | 0.01 | 55 | 2.3 | 1.15 | None: Canonical x77, 8.00 B/value, scan 1.4 ms, take 0.29 ms; reads faster above 88,339 MB/s |
-| timestamps (ms, increasing, jittered) | BitPacked x77 | 3.38 | 85 | 6.6 | 0.60 | Smallest: Zstd x77, 2.07 B/value, scan 74.5 ms, take 60.30 ms; reads faster below 193 MB/s; None: Canonical x77, 8.00 B/value, scan 1.3 ms, take 0.25 ms; reads faster above 8,691 MB/s |
-| random in 0..999 | BitPacked x77 | 1.25 | 0 | 2.4 | 0.30 |  |
-| 16 distinct, random order | Dictionary x77 | 0.51 | 38 | 2.3 | 0.49 | None: Canonical x77, 8.00 B/value, scan 1.4 ms, take 0.24 ms; reads faster above 79,377 MB/s |
-| 100 003 distinct, repeating | BitPacked x77 | 4.63 | 32 | 2.6 | 0.26 | Auto, 16 MiB chunks: Dictionary x5, 2.36 B/value, scan 6.7 ms, take 0.47 ms; reads faster below 5,585 MB/s |
-| uniform 64-bit | Canonical x77 | 8.00 | 31 | 1.4 | 0.22 |  |
-| random in 0..999, 10 % null | BitPacked x82 | 1.38 | 15 | 3.6 | 0.31 | hint Dictionary: Dictionary x82, 1.27 B/value, scan 6.3 ms, take 0.53 ms; reads faster below 417 MB/s |
+| a sequence | Sequence x77 | 0.00 | 13 | 1.8 | 0.26 |  |
+| sorted runs of 1 000 | RunEnd x77 | 0.01 | 14 | 2.7 | 0.36 | Smallest: RunEnd x76, Pco x1, 0.01 B/value, scan 3.0 ms, take 0.74 ms; reads faster below 96 MB/s |
+| timestamps (ms, increasing, jittered) | BitPacked x77 | 3.38 | 70 | 12.9 | 1.72 | Smallest: Pco x77, 1.35 B/value, scan 112.6 ms, take 118.47 ms; reads faster below 204 MB/s |
+| random in 0..999 | BitPacked x77 | 1.25 | 22 | 5.5 | 1.54 |  |
+| 16 distinct, random order | Dictionary x77 | 0.51 | 55 | 3.3 | 1.14 |  |
+| 100 003 distinct, repeating | BitPacked x77 | 4.63 | 38 | 12.9 | 1.51 | Smallest: Pco x77, 0.06 B/value, scan 72.5 ms, take 69.30 ms; reads faster below 767 MB/s; Auto, 16 MiB chunks: Dictionary x5, 2.36 B/value, scan 9.5 ms, take 1.32 ms; reads faster at any throughput |
+| uniform 64-bit | Canonical x77 | 8.00 | 43 | 27.0 | 2.14 |  |
+| random in 0..999, 10 % null | BitPacked x82 | 1.38 | 25 | 6.3 | 1.35 | Smallest: Pco x82, 1.26 B/value, scan 45.3 ms, take 44.57 ms; reads faster below 32 MB/s |
 
 <details><summary>a sequence: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Sequence x77 | 38,836 | 0.00 | 26 | 2.8 | 1.19 |  |
-| Fastest | Sequence x77 | 38,836 | 0.00 | 27 | 2.7 | 1.22 | same |
-| Smallest | Sequence x77 | 38,836 | 0.00 | 29 | 2.8 | 1.48 | same |
-| None | Canonical x77 | 80,043,716 | 8.00 | 51 | 2.8 | 1.42 | reads slower at any throughput |
-| hint Dictionary | Sequence x77 | 38,836 | 0.00 | 195 | 1.7 | 0.43 | reads faster at any throughput |
-| hint BitPacked | Sequence x77 | 38,836 | 0.00 | 5 | 1.7 | 0.42 | reads faster at any throughput |
-| hint RunEnd | Sequence x77 | 38,836 | 0.00 | 4 | 1.7 | 0.41 | reads faster at any throughput |
-| hint Zstd | Sequence x77 | 38,836 | 0.00 | 4 | 1.7 | 0.43 | reads faster at any throughput |
+| Auto | Sequence x77 | 38,844 | 0.00 | 13 | 1.8 | 0.26 |  |
+| Fastest | Sequence x77 | 38,844 | 0.00 | 22 | 1.9 | 0.28 | reads slower at any throughput |
+| Smallest | Sequence x77 | 38,844 | 0.00 | 15 | 1.8 | 0.27 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 51 | 23.2 | 1.68 | reads slower at any throughput |
+| hint Dictionary | Sequence x77 | 38,844 | 0.00 | 121 | 1.8 | 0.28 | same |
+| hint BitPacked | Sequence x77 | 38,844 | 0.00 | 15 | 1.8 | 0.28 | same |
+| hint RunEnd | Sequence x77 | 38,844 | 0.00 | 13 | 2.1 | 0.37 | reads slower at any throughput |
+| hint Zstd | Sequence x77 | 38,844 | 0.00 | 11 | 1.8 | 0.27 | same |
 
 </details>
 
@@ -128,14 +129,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | RunEnd x77 | 87,996 | 0.01 | 55 | 2.3 | 1.15 |  |
-| Fastest | RunEnd x77 | 87,996 | 0.01 | 67 | 2.3 | 1.14 | same |
-| Smallest | RunEnd x76, Zstd x1 | 87,964 | 0.01 | 90 | 3.6 | 1.79 | reads slower at any throughput |
-| None | Canonical x77 | 80,043,708 | 8.00 | 43 | 1.4 | 0.29 | reads faster above 88,339 MB/s |
-| hint Dictionary | Dictionary x77 | 1,449,884 | 0.14 | 34 | 5.8 | 1.65 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 10,034,452 | 1.00 | 75 | 4.8 | 0.44 | reads slower at any throughput |
-| hint RunEnd | RunEnd x77 | 87,996 | 0.01 | 23 | 2.4 | 0.65 | reads slower at any throughput |
-| hint Zstd | Zstd x77 | 136,620 | 0.01 | 13 | 6.3 | 4.86 | reads slower at any throughput |
+| Auto | RunEnd x77 | 88,004 | 0.01 | 14 | 2.7 | 0.36 |  |
+| Fastest | RunEnd x77 | 88,004 | 0.01 | 10 | 2.6 | 0.38 | same |
+| Smallest | RunEnd x76, Pco x1 | 53,748 | 0.01 | 110 | 3.0 | 0.74 | reads faster below 96 MB/s |
+| None | Canonical x77 | 80,043,716 | 8.00 | 83 | 21.3 | 1.80 | reads slower at any throughput |
+| hint Dictionary | Dictionary x77 | 1,449,892 | 0.14 | 17 | 6.2 | 1.53 | reads slower at any throughput |
+| hint BitPacked | BitPacked x77 | 10,034,460 | 1.00 | 21 | 5.7 | 1.13 | reads slower at any throughput |
+| hint RunEnd | RunEnd x77 | 88,004 | 0.01 | 10 | 2.6 | 0.36 | same |
+| hint Zstd | Zstd x77 | 136,628 | 0.01 | 12 | 3.0 | 1.15 | reads slower at any throughput |
 
 </details>
 
@@ -143,14 +144,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 33,795,164 | 3.38 | 85 | 6.6 | 0.60 |  |
-| Fastest | BitPacked x77 | 33,795,164 | 3.38 | 16 | 3.6 | 0.29 | reads faster at any throughput |
-| Smallest | Zstd x77 | 20,700,788 | 2.07 | 187 | 74.5 | 60.30 | reads faster below 193 MB/s |
-| None | Canonical x77 | 80,043,716 | 8.00 | 28 | 1.3 | 0.25 | reads faster above 8,691 MB/s |
-| hint Dictionary | BitPacked x77 | 33,795,164 | 3.38 | 93 | 3.6 | 0.26 | reads faster at any throughput |
-| hint BitPacked | BitPacked x77 | 33,795,164 | 3.38 | 14 | 3.6 | 0.26 | reads faster at any throughput |
-| hint RunEnd | BitPacked x77 | 33,795,164 | 3.38 | 26 | 3.6 | 0.28 | reads faster at any throughput |
-| hint Zstd | Zstd x77 | 20,700,788 | 2.07 | 150 | 74.1 | 60.66 | reads faster below 194 MB/s |
+| Auto | BitPacked x77 | 33,795,172 | 3.38 | 70 | 12.9 | 1.72 |  |
+| Fastest | BitPacked x77 | 33,795,172 | 3.38 | 30 | 11.5 | 1.42 | reads faster at any throughput |
+| Smallest | Pco x77 | 13,472,444 | 1.35 | 453 | 112.6 | 118.47 | reads faster below 204 MB/s |
+| None | Canonical x77 | 80,043,724 | 8.00 | 43 | 19.3 | 1.57 | reads slower at any throughput |
+| hint Dictionary | BitPacked x77 | 33,795,172 | 3.38 | 156 | 11.2 | 1.45 | reads faster at any throughput |
+| hint BitPacked | BitPacked x77 | 33,795,172 | 3.38 | 29 | 11.3 | 1.39 | reads faster at any throughput |
+| hint RunEnd | BitPacked x77 | 33,795,172 | 3.38 | 49 | 11.1 | 1.41 | reads faster at any throughput |
+| hint Zstd | Zstd x77 | 20,700,796 | 2.07 | 182 | 80.8 | 35.05 | reads faster below 193 MB/s |
 
 </details>
 
@@ -158,14 +159,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 12,544,276 | 1.25 | 0 | 2.4 | 0.30 |  |
-| Fastest | BitPacked x77 | 12,544,276 | 1.25 | 0 | 2.4 | 0.25 | same |
-| Smallest | BitPacked x77 | 12,544,276 | 1.25 | 151 | 2.4 | 0.25 | same |
-| None | Canonical x77 | 80,043,708 | 8.00 | 5 | 1.3 | 0.23 | reads faster above 57,820 MB/s |
-| hint Dictionary | Dictionary x77 | 12,652,716 | 1.27 | 28 | 5.7 | 0.56 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 12,544,276 | 1.25 | 0 | 2.7 | 0.41 | reads slower at any throughput |
-| hint RunEnd | BitPacked x77 | 12,544,276 | 1.25 | 0 | 2.5 | 0.32 | same |
-| hint Zstd | Zstd x77 | 20,141,164 | 2.01 | 143 | 78.7 | 64.11 | reads slower at any throughput |
+| Auto | BitPacked x77 | 12,544,284 | 1.25 | 22 | 5.5 | 1.54 |  |
+| Fastest | BitPacked x77 | 12,544,284 | 1.25 | 32 | 6.9 | 1.67 | reads slower at any throughput |
+| Smallest | BitPacked x76, Pco x1 | 12,543,924 | 1.25 | 344 | 5.1 | 1.34 | reads faster at any throughput |
+| None | Canonical x77 | 80,043,716 | 8.00 | 43 | 21.5 | 1.82 | reads slower at any throughput |
+| hint Dictionary | Dictionary x77 | 12,652,724 | 1.27 | 70 | 6.5 | 1.25 | reads slower at any throughput |
+| hint BitPacked | BitPacked x77 | 12,544,284 | 1.25 | 23 | 4.9 | 1.15 | reads faster at any throughput |
+| hint RunEnd | BitPacked x77 | 12,544,284 | 1.25 | 23 | 7.0 | 1.64 | reads slower at any throughput |
+| hint Zstd | Zstd x77 | 20,141,172 | 2.01 | 186 | 78.1 | 31.66 | reads slower at any throughput |
 
 </details>
 
@@ -173,15 +174,15 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 5,063,740 | 0.51 | 38 | 2.3 | 0.49 |  |
-| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 37 | 2.0 | 0.30 | reads faster at any throughput |
-| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 169 | 2.0 | 0.31 | reads faster at any throughput |
-| None | Canonical x77 | 80,043,724 | 8.00 | 31 | 1.4 | 0.24 | reads faster above 79,377 MB/s |
-| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 37 | 2.0 | 0.34 | reads faster at any throughput |
-| hint BitPacked | Dictionary x77 | 5,063,740 | 0.51 | 102 | 2.0 | 0.32 | reads faster at any throughput |
-| hint RunEnd | Dictionary x77 | 5,063,740 | 0.51 | 93 | 2.0 | 0.31 | reads faster at any throughput |
-| hint Zstd | Zstd x77 | 10,539,388 | 1.05 | 125 | 61.4 | 49.82 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 51 | 2.9 | 0.50 | reads slower at any throughput |
+| Auto | Dictionary x77 | 5,063,748 | 0.51 | 55 | 3.3 | 1.14 |  |
+| Fastest | Dictionary x77 | 5,063,748 | 0.51 | 66 | 3.1 | 1.09 | reads faster at any throughput |
+| Smallest | Dictionary x76, Pco x1 | 5,063,588 | 0.51 | 614 | 3.4 | 1.37 | same |
+| None | Canonical x77 | 80,043,732 | 8.00 | 55 | 19.7 | 1.47 | reads slower at any throughput |
+| hint Dictionary | Dictionary x77 | 5,063,748 | 0.51 | 54 | 3.1 | 1.08 | reads faster at any throughput |
+| hint BitPacked | Dictionary x77 | 5,063,748 | 0.51 | 127 | 3.1 | 1.07 | reads faster at any throughput |
+| hint RunEnd | Dictionary x77 | 5,063,748 | 0.51 | 105 | 3.2 | 1.08 | same |
+| hint Zstd | Zstd x77 | 10,539,396 | 1.05 | 139 | 51.4 | 24.40 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 5,032,932 | 0.50 | 84 | 3.1 | 1.05 | reads faster at any throughput |
 
 </details>
 
@@ -189,15 +190,15 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 46,295,644 | 4.63 | 32 | 2.6 | 0.26 |  |
-| Fastest | BitPacked x77 | 46,295,644 | 4.63 | 37 | 2.6 | 0.29 | same |
-| Smallest | BitPacked x77 | 46,295,644 | 4.63 | 162 | 2.6 | 0.29 | same |
-| None | Canonical x77 | 80,043,716 | 8.00 | 40 | 1.3 | 0.22 | reads faster above 25,357 MB/s |
-| hint Dictionary | BitPacked x77 | 46,295,644 | 4.63 | 105 | 2.7 | 0.34 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 46,295,644 | 4.63 | 33 | 2.6 | 0.32 | same |
-| hint RunEnd | BitPacked x77 | 46,295,644 | 4.63 | 58 | 2.6 | 0.29 | same |
-| hint Zstd | Zstd x77 | 51,815,860 | 5.18 | 132 | 60.3 | 49.04 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 23,603,540 | 2.36 | 117 | 6.7 | 0.47 | reads faster below 5,585 MB/s |
+| Auto | BitPacked x77 | 46,295,652 | 4.63 | 38 | 12.9 | 1.51 |  |
+| Fastest | BitPacked x77 | 46,295,652 | 4.63 | 64 | 16.5 | 1.96 | reads slower at any throughput |
+| Smallest | Pco x77 | 580,924 | 0.06 | 423 | 72.5 | 69.30 | reads faster below 767 MB/s |
+| None | Canonical x77 | 80,043,724 | 8.00 | 42 | 19.6 | 1.56 | reads slower at any throughput |
+| hint Dictionary | BitPacked x77 | 46,295,652 | 4.63 | 123 | 12.7 | 1.46 | same |
+| hint BitPacked | BitPacked x77 | 46,295,652 | 4.63 | 37 | 13.2 | 1.55 | same |
+| hint RunEnd | BitPacked x77 | 46,295,652 | 4.63 | 86 | 13.7 | 1.56 | reads slower at any throughput |
+| hint Zstd | Zstd x77 | 51,815,868 | 5.18 | 128 | 62.1 | 42.11 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 23,603,548 | 2.36 | 138 | 9.5 | 1.32 | reads faster at any throughput |
 
 </details>
 
@@ -205,14 +206,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Canonical x77 | 80,043,724 | 8.00 | 31 | 1.4 | 0.22 |  |
-| Fastest | Canonical x77 | 80,043,724 | 8.00 | 30 | 1.3 | 0.24 | reads faster at any throughput |
-| Smallest | Canonical x77 | 80,043,724 | 8.00 | 95 | 1.4 | 0.28 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 30 | 1.3 | 0.22 | reads faster at any throughput |
-| hint Dictionary | Canonical x77 | 80,043,724 | 8.00 | 130 | 1.3 | 0.24 | same |
-| hint BitPacked | Canonical x77 | 80,043,724 | 8.00 | 97 | 1.3 | 0.22 | reads faster at any throughput |
-| hint RunEnd | Canonical x77 | 80,043,724 | 8.00 | 101 | 1.5 | 0.27 | same |
-| hint Zstd | Canonical x77 | 80,043,724 | 8.00 | 105 | 1.3 | 0.27 | reads faster at any throughput |
+| Auto | Canonical x77 | 80,043,732 | 8.00 | 43 | 27.0 | 2.14 |  |
+| Fastest | Canonical x77 | 80,043,732 | 8.00 | 43 | 20.0 | 1.62 | reads faster at any throughput |
+| Smallest | Canonical x77 | 80,043,732 | 8.00 | 350 | 20.1 | 1.70 | reads faster at any throughput |
+| None | Canonical x77 | 80,043,732 | 8.00 | 43 | 23.3 | 1.64 | reads faster at any throughput |
+| hint Dictionary | Canonical x77 | 80,043,732 | 8.00 | 152 | 20.0 | 1.58 | reads faster at any throughput |
+| hint BitPacked | Canonical x77 | 80,043,732 | 8.00 | 117 | 19.9 | 1.68 | reads faster at any throughput |
+| hint RunEnd | Canonical x77 | 80,043,732 | 8.00 | 114 | 24.1 | 2.27 | reads faster at any throughput |
+| hint Zstd | Canonical x77 | 80,043,732 | 8.00 | 132 | 18.5 | 1.52 | reads faster at any throughput |
 
 </details>
 
@@ -220,14 +221,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x82 | 13,800,452 | 1.38 | 15 | 3.6 | 0.31 |  |
-| Fastest | BitPacked x82 | 13,800,452 | 1.38 | 15 | 3.5 | 0.30 | same |
-| Smallest | BitPacked x82 | 13,800,452 | 1.38 | 164 | 3.5 | 0.31 | same |
-| None | Canonical x82 | 81,294,660 | 8.13 | 34 | 1.4 | 0.33 | reads faster above 31,597 MB/s |
-| hint Dictionary | Dictionary x82 | 12,676,388 | 1.27 | 68 | 6.3 | 0.53 | reads faster below 417 MB/s |
-| hint BitPacked | BitPacked x82 | 13,800,452 | 1.38 | 14 | 3.5 | 0.32 | same |
-| hint RunEnd | BitPacked x82 | 13,800,452 | 1.38 | 15 | 3.5 | 0.30 | same |
-| hint Zstd | Zstd x82 | 19,283,932 | 1.93 | 156 | 74.0 | 58.66 | reads slower at any throughput |
+| Auto | BitPacked x82 | 13,800,460 | 1.38 | 25 | 6.3 | 1.35 |  |
+| Fastest | BitPacked x82 | 13,800,460 | 1.38 | 23 | 7.6 | 1.97 | reads slower at any throughput |
+| Smallest | Pco x82 | 12,567,268 | 1.26 | 311 | 45.3 | 44.57 | reads faster below 32 MB/s |
+| None | Canonical x82 | 81,294,668 | 8.13 | 42 | 20.6 | 2.10 | reads slower at any throughput |
+| hint Dictionary | Dictionary x82 | 12,676,396 | 1.27 | 89 | 10.0 | 1.52 | reads faster below 307 MB/s |
+| hint BitPacked | BitPacked x82 | 13,800,460 | 1.38 | 27 | 6.3 | 1.34 | same |
+| hint RunEnd | BitPacked x82 | 13,800,460 | 1.38 | 56 | 9.5 | 2.06 | reads slower at any throughput |
+| hint Zstd | Zstd x82 | 19,283,940 | 1.93 | 169 | 65.0 | 30.96 | reads slower at any throughput |
 
 </details>
 
@@ -235,23 +236,23 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| prices (2 decimals) | Alp x77 | 2.50 | 59 | 6.9 | 0.55 |  |
-| 16 distinct, random order | Dictionary x77 | 0.51 | 30 | 2.1 | 0.34 |  |
-| 1 000 distinct prices | Dictionary x77 | 1.28 | 68 | 3.8 | 0.42 |  |
-| 100 003 distinct, repeating | Zstd x77 | 1.69 | 185 | 79.0 | 71.68 | Auto, 16 MiB chunks: Dictionary x5, 2.21 B/value, scan 7.4 ms, take 3.33 ms; reads faster above 73 MB/s; None: Canonical x77, 8.00 B/value, scan 1.3 ms, take 0.23 ms; reads faster above 812 MB/s |
-| uniform in [0, 1) | AlpRd x77 | 6.91 | 45 | 5.6 | 0.71 | None: Canonical x77, 8.00 B/value, scan 1.4 ms, take 0.27 ms; reads faster above 2,658 MB/s |
+| prices (2 decimals) | Alp x77 | 2.50 | 47 | 10.5 | 1.33 |  |
+| 16 distinct, random order | Dictionary x77 | 0.51 | 47 | 3.1 | 1.08 |  |
+| 1 000 distinct prices | Dictionary x77 | 1.28 | 90 | 9.8 | 1.84 | hint Alp: Alp x77, 1.28 B/value, scan 7.5 ms, take 1.31 ms; reads faster at any throughput |
+| 100 003 distinct, repeating | Zstd x77 | 1.69 | 161 | 48.8 | 23.24 | Auto, 16 MiB chunks: Dictionary x5, 2.21 B/value, scan 11.0 ms, take 3.70 ms; reads faster above 138 MB/s; None: Canonical x77, 8.00 B/value, scan 19.8 ms, take 1.56 ms; reads faster above 2,178 MB/s |
+| uniform in [0, 1) | AlpRd x77 | 6.91 | 60 | 22.9 | 2.46 |  |
 
 <details><summary>prices (2 decimals): every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Alp x77 | 25,049,724 | 2.50 | 59 | 6.9 | 0.55 |  |
-| Fastest | Alp x77 | 25,049,724 | 2.50 | 40 | 4.6 | 0.34 | reads faster at any throughput |
-| Smallest | Alp x77 | 25,049,724 | 2.50 | 356 | 4.5 | 0.30 | reads faster at any throughput |
-| None | Canonical x77 | 80,043,724 | 8.00 | 40 | 1.6 | 0.33 | reads faster above 10,473 MB/s |
-| hint Dictionary | Alp x77 | 25,049,724 | 2.50 | 143 | 4.6 | 0.34 | reads faster at any throughput |
-| hint Alp | Alp x77 | 25,049,724 | 2.50 | 39 | 4.6 | 0.35 | reads faster at any throughput |
-| hint Zstd | Zstd x77 | 41,240,252 | 4.12 | 286 | 77.1 | 62.95 | reads slower at any throughput |
+| Auto | Alp x77 | 25,049,732 | 2.50 | 47 | 10.5 | 1.33 |  |
+| Fastest | Alp x77 | 25,049,732 | 2.50 | 50 | 9.6 | 1.20 | reads faster at any throughput |
+| Smallest | Alp x77 | 25,048,868 | 2.50 | 880 | 9.9 | 1.38 | same |
+| None | Canonical x77 | 80,043,732 | 8.00 | 43 | 19.3 | 1.59 | reads slower at any throughput |
+| hint Dictionary | Alp x77 | 25,049,732 | 2.50 | 177 | 9.7 | 1.21 | reads faster at any throughput |
+| hint Alp | Alp x77 | 25,049,732 | 2.50 | 48 | 9.7 | 1.23 | reads faster at any throughput |
+| hint Zstd | Zstd x77 | 41,240,260 | 4.12 | 295 | 66.1 | 36.34 | reads slower at any throughput |
 
 </details>
 
@@ -259,14 +260,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 5,063,740 | 0.51 | 30 | 2.1 | 0.34 |  |
-| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 30 | 2.0 | 0.32 | same |
-| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 168 | 2.0 | 0.32 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 32 | 1.3 | 0.24 | reads faster above 99,549 MB/s |
-| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 28 | 2.0 | 0.32 | same |
-| hint Alp | Dictionary x77 | 5,063,740 | 0.51 | 100 | 2.0 | 0.32 | same |
-| hint Zstd | Zstd x77 | 10,545,660 | 1.05 | 127 | 61.5 | 49.92 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 43 | 2.0 | 0.27 | same |
+| Auto | Dictionary x77 | 5,063,748 | 0.51 | 47 | 3.1 | 1.08 |  |
+| Fastest | Dictionary x77 | 5,063,748 | 0.51 | 41 | 3.1 | 1.07 | same |
+| Smallest | Dictionary x76, Pco x1 | 5,063,588 | 0.51 | 560 | 3.4 | 1.33 | reads slower at any throughput |
+| None | Canonical x77 | 80,043,732 | 8.00 | 27 | 20.2 | 1.65 | reads slower at any throughput |
+| hint Dictionary | Dictionary x77 | 5,063,748 | 0.51 | 42 | 3.5 | 1.19 | reads slower at any throughput |
+| hint Alp | Dictionary x77 | 5,063,748 | 0.51 | 100 | 3.1 | 1.08 | same |
+| hint Zstd | Zstd x77 | 10,545,668 | 1.05 | 139 | 47.7 | 22.21 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 5,032,932 | 0.50 | 66 | 3.0 | 1.03 | same |
 
 </details>
 
@@ -274,14 +275,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 12,756,252 | 1.28 | 68 | 3.8 | 0.42 |  |
-| Fastest | Dictionary x77 | 12,756,252 | 1.28 | 87 | 5.1 | 0.68 | reads slower at any throughput |
-| Smallest | Dictionary x77 | 12,756,252 | 1.28 | 334 | 5.3 | 0.65 | reads slower at any throughput |
-| None | Canonical x77 | 80,043,724 | 8.00 | 46 | 1.6 | 0.34 | reads faster above 30,690 MB/s |
-| hint Dictionary | Dictionary x77 | 12,756,252 | 1.28 | 99 | 5.4 | 0.67 | reads slower at any throughput |
-| hint Alp | Alp x77 | 12,756,252 | 1.28 | 161 | 6.7 | 0.62 | reads slower at any throughput |
-| hint Zstd | Zstd x77 | 26,073,404 | 2.61 | 293 | 103.3 | 82.83 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 12,545,724 | 1.25 | 110 | 5.4 | 0.62 | reads faster below 130 MB/s |
+| Auto | Dictionary x77 | 12,756,260 | 1.28 | 90 | 9.8 | 1.84 |  |
+| Fastest | Dictionary x77 | 12,756,260 | 1.28 | 75 | 7.8 | 1.42 | reads faster at any throughput |
+| Smallest | Dictionary x77 | 12,751,356 | 1.28 | 499 | 6.8 | 1.61 | reads faster at any throughput |
+| None | Canonical x77 | 80,043,732 | 8.00 | 46 | 23.2 | 1.73 | reads slower at any throughput |
+| hint Dictionary | Dictionary x77 | 12,756,260 | 1.28 | 68 | 6.3 | 1.28 | reads faster at any throughput |
+| hint Alp | Alp x77 | 12,756,260 | 1.28 | 121 | 7.5 | 1.31 | reads faster at any throughput |
+| hint Zstd | Zstd x77 | 26,073,412 | 2.61 | 213 | 61.7 | 31.41 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 12,545,732 | 1.25 | 100 | 7.0 | 1.22 | reads faster at any throughput |
 
 </details>
 
@@ -289,14 +290,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x77 | 16,909,884 | 1.69 | 185 | 79.0 | 71.68 |  |
-| Fastest | Zstd x77 | 16,909,884 | 1.69 | 203 | 87.1 | 62.72 | reads slower at any throughput |
-| Smallest | Zstd x77 | 16,909,884 | 1.69 | 216 | 61.9 | 52.47 | reads faster at any throughput |
-| None | Canonical x77 | 80,043,724 | 8.00 | 27 | 1.3 | 0.23 | reads faster above 812 MB/s |
-| hint Dictionary | Zstd x77 | 16,909,884 | 1.69 | 247 | 77.3 | 50.25 | same |
-| hint Alp | Zstd x77 | 16,909,884 | 1.69 | 224 | 62.2 | 50.60 | reads faster at any throughput |
-| hint Zstd | Zstd x77 | 16,909,884 | 1.69 | 148 | 61.8 | 50.31 | reads faster at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 22,129,980 | 2.21 | 98 | 7.4 | 3.33 | reads faster above 73 MB/s |
+| Auto | Zstd x77 | 16,909,892 | 1.69 | 161 | 48.8 | 23.24 |  |
+| Fastest | Zstd x77 | 16,909,892 | 1.69 | 174 | 47.9 | 22.40 | same |
+| Smallest | Zstd x77 | 16,909,892 | 1.69 | 296 | 61.3 | 28.88 | reads slower at any throughput |
+| None | Canonical x77 | 80,043,732 | 8.00 | 43 | 19.8 | 1.56 | reads faster above 2,178 MB/s |
+| hint Dictionary | Zstd x77 | 16,909,892 | 1.69 | 260 | 63.0 | 28.51 | reads slower at any throughput |
+| hint Alp | Zstd x77 | 16,909,892 | 1.69 | 284 | 47.8 | 22.96 | same |
+| hint Zstd | Zstd x77 | 16,909,892 | 1.69 | 163 | 48.3 | 24.00 | same |
+| Auto, 16 MiB chunks | Dictionary x5 | 22,129,988 | 2.21 | 132 | 11.0 | 3.70 | reads faster above 138 MB/s |
 
 </details>
 
@@ -304,13 +305,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | AlpRd x77 | 69,054,372 | 6.91 | 45 | 5.6 | 0.71 |  |
-| Fastest | AlpRd x77 | 69,054,372 | 6.91 | 48 | 4.7 | 0.51 | reads faster at any throughput |
-| Smallest | AlpRd x77 | 69,054,372 | 6.91 | 169 | 4.7 | 0.49 | reads faster at any throughput |
-| None | Canonical x77 | 80,043,724 | 8.00 | 32 | 1.4 | 0.27 | reads faster above 2,658 MB/s |
-| hint Dictionary | AlpRd x77 | 69,054,372 | 6.91 | 212 | 4.7 | 0.54 | reads faster at any throughput |
-| hint Alp | AlpRd x77 | 69,054,372 | 6.91 | 175 | 4.7 | 0.59 | reads faster at any throughput |
-| hint Zstd | AlpRd x77 | 69,054,372 | 6.91 | 231 | 4.7 | 0.51 | reads faster at any throughput |
+| Auto | AlpRd x77 | 69,054,380 | 6.91 | 60 | 22.9 | 2.46 |  |
+| Fastest | AlpRd x77 | 69,054,380 | 6.91 | 82 | 24.1 | 3.54 | reads slower at any throughput |
+| Smallest | Pco x77 | 67,609,668 | 6.76 | 548 | 118.0 | 117.47 | reads faster below 15 MB/s |
+| None | Canonical x77 | 80,043,732 | 8.00 | 45 | 18.9 | 1.57 | reads faster above 2,761 MB/s |
+| hint Dictionary | AlpRd x77 | 69,054,380 | 6.91 | 288 | 21.2 | 2.62 | reads faster at any throughput |
+| hint Alp | AlpRd x77 | 69,054,380 | 6.91 | 235 | 23.3 | 3.00 | same |
+| hint Zstd | AlpRd x77 | 69,054,380 | 6.91 | 269 | 21.8 | 2.56 | same |
 
 </details>
 
@@ -318,23 +319,23 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| 16 cities, random order | Dictionary x175 | 0.51 | 210 | 7.4 | 0.76 |  |
-| 10 000 distinct ids | Dictionary x306 | 2.54 | 622 | 35.5 | 29.36 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 8.7 ms, take 2.43 ms; reads faster at any throughput; hint Fsst: Fsst x306, 9.06 B/value, scan 32.1 ms, take 1.05 ms; reads faster above 19,417 MB/s |
-| 10 000 distinct ids, 10 % null | Dictionary x306 | 2.45 | 642 | 41.6 | 33.35 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 14.5 ms, take 3.70 ms; reads faster at any throughput; hint Fsst: Fsst x306, 8.80 B/value, scan 38.0 ms, take 0.98 ms; reads faster above 17,261 MB/s |
-| unique UUIDs | Zstd x611 | 20.61 | 1520 | 293.3 | 290.51 | hint Fsst: Fsst x611, 24.91 B/value, scan 148.5 ms, take 2.13 ms; reads faster above 297 MB/s |
-| log lines (~100 B) | Zstd x1221 | 13.71 | 1406 | 394.9 | 321.43 | hint Fsst: Fsst x1221, 23.96 B/value, scan 161.6 ms, take 3.69 ms; reads faster above 440 MB/s |
+| 16 cities, random order | Dictionary x175 | 0.51 | 124 | 7.7 | 1.60 |  |
+| 10 000 distinct ids | Dictionary x306 | 2.54 | 1032 | 41.2 | 29.59 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 14.8 ms, take 3.78 ms; reads faster at any throughput |
+| 10 000 distinct ids, 10 % null | Dictionary x306 | 2.45 | 995 | 54.5 | 36.86 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 13.5 ms, take 3.38 ms; reads faster at any throughput |
+| unique UUIDs | Zstd x611 | 20.61 | 1792 | 309.4 | 301.45 | hint Fsst: Fsst x611, 22.44 B/value, scan 175.1 ms, take 13.05 ms; reads faster above 136 MB/s |
+| log lines (~100 B) | Zstd x1221 | 13.71 | 1468 | 406.8 | 321.21 | hint Fsst: Fsst x1221, 22.01 B/value, scan 177.4 ms, take 13.64 ms; reads faster above 362 MB/s |
 
 <details><summary>16 cities, random order: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x175 | 5,117,276 | 0.51 | 210 | 7.4 | 0.76 |  |
-| Fastest | Dictionary x175 | 5,117,276 | 0.51 | 201 | 8.0 | 0.95 | reads slower at any throughput |
-| Smallest | Dictionary x175 | 5,117,276 | 0.51 | 357 | 4.9 | 0.54 | reads faster at any throughput |
-| None | Canonical x175 | 96,746,748 | 9.67 | 159 | 22.8 | 2.78 | reads slower at any throughput |
-| hint Dictionary | Dictionary x175 | 5,117,276 | 0.51 | 204 | 4.8 | 0.54 | reads faster at any throughput |
-| hint Fsst | Fsst x175 | 64,458,972 | 6.45 | 226 | 25.9 | 0.72 | reads slower at any throughput |
-| hint Zstd | Zstd x175 | 17,427,092 | 1.74 | 233 | 91.6 | 64.44 | reads slower at any throughput |
+| Auto | Dictionary x175 | 5,117,284 | 0.51 | 124 | 7.7 | 1.60 |  |
+| Fastest | Dictionary x175 | 5,117,284 | 0.51 | 141 | 6.1 | 1.39 | reads faster at any throughput |
+| Smallest | Dictionary x175 | 5,117,284 | 0.51 | 323 | 6.4 | 1.37 | reads faster at any throughput |
+| None | Canonical x175 | 96,746,756 | 9.67 | 183 | 46.6 | 20.78 | reads slower at any throughput |
+| hint Dictionary | Dictionary x175 | 5,117,284 | 0.51 | 122 | 6.2 | 1.42 | reads faster at any throughput |
+| hint Fsst | Fsst x175 | 41,142,948 | 4.11 | 315 | 42.9 | 8.95 | reads slower at any throughput |
+| hint Zstd | Zstd x175 | 17,427,100 | 1.74 | 287 | 97.8 | 61.74 | reads slower at any throughput |
 
 </details>
 
@@ -342,14 +343,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x306 | 25,433,780 | 2.54 | 622 | 35.5 | 29.36 |  |
-| Fastest | Dictionary x306 | 25,433,780 | 2.54 | 611 | 34.8 | 29.27 | same |
-| Smallest | Dictionary x305, Zstd x1 | 25,427,444 | 2.54 | 1311 | 35.6 | 29.93 | same |
-| None | Canonical x306 | 140,098,164 | 14.01 | 368 | 18.6 | 4.34 | reads faster above 6,808 MB/s |
-| hint Dictionary | Dictionary x306 | 25,433,780 | 2.54 | 951 | 46.1 | 38.67 | reads slower at any throughput |
-| hint Fsst | Fsst x306 | 90,615,708 | 9.06 | 374 | 32.1 | 1.05 | reads faster above 19,417 MB/s |
-| hint Zstd | Zstd x306 | 27,097,620 | 2.71 | 368 | 90.7 | 68.49 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x18 | 18,014,004 | 1.80 | 398 | 8.7 | 2.43 | reads faster at any throughput |
+| Auto | Dictionary x306 | 25,433,788 | 2.54 | 1032 | 41.2 | 29.59 |  |
+| Fastest | Dictionary x306 | 25,433,788 | 2.54 | 1009 | 58.0 | 32.81 | reads slower at any throughput |
+| Smallest | Dictionary x305, Zstd x1 | 23,452,500 | 2.35 | 2062 | 138.8 | 134.32 | reads faster below 20 MB/s |
+| None | Canonical x306 | 140,098,172 | 14.01 | 225 | 55.6 | 40.79 | reads slower at any throughput |
+| hint Dictionary | Dictionary x306 | 25,433,788 | 2.54 | 713 | 38.1 | 28.72 | reads faster at any throughput |
+| hint Fsst | Fsst x306 | 62,863,260 | 6.29 | 461 | 47.5 | 8.41 | reads slower at any throughput |
+| hint Zstd | Zstd x306 | 27,097,628 | 2.71 | 430 | 92.2 | 63.15 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x18 | 18,014,012 | 1.80 | 446 | 14.8 | 3.78 | reads faster at any throughput |
 
 </details>
 
@@ -357,14 +358,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x306 | 24,539,276 | 2.45 | 642 | 41.6 | 33.35 |  |
-| Fastest | Dictionary x306 | 24,539,276 | 2.45 | 655 | 41.8 | 33.52 | same |
-| Smallest | Dictionary x305, Zstd x1 | 24,533,580 | 2.45 | 1384 | 41.8 | 33.98 | same |
-| None | Canonical x306 | 151,883,724 | 15.19 | 312 | 26.1 | 3.88 | reads faster above 8,195 MB/s |
-| hint Dictionary | Dictionary x306 | 24,539,276 | 2.45 | 646 | 42.1 | 33.53 | same |
-| hint Fsst | Fsst x306 | 87,950,764 | 8.80 | 470 | 38.0 | 0.98 | reads faster above 17,261 MB/s |
-| hint Zstd | Zstd x306 | 25,595,628 | 2.56 | 391 | 113.5 | 62.19 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x18 | 17,982,596 | 1.80 | 706 | 14.5 | 3.70 | reads faster at any throughput |
+| Auto | Dictionary x306 | 24,539,284 | 2.45 | 995 | 54.5 | 36.86 |  |
+| Fastest | Dictionary x306 | 24,539,284 | 2.45 | 944 | 40.5 | 34.87 | reads faster at any throughput |
+| Smallest | Dictionary x305, Zstd x1 | 22,854,628 | 2.29 | 1984 | 148.6 | 139.29 | reads faster below 18 MB/s |
+| None | Canonical x306 | 151,883,732 | 15.19 | 293 | 69.6 | 39.43 | reads slower at any throughput |
+| hint Dictionary | Dictionary x306 | 24,539,284 | 2.45 | 817 | 39.9 | 28.75 | reads faster at any throughput |
+| hint Fsst | Fsst x306 | 64,408,284 | 6.44 | 533 | 60.9 | 11.45 | reads slower at any throughput |
+| hint Zstd | Zstd x306 | 25,595,636 | 2.56 | 400 | 99.0 | 63.07 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x18 | 17,982,604 | 1.80 | 504 | 13.5 | 3.38 | reads faster at any throughput |
 
 </details>
 
@@ -372,13 +373,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x611 | 206,058,580 | 20.61 | 1520 | 293.3 | 290.51 |  |
-| Fastest | Zstd x611 | 206,058,580 | 20.61 | 1509 | 293.2 | 288.92 | same |
-| Smallest | Zstd x611 | 206,058,580 | 20.61 | 2820 | 290.7 | 288.95 | same |
-| None | Canonical x611 | 360,155,508 | 36.02 | 196 | 21.0 | 7.27 | reads faster above 566 MB/s |
-| hint Dictionary | Zstd x611 | 206,058,580 | 20.61 | 2884 | 289.7 | 288.12 | same |
-| hint Fsst | Fsst x611 | 249,114,908 | 24.91 | 1497 | 148.5 | 2.13 | reads faster above 297 MB/s |
-| hint Zstd | Zstd x611 | 206,058,580 | 20.61 | 1473 | 290.8 | 289.80 | same |
+| Auto | Zstd x611 | 206,058,588 | 20.61 | 1792 | 309.4 | 301.45 |  |
+| Fastest | Zstd x611 | 206,058,588 | 20.61 | 1702 | 302.5 | 306.99 | same |
+| Smallest | Zstd x611 | 206,058,588 | 20.61 | 3473 | 299.3 | 307.14 | same |
+| None | Canonical x611 | 360,155,516 | 36.02 | 281 | 109.3 | 96.06 | reads faster above 770 MB/s |
+| hint Dictionary | Zstd x610, Fsst x1 | 206,059,580 | 20.61 | 6414 | 301.3 | 323.16 | same |
+| hint Fsst | Fsst x611 | 224,384,604 | 22.44 | 1798 | 175.1 | 13.05 | reads faster above 136 MB/s |
+| hint Zstd | Zstd x611 | 206,058,588 | 20.61 | 1761 | 305.3 | 320.92 | same |
 
 </details>
 
@@ -386,13 +387,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x1221 | 137,107,180 | 13.71 | 1406 | 394.9 | 321.43 |  |
-| Fastest | Zstd x1221 | 137,107,180 | 13.71 | 1400 | 394.4 | 321.13 | same |
-| Smallest | Zstd x1221 | 137,107,180 | 13.71 | 3392 | 400.1 | 321.98 | same |
-| None | Canonical x1221 | 725,468,436 | 72.55 | 756 | 34.1 | 12.23 | reads faster above 1,631 MB/s |
-| hint Dictionary | Zstd x1221 | 137,107,180 | 13.71 | 2815 | 391.9 | 320.55 | same |
-| hint Fsst | Fsst x1221 | 239,634,612 | 23.96 | 1920 | 161.6 | 3.69 | reads faster above 440 MB/s |
-| hint Zstd | Zstd x1221 | 137,107,180 | 13.71 | 1399 | 393.9 | 320.61 | same |
+| Auto | Zstd x1221 | 137,107,188 | 13.71 | 1468 | 406.8 | 321.21 |  |
+| Fastest | Zstd x1221 | 137,107,188 | 13.71 | 1450 | 393.2 | 317.69 | same |
+| Smallest | Zstd x1221 | 137,107,188 | 13.71 | 2932 | 387.2 | 335.15 | same |
+| None | Canonical x1221 | 725,468,444 | 72.55 | 790 | 206.6 | 158.59 | reads faster above 2,939 MB/s |
+| hint Dictionary | Zstd x1221 | 137,107,188 | 13.71 | 6070 | 404.3 | 347.13 | same |
+| hint Fsst | Fsst x1221 | 220,058,684 | 22.01 | 1838 | 177.4 | 13.64 | reads faster above 362 MB/s |
+| hint Zstd | Zstd x1221 | 137,107,188 | 13.71 | 1398 | 401.5 | 320.92 | same |
 
 </details>
 
@@ -400,18 +401,18 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| half true | Canonical x10 | 0.13 | 0 | 0.1 | 0.20 |  |
-| 1 % true | RunEnd x10 | 0.05 | 1 | 2.6 | 1.95 | None: Canonical x10, 0.13 B/value, scan 0.1 ms, take 0.17 ms; reads faster above 289 MB/s |
+| half true | Canonical x10 | 0.13 | 10 | 0.4 | 0.46 |  |
+| 1 % true | RunEnd x10 | 0.05 | 5 | 2.5 | 0.49 | None: Canonical x10, 0.13 B/value, scan 0.6 ms, take 0.66 ms; reads faster above 390 MB/s |
 
 <details><summary>half true: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.1 | 0.20 |  |
-| Fastest | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.1 | 0.18 | same |
-| Smallest | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.1 | 0.21 | reads slower at any throughput |
-| None | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.1 | 0.31 | reads slower at any throughput |
-| hint RunEnd | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.1 | 0.17 | reads faster at any throughput |
+| Auto | Canonical x10 | 1,262,556 | 0.13 | 10 | 0.4 | 0.46 |  |
+| Fastest | Canonical x10 | 1,262,556 | 0.13 | 0 | 0.5 | 0.46 | same |
+| Smallest | Canonical x10 | 1,262,556 | 0.13 | 0 | 0.5 | 0.47 | same |
+| None | Canonical x10 | 1,262,556 | 0.13 | 0 | 0.5 | 0.46 | same |
+| hint RunEnd | Canonical x10 | 1,262,556 | 0.13 | 7 | 0.4 | 0.46 | same |
 
 </details>
 
@@ -419,20 +420,20 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | RunEnd x10 | 548,084 | 0.05 | 1 | 2.6 | 1.95 |  |
-| Fastest | RunEnd x10 | 548,084 | 0.05 | 0 | 2.5 | 1.95 | same |
-| Smallest | RunEnd x10 | 548,084 | 0.05 | 0 | 2.4 | 1.87 | same |
-| None | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.1 | 0.17 | reads faster above 289 MB/s |
-| hint RunEnd | RunEnd x10 | 548,084 | 0.05 | 0 | 2.5 | 1.88 | same |
+| Auto | RunEnd x10 | 548,092 | 0.05 | 5 | 2.5 | 0.49 |  |
+| Fastest | RunEnd x10 | 548,092 | 0.05 | 5 | 2.5 | 0.50 | same |
+| Smallest | RunEnd x10 | 164,692 | 0.02 | 27 | 4.0 | 3.67 | reads faster below 246 MB/s |
+| None | Canonical x10 | 1,262,556 | 0.13 | 13 | 0.6 | 0.66 | reads faster above 390 MB/s |
+| hint RunEnd | RunEnd x10 | 548,092 | 0.05 | 6 | 2.4 | 0.49 | same |
 
 </details>
 
 ### The profiles side by side
 
-`Fastest` wrote what `Auto` wrote on 20 of 20 columns. `Smallest` wrote something else on *i64, sorted runs of 1 000*, *i64, timestamps (ms, increasing, jittered)*, *utf8, 10 000 distinct ids*, *utf8, 10 000 distinct ids, 10 % null*, and took up to 10.8 times `Auto`'s write, 164 ms against 15 ms on *i64, random in 0..999, 10 % null*, since it tries every scheme on every chunk.
+`Fastest` wrote what `Auto` wrote on 20 of 20 columns. `Smallest` wrote something else on *i64, sorted runs of 1 000*, *i64, timestamps (ms, increasing, jittered)*, *i64, random in 0..999*, *i64, 16 distinct, random order*, *i64, 100 003 distinct, repeating*, *i64, random in 0..999, 10 % null*, *f64, 16 distinct, random order*, *f64, uniform in [0, 1)*, *utf8, 10 000 distinct ids*, *utf8, 10 000 distinct ids, 10 % null*, and took up to 18.8 times `Auto`'s write, 880 ms against 47 ms on *f64, prices (2 decimals)*, since it tries every scheme on every chunk.
 `None`, the plain form, made the largest file on 20 of 20 columns.
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; commit b5104f2 with uncommitted changes, 2026-09-27 02:59 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; commit a3dfc8ab, 2026-10-09 16:49 UTC.*
 <!-- /results: tradeoffs -->
 
 <!-- results: advice -->
@@ -445,20 +446,21 @@ does not; a column it never departs on is left out.
 
 | column | scans at 2 GB/s | scans at 100 MB/s | scans at 10 GB/s | a row in 1 000 read by row | size |
 |---|---|---|---|---|---|
-| i64, timestamps (ms, increasing, jittered) |  | `Zstd` |  | `Zstd` |  |
-| i64, 100 003 distinct, repeating | 16 MiB chunks | 16 MiB chunks |  |  | 16 MiB chunks |
+| i64, sorted runs of 1 000 |  |  | `Zstd` |  |  |
+| i64, timestamps (ms, increasing, jittered) |  | `Pco` |  | `Zstd` |  |
+| i64, 100 003 distinct, repeating | 16 MiB chunks | `Pco` | 16 MiB chunks |  | `Dictionary`, 16 MiB chunks |
 | i64, random in 0..999, 10 % null |  | `Dictionary` |  | `Dictionary` | `Dictionary` |
-| f64, 100 003 distinct, repeating | 16 MiB chunks | 16 MiB chunks | `Canonical` |  |  |
+| f64, 100 003 distinct, repeating | 16 MiB chunks |  | 16 MiB chunks |  | `Dictionary`, 16 MiB chunks |
 | f64, uniform in [0, 1) |  |  | `Canonical` |  |  |
-| utf8, 10 000 distinct ids | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `Zstd` | 16 MiB chunks |
+| utf8, 10 000 distinct ids | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `OnPair` | 16 MiB chunks |
 | utf8, 10 000 distinct ids, 10 % null | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `Zstd` | 16 MiB chunks |
 | utf8, unique UUIDs | `Canonical` |  | `Canonical` | `Fsst` |  |
-| utf8, log lines (~100 B) | `Fsst` |  | `Canonical` | `Fsst` |  |
-| bool, 1 % true | `Canonical` |  | `Canonical` | `Canonical` |  |
+| utf8, log lines (~100 B) | `OnPair` |  | `Canonical` | `OnPair` |  |
+| bool, 1 % true | `Canonical` |  | `Canonical` |  |  |
 
-It keeps the writer's choice under every goal on the 10 other columns.
+It keeps the writer's choice under every goal on the 9 other columns.
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; commit b5104f2 with uncommitted changes, 2026-09-27 03:01 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; commit a3dfc8ab, 2026-10-09 16:52 UTC.*
 <!-- /results: advice -->
 
 ## Kernels, against their baselines
@@ -511,16 +513,16 @@ Benchmarks with issues:
 <!-- results: kernel:CompressorBenchmarks -->
 ### `CompressorBenchmarks`
 
-| Method                       | Column | Mean          | Error         | StdDev      | Speedup | MannWhitney(5%) | Allocated | Alloc Ratio |
-|----------------------------- |------- |--------------:|--------------:|------------:|--------:|---------------- |----------:|------------:|
-| &#39;Choose, the whole decision&#39; | i64    | 57,255.034 ns | 1,758.2423 ns | 456.6099 ns |   1.00x | Baseline        |      72 B |        1.00 |
-| &#39;candidate: sequence&#39;        | i64    |     13.330 ns |     3.0557 ns |   0.4729 ns |  4,295x | Faster          |         - |        0.00 |
-| &#39;candidate: bit packing&#39;     | i64    | 21,888.618 ns | 3,518.0519 ns | 913.6269 ns |   2.62x | Faster          |         - |        0.00 |
-| &#39;candidate: FSST&#39;            | i64    |      2.234 ns |     1.1546 ns |   0.2998 ns | 25,629x | Faster          |         - |        0.00 |
-| &#39;candidate: zstd&#39;            | i64    | 26,766.801 ns | 2,571.6941 ns | 667.8608 ns |   2.14x | Faster          |      72 B |        1.00 |
-| &#39;candidate: ALP&#39;             | i64    |      2.614 ns |     0.0307 ns |   0.0047 ns | 21,903x | Faster          |         - |        0.00 |
+| Method                       | Column | Mean          | Error       | StdDev     | Speedup | MannWhitney(5%) | Allocated | Alloc Ratio |
+|----------------------------- |------- |--------------:|------------:|-----------:|--------:|---------------- |----------:|------------:|
+| &#39;Choose, the whole decision&#39; | i64    | 52,503.854 ns | 230.5989 ns | 35.6854 ns |   1.00x | Baseline        |         - |          NA |
+| &#39;candidate: sequence&#39;        | i64    |     10.728 ns |   0.1120 ns |  0.0291 ns |  4,894x | Faster          |         - |          NA |
+| &#39;candidate: bit packing&#39;     | i64    |  4,950.600 ns | 148.8102 ns | 23.0285 ns |   10.6x | Faster          |         - |          NA |
+| &#39;candidate: FSST&#39;            | i64    |      1.846 ns |   0.0144 ns |  0.0038 ns | 28,448x | Faster          |         - |          NA |
+| &#39;candidate: zstd&#39;            | i64    |  7,546.505 ns | 194.1759 ns | 30.0489 ns |   6.96x | Faster          |         - |          NA |
+| &#39;candidate: ALP&#39;             | i64    |      2.599 ns |   0.0136 ns |  0.0035 ns | 20,204x | Faster          |         - |          NA |
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit b5104f2 with uncommitted changes, 2026-09-27 03:15 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.2, the fast profile; commit a3dfc8ab, 2026-10-09 16:52 UTC.*
 <!-- /results: kernel:CompressorBenchmarks -->
 
 <!-- results: kernel:LanesBenchmarks -->
