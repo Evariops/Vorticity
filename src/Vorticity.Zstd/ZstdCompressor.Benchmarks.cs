@@ -142,7 +142,7 @@ public sealed unsafe partial class ZstdCompressor
                 total += (long)CompressLiterals(destination, capacity, _store.LiteralsStart, _store.LiteralCount, disabled, suspect);
                 if (block.Compressed)
                 {
-                    _previous.Huffman.CopyFrom(_next.Huffman);
+                    _previous.Huffman = _next.Huffman;
                     _previous.HuffmanRepeat = _next.HuffmanRepeat;
                 }
             }

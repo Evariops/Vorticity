@@ -388,7 +388,7 @@ public sealed unsafe partial class ZstdCompressor
     private SymbolEncodingType BuildLiteralStatistics(byte* literals, nuint size, out nuint descriptionSize)
     {
         descriptionSize = 0;
-        _next.Huffman.CopyFrom(_previous.Huffman);
+        _next.Huffman = _previous.Huffman;
         _next.HuffmanRepeat = _previous.HuffmanRepeat;
 
         nuint minimumSize = _previous.HuffmanRepeat == HuffmanRepeat.Valid ? 6u : 63u;
@@ -415,16 +415,17 @@ public sealed unsafe partial class ZstdCompressor
             repeat = HuffmanRepeat.None;
         }
 
-        new Span<ulong>(_next.Huffman.Elements, HuffmanTable.MaxSymbols).Clear();
-        _next.Huffman.TableLog = 0;
-        _next.Huffman.MaxSymbolValue = 0;
+        HuffmanCTable fresh = _next.FreshHuffman(_previous);
+        new Span<ulong>(fresh.Elements, HuffmanTable.MaxSymbols).Clear();
+        fresh.TableLog = 0;
+        fresh.MaxSymbolValue = 0;
         uint huffLog = HuffmanEncoder.OptimalTableLog(
             HuffmanEncoder.LiteralsTableLog, size, maxSymbol, _huffmanWorkspace, count, _parameters.Strategy >= Strategy.BinaryTreeUltra);
-        huffLog = HuffmanEncoder.BuildCTable(_next.Huffman, count, maxSymbol, huffLog);
+        huffLog = HuffmanEncoder.BuildCTable(fresh, count, maxSymbol, huffLog);
 
-        nuint newSize = HuffmanEncoder.EstimateCompressedSize(_next.Huffman, count, maxSymbol);
+        nuint newSize = HuffmanEncoder.EstimateCompressedSize(fresh, count, maxSymbol);
         byte* description = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_splitScratch));
-        nuint headerSize = HuffmanEncoder.WriteCTable(description, MaxHuffmanHeaderSize, _next.Huffman, maxSymbol, huffLog, _huffmanWorkspace.Weights);
+        nuint headerSize = HuffmanEncoder.WriteCTable(description, MaxHuffmanHeaderSize, fresh, maxSymbol, huffLog, _huffmanWorkspace.Weights);
         if (headerSize == 0)
         {
             descriptionSize = nuint.MaxValue;
@@ -436,19 +437,16 @@ public sealed unsafe partial class ZstdCompressor
             nuint oldSize = HuffmanEncoder.EstimateCompressedSize(_previous.Huffman, count, maxSymbol);
             if (oldSize < size && (oldSize <= headerSize + newSize || headerSize + 12 >= size))
             {
-                _next.Huffman.CopyFrom(_previous.Huffman);
-                _next.HuffmanRepeat = _previous.HuffmanRepeat;
                 return SymbolEncodingType.Repeat;
             }
         }
 
         if (newSize + headerSize >= size)
         {
-            _next.Huffman.CopyFrom(_previous.Huffman);
-            _next.HuffmanRepeat = _previous.HuffmanRepeat;
             return SymbolEncodingType.Basic;
         }
 
+        _next.Huffman = fresh;
         _next.HuffmanRepeat = HuffmanRepeat.Check;
         descriptionSize = headerSize;
         return SymbolEncodingType.Compressed;

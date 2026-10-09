@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -215,7 +216,7 @@ internal static unsafe class LazyMatchFinder
                         nuint repLength = ExtDictRepeatLength(ref state, ip, current, offset1, dictBase, dictEnd, iend);
                         int gain2 = (int)(repLength * 3);
                         int gain1 = (int)(((nint)matchLength * 3) - HighBit(offBase) + 1);
-                        if ((repLength >= 4) & (gain2 > gain1))
+                        if (X86Base.IsSupported ? repLength >= 4 && gain2 > gain1 : (repLength >= 4) & (gain2 > gain1))
                         {
                             matchLength = repLength;
                             offBase = RepeatCode1;
@@ -228,7 +229,7 @@ internal static unsafe class LazyMatchFinder
                         nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
                         int gain2 = (int)(((nint)length * 4) - HighBit(candidate));
                         int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 4);
-                        if ((length >= 4) & (gain2 > gain1))
+                        if (X86Base.IsSupported ? length >= 4 && gain2 > gain1 : (length >= 4) & (gain2 > gain1))
                         {
                             matchLength = length;
                             offBase = candidate;
@@ -245,7 +246,7 @@ internal static unsafe class LazyMatchFinder
                             nuint repLength = ExtDictRepeatLength(ref state, ip, current, offset1, dictBase, dictEnd, iend);
                             int gain2 = (int)(repLength * 4);
                             int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 1);
-                            if ((repLength >= 4) & (gain2 > gain1))
+                            if (X86Base.IsSupported ? repLength >= 4 && gain2 > gain1 : (repLength >= 4) & (gain2 > gain1))
                             {
                                 matchLength = repLength;
                                 offBase = RepeatCode1;
@@ -258,7 +259,7 @@ internal static unsafe class LazyMatchFinder
                             nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
                             int gain2 = (int)(((nint)length * 4) - HighBit(candidate));
                             int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 7);
-                            if ((length >= 4) & (gain2 > gain1))
+                            if (X86Base.IsSupported ? length >= 4 && gain2 > gain1 : (length >= 4) & (gain2 > gain1))
                             {
                                 matchLength = length;
                                 offBase = candidate;
@@ -428,7 +429,7 @@ internal static unsafe class LazyMatchFinder
                     }
                 }
             }
-            else if ((offset1 > 0) & (Read32(ip + 1 - offset1) == Read32(ip + 1)))
+            else if (X86Base.IsSupported ? offset1 > 0 && Read32(ip + 1 - offset1) == Read32(ip + 1) : (offset1 > 0) & (Read32(ip + 1 - offset1) == Read32(ip + 1)))
             {
                 matchLength = Count(ip + 1 + 4, ip + 1 + 4 - offset1, iend) + 4;
                 if (TDepth.Depth == 0)
@@ -470,19 +471,19 @@ internal static unsafe class LazyMatchFinder
                         nuint repLength = AttachedRepeatLength(ip, offset1, @base, prefixLowestIndex, dictBase, dictIndexDelta, dictEnd, iend);
                         int gain2 = (int)(repLength * 3);
                         int gain1 = (int)(((nint)matchLength * 3) - HighBit(offBase) + 1);
-                        if ((repLength >= 4) & (gain2 > gain1))
+                        if (X86Base.IsSupported ? repLength >= 4 && gain2 > gain1 : (repLength >= 4) & (gain2 > gain1))
                         {
                             matchLength = repLength;
                             offBase = RepeatCode1;
                             start = ip;
                         }
                     }
-                    else if ((offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
+                    else if (X86Base.IsSupported ? offset1 > 0 && Read32(ip) == Read32(ip - offset1) : (offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
                     {
                         nuint repLength = Count(ip + 4, ip + 4 - offset1, iend) + 4;
                         int gain2 = (int)(repLength * 3);
                         int gain1 = (int)(((nint)matchLength * 3) - HighBit(offBase) + 1);
-                        if ((repLength >= 4) & (gain2 > gain1))
+                        if (X86Base.IsSupported ? repLength >= 4 && gain2 > gain1 : (repLength >= 4) & (gain2 > gain1))
                         {
                             matchLength = repLength;
                             offBase = RepeatCode1;
@@ -495,7 +496,7 @@ internal static unsafe class LazyMatchFinder
                         nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
                         int gain2 = (int)(((nint)length * 4) - HighBit(candidate));
                         int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 4);
-                        if ((length >= 4) & (gain2 > gain1))
+                        if (X86Base.IsSupported ? length >= 4 && gain2 > gain1 : (length >= 4) & (gain2 > gain1))
                         {
                             matchLength = length;
                             offBase = candidate;
@@ -512,19 +513,19 @@ internal static unsafe class LazyMatchFinder
                             nuint repLength = AttachedRepeatLength(ip, offset1, @base, prefixLowestIndex, dictBase, dictIndexDelta, dictEnd, iend);
                             int gain2 = (int)(repLength * 4);
                             int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 1);
-                            if ((repLength >= 4) & (gain2 > gain1))
+                            if (X86Base.IsSupported ? repLength >= 4 && gain2 > gain1 : (repLength >= 4) & (gain2 > gain1))
                             {
                                 matchLength = repLength;
                                 offBase = RepeatCode1;
                                 start = ip;
                             }
                         }
-                        else if ((offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
+                        else if (X86Base.IsSupported ? offset1 > 0 && Read32(ip) == Read32(ip - offset1) : (offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
                         {
                             nuint repLength = Count(ip + 4, ip + 4 - offset1, iend) + 4;
                             int gain2 = (int)(repLength * 4);
                             int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 1);
-                            if ((repLength >= 4) & (gain2 > gain1))
+                            if (X86Base.IsSupported ? repLength >= 4 && gain2 > gain1 : (repLength >= 4) & (gain2 > gain1))
                             {
                                 matchLength = repLength;
                                 offBase = RepeatCode1;
@@ -537,7 +538,7 @@ internal static unsafe class LazyMatchFinder
                             nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
                             int gain2 = (int)(((nint)length * 4) - HighBit(candidate));
                             int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 7);
-                            if ((length >= 4) & (gain2 > gain1))
+                            if (X86Base.IsSupported ? length >= 4 && gain2 > gain1 : (length >= 4) & (gain2 > gain1))
                             {
                                 matchLength = length;
                                 offBase = candidate;
@@ -570,7 +571,7 @@ internal static unsafe class LazyMatchFinder
                 }
                 else
                 {
-                    while (((start > anchor) & (start - offset > prefixLowest)) && start[-1] == (start - offset)[-1])
+                    while ((X86Base.IsSupported ? start > anchor && start - offset > prefixLowest : (start > anchor) & (start - offset > prefixLowest)) && start[-1] == (start - offset)[-1])
                     {
                         start--;
                         matchLength++;
@@ -614,7 +615,7 @@ internal static unsafe class LazyMatchFinder
             }
             else
             {
-                while (((ip <= ilimit) & (offset2 > 0)) && Read32(ip) == Read32(ip - offset2))
+                while ((X86Base.IsSupported ? ip <= ilimit && offset2 > 0 : (ip <= ilimit) & (offset2 > 0)) && Read32(ip) == Read32(ip - offset2))
                 {
                     matchLength = Count(ip + 4, ip + 4 - offset2, iend) + 4;
                     (offset1, offset2) = (offset2, offset1);
@@ -733,6 +734,10 @@ internal readonly unsafe struct HashChainSearch<THash, TDictionary> : ILazySearc
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static nuint FindBestMatch(ref MatchState state, byte* ip, byte* end, ref nuint offBase)
     {
+        // The insertion first, then the search's values: computed before it, they were live across
+        // its loop, which x64 has not the registers for, and spilled, the loop's own with them.
+        nuint matchIndex = InsertAndFindFirstIndex(ref state, ip);
+
         uint* chainTable = state.ChainTable;
         uint chainSize = 1u << state.Parameters.ChainLog;
         nuint chainMask = chainSize - 1;
@@ -750,9 +755,8 @@ internal readonly unsafe struct HashChainSearch<THash, TDictionary> : ILazySearc
         byte* dictBase = state.DictionaryBase;
         byte* dictEnd = dictBase + dictLimit;
 
-        nuint matchIndex = InsertAndFindFirstIndex(ref state, ip);
         nuint bestLength = 4 - 1;
-        for (; (matchIndex >= lowLimit) & (attempts > 0); attempts--)
+        for (; X86Base.IsSupported ? matchIndex >= lowLimit && attempts > 0 : (matchIndex >= lowLimit) & (attempts > 0); attempts--)
         {
             if (TDictionary.Mode != ExtDictionary.Value || matchIndex >= dictLimit)
             {
@@ -870,16 +874,25 @@ internal readonly unsafe struct HashChainSearch<THash, TDictionary> : ILazySearc
         byte* @base = state.Base;
         uint target = (uint)(ip - @base);
         uint index = state.NextToUpdate;
-        bool skipping = state.LazySkipping;
-        while (index < target)
+        if (state.LazySkipping)
         {
-            nuint hash = THash.Hash(Read64(@base + index), hashLog);
-            chainTable[index & chainMask] = hashTable[hash];
-            hashTable[hash] = index;
-            index++;
-            if (skipping)
+            // Only the first position while skipping.
+            if (index < target)
             {
-                break;
+                nuint hash = THash.Hash(Read64(@base + index), hashLog);
+                chainTable[index & chainMask] = hashTable[hash];
+                hashTable[hash] = index;
+            }
+        }
+        else
+        {
+            // The skipping test out of the loop, which then holds one value less: on x64, short of
+            // registers in the search it is inlined into, the tables and the mask came from memory.
+            for (; index < target; index++)
+            {
+                nuint hash = THash.Hash(Read64(@base + index), hashLog);
+                chainTable[index & chainMask] = hashTable[hash];
+                hashTable[hash] = index;
             }
         }
 
@@ -1308,9 +1321,9 @@ internal readonly struct Row64 : IRowLog
 /// </para>
 /// <para>
 /// libzstd prefetches the rows of the position eight ahead, whose hash its cache computes, and the
-/// candidates before it compares them. .NET has no prefetch on arm64. The row of entries is brought
-/// in by a store instead: of a 0 to its place 0, which no entry takes and nothing reads, in the line
-/// the position writes once inserted. A store retires as a prefetch does, before its line arrives,
+/// candidates before it compares them. So does x64 (see <c>PrefetchRow</c>); .NET has no prefetch on
+/// Arm64. There, the row of entries is brought in by a store instead: of a 0 to its place 0, which no
+/// entry takes and nothing reads, in the line the position writes once inserted. A store retires as a prefetch does, before its line arrives,
 /// where a load holds up the retirement of everything after it until its line is there. The row of
 /// tags has no such place (its first byte is the head, its others are tags, all read by the search,
 /// which a store still on its way would hold up): it is read, as are the candidates, summed into
@@ -1372,7 +1385,7 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
             MatchState* dictionary = state.Dictionary;
             dictionaryHash = (nuint)((Read64(ip) * state.RowHashMultiplier) >> (64 - (dictionary->RowHashLog + LazyMatchFinder.RowHashTagBits)));
             nuint dictionaryRow = RowOf(dictionaryHash);
-            read += dictionary->TagTable[dictionaryRow] + dictionary->HashTable[dictionaryRow];
+            PrefetchRow(dictionary->TagTable, dictionary->HashTable, dictionaryRow, ref read, write: false);
         }
 
         // libzstd's ZSTD_row_update_internal: the positions before ip into their rows, then ip's
@@ -1437,7 +1450,7 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
 
             candidates[count] = matchIndex;
             count++;
-            read += (TDictionary.Mode == ExtDictionary.Value && matchIndex < state.DictLimit ? state.DictionaryBase : @base)[matchIndex];
+            PrefetchCandidate((TDictionary.Mode == ExtDictionary.Value && matchIndex < state.DictLimit ? state.DictionaryBase : @base) + matchIndex, ref read);
             if (--attempts == 0)
             {
                 break;
@@ -1539,7 +1552,7 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
                 break;
             }
 
-            read += dictionaryBase[matchIndex];
+            PrefetchCandidate(dictionaryBase + matchIndex, ref read);
             candidates[count++] = matchIndex;
             attempts--;
         }
@@ -1584,8 +1597,7 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
             nuint hash = (nuint)(((Read64(@base + index) * multiplier) ^ salt) >> shift);
             cache[index & (LazyMatchFinder.RowHashCacheSize - 1)] = (uint)hash;
             nuint relativeRow = RowOf(hash);
-            read += state.TagTable[relativeRow];
-            state.HashTable[relativeRow] = 0;
+            PrefetchRow(state.TagTable, state.HashTable, relativeRow, ref read, write: true);
         }
 
         state.Touched += read;
@@ -1645,9 +1657,61 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
         nuint next = (nuint)(((Read64(@base + index + LazyMatchFinder.RowHashCacheSize) * multiplier) ^ salt) >> shift);
         *slot = (uint)next;
         nuint nextRow = RowOf(next);
-        read += tagTable[nextRow];
-        hashTable[nextRow] = 0;
+        PrefetchRow(tagTable, hashTable, nextRow, ref read, write: true);
         return hash;
+    }
+
+    /// <summary>
+    /// Brings a row's entries and tags on their way. On x64, prefetches, as libzstd's
+    /// <c>ZSTD_row_prefetch</c>: they retire at once and wait on nothing. Without them (Arm64, see the
+    /// remarks), the row of tags is read, summed into <paramref name="read"/>, and the row of entries
+    /// written at its place 0 when it is the frame's own (<paramref name="write"/>), read otherwise.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void PrefetchRow(byte* tagTable, uint* hashTable, nuint relativeRow, ref uint read, bool write)
+    {
+        if (Sse.IsSupported)
+        {
+            Sse.Prefetch0(hashTable + relativeRow);
+            if (TRow.Log >= 5)
+            {
+                Sse.Prefetch0(hashTable + relativeRow + 16);
+            }
+
+            Sse.Prefetch0(tagTable + relativeRow);
+            if (TRow.Log == 6)
+            {
+                Sse.Prefetch0(tagTable + relativeRow + 32);
+            }
+
+            return;
+        }
+
+        read += tagTable[relativeRow];
+        if (write)
+        {
+            hashTable[relativeRow] = 0;
+        }
+        else
+        {
+            read += hashTable[relativeRow];
+        }
+    }
+
+    /// <summary>
+    /// Brings a candidate's first bytes on their way before it is compared: a prefetch on x64, as
+    /// libzstd's; a load summed into <paramref name="read"/> elsewhere.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void PrefetchCandidate(byte* candidate, ref uint read)
+    {
+        if (Sse.IsSupported)
+        {
+            Sse.Prefetch0(candidate);
+            return;
+        }
+
+        read += *candidate;
     }
 
     /// <summary>

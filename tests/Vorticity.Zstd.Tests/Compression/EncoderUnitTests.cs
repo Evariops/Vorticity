@@ -75,6 +75,7 @@ public sealed unsafe class EncoderUnitTests
         var random = new Random(seed);
         var workspace = new HuffmanWorkspace();
         var previous = new HuffmanCTable();
+        var fresh = new HuffmanCTable();
         var table = new HuffmanTable();
         byte[] output = new byte[1 << 17];
         for (int round = 0; round < 100; round++)
@@ -103,7 +104,7 @@ public sealed unsafe class EncoderUnitTests
             fixed (byte* dst = destination)
             {
                 compressed = HuffmanEncoder.Compress(
-                    dst, (nuint)destination.Length, src, (nuint)size, singleStream, previous, workspace, ref repeat,
+                    dst, (nuint)destination.Length, src, (nuint)size, singleStream, previous, fresh, workspace, ref repeat,
                     preferRepeat: false, optimalDepth: random.Next(2) == 0, suspectUncompressible: false);
             }
 

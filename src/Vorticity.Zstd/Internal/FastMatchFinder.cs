@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -161,7 +162,7 @@ internal static unsafe partial class FastMatchFinder
             byte* repeat = ip2 - repOffset1;
             uint repValue = Read32(repeat);
             hashTable[hash0] = (uint)(ip0 - @base);
-            if ((Read32(ip2) == repValue) & (repeat != ip2))
+            if (X86Base.IsSupported ? Read32(ip2) == repValue && repeat != ip2 : (Read32(ip2) == repValue) & (repeat != ip2))
             {
                 current0 = (uint)(ip0 - @base);
 
@@ -295,9 +296,19 @@ internal static unsafe partial class FastMatchFinder
     /// libzstd's <c>ZSTD_match4Found_cmov</c>: whether the candidate at <paramref name="matchIndex"/>,
     /// within the window, starts with the same four bytes. A candidate below the window is read at
     /// the window's start instead (see <see cref="MatchFinder.ClampToWindow(nuint, nuint)"/>), and the window test
-    /// joins the compare in one condition.
+    /// joins the compare in one condition: combined with <c>&amp;</c> on Arm64, one chain of compares;
+    /// on x64, which would combine them with <c>setcc</c>, two compares and branches, which it fuses.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool MatchFound(byte* current, byte* @base, nuint matchIndex, nuint lowLimit) =>
-        (Read32(current) == Read32(@base + ClampToWindow(matchIndex, lowLimit))) & (matchIndex >= lowLimit);
+    private static bool MatchFound(byte* current, byte* @base, nuint matchIndex, nuint lowLimit)
+    {
+        if (X86Base.IsSupported)
+        {
+            // The clamp as x64 takes it best: see MatchFinder.InWindow.
+            nint distance = (nint)(matchIndex - lowLimit);
+            return Read32(current) == Read32(InWindow(@base + lowLimit, distance)) && distance >= 0;
+        }
+
+        return (Read32(current) == Read32(@base + ClampToWindow(matchIndex, lowLimit))) & (matchIndex >= lowLimit);
+    }
 }

@@ -12,6 +12,12 @@ internal static unsafe class Histogram
     /// <paramref name="count"/>, whose first <paramref name="maxSymbolValue"/> + 1 counters it clears.
     /// On return <paramref name="maxSymbolValue"/> is the largest byte present (0 for no byte).
     /// </summary>
+    /// <remarks>
+    /// From 64 bytes, the bytes at even and odd places are counted apart, then added: a byte's count
+    /// waits on its last increment, which a frequent byte made a chain of, half as long so. The
+    /// largest count is taken four at a time as they are added: a maximum in a loop is a branch on
+    /// each count, which the counts make unpredictable.
+    /// </remarks>
     /// <returns>The largest count.</returns>
     public static uint CountSimple(uint* count, ref uint maxSymbolValue, byte* source, nuint size)
     {
@@ -24,9 +30,64 @@ internal static unsafe class Histogram
         }
 
         byte* end = source + size;
-        for (byte* p = source; p < end; p++)
+        byte* p = source;
+        if (size < 64)
         {
-            count[*p]++;
+            for (; p < end; p++)
+            {
+                count[*p]++;
+            }
+        }
+        else
+        {
+            // Rounded up to whole vectors, which the sum reads.
+            uint* odd = stackalloc uint[256];
+            uint rounded = (max + 4) & ~3u;
+            Unsafe.InitBlockUnaligned(odd, 0, rounded * sizeof(uint));
+            for (; p + 1 < end; p += 2)
+            {
+                count[p[0]]++;
+                odd[p[1]]++;
+            }
+
+            if (p < end)
+            {
+                count[*p]++;
+            }
+
+            if (Vector128.IsHardwareAccelerated)
+            {
+                Vector128<uint> largestLanes = Vector128<uint>.Zero;
+                uint s = 0;
+                for (; s + 4 <= max + 1; s += 4)
+                {
+                    Vector128<uint> total = Vector128.Load(count + s) + Vector128.Load(odd + s);
+                    total.Store(count + s);
+                    largestLanes = Vector128.Max(largestLanes, total);
+                }
+
+                uint largestCount = Math.Max(
+                    Math.Max(largestLanes.GetElement(0), largestLanes.GetElement(1)),
+                    Math.Max(largestLanes.GetElement(2), largestLanes.GetElement(3)));
+                for (; s <= max; s++)
+                {
+                    count[s] += odd[s];
+                    largestCount = Math.Max(largestCount, count[s]);
+                }
+
+                while (count[max] == 0)
+                {
+                    max--;
+                }
+
+                maxSymbolValue = max;
+                return largestCount;
+            }
+
+            for (uint s = 0; s <= max; s++)
+            {
+                count[s] += odd[s];
+            }
         }
 
         while (count[max] == 0)

@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -32,27 +34,68 @@ internal enum SymbolEncodingType
 /// libzstd's <c>ZSTD_compressedBlockState_t</c>: what a block hands the next, once it is emitted
 /// compressed: its entropy tables, their repeat modes, and the repeat offsets.
 /// </summary>
+/// <remarks>
+/// The tables are references: a table that carries over from the previous state, a predefined one or
+/// a dictionary's is that table, where libzstd copies it into the state (the previous tree into each
+/// block's state, each table repeated or predefined: 2 to 5 KiB a block, the largest cost of a small
+/// frame after its match finding). A new table is built into one the previous state does not use
+/// (<see cref="FreshHuffman"/>).
+/// </remarks>
 internal sealed unsafe class BlockState
 {
     private readonly uint[] _rep = GC.AllocateArray<uint>(SequenceEncoder.RepeatOffsetCount, pinned: true);
 
+    // The tables this state owns, which this state or the next builds its new tables into.
+    private readonly HuffmanCTable _huffman = new();
+    private readonly FseCTable _literalLengths = new(SequenceEncoder.LiteralLengthFseLog, SequenceCodes.MaxLiteralLength);
+    private readonly FseCTable _offsets = new(SequenceEncoder.OffsetFseLog, SequenceCodes.MaxOffset);
+    private readonly FseCTable _matchLengths = new(SequenceEncoder.MatchLengthFseLog, SequenceCodes.MaxMatchLength);
+
     public BlockState()
     {
         Rep = (uint*)Unsafe.AsPointer(ref _rep[0]);
+        Huffman = _huffman;
+        LiteralLengths = _literalLengths;
+        Offsets = _offsets;
+        MatchLengths = _matchLengths;
         Reset();
     }
 
-    public readonly HuffmanCTable Huffman = new();
+    /// <summary>The tree in use: a table this state or the previous one owns, or a dictionary's.</summary>
+    public HuffmanCTable Huffman;
     public HuffmanRepeat HuffmanRepeat;
-    public readonly FseCTable LiteralLengths = new(SequenceEncoder.LiteralLengthFseLog, SequenceCodes.MaxLiteralLength);
-    public readonly FseCTable Offsets = new(SequenceEncoder.OffsetFseLog, SequenceCodes.MaxOffset);
-    public readonly FseCTable MatchLengths = new(SequenceEncoder.MatchLengthFseLog, SequenceCodes.MaxMatchLength);
+
+    /// <summary>The tables in use, as <see cref="Huffman"/>, or predefined ones.</summary>
+    public FseCTable LiteralLengths;
+    public FseCTable Offsets;
+    public FseCTable MatchLengths;
     public FseRepeat LiteralLengthRepeat;
     public FseRepeat OffsetRepeat;
     public FseRepeat MatchLengthRepeat;
 
     /// <summary>The three repeat offsets, pinned: the match finders update them in place.</summary>
     public uint* Rep { get; }
+
+    /// <summary>
+    /// The table this state builds a new tree into: its own, unless <paramref name="previous"/> uses
+    /// it, then the previous state's own, which that state does not use then.
+    /// </summary>
+    /// <remarks>
+    /// Only the previous state's tables must outlive a block, which may still be emitted raw; this
+    /// state's are replaced, and neither is ever a dictionary's or a predefined table.
+    /// </remarks>
+    public HuffmanCTable FreshHuffman(BlockState previous) => previous.Huffman != _huffman ? _huffman : previous._huffman;
+
+    /// <summary>As <see cref="FreshHuffman"/>, for the literal lengths' table.</summary>
+    public FseCTable FreshLiteralLengths(BlockState previous) =>
+        previous.LiteralLengths != _literalLengths ? _literalLengths : previous._literalLengths;
+
+    /// <summary>As <see cref="FreshHuffman"/>, for the offsets' table.</summary>
+    public FseCTable FreshOffsets(BlockState previous) => previous.Offsets != _offsets ? _offsets : previous._offsets;
+
+    /// <summary>As <see cref="FreshHuffman"/>, for the match lengths' table.</summary>
+    public FseCTable FreshMatchLengths(BlockState previous) =>
+        previous.MatchLengths != _matchLengths ? _matchLengths : previous._matchLengths;
 
     /// <summary>libzstd's <c>ZSTD_reset_compressedBlockState</c>: the state every frame starts from.</summary>
     public void Reset()
@@ -69,7 +112,7 @@ internal sealed unsafe class BlockState
     /// <summary>A copy of <paramref name="other"/>: its tables, their repeat modes, its repeat offsets.</summary>
     public void CopyFrom(BlockState other)
     {
-        Huffman.CopyFrom(other.Huffman);
+        Huffman = other.Huffman;
         HuffmanRepeat = other.HuffmanRepeat;
         CopySequenceTablesFrom(other);
         Rep[0] = other.Rep[0];
@@ -80,9 +123,9 @@ internal sealed unsafe class BlockState
     /// <summary>libzstd's copy of <c>prevEntropy->fse</c> into <c>nextEntropy->fse</c>, when a block has no sequence.</summary>
     public void CopySequenceTablesFrom(BlockState other)
     {
-        LiteralLengths.CopyFrom(other.LiteralLengths);
-        Offsets.CopyFrom(other.Offsets);
-        MatchLengths.CopyFrom(other.MatchLengths);
+        LiteralLengths = other.LiteralLengths;
+        Offsets = other.Offsets;
+        MatchLengths = other.MatchLengths;
         LiteralLengthRepeat = other.LiteralLengthRepeat;
         OffsetRepeat = other.OffsetRepeat;
         MatchLengthRepeat = other.MatchLengthRepeat;
@@ -155,15 +198,35 @@ internal static unsafe class SequenceEncoder
     ];
 
     /// <summary>The largest symbol counted, and the largest count: what a histogram of codes returns.</summary>
-    private static uint LargestCount(uint* count, ref uint max)
+    /// <remarks>
+    /// The largest symbol is searched in a local: through the reference, each step down was a
+    /// decrement in memory and a load of it, one waiting on the other. The largest count four at a
+    /// time: a maximum in a loop is a branch on each count, which the counts make unpredictable,
+    /// where a vector maximum has none.
+    /// </remarks>
+    private static uint LargestCount(uint* count, ref uint largestSymbol)
     {
+        uint max = largestSymbol;
         while (count[max] == 0)
         {
             max--;
         }
 
+        largestSymbol = max;
         uint largest = 0;
-        for (uint s = 0; s <= max; s++)
+        uint s = 0;
+        if (Vector128.IsHardwareAccelerated && max >= 3)
+        {
+            Vector128<uint> best = Vector128.Load(count);
+            for (s = 4; s + 3 <= max; s += 4)
+            {
+                best = Vector128.Max(best, Vector128.Load(count + s));
+            }
+
+            largest = Math.Max(Math.Max(best.GetElement(0), best.GetElement(1)), Math.Max(best.GetElement(2), best.GetElement(3)));
+        }
+
+        for (; s <= max; s++)
         {
             largest = Math.Max(largest, count[s]);
         }
@@ -320,26 +383,28 @@ internal static unsafe class SequenceEncoder
     /// libzstd's <c>ZSTD_buildCTable</c>: the table of a code in its mode, and its description when
     /// it has one. A new table leaves out the last sequence's symbol once, which the state that
     /// starts the bitstream encodes for free; libzstd takes it off its histogram, which it counts
-    /// again for its estimates, where it is put back here.
+    /// again for its estimates, where it is put back here. A table repeated or predefined is that
+    /// table, a new one is built into <paramref name="fresh"/>: <paramref name="next"/> is set to it.
     /// </summary>
     /// <returns>The size of the description.</returns>
     public static nuint BuildCTable(
-        byte* destination, FseCTable next, uint fseLog, SymbolEncodingType type, uint* count, uint max, uint firstCode, uint lastCode,
-        nuint sequenceCount, FseCTable defaultTable, FseCTable previous)
+        byte* destination, ref FseCTable next, FseCTable fresh, uint fseLog, SymbolEncodingType type, uint* count, uint max, uint firstCode,
+        uint lastCode, nuint sequenceCount, FseCTable defaultTable, FseCTable previous)
     {
         switch (type)
         {
             case SymbolEncodingType.Rle:
-                FseEncoder.BuildCTableRle(next, (byte)max);
+                FseEncoder.BuildCTableRle(fresh, (byte)max);
+                next = fresh;
                 *destination = (byte)firstCode;
                 return 1;
 
             case SymbolEncodingType.Repeat:
-                next.CopyFrom(previous);
+                next = previous;
                 return 0;
 
             case SymbolEncodingType.Basic:
-                next.CopyFrom(defaultTable);
+                next = defaultTable;
                 return 0;
 
             default:
@@ -353,7 +418,8 @@ internal static unsafe class SequenceEncoder
                 FseEncoder.NormalizeCount(normalized, tableLog, count, total, max, UseLowProbCount(total));
                 count[lastCode] += taken;
                 nuint size = FseEncoder.WriteNCount(destination, normalized, max, tableLog);
-                FseEncoder.BuildCTable(next, normalized, max, tableLog);
+                FseEncoder.BuildCTable(fresh, normalized, max, tableLog);
+                next = fresh;
                 return size;
             }
         }
@@ -393,7 +459,7 @@ internal static unsafe class SequenceEncoder
                 ref next.LiteralLengthRepeat, llCount, max, mostFrequent, sequenceCount, LiteralLengthFseLog, previous.LiteralLengths,
                 SequenceCodes.LiteralLengthDefaultNorm, LiteralLengthDefaultNormLog, isDefaultAllowed: true, strategy);
             nuint countSize = BuildCTable(
-                op, next.LiteralLengths, LiteralLengthFseLog, stats.LiteralLengths, llCount, max, first & 0x7F, last & 0x7F, sequenceCount,
+                op, ref next.LiteralLengths, next.FreshLiteralLengths(previous), LiteralLengthFseLog, stats.LiteralLengths, llCount, max, first & 0x7F, last & 0x7F, sequenceCount,
                 DefaultLiteralLengths, previous.LiteralLengths);
             if (stats.LiteralLengths == SymbolEncodingType.Compressed)
             {
@@ -414,7 +480,7 @@ internal static unsafe class SequenceEncoder
                 ref next.OffsetRepeat, ofCount, max, mostFrequent, sequenceCount, OffsetFseLog, previous.Offsets,
                 SequenceCodes.OffsetDefaultNorm, OffsetDefaultNormLog, defaultAllowed, strategy);
             nuint countSize = BuildCTable(
-                op, next.Offsets, OffsetFseLog, stats.Offsets, ofCount, max, ((first >> 8) & 0x7F) - SequenceStore.OffsetCodes, ((last >> 8) & 0x7F) - SequenceStore.OffsetCodes, sequenceCount,
+                op, ref next.Offsets, next.FreshOffsets(previous), OffsetFseLog, stats.Offsets, ofCount, max, ((first >> 8) & 0x7F) - SequenceStore.OffsetCodes, ((last >> 8) & 0x7F) - SequenceStore.OffsetCodes, sequenceCount,
                 DefaultOffsets, previous.Offsets);
             if (stats.Offsets == SymbolEncodingType.Compressed)
             {
@@ -434,7 +500,7 @@ internal static unsafe class SequenceEncoder
                 ref next.MatchLengthRepeat, mlCount, max, mostFrequent, sequenceCount, MatchLengthFseLog, previous.MatchLengths,
                 SequenceCodes.MatchLengthDefaultNorm, MatchLengthDefaultNormLog, isDefaultAllowed: true, strategy);
             nuint countSize = BuildCTable(
-                op, next.MatchLengths, MatchLengthFseLog, stats.MatchLengths, mlCount, max, ((first >> 16) & 0x7F) - SequenceStore.MatchLengthCodes, ((last >> 16) & 0x7F) - SequenceStore.MatchLengthCodes,
+                op, ref next.MatchLengths, next.FreshMatchLengths(previous), MatchLengthFseLog, stats.MatchLengths, mlCount, max, ((first >> 16) & 0x7F) - SequenceStore.MatchLengthCodes, ((last >> 16) & 0x7F) - SequenceStore.MatchLengthCodes,
                 sequenceCount,
                 DefaultMatchLengths, previous.MatchLengths);
             if (stats.MatchLengths == SymbolEncodingType.Compressed)
@@ -490,6 +556,11 @@ internal static unsafe class SequenceEncoder
         if (capacity <= sizeof(ulong))
         {
             return 0;
+        }
+
+        if (X86Base.IsSupported)
+        {
+            return EncodeSequencesInPlace(destination, capacity, literalLengthTable, offsetTable, matchLengthTable, sequences, sequenceCount);
         }
 
         // The three tables in two arrays: the transforms by code at the codes' places, the states one
@@ -605,6 +676,96 @@ internal static unsafe class SequenceEncoder
         }
     }
 
+    /// <summary>
+    /// <see cref="EncodeSequences"/> as x64 runs it: the three tables read in place, as libzstd reads
+    /// them, and the three states encoded one after the other, in the stream's order, each one's bits
+    /// into the container as soon as they are known.
+    /// </summary>
+    /// <remarks>
+    /// Gathering the tables costs a copy of their 2.5 KiB of states and a pass over their transforms
+    /// a block, which a small block (a record of a few hundred bytes, some fifty sequences) pays in
+    /// full; the gathered loop saves registers, which x64 has too few of to keep the three states'
+    /// parts anyway (the JIT spilled them), and which its six table pointers here only take in
+    /// memory, read without a store. The bits are those of the gathered loop: every state's low bits
+    /// in the stream's order, offset, match length, literal length, then the extra bits.
+    /// </remarks>
+    private static nuint EncodeSequencesInPlace(
+        byte* destination, nuint capacity, FseCTable literalLengthTable, FseCTable offsetTable, FseCTable matchLengthTable,
+        SequenceRecord* sequences, nuint sequenceCount)
+    {
+        // Each table's transforms moved down by its codes' place, which the records index them by.
+        FseSymbolTransform* llTransforms = literalLengthTable.Symbols;
+        FseSymbolTransform* ofTransforms = offsetTable.Symbols - SequenceStore.OffsetCodes;
+        FseSymbolTransform* mlTransforms = matchLengthTable.Symbols - SequenceStore.MatchLengthCodes;
+        ushort* llStates = literalLengthTable.StateTable;
+        ushort* ofStates = offsetTable.StateTable;
+        ushort* mlStates = matchLengthTable.StateTable;
+
+        byte* ptr = destination;
+        byte* end = destination + capacity - sizeof(ulong);
+        ulong container;
+        nint bitPosition;
+
+        // ---- the last sequence: its states start the stream, then its extra bits
+        SequenceRecord* last = sequences + sequenceCount - 1;
+        nint lastCodes = (nint)last->Codes;
+        nint mlState = InitialState(mlStates, mlTransforms, (lastCodes >> 16) & 0x7F);
+        nint ofState = InitialState(ofStates, ofTransforms, (lastCodes >> 8) & 0x7F);
+        nint llState = InitialState(llStates, llTransforms, lastCodes & 0x7F);
+        container = last->Extras;
+        bitPosition = lastCodes >> 24;
+        Flush(ref container, ref bitPosition, ref ptr, end);
+
+        for (SequenceRecord* sequence = last - 1; sequence >= sequences; sequence--)
+        {
+            nint codes = (nint)sequence->Codes;
+            EncodeState(ref ofState, ofTransforms[(codes >> 8) & 0x7F], ofStates, ref container, ref bitPosition);
+            EncodeState(ref mlState, mlTransforms[(codes >> 16) & 0x7F], mlStates, ref container, ref bitPosition);
+            EncodeState(ref llState, llTransforms[codes & 0x7F], llStates, ref container, ref bitPosition);
+            nint extraBits = codes >> 24;
+            if (extraBits >= 64 - 7 - (LiteralLengthFseLog + MatchLengthFseLog + OffsetFseLog))
+            {
+                Flush(ref container, ref bitPosition, ref ptr, end);
+            }
+
+            ulong extras = sequence->Extras;
+            if (extraBits <= 56)
+            {
+                container |= extras << (int)bitPosition;
+                bitPosition += extraBits;
+            }
+            else
+            {
+                // The lengths' bits, then a flush, then the offset's.
+                nint ofBits = (nint)BitOperations.Log2(sequence->OffBase);
+                nint lengthBits = extraBits - ofBits;
+                container |= LowBits(extras, lengthBits) << (int)bitPosition;
+                bitPosition += lengthBits;
+                Flush(ref container, ref bitPosition, ref ptr, end);
+                container |= (extras >> (int)lengthBits) << (int)bitPosition;
+                bitPosition += ofBits;
+            }
+
+            Flush(ref container, ref bitPosition, ref ptr, end);
+        }
+
+        // ---- the final states, which the decoder starts from, then the end marker
+        AddBits(ref container, ref bitPosition, (ulong)mlState, matchLengthTable.TableLog);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        AddBits(ref container, ref bitPosition, (ulong)ofState, offsetTable.TableLog);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        AddBits(ref container, ref bitPosition, (ulong)llState, literalLengthTable.TableLog);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        AddBits(ref container, ref bitPosition, 1, 1);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        if (ptr >= end)
+        {
+            return 0;
+        }
+
+        return (nuint)(ptr - destination) + (bitPosition > 0 ? 1u : 0u);
+    }
+
     /// <summary>libzstd's <c>FSE_initCState2</c>: see <see cref="FseState"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static nint InitialState(ushort* states, FseSymbolTransform* symbols, nint symbol)
@@ -613,6 +774,22 @@ internal static unsafe class SequenceEncoder
         uint nbBitsOut = (transform.DeltaNbBits + (1u << 15)) >> 16;
         uint value = (nbBitsOut << 16) - transform.DeltaNbBits;
         return states[(nint)(value >> (int)nbBitsOut) + transform.DeltaFindState];
+    }
+
+    /// <summary>
+    /// libzstd's <c>FSE_encodeSymbol</c> on a state of the gathered tables: its low bits into the
+    /// container, then its successor. As in the loop that gathers the three: the high part of the
+    /// state indexes the successor, the state less the high part shifted back is what it outputs.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EncodeState(ref nint state, FseSymbolTransform transform, ushort* states, ref ulong container, ref nint bitPosition)
+    {
+        nint nb = (state + (nint)transform.DeltaNbBits) >> 16;
+        nint high = state >> (int)nb;
+        ulong low = (ulong)(state - (high << (int)(nb + 64)));
+        container |= low << (int)bitPosition;
+        bitPosition += nb;
+        state = states[high + transform.DeltaFindState];
     }
 
     /// <summary>The low <paramref name="count"/> bits (0 to 63) of <paramref name="value"/>: a shift and a bit clear.</summary>

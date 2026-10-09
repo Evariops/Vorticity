@@ -22,6 +22,7 @@ internal unsafe struct BitWriter
     private readonly byte* _end;
 
     /// <summary>libzstd's <c>BIT_initCStream</c>; <see cref="IsValid"/> is false for a buffer of eight bytes or less.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public BitWriter(byte* start, nuint capacity)
     {
         _start = start;
@@ -70,6 +71,7 @@ internal unsafe struct BitWriter
 
     /// <summary>libzstd's <c>BIT_closeCStream</c>: the end marker, then the last bytes.</summary>
     /// <returns>The size of the stream, or 0 when it did not fit.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public nuint Close()
     {
         AddBitsFast(1, 1);

@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -76,11 +77,16 @@ internal static unsafe partial class DoubleFastMatchFinder
     /// <summary>
     /// libzstd's <c>ZSTD_compressBlock_doubleFast_dictMatchState_generic</c>: the frame's tables first,
     /// the dictionary's (its own parameters, tagged indices) where they have nothing in the prefix;
-    /// the dictionary's indices sit just below the prefix's.
+    /// the dictionary's indices sit just below the prefix's. On x64, <see cref="CompressBlockAttachedX64{THash}"/>.
     /// </summary>
     private static nuint CompressBlockAttached<THash>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
         where THash : IMatchHash
     {
+        if (X86Base.IsSupported)
+        {
+            return CompressBlockAttachedX64<THash>(ref state, store, rep, source, size);
+        }
+
         CompressionParameters parameters = state.Parameters;
         uint* hashLong = state.HashTable;
         int hashLogLong = parameters.HashLog;

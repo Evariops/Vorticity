@@ -392,6 +392,7 @@ public sealed unsafe partial class ZstdCompressor
             // attached dictionary.
             nuint dictionaryLiterals = FindSequencesWithDictionary(source, size, rep);
             _store.StoreLastLiterals(source + size - (nint)dictionaryLiterals, dictionaryLiterals);
+            _store.ComputeCodes();
             SkipJobSequences(size);
             return;
         }
@@ -405,6 +406,7 @@ public sealed unsafe partial class ZstdCompressor
         };
 
         _store.StoreLastLiterals(source + size - (nint)lastLiterals, lastLiterals);
+        _store.ComputeCodes();
         SkipJobSequences(size);
     }
 
@@ -508,8 +510,8 @@ public sealed unsafe partial class ZstdCompressor
         bool singleStream = size < 256;
         SymbolEncodingType type = SymbolEncodingType.Compressed;
 
-        // The previous tree, assumed reused.
-        _next.Huffman.CopyFrom(_previous.Huffman);
+        // The previous tree, assumed reused: the state takes a new one only when it is used.
+        _next.Huffman = _previous.Huffman;
         _next.HuffmanRepeat = _previous.HuffmanRepeat;
         if (disabled || size < MinLiteralsToCompress(strategy, _previous.HuffmanRepeat))
         {
@@ -525,9 +527,10 @@ public sealed unsafe partial class ZstdCompressor
             singleStream = true;
         }
 
+        HuffmanCTable fresh = _next.FreshHuffman(_previous);
         nuint compressed = HuffmanEncoder.Compress(
-            destination + headerSize, capacity - headerSize, source, size, singleStream, _next.Huffman, _huffmanWorkspace,
-            ref repeat, preferRepeat, optimalDepth, suspectUncompressible);
+            destination + headerSize, capacity - headerSize, source, size, singleStream, _previous.Huffman, fresh,
+            _huffmanWorkspace, ref repeat, preferRepeat, optimalDepth, suspectUncompressible);
         if (repeat != HuffmanRepeat.None)
         {
             type = SymbolEncodingType.Repeat;
@@ -536,8 +539,6 @@ public sealed unsafe partial class ZstdCompressor
         nuint minGain = MinGain(size, strategy);
         if (compressed == 0 || compressed >= size - minGain)
         {
-            _next.Huffman.CopyFrom(_previous.Huffman);
-            _next.HuffmanRepeat = _previous.HuffmanRepeat;
             return WriteRawLiterals(destination, source, size);
         }
 
@@ -546,14 +547,13 @@ public sealed unsafe partial class ZstdCompressor
             // One symbol, or, for fewer than 8 literals, possibly one byte of stream: checked.
             if (size >= 8 || new ReadOnlySpan<byte>(source + 1, (int)size - 1).IndexOfAnyExcept(source[0]) < 0)
             {
-                _next.Huffman.CopyFrom(_previous.Huffman);
-                _next.HuffmanRepeat = _previous.HuffmanRepeat;
                 return WriteRleLiterals(destination, source, size);
             }
         }
 
         if (type == SymbolEncodingType.Compressed)
         {
+            _next.Huffman = fresh;
             _next.HuffmanRepeat = HuffmanRepeat.Check;
         }
 
