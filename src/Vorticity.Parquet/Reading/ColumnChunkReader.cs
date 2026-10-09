@@ -382,8 +382,10 @@ internal sealed class ColumnChunkReader : IDisposable
             ParquetThrow.Format($"A page of the flat column '{Name}' holds {header.ValueCount} values for {rows} rows.");
         }
 
+        // A flat column's repetition levels say nothing, and a required one's definition levels
+        // neither: some writers write them anyway, and they are stepped over.
         int levels = header.RepetitionLevelsLength + header.DefinitionLevelsLength;
-        if (header.RepetitionLevelsLength != 0 || header.DefinitionLevelsLength < 0 || levels > header.CompressedPageSize || levels > header.UncompressedPageSize)
+        if (header.RepetitionLevelsLength < 0 || header.DefinitionLevelsLength < 0 || levels > header.CompressedPageSize || levels > header.UncompressedPageSize)
         {
             ParquetThrow.Format($"A page of '{Name}' declares levels its bytes do not hold.");
         }
@@ -391,7 +393,9 @@ internal sealed class ColumnChunkReader : IDisposable
         Page page = Rent(rows);
         try
         {
-            int valid = Levels(page, _chunk.Slice(at, header.DefinitionLevelsLength).Span, rows);
+            int valid = _leaf.MaxDefinitionLevel == 0
+                ? rows
+                : Levels(page, _chunk.Slice(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
             if (header.NullCount != rows - valid)
             {
                 ParquetThrow.Format($"A page of '{Name}' declares {header.NullCount} nulls where its levels hold {rows - valid}.");
@@ -400,7 +404,13 @@ internal sealed class ColumnChunkReader : IDisposable
             RequireEncoding(header.Encoding);
             int size = header.UncompressedPageSize - levels;
             VortexBuffer stored = _chunk.Slice(at + levels, header.CompressedPageSize - levels);
-            if (header.IsCompressed && _codec != CompressionCodec.Uncompressed)
+
+            // A page of nulls may have no values at all, and no bytes the codec would make of none.
+            if (size == 0)
+            {
+                Decode(page, header.Encoding, default, null, valid);
+            }
+            else if (header.IsCompressed && _codec != CompressionCodec.Uncompressed)
             {
                 Cap(size);
                 NativeSegmentOwner owner = _pool.Rent(size, 64);

@@ -223,8 +223,7 @@ internal struct ColumnChunkMetadata
         {
             switch (id)
             {
-                case 1:
-                    ThriftCompactReader.Expect(type, ThriftType.Binary);
+                case 1 when type == ThriftType.Binary:
                     chunk.HasFilePath = reader.ReadBinary().Length > 0;
                     break;
                 case 3:
@@ -232,20 +231,16 @@ internal struct ColumnChunkMetadata
                     ReadColumnMetaData(ref reader, ref chunk, origin);
                     hasMetadata = true;
                     break;
-                case 4:
-                    ThriftCompactReader.Expect(type, ThriftType.I64);
+                case 4 when type == ThriftType.I64:
                     chunk.OffsetIndexOffset = reader.ReadI64();
                     break;
-                case 5:
-                    ThriftCompactReader.Expect(type, ThriftType.I32);
+                case 5 when type == ThriftType.I32:
                     chunk.OffsetIndexLength = reader.ReadI32();
                     break;
-                case 6:
-                    ThriftCompactReader.Expect(type, ThriftType.I64);
+                case 6 when type == ThriftType.I64:
                     chunk.ColumnIndexOffset = reader.ReadI64();
                     break;
-                case 7:
-                    ThriftCompactReader.Expect(type, ThriftType.I32);
+                case 7 when type == ThriftType.I32:
                     chunk.ColumnIndexLength = reader.ReadI32();
                     break;
                 case 8:
@@ -325,28 +320,22 @@ internal struct ColumnChunkMetadata
                     chunk.DataPageOffset = reader.ReadI64();
                     found |= 128;
                     break;
-                case 11:
-                    ThriftCompactReader.Expect(type, ThriftType.I64);
+                case 11 when type == ThriftType.I64:
                     chunk.DictionaryPageOffset = reader.ReadI64();
                     break;
-                case 12:
-                    ThriftCompactReader.Expect(type, ThriftType.Struct);
+                case 12 when type == ThriftType.Struct:
                     chunk.Statistics = ColumnStatistics.Read(ref reader, origin);
                     break;
-                case 13:
-                    ThriftCompactReader.Expect(type, ThriftType.List);
+                case 13 when type == ThriftType.List:
                     ReadEncodingStats(ref reader, ref chunk);
                     break;
-                case 14:
-                    ThriftCompactReader.Expect(type, ThriftType.I64);
+                case 14 when type == ThriftType.I64:
                     chunk.BloomFilterOffset = reader.ReadI64();
                     break;
-                case 15:
-                    ThriftCompactReader.Expect(type, ThriftType.I32);
+                case 15 when type == ThriftType.I32:
                     chunk.BloomFilterLength = reader.ReadI32();
                     break;
-                case 16:
-                    ThriftCompactReader.Expect(type, ThriftType.Struct);
+                case 16 when type == ThriftType.Struct:
                     int sizeStart = reader.Position;
                     reader.Skip(type);
                     chunk.SizeStatistics = new ByteRange(origin + sizeStart, reader.Position - sizeStart);

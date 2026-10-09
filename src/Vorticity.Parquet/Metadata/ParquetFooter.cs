@@ -111,17 +111,14 @@ internal sealed class ParquetFooter
                     rowGroups = ReadRowGroups(ref reader);
                     found |= 8;
                     break;
-                case 5:
-                    ThriftCompactReader.Expect(type, ThriftType.List);
+                case 5 when type == ThriftType.List:
                     keyValues = ReadKeyValues(ref reader);
                     break;
-                case 6:
-                    ThriftCompactReader.Expect(type, ThriftType.Binary);
+                case 6 when type == ThriftType.Binary:
                     int length = reader.ReadBinary().Length;
                     createdBy = new ByteRange(reader.Position - length, length);
                     break;
-                case 7:
-                    ThriftCompactReader.Expect(type, ThriftType.List);
+                case 7 when type == ThriftType.List:
                     orders = ReadColumnOrders(ref reader);
                     break;
                 case 8:
@@ -149,14 +146,18 @@ internal sealed class ParquetFooter
         long rows = 0;
         for (int i = 0; i < rowGroups.Length; i++)
         {
+            if (rowGroups[i].RowCount < 0)
+            {
+                ParquetThrow.Format($"Row group {i} declares {rowGroups[i].RowCount} rows.");
+            }
+
             rowGroups[i].FirstRow = rows;
             rows += rowGroups[i].RowCount;
         }
 
-        if (rowCount < 0 || rows != rowCount)
-        {
-            ParquetThrow.Format($"The footer counts {rowCount} rows and its row groups {rows}.");
-        }
+        // The rows are the row groups': some writers left the file's own count at 0, and no read
+        // depends on it.
+        rowCount = rows;
 
         ParquetFooter footer = new(bytes, rowGroups.Length)
         {
@@ -273,18 +274,15 @@ internal sealed class ParquetFooter
                         entry.RowCount = reader.ReadI64();
                         found |= 4;
                         break;
-                    case 4:
-                        ThriftCompactReader.Expect(type, ThriftType.List);
+                    case 4 when type == ThriftType.List:
                         int start = reader.Position;
                         reader.Skip(type);
                         entry.SortingColumns = new ByteRange(start, reader.Position - start);
                         break;
-                    case 6:
-                        ThriftCompactReader.Expect(type, ThriftType.I64);
+                    case 6 when type == ThriftType.I64:
                         entry.TotalCompressedSize = reader.ReadI64();
                         break;
-                    case 7:
-                        ThriftCompactReader.Expect(type, ThriftType.I16);
+                    case 7 when type == ThriftType.I16:
                         entry.Ordinal = reader.ReadI16();
                         break;
                     default:
