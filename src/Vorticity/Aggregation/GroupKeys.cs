@@ -88,6 +88,16 @@ internal abstract class GroupKeys
     /// <exception cref="VortexUnsupportedException">The array cannot double.</exception>
     internal static int Doubled(int length) => length < MostDoubled ? length * 2 : throw TooMany();
 
+    /// <summary>
+    /// <paramref name="length"/> doubled, or <paramref name="bound"/> when it lies between them: an array
+    /// that would double past the groups foretold stops at them, and doubles again once they are passed.
+    /// </summary>
+    internal static int DoubledUpTo(int length, int bound)
+    {
+        int doubled = Doubled(length);
+        return bound > length && bound < doubled ? bound : doubled;
+    }
+
     private static VortexUnsupportedException TooMany() => new VortexUnsupportedException(
         "group by of more than 2^29 groups",
         ComponentKind.Feature,
@@ -167,6 +177,15 @@ internal abstract class GroupKeys
     internal virtual void Reserve(int groups)
     {
     }
+
+    /// <summary>
+    /// Room for a lane whose first rows were all new groups: every row new to the end, or a key whose values
+    /// come back later, at most half as many groups as rows. The index, which places every group again as
+    /// it grows, takes <paramref name="groups"/>; the keys' arrays half, which double once, up to
+    /// <paramref name="groups"/>, when every row stays new: growing an array copies it, in order. Keys whose
+    /// index is not apart from their arrays reserve both (<see cref="Reserve"/>).
+    /// </summary>
+    internal virtual void ReserveAllNew(int groups) => Reserve(groups);
 
     /// <summary>
     /// The bytes a key takes beside its group's record in an entry of a part's batch, a power of two; 0
@@ -1371,6 +1390,26 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Reserve(int groups)
     {
+        ReserveIndex(groups);
+        if (_keys.Length < groups)
+        {
+            Grow(groups);
+        }
+    }
+
+    internal override void ReserveAllNew(int groups)
+    {
+        _doublesUpTo = groups;
+        ReserveIndex(groups);
+        if (_keys.Length < groups / 2)
+        {
+            Grow(groups / 2);
+        }
+    }
+
+    /// <summary>The index's room for <paramref name="groups"/> groups, the slots of a hash and a group past a few thousand of a wide key.</summary>
+    private void ReserveIndex(int groups)
+    {
         // Keys numbered by value take the index only past the bounds, which exact statistics never leave.
         if (_pages is null)
         {
@@ -1388,12 +1427,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 _index.Reserve(groups);
             }
         }
-
-        if (_keys.Length < groups)
-        {
-            Grow(groups);
-        }
     }
+
+    // The length the keys' array doubles to at most, once a lane reserved the room of first rows all new
+    // (ReserveAllNew): 10⁶ names at one lane, each once then all again, foretold as 2M, held 2.25M keys.
+    private int _doublesUpTo = int.MaxValue;
 
     /// <summary>The keys' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>
     private void Grow(int length)
@@ -1797,7 +1835,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     {
         if (Count == _keys.Length)
         {
-            Grow(Doubled(Count));
+            Grow(DoubledUpTo(Count, _doublesUpTo));
         }
 
         _keys[Count] = value;

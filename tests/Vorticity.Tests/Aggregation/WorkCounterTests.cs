@@ -24,6 +24,7 @@ public sealed partial class WorkCounterTests
     private const int SpreadRows = 300_000;
     private const int PageRows = 200_000;
     private const int VisitRows = 300_000;
+    private const int NameRows = 200_000;
 
     /// <summary>The counts at one lane, a line a query, as <see cref="Line"/> writes them.</summary>
     private static readonly string[] Expected =
@@ -38,6 +39,7 @@ public sealed partial class WorkCounterTests
         "distinct values of 10^6: result 129508936719, rows 0, lanes 0, lane groups 0, arrays 0 of 0 B, copied 0 B, blocks 0/0/0, merge  parts 0 entries, peak 0 B",
         "count by a text: result 200000, rows 200000, lanes 1, lane groups 49081, arrays 50 of 7730472 B, copied 1833792 B, blocks 0/12/1, merge 0 parts 0 entries, peak 6029368 B",
         "count by a text and an int: result 200000, rows 200000, lanes 1, lane groups 196058, arrays 94 of 14492304 B, copied 2357952 B, blocks 0/0/0, merge 0 parts 0 entries, peak 12126112 B",
+        "count by a name, each once then all again: result 200000, rows 200000, lanes 1, lane groups 100000, arrays 72 of 11905852 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 7947288 B",
         "least and greatest text by 10^3 values: result 56000, rows 200000, lanes 1, lane groups 1000, arrays 21 of 171968 B, copied 0 B, blocks 0/0/13, merge 0 parts 0 entries, peak 1310720 B",
         "distinct users by day: result 299552, rows 300000, lanes 1, lane groups 1, arrays 370 of 2940924 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 2621440 B",
     ];
@@ -100,6 +102,7 @@ public sealed partial class WorkCounterTests
         yield return ("distinct values of 10^6", DistinctAsync, SpreadAsync);
         yield return ("count by a text", UrlsAsync, PagesAsync);
         yield return ("count by a text and an int", UrlSmallsAsync, PagesAsync);
+        yield return ("count by a name, each once then all again", NamesAsync, NamesTwiceAsync);
         yield return ("least and greatest text by 10^3 values", TextExtremesAsync, PagesAsync);
         yield return ("distinct users by day", UsersByDayAsync, VisitsAsync);
     }
@@ -161,6 +164,18 @@ public sealed partial class WorkCounterTests
     private static async Task<(long, AggregationPlan)> UrlsAsync(VortexFile file)
     {
         Vorticity.Aggregation query = file.Scan<Page>().GroupBy(p => p.Url).Select(g => (g.Key, g.Count()));
+        long rows = 0;
+        await foreach (TextCount count in query.As<TextCount>().ToRecordsAsync(Ct))
+        {
+            rows += count.Count;
+        }
+
+        return (rows, query.Plan);
+    }
+
+    private static async Task<(long, AggregationPlan)> NamesAsync(VortexFile file)
+    {
+        Vorticity.Aggregation query = file.Scan<Named>().GroupBy(n => n.Name).Select(g => (g.Key, g.Count()));
         long rows = 0;
         await foreach (TextCount count in query.As<TextCount>().ToRecordsAsync(Ct))
         {
@@ -275,6 +290,13 @@ public sealed partial class WorkCounterTests
         return new Page(string.Create(CultureInfo.InvariantCulture, $"https://example.org/p/{a % 50_000:D6}"), (int)((a >> 20) % 100), (int)((a >> 40) % 1_000));
     }));
 
+    /// <summary>
+    /// 10⁵ names of eleven bytes, each once in a scattered order, then all again in the same order: the
+    /// bench's names, cut short. The first rows are all new, as a key whose every row is new.
+    /// </summary>
+    private static Task<string> NamesTwiceAsync() => SharedFiles.GetAsync($"{nameof(WorkCounterTests)}-names-{NameRows}", path => WriteAsync(path, NameRows, row =>
+        new Named(string.Create(CultureInfo.InvariantCulture, $"user-{(long)row * 7_919 % (NameRows / 2):D6}"))));
+
     /// <summary>A hundred days in order, a user among a million drawn for each visit: the bench's visits, cut short.</summary>
     private static Task<string> VisitsAsync() => SharedFiles.GetAsync($"{nameof(WorkCounterTests)}-visits-{VisitRows}", path => WriteAsync(path, VisitRows, row =>
         new Visit((int)((long)row * 100 / VisitRows), (int)(Mix((ulong)row) % 1_000_000))));
@@ -311,6 +333,9 @@ public sealed partial class WorkCounterTests
 
     [VortexRecord]
     public partial record struct Visit(int Day, int User);
+
+    [VortexRecord]
+    public partial record struct Named(string Name);
 
     [VortexRecord]
     public partial record struct KeyTotal(int Key, long Count, long Total);

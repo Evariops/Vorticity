@@ -104,8 +104,9 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
 /// fourteen lanes. Unbounded, in slots of a hash and a group past 4 096 groups, against the bytes a lane
 /// turned into there (2026-10-09): by <c>id3</c> ×0.603 the time at one lane and ×0.765 at fourteen, q3
 /// ×0.690 and ×0.814, 10⁶ names ×0.753 and ×0.924, q10 ×0.948 and ×0.971; the state by <c>id3</c> ×0.66
-/// and ×0.71, by 10⁶ names ×1.54 at one lane, whose first rows foretell twice as many, and ×1.01 at
-/// fourteen.
+/// and ×0.71, by 10⁶ names ×1.54 at one lane, whose first rows, all new, foretold twice as many, and
+/// ×1.01 at fourteen. Such a lane now reserves the keys for half its rows: the names' state ×1.00 of the
+/// bytes' at one lane (<see cref="GroupKeys.ReserveAllNew"/>).
 /// </para>
 /// <para>
 /// Kept to the lanes' tables: the core, which holds a key's entries apart from any lane, stays with the
@@ -455,6 +456,12 @@ internal sealed class ShortTextKeys : GroupKeys
     internal override void Reserve(int groups)
     {
         _words?.Reserve(groups);
+        _bytes?.Reserve(groups);
+    }
+
+    internal override void ReserveAllNew(int groups)
+    {
+        _words?.ReserveAllNew(groups);
         _bytes?.Reserve(groups);
     }
 

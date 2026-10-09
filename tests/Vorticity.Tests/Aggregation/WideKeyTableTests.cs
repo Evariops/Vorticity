@@ -282,6 +282,45 @@ public sealed partial class WideKeyTableTests
     }
 
     [Fact]
+    public void KeysOfFirstRowsAllNewTakeHalfTheirRoomAndDoubleOnceUpToIt()
+    {
+        // 6 000 keys in an array of 8 192, then the room of 10 000 rows all new: the index takes it, the keys
+        // already hold half. Past 8 192 they grow to 10 000, not to 16 384, and every key is found again.
+        // The chains' few links aside, the footprint moves by those keys alone.
+        FixedKeys<UInt128> keys = new FixedKeys<UInt128>(new ColumnShape(new ColumnSym(Expr.Field("k"), VortexType.Uuid, null, null, -1, [])), sorted: false);
+        Random random = new Random(59);
+        UInt128[] values = new UInt128[10_000];
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = new UInt128((ulong)random.NextInt64(), (ulong)random.NextInt64());
+        }
+
+        for (int i = 0; i < 6_000; i++)
+        {
+            Assert.Equal(i, keys.Lookup(values[i]));
+        }
+
+        keys.ReserveAllNew(values.Length);
+        long reserved = keys.Footprint;
+        for (int i = 6_000; i < 8_192; i++)
+        {
+            Assert.Equal(i, keys.Lookup(values[i]));
+        }
+
+        Assert.InRange(keys.Footprint - reserved, 0, 4_096);
+        for (int i = 8_192; i < values.Length; i++)
+        {
+            Assert.Equal(i, keys.Lookup(values[i]));
+        }
+
+        Assert.InRange(keys.Footprint - reserved, (10_000L - 8_192) * 16, ((10_000L - 8_192) * 16) + 4_096);
+        for (int i = 0; i < values.Length; i++)
+        {
+            Assert.Equal(i, keys.Lookup(values[i]));
+        }
+    }
+
+    [Fact]
     public void AnIndexKeepingNoneOfItsGroupsKeepsItsSize()
     {
         // A lane's table emptied under its budget, or the core's cache once flushed, keeps none of its

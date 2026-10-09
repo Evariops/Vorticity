@@ -1374,8 +1374,11 @@ internal sealed class AggregationPartition
     /// Once <see cref="JudgedRows"/> rows are folded, a table of a hashed key reserves the groups its first
     /// rows foretell for the rows the partition expects: those a uniform key of <see cref="EstimatedValues"/>
     /// values makes from them, as its budget lets it. Grown by doubling, the table placed every group again
-    /// at each step, a sixth of a group by of 1.8M pairs of integers. With no
-    /// key, each slot foretells its own (<see cref="AggregateSlot.Foretell"/>).
+    /// at each step, a sixth of a group by of 1.8M pairs of integers. First rows all new reserve the index
+    /// for every row new and the keys and their states for half (<see cref="GroupKeys.ReserveAllNew"/>):
+    /// at one lane, 10⁶ names over 2M rows, each once then all again, held 66.6 MB rather than 101.9, the
+    /// bytes' 66.3, and db-benchmark's q10, every row new, 899 MB rather than 989, both in the same time
+    /// (2026-10-09). With no key, each slot foretells its own (<see cref="AggregateSlot.Foretell"/>).
     /// </summary>
     private void Foretell()
     {
@@ -1419,6 +1422,16 @@ internal sealed class AggregationPartition
         // room took it together, and the last overdrew the budget.
         long perGroup = Footprint / keys.Count;
         long room = groups + (groups / 8);
+
+        // First rows all new are every row new to the end, or a key whose values come back later, at most
+        // half as many groups as rows: the same first rows. A lane alone folds the source's rows and holds
+        // no more groups than rows, where the eighth would go past them.
+        bool allNew = double.IsPositiveInfinity(values);
+        if (allNew && Lanes == 1)
+        {
+            room = Math.Min(room, ExpectedRows);
+        }
+
         if (Memory is { } memory)
         {
             if (!memory.CanGrow(perGroup * room * Lanes))
@@ -1432,8 +1445,19 @@ internal sealed class AggregationPartition
             }
         }
 
-        keys.Reserve((int)room);
-        Records?.Reserve((int)room);
+        // The index, which places every group again as it grows, takes the room of every row new; the keys
+        // and their states half, which double once if every row stays new. 10⁶ names over 2M rows, each once
+        // then all again, foretold as 2M at one lane, held 2.25M keys and states.
+        if (allNew)
+        {
+            keys.ReserveAllNew((int)room);
+            Records?.ReserveAllNew((int)room);
+        }
+        else
+        {
+            keys.Reserve((int)room);
+            Records?.Reserve((int)room);
+        }
     }
 
     private readonly CorePressure? _pressure;

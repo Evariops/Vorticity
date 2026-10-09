@@ -105,6 +105,27 @@ public sealed partial class GroupRecordsTests
     }
 
     [Fact]
+    public void RecordsOfFirstRowsAllNewTakeHalfTheirRoomAndDoubleOnceUpToIt()
+    {
+        // A lane whose first rows were all new holds half of its rows' groups when its key's values come
+        // back later, and every row's when they never do: half its room first, then the room, not the next
+        // power of two past it; once past the room, the records double as they did.
+        RecordLayout layout = RecordLayout.Of([new CountSlot<long>()])!;
+        int stride = layout.Stride;
+        GroupRecords records = new GroupRecords(layout);
+        records.ReserveAllNew(10_000);
+        Assert.Equal(((5_000L * stride) + 7) * sizeof(ulong), records.Footprint);
+        records.EnsureGroups(5_000);
+        Assert.Equal(((5_000L * stride) + 7) * sizeof(ulong), records.Footprint);
+        records.EnsureGroups(5_001);
+        Assert.Equal(((10_000L * stride) + 7) * sizeof(ulong), records.Footprint);
+        records.EnsureGroups(10_000);
+        Assert.Equal(((10_000L * stride) + 7) * sizeof(ulong), records.Footprint);
+        records.EnsureGroups(10_001);
+        Assert.Equal(((32_768L * stride) + 7) * sizeof(ulong), records.Footprint);
+    }
+
+    [Fact]
     public void RecordsGrowSeededAndKeepTheGroupsKept()
     {
         AggregateSlot[] slots = [new CountSlot<long>(), new RowSlot(last: false)];

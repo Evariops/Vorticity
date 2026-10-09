@@ -66,8 +66,9 @@ internal sealed class GroupRecords
         if (groups > _capacity)
         {
             // Doubled as the records were, the words past them aside: counted, they would round the
-            // next capacity up to four times this one.
-            Reserve(Scratch.Capacity(groups, _capacity));
+            // next capacity up to four times this one. No further than the groups foretold, until passed.
+            int capacity = Scratch.Capacity(groups, _capacity);
+            Reserve(_doublesUpTo >= groups && _doublesUpTo < capacity ? _doublesUpTo : capacity);
         }
 
         // The seed once, then the records seeded copied onto the next as many, doubling: a call a
@@ -89,6 +90,20 @@ internal sealed class GroupRecords
 
         _groups = groups;
     }
+
+    /// <summary>
+    /// Room for half of <paramref name="groups"/> records, doubling once up to <paramref name="groups"/>:
+    /// a lane whose first rows were all new groups, which a key whose values come back later holds half of
+    /// at most (<see cref="GroupKeys.ReserveAllNew"/>).
+    /// </summary>
+    internal void ReserveAllNew(int groups)
+    {
+        _doublesUpTo = groups;
+        Reserve(groups / 2);
+    }
+
+    // The capacity the records double to at most (ReserveAllNew).
+    private int _doublesUpTo = int.MaxValue;
 
     /// <summary>Room for <paramref name="capacity"/> records, those made kept: a sub-table of the core made at its bound, which then never grows.</summary>
     internal void Reserve(int capacity)
