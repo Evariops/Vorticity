@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Expressions;
 using Vorticity.Types.Numerics;
 using Xunit;
 
@@ -93,6 +94,80 @@ public sealed partial class WideKeyTableTests
     }
 
     [Fact]
+    public void WordsBuiltToShareACrcSpreadOverTheirHomes()
+    {
+        // CRC32C is linear: words that differ by sums of its kernel share their CRC under any initial
+        // value, so that a seed could not part them when it homed words. Homed by rapidhash, they spread:
+        // no chain grows long enough for a seed.
+        if (!System.Runtime.Intrinsics.Arm.Crc32.Arm64.IsSupported && !System.Runtime.Intrinsics.X86.Sse42.X64.IsSupported)
+        {
+            return;
+        }
+
+        TextWord[] words = CrcTwins(5_000);
+        WideKeyTable<TextWord> table = new WideKeyTable<TextWord>();
+        TextWord[] held = new TextWord[words.Length];
+        Assert.Equal(words.Length, Insert(ref table, words, held, 0));
+        Assert.False(table.Seeded);
+        Assert.Equal(words.Length, Insert(ref table, words, held, words.Length));
+    }
+
+    /// <summary>The CRC32C of a word's two halves, from zero, as the instructions compute it.</summary>
+    private static uint Crc(ulong low, ulong high) => System.Runtime.Intrinsics.Arm.Crc32.Arm64.IsSupported
+        ? System.Runtime.Intrinsics.Arm.Crc32.Arm64.ComputeCrc32C(System.Runtime.Intrinsics.Arm.Crc32.Arm64.ComputeCrc32C(0u, low), high)
+        : (uint)System.Runtime.Intrinsics.X86.Sse42.X64.Crc32(System.Runtime.Intrinsics.X86.Sse42.X64.Crc32(0u, low), high);
+
+    /// <summary>
+    /// <paramref name="count"/> words of one CRC32C: a word, and its sums with combinations of a basis of the
+    /// words whose CRC is zero, found by elimination over the CRCs of the 128 bits alone.
+    /// </summary>
+    private static TextWord[] CrcTwins(int count)
+    {
+        List<UInt128> kernel = [];
+        List<(UInt128 Bits, uint Crc)> pivots = [];
+        for (int bit = 0; bit < 128; bit++)
+        {
+            UInt128 bits = UInt128.One << bit;
+            uint crc = Crc((ulong)bits, (ulong)(bits >> 64));
+            foreach ((UInt128 pivotBits, uint pivotCrc) in pivots)
+            {
+                if ((crc & HighestBit(pivotCrc)) != 0)
+                {
+                    crc ^= pivotCrc;
+                    bits ^= pivotBits;
+                }
+            }
+
+            if (crc == 0)
+            {
+                kernel.Add(bits);
+            }
+            else
+            {
+                pivots.Add((bits, crc));
+            }
+        }
+
+        UInt128 first = new UInt128(0x0000_0000_0000_6261, 0x0000_0000_0000_0002);
+        TextWord[] words = new TextWord[count];
+        for (int i = 0; i < count; i++)
+        {
+            UInt128 word = first;
+            for (int k = 0; k < kernel.Count && (i >> k) != 0; k++)
+            {
+                word ^= ((i >> k) & 1) != 0 ? kernel[k] : UInt128.Zero;
+            }
+
+            words[i] = new TextWord((ulong)word, (ulong)(word >> 64));
+            Assert.Equal(Crc((ulong)first, (ulong)(first >> 64)), Crc(words[i].Low, words[i].High));
+        }
+
+        return words;
+    }
+
+    private static uint HighestBit(uint value) => 1u << (31 - System.Numerics.BitOperations.LeadingZeroCount(value));
+
+    [Fact]
     public void ShortTextsAndKeysOf32BytesAreFoundToo()
     {
         WideKeyTable<TextWord> words = new WideKeyTable<TextWord>();
@@ -151,10 +226,10 @@ public sealed partial class WideKeyTableTests
     [Fact]
     public void AClearedTableMakesRoomForTheKeysItHeldBesideThoseKept()
     {
-        // 164 keys, the most 277 slots hold before they grow at 166; five kept and 164 more would pass
-        // it: cleared with room for 169, the table doubles empty, then takes them all without a growth.
+        // 110 keys, the most 277 slots hold four tenths full; five kept and 110 more would pass it:
+        // cleared with room for 115, the table doubles empty, then takes them all without a growth.
         Random random = new Random(43);
-        UInt128[] keys = new UInt128[169];
+        UInt128[] keys = new UInt128[115];
         for (int i = 0; i < keys.Length; i++)
         {
             keys[i] = new UInt128((ulong)random.NextInt64(), (ulong)random.NextInt64());
@@ -162,17 +237,71 @@ public sealed partial class WideKeyTableTests
 
         WideKeyTable<UInt128> table = new WideKeyTable<UInt128>();
         UInt128[] held = new UInt128[keys.Length];
-        Assert.Equal(164, Insert(ref table, keys[..164], held, 0));
+        Assert.Equal(110, Insert(ref table, keys[..110], held, 0));
         long before = table.Footprint;
-        table.Clear(169);
+        table.Clear(115);
         long room = table.Footprint;
         Assert.True(room > before, $"{room:N0} bytes, {before:N0} before");
-        Assert.Equal(169, Insert(ref table, keys, held, 0));
+        Assert.Equal(115, Insert(ref table, keys, held, 0));
         Assert.Equal(room, table.Footprint);
 
         // Room it has already: nothing grows.
         table.Clear(100);
         Assert.Equal(room, table.Footprint);
+    }
+
+    [Fact]
+    public void ASqueezedTableTakesKeysPastItsGrowthPointWithoutGrowing()
+    {
+        // 110 keys, the most 277 slots hold four tenths full: squeezed, the table takes 56 more without a
+        // growth, its chains' few links aside, every key found again, and doubles at the next past six
+        // tenths.
+        Random random = new Random(47);
+        UInt128[] keys = new UInt128[167];
+        for (int i = 0; i < keys.Length; i++)
+        {
+            keys[i] = new UInt128((ulong)random.NextInt64(), (ulong)random.NextInt64());
+        }
+
+        WideKeyTable<UInt128> table = new WideKeyTable<UInt128>();
+        UInt128[] held = new UInt128[keys.Length];
+        Assert.Equal(110, Insert(ref table, keys[..110], held, 0));
+        long before = table.Footprint;
+        Assert.True(table.GrowthFor(56) > 0);
+        Assert.False(table.Squeeze(57));
+        Assert.True(table.Squeeze(56));
+        Assert.Equal(0, table.GrowthFor(56));
+        Assert.Equal(166, Insert(ref table, keys[..166], held, 110));
+        Assert.Equal(166, Insert(ref table, keys[..166], held, 166));
+        long squeezed = table.Footprint;
+        Assert.True(squeezed < before + (before / 4), $"{squeezed:N0} bytes, {before:N0} before");
+
+        Assert.Equal(167, Insert(ref table, keys, held, 166));
+        Assert.True(table.Footprint > 3 * before / 2, $"{table.Footprint:N0} bytes, {before:N0} before");
+        Assert.Equal(167, Insert(ref table, keys, held, 167));
+    }
+
+    [Fact]
+    public void AnIndexKeepingNoneOfItsGroupsKeepsItsSize()
+    {
+        // A lane's table emptied under its budget, or the core's cache once flushed, keeps none of its
+        // groups, and its index keeps its size. Room for as many groups again and an eighth, a stream's,
+        // doubled it whenever it held more than eight ninths of what it holds before it grows: a lane's
+        // table grew as it emptied, past the budget it emptied for (2026-10-09).
+        FixedKeys<UInt128> keys = new FixedKeys<UInt128>(new ColumnShape(new ColumnSym(Expr.Field("k"), VortexType.Uuid, null, null, -1, [])), sorted: false);
+        Random random = new Random(53);
+        for (int count = 4_500; count <= 40_000; count += 250)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Assert.Equal(i, keys.Lookup(new UInt128((ulong)random.NextInt64(), (ulong)random.NextInt64())));
+            }
+
+            long full = keys.Footprint;
+            keys.Keep([]);
+            Assert.Equal(0, keys.Count);
+            Assert.True(keys.Footprint == full, $"{keys.Footprint:N0} bytes once none of {count} groups is kept, {full:N0} before");
+        }
     }
 
     [Fact]
@@ -319,6 +448,125 @@ public sealed partial class WideKeyTableTests
         finally
         {
             System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1, 200)]
+    [InlineData(1, 10)]
+    [InlineData(4, 50)]
+    [InlineData(14, 10)]
+    public async Task AUuidKeySpillsUnderItsBudgetAndEndsExact(int degree, int percent)
+    {
+        // 300 000 UUIDs at random over 1.2M rows, under a share of what one lane holds: slots of a hash and
+        // a group grow, are written to the scratch and read back as the tables of other keys are; nothing
+        // written at one lane under twice it, the peak within 6 % of the ceiling, nothing left after.
+        (string path, Dictionary<Guid, UserTotal> expected) = await SpilledUuids.Async;
+        string scratch = Directory.CreateTempSubdirectory("vorticity-wide-spill-").FullName;
+        try
+        {
+            long result;
+            QueryMemoryBudget large = new QueryMemoryBudget(1L << 30);
+            await using (VortexSession alone = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 1;
+                options.MemoryBudget = large;
+            }))
+            {
+                await using VortexFile first = await alone.OpenAsync(path, cancellationToken: Ct);
+                await foreach (UserTotal _ in Totals(first).As<UserTotal>().ToRecordsAsync(Ct))
+                {
+                }
+
+                result = large.PeakBytes;
+            }
+
+            QueryMemoryBudget budget = new QueryMemoryBudget(result / 100 * percent);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = degree;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            Vorticity.Aggregation totals = Totals(file);
+            Dictionary<Guid, UserTotal> read = [];
+            await foreach (UserTotal total in totals.As<UserTotal>().ToRecordsAsync(Ct))
+            {
+                read.Add(total.User, total);
+            }
+
+            Assert.Equal(expected.Count, read.Count);
+            foreach ((Guid user, UserTotal total) in expected)
+            {
+                Assert.Equal(total, read[user]);
+            }
+
+            // A UUID is a key the core takes: under pressure the lanes turn to it, which spills on its own,
+            // or write their tables.
+            int runs = totals.Plan.LastRun!.SpilledRuns;
+            if (percent <= 50)
+            {
+                Assert.True(runs > 0 || totals.Plan.LastRun.Core is not null, $"no run written and no core under {budget.CeilingBytes:N0} bytes of {result:N0}");
+            }
+            else if (degree == 1)
+            {
+                Assert.Equal(0, runs);
+            }
+
+            // The lanes' tables keep within their budget; the core, under pressure, takes past it what a
+            // stack asks more, and gives everything back (CorePressureTests).
+            if (totals.Plan.LastRun.Core is null)
+            {
+                Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+            }
+
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+        }
+    }
+
+    /// <summary>A count and a sum by user.</summary>
+    private static Vorticity.Aggregation Totals(VortexFile file) => file.Scan<Visit>().GroupBy(r => r.User).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value)));
+
+    /// <summary>The visits of 300 000 users at random over 1.2M rows, written once for the class, and their totals.</summary>
+    private static class SpilledUuids
+    {
+        private static readonly Lazy<Task<(string Path, Dictionary<Guid, UserTotal> Expected)>> s_written = new Lazy<Task<(string, Dictionary<Guid, UserTotal>)>>(WriteAsync);
+
+        internal static Task<(string Path, Dictionary<Guid, UserTotal> Expected)> Async => s_written.Value;
+
+        private static async Task<(string, Dictionary<Guid, UserTotal>)> WriteAsync()
+        {
+            Random random = new Random(53);
+            Guid[] users = new Guid[300_000];
+            for (int i = 0; i < users.Length; i++)
+            {
+                users[i] = new Guid(random.Next(), (short)random.Next(), (short)random.Next(), (byte)random.Next(), (byte)random.Next(), (byte)random.Next(), (byte)random.Next(), 0, 0, 0, (byte)i);
+            }
+
+            Visit[] rows = new Visit[1_200_000];
+            for (int row = 0; row < rows.Length; row++)
+            {
+                rows[row] = new Visit(users[random.Next(users.Length)], row % 7, row % 1_000);
+            }
+
+            string directory = Path.Combine(AppContext.BaseDirectory, "wide-keys");
+            Directory.CreateDirectory(directory);
+            string path = Path.Combine(directory, $"spilled-{Environment.ProcessId}.vortex");
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Visit>(path))
+            {
+                await writer.WriteAsync<Visit>(rows, CancellationToken.None);
+                await writer.CompleteAsync(CancellationToken.None);
+            }
+
+            Dictionary<Guid, UserTotal> expected = rows.GroupBy(r => r.User).ToDictionary(g => g.Key, g => new UserTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+            return (path, expected);
         }
     }
 

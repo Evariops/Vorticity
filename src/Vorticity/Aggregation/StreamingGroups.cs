@@ -202,7 +202,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             if (_keepPending)
             {
                 // Every closed group is out: the partition keeps the open ones, numbered again.
-                _partition!.Keep(_open.AsSpan(0, _openCount));
+                _partition!.Carry(_open.AsSpan(0, _openCount));
                 _keepPending = false;
             }
 

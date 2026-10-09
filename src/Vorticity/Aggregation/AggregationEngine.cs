@@ -1412,15 +1412,28 @@ internal sealed class AggregationPartition
             return;
         }
 
-        // What the partition takes a group now, its slack included, times the groups foretold: past what
-        // the budget grants, the table grows as before.
-        if (Memory is { } memory && !memory.CanGrow(Footprint / keys.Count * groups))
+        // What the partition takes a group now, its slack included, times the groups foretold and an eighth,
+        // on every lane: a few groups past an estimate that held them all doubled the keys and their states
+        // at the end of the pass. Without the eighth when the budget does not hold it on every lane, and
+        // past what it grants them all, the table grows as before: four lanes that each checked their own
+        // room took it together, and the last overdrew the budget.
+        long perGroup = Footprint / keys.Count;
+        long room = groups + (groups / 8);
+        if (Memory is { } memory)
         {
-            return;
+            if (!memory.CanGrow(perGroup * room * Lanes))
+            {
+                room = groups;
+            }
+
+            if (!memory.CanGrow(perGroup * room * Lanes))
+            {
+                return;
+            }
         }
 
-        keys.Reserve((int)groups);
-        Records?.Reserve((int)groups);
+        keys.Reserve((int)room);
+        Records?.Reserve((int)room);
     }
 
     private readonly CorePressure? _pressure;
@@ -2009,9 +2022,17 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// Keeps the groups <paramref name="groups"/> alone, keys and states, numbered again from 0 in
-    /// their order: what a streaming group by does once it has delivered the groups it closed.
+    /// their order, the indexes keeping their size: a top's best groups.
     /// </summary>
-    internal void Keep(ReadOnlySpan<int> groups)
+    internal void Keep(ReadOnlySpan<int> groups) => Keep(groups, carry: false);
+
+    /// <summary>
+    /// <see cref="Keep(ReadOnlySpan{int})"/> for a stream once it has delivered the groups it closed, the
+    /// indexes making room for as many groups as those brought (<see cref="GroupKeys.Carry"/>).
+    /// </summary>
+    internal void Carry(ReadOnlySpan<int> groups) => Keep(groups, carry: true);
+
+    private void Keep(ReadOnlySpan<int> groups, bool carry)
     {
         if (_componentKeys is not null)
         {
@@ -2033,7 +2054,14 @@ internal sealed class AggregationPartition
             }
 
             components[..count].Sort();
-            _componentKeys.Keep(components[..count]);
+            if (carry)
+            {
+                _componentKeys.Carry(components[..count]);
+            }
+            else
+            {
+                _componentKeys.Keep(components[..count]);
+            }
             for (int i = 0; i < groups.Length; i++)
             {
                 _componentOf[i] = components[..count].IndexOf(_componentOf[groups[i]]);
@@ -2046,7 +2074,15 @@ internal sealed class AggregationPartition
             LastValueGroup = groups.IndexOf(LastValueGroup);
         }
 
-        Keys!.Keep(groups);
+        if (carry)
+        {
+            Keys!.Carry(groups);
+        }
+        else
+        {
+            Keys!.Keep(groups);
+        }
+
         Records?.Keep(groups);
         foreach (AggregateSlot slot in Slots)
         {

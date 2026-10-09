@@ -254,6 +254,13 @@ internal abstract class GroupKeys
     /// </summary>
     internal virtual long GrowthFor(int more) => 2 * Footprint;
 
+    /// <summary>
+    /// Room for <paramref name="more"/> new groups without the index doubling, filled tighter than its
+    /// speed asks: for a table the budget cannot double, which the retired lanes share
+    /// (<see cref="LaneRetirement"/>). Whether it has that room; false for an index that does not fill tighter.
+    /// </summary>
+    internal virtual bool Squeeze(int more) => false;
+
     private static NotSupportedException NotSpilled() => new NotSupportedException("These keys do not go to a spill.");
 
     /// <summary>
@@ -288,9 +295,17 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// Keeps the keys of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
-    /// <c>i</c>: the groups a streaming group by has not closed. <paramref name="groups"/> ascend.
+    /// <c>i</c>, the index keeping its size: a top's best groups, or none, a lane's table emptied under its
+    /// budget or the core's cache once flushed. <paramref name="groups"/> ascend.
     /// </summary>
     internal abstract void Keep(ReadOnlySpan<int> groups);
+
+    /// <summary>
+    /// <see cref="Keep"/> for a stream, the groups it has not closed, whose next batch brings about as many
+    /// groups as the one it closed: an index makes room for them now, beside the kept ones, rather than
+    /// grow in the middle of that batch.
+    /// </summary>
+    internal virtual void Carry(ReadOnlySpan<int> groups) => Keep(groups);
 
     /// <summary>
     /// The rows of <paramref name="selection"/> whose key does not lie past the key of group
@@ -645,14 +660,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// its group (<see cref="WideKeyTable{TValue}"/>): 4 096, a table of a few hundred kilobytes. Measured on
     /// 2026-10-08 against slots that hold the key: a hundred short texts took ×1.10 the time in slots of a
     /// hash and a group, a second read every row; a million UUIDs took a quarter of the memory (38.5 MB
-    /// against 139.7), ×1.06 the time at one lane and ×0.92 at fourteen. A short text's words turn into
-    /// bytes before, at <c>ShortTextKeys.MostWords</c>.
+    /// against 139.7), ≈ ×0.91 the time at one lane and ×0.93 at fourteen once the first pass read slots
+    /// and keys in two loops. The value itself is not swept.
     /// </summary>
-    private static int CompactFrom
-    {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => typeof(TValue) == typeof(TextWord) ? int.MaxValue : 1 << 12;
-    }
+    private const int CompactFrom = 1 << 12;
 
     /// <summary>Whether the groups are in the table of a hash and a group: a key wider than a word, past <see cref="CompactFrom"/> groups.</summary>
     private bool Compact
@@ -695,6 +706,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Compact ? _wide.GrowthFor(more)
         : Wide && Count + (long)more > CompactFrom ? WideKeyTable<TValue>.BytesFor(2 * (Count + more))
         : _index.GrowthFor(more);
+
+    /// <summary>The table of a hash and a group fills to six tenths (<see cref="WideKeyTable{TValue}.Squeeze"/>); slots that hold their keys do not.</summary>
+    internal override bool Squeeze(int more) => Compact && _wide.Squeeze(more);
 
     /// <summary>Whether the values are integers, which a table of groups can be indexed by.</summary>
     private static readonly bool Integers =
@@ -983,7 +997,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
         if (_probeAhead >= 0 && selection.IsEmpty && !_appending)
         {
-            TwoPasses(canonical, validity, rows, rowGroups);
+            TwoPasses(canonical[..rows], validity, 0, rowGroups);
             return false;
         }
 
@@ -1014,20 +1028,23 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     /// <summary>
-    /// Every row's group in two passes: the group of each key that sits in
-    /// its home slot, with no branch on the keys; then, in their order, the rows that pass left (keys
-    /// past their home, new keys, nulls) through the whole lookup, which numbers a new key as it first
-    /// comes. The rows left are gathered without a branch either.
+    /// The group of each row from <paramref name="start"/> of a block, <paramref name="values"/> theirs,
+    /// every row selected, in two passes: the group of each key that sits in its home slot, with no branch
+    /// on the keys; then, in their order, the rows that pass left (keys past their home, new keys, nulls)
+    /// through the whole lookup, which numbers a new key as it first comes. The rows left are gathered
+    /// without a branch either. A block whole, or a short text's words a few thousand rows at a time
+    /// (<see cref="ShortTextKeys"/>); never keys in runs, numbered by value or appended.
     /// </summary>
-    private void TwoPasses(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, int[] rowGroups)
+    internal void TwoPasses(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, int[] rowGroups)
     {
+        int rows = values.Length;
         if (_probeAhead > 0)
         {
             Scratch.Grow(ref _homes, rows);
         }
 
-        Span<int> groups = rowGroups.AsSpan(0, rows);
-        _sink ^= FindAtHome(canonical[..rows], groups, _homes, _probeAhead, out bool missed);
+        Span<int> groups = rowGroups.AsSpan(start, rows);
+        _sink ^= FindAtHome(values, groups, _homes, _probeAhead, out bool missed);
 
         // Every row found its group, none null: the usual batch once the keys are known.
         if (!missed && validity.IsEmpty)
@@ -1040,55 +1057,26 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         int count = 0;
         if (validity.IsEmpty)
         {
-            for (int row = 0; row < rows; row++)
+            for (int i = 0; i < rows; i++)
             {
-                left[count] = row;
-                count += groups[row] >>> 31;
+                left[count] = i;
+                count += groups[i] >>> 31;
             }
         }
         else
         {
-            for (int row = 0; row < rows; row++)
+            for (int i = 0; i < rows; i++)
             {
-                left[count] = row;
-                count += (groups[row] >>> 31) | (int)(~(validity[row >> 6] >> (row & 63)) & 1);
+                int row = start + i;
+                left[count] = i;
+                count += (groups[i] >>> 31) | (int)(~(validity[row >> 6] >> (row & 63)) & 1);
             }
         }
 
-        for (int i = 0; i < count; i++)
+        for (int k = 0; k < count; k++)
         {
-            int row = left[i];
-            rowGroups[row] = StorageValues.IsValid(validity, row) ? Lookup(canonical[row]) : NullGroup();
-        }
-    }
-
-    /// <summary>
-    /// <see cref="TwoPasses"/> over the rows from <paramref name="start"/> of a block, <paramref name="values"/>
-    /// theirs, every row selected: a short text key's words taken a few thousand rows at a time, so that a
-    /// lane that meets many keys turns into bytes before its table of words grows (<see cref="ShortTextKeys"/>).
-    /// </summary>
-    internal void AssignRange(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, int[] rowGroups)
-    {
-        int rows = values.Length;
-        if (_probeAhead > 0)
-        {
-            Scratch.Grow(ref _homes, rows);
-        }
-
-        Span<int> groups = rowGroups.AsSpan(start, rows);
-        _sink ^= FindAtHome(values, groups, _homes, Math.Max(_probeAhead, 0), out bool missed);
-        if (!missed && validity.IsEmpty)
-        {
-            return;
-        }
-
-        for (int i = 0; i < rows; i++)
-        {
-            bool valid = StorageValues.IsValid(validity, start + i);
-            if (groups[i] < 0 || !valid)
-            {
-                groups[i] = valid ? Lookup(values[i]) : NullGroup();
-            }
+            int i = left[k];
+            groups[i] = StorageValues.IsValid(validity, start + i) ? Lookup(values[i]) : NullGroup();
         }
     }
 
@@ -1451,7 +1439,15 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return _keys[a].CompareTo(_keys[b]);
     }
 
-    internal override void Keep(ReadOnlySpan<int> groups)
+    internal override void Keep(ReadOnlySpan<int> groups) => Keep(groups, room: 0);
+
+    // Room for as many groups as the batch closed brought, beside those kept, and an eighth: a batch a few
+    // groups fuller than the last grew the table in its middle, past the stream's first read. The same room
+    // for every keep doubled a lane's table as the lane emptied it under its budget, and each cache of the
+    // core's at its first flush.
+    internal override void Carry(ReadOnlySpan<int> groups) => Keep(groups, Count + groups.Length + (Count / 8));
+
+    private void Keep(ReadOnlySpan<int> groups, int room)
     {
         // The table of groups forgets every group's number, then learns the kept ones' new ones; a
         // value it holds is in no index.
@@ -1473,11 +1469,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
         if (Compact)
         {
-            _wide.Clear(Count + groups.Length);
+            _wide.Clear(room);
         }
         else
         {
-            _index.Clear();
+            _index.Clear(room);
         }
 
         for (int i = 0; i < groups.Length; i++)

@@ -17,11 +17,12 @@ namespace Vorticity.Aggregating;
 /// integer of 128 bits, which .NET aligns on 16, 40 for one of 256; two to a line of 64, or one; the key
 /// held a second time in the groups' keys. With the table three tenths to six full, a group took 56 to
 /// 96 bytes as a word, 69 to 123 as a UUID: what let a short text's words hold no more than a few
-/// thousand groups (<see cref="ShortTextKeys"/>). Here a line holds eight slots, and a group takes 29 to
-/// 43. A key found pays a second read, the key of the group its slot names, once the hash agrees: 32
-/// bits, so that another key's group is read one time in four billion. That read costs more than the
-/// cache it spares while the groups are few: <see cref="FixedKeys{TValue}"/> moves its groups here past a
-/// few thousand of them, from slots that hold their keys.
+/// thousand groups (<see cref="ShortTextKeys"/>). Here a line holds eight slots, a table at most four
+/// tenths full (<see cref="MostFull"/>), and a group takes 36 to 56. A key found pays a second read, the
+/// key of the group its slot names, once the hash agrees: 32 bits, so that another key's group is read
+/// one time in four billion. That read costs more than the cache it spares while the groups are few:
+/// <see cref="FixedKeys{TValue}"/> moves its groups here past a few thousand of them, from slots that
+/// hold their keys.
 /// </para>
 /// <para>
 /// A growth places each slot again by the hash it keeps, reading no key; a seed hashes every key again,
@@ -40,6 +41,21 @@ internal struct WideKeyTable<TValue>
     /// <summary>The slots of a line of 64 bytes.</summary>
     private const int Width = 8;
 
+    /// <summary>
+    /// The tenths of its slots a table holds before it doubles: four. Six full, as a table whose slots hold
+    /// their keys, a quarter of the keys lay past their home slot, and every row of theirs paid the search.
+    /// Against five and six tenths, measured on 2026-10-09 at one lane: a sum by 10⁵ short texts over 10⁷
+    /// rows ×1.135 and ×1.267 the time, a sum and a mean by them ×1.094 and ×1.183, 10⁶ UUIDs ×1.00 and
+    /// ×1.105, 10⁶ names ×0.98 and ×1.00, for 9 % and 15 % less state; at fourteen lanes, ×0.95 to ×1.06.
+    /// </summary>
+    private const int MostFull = 4;
+
+    /// <summary>
+    /// The tenths of its slots a table its budget cannot double holds at most: six, as a table whose slots
+    /// hold their keys. A key past its home slot costs its row the search; a spill costs far more.
+    /// </summary>
+    private const int MostFullPressed = 6;
+
     private const int WidthShift = 3;
 
     // The slots, from the first word of a line of 64 bytes of their store, as KeyTable lays them.
@@ -53,6 +69,9 @@ internal struct WideKeyTable<TValue>
     private ulong _seed;
     private int _count;
     private int _growAt;
+
+    // Whether the table grows at six tenths, its budget unable to double it (Squeeze), until it grows.
+    private bool _squeezed;
     private readonly ArrayShelf? _shelf;
 
     public WideKeyTable()
@@ -83,32 +102,58 @@ internal struct WideKeyTable<TValue>
     internal readonly long Footprint =>
         ((long)_store.Length * sizeof(ulong)) + ((long)_chains.Length * sizeof(int)) + ((long)_overflow.Length * Unsafe.SizeOf<Entry>());
 
-    /// <summary>The bytes of a table reserved for <paramref name="keys"/> keys: its slots six tenths full, and their chains' heads.</summary>
+    /// <summary>The bytes of a table reserved for <paramref name="keys"/> keys: its slots four tenths full, and their chains' heads.</summary>
     internal static long BytesFor(int keys)
     {
-        long slots = ((10L * keys) / 6) + 1;
+        long slots = ((10L * keys) / MostFull) + 1;
         return ((slots + (GroupRecords.Line / sizeof(ulong))) * sizeof(ulong)) + (((slots >> WidthShift) + 1) * sizeof(int));
     }
 
     /// <summary>
-    /// The bytes the table would take more were <paramref name="more"/> new keys to come: past six tenths
-    /// full it doubles, its store and its chains twice what they hold. Its chains may make it grow sooner.
+    /// The bytes the table would take more were <paramref name="more"/> new keys to come: past four tenths
+    /// full it doubles, its store and its chains twice what they hold. Its chains may make it grow sooner,
+    /// unless it is squeezed (<see cref="Squeeze"/>).
     /// </summary>
     internal readonly long GrowthFor(int more)
     {
-        long fills = _overflowed > 0 ? Math.Min(_growAt, 3L * _length / 10) : _growAt;
+        long fills = _overflowed > 0 && !_squeezed ? Math.Min(_growAt, 3L * _length / 10) : _growAt;
         if (_count + (long)more <= fills)
         {
             return 0;
         }
 
         long bytes = Math.Max(2 * Footprint, (long)FirstSlots * Unsafe.SizeOf<Slot>());
-        for (long fill = Math.Max(1, _growAt) * 2; _count + (long)more > fill; fill *= 2)
+        for (long fill = Math.Max(1, MostFull * (long)_length / 10) * 2; _count + (long)more > fill; fill *= 2)
         {
             bytes *= 2;
         }
 
         return bytes;
+    }
+
+    /// <summary>
+    /// Room for <paramref name="more"/> new keys without growing, the table filling up to six tenths
+    /// (<see cref="MostFullPressed"/>) and its chains no longer making it grow until it does: for a table
+    /// the budget cannot double. Whether it has that room; squeezed or not, it holds every key it held.
+    /// </summary>
+    /// <remarks>
+    /// The lanes that retire merge into one table sized for the groups their first rows foretold
+    /// (<see cref="LaneRetirement"/>). Over 50 000 short texts, the shared table sat at its four tenths, a
+    /// lane brought it a few hundred keys and a thousand for its sketch's error, and the doubling that
+    /// asked for did not fit: the shared table went to the scratch, five times over 14 lanes under four
+    /// times what one holds, where the same lanes over bytes wrote nothing (2026-10-09).
+    /// </remarks>
+    internal bool Squeeze(int more)
+    {
+        long most = MostFullPressed * (long)_length / 10;
+        if (_length == 0 || _count + (long)more > most)
+        {
+            return false;
+        }
+
+        _growAt = (int)Math.Max(_growAt, most);
+        _squeezed = true;
+        return true;
     }
 
     /// <summary>
@@ -239,7 +284,7 @@ internal struct WideKeyTable<TValue>
     /// <summary>Makes room for <paramref name="keys"/> keys without growing on the way.</summary>
     internal void Reserve(int keys)
     {
-        long slots = ((10L * keys) / 6) + 1;
+        long slots = ((10L * keys) / MostFull) + 1;
         if (slots > _length)
         {
             Resize(KeyTable<TValue>.PrimeAtLeast((int)Math.Min(int.MaxValue / 2, slots)));
@@ -252,7 +297,7 @@ internal struct WideKeyTable<TValue>
     /// the middle of its next batch with every key placed again.
     /// </summary>
     /// <remarks>
-    /// A streaming key keeps its open groups at each batch closed (<see cref="FixedKeys{TValue}.Keep"/>):
+    /// A streaming key keeps its open groups at each batch closed (<see cref="FixedKeys{TValue}.Carry"/>):
     /// a day's few names, then the next batch's. Batches of 164 names, five kept, passed the growth point
     /// of 277 slots in the second batch, past the first read: an allocation once the stream was warm.
     /// </remarks>
@@ -262,10 +307,12 @@ internal struct WideKeyTable<TValue>
         Array.Clear(_chains);
         _overflowed = 0;
         _count = 0;
+        _growAt = (int)(MostFull * (long)_length / 10);
+        _squeezed = false;
         if (_length > 0 && room > _growAt)
         {
             int length = _length;
-            while ((int)(6L * length / 10) < room)
+            while ((int)(MostFull * (long)length / 10) < room)
             {
                 length = KeyTable<TValue>.PrimeAtLeast(GroupKeys.Doubled(length));
             }
@@ -288,6 +335,7 @@ internal struct WideKeyTable<TValue>
         _overflowed = 0;
         _count = 0;
         _growAt = 0;
+        _squeezed = false;
     }
 
     /// <summary>A key whose home is taken: the rest of the home's line, then the line's chain.</summary>
@@ -344,8 +392,8 @@ internal struct WideKeyTable<TValue>
         }
 
         // A new key past a full line: the table grows if it is full, or if its chains hold one key in
-        // eight while it is past three tenths full, or takes a seed if the chain is long.
-        if (_count >= _growAt || (8L * _overflowed > _count && 10L * _count > 3L * slots.Length))
+        // eight while it is past three tenths full and not squeezed, or takes a seed if the chain is long.
+        if (_count >= _growAt || (!_squeezed && 8L * _overflowed > _count && 10L * _count > 3L * slots.Length))
         {
             Resize(KeyTable<TValue>.PrimeAtLeast(GroupKeys.Doubled(slots.Length)));
             return Search(key, next, keys);
@@ -390,7 +438,8 @@ internal struct WideKeyTable<TValue>
 
     /// <summary>
     /// The 32 bits a key is homed by and its slot keeps: as <see cref="KeyTable{TValue}"/> homes a key wider
-    /// than a word, its two words folded, a short text's by CRC32C, mixed under the seed once there is one.
+    /// than a word, its two words folded, mixed under the seed once there is one, a short text's by
+    /// rapidhash (<see cref="TextWord.Home"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint HashOf(TValue key, ulong seed)
@@ -431,7 +480,8 @@ internal struct WideKeyTable<TValue>
         _overflow = kept ? overflow : NewArray<Entry>(overflowed);
         _overflowed = 0;
         _multiplier = (ulong.MaxValue / (uint)length) + 1;
-        _growAt = (int)(6L * length / 10);
+        _growAt = (int)(MostFull * (long)length / 10);
+        _squeezed = false;
         foreach (Slot slot in old)
         {
             if (slot.Group != 0)

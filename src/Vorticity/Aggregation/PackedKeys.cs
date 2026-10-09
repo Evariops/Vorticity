@@ -529,7 +529,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
-    internal override void Keep(ReadOnlySpan<int> groups)
+    internal override void Keep(ReadOnlySpan<int> groups) => Keep(groups, carry: false);
+
+    internal override void Carry(ReadOnlySpan<int> groups) => Keep(groups, carry: true);
+
+    private void Keep(ReadOnlySpan<int> groups, bool carry)
     {
         // Each part keeps the numbers the kept groups hold, numbered again in their order, so that
         // no part holds more values than the open groups do; the words are packed again from them.
@@ -556,7 +560,14 @@ internal sealed class PackedKeys<TKey> : GroupKeys
                 }
             }
 
-            _parts[p].Keep(_held.AsSpan(0, held));
+            if (carry)
+            {
+                _parts[p].Carry(_held.AsSpan(0, held));
+            }
+            else
+            {
+                _parts[p].Keep(_held.AsSpan(0, held));
+            }
 
             // The part's new numbers go into the words now: the next part reads its own from them.
             for (int i = 0; i < groups.Length; i++)

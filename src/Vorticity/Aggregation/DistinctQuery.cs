@@ -726,7 +726,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 
         if (open < count)
         {
-            partition.Keep(_open.AsSpan(0, open));
+            partition.Carry(_open.AsSpan(0, open));
         }
     }
 

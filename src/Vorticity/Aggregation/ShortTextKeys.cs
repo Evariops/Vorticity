@@ -3,8 +3,6 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics.Arm;
-using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Writing;
@@ -37,47 +35,82 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     public int CompareTo(TextWord other) => High != other.High ? High.CompareTo(other.High) : Low.CompareTo(other.Low);
 
     /// <summary>
-    /// The 32 bits a key table homes a word by: CRC32C of its two halves, an instruction each, under
-    /// <paramref name="seed"/>. A short text's low half is its length and its first bytes, the same for
-    /// many keys, and the table's fold of two words, made for integers, homed db-benchmark's ids of 12
-    /// bytes, 10⁵ of them that differ in their last digits alone, so badly that a group by took 639 ms
-    /// where a table of bytes took 191; mixed under a seed, 140, but a group by of 100 short texts 112
-    /// where the fold took 56. The CRC: 119 and 92, measured on 2026-10-08 at one lane.
+    /// The 32 bits a key table homes a word by: rapidhash's path for 16 bytes (V3), two products of 128
+    /// bits, under the <paramref name="seed"/> a table takes after a long chain, 0 until then. A short
+    /// text's low half is its length and its first bytes, the same for many keys, and the table's fold of
+    /// two words, made for integers, homed db-benchmark's ids of 12 bytes, 10⁵ of them that differ in their
+    /// last digits alone, so badly that a group by took 639 ms where a table of bytes took 191 (2026-10-08,
+    /// one lane).
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// CRC32C, an instruction a half, homed those ids faster, by the luck of their digits: against it,
+    /// rapidhash took ×0.96 to ×1.13 at one lane (q1 to 2·10⁶ names, <c>id3</c> ×1.10), ×1.00 to ×1.06 at
+    /// 14, and XXH3 of System.IO.Hashing ×1.13 to ×1.55, its call the cost (2026-10-09). But a CRC is
+    /// linear: a seed moves every word's home by one mask, so that words built to share a CRC share their
+    /// home whatever the seed and chain past any seed a table takes. SMHasher fails CRC32C on its bias, its
+    /// collisions and its distribution, and passes rapidhash, at 22 cycles a small key where xxh3 takes 29.
+    /// </para>
+    /// <para>
+    /// Sources: github.com/Nicoshev/rapidhash, rapidhash.h, its secrets and its path for 4 to 16 bytes;
+    /// github.com/rurban/smhasher, its table of hashes.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static uint Home(ulong low, ulong high, ulong seed)
     {
-        if (Crc32.Arm64.IsSupported)
-        {
-            return Crc32.Arm64.ComputeCrc32C(Crc32.Arm64.ComputeCrc32C((uint)seed, low), high);
-        }
+        ulong prepared = seed == 0 ? Unseeded : seed ^ Mix(seed ^ Secret2, Secret1) ^ 16;
+        ulong upper = Math.BigMul(low ^ Secret1, high ^ prepared, out ulong lower);
+        return (uint)(Mix(lower ^ Secret7, upper ^ Secret1 ^ 16) >> 32);
+    }
 
-        if (Sse42.X64.IsSupported)
-        {
-            return (uint)Sse42.X64.Crc32(Sse42.X64.Crc32((uint)seed, low), high);
-        }
+    // rapidhash's secrets (V3) its path for 16 bytes reads.
+    private const ulong Secret1 = 0x8bb84b93962eacc9UL;
+    private const ulong Secret2 = 0x4b33a62ed433d4a3UL;
+    private const ulong Secret7 = 0xaaaaaaaaaaaaaaaaUL;
 
-        return (uint)(MergeHash.Of(low, high, seed | 1) >> 32);
+    // A seed of 0 prepared as rapidhash prepares its seed, the length folded in: seed ^ mix(seed ^ secret[2], secret[1]) ^ 16.
+    private const ulong Unseeded = 0x422765567D8FBFC6UL;
+
+    /// <summary>The two halves of the 128-bit product of <paramref name="a"/> and <paramref name="b"/>, folded: rapidhash's mix.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Mix(ulong a, ulong b)
+    {
+        ulong upper = Math.BigMul(a, b, out ulong lower);
+        return lower ^ upper;
     }
 }
 
 /// <summary>
-/// A key of one text or binary column whose values are short and few, grouped as words: a value of 12 bytes
-/// or less is the 16 bytes of its canonical view, its length then its bytes, zero past them, which a table
-/// of 128-bit keys finds by two comparisons where a table of bytes hashes and compares them
-/// (<see cref="FixedKeys{TValue}"/>). The first value longer than that, or the first group past
-/// <see cref="MostWords"/>, turns the lane's table into one of bytes for good, every group of the words
-/// added again in its order, so that each keeps its number (<see cref="BytesKeys"/>). A merge, its parts, a
-/// spill's sections and its runs read the keys as bytes, hashed as a table of bytes hashes them, so that a
-/// key falls in the same part in every lane whatever its table: lanes of words and lanes of bytes merge.
+/// A key of one text or binary column whose values are short, grouped as words: a value of 12 bytes or less
+/// is the 16 bytes of its canonical view, its length then its bytes, zero past them, which a table of
+/// 128-bit keys finds by two comparisons where a table of bytes hashes and compares them
+/// (<see cref="FixedKeys{TValue}"/>, whose slots hold the words while the groups are few, and their hash
+/// past that). The first value longer than that turns the lane's table into one of bytes for good, every
+/// group of the words added again in its order, so that each keeps its number (<see cref="BytesKeys"/>). A
+/// merge, its parts, a spill's sections and its runs read the keys as bytes, hashed as a table of bytes
+/// hashes them, so that a key falls in the same part in every lane whatever its table: lanes of words and
+/// lanes of bytes merge.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Measured on 2026-10-08 (M4 Pro), db-benchmark's rows, 10⁷ of them, against the table of bytes: a sum by
 /// <c>id1</c>, 100 texts of 5 bytes, ×0.69 at one lane and ×0.84 at fourteen; by <c>id1</c> and
-/// <c>id2</c>, ×0.71 and ×0.70. By <c>id3</c>, 10⁵ texts of 12 bytes, the words won at one lane (×0.70)
-/// and lost at fourteen (×1.26) before they were bounded, and a lane now turns: the same as bytes. Kept
-/// to the lanes' tables: the core, which holds a key's entries apart from any lane, stays with the keys
-/// whose width the plan knows (<see cref="GroupKeys.EntryBytes"/>).
+/// <c>id2</c>, ×0.71 and ×0.70.
+/// </para>
+/// <para>
+/// Words were bounded to 4 096 groups while a slot held its word, 24 bytes, the word kept twice: twice the
+/// memory of bytes at 10⁶ keys, and by <c>id3</c>, 10⁵ texts of 12 bytes, ×1.26 the time of bytes at
+/// fourteen lanes. Unbounded, in slots of a hash and a group past 4 096 groups, against the bytes a lane
+/// turned into there (2026-10-09): by <c>id3</c> ×0.603 the time at one lane and ×0.765 at fourteen, q3
+/// ×0.690 and ×0.814, 10⁶ names ×0.753 and ×0.924, q10 ×0.948 and ×0.971; the state by <c>id3</c> ×0.66
+/// and ×0.71, by 10⁶ names ×1.54 at one lane, whose first rows foretell twice as many, and ×1.01 at
+/// fourteen.
+/// </para>
+/// <para>
+/// Kept to the lanes' tables: the core, which holds a key's entries apart from any lane, stays with the
+/// keys whose width the plan knows (<see cref="GroupKeys.EntryBytes"/>).
+/// </para>
 /// </remarks>
 internal sealed class ShortTextKeys : GroupKeys
 {
@@ -85,12 +118,11 @@ internal sealed class ShortTextKeys : GroupKeys
     private const int Longest = 12;
 
     /// <summary>
-    /// The most groups a table of words holds before it turns into one of bytes: 4 096. Measured on
-    /// 2026-10-08 against the table of bytes, 10⁷ rows, while a slot held its word, 24 bytes, the word kept
-    /// twice, twice the memory of bytes at 10⁶ keys (137 MB against 66): 100 keys ×0.62 at one lane and
-    /// ×0.81 at fourteen; 10⁵ keys ×0.70 and ×1.26; 10⁶ names over 2M rows ×1.10 and ×1.46.
+    /// The rows of a block whose words are made and found at a time, every row selected: 64 KB of words a
+    /// lane, where a block of 65 536 rows at once held 1 MB of them and 256 KB of homes, a hundred groups'
+    /// state ×17 (<see cref="FixedKeys{TValue}.TwoPasses"/>).
     /// </summary>
-    private const int MostWords = 1 << 12;
+    private const int Chunk = 1 << 12;
 
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
@@ -162,32 +194,25 @@ internal sealed class ShortTextKeys : GroupKeys
 
         BytesBlock canonical = BytesBlock.Canonical(arena, node, out ReadOnlySpan<ulong> validity);
 
-        // A block that could take the lane past what words hold, a few thousand rows at a time, its words made
-        // a chunk at a time: the lane turns into bytes as soon as it passes, the block done again as bytes,
-        // each key it gave a number keeping it. A block at once grew a table of words to its own size first,
-        // 10 MB a lane over names.
-        if (Count + rows > MostWords && selection.IsEmpty && !_sorted && _probeAhead >= 0)
+        // A value too long for a word turns the lane into bytes, the block done again as bytes, each key
+        // its first chunks gave a number keeping it.
+        if (selection.IsEmpty && !_sorted && _probeAhead >= 0)
         {
-            Scratch.Grow(ref _block, Math.Min(rows, MostWords));
-            for (int start = 0; start < rows; start += MostWords)
+            Scratch.Grow(ref _block, Math.Min(rows, Chunk));
+            for (int start = 0; start < rows; start += Chunk)
             {
-                int end = Math.Min(rows, start + MostWords);
+                int end = Math.Min(rows, start + Chunk);
                 if (!FillWords(canonical, validity, start, end))
                 {
                     Demote();
                     return AssignBytes(arena, nodes, rows, selection, rowGroups, ranges);
                 }
 
-                words.AssignRange(_block.AsSpan(0, end - start), validity, start, rowGroups);
-                Count = words.Count;
-                if (Count > MostWords)
-                {
-                    Demote();
-                    return AssignBytes(arena, nodes, rows, selection, rowGroups, ranges);
-                }
+                words.TwoPasses(_block.AsSpan(0, end - start), validity, start, rowGroups);
             }
 
             Saw(encoding);
+            Count = words.Count;
             return false;
         }
 
@@ -201,11 +226,6 @@ internal sealed class ShortTextKeys : GroupKeys
         Saw(encoding);
         bool byRange = words.AssignValues(_block.AsSpan(0, rows), validity, rows, selection, rowGroups, ranges);
         Count = words.Count;
-        if (Count > MostWords)
-        {
-            Demote();
-        }
-
         return byRange;
     }
 
@@ -421,6 +441,8 @@ internal sealed class ShortTextKeys : GroupKeys
 
     internal override long GrowthFor(int more) => _words?.GrowthFor(more) ?? _bytes!.GrowthFor(more);
 
+    internal override bool Squeeze(int more) => _words?.Squeeze(more) ?? false;
+
     internal override int NullNumber => _words?.NullNumber ?? _bytes!.NullNumber;
 
     internal override void Release()
@@ -429,27 +451,30 @@ internal sealed class ShortTextKeys : GroupKeys
         _bytes?.Release();
     }
 
-    /// <summary>
-    /// Room for <paramref name="groups"/> groups, foretold by a lane's first rows: past what a table of words
-    /// holds, the keys turn into bytes first, which the room goes to. Reserved as words, then turned, a
-    /// lane's table of bytes grew again from nothing: 11 MB more a lane and a round over 10⁵ keys.
-    /// </summary>
+    /// <summary>Room for <paramref name="groups"/> groups, foretold by a lane's first rows, in the table the keys are in.</summary>
     internal override void Reserve(int groups)
     {
-        if (_words is not null && groups > MostWords)
-        {
-            Demote();
-        }
-
         _words?.Reserve(groups);
         _bytes?.Reserve(groups);
     }
 
-    internal override void Keep(ReadOnlySpan<int> groups)
+    internal override void Keep(ReadOnlySpan<int> groups) => Keep(groups, carry: false);
+
+    internal override void Carry(ReadOnlySpan<int> groups) => Keep(groups, carry: true);
+
+    private void Keep(ReadOnlySpan<int> groups, bool carry)
     {
         if (_words is { } words)
         {
-            words.Keep(groups);
+            if (carry)
+            {
+                words.Carry(groups);
+            }
+            else
+            {
+                words.Keep(groups);
+            }
+
             Count = words.Count;
         }
         else
@@ -468,10 +493,6 @@ internal sealed class ShortTextKeys : GroupKeys
         {
             words.MergeInto(intoWords, groups, map);
             into.Count = intoWords.Count;
-            if (into.Count > MostWords)
-            {
-                into.Demote();
-            }
         }
         else
         {
