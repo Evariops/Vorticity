@@ -1112,25 +1112,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return false;
         }
 
-        // Appending, every row selected and none null: the batch's values taken whole, a group a row in
-        // their order, where a lookup a row cost a call and an add, a sixth of k7's cycles at fourteen
-        // lanes as they bypassed their caches. A row whose key is the row before's makes a group of its
-        // own too, which the core merges.
         if (_appending && selection.IsEmpty && validity.IsEmpty)
         {
-            int first = Count;
-            if (_keys.Length < first + rows)
-            {
-                Grow(Math.Max(first + rows, DoubledUpTo(_keys.Length, _doublesUpTo)));
-            }
-
-            canonical[..rows].CopyTo(_keys.AsSpan(first));
-            for (int i = 0; i < rows; i++)
-            {
-                rowGroups[i] = first + i;
-            }
-
-            Count = first + rows;
+            AppendAll(canonical[..rows], rowGroups.AsSpan(0, rows));
             return false;
         }
 
@@ -1158,6 +1142,66 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Appending, every row selected and none null: <paramref name="values"/> taken whole, a group a value
+    /// in their order, <paramref name="groups"/> theirs, where a lookup a row cost a call and an add, a sixth
+    /// of k7's cycles at fourteen lanes as they bypassed their caches. A value that is the one before makes
+    /// a group of its own too, which the core merges.
+    /// </summary>
+    internal void AppendAll(ReadOnlySpan<TValue> values, Span<int> groups)
+    {
+        int first = Count;
+        if (_keys.Length < first + values.Length)
+        {
+            Grow(Math.Max(first + values.Length, DoubledUpTo(_keys.Length, _doublesUpTo)));
+        }
+
+        values.CopyTo(_keys.AsSpan(first));
+        for (int i = 0; i < values.Length; i++)
+        {
+            groups[i] = first + i;
+        }
+
+        Count = first + values.Length;
+    }
+
+    /// <summary>
+    /// The groups of the rows of a block from <paramref name="start"/> that <paramref name="selection"/>
+    /// selects, <paramref name="values"/> theirs, none null: a block made a chunk at a time
+    /// (<see cref="TupleKeys"/>), each found as <see cref="AssignValues"/> finds a block whole.
+    /// </summary>
+    internal void AssignChunk(ReadOnlySpan<TValue> values, int start, ReadOnlySpan<ulong> selection, int[] rowGroups)
+    {
+        if (selection.IsEmpty && _appending)
+        {
+            AppendAll(values, rowGroups.AsSpan(start, values.Length));
+            return;
+        }
+
+        if (selection.IsEmpty && _probeAhead >= 0)
+        {
+            TwoPasses(values, default, start, rowGroups);
+            return;
+        }
+
+        RowCursor selected = new RowCursor(selection, start, start + values.Length);
+        bool hasLast = false;
+        TValue last = default;
+        int lastGroup = -1;
+        while (selected.Next(out int row))
+        {
+            TValue value = values[row - start];
+            if (!hasLast || !value.Equals(last))
+            {
+                last = value;
+                lastGroup = Lookup(value);
+                hasLast = true;
+            }
+
+            rowGroups[row] = lastGroup;
+        }
     }
 
     /// <summary>

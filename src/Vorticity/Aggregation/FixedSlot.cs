@@ -1424,6 +1424,11 @@ internal static class KeyWords
             return (Half.IsNaN(h) ? (ushort)0x7E00 : h == Half.Zero ? (ushort)0 : BitConverter.HalfToUInt16Bits(h), 0);
         }
 
+        if (typeof(TValue) == typeof(KeyTuple))
+        {
+            return Unsafe.BitCast<TValue, KeyTuple>(value).Words();
+        }
+
         if (Unsafe.SizeOf<TValue>() == 32)
         {
             // A decimal of 256 bits: the high words folded into the low ones through a multiply,

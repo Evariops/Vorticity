@@ -447,20 +447,55 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// The index of the groups of one partition: a key of one column by its own index, of two to
-    /// eight by their indexes' numbers packed into a word, of more by their values encoded into bytes.
+    /// eight by their indexes' numbers packed into a word, or of five to eight texts and integers by
+    /// the tuple of their values, of more by their values encoded into bytes.
     /// </summary>
     /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
     /// <param name="shelf">The lane's shelf under its query's memory, which the key's tables grow from; null for tables nothing counts.</param>
-    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null) => Keys.Length switch
+    /// <param name="memory">
+    /// The run's memory, the shelf's when not given: a key held as its tuples numbers its long texts once
+    /// for the run, under it. Null for keys that only tell what they are.
+    /// </param>
+    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null, QueryMemory? memory = null) => Keys.Length switch
     {
         1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf),
         2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout, shelf: shelf) : new RawKeys<UInt128>(layout, shelf: shelf),
         2 => new PackedKeys<ulong>(Keys, facts, shelf: shelf),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts, shelf: shelf),
+        <= 8 when Tuples && TupleLayout(memory ?? shelf?.Memory) is { } layout => new TupleKeys(layout, ProbeAhead, shelf),
         <= 8 => new PackedKeys<PackedTuple>(Keys, facts, shelf: shelf),
         _ => new CompositeKeys(Keys, shelf),
     };
+
+    /// <summary>
+    /// Whether a key of five to eight text and integer columns is held as the tuple of its values
+    /// (<see cref="TupleKeys"/>), which the core takes, rather than as the numbers its columns have in
+    /// indexes of their own: false for those numbers, the switch the tests and the bench compare them with.
+    /// </summary>
+    internal bool Tuples { get; set; } = true;
+
+    // Whether a tuple holds the key (null before it is asked), and the layout of each run's tuples, keyed
+    // by the run's memory: its long texts numbered once for the run, the same in every lane, and dropped
+    // with it.
+    private bool? _tuplesFit;
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<QueryMemory, TupleLayout> _tupleLayouts = new();
+
+    /// <summary>
+    /// The layout of the key's tuples for the run <paramref name="run"/> counts, the same for every lane of
+    /// it; one of its own without a run, which only tells what the keys are. Null when a tuple cannot hold
+    /// the key.
+    /// </summary>
+    private TupleLayout? TupleLayout(QueryMemory? run)
+    {
+        _tuplesFit ??= Aggregating.TupleLayout.Of(Keys, memory: null) is not null;
+        if (_tuplesFit != true)
+        {
+            return null;
+        }
+
+        return run is null ? Aggregating.TupleLayout.Of(Keys, memory: null) : _tupleLayouts.GetValue(run, memory => Aggregating.TupleLayout.Of(Keys, memory)!);
+    }
 
     /// <summary>
     /// The layout of the key as the tuple of its values in one word, unless the statistics say a

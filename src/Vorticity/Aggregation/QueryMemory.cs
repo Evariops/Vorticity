@@ -79,6 +79,7 @@ internal sealed class QueryMemory : IDisposable
     private long _held;
     private long _peak;
     private long _measured;
+    private long _beside;
     private int _left;
 
     /// <summary>A query's memory under <paramref name="budget"/>, one more query to share its ceiling with until it is given back.</summary>
@@ -200,16 +201,39 @@ internal sealed class QueryMemory : IDisposable
         }
     }
 
-    /// <summary>Keeps <paramref name="bytes"/> of what the query holds and measures, the result it delivers, and gives back the rest.</summary>
-    internal void Keep(long bytes)
+    /// <summary>
+    /// Reserves and measures <paramref name="bytes"/> the query holds beside its groups for its whole run,
+    /// which its lanes share: the long texts of a key's tuples (<see cref="TupleLayout"/>). Past the
+    /// ceiling when the budget refuses them, as a table that grows within a batch: the lanes' next readings
+    /// spill or turn to the core. Kept with the result until it is delivered.
+    /// </summary>
+    internal void HoldBeside(long bytes)
     {
-        long held = Held;
-        if (held > bytes)
+        if (!TryGrow(bytes))
         {
-            Shrink(held - bytes);
+            Force(bytes);
         }
 
-        Measure(bytes - Measured);
+        Measure(bytes);
+        Interlocked.Add(ref _beside, bytes);
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="bytes"/> of what the query holds and measures, the result it delivers, and
+    /// what it holds beside its groups (<see cref="HoldBeside"/>), and gives back the rest.
+    /// </summary>
+    internal void Keep(long bytes)
+    {
+        // What it holds beside its groups stays, whether the bytes count it (what it holds) or not (a
+        // result's own).
+        long held = Held;
+        long kept = Math.Max(bytes, Math.Min(held, bytes + Volatile.Read(ref _beside)));
+        if (held > kept)
+        {
+            Shrink(held - kept);
+        }
+
+        Measure(kept - Measured);
     }
 
     /// <summary>Gives back everything the query holds.</summary>

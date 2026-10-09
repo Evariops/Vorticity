@@ -399,7 +399,7 @@ internal sealed partial class GroupCore
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, ScanSource source, KeyFacts? facts, bool sorted, KeyTop? top, int lanes,
         QueryMemory? memory, bool lean)
     {
-        if (!plan.Grouped || sorted || top is not null || !Holds(plan, settled, source, facts, out GroupKeys? kind, out GroupRecords? records))
+        if (!plan.Grouped || sorted || top is not null || !Holds(plan, settled, source, facts, memory, out GroupKeys? kind, out GroupRecords? records))
         {
             return null;
         }
@@ -413,17 +413,18 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// Whether the core can hold the plan's groups: a key that travels in entries, of fixed width, and
-    /// every state in the records. The others, a text key, a composite holding one, a text's extremes, a
-    /// distinct count, only the lanes' tables hold, which spill under pressure.
+    /// every state in the records. The others, a text key, a composite of two to four columns holding one,
+    /// a text's extremes, a distinct count, only the lanes' tables hold, which spill under pressure.
     /// </summary>
     internal static bool Holds(AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts) =>
-        plan.Grouped && Holds(plan, settled, source, facts, out _, out _);
+        plan.Grouped && Holds(plan, settled, source, facts, memory: null, out _, out _);
 
+    /// <summary>Whether the core can hold the plan's groups, and the keys it holds them by: the run's under <paramref name="memory"/>, which its lanes share.</summary>
     private static bool Holds(
-        AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts, [NotNullWhen(true)] out GroupKeys? kind, out GroupRecords? records)
+        AggregationPlan plan, AggregateSlot?[] settled, ScanSource source, KeyFacts? facts, QueryMemory? memory, [NotNullWhen(true)] out GroupKeys? kind, out GroupRecords? records)
     {
         records = null;
-        kind = plan.CreateKeys(sorted: false, CacheFacts(facts));
+        kind = plan.CreateKeys(sorted: false, CacheFacts(facts), memory: memory);
         if (kind.EntryBytes == 0)
         {
             return false;
@@ -638,7 +639,7 @@ internal sealed partial class GroupCore
 
     /// <summary>
     /// Whether the parts wait for the end rather than burst: past the query's first applications, an entry
-    /// applied made a group nine times in ten or more, and the budget could still grant half its ceiling.
+    /// applied made a group three times in four or more, and the budget could still grant half its ceiling.
     /// Such a burst only moves entries into sub-tables that split at the end, their groups moved again:
     /// ten million keys over forty million rows at fourteen lanes took 205 ms with no burst against 273,
     /// their peak 1.30 GB against 1.57 (2026-10-09). A million keys, each forty times, reduce: they burst.

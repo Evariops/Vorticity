@@ -78,6 +78,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>Whether the shelf is a lane's: under a query's memory, with no pile and no process's shelf behind it.</summary>
     private bool Lane => _memory is not null && _parent is null;
 
+    /// <summary>The query's memory the shelf counts its arrays under: its run's; null for a shelf that counts nothing.</summary>
+    internal QueryMemory? Memory => _memory;
+
     private ArrayShelf(ArrayShelf? parent, long budget)
     {
         _parent = parent;
