@@ -1,5 +1,7 @@
 using System;
 using System.IO.Pipelines;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Vorticity.Parquet;
 
@@ -8,6 +10,20 @@ public static class ParquetSessionExtensions
 {
     extension(VortexSession session)
     {
+        /// <summary>Opens the Parquet file at <paramref name="path"/> in this session, whose pool, mapping and caches its scans use.</summary>
+        /// <param name="path">The file.</param>
+        /// <param name="options">How the file is read; null for the defaults.</param>
+        /// <param name="cancellationToken">Cancels the reads.</param>
+        /// <returns>The open file; the caller disposes it.</returns>
+        /// <exception cref="ParquetFormatException">The file is not a well-formed Parquet file.</exception>
+        /// <exception cref="ParquetUnsupportedException">The file is encrypted.</exception>
+        public ValueTask<ParquetFile> OpenParquetAsync(string path, ParquetOpenOptions? options = null, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(session);
+            session.ThrowIfDisposed();
+            return ParquetFile.OpenAsync(path, options ?? ParquetOpenOptions.Default, session, cancellationToken);
+        }
+
         /// <summary>
         /// Starts a Parquet file at <paramref name="path"/>, which replaces whatever is there once the
         /// file completes; until then the path holds what it held, and a file given up leaves it so.
