@@ -4,8 +4,10 @@ using System.Collections.Immutable;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.IO;
 using Vorticity.Parquet.Metadata;
+using Vorticity.Parquet.Schema;
 using Vorticity.Scanning;
 
 namespace Vorticity.Parquet.Reading;
@@ -90,6 +92,84 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         }
 
         return await base.AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <remarks>
+    /// Over every row, the footer answers where every row group bounds the column exactly or holds
+    /// nothing but nulls in it, with no read, unless the scan prunes nothing; otherwise, and for a
+    /// float whose extreme is a zero, whose sign the data's first zero decides, the rows are read.
+    /// </remarks>
+    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
+    {
+        if (spec is { Filter: null, Rows: null, Take: null, Live: null, MatchesNothing: false, Options.UseStatistics: true }
+            && column is not FunctionFieldExpr
+            && Leaf(column.Path) is int leaf
+            && TryExtremes(leaf, out FilterLiteral low, out FilterLiteral high))
+        {
+            return min ? low : high;
+        }
+
+        return await base.ExtremeAsync(spec, column, min, metrics, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
+    {
+        min = FilterLiteral.Null;
+        max = FilterLiteral.Null;
+        return path.Length == 1
+            && (uint)path[0] < (uint)file.Compiled.Fields.Length
+            && Leaf(file.Compiled.Fields[path[0]].Name) is int leaf
+            && TryExtremes(leaf, out min, out max)
+            && min.Kind != FilterLiteralKind.Null;
+    }
+
+    /// <summary>The leaf at <paramref name="path"/>, one value a row: none under a list.</summary>
+    private int? Leaf(string path)
+    {
+        foreach (ParquetColumn column in file.Compiled.Columns)
+        {
+            if (column.MaxRepetitionLevel == 0 && column.Form != LeafForm.Null && string.Equals(column.DottedPath, path, StringComparison.Ordinal))
+            {
+                return column.Ordinal;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The least and the greatest value of <paramref name="leaf"/> over the file, from the footer:
+    /// false unless every row group bounds it exactly or holds only nulls in it; both null when every
+    /// row is.
+    /// </summary>
+    private bool TryExtremes(int leaf, out FilterLiteral min, out FilterLiteral max)
+    {
+        min = FilterLiteral.Null;
+        max = FilterLiteral.Null;
+        ParquetFooter footer = file.Footer;
+        ParquetColumn column = file.Compiled.Columns[leaf];
+        bool decimals = ColumnBounds.IsDecimal(column);
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            long rows = footer.RowGroups[group].RowCount;
+            ZoneBounds bounds = ColumnBounds.Of(column, footer.Chunk(group, leaf).Statistics, footer.Bytes);
+            if (rows == 0 || (bounds.HasNullCount && bounds.NullCount == rows))
+            {
+                continue;
+            }
+
+            if (!bounds.IsExact)
+            {
+                return false;
+            }
+
+            TerminalScan.Keep(ref min, bounds.Min, wantMin: true, decimals);
+            TerminalScan.Keep(ref max, bounds.Max, wantMin: false, decimals);
+        }
+
+        // Which zero a float's data meets first is the data's to say.
+        return !(min.Kind == FilterLiteralKind.Float && min.FloatValue == 0)
+            && !(max.Kind == FilterLiteralKind.Float && max.FloatValue == 0);
     }
 
     internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
