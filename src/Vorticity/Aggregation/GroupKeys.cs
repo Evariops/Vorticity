@@ -2300,7 +2300,23 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         StorageKind kind = _shape.Kind;
         if (kind == StorageKind.Primitive && store.Leaf is FixedStore leaf && leaf.Width == Unsafe.SizeOf<TValue>())
         {
-            foreach (int group in groups)
+            // Into the values at once up to the null group, then one at a time from it: a call a value
+            // took a group by's output six cycles a key (q10's tuples, 2026-10-10).
+            Span<TValue> into = leaf.GetSpan<TValue>(groups.Length);
+            int done = 0;
+            for (; done < groups.Length; done++)
+            {
+                int group = groups[done];
+                if (group == nullGroup)
+                {
+                    break;
+                }
+
+                into[done] = keys[group];
+            }
+
+            leaf.Advance(done);
+            foreach (int group in groups[done..])
             {
                 if (group == nullGroup)
                 {

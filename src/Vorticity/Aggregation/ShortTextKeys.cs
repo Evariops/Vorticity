@@ -697,7 +697,26 @@ internal sealed class ShortTextKeys : GroupKeys
         int nullGroup = NullNumber;
         if (_words is { } words)
         {
-            foreach (int group in groups)
+            // The views written in place up to the null group, then one at a time from it.
+            Span<byte> views = leaf.InlineViews(groups.Length);
+            ref byte view = ref MemoryMarshal.GetReference(views);
+            int done = 0;
+            for (; done < groups.Length; done++)
+            {
+                int group = groups[done];
+                if (group == nullGroup)
+                {
+                    break;
+                }
+
+                ref readonly TextWord word = ref words.KeyRef(group);
+                ref byte at = ref Unsafe.Add(ref view, (nint)done * (2 * sizeof(ulong)));
+                Unsafe.WriteUnaligned(ref at, word.Low);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref at, sizeof(ulong)), word.High);
+            }
+
+            leaf.AdvanceViews(done);
+            foreach (int group in groups[done..])
             {
                 if (group == nullGroup)
                 {

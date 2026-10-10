@@ -609,9 +609,33 @@ internal sealed class TupleKeys : GroupKeys
         if (_layout.Text(component))
         {
             // The texts came from the column the reader checked as it decoded it, as a table of bytes appends
-            // them: a short one its word, which is its view, a long one its bytes.
+            // them: a short one its word, which is its view, a long one its bytes. The short ones written in
+            // place up to the first null or long one, then one at a time from it.
             VarBinStore leaf = (VarBinStore)store.Leaf;
-            foreach (int group in groups)
+            int done = 0;
+            Span<byte> views = leaf.InlineViews(groups.Length);
+            ref byte view = ref MemoryMarshal.GetReference(views);
+            for (; done < groups.Length; done++)
+            {
+                ref byte tuple = ref TupleOf(groups[done]);
+                if (IsNull(ref tuple, component))
+                {
+                    break;
+                }
+
+                TextWord word = Read<TextWord>(ref tuple, offset);
+                if (TupleLayout.IsLong(word))
+                {
+                    break;
+                }
+
+                ref byte at = ref Unsafe.Add(ref view, (nint)done * (2 * sizeof(ulong)));
+                Unsafe.WriteUnaligned(ref at, word.Low);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref at, sizeof(ulong)), word.High);
+            }
+
+            leaf.AdvanceViews(done);
+            foreach (int group in groups[done..])
             {
                 ref byte tuple = ref TupleOf(group);
                 if (IsNull(ref tuple, component))
@@ -668,7 +692,27 @@ internal sealed class TupleKeys : GroupKeys
         where TValue : unmanaged
     {
         FixedStore? leaf = store.Leaf is FixedStore fixedStore && fixedStore.Width == Unsafe.SizeOf<TValue>() ? fixedStore : null;
-        foreach (int group in groups)
+
+        // Into the values at once up to the first null, then one at a time from it.
+        int done = 0;
+        if (leaf is not null)
+        {
+            Span<TValue> into = leaf.GetSpan<TValue>(groups.Length);
+            for (; done < groups.Length; done++)
+            {
+                ref byte tuple = ref TupleOf(groups[done]);
+                if (IsNull(ref tuple, component))
+                {
+                    break;
+                }
+
+                into[done] = Read<TValue>(ref tuple, offset);
+            }
+
+            leaf.Advance(done);
+        }
+
+        foreach (int group in groups[done..])
         {
             ref byte tuple = ref TupleOf(group);
             if (IsNull(ref tuple, component))
