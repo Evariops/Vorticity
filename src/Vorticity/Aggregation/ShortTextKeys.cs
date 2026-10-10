@@ -145,6 +145,7 @@ internal sealed class ShortTextKeys : GroupKeys
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
     private readonly int _probeAhead;
+    private readonly long _aheadBytes;
     private readonly ArrayShelf? _shelf;
 
     // The words while every value met is short, then the bytes for good: one of them, never both.
@@ -152,13 +153,14 @@ internal sealed class ShortTextKeys : GroupKeys
     private BytesKeys? _bytes;
     private TextWord[] _block = [];
 
-    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null)
+    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
     {
         _shape = shape;
         _sorted = sorted;
         _probeAhead = probeAhead;
+        _aheadBytes = aheadBytes;
         _shelf = shelf;
-        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, shelf: shelf);
+        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes);
     }
 
     /// <summary>Whether the keys are still words: every value met so far 12 bytes or less.</summary>
@@ -454,7 +456,7 @@ internal sealed class ShortTextKeys : GroupKeys
     private ReadOnlySpan<byte> KeyOf(int group, Span<byte> buffer) =>
         _words is { } words ? BytesOf(words.KeyAt(group), buffer) : _bytes!.KeyOf(group);
 
-    internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead);
+    internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead, aheadBytes: _aheadBytes);
 
     internal override GroupKeys ForTable(ArrayShelf shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
 

@@ -223,6 +223,25 @@ internal sealed class AggregationPlan
     /// </summary>
     internal const int DefaultProbeAhead = 0;
 
+    /// <summary>
+    /// The bytes of a lane's table of hashed keys past which, <see cref="ProbeAhead"/> left at its
+    /// default, its first pass reads each slot <see cref="ReadAhead"/> rows ahead: the share of a private
+    /// cache a lane's cache gets, past which every probe misses. Each run sets it from its lanes; none
+    /// reads ahead before it does.
+    /// </summary>
+    internal long ReadAheadBytes { get; set; } = long.MaxValue;
+
+    /// <summary>
+    /// The rows ahead a lane's table read its slots once it outgrew <see cref="ReadAheadBytes"/>. Measured
+    /// on 2026-10-10 on the Mac at fourteen lanes, every table read ahead: 16 rows took ×0.929 off q3
+    /// (10⁵ short texts, a lane's table of 2.4 MB) and nothing off q2 nor 10⁶ hashed keys, 32 rows
+    /// ×0.939; keys in a row, at a stride or hot gave back 2 to 8 % at one lane on 2026-10-06, their
+    /// tables in cache, which the size spares. Read ahead past the size alone: q3 ×0.963 and q7 ×0.947
+    /// at fourteen lanes, the rest flat; never the tuples of several columns, whose slot read ahead
+    /// still leaves their 64 bytes to compare: q10 ×1.015 at one lane.
+    /// </summary>
+    internal const int ReadAhead = 16;
+
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
@@ -473,7 +492,7 @@ internal sealed class AggregationPlan
     /// </param>
     internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null, QueryMemory? memory = null) => Keys.Length switch
     {
-        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf),
+        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf, ReadAheadBytes),
         2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout, shelf: shelf) : new RawKeys<UInt128>(layout, shelf: shelf),
         2 => new PackedKeys<ulong>(Keys, facts, shelf: shelf),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts, shelf: shelf),
@@ -548,28 +567,29 @@ internal sealed class AggregationPlan
     }
 
     /// <summary>The index of a key of one column.</summary>
-    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1, ArrayShelf? shelf = null) =>
+    internal static GroupKeys Single(
+        ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue) =>
         key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
-                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
             },
-            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
             StorageKind.Bool => new BoolKeys(key),
-            StorageKind.Bytes => new ShortTextKeys(key, sorted, probeAhead, shelf),
+            StorageKind.Bytes => new ShortTextKeys(key, sorted, probeAhead, shelf, aheadBytes),
             _ => throw key.Unsupported("a group key"),
         };
 }
@@ -3327,6 +3347,10 @@ internal static class AggregationEngine
             // their working memory, admitted with it: the largest split of the layout, so many a lane.
             long splitBytes = ranges is null ? 0 : source.ReadAheadBytes(pass);
             int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, out int ahead);
+
+            // A lane's table reads its slots ahead once past its share of a cache: one lane alone has its
+            // cluster's to itself.
+            plan.ReadAheadBytes = lanes > 1 ? GroupCore.LaneCacheBytes : GroupCore.AloneCacheBytes;
 
             // The core holds the groups once a lane's cache fills: each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.

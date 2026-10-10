@@ -624,8 +624,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private ValuesCache<TValue> _entries;
 
     // The hashed path in two passes (AggregationPlan.ProbeAhead): each row's home slot, then the rows
-    // the first pass left; what its reads ahead found, written so that they stay.
+    // the first pass left; what its reads ahead found, written so that they stay. Left at its default,
+    // the slots read ahead once the table outgrew its lane's share of a cache (AggregationPlan.ReadAheadBytes):
+    // its bytes, and its groups by a key and a slot each.
     private readonly int _probeAhead;
+    private readonly long _aheadBytes;
+    private readonly int _aheadFrom;
     private uint[] _homes = [];
     private int[] _left = [];
     private int _sink;
@@ -672,12 +676,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal FixedKeys(
         ColumnShape shape, bool sorted, KeyBounds? bounds = null, int probeAhead = AggregationPlan.DefaultProbeAhead, long rows = -1, bool appending = false,
-        ArrayShelf? shelf = null)
+        ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
     {
         _shape = shape;
         _sorted = sorted;
         _bounds = bounds;
         _probeAhead = probeAhead;
+        _aheadBytes = aheadBytes;
+        _aheadFrom = aheadBytes == long.MaxValue ? int.MaxValue : (int)Math.Clamp(aheadBytes / (Unsafe.SizeOf<TValue>() + sizeof(ulong)), 1, int.MaxValue);
         _rows = rows;
         _appending = appending;
         _shelf = shelf;
@@ -1236,13 +1242,14 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal void TwoPasses(ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> validity, int start, int[] rowGroups)
     {
         int rows = values.Length;
-        if (_probeAhead > 0)
+        int ahead = _probeAhead > 0 ? _probeAhead : Count >= _aheadFrom ? AggregationPlan.ReadAhead : 0;
+        if (ahead > 0)
         {
             Scratch.Grow(ref _homes, rows);
         }
 
         Span<int> groups = rowGroups.AsSpan(start, rows);
-        _sink ^= FindAtHome(values, groups, _homes, _probeAhead, out bool missed);
+        _sink ^= FindAtHome(values, groups, _homes, ahead, out bool missed);
 
         // Every row found its group, none null: the usual batch once the keys are known.
         if (!missed && validity.IsEmpty)
@@ -1719,7 +1726,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return number < _span;
     }
 
-    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds, _probeAhead, _rows);
+    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds, _probeAhead, _rows, aheadBytes: _aheadBytes);
 
     /// <summary>Whether the groups are numbered by value, in the pages of a table of groups, rather than hashed.</summary>
     internal bool ByValue => _pages is not null;
@@ -2151,19 +2158,39 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         }
 
         groups = groups[..count];
+        bool hashed = Compact;
+        ulong seed = hashed ? _wide.Seed : 0;
         _sink ^= FindAtHome(keys, groups, homes, 0, out bool missed);
         if (!missed)
         {
             return;
         }
 
+        // A key missed added under the hash its home was found by, while the table's seed holds: only a
+        // table of a hash and a group keeps them, and only from before the batch (one condensed during
+        // it was not the one the homes were taken in).
         for (int i = 0; i < count; i++)
         {
             if (groups[i] < 0)
             {
-                groups[i] = Lookup(keys[i]);
+                groups[i] = hashed && _wide.Seed == seed ? LookupHashed(keys[i], homes[i]) : Lookup(keys[i]);
             }
         }
+    }
+
+    /// <summary>
+    /// <see cref="Lookup"/> of a key hashed in a table of a hash and a group, under its seed now: a wide
+    /// key hashed once, where a new one was hashed again at its home, then at its line.
+    /// </summary>
+    private int LookupHashed(TValue value, uint hash)
+    {
+        int group = _wide.GetOrAdd(value, hash, Count, _keys);
+        if (group == Count)
+        {
+            Add(value);
+        }
+
+        return group;
     }
 
     /// <summary>

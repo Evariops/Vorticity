@@ -117,10 +117,10 @@ internal sealed partial class GroupCore
     /// smallest core it may run on, a megabyte on current ones, less its open batches' lines and a
     /// window of rows. A fixed default until the topology is read.
     /// </summary>
-    private const long LaneCacheBytes = 768 * 1024;
+    internal const long LaneCacheBytes = 768 * 1024;
 
     /// <summary>The bytes of the cache of a lane alone, which has the level of cache its cluster shares to itself.</summary>
-    private const long AloneCacheBytes = 8L * 1024 * 1024;
+    internal const long AloneCacheBytes = 8L * 1024 * 1024;
 
     /// <summary>
     /// The share of its rows a cache finds below which its lane bypasses it, ε: a row the cache misses
