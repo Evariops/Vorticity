@@ -1154,6 +1154,8 @@ by, which is what the sum's overhead is set against. The query bench turns each 
 | `GroupBy(…).AggAsync(g => …)` | `GroupBy(…).Select(g => …)` |
 | `await foreach (var (city, n) in ….AggAsync(g => (g.Key, g.Count())))`, a tuple per group | `….Select(g => (g.Key, g.Count())).As<CityCount>()`, read as batches or with `ToRecordsAsync()` |
 | `var (min, max) = await scan.AggAsync(a => (…, …))` | `MinMax m = await scan.AggregateAsync<MinMax>(a => (…, …))` |
+| `scan.AggAsync(a => e)` | `scan.AggregateAsync(a => e)` |
+| `scan.Statistics`, `ScanStatistics`, `GroupStatistics` | `scan.Metrics`, `ScanMetrics`, `GroupMetrics` |
 | at most eight values in a selection | as many as the record has members |
 | `GroupBy(r => (r.City, r.Day))`, then `g.Key.Item1` | `g.Key.City` |
 | `Avg`, `AvgAsync` | `Average`, `AverageAsync` |
@@ -1164,3 +1166,5 @@ by, which is what the sum's overhead is set against. The query bench turns each 
 | `Sum` of a `float` as a `float` | as a `double` |
 | a float sum whose last bits depended on the degree | the same bits whatever the degree and the split, and closer to the exact sum |
 | `g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)` | the same, or `g.Welford(x => x.Celsius)` through the aggregator's extension |
+
+The other members renamed since are listed in [the public API design](14-public-api.md#renamed).

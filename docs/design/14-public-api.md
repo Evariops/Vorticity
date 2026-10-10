@@ -30,6 +30,7 @@ Seven rules decide every signature:
    query) ends in `Async`: `CountAsync`, `AverageAsync`, `ToRecordsAsync`. A method that only
    describes the query does not: `Where`, `GroupBy`, `Select`, `Take`, whose result is run by
    `await foreach`. A builder never reads, and what it checks is in the schema the open already read.
+   The other rules a name follows are in [names](#11-names).
 7. Batches flow. Every source, operator and sink exchanges batches, pulled by its consumer and decoded
    ahead within a bounded window. A query answers as soon as its first batch is final, holds what is
    still open rather than what it read, stops reading when its consumer stops, and allocates nothing
@@ -365,3 +366,57 @@ VX1011 accompanies the compiler's own error, to name the fix.
 - `vxdump` is written against the tool path, the inspection members of `VortexFile` and the plans
   only, and published ahead of time. A section it could not print from the public API would be a gap
   in the API, not in the tool ([vxdump.md](../guide/vxdump.md)).
+
+## 11. Names
+
+A name says what a member hands back and what it costs to get, and a word means the same thing
+wherever it appears. Rule 6 decides the `Async` suffix, and these rules decide the rest:
+
+1. A method's prefix says what it returns. `As` is the same data in another form, still borrowed
+   from the batch it comes from: `As<TRecord>()`, and the forms of a column, `AsCanonical()`,
+   `AsDictionary()`, `AsRunEnd()`, `AsConstant()` and `AsStorage()`. `To` is a copy the caller owns:
+   `ToOwned()`, `ToArray()`, `ToListAsync()`, `ToRecordsAsync()`. `Get` is a value computed or read:
+   `GetString(i)`, `GetLayoutAsync()`, `GetValidLengthAsync()`. A method without a prefix returns
+   what is already there, a part of the object or a value it holds: `Column<T>(i)`, `Row(i)`,
+   `Builder()`, `ChunkRowsOf(i)`.
+2. A method is a verb, so a method that runs names what it does: `ListObjectsAsync`,
+   `CountAtKeyAsync`, `OpenWriterAsync`. The operators and aggregates of a query keep the names LINQ
+   gives them (`Where`, `Select`, `Count`, `Average`), and a factory is named after what it builds
+   (`VortexType.List`, `IndexPolicy.Bloom`), as `Expression.Constant` is.
+3. A word keeps one meaning. Statistics describe the data: a file's `Statistics`, its zone maps,
+   `UseStatistics`, `WriteStatistics`, `VerifyStatistics`. Metrics count what a query did: `Metrics`,
+   `ScanMetrics`, `GroupMetrics`. `Create` makes something new and `Open` takes something that
+   exists (`CreateWriter`, `OpenWriterAsync`, `OpenAsync`), and `Append` writes rows after those
+   already there (`VortexDataset.AppendAsync`, `AppendIndexesAsync`). A dataset deletes and updates
+   rows (`DeleteAsync`, `UpdateAsync`), and lists, removes and replaces objects (`ListObjectsAsync`,
+   `RemoveObjectsAsync`, `ReplaceObjectsAsync`).
+4. Names are written out. The three exceptions are terms of the domain a reader meets on every
+   page: `Sym`, `Expr` and `DType`.
+5. A quantity of bytes ends in `Bytes`: `MaxDecompressedBytes`, `IndexCacheBytes`, `CapacityBytes`.
+   The exceptions are the extent of a file or a range (`Length`, `Offset`), a limit the Vortex format
+   names (`MaxPostscriptSize`), and a member that comes from the BCL (`MaxBufferSize`).
+6. A switch in an options type is a verb (`UseIndexes`, `UseStatistics`, `WriteStatistics`,
+   `MapFiles`, `UseLeases`), and a fact is an adjective or starts with `Is` or `Has` (`Durable`,
+   `IsClustered`, `HasRows`).
+7. A unit that counts a quantity is plural, as in `TimeSpan.FromMilliseconds`:
+   `TimeUnit.Milliseconds`, `TimeUnit.Days`. A period of the calendar is singular, since
+   `Truncate(CalendarUnit.Day)` rounds down to one day.
+
+### Renamed
+
+The members these rules renamed, for a caller moving to the current names:
+
+| before | now |
+|---|---|
+| `scan.AggAsync(a => e)`, `scan.AggAsync<TResult>(a => (…))` | `scan.AggregateAsync(a => e)`, `scan.AggregateAsync<TResult>(a => (…))` |
+| `Statistics` on a scan, a projection and an aggregation, `ScanStatistics`, `GroupStatistics` | `Metrics`, `ScanMetrics`, `GroupMetrics` |
+| `session.AppendAsync(path)` | `session.OpenWriterAsync(path)` |
+| `dataset.ObjectsAsync()`, `RemoveAsync(objects)`, `ReplaceAsync(removed, added)` | `ListObjectsAsync()`, `RemoveObjectsAsync(objects)`, `ReplaceObjectsAsync(removed, added)` |
+| `cursor.KeyCountAsync()`, `PrevAsync()`, `PrevKeyAsync()`, `SeekOp` | `CountAtKeyAsync()`, `PreviousAsync()`, `PreviousKeyAsync()`, `SeekMode` |
+| `schema.TryGetField(utf8, out int index)` | `schema.IndexOf(utf8)`, -1 when no field matches |
+| `column.Canonical()`, `column.Storage()` | `column.AsCanonical()`, `column.AsStorage()` |
+| `VortexFileRepair.ValidLengthAsync(path)` | `VortexFileRepair.GetValidLengthAsync(path)` |
+| `MaxDecompressedSize`, `MaxBatchDecompressedSize` and `InitialReadSize` on `VortexOpenOptions`, `VortexLimits.DefaultMaxDecompressedSize` | `MaxDecompressedBytes`, `MaxBatchDecompressedBytes`, `InitialReadBytes`, `DefaultMaxDecompressedBytes` |
+| `SegmentCache.Capacity`, `SegmentCache.Size` | `CapacityBytes`, `HeldBytes` |
+| `ScanOptions.Pruning`, `VortexWriteOptions.Statistics`, `CompactionSchedule.Leases` | `UseStatistics`, `WriteStatistics`, `UseLeases` |
+| `CompactionJob.Objects`, `GroupKeyPlan.Values`, `VortexDataset.ClusteringKeyPaths` | `ObjectKeys`, `ValueRange`, `ClusteringKey` |
