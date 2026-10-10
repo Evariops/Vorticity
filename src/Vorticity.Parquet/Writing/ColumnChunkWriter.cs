@@ -126,6 +126,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkUncompressed;
     private readonly ChunkStatistics _statistics;
 
+    /// <summary>The chunk's size statistics, page by page.</summary>
+    private readonly SizeCollector _sizes;
+
     /// <summary>The CRC-32 a page's checksum is computed by, made at the first.</summary>
     private Crc32? _crc;
 
@@ -188,6 +191,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _mask = new ulong[(blockRows + 63) >> 6];
         _pageCodes = new uint[blockRows];
         _statistics = new ChunkStatistics(column);
+        _sizes = new SizeCollector(column);
         if (bloomRate > 0 && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null))
         {
             // A flat column's chunk holds a value a row at most, a nested one's any number.
@@ -404,6 +408,11 @@ internal sealed class ColumnChunkWriter : IDisposable
             ? _values.WrittenSpan[..((_boolBits + 7) / 8)]
             : _values.WrittenSpan[range.FirstByte..range.EndByte];
         _statistics.AddPage(body, values, nulls);
+        _sizes.AddPage(
+            body,
+            values,
+            nested && _column.MaxRepetitionLevel > 0 ? _repetitionLevels!.WrittenSpan[range.FirstEntry..range.EndEntry] : default,
+            nested && _column.MaxDefinitionLevel > 1 ? _definitionLevels!.WrittenSpan[range.FirstEntry..range.EndEntry] : default);
 
         ParquetEncoding encoding = ParquetEncoding.Plain;
         if (coding == Coding.Codes)
@@ -746,7 +755,8 @@ internal sealed class ColumnChunkWriter : IDisposable
             encodings,
             _statistics.Close(),
             pages,
-            (int[])_pagesBy.Clone());
+            (int[])_pagesBy.Clone(),
+            _sizes.Close());
     }
 
     /// <summary>Forgets the closed chunk, keeping the buffers for the next row group's.</summary>
@@ -1384,6 +1394,7 @@ internal sealed class ColumnChunkWriter : IDisposable
 /// <param name="Statistics">Its bounds and counts, and its pages'.</param>
 /// <param name="Pages">Where each data page lies, for the offset index.</param>
 /// <param name="PagesByEncoding">Per encoding, the data pages that took it.</param>
+/// <param name="Sizes">Its size statistics, where the column has any.</param>
 internal sealed record ChunkResult(
     long Offset,
     long DataPageOffset,
@@ -1396,4 +1407,5 @@ internal sealed record ChunkResult(
     uint Encodings,
     WrittenStatistics Statistics,
     PageLocation[] Pages,
-    int[] PagesByEncoding);
+    int[] PagesByEncoding,
+    ChunkSizes? Sizes);

@@ -646,7 +646,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable, IFanWork
                 }
 
                 int start = tail.Length;
-                ColumnIndex.Write(ref writer, statistics.Pages, statistics.Order);
+                ColumnIndex.Write(ref writer, statistics.Pages, statistics.Order, chunk.Chunk.Sizes);
                 writer.Flush();
                 chunk.ColumnIndexOffset = position + start;
                 chunk.ColumnIndexLength = tail.Length - start;
@@ -658,7 +658,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable, IFanWork
             foreach (WrittenChunk chunk in rowGroup.Chunks)
             {
                 int start = tail.Length;
-                OffsetIndex.Write(ref writer, chunk.Chunk.Pages);
+                OffsetIndex.Write(ref writer, chunk.Chunk.Pages, chunk.Chunk.Sizes);
                 writer.Flush();
                 chunk.OffsetIndexOffset = position + start;
                 chunk.OffsetIndexLength = tail.Length - start;

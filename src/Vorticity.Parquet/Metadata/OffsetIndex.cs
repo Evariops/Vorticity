@@ -62,7 +62,7 @@ internal static class OffsetIndex
     }
 
     /// <summary>Writes an offset index of <paramref name="pages"/>.</summary>
-    internal static void Write(ref ThriftCompactWriter writer, ReadOnlySpan<PageLocation> pages)
+    internal static void Write(ref ThriftCompactWriter writer, ReadOnlySpan<PageLocation> pages, Writing.ChunkSizes? sizes = null)
     {
         short saved = writer.BeginStruct();
         writer.WriteListField(1, ThriftType.Struct, pages.Length);
@@ -75,6 +75,7 @@ internal static class OffsetIndex
             writer.EndStruct(location);
         }
 
+        sizes?.WriteOffsetIndex(ref writer);
         writer.EndStruct(saved);
     }
 

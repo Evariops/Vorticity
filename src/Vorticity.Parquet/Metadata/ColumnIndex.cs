@@ -120,7 +120,7 @@ internal sealed class ColumnIndex
     }
 
     /// <summary>Writes a column index of <paramref name="pages"/>, their bounds run in <paramref name="order"/>.</summary>
-    internal static void Write(ref ThriftCompactWriter writer, ReadOnlySpan<Writing.PageStatistics> pages, BoundaryOrder order)
+    internal static void Write(ref ThriftCompactWriter writer, ReadOnlySpan<Writing.PageStatistics> pages, BoundaryOrder order, Writing.ChunkSizes? sizes = null)
     {
         short saved = writer.BeginStruct();
         writer.WriteListField(1, ThriftType.BooleanTrue, pages.Length);
@@ -148,6 +148,7 @@ internal sealed class ColumnIndex
             writer.WriteI64Element(page.Nulls);
         }
 
+        sizes?.WriteColumnIndex(ref writer);
         writer.EndStruct(saved);
     }
 

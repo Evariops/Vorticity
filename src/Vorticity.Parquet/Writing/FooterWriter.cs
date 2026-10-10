@@ -199,6 +199,8 @@ internal static class FooterWriter
             writer.WriteI32Field(15, written.BloomFilterLength);
         }
 
+        chunk.Sizes?.WriteChunk(ref writer);
+
         writer.EndStruct(metadata);
         if (written.OffsetIndexOffset >= 0)
         {
