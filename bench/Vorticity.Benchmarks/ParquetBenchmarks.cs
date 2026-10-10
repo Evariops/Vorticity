@@ -7,6 +7,7 @@
 // disk is not what is measured; the scans read a file written once at setup, opened by each call,
 // through the tool scan both formats share. The bytes each format wrote are printed at setup.
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipelines;
 using System.Threading;
@@ -26,7 +27,7 @@ public class ParquetWriteBenchmarks
     private readonly ParquetTable _table = new();
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-bloom")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -198,11 +199,15 @@ internal sealed class ParquetTable
 
         ParquetCompression compression = format switch
         {
-            "parquet-none" => ParquetCompression.Uncompressed,
+            "parquet-none" or "parquet-bloom" => ParquetCompression.Uncompressed,
             "parquet-snappy" => ParquetCompression.Snappy,
             _ => ParquetCompression.Zstd,
         };
-        await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter(pipe, Schema, new ParquetWriteOptions { Compression = compression });
+        await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter(pipe, Schema, new ParquetWriteOptions
+        {
+            Compression = compression,
+            BloomFilters = format == "parquet-bloom" ? new Dictionary<string, double> { ["id"] = 0.01, ["label"] = 0.01 } : null,
+        });
         Fill(parquet.Builder());
         await parquet.WriteAsync(parquet.Builder(), CancellationToken.None).ConfigureAwait(false);
         await parquet.CompleteAsync(CancellationToken.None).ConfigureAwait(false);

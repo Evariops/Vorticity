@@ -420,7 +420,7 @@ data otherwise.
 | size statistics | the byte arrays' unencoded bytes and the level histograms, per chunk and per page |
 | key-value metadata | `vorticity.schema`: the Vortex dtype the file was written from, its FlatBuffers bytes in base64 (§4.1), and the caller's own pairs |
 | `created_by` | `Vorticity.Parquet version <version> (build <commit>)`, the form the standard asks for |
-| Bloom filters | by `BloomFilters`, off by default: per column, a false-positive rate, sized from the chunk's exact distinct count when the dictionary table ran, else from its rows, by the core's sizing; written after the row groups, before the page index |
+| Bloom filters | by `BloomFilters`, off by default: per column, a false-positive rate. A value is inserted as its page closes, into a filter sized by the core's sizing for the most values the chunk can hold, a page of dictionary codes by the dictionary's entries as the chunk closes; the filter is then folded, bit for bit the filter built smaller, to the size of the dictionary's exact count plus every other value counted as one, at most 1 MiB. Written after the row group's chunks, the standard's other place for them, so that a writer holds no filter past its row group |
 | checksums | a `crc` on every page when `WriteChecksums` asks for it, off by default |
 | never written | INT96, PLAIN_DICTIONARY, BIT_PACKED, LZ4, LZO, a `ConvertedType` without its `LogicalType` but `INTERVAL`'s, two-level lists, data pages v1 unless `DataPageVersion.V1` is asked for |
 
@@ -503,12 +503,12 @@ of the file its values in place; `AlignUncompressedPages` turns it off.
 
 ### 6.6 Row groups, memory and order on disk
 
-A writer holds the open block of each column, each chunk's distinct table while it runs, and the
-compressed pages of the row group being written, which `RowGroupBytes` bounds; nothing per row. The
-file is laid out as: the magic; the row groups, each its column chunks in schema order, each its
-dictionary page then its data pages; the Bloom filters; every `ColumnIndex`, then every
-`OffsetIndex`, by row group then column, so that a reader's index reads coalesce; the footer, its
-length and the magic. `Abandon()` gives the file up as the core's writer does: a new file is deleted,
+A writer holds the open block of each column, each chunk's distinct table while it runs, the
+compressed pages of the row group being written, which `RowGroupBytes` bounds, and a Bloom filter of
+at most 1 MiB per column that asked for one; nothing per row. The file is laid out as: the magic; the
+row groups, each its column chunks in schema order, each its dictionary page then its data pages,
+then the row group's Bloom filters; every `ColumnIndex`, then every `OffsetIndex`, by row group then
+column, so that a reader's index reads coalesce; the footer, its length and the magic. `Abandon()` gives the file up as the core's writer does: a new file is deleted,
 a caller's pipe completed with an error.
 
 ## 7. Kernels

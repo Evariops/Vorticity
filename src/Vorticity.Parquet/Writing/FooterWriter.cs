@@ -21,6 +21,10 @@ internal sealed class WrittenChunk
     internal long ColumnIndexOffset { get; set; } = -1;
 
     internal int ColumnIndexLength { get; set; }
+
+    internal long BloomFilterOffset { get; set; } = -1;
+
+    internal int BloomFilterLength { get; set; }
 }
 
 /// <summary>A row group written to the file.</summary>
@@ -187,6 +191,12 @@ internal static class FooterWriter
             {
                 WriteEncodingStats(ref writer, PageType.DataPageV2, (ParquetEncoding)encoding, chunk.PagesByEncoding[encoding]);
             }
+        }
+
+        if (written.BloomFilterOffset >= 0)
+        {
+            writer.WriteI64Field(14, written.BloomFilterOffset);
+            writer.WriteI32Field(15, written.BloomFilterLength);
         }
 
         writer.EndStruct(metadata);

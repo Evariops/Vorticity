@@ -125,6 +125,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkUncompressed;
     private readonly ChunkStatistics _statistics;
 
+    /// <summary>The chunk's Bloom filter, when the column asked for one.</summary>
+    private readonly BloomCollector? _bloom;
+
     /// <summary>Whether the staged rows carry a validity bitmap: a flat column's that may be null.</summary>
     private readonly bool _rowValidity;
 
@@ -139,7 +142,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private int _pageNestedRows;
     private int _pageEntries;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
         if (column.Nested)
@@ -166,6 +169,11 @@ internal sealed class ColumnChunkWriter : IDisposable
         _mask = new ulong[(blockRows + 63) >> 6];
         _pageCodes = new uint[blockRows];
         _statistics = new ChunkStatistics(column);
+        if (bloomRate > 0 && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null))
+        {
+            // A flat column's chunk holds a value a row at most, a nested one's any number.
+            _bloom = new BloomCollector(column, bloomRate, column.Nested || rowGroupRows <= 0 ? long.MaxValue : rowGroupRows, pool);
+        }
         _eligible = profile != CompressionProfile.None && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
         _encodings = profile is CompressionProfile.Auto or CompressionProfile.Smallest;
         _encoded = new PooledBytes(pool);
@@ -191,6 +199,14 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         await _chunk.WriteToAsync(sink, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Whether the closed chunk has a Bloom filter for <see cref="WriteBloomAsync"/> to write.</summary>
+    internal bool HasBloom => _bloom is { Closed: true };
+
+    /// <summary>Writes the closed chunk's Bloom filter, its header then its bitset, after the row group's chunks.</summary>
+    /// <returns>The bytes written.</returns>
+    internal ValueTask<int> WriteBloomAsync(ISegmentSink sink, CancellationToken cancellationToken) =>
+        _bloom!.WriteToAsync(sink, cancellationToken);
 
     /// <summary>
     /// Appends <paramref name="count"/> rows of <paramref name="node"/> from <paramref name="start"/>,
@@ -266,6 +282,12 @@ internal sealed class ColumnChunkWriter : IDisposable
                     _dictionary = false;
                     break;
             }
+        }
+
+        // A page of codes holds the dictionary's entries, which the filter takes as the chunk closes.
+        if (encoding != ParquetEncoding.RleDictionary)
+        {
+            _bloom?.AddPage(body, _pageValues);
         }
 
         if (encoding == ParquetEncoding.Plain && _encodings && _pageValues > 0)
@@ -471,6 +493,8 @@ internal sealed class ColumnChunkWriter : IDisposable
             encodings |= 1u << (int)ParquetEncoding.Rle;
         }
 
+        // The dictionary page's entries are the values of the pages of codes.
+        _bloom?.Close(_entries.WrittenSpan[.._frozenBytes], _pagesBy[(int)ParquetEncoding.RleDictionary] > 0 ? _frozenEntries : 0);
         return new ChunkResult(
             offset,
             offset + dictionary,
@@ -523,6 +547,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _encoded.Dispose();
         _data.Dispose();
         _repetitionLevels?.Dispose();
+        _bloom?.Dispose();
         _shredder?.Dispose();
         _definitionLevels?.Dispose();
         _table?.Reset();

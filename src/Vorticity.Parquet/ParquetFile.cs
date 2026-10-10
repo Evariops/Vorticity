@@ -180,6 +180,14 @@ public sealed class ParquetFile : IAsyncDisposable
     }
 
     /// <summary>Where a column chunk's pages lie, its dictionary page first; checked against the file's bytes.</summary>
+    /// <summary>
+    /// Whether <paramref name="length"/> bytes at <paramref name="offset"/> lie between the leading
+    /// magic and the footer's length: where a structure the footer points to may be. A page index or
+    /// a Bloom filter outside them is no index, which the reader does without.
+    /// </summary>
+    internal bool Holds(long offset, long length) =>
+        offset >= 4 && length > 0 && length <= int.MaxValue && offset <= Length - 8 - length;
+
     internal (long Start, int Length) ChunkRange(ColumnChunkMetadata chunk)
     {
         if (chunk.IsEncrypted)

@@ -124,6 +124,15 @@ internal sealed class HandBuiltFile
             writer.WriteI64Field(6, column.Bytes);
             writer.WriteI64Field(7, column.Bytes);
             writer.WriteI64Field(9, offsets[i]);
+            if (column.BloomFilterOffset >= 0)
+            {
+                writer.WriteI64Field(14, column.BloomFilterOffset);
+                if (column.BloomFilterLength > 0)
+                {
+                    writer.WriteI32Field(15, column.BloomFilterLength);
+                }
+            }
+
             writer.EndStruct(meta);
             writer.EndStruct(chunk);
             total += column.Bytes;
@@ -184,6 +193,12 @@ internal sealed class HandBuiltFile
         internal long Values { get; private set; }
 
         internal long Bytes { get; private set; }
+
+        /// <summary>Where the footer says the chunk's Bloom filter is, or -1 for none.</summary>
+        internal long BloomFilterOffset { get; set; } = -1;
+
+        /// <summary>The Bloom filter's length the footer gives, or 0 for none.</summary>
+        internal int BloomFilterLength { get; set; }
 
         /// <summary>
         /// Adds a v1 page: its levels inside its bytes, RLE behind their lengths or, when

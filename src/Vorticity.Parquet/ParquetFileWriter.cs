@@ -102,9 +102,19 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         _columns = new ColumnChunkWriter[map.Columns.Length];
+        HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
         for (int i = 0; i < _columns.Length; i++)
         {
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool);
+            // A column's Bloom filter by its dotted path, which a top-level column's name is.
+            string path = string.Join('.', map.Columns[i].Path);
+            double rate = options.BloomFilters is { } rates && rates.TryGetValue(path, out double asked) ? asked : 0;
+            blooms.Remove(path);
+            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows);
+        }
+
+        if (blooms.Count > 0)
+        {
+            throw new ArgumentException($"The Bloom filters name '{string.Join("', '", blooms)}', which no column of the schema is.", nameof(options));
         }
 
         _nodes = new int[_columns.Length];
@@ -528,6 +538,17 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = _codec };
         }
 
+        // The row group's Bloom filters after its chunks, the standard's other place for them: a
+        // writer holds none past its row group.
+        for (int c = 0; c < _columns.Length; c++)
+        {
+            if (_columns[c].HasBloom)
+            {
+                chunks[c].BloomFilterOffset = _sink.Position;
+                chunks[c].BloomFilterLength = await _columns[c].WriteBloomAsync(_sink, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         _rowGroups.Add(new WrittenRowGroup { Chunks = chunks, Rows = rows, Ordinal = _rowGroups.Count });
         _groupRows -= rows;
         await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -554,13 +575,13 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     }
 
     /// <summary>
-    /// The file's end, starting at <paramref name="position"/>: every column chunk's offset index,
-    /// then the footer, its length and the magic.
+    /// The file's end, starting at <paramref name="position"/>: every column chunk's column index,
+    /// then every offset index, then the footer, its length and the magic.
     /// </summary>
     private void WriteTail(PooledBytes tail, long position)
     {
-        // Every column index, then every offset index, by row group then column, so that a
-        // reader's index reads coalesce.
+        // Every column index, then every offset index, by row group then column, so that a reader's
+        // reads of each coalesce.
         ThriftCompactWriter writer = new(tail);
         foreach (WrittenRowGroup rowGroup in _rowGroups)
         {

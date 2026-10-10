@@ -123,7 +123,7 @@ internal static class PagePruning
         {
             ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
             columnSlots[i] = -1;
-            if (chunk.ColumnIndexOffset < 0 || chunk.OffsetIndexOffset < 0 || chunk.ColumnIndexLength <= 0 || chunk.OffsetIndexLength <= 0)
+            if (!file.Holds(chunk.ColumnIndexOffset, chunk.ColumnIndexLength) || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
             {
                 continue;
             }

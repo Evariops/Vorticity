@@ -59,6 +59,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
     private readonly FilterColumns? _pruning;
+
+    /// <summary>Whether the filter asks equalities Bloom filters may answer, and the scan reads indexes.</summary>
+    private readonly bool _bloom;
     private readonly SegmentRequestSet _indexes = new();
 
     /// <summary>The batches of the row group being read the page index leaves, or null when it rules none out.</summary>
@@ -122,6 +125,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _slots = new int[_readers.Length];
         _nodes = new int[fields.Length];
         _pruning = FilterColumns.For(file, spec);
+        _bloom = _pruning is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -225,6 +229,13 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 // A file the session maps is mapped now, so that the chunks are read in place.
                 (_file.Reader as IReadAnticipation)?.AnticipateData();
                 _anticipated = true;
+            }
+
+            // The Bloom filters of the columns the filter's equalities ask about rule a group out whole.
+            if (_bloom && await BloomPruning.RulesOutAsync(_pruning!, _rowGroup, _indexes, _metrics, _cancellationToken).ConfigureAwait(false))
+            {
+                _metrics.AddBlocksPruned((int)((group.RowCount + _batchRows - 1) / _batchRows));
+                continue;
             }
 
             // The page index of the filter's columns rules batches out; a group it leaves none of

@@ -34,7 +34,7 @@ public sealed class RealFilePruningTests
         foreach (string path in Directory.EnumerateFiles(Root!, "*.parquet", SearchOption.AllDirectories))
         {
             string name = Path.GetRelativePath(Root!, path);
-            List<(string Column, FilterLiteral Value)> samples;
+            List<(string Column, FilterLiteral Value, bool Decimal)> samples;
             try
             {
                 samples = await SamplesAsync(path);
@@ -47,9 +47,9 @@ public sealed class RealFilePruningTests
             await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
             // In batches of the scan's default and of 128 rows, which a file's small pages rule out
             // a batch at a time.
-            foreach ((string column, FilterLiteral value) in samples)
+            foreach ((string column, FilterLiteral value, bool decimalColumn) in samples)
             {
-                foreach ((int batchRows, VortexExpr filter) in Filters(column, value))
+                foreach ((int batchRows, VortexExpr filter) in Filters(column, value, decimalColumn))
                 {
                     long pruned;
                     long whole;
@@ -84,21 +84,51 @@ public sealed class RealFilePruningTests
         Assert.Empty(failures);
     }
 
-    /// <summary>Equal, less, and not less than the value, each in batches of the default and of 128 rows.</summary>
-    private static IEnumerable<(int BatchRows, VortexExpr Filter)> Filters(string column, FilterLiteral value)
+    /// <summary>
+    /// Equal, less, and not less than the value, each in batches of the default and of 128 rows;
+    /// equal to the value just past it, and in the two, which the column seldom holds and its bounds
+    /// seldom rule out: what a Bloom filter is for.
+    /// </summary>
+    private static IEnumerable<(int BatchRows, VortexExpr Filter)> Filters(string column, FilterLiteral value, bool decimalColumn)
     {
+        FilterLiteral? next = Neighbor(value, decimalColumn);
         foreach (int batchRows in (int[])[0, 128])
         {
             yield return (batchRows, Expr.Eq(Expr.Field(column), Expr.Literal(value)));
             yield return (batchRows, Expr.Lt(Expr.Field(column), Expr.Literal(value)));
             yield return (batchRows, Expr.Ge(Expr.Field(column), Expr.Literal(value)));
+            if (next is { } past)
+            {
+                yield return (batchRows, Expr.Eq(Expr.Field(column), Expr.Literal(past)));
+                yield return (batchRows, Expr.In(Expr.Field(column), value, past));
+            }
+        }
+    }
+
+    /// <summary>The value just past <paramref name="value"/>: a float's next, a byte string's with a zero after it.</summary>
+    private static FilterLiteral? Neighbor(FilterLiteral value, bool decimalColumn)
+    {
+        switch (value.Kind)
+        {
+            case FilterLiteralKind.Signed when value.SignedValue < long.MaxValue:
+                return FilterLiteral.From(value.SignedValue + 1);
+            case FilterLiteralKind.Unsigned when value.UnsignedValue < ulong.MaxValue:
+                return FilterLiteral.From(value.UnsignedValue + 1);
+            case FilterLiteralKind.Float:
+                double v = value.FloatValue;
+                return FilterLiteral.From((float)v == v ? MathF.BitIncrement((float)v) : Math.BitIncrement(v));
+            case FilterLiteralKind.Bytes when !decimalColumn:
+                byte[] bytes = [.. value.BytesValue, 0];
+                return FilterLiteral.From((ReadOnlySpan<byte>)bytes);
+            default:
+                return null;
         }
     }
 
     /// <summary>A value of each top-level column the first batch holds one of, from its middle row.</summary>
-    private static async Task<List<(string Column, FilterLiteral Value)>> SamplesAsync(string path)
+    private static async Task<List<(string Column, FilterLiteral Value, bool Decimal)>> SamplesAsync(string path)
     {
-        List<(string, FilterLiteral)> samples = [];
+        List<(string, FilterLiteral, bool)> samples = [];
         await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
         await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
         {
@@ -114,7 +144,7 @@ public sealed class RealFilePruningTests
                         : LiteralReader.TryRead(batch.Arena, node, row, out value);
                     if (read && !(value.Kind == FilterLiteralKind.Float && double.IsNaN(value.FloatValue)))
                     {
-                        samples.Add((batch.Schema[c].Name, value));
+                        samples.Add((batch.Schema[c].Name, value, decimalColumn));
                     }
                 }
             }

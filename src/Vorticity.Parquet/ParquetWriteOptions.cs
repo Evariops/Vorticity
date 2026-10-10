@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Vorticity.Zstd;
 
 namespace Vorticity.Parquet;
@@ -71,8 +72,27 @@ public sealed record ParquetWriteOptions
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }
 
+    /// <summary>
+    /// The columns that get a Bloom filter in every row group, by name — a nested column by its
+    /// dotted path — each with the false-positive rate it is sized for, above 0 and below 1. None by
+    /// default. A filter is the standard's split-block filter of xxHash64, which a reader probes for
+    /// an equality or an IN; a boolean column gets none.
+    /// </summary>
+    public IReadOnlyDictionary<string, double>? BloomFilters { get; init; }
+
     internal void Validate()
     {
+        if (BloomFilters is { } blooms)
+        {
+            foreach ((string column, double rate) in blooms)
+            {
+                if (!(rate > 0 && rate < 1))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(BloomFilters), rate, $"The Bloom filter of '{column}' asks a false-positive rate outside (0, 1).");
+                }
+            }
+        }
+
         ArgumentOutOfRangeException.ThrowIfLessThan(BlockRows, 1, nameof(BlockRows));
         ArgumentOutOfRangeException.ThrowIfLessThan(RowGroupRows, BlockRows, nameof(RowGroupRows));
         if (RowGroupRows % BlockRows != 0)
