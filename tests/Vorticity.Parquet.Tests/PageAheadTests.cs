@@ -18,7 +18,7 @@ namespace Vorticity.Parquet.Tests;
 /// </summary>
 public sealed class PageAheadTests : IDisposable
 {
-    private const int Rows = 40_000;
+    private const int Rows = 81_920;
 
     private readonly string _path = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.parquet");
 
@@ -30,6 +30,7 @@ public sealed class PageAheadTests : IDisposable
         ("price", VortexType.Float64.Nullable),
         ("label", VortexType.Utf8.Nullable),
         ("flag", VortexType.Bool.Nullable),
+        ("payload", VortexType.Utf8),
     ];
 
     public void Dispose() => System.IO.File.Delete(_path);
@@ -122,10 +123,13 @@ public sealed class PageAheadTests : IDisposable
         return rows;
     }
 
-    /// <summary>The rows, pages of a thousand of them in a row group of them all, so that every column has forty pages to decompress ahead.</summary>
+    /// <summary>
+    /// The rows, pages of 16 384 of them in a row group of them all: five pages a column, those of the
+    /// payloads, text that seldom repeats, large enough to be worth a lane under every codec.
+    /// </summary>
     private async Task WriteAsync(ParquetCompression compression, DataPageVersion version)
     {
-        ParquetWriteOptions options = new() { Compression = compression, DataPageVersion = version, BlockRows = 1_000, RowGroupRows = Rows };
+        ParquetWriteOptions options = new() { Compression = compression, DataPageVersion = version, BlockRows = 16_384, RowGroupRows = Rows };
         await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(_path, Schema, options);
         ColumnsBuilder builder = writer.Builder();
         for (int row = 0; row < Rows; row++)
@@ -157,6 +161,8 @@ public sealed class PageAheadTests : IDisposable
             {
                 builder.Column<bool?>(3).Append(row % 3 == 0);
             }
+
+            builder.Column<string>(4).Append(string.Create(CultureInfo.InvariantCulture, $"payload {row * 2_654_435_761L % 1_000_003:D7} of the row, long enough to fill a page"));
         }
 
         await writer.WriteAsync(builder, Ct);

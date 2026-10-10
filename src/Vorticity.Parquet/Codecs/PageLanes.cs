@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.ExceptionServices;
 using System.Threading;
+using Vorticity.Parquet.Metadata;
 
 namespace Vorticity.Parquet.Codecs;
 
@@ -22,6 +23,18 @@ internal sealed class PageLanes(int lanes)
     internal const int Bytes = 2 << 20;
 
     private int _free = lanes;
+
+    /// <summary>
+    /// The decompressed bytes from which a page of <paramref name="codec"/> is worth a lane: about ten
+    /// microseconds of its decompression, which a hand-off to another thread costs. A smaller page is
+    /// decompressed where it is read.
+    /// </summary>
+    internal static int Worth(CompressionCodec codec) => codec switch
+    {
+        CompressionCodec.Snappy or CompressionCodec.Lz4Raw => 64 << 10,
+        CompressionCodec.Zstd => 16 << 10,
+        _ => 4 << 10,
+    };
 
     /// <summary>Takes a lane; false when every one is busy, and the column runs the codec itself.</summary>
     internal bool TryTake()

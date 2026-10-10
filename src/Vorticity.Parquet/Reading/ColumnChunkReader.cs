@@ -146,6 +146,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The decompressed bytes of the pages in <see cref="_ahead"/>.</summary>
     private int _aheadBytes;
 
+    /// <summary>Where the walk of the pages to decompress ahead stopped: every page before it was taken or passed over.</summary>
+    private int _walked;
+
     /// <summary>
     /// The ZSTD decompressors the reader's pages decompressed ahead use, one a page in flight, kept from
     /// one page to the next: the core's pool keeps sixteen, and a scan's lanes may be more.
@@ -290,6 +293,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         _mapped = 0;
         _codec = codec;
         _position = 0;
+        _walked = 0;
         _rowsTotal = rows;
         _rowsLeft = rows;
         _rowsUnread = rows;
@@ -1219,8 +1223,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// Starts the decompression of the data pages after the one read on the scan's lanes, where one is
     /// free, up to <see cref="PageLanes.Depth"/> pages ahead, from the chunk's start: of a chunk read
     /// whole, compressed and in plaintext, whose bytes stay where they lie until the chunk ends. A
-    /// header this cannot take as it is ends the walk, a dictionary or index page, or a page of no
-    /// compressed values, is passed over, and each is the read's to decide.
+    /// header this cannot take as it is ends the walk; a dictionary or index page, or a page too small
+    /// to be worth a lane (<see cref="PageLanes.Worth"/>), is passed over, and each is the read's to
+    /// decide. The walk goes on from where it stopped, over no page twice.
     /// </summary>
     private void Prefetch()
     {
@@ -1230,12 +1235,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        int position = _position;
-        foreach (AheadPage queued in _ahead)
-        {
-            position = queued.At + queued.Stored;
-        }
-
+        int position = Math.Max(_position, _walked);
         while (_ahead.Count < PageLanes.Depth && (_ahead.Count == 0 || _aheadBytes < PageLanes.Bytes) && position < _chunkLength)
         {
             ReadOnlySpan<byte> rest = _chunk.Span[position..];
@@ -1246,12 +1246,14 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
             catch (ParquetFormatException)
             {
+                _walked = position;
                 return;
             }
 
             int stored = header.CompressedPageSize;
             if (stored < 0 || stored > rest.Length - header.HeaderLength)
             {
+                _walked = position;
                 return;
             }
 
@@ -1264,6 +1266,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     offset = header.RepetitionLevelsLength + header.DefinitionLevelsLength;
                     if (header.RepetitionLevelsLength < 0 || header.DefinitionLevelsLength < 0 || offset > stored || offset > header.UncompressedPageSize)
                     {
+                        _walked = position;
                         return;
                     }
 
@@ -1278,10 +1281,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     break;
             }
 
-            if (size > 0 && size <= _cap)
+            if (size >= PageLanes.Worth(_codec) && size <= _cap)
             {
                 if (!lanes.TryTake())
                 {
+                    _walked = position;
                     return;
                 }
 
@@ -1294,6 +1298,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             position = at + stored;
         }
+
+        _walked = position;
     }
 
     /// <summary>A ZSTD decompressor for a page decompressed ahead: one of the reader's, or the core pool's.</summary>
