@@ -102,8 +102,9 @@ the seam does not already give, and Parquet would lose every query.
 The surface follows the rules of [14-public-api.md](14-public-api.md). In outline, its names open to
 review: `ParquetFile.OpenAsync`, from a path or any `ISegmentSource`, on a session; its `Schema`, a
 `VortexSchema`; `RowCount`; `Metadata`, for inspection (row groups, column chunks, encodings,
-codecs, statistics, field ids, key-value metadata, what this build supports); `Scan<TRecord>()` and
-`Scan(columns)`. `ParquetFileWriter`, over a path or a `PipeWriter`, typed by a record or a schema,
+codecs, statistics, field ids, key-value metadata), each type named as the standard spells it;
+`VerifyAsync`, the metadata oracle of §9 over the file, whose findings say what its footer claims
+that its rows refute; `Scan<TRecord>()` and `Scan(columns)`. `ParquetFileWriter`, over a path or a `PipeWriter`, typed by a record or a schema,
 with `Builder()`, `WriteAsync`, `FlushAsync`, which closes a row group, `CompleteAsync`, which
 returns a `ParquetWriteReport`, and `Abandon()`. `ParquetOpenOptions` and `ParquetWriteOptions`.
 The session gains `OpenParquetAsync` and `CreateParquetWriter` as extension members. A malformed
@@ -609,7 +610,7 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 | the first batch waits for its pages, not its row group | the time to first batch flat over row groups sixteen times apart, locally and over the HTTP source with latency |
 | no dispatch per value | `PerRowDispatchTests` extended to the package |
 | every kernel has a scalar twin | the package's kernel tests in `tests/scalar-pass.txt` |
-| Native AOT | an inspection tool published ahead of time and run over the test files |
+| Native AOT | `pqdump`, the inspection tool, built on the public surface alone and published ahead of time, opens, scans and verifies every file of the standard's test suite at a pinned commit; its surface is on record beside the core's, rendered the same way |
 | a file is the same bytes at every degree | written at degrees 1, 2, 4 and 8 and compared |
 | the writer allocates per file, not per row | a ceiling per written file and per column of a wide schema |
 

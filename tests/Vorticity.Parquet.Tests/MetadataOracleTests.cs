@@ -69,8 +69,29 @@ public sealed partial class MetadataOracleTests : IDisposable
             await writer.CompleteAsync(Ct);
         }
 
-        List<string> findings = await ParquetVerifier.VerifyAsync(_path, VortexSession.Default, Ct);
+        List<ParquetFinding> findings = await ParquetVerifier.VerifyAsync(_path, VortexSession.Default, Ct);
         Assert.Empty(findings);
+
+        // The public surface says the same, and describes the file as its footer does.
+        await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
+        Assert.Empty(await file.VerifyAsync(Ct));
+        ParquetMetadata metadata = file.Metadata;
+        Assert.StartsWith("Vorticity.Parquet version", metadata.CreatedBy, StringComparison.Ordinal);
+        Assert.Equal(rows.Length, metadata.RowCount);
+        Assert.Equal(rows.Length, metadata.RowGroups.Sum(group => group.RowCount));
+        Assert.Equal("INT64", metadata.Columns.Single(c => c.Path == "Id").PhysicalType);
+        Assert.Equal("STRING", metadata.Columns.Single(c => c.Path == "Name").LogicalType);
+        Assert.StartsWith("DECIMAL(", metadata.Columns.Single(c => c.Path == "Price").LogicalType, StringComparison.Ordinal);
+        Assert.Equal(1, metadata.Columns.Single(c => c.Path.StartsWith("Tags", StringComparison.Ordinal)).MaxRepetitionLevel);
+        ParquetChunkInfo id = metadata.RowGroups[0].Chunks[0];
+        Assert.Equal("Id", id.Column);
+        Assert.True(id.HasBloomFilter && id.HasColumnIndex && id.HasOffsetIndex);
+        Assert.Equal(compression == ParquetCompression.Uncompressed ? "UNCOMPRESSED" : compression.ToString().ToUpperInvariant(), id.Codec);
+        Assert.Equal(0, id.Statistics!.NullCount);
+        long first = metadata.RowGroups[0].RowCount;
+        Assert.Equal(rows.Take((int)first).Min(r => r.Id).ToString(System.Globalization.CultureInfo.InvariantCulture), id.Statistics.Min);
+        Assert.True(id.Statistics.MinExact);
+        Assert.Contains(metadata.KeyValues, pair => pair.Key == "vorticity.schema");
     }
 
     [Theory]
@@ -82,8 +103,9 @@ public sealed partial class MetadataOracleTests : IDisposable
         Assert.SkipWhen(Root is null || !Directory.Exists(Root), "VORTICITY_PARQUET_DATA names no directory of Parquet files.");
         string? path = Directory.EnumerateFiles(Root!, Path.GetFileName(relative), SearchOption.AllDirectories).FirstOrDefault();
         Assert.SkipWhen(path is null, $"{relative} is not under VORTICITY_PARQUET_DATA.");
-        List<string> findings = await ParquetVerifier.VerifyAsync(path!, VortexSession.Default, Ct);
-        Assert.Contains(findings, finding => finding.Contains(structure, StringComparison.Ordinal));
+        await using ParquetFile file = await ParquetFile.OpenAsync(path!, Ct);
+        IReadOnlyList<ParquetFinding> findings = await file.VerifyAsync(Ct);
+        Assert.Contains(findings, finding => finding.ToString().Contains(structure, StringComparison.Ordinal));
     }
 
     [Fact]
@@ -96,7 +118,7 @@ public sealed partial class MetadataOracleTests : IDisposable
         int clean = 0;
         foreach (string path in Directory.EnumerateFiles(Root!, "*.parquet", SearchOption.AllDirectories))
         {
-            List<string> findings;
+            List<ParquetFinding> findings;
             try
             {
                 findings = await ParquetVerifier.VerifyAsync(path, VortexSession.Default, Ct);
@@ -108,7 +130,7 @@ public sealed partial class MetadataOracleTests : IDisposable
 
             checkedFiles++;
             clean += findings.Count == 0 ? 1 : 0;
-            foreach (string finding in findings.Take(5))
+            foreach (ParquetFinding finding in findings.Take(5))
             {
                 report?.WriteLine($"{Path.GetRelativePath(Root!, path)}: {finding}");
             }

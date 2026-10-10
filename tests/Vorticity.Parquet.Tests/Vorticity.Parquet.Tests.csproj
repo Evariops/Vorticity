@@ -21,6 +21,11 @@
     <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
+  <!-- The core's surface renderer, so that every surface on record is rendered one way. -->
+  <ItemGroup>
+    <Compile Include="../Vorticity.Tests/Api/SurfaceRenderer.cs" Link="Api/SurfaceRenderer.cs" />
+  </ItemGroup>
+
   <!-- Every test runs beside the others, each row of a theory a test of its own: tests/xunit.runner.json. -->
   <ItemGroup>
     <None Include="../xunit.runner.json" Link="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />

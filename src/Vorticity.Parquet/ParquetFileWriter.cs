@@ -29,7 +29,7 @@ namespace Vorticity.Parquet;
 /// to the sink one after the other and the sink is flushed, the only I/O before
 /// <see cref="CompleteAsync"/>. A write that fails part way leaves the file to be abandoned.
 /// </remarks>
-public sealed class ParquetFileWriter : IAsyncDisposable, IFanWork
+public sealed class ParquetFileWriter : IAsyncDisposable
 {
     private static readonly byte[] Magic = "PAR1"u8.ToArray();
 
@@ -48,6 +48,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable, IFanWork
     /// <summary>The threads the columns close their pages on, the writing one included.</summary>
     private readonly int _lanes;
     private WorkFan? _fan;
+    private PageClosing? _closing;
     private readonly ColumnChunkWriter[] _columns;
 
     /// <summary>Per column, its node in the batch being taken.</summary>
@@ -426,12 +427,15 @@ public sealed class ParquetFileWriter : IAsyncDisposable, IFanWork
     {
         if (_lanes > 1 && _columns.Length > 1)
         {
-            (_fan ??= WorkFan.Rent(_lanes)).Run(this, _columns.Length);
+            (_fan ??= WorkFan.Rent(_lanes)).Run(_closing ??= new PageClosing(_columns), _columns.Length);
         }
     }
 
-    /// <summary>Closes column <paramref name="item"/>'s page, on whichever of the writer's threads claimed it.</summary>
-    void IFanWork.Run(WorkFan fan, int item) => _columns[item].ClosePage();
+    /// <summary>The columns' pages closed by the work fan, a column an item, on whichever of the writer's threads claims it.</summary>
+    private sealed class PageClosing(ColumnChunkWriter[] columns) : IFanWork
+    {
+        public void Run(WorkFan fan, int item) => columns[item].ClosePage();
+    }
 
     /// <summary>
     /// The file's key-value metadata: the Vortex schema it is written from, from which a reader of this

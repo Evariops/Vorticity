@@ -33,11 +33,20 @@ namespace Vorticity.Parquet.Verification;
 internal static class ParquetVerifier
 {
     /// <summary>The findings on the file at <paramref name="path"/>: none for a file that says only what is true.</summary>
-    internal static async ValueTask<List<string>> VerifyAsync(string path, VortexSession session, CancellationToken cancellationToken)
+    internal static async ValueTask<List<ParquetFinding>> VerifyAsync(string path, VortexSession session, CancellationToken cancellationToken)
     {
-        List<string> findings = [];
-        ParquetFile file = await session.OpenParquetAsync(path, new ParquetOpenOptions { VerifyChecksums = true }, cancellationToken).ConfigureAwait(false);
+        ParquetFile file = await session.OpenParquetAsync(path, null, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
+        {
+            return await VerifyAsync(file, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The findings on <paramref name="opened"/>, its pages held to their checksums whatever it was opened with.</summary>
+    internal static async ValueTask<List<ParquetFinding>> VerifyAsync(ParquetFile opened, CancellationToken cancellationToken)
+    {
+        List<ParquetFinding> findings = [];
+        ParquetFile file = opened.Checked();
         {
             ParquetFooter footer = file.Footer;
             long rows = 0;
@@ -48,7 +57,7 @@ internal static class ParquetVerifier
 
             if (rows != footer.RowCount)
             {
-                findings.Add($"the file counts {footer.RowCount} rows where its row groups hold {rows}");
+                findings.Add(new ParquetFinding(-1, null, "num_rows", $"the file counts {footer.RowCount} rows where its row groups hold {rows}"));
             }
 
             for (int group = 0; group < footer.RowGroups.Length; group++)
@@ -76,10 +85,10 @@ internal static class ParquetVerifier
         return findings;
     }
 
-    private static string Finding(int group, ParquetColumn column, string structure, string message) =>
-        $"row group {group}, {column.DottedPath}: {structure}: {message}";
+    private static ParquetFinding Finding(int group, ParquetColumn column, string structure, string message) =>
+        new ParquetFinding(group, column.DottedPath, structure, message);
 
-    private static async ValueTask VerifyChunkAsync(ParquetFile file, int group, ParquetColumn column, List<string> findings, CancellationToken cancellationToken)
+    private static async ValueTask VerifyChunkAsync(ParquetFile file, int group, ParquetColumn column, List<ParquetFinding> findings, CancellationToken cancellationToken)
     {
         ParquetFooter footer = file.Footer;
         RowGroupEntry entry = footer.RowGroups[group];
@@ -103,7 +112,7 @@ internal static class ParquetVerifier
     }
 
     /// <summary>The chunk's pages by their headers: their rows and values against the chunk's, and every data page's encoding against its claim.</summary>
-    private static void Walk(ReadOnlySpan<byte> bytes, int group, ParquetColumn column, ColumnChunkMetadata chunk, long groupRows, List<string> findings)
+    private static void Walk(ReadOnlySpan<byte> bytes, int group, ParquetColumn column, ColumnChunkMetadata chunk, long groupRows, List<ParquetFinding> findings)
     {
         long values = 0;
         long rows = 0;
@@ -293,7 +302,7 @@ internal static class ParquetVerifier
     }
 
     /// <summary>The chunk's statistics against its values: its null and NaN counts, and its bounds, equal to the extremes where exact and around them otherwise.</summary>
-    private static void Statistics(int group, ParquetColumn column, ColumnChunkMetadata chunk, ParquetFooter footer, ChunkValues values, List<string> findings)
+    private static void Statistics(int group, ParquetColumn column, ColumnChunkMetadata chunk, ParquetFooter footer, ChunkValues values, List<ParquetFinding> findings)
     {
         ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, footer.Bytes);
         bool decimals = ColumnBounds.IsDecimal(column);
@@ -318,7 +327,7 @@ internal static class ParquetVerifier
     }
 
     /// <summary>A bound against the extreme of the values it bounds: equal to it when exact, on its outer side otherwise.</summary>
-    private static void Bound(int group, ParquetColumn column, string structure, bool has, FilterLiteral bound, FilterLiteral extreme, bool lower, bool exact, bool decimals, List<string> findings)
+    private static void Bound(int group, ParquetColumn column, string structure, bool has, FilterLiteral bound, FilterLiteral extreme, bool lower, bool exact, bool decimals, List<ParquetFinding> findings)
     {
         if (!has || !TryOrder(bound, extreme, decimals, out int order))
         {
@@ -332,7 +341,7 @@ internal static class ParquetVerifier
     }
 
     /// <summary>The column index against its pages' values: null pages, null counts, bounds around each page and the boundary order.</summary>
-    private static async ValueTask PageIndexAsync(ParquetFile file, int group, ParquetColumn column, ColumnChunkMetadata chunk, ChunkValues values, List<string> findings, CancellationToken cancellationToken)
+    private static async ValueTask PageIndexAsync(ParquetFile file, int group, ParquetColumn column, ColumnChunkMetadata chunk, ChunkValues values, List<ParquetFinding> findings, CancellationToken cancellationToken)
     {
         if (!file.Holds(chunk.ColumnIndexOffset, chunk.ColumnIndexLength) || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
         {
@@ -389,7 +398,7 @@ internal static class ParquetVerifier
     }
 
     /// <summary>The Bloom filter asked for every value the chunk holds: one it says is absent is a false negative.</summary>
-    private static async ValueTask BloomAsync(ParquetFile file, int group, ParquetColumn column, ColumnChunkMetadata chunk, ChunkValues values, List<string> findings, CancellationToken cancellationToken)
+    private static async ValueTask BloomAsync(ParquetFile file, int group, ParquetColumn column, ColumnChunkMetadata chunk, ChunkValues values, List<ParquetFinding> findings, CancellationToken cancellationToken)
     {
         if (chunk.BloomFilterOffset < 0 || values.Unbounded)
         {

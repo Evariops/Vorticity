@@ -98,7 +98,7 @@ jobs:
               # The reference's crates, and the upstream schemas the drift report compares.
               tools/conformance-gen/* | spec/*) crosscheck=true ;;
               # In the solution the package job builds, and referenced by no test project.
-              bench/* | samples/* | tools/vxdump/* | tools/testimpact/*) package=true ;;
+              bench/* | samples/* | tools/vxdump/* | tools/pqdump/* | tools/testimpact/*) package=true ;;
               # The script that writes Vorticity.Zstd's test data.
               tools/native-ref/*) test=true ;;
               # The tests, the build's configuration, this workflow, and any path added later.
@@ -332,6 +332,45 @@ jobs:
           echo "AOT scan: $scanned scanned, $refused refused, $crashed crashed"
           test "$crashed" = 0
           test "$scanned" -ge 800
+
+      # The same promise of Vorticity.Parquet, over the standard's own test files, pinned: pqdump
+      # reads what the footer says, scans every batch and holds the footer to the rows, from the
+      # public surface alone.
+      - name: Fetch the Parquet test files
+        run: |
+          git clone --quiet https://github.com/apache/parquet-testing.git "$RUNNER_TEMP/parquet-testing"
+          git -C "$RUNNER_TEMP/parquet-testing" checkout --quiet 56653c437c8092f704a092d0d1d4e600124cd49f
+
+      - name: Publish pqdump as Native AOT
+        run: dotnet publish tools/pqdump -c Release -r linux-x64
+
+      # Exit 3 (unsupported) and 4 (malformed) are expected answers for thirteen of these files: five
+      # use what this build does not read, the deprecated LZ4 and ALP among them, and eight are
+      # malformed on purpose. A verify that finds something exits 1, which ten files do by design.
+      - name: Scan and verify every Parquet test file with the AOT pqdump
+        run: |
+          BIN=tools/pqdump/bin/Release/net11.0/linux-x64/publish/pqdump
+          scanned=0
+          refused=0
+          crashed=0
+          clean=0
+          found=0
+          while IFS= read -r f; do
+            if "$BIN" "$f" --all --scan > /dev/null 2>&1; then code=0; else code=$?; fi
+            if [ "$code" = 0 ]; then
+              scanned=$((scanned + 1))
+              if "$BIN" "$f" --verify > /dev/null 2>&1; then clean=$((clean + 1)); else found=$((found + 1)); fi
+            elif [ "$code" = 3 ] || [ "$code" = 4 ]; then
+              refused=$((refused + 1))
+            else
+              echo "pqdump exited $code on $f"
+              crashed=$((crashed + 1))
+            fi
+          done < <(find "$RUNNER_TEMP/parquet-testing" -name '*.parquet')
+          echo "AOT pqdump: $scanned scanned ($clean true to their footers, $found not), $refused refused, $crashed crashed"
+          test "$crashed" = 0
+          test "$refused" -le 13
+          test "$scanned" -ge 227
 
   crosscheck:
     name: cross-check with the reference

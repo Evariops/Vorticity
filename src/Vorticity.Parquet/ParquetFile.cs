@@ -26,6 +26,7 @@ public sealed class ParquetFile : IAsyncDisposable
     private ParquetScanSource? _source;
     private int _disposed;
     private KeyValuePair<string, string?>[]? _keyValues;
+    private ParquetMetadata? _metadata;
 
     private ParquetFile(ISegmentReader reader, VortexSession session, ParquetOpenOptions options, long length, ParquetFooter footer, ParquetSchema schema)
     {
@@ -45,6 +46,12 @@ public sealed class ParquetFile : IAsyncDisposable
 
     /// <summary>The file's row groups.</summary>
     public int RowGroupCount => Footer.RowGroups.Length;
+
+    /// <summary>
+    /// What the footer says of the file, for inspection: its writer, its columns with their types as
+    /// the standard spells them, its row groups and their column chunks, and its key-value pairs.
+    /// </summary>
+    public ParquetMetadata Metadata => _metadata ??= new ParquetMetadata(this);
 
     /// <summary>
     /// The key-value pairs the file's footer carries, in its order, a pair given no value with a null
@@ -107,6 +114,24 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <param name="columns">The columns read.</param>
     /// <returns>The scan.</returns>
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(Source, columns);
+
+    /// <summary>
+    /// What the file says of itself that its rows do not bear out: each flat column's chunk statistics
+    /// recomputed from its values, its page index held to its pages, its Bloom filter asked for every
+    /// value, its pages' rows and values counted, its encoding stats walked and its checksums
+    /// verified. It reads the whole file; none for a file that says only what is true.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The findings, in the file's order.</returns>
+    public async ValueTask<IReadOnlyList<ParquetFinding>> VerifyAsync(CancellationToken cancellationToken = default) =>
+        await Verification.ParquetVerifier.VerifyAsync(this, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// This file read with its pages held to their checksums: itself when it is, else a view over its
+    /// reader, which the view does not own and is never disposed.
+    /// </summary>
+    internal ParquetFile Checked() =>
+        Options.VerifyChecksums ? this : new ParquetFile(Reader, Session, Options with { VerifyChecksums = true }, Length, Footer, Compiled);
 
     /// <summary>Closes the file.</summary>
     /// <returns>A task that completes when the file is closed.</returns>
