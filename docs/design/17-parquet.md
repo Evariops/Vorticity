@@ -246,7 +246,10 @@ product. A row group's column chunks are indexed the first time a scan needs tha
 over its columns, recording where each `ColumnChunk` and `ColumnMetaData` begins, published once on
 the file, which is thread-safe as a `VortexFile` is. Statistics, encodings, offsets and the page
 index's locations are decoded from those positions when a plan asks for them. A file of a thousand
-columns and a thousand row groups opens without decoding a million column chunks.
+columns and a thousand row groups opens without decoding a million column chunks. The footer's bytes
+are not copied either: they are read where the open's read put them, a mapped file's in the mapping,
+and held until the file closes, as the core holds a Vortex file's tail, so that nothing an open
+allocates grows with the footer.
 
 ### 5.2 Thrift, in place
 
@@ -628,7 +631,7 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 | a pruned page is neither read nor decoded | `Requests` and `BytesRequested` equal the plan's; pages decoded equal live pages |
 | a range is requested at most once per scan | `Requests` equals the plan's distinct ranges |
 | what the footer answers reads nothing more | no request after the open for a count, and for a minimum or a maximum under exact statistics |
-| the open is the schema and the row groups, not their product | the open's allocations on a footer of 1 000 columns by 1 000 row groups under a ceiling that does not grow with their product |
+| the open is the schema and the row groups, not their product | the opens of footers of 50 and 200 columns by 50 and 200 row groups: the widest costs what the two mixed ones do less the smallest, within 2 KiB, where a cost per chunk would leave 22 500 chunks over |
 | the first batch waits for its pages, not its row group | the time to first batch flat over row groups sixteen times apart, locally and over the HTTP source with latency |
 | no dispatch per value | `PerRowDispatchTests` counts the package's calls to the per-value readers beside the core's, at the same ceilings |
 | every kernel has a scalar twin | the package's suite, run whole by `tests/scalar-pass.sh` with hardware intrinsics disabled |

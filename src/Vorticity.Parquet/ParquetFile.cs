@@ -23,18 +23,27 @@ namespace Vorticity.Parquet;
 /// </remarks>
 public sealed class ParquetFile : IAsyncDisposable
 {
+    private readonly ParquetFooter _footer;
+
+    /// <summary>
+    /// The footer's bytes where the open read them, kept for the file's life and given back as it
+    /// closes; null for a view of another file's.
+    /// </summary>
+    private readonly IDisposable? _footerBytes;
+
     private ParquetScanSource? _source;
     private int _disposed;
     private KeyValuePair<string, string?>[]? _keyValues;
     private ParquetMetadata? _metadata;
 
-    private ParquetFile(ISegmentReader reader, VortexSession session, ParquetOpenOptions options, long length, ParquetFooter footer, ParquetSchema schema)
+    private ParquetFile(ISegmentReader reader, VortexSession session, ParquetOpenOptions options, long length, ParquetFooter footer, ParquetSchema schema, IDisposable? footerBytes = null)
     {
         Reader = reader;
         Session = session;
         Options = options;
         Length = length;
-        Footer = footer;
+        _footer = footer;
+        _footerBytes = footerBytes;
         Compiled = schema;
     }
 
@@ -42,10 +51,10 @@ public sealed class ParquetFile : IAsyncDisposable
     public VortexSchema Schema => Compiled.Vortex;
 
     /// <summary>The file's rows, as its footer counts them.</summary>
-    public long RowCount => Footer.RowCount;
+    public long RowCount => _footer.RowCount;
 
     /// <summary>The file's row groups.</summary>
-    public int RowGroupCount => Footer.RowGroups.Length;
+    public int RowGroupCount => _footer.RowGroups.Length;
 
     /// <summary>
     /// What the footer says of the file, for inspection: its writer, its columns with their types as
@@ -88,7 +97,15 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <summary>The file's bytes.</summary>
     internal long Length { get; }
 
-    internal ParquetFooter Footer { get; }
+    /// <summary>The footer, whose bytes lie where the open read them until the file closes; read after, it throws.</summary>
+    internal ParquetFooter Footer
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            return _footer;
+        }
+    }
 
     /// <summary>The schema compiled to its leaves and levels.</summary>
     internal ParquetSchema Compiled { get; }
@@ -136,7 +153,19 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <summary>Closes the file.</summary>
     /// <returns>A task that completes when the file is closed.</returns>
     public ValueTask DisposeAsync() =>
-        Interlocked.Exchange(ref _disposed, 1) == 0 ? Reader.DisposeAsync() : ValueTask.CompletedTask;
+        Interlocked.Exchange(ref _disposed, 1) == 0 ? CloseAsync() : ValueTask.CompletedTask;
+
+    private async ValueTask CloseAsync()
+    {
+        try
+        {
+            await Reader.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _footerBytes?.Dispose();
+        }
+    }
 
     /// <summary>Opens the file at <paramref name="path"/> in <paramref name="session"/>: mapped, when the session maps files and a scan reads enough to pay for it.</summary>
     internal static async ValueTask<ParquetFile> OpenAsync(string path, ParquetOpenOptions options, VortexSession session, CancellationToken cancellationToken)
@@ -167,8 +196,9 @@ public sealed class ParquetFile : IAsyncDisposable
         }
 
         int tail = (int)Math.Min(length, Math.Max(reader.TailReadSize, 8));
-        byte[] footerBytes;
-        SegmentOwner read = await reader.ReadRangeAsync(length - tail, tail, 1, cancellationToken).ConfigureAwait(false);
+        SegmentOwner? read = await reader.ReadRangeAsync(length - tail, tail, 1, cancellationToken).ConfigureAwait(false);
+        SegmentOwner? held = null;
+        VortexBuffer footerBytes = default;
         int footerLength;
         try
         {
@@ -201,36 +231,46 @@ public sealed class ParquetFile : IAsyncDisposable
                 ParquetThrow.Format("The file does not begin with the magic PAR1.");
             }
 
-            footerBytes = footerLength <= tail - 8 ? bytes.Slice(tail - 8 - footerLength, footerLength).ToArray() : [];
+            if (footerLength <= tail - 8)
+            {
+                // The tail holds the footer, which stays where the read put it.
+                footerBytes = read.Buffer.Slice(tail - 8 - footerLength, footerLength);
+                held = read;
+                read = null;
+            }
         }
         finally
         {
-            read.Release();
+            read?.Release();
         }
 
-        if (footerBytes.Length == 0)
+        if (held is null)
         {
             // The tail did not hold the footer: one more read, of exactly its bytes.
-            SegmentOwner footer = await reader.ReadRangeAsync(length - 8 - footerLength, footerLength, 1, cancellationToken).ConfigureAwait(false);
-            try
-            {
-                footerBytes = footer.Buffer.Span.ToArray();
-            }
-            finally
-            {
-                footer.Release();
-            }
+            held = await reader.ReadRangeAsync(length - 8 - footerLength, footerLength, 1, cancellationToken).ConfigureAwait(false);
+            footerBytes = held.Buffer;
         }
 
-        ParquetFooter metadata = ParquetFooter.Read(footerBytes);
-        if (metadata.IsEncrypted)
+        // The footer is read where it lies, a mapped file's in the mapping, for the file's life: an
+        // open copies nothing that grows with the footer, which grows with the chunks.
+        SegmentOwnerMemory memory = new(held, footerBytes);
+        try
         {
-            throw new ParquetUnsupportedException("encrypted columns", ParquetComponentKind.Encryption,
-                "The file encrypts its columns; this version of the reader reads plaintext files.");
-        }
+            ParquetFooter metadata = ParquetFooter.Read(memory.Memory);
+            if (metadata.IsEncrypted)
+            {
+                throw new ParquetUnsupportedException("encrypted columns", ParquetComponentKind.Encryption,
+                    "The file encrypts its columns; this version of the reader reads plaintext files.");
+            }
 
-        ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
-        return new ParquetFile(reader, session, options, length, metadata, schema);
+            ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
+            return new ParquetFile(reader, session, options, length, metadata, schema, memory);
+        }
+        catch
+        {
+            ((IDisposable)memory).Dispose();
+            throw;
+        }
     }
 
     /// <summary>
