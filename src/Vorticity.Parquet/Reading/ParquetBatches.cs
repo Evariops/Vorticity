@@ -87,6 +87,14 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private const int AcrossFields = 8;
 
     /// <summary>
+    /// The most threads a batch's fields decode on side by side, whatever the degree: a batch waits
+    /// for its slowest field, and past six the wake-ups of each batch cost more than the threads
+    /// share. A file of two million rows, 22 fields and six lists scanned in 31 ms on 32 lanes
+    /// side by side on all of them, 27 on eight and 23.7 on six; on eight lanes, in 27.5 against 24.8.
+    /// </summary>
+    private const int FanLanes = 6;
+
+    /// <summary>
     /// The ticks the batches before must take to decode, on average, for a batch of fewer fields to
     /// decode side by side, 50 microseconds: below, waking the threads costs more than the decode
     /// they would share.
@@ -361,7 +369,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             ScanContext[] fieldContexts = _fieldContexts ??= FieldContexts();
             // The fields side by side, each into its own arena, whose nodes the batch's then
             // references: their bytes stay where they were decoded, until the batch is dead.
-            WorkFan fan = _fan ??= WorkFan.Rent(_degree);
+            WorkFan fan = _fan ??= WorkFan.Rent(Math.Min(_degree, FanLanes));
             FieldDecoding decoding = _decoding ??= new FieldDecoding(this);
             decoding.Order(fan.Items(_nodes.Length));
             fan.Run(decoding, _nodes.Length, null, rows);
