@@ -34,6 +34,12 @@ cannot be told from a dataset that never had them by a reader that never saw the
 dataset swapped whole for another. A handle refuses to move back from a version it knew, and anything
 stronger needs a record outside the store, which is the application's.
 
+A file appended to is the same case. An append writes nothing before the old end, so the file cut
+right after the trailer of an earlier version is that earlier version, whole and authentic, and a
+reader that does not know the newer one cannot tell. Only a cut elsewhere fails. Tink's streams and
+every other format built on the same construction have this property, since nothing in a file can
+prove that it is the newest version of itself.
+
 Traffic analysis (sizes, timing, which ranges are read), physical side channels (power,
 electromagnetic emissions) and denial of service by someone who can delete are outside the model.
 
@@ -118,15 +124,38 @@ reader compares the object id and the binding with what it expects (see [dataset
 
 ### 3.3 Frames and nonces
 
-The frames follow the segments of Tink's streaming AEAD, AES-GCM-HKDF, in which a key derived for one
-stream seals each segment under a nonce made of the segment's index and a last-segment flag. Each
-epoch of each object has its own key (see [keys](#4-keys)), so the nonce only has to be unique within
-one epoch, and Tink's random nonce prefix has nothing left to do. The nonce of frame `i` is twelve
-bytes: `i` as a little-endian 64-bit integer, then a 32-bit word of flags whose bit 0 marks the
-epoch's last frame. Frames carry no associated data. A writer emits the frames of an epoch once and in
-order, so no nonce is used twice under a key, which is what the deterministic construction of NIST
-SP 800-38D asks. An epoch holds at most 2^32 frames, within every limit the standard sets on the
-invocations of one key.
+An AEAD cannot release a byte of a message before it has checked the message's tag, so it does not
+stream by itself. The construction that makes it stream is STREAM (Hoang, Reyhanitabar, Rogaway and
+Vizár, 2015): the message is cut into segments, each sealed on its own under a nonce made of its
+position and a flag that marks the last one, so that a segment can be released as soon as its own tag
+holds, and none can be moved, dropped or added at the end without a tag failing. Tink's streaming AEAD,
+AES-GCM-HKDF, is this construction over AES-GCM, with a key derived for each stream, and the analysis
+of Hoang and Shen (2020) covers it. The format age seals its payload the same way, in chunks of 64 KiB.
+
+Each epoch of a sealed object is one such stream:
+
+| | Tink, AES-GCM-HKDF | an epoch |
+|---|---|---|
+| the stream's key | HKDF of the main key, a random salt, and the associated data as info | HKDF of the data key, a random salt of 32 bytes, and the descriptor's hash, the epoch's index and its first plaintext offset as info ([the derivation](#42-the-derivation)) |
+| a segment's nonce | a random prefix of 7 bytes, the index in 4 bytes big-endian, a last-segment byte | the index in 8 bytes little-endian, 4 bytes of flags whose bit 0 marks the last frame |
+| a segment's associated data | none | none |
+| segments | at most 2^32, the first shorter by the header it shares | at most 2^32, all of `F` bytes but the last, the header outside them |
+| the key, committed | no | yes, checked before any frame is decrypted ([the derivation](#42-the-derivation)) |
+
+The random nonce prefix guards against two streams that would derive the same key. A salt of 256 bits
+makes that a collision of 256-bit values, so the prefix has nothing left to guard, and the nonce only
+has to be unique within one epoch. Keeping every frame `F` bytes, the header apart, lets a plaintext
+offset name its frame by a division. Tink commits to no key, and AES-GCM does not either, which is what
+partitioning oracle attacks use, so the commitment is added. A stream closed by its last flag cannot be
+extended without rewriting its last segment, which an append must never do, so an append opens a new
+stream, under a key of its own: that is all an epoch is.
+
+The nonce of frame `i` is twelve bytes: `i` as a little-endian 64-bit integer, then a 32-bit word of
+flags whose bit 0 marks the epoch's last frame. Frames carry no associated data. A writer emits the
+frames of an epoch once and in order, so no nonce is used twice under a key, which is what the
+deterministic construction of NIST SP 800-38D asks, and an append given up and tried again draws a new
+salt, so it never seals a frame twice under one key either. An epoch holds at most 2^32 frames, within
+every limit the standard sets on the invocations of one key.
 
 A frame cannot move, since its index is in its nonce. An epoch cannot lose its end or be extended,
 since only its last frame carries the final flag, the reader takes from the trailer which frame is
@@ -153,7 +182,10 @@ a store, as a plain one does. A plain file opened by such a session costs 64 KiB
 which a store answers in the same round trip. On a disk, where a plaintext open reads its last
 8 KiB, the sealed open reads about 130 KiB, one positional read. A file sealed with frames larger
 than 64 KiB, or whose trailer is longer than usual, which only a long key id or many epochs make,
-costs a second read, as a footer larger than the window does today.
+costs a second read, as a footer larger than the window does today. A trailer whose length passes the
+longest one the format allows, the longest descriptor and every epoch a trailer may list, a little over
+5 MiB, is refused from that length alone, so a corrupt length never makes a reader fetch what it cannot
+use. A header's descriptor is held to its own longest length the same way.
 
 A sealed file is recognised by the last bytes of its tail read, `VXSE` where a plaintext file has
 `VTXF`, so a session without a keyring that opens one fails with a message saying the file is sealed.
@@ -495,6 +527,14 @@ And the classic mistakes with GCM:
 
 `VortexEncryptionException` derives from `VortexException`, as the core's other exceptions do.
 
+A frame is checked when it is read, as each segment of a stream is, and not before. A truncated or
+extended object fails at its open, which reads the trailer and the last frames first, and a frame
+altered in the middle fails at the first read that needs it. A scan that meets one stops with
+`VortexEncryptionException`: the batches it delivered before were authentic, every one of their
+bytes checked, but the answer is incomplete, and the caller drops it as it would after any other
+failure of the scan. A dataset's verification reads every frame of every object, so it finds an
+altered frame that no query read.
+
 ## 10. How it is tested
 
 - The sealed format's known-answer vectors on the three platforms, as
@@ -545,7 +585,7 @@ And the classic mistakes with GCM:
 
 ## 13. What this rests on
 
-Each claim is either read in this repository's code, taken from a source checked on 2026-10-10, or a
+Each claim is either read in this repository's code, taken from a source checked on 2026-10-10 unless its row gives another date, or a
 proposal of this design, to be measured.
 
 | claim | where it comes from |
@@ -560,7 +600,11 @@ proposal of this design, to be measured.
 | VAES and VPCLMULQDQ AES-256-GCM against the AES-NI code on 16 KiB messages: about +100 % on Zen 4 and up to +157 % on Sapphire and Emerald Rapids | source: Eric Biggers, "crypto: x86/aes-gcm - add VAES and AVX512 / AVX10 optimized AES-GCM", Linux kernel mailing list, May and June 2024, two years old but the code the kernel runs today |
 | `AesGcm`: the tag size given to its constructor, `AuthenticationTagMismatchException` and the plaintext cleared when a tag fails, no support in a browser | source: .NET API reference, `AesGcm` and `AesGcm.Decrypt` |
 | on Linux, `AesGcm` keeps one OpenSSL context per instance, imports its key once, makes a handful of native calls per operation, and holds no lock | code: dotnet/runtime, `AesGcm.OpenSsl.cs`, read on 2026-10-10 |
-| a stream's key derived by HKDF from one key and a random salt, segments sealed under a nonce of their index and a last-segment flag, without associated data | source: Tink documentation, AES-GCM-HKDF streaming AEAD |
+| a stream's key derived by HKDF from one key and a random salt, segments sealed under a nonce of their index and a last-segment flag, without associated data | source: Tink documentation, AES-GCM-HKDF streaming AEAD, checked again on 2026-10-11 |
+| an AEAD made to stream by sealing segments under a nonce of their position and a last flag, the STREAM construction | source: Hoang, Reyhanitabar, Rogaway, Vizár, "Online Authenticated-Encryption and its Nonce-Reuse Misuse-Resistance", CRYPTO 2015, which Tink and age cite |
+| Tink's streaming AEAD analysed | source: Hoang, Shen, "Security of Streaming Encryption in Google's Tink Library", ACM CCS 2020, which Tink's documentation cites |
+| a payload in chunks of 64 KiB under a nonce of an 11-byte counter and a final byte, with no nonce prefix because the 256-bit key is derived from a random nonce, and a reader that seeks from the end checks the final chunk first | source: the age format specification (C2SP), checked on 2026-10-11 |
+| AES-GCM commits to no key, which partitioning oracle attacks use | source: Len, Grubbs, Ristenpart, "Partitioning Oracle Attacks", USENIX Security 2021 |
 | GCM's deterministic nonce construction, and the limits on the invocations of a key | source: NIST SP 800-38D (2007), the standard in force |
 | HKDF | source: RFC 5869 (2010), the standard in force |
 | key commitment derived with the data key, and the encryption context kept in clear in the message header | source: AWS Encryption SDK developer guide, key commitment and message format |
