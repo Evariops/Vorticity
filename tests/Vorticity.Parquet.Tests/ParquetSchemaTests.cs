@@ -200,6 +200,22 @@ public sealed class ParquetSchemaTests
         Assert.Equal(ColumnOrderKind.Unrecognized, schema.Columns[0].Order);
     }
 
+    /// <summary>
+    /// Column orders fewer or more than the leaves, as a flipped bit of the footer's list makes them:
+    /// refused as malformed before a leaf looks for its own, which a shorter list would not hold.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public void ColumnOrdersThatAreNotOneALeafAreRefused(int count)
+    {
+        ColumnOrderKind[] orders = new ColumnOrderKind[count];
+        Array.Fill(orders, ColumnOrderKind.TypeDefined);
+        ParquetFormatException refused = Assert.Throws<ParquetFormatException>(
+            () => ParquetSchema.Compile([Root(2), Leaf("a", PhysicalType.Int64), Leaf("b", PhysicalType.Double)], orders));
+        Assert.Contains($"{count} column orders for 2 columns", refused.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AFixedLengthDecimalHoldsTheDigitsItsBytesAllow()
     {

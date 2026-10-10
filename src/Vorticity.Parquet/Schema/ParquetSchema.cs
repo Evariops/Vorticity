@@ -213,12 +213,16 @@ internal sealed class ParquetSchema
     internal static ParquetSchema Compile(SchemaElement[] elements, ColumnOrderKind[] orders, Func<string, string?>? keys = null)
     {
         Node[] nodes = BuildTree(elements);
+
+        // A column's order is found by its ordinal as its leaf is collected: the list is held to the
+        // leaves before, since a list shorter than them would be read past its end.
+        if (orders.Length != 0 && orders.Length != nodes[0].LeafCount)
+        {
+            ParquetThrow.Format($"The footer declares {orders.Length} column orders for {nodes[0].LeafCount} columns.");
+        }
+
         List<ParquetColumn> columns = [];
         Collect(elements, nodes, 0, [], columns, orders, keys);
-        if (orders.Length != 0 && orders.Length != columns.Count)
-        {
-            ParquetThrow.Format($"The footer declares {orders.Length} column orders for {columns.Count} columns.");
-        }
 
         ParquetColumn[] leaves = columns.ToArray();
         Mapper mapper = new(elements, nodes, leaves);
