@@ -221,16 +221,18 @@ internal static class Inflate
                         throw Corrupt();
                     }
 
-                    bits >>= (byte)entry;
+                    bits >>= (int)entry;
                     count -= (byte)entry;
                     ended = true;
                     break;
                 }
             }
 
+            // A shift by the entry itself: a shift takes its count's low six bits, an entry's the bits
+            // it takes, and the byte its count would be read from is one step more on each literal's chain.
             if ((entry & Literal) != 0)
             {
-                bits >>= (byte)entry;
+                bits >>= (int)entry;
                 count -= (byte)entry;
                 *outNext++ = (byte)(entry >> 16);
                 entry = litlen[(uint)bits & ((1u << LitlenTableBits) - 1)];
@@ -239,7 +241,7 @@ internal static class Inflate
                     continue;
                 }
 
-                bits >>= (byte)entry;
+                bits >>= (int)entry;
                 count -= (byte)entry;
                 *outNext++ = (byte)(entry >> 16);
                 entry = litlen[(uint)bits & ((1u << LitlenTableBits) - 1)];
@@ -248,7 +250,7 @@ internal static class Inflate
                     continue;
                 }
 
-                bits >>= (byte)entry;
+                bits >>= (int)entry;
                 count -= (byte)entry;
                 *outNext++ = (byte)(entry >> 16);
                 continue;
@@ -256,7 +258,7 @@ internal static class Inflate
 
             // A length, its extra bits past its codeword, then its distance's.
             nint length = (nint)(entry >> 16) + (nint)((bits & ((1UL << (byte)entry) - 1)) >> (int)((entry >> 8) & 0xF));
-            bits >>= (byte)entry;
+            bits >>= (int)entry;
             count -= (byte)entry;
             entry = offsets[(uint)bits & ((1u << OffsetTableBits) - 1)];
             if ((entry & Exceptional) != 0)
@@ -276,7 +278,7 @@ internal static class Inflate
             }
 
             nint distance = (nint)(entry >> 16) + (nint)((bits & ((1UL << (byte)entry) - 1)) >> (int)((entry >> 8) & 0xF));
-            bits >>= (byte)entry;
+            bits >>= (int)entry;
             count -= (byte)entry;
             if (distance > outNext - output)
             {
