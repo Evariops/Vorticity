@@ -69,14 +69,32 @@ internal sealed partial class GroupCore
     private const int DefaultFloor = 16_384;
 
     /// <summary>
-    /// The bytes of a sub-table past which it splits, S: within the private cache of any current core,
-    /// half a megabyte where the smallest hold one. Measured on the Mac on 2026-10-07 at fourteen
-    /// lanes on 20M rows, sub-tables of 16 000 groups against 7 900 (a count and a sum, 528 KB against
-    /// 256 KiB) took ×0.91 to ×0.95 off 10⁷, the stride, ten rows a key and a key a row, nothing below,
-    /// and ×0.83 off four aggregates at ≈ 900 KB; 32 000 groups more off 10⁷ (×0.81), but a megabyte
-    /// fills the whole private cache of a core of a current x64.
+    /// The bytes of a sub-table past which it splits under pressure, S: within the private cache of any
+    /// current core, half a megabyte where the smallest hold one. Measured on the Mac on 2026-10-07 at
+    /// fourteen lanes on 20M rows, sub-tables of 16 000 groups against 7 900 (a count and a sum, 528 KB
+    /// against 256 KiB) took ×0.91 to ×0.95 off 10⁷, the stride, ten rows a key and a key a row, nothing
+    /// below, and ×0.83 off four aggregates at ≈ 900 KB; 32 000 groups more off 10⁷ (×0.81), but a
+    /// megabyte fills the whole private cache of a core of a current x64.
     /// </summary>
     private const long TableBytes = 512 * 1024;
+
+    /// <summary>
+    /// The groups past which a sub-table splits, its memory not pressed: 65 536, or what holds in
+    /// <see cref="WideTableBytes"/> of wide groups. A split moves half a sub-table, and each level of
+    /// splits moves every group again, where a table held whole moves each about twice as it doubles:
+    /// 10⁷ groups make 39 000 a part, which sub-tables of half a megabyte split three times over (q10)
+    /// or once (a key of 8 bytes). Measured on the Mac on 2026-10-10 at fourteen lanes, the process's
+    /// shelf keeping their arrays: against half a megabyte, 64 000 groups took ×0.754 off q10 on 10M
+    /// (132 to 100 ms) and ×0.787 off the keys of 10⁷ hashed on 40M; 128 000 the same, 256 000 ×1.10 on
+    /// the hashed keys (the first sub-table reserves what is pending, four times their groups there),
+    /// and 40 000, just past q10's parts, ×1.20: a single split of a sub-table that size costs more than
+    /// it saves. A burst's reads then spread over megabytes, a private cache on a current x64 and the
+    /// shared cache past it: to measure there.
+    /// </summary>
+    private const int WholeTableGroups = 65_536;
+
+    /// <summary>The bytes past which a sub-table of wide groups splits before <see cref="WholeTableGroups"/>: eight megabytes.</summary>
+    private const long WideTableBytes = 8L << 20;
 
     /// <summary>The most α: past it, reading the sub-tables back weighs a few percent of the batches' bytes, and only the memory grows.</summary>
     private const int MostAlpha = 8;
@@ -221,7 +239,7 @@ internal sealed partial class GroupCore
         FlushAt = Math.Max(1, (int)(2L * Capacity / 3));
         Bypass = plan.CoreBypass ?? DefaultBypass;
         BypassPeriod = plan.CoreBypassPeriod ?? DefaultBypassPeriod;
-        _tableGroups = plan.CoreTableGroups ?? Math.Max(64, tableBytes / groupBytes);
+        _tableGroups = plan.CoreTableGroups ?? (lean ? Math.Max(64, tableBytes / groupBytes) : Math.Clamp(WideTableBytes / groupBytes, 64, WholeTableGroups));
         _tableBytes = _tableGroups * groupBytes;
         _batchEntries = plan.CoreBatchEntries ?? (int)Math.Max(1, batchBytes / entryBytes);
         _batchWords = _batchEntries * Shape.Words;
