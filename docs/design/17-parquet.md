@@ -844,7 +844,12 @@ comes down. Speed is measured against baselines this repository owns:
   BenchmarkDotNet;
 - **the format's cost in one engine**: the core report's actions — open, scan, project, the narrow and
   wide filters, take, write — on the same table written once as Parquet and once as Vortex by this
-  repository's writers, read by the same engine; the ratio informs and gates nothing;
+  repository's writers, read through the same `Scan` in one process, each action warmed past the
+  JIT's recompiling it, which two calls are not (`--format-cost`, `--columns` for each column
+  alone); the ratio informs and gates nothing. On the report's million rows on one core, Parquet
+  scans in 3.19 ms against 3.49, takes in 3.71 against 3.99 and writes back in 26.4 against 25.1;
+  its monotone column, delta-encoded, projects in 0.68 against 0.33, and on 32 cores its scan
+  stays at 3.2 ms where Vortex's falls to 1.87, a stream's batches read on one lane;
 - **regressions**, as the ratio of two kept runners across commits (`bench/runners.sh`);
 - **real files**, read from the data disk under §9's metadata oracle: throughput, allocations, and the
   oracle's verdict.

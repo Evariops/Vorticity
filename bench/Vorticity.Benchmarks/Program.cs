@@ -279,6 +279,11 @@ internal static class Program
             return await TreeBench.RunAsync(sizes).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--format-cost")
+        {
+            return await FormatCost.RunAsync(args).ConfigureAwait(false);
+        }
+
         if (args.Length > 0 && args[0] == "--probe")
         {
             // The write, decomposed into its separate costs: one line per file, five columns.
@@ -584,6 +589,16 @@ internal static class Program
                                    one scenario in this process, printing the rows it rendered and
                                      what the process cost. What --report spawns; not a benchmark
                                      on its own
+          --format-cost            the format's cost in one engine: the report's table written
+                                     as Vortex and as Parquet by our writers, the report's
+                                     actions on both through the same scan, in this process,
+                                     warm, on one core and on all; time, ratio, allocations
+                                     --rows N          rows of the table, default 2^20
+                                     --runs N          timed calls an action, default 5
+                                     --keep            leave both files, and say where
+                                     --columns         each column alone too, on one core
+                                     --loop <format> <action> [secs]
+                                                       one action in a bare loop, for a trace
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
           --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,

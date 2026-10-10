@@ -44,37 +44,37 @@ public class ParquetWriteBenchmarks
         await _table.WriteAsync(Format, pipe).ConfigureAwait(false);
         return pipe.Written;
     }
+}
 
-    /// <summary>A pipe that counts what it is given and keeps none of it.</summary>
-    private sealed class DiscardingPipe : PipeWriter
+/// <summary>A pipe that counts what it is given and keeps none of it.</summary>
+internal sealed class DiscardingPipe : PipeWriter
+{
+    private byte[] _buffer = new byte[1 << 16];
+
+    internal long Written { get; private set; }
+
+    public override void Advance(int bytes) => Written += bytes;
+
+    public override Memory<byte> GetMemory(int sizeHint = 0)
     {
-        private byte[] _buffer = new byte[1 << 16];
-
-        internal long Written { get; private set; }
-
-        public override void Advance(int bytes) => Written += bytes;
-
-        public override Memory<byte> GetMemory(int sizeHint = 0)
+        if (sizeHint > _buffer.Length)
         {
-            if (sizeHint > _buffer.Length)
-            {
-                _buffer = new byte[sizeHint];
-            }
-
-            return _buffer;
+            _buffer = new byte[sizeHint];
         }
 
-        public override Span<byte> GetSpan(int sizeHint = 0) => GetMemory(sizeHint).Span;
+        return _buffer;
+    }
 
-        public override ValueTask<FlushResult> FlushAsync(CancellationToken cancellationToken = default) => new(new FlushResult(false, false));
+    public override Span<byte> GetSpan(int sizeHint = 0) => GetMemory(sizeHint).Span;
 
-        public override void CancelPendingFlush()
-        {
-        }
+    public override ValueTask<FlushResult> FlushAsync(CancellationToken cancellationToken = default) => new(new FlushResult(false, false));
 
-        public override void Complete(Exception? exception = null)
-        {
-        }
+    public override void CancelPendingFlush()
+    {
+    }
+
+    public override void Complete(Exception? exception = null)
+    {
     }
 }
 
