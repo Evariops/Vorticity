@@ -56,8 +56,11 @@ internal static class FormatCost
             string[] actions = Actions;
             if (fileAt >= 0)
             {
-                rows = await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
+                // A loop of the Parquet file alone has no use for its Vortex rewrite, which a trace would count.
+                int looping = Array.IndexOf(args, "--loop");
+                bool parquetAlone = looping >= 0 && looping + 1 < args.Length && string.Equals(args[looping + 1], "parquet", StringComparison.OrdinalIgnoreCase);
                 await using ParquetFile given = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
+                rows = parquetAlone ? checked((int)given.RowCount) : await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
                 Projected = given.Schema[0].Name;
                 actions = given.Schema.Any(f => f.Name == Set.Field) ? Actions : [.. Actions.Where(a => !a.StartsWith("filter", StringComparison.Ordinal))];
             }
