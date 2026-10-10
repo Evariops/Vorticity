@@ -25,9 +25,10 @@ namespace Vorticity.Parquet;
 /// </summary>
 /// <remarks>
 /// Not thread-safe. Each write stages its rows as it takes them, so a builder is free again when the
-/// write returns. A row group's pages wait in the writer until it closes; its column chunks then go
-/// to the sink one after the other and the sink is flushed, the only I/O before
-/// <see cref="CompleteAsync"/>. A write that fails part way leaves the file to be abandoned.
+/// write returns. A row group's pages wait in the writer until it closes; its column chunks are then
+/// lent to the sink one after the other and the sink is flushed, the only I/O before
+/// <see cref="CompleteAsync"/>: over a path, one gathered write of the buffers the pages lie in, which
+/// copies none of them. A write that fails part way leaves the file to be abandoned.
 /// </remarks>
 public sealed class ParquetFileWriter : IAsyncDisposable
 {
@@ -666,8 +667,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             ColumnChunkWriter column = _columns[c];
             ChunkResult chunk = column.Close(_sink.Position, partial);
             Debug.Assert(chunk.Rows == rows, "Every column closes the same rows.");
-            await column.WriteChunkAsync(_sink, cancellationToken).ConfigureAwait(false);
-            column.Reset();
+            await column.LendChunkAsync(_sink, cancellationToken).ConfigureAwait(false);
             chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = column.Codec };
         }
 
@@ -682,9 +682,16 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             }
         }
 
+        // The chunks were lent where they lie: over a file, this flush writes them in one gathered write,
+        // and only then do the columns take their buffers back.
+        await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+        foreach (ColumnChunkWriter column in _columns)
+        {
+            column.Reset();
+        }
+
         _rowGroups.Add(new WrittenRowGroup { Chunks = chunks, Rows = rows, Ordinal = _rowGroups.Count });
         _groupRows -= rows;
-        await _sink.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Writes the leading magic, once, before the first row group or the footer.</summary>

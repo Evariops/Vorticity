@@ -13,7 +13,8 @@ namespace Vorticity.Parquet.Writing;
 
 /// <summary>
 /// A column chunk's pages while its row group is open: blocks of the engine's pool filled one after
-/// the other, handed to the sink one by one when the row group closes, and never copied to grow.
+/// the other, lent to the sink one by one when the row group closes, and never copied to grow: over a
+/// file, the flush that closes the row group writes them where they lie.
 /// </summary>
 /// <remarks>
 /// The blocks start at 64 KiB and double up to 1 MiB, so a narrow column holds little and a wide one
@@ -73,15 +74,18 @@ internal sealed unsafe class ChunkBytes : IBufferWriter<byte>, IDisposable
 
     public Span<byte> GetSpan(int sizeHint = 0) => Room(Math.Max(sizeHint, 1));
 
-    /// <summary>Hands every block's bytes to <paramref name="sink"/>, in order.</summary>
-    internal async ValueTask WriteToAsync(ISegmentSink sink, CancellationToken cancellationToken)
+    /// <summary>
+    /// Lends every block's bytes to <paramref name="sink"/>, in order: they stay as they are until the
+    /// sink's next flush completes, which a caller awaits before <see cref="Clear"/>.
+    /// </summary>
+    internal async ValueTask LendToAsync(ISegmentSink sink, CancellationToken cancellationToken)
     {
         for (int i = 0; i <= _current; i++)
         {
             Block block = _blocks[i];
             if (block.Used > 0)
             {
-                await sink.WriteAsync(block.View.Memory[..block.Used], cancellationToken).ConfigureAwait(false);
+                await sink.LendAsync(block.View.Memory[..block.Used], cancellationToken).ConfigureAwait(false);
             }
         }
     }

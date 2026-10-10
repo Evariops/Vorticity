@@ -34,7 +34,9 @@ internal class FilePipeWriter : PipeWriter
     private readonly SafeFileHandle _handle;
     private readonly MemoryPool<byte> _pool;
     private readonly long _origin;
-    private readonly List<(IMemoryOwner<byte> Owner, int Length)> _filled = [];
+
+    /// <summary>What the next flush writes, in order: the pool's segments it owns, and the bytes callers lent.</summary>
+    private readonly List<(IMemoryOwner<byte>? Owner, ReadOnlyMemory<byte> Bytes)> _filled = [];
     private readonly List<ReadOnlyMemory<byte>> _gather = [];
     private IMemoryOwner<byte>? _current;
     private int _currentLength;
@@ -125,6 +127,18 @@ internal class FilePipeWriter : PipeWriter
 
     public override Span<byte> GetSpan(int sizeHint = 0) => GetMemory(sizeHint).Span;
 
+    /// <summary>
+    /// Appends <paramref name="data"/> where it lies, after what was written before it: the next flush
+    /// writes it gathered with the rest, and the caller leaves it as it is until that flush completes.
+    /// </summary>
+    internal void Lend(ReadOnlyMemory<byte> data)
+    {
+        ObjectDisposedException.ThrowIf(_completed, this);
+        Seal();
+        _filled.Add((null, data));
+        _unflushed += data.Length;
+    }
+
     public override async ValueTask<FlushResult> FlushAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_completed, this);
@@ -133,10 +147,10 @@ internal class FilePipeWriter : PipeWriter
         {
             _gather.Clear();
             long bytes = 0;
-            foreach ((IMemoryOwner<byte> owner, int length) in _filled)
+            foreach ((IMemoryOwner<byte>? _, ReadOnlyMemory<byte> filled) in _filled)
             {
-                _gather.Add(owner.Memory[..length]);
-                bytes += length;
+                _gather.Add(filled);
+                bytes += filled.Length;
             }
 
             await RandomAccess.WriteAsync(_handle, _gather, _offset, cancellationToken).ConfigureAwait(false);
@@ -272,7 +286,7 @@ internal class FilePipeWriter : PipeWriter
 
         if (_currentLength > 0)
         {
-            _filled.Add((_current, _currentLength));
+            _filled.Add((_current, _current.Memory[.._currentLength]));
         }
         else
         {
@@ -285,9 +299,9 @@ internal class FilePipeWriter : PipeWriter
 
     private void ReturnFilled()
     {
-        foreach ((IMemoryOwner<byte> owner, int _) in _filled)
+        foreach ((IMemoryOwner<byte>? owner, ReadOnlyMemory<byte> _) in _filled)
         {
-            owner.Dispose();
+            owner?.Dispose();
         }
 
         _filled.Clear();

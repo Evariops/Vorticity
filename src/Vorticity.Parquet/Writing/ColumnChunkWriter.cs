@@ -251,15 +251,19 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The bytes of the pages closed so far, waiting for the row group to close.</summary>
     internal long BufferedBytes => _chunk.Length + _values.Length + _entries.Length;
 
-    /// <summary>Hands the closed chunk's bytes to <paramref name="sink"/>, between <see cref="Close"/> and <see cref="Reset"/>: its dictionary page first.</summary>
-    internal async ValueTask WriteChunkAsync(ISegmentSink sink, CancellationToken cancellationToken)
+    /// <summary>
+    /// Lends the closed chunk's bytes to <paramref name="sink"/>, its dictionary page first, between
+    /// <see cref="Close"/> and <see cref="Reset"/>: they stay as they are until the sink's next flush
+    /// completes, which the caller awaits before <see cref="Reset"/>.
+    /// </summary>
+    internal async ValueTask LendChunkAsync(ISegmentSink sink, CancellationToken cancellationToken)
     {
         if (_dictionaryPage.Length > 0)
         {
-            await sink.WriteAsync(_dictionaryPage.Written, cancellationToken).ConfigureAwait(false);
+            await sink.LendAsync(_dictionaryPage.Written, cancellationToken).ConfigureAwait(false);
         }
 
-        await _chunk.WriteToAsync(sink, cancellationToken).ConfigureAwait(false);
+        await _chunk.LendToAsync(sink, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Whether the closed chunk has a Bloom filter for <see cref="WriteBloomAsync"/> to write.</summary>
@@ -797,7 +801,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>
     /// The chunk's pages and what its metadata says of them, the chunk starting at
     /// <paramref name="offset"/> in the file; the caller writes it there with
-    /// <see cref="WriteChunkAsync"/> and then calls <see cref="Reset"/>.
+    /// <see cref="LendChunkAsync"/> and calls <see cref="Reset"/> once the sink has flushed it.
     /// </summary>
     /// <param name="offset">Where the chunk goes in the file.</param>
     /// <param name="partial">
