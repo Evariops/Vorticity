@@ -8,8 +8,10 @@
 // object moved under another key, a commit moved under another version or taken from another
 // dataset, and a plain object put in a sealed one's place are each refused; a rekey changes the key
 // the next objects are sealed under and leaves the old ones readable; verification passes and finds a
-// descriptor altered; compaction, vacuum and imports keep the dataset sealed whole; and opening and
-// scanning costs the requests a plain dataset costs.
+// descriptor altered; compaction, vacuum and imports keep the dataset sealed whole; a torn sealed
+// commit is named, and removed without the key; an index fragment lies sealed in its commit and a
+// session that refuses plaintext uses it; and opening and scanning costs the requests a plain dataset
+// costs.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -306,6 +308,38 @@ public sealed class EncryptedDatasetTests
         Assert.Equal(
             VortexEncryptionError.Refused,
             (await Assert.ThrowsAsync<VortexEncryptionException>(async () => await plain.ImportAsync("imports/sealed.vortex", ct))).Error);
+    }
+
+    [Fact]
+    public async Task ATornSealedCommitIsNamedAndRemovedWithoutTheKey()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        await using VortexSession session = Session(keyring);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(session), ct))
+        {
+            await AppendAsync(dataset, 0, ct);
+            Assert.Equal(2UL, dataset.Version);
+        }
+
+        // A whole sealed commit is told whole by its envelope alone.
+        Assert.Null(await VortexDataset.RemoveTornCommitAsync(store, ct));
+
+        // A writer that stopped halfway through the next commit.
+        byte[] whole = await AllAsync(store, CommitKey.For(2), ct);
+        await store.PutIfAbsentAsync(CommitKey.For(3), whole.AsSpan(0, whole.Length / 2).ToArray(), ct);
+        TornCommitException torn = await Assert.ThrowsAsync<TornCommitException>(
+            async () => await VortexDataset.OpenAsync(store, Encrypted(session), ct));
+        Assert.Equal(3UL, torn.Version);
+
+        Assert.Equal(3UL, await VortexDataset.RemoveTornCommitAsync(store, ct));
+        Assert.Null(await VortexDataset.RemoveTornCommitAsync(store, ct));
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(store, Encrypted(session), ct);
+        Assert.Equal(2UL, reopened.Version);
+        await AppendAsync(reopened, 1, ct);
+        Assert.Equal(3UL, reopened.Version);
+        Assert.Equal(2L * Rows, await reopened.Scan<Reading>().CountAsync(ct));
     }
 
     [Fact]

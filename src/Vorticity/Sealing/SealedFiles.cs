@@ -89,6 +89,20 @@ internal static class SealedFiles
         return await PreviousEndAsync(reader, length, header, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Whether the sealed object <paramref name="reader"/> reads is whole: it begins with a header and
+    /// ends with a trailer whose layout reads under the header's descriptor, its frames filling the
+    /// bytes between. A sealing stage writes the trailer last, so a whole envelope holds its whole
+    /// plaintext. No key is needed, and none of the frames is read.
+    /// </summary>
+    /// <param name="reader">The object.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    internal static async ValueTask<bool> IsWholeAsync(ISegmentReader reader, long length, CancellationToken cancellationToken) =>
+        await HeaderAsync(reader, length, cancellationToken).ConfigureAwait(false) is { } header
+        && await LastFourAsync(reader, length, cancellationToken).ConfigureAwait(false) == TrailerMagic
+        && await EndsTrailerAsync(reader, length, header, cancellationToken).ConfigureAwait(false);
+
     /// <summary>The refusal of a plain file by a session that reads sealed ones only.</summary>
     internal static VortexEncryptionException RefusedPlain(string name) =>
         VortexEncryptionException.Refused(

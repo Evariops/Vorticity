@@ -263,7 +263,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <remarks>
     /// The commit is read whole and checked from its preamble to its trailer first. A store whose
     /// writer still holds the object makes the read wait for it, so a commit being written is never
-    /// taken for a torn one.
+    /// taken for a torn one. An encrypted dataset's commit is checked by its envelope, which needs no
+    /// key: it is whole when it ends with the trailer its writer writes last.
     /// </remarks>
     public static async ValueTask<ulong?> RemoveTornCommitAsync(IObjectStore store, CancellationToken cancellationToken = default)
     {
