@@ -1318,6 +1318,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             ParquetEncoding.ByteStreamSplit => _form is LeafForm.Fixed or LeafForm.Float16 or LeafForm.FixedBytes or LeafForm.Narrowed
                 || (_form == LeafForm.BigEndianDecimal && _width > 0),
             ParquetEncoding.Rle => _form == LeafForm.Bool,
+            ParquetEncoding.Alp => _form == LeafForm.Fixed && _leaf.Physical is PhysicalType.Float or PhysicalType.Double,
             _ => false,
         };
         if (!fits)
@@ -1355,6 +1356,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     break;
                 case ParquetEncoding.Rle:
                     Runs(page, values.Span, valid);
+                    break;
+                case ParquetEncoding.Alp:
+                    AlpPage(page, values.Span, valid);
                     break;
                 default:
                     Codes(page, values.Span, valid);
@@ -1535,6 +1539,43 @@ internal sealed partial class ColumnChunkReader : IDisposable
         finally
         {
             dense.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// An ALP page of FLOAT or DOUBLE values: decoded straight into the page's slots when it has no
+    /// null, else densely and then placed, each vector's deltas unpacked into a scratch of the pool.
+    /// </summary>
+    private void AlpPage(Page page, ReadOnlySpan<byte> source, int valid)
+    {
+        int rows = page.Rows;
+        bool wide = _leaf.Physical == PhysicalType.Double;
+        int width = wide ? sizeof(double) : sizeof(float);
+        NativeSegmentOwner scratch = _pool.Rent(Encodings.Alp.VectorSize(source) * width, 64);
+        NativeSegmentOwner? dense = null;
+        try
+        {
+            Span<byte> into = page.Validity is null
+                ? Slots(page, rows * width).WritableSpan[..(rows * width)]
+                : (dense = _pool.Rent(Math.Max(valid, 1) * width, 64)).WritableSpan[..(valid * width)];
+            if (wide)
+            {
+                Encodings.Alp.Decode(source, MemoryMarshal.Cast<byte, double>(into), MemoryMarshal.Cast<byte, ulong>(scratch.WritableSpan));
+            }
+            else
+            {
+                Encodings.Alp.Decode(source, MemoryMarshal.Cast<byte, float>(into), MemoryMarshal.Cast<byte, uint>(scratch.WritableSpan));
+            }
+
+            if (dense is not null)
+            {
+                Place(page, into, valid);
+            }
+        }
+        finally
+        {
+            scratch.Dispose();
+            dense?.Dispose();
         }
     }
 
