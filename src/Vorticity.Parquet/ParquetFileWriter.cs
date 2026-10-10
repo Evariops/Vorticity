@@ -132,6 +132,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                     DefersPages = _lanes > 1 && map.Columns.Length > 1,
                     DataPages = options.DataPageVersion,
                     AlignUncompressedPages = options.AlignUncompressedPages,
+                    AllowAlp = options.Alp,
                     Hint = hint,
                 };
             }
@@ -449,6 +450,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             ParquetEncodingHint.DeltaLengthByteArray => column.Physical == PhysicalType.ByteArray,
             ParquetEncodingHint.DeltaByteArray => column.Physical is PhysicalType.ByteArray or PhysicalType.FixedLenByteArray,
             ParquetEncodingHint.ByteStreamSplit => column.Physical is PhysicalType.Int32 or PhysicalType.Int64 or PhysicalType.Float or PhysicalType.Double or PhysicalType.FixedLenByteArray,
+            ParquetEncodingHint.Alp => column.Physical is PhysicalType.Float or PhysicalType.Double,
             _ => column.Physical == PhysicalType.Boolean,
         };
         if (!takes)

@@ -143,6 +143,153 @@ public sealed class AlpTests
         Assert.True(AlpTables.F10Double.Length > 18 && AlpTables.If10Double.Length > 18);
     }
 
+    /// <summary>
+    /// With <see cref="ParquetWriteOptions.Alp"/>, decimals of few digits are written ALP, and read
+    /// back to their very bits, a NaN's payload, the infinities, -0, subnormals and values too large
+    /// for an integer among them as exceptions; noise of full mantissas is left to the encodings that
+    /// pay for it.
+    /// </summary>
+    [Theory]
+    [InlineData(ParquetCompression.Zstd, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Uncompressed, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Snappy, DataPageVersion.V1)]
+    public async Task WritesDecimalsOfFewDigitsAsAlp(ParquetCompression compression, DataPageVersion pages)
+    {
+        const int Rows = 20_000;
+        VortexSchema schema = [("price", VortexType.Float64.Nullable), ("temperature", VortexType.Float32), ("noise", VortexType.Float64)];
+        Random random = new(43);
+        double?[] prices = new double?[Rows];
+        float[] temperatures = new float[Rows];
+        double[] noise = new double[Rows];
+        double[] specials = [double.NaN, BitConverter.Int64BitsToDouble(0x7FF8_0000_0000_00AB), double.PositiveInfinity, double.NegativeInfinity, -0.0, double.Epsilon, 1e300, -4.4e19, 3.141592653589793];
+        for (int i = 0; i < Rows; i++)
+        {
+            prices[i] = i % 13 == 0 ? null : i % 997 == 0 ? specials[i / 997 % specials.Length] : Math.Round(random.Next(100, 100_000) / 100.0, 2);
+            temperatures[i] = i % 1_009 == 0 ? (float)specials[i / 1_009 % specials.Length] : MathF.Round((float)(random.Next(-300_000, 450_000) / 10_000.0), 4);
+            noise[i] = random.NextDouble() * 1e6;
+        }
+
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vx-alp-{Guid.NewGuid():N}.parquet");
+        try
+        {
+            await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path, schema, new ParquetWriteOptions { Alp = true, Compression = compression, DataPageVersion = pages }))
+            {
+                ColumnsBuilder builder = writer.Builder();
+                for (int i = 0; i < Rows; i++)
+                {
+                    if (prices[i] is { } price)
+                    {
+                        builder.Column<double?>(0).Append(price);
+                    }
+                    else
+                    {
+                        builder.Column<double?>(0).AppendNull();
+                    }
+
+                    builder.Column<float>(1).Append(temperatures[i]);
+                    builder.Column<double>(2).Append(noise[i]);
+                }
+
+                await writer.WriteAsync(builder, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
+            string Encodings(string column) => string.Join(", ", file.Metadata.RowGroups[0].Chunks.Single(chunk => chunk.Column == column).Encodings);
+            Assert.True(Encodings("price").Contains("ALP", StringComparison.Ordinal), Encodings("price"));
+            Assert.True(Encodings("temperature").Contains("ALP", StringComparison.Ordinal), Encodings("temperature"));
+            Assert.False(Encodings("noise").Contains("ALP", StringComparison.Ordinal), Encodings("noise"));
+
+            long row = 0;
+            await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
+            {
+                using (batch)
+                {
+                    VortexColumn price = batch.Column("price"u8);
+                    ReadOnlySpan<double> priceValues = price.AsPrimitive<double>().Values;
+                    ReadOnlySpan<float> temperatureValues = batch.Column("temperature"u8).AsPrimitive<float>().Values;
+                    ReadOnlySpan<double> noiseValues = batch.Column("noise"u8).AsPrimitive<double>().Values;
+                    for (int r = 0; r < batch.RowCount; r++, row++)
+                    {
+                        Assert.Equal(prices[row].HasValue, price.IsValid(r));
+                        if (prices[row] is { } expected)
+                        {
+                            Assert.Equal(BitConverter.DoubleToInt64Bits(expected), BitConverter.DoubleToInt64Bits(priceValues[r]));
+                        }
+
+                        Assert.Equal(BitConverter.SingleToInt32Bits(temperatures[row]), BitConverter.SingleToInt32Bits(temperatureValues[r]));
+                        Assert.Equal(BitConverter.DoubleToInt64Bits(noise[row]), BitConverter.DoubleToInt64Bits(noiseValues[r]));
+                    }
+                }
+            }
+
+            Assert.Equal(Rows, row);
+            Assert.Empty(await file.VerifyAsync(Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>A hint pins ALP on a float column without the option, as a pin is a caller's own choice; an integer takes none.</summary>
+    [Fact]
+    public async Task APinWritesAlpAndAnIntegerTakesNone()
+    {
+        VortexSchema schema = [("value", VortexType.Float64), ("count", VortexType.Int64)];
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vx-alp-pin-{Guid.NewGuid():N}.parquet");
+        try
+        {
+            await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path, schema, new ParquetWriteOptions
+            {
+                Profile = CompressionProfile.None,
+                Hints = new Dictionary<string, ParquetEncodingHint> { ["value"] = ParquetEncodingHint.Alp },
+            }))
+            {
+                ColumnsBuilder builder = writer.Builder();
+                for (int i = 0; i < 5_000; i++)
+                {
+                    builder.Column<double>(0).Append(i * 0.25);
+                    builder.Column<long>(1).Append(i);
+                }
+
+                await writer.WriteAsync(builder, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using (ParquetFile file = await ParquetFile.OpenAsync(path, Ct))
+            {
+                ParquetChunkInfo chunk = file.Metadata.RowGroups[0].Chunks.Single(c => c.Column == "value");
+                Assert.Contains("ALP", chunk.Encodings);
+
+                // A quarter of each value an integer: two bits of it, against PLAIN's eight bytes.
+                Assert.True(chunk.CompressedBytes < 5_000 * sizeof(double) / 4, $"{chunk.CompressedBytes} bytes");
+                double expected = 0;
+                await foreach (RecordBatch batch in file.Scan("value").ToBatchesAsync(Ct))
+                {
+                    using (batch)
+                    {
+                        foreach (double value in batch.Column(0).AsPrimitive<double>().Values)
+                        {
+                            Assert.Equal(expected, value);
+                            expected += 0.25;
+                        }
+                    }
+                }
+            }
+
+            await Assert.ThrowsAsync<ArgumentException>(async () =>
+            {
+                await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(
+                    path + ".int", schema, new ParquetWriteOptions { Hints = new Dictionary<string, ParquetEncodingHint> { ["count"] = ParquetEncodingHint.Alp } });
+            });
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     /// <summary>Whether <paramref name="value"/> is the double nearest <paramref name="numerator"/> / <paramref name="denominator"/>, ties to even.</summary>
     private static bool Rounds(double value, BigInteger numerator, BigInteger denominator) =>
         Within(Exact(value), Exact(Math.BitDecrement(value)), Exact(Math.BitIncrement(value)), numerator, denominator, (BitConverter.DoubleToInt64Bits(value) & 1) == 0);

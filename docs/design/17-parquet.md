@@ -490,14 +490,20 @@ encoding takes 178 ms of 2 081, nearly all of it the encoding a remembered plan 
 |---|---|
 | BOOLEAN | PLAIN; RLE when runs make it smaller |
 | INT32, INT64 | PLAIN, RLE_DICTIONARY, DELTA_BINARY_PACKED; BYTE_STREAM_SPLIT under a codec, by trial |
-| FLOAT, DOUBLE | PLAIN, RLE_DICTIONARY; BYTE_STREAM_SPLIT under a codec, by trial; ALP when `Alp` is enabled, by trial |
+| FLOAT, DOUBLE | PLAIN, RLE_DICTIONARY; BYTE_STREAM_SPLIT under a codec, by trial; ALP when `Alp` is enabled, by the same trial, which then weighs all three on the chunk's first PLAIN page |
 | BYTE_ARRAY | PLAIN, RLE_DICTIONARY, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY |
 | FIXED_LEN_BYTE_ARRAY | PLAIN, RLE_DICTIONARY, DELTA_BYTE_ARRAY; BYTE_STREAM_SPLIT under a codec, by trial |
 | levels | the RLE/bit-packing hybrid, the only encoding v2 allows |
 
 ALP stays behind an option while the standard marks it Preview, as the standard recommends of a
-writer. `CompressionProfile` changes the arithmetic, not the pass: `Auto` weighs bytes against decode
-speed, an encoding taken when it saves an eighth; `Smallest` weighs every candidate by the bytes it
+writer; a hint pins it without one. A page takes one pair of exponents, the core's search over a
+sample of its values, and vectors of 1 024. On a million prices of two decimals ALP stores 3.03 MB
+where PLAIN under ZSTD stores 4.34, on as many coordinates of six 2.75 MB where it stores 6.59, and
+both scan five times as fast, an ALP page that ZSTD does not shrink staying as it is; a column of few
+distinct values keeps its dictionary, which the taxi file's every double does.
+
+`CompressionProfile` changes the arithmetic, not the pass: `Auto` weighs bytes against decode speed,
+an encoding taken when it saves an eighth; `Smallest` weighs every candidate by the bytes it
 stores once compressed, in a trial of each chunk's first PLAIN page at the chunk's codec and level,
 whose winner the chunk's later PLAIN pages take, a few compressions a chunk; `Fastest` writes PLAIN
 and dictionaries, `None` writes PLAIN. `Hints` pins a column to an encoding by path, as the core's

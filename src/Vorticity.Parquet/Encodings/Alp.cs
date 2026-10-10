@@ -30,6 +30,164 @@ internal static class Alp
     private const int MaxExponent32 = 10;
     private const int MaxExponent64 = 18;
 
+    /// <summary>The values of each vector the writer cuts, the standard's default, and their log.</summary>
+    internal const int WrittenVectorLog = 10;
+    internal const int WrittenVector = 1 << WrittenVectorLog;
+
+    /// <summary>
+    /// The most bytes <see cref="Encode(ReadOnlySpan{float}, Span{byte}, Scratch)"/> writes for
+    /// <paramref name="count"/> values of <paramref name="width"/> bytes: every vector's offset and
+    /// header, every delta at the full width, and every value an exception besides.
+    /// </summary>
+    internal static int MaxSize(int count, int width)
+    {
+        int vectors = (count + WrittenVector - 1) / WrittenVector;
+        return checked(HeaderBytes + (vectors * (sizeof(uint) + 5 + width)) + (count * width) + (count * (sizeof(ushort) + width)));
+    }
+
+    /// <summary>What the writer encodes a vector through: its integers, and its exceptions' rows and values.</summary>
+    internal sealed class Scratch
+    {
+        internal readonly int[] Ints = new int[WrittenVector];
+        internal readonly long[] Longs = new long[WrittenVector];
+        internal readonly int[] Rows = new int[WrittenVector];
+        internal readonly float[] Singles = new float[WrittenVector];
+        internal readonly double[] Doubles = new double[WrittenVector];
+    }
+
+    /// <summary>
+    /// Encodes <paramref name="values"/>, FLOAT, as an ALP page into <paramref name="destination"/>,
+    /// which holds <see cref="MaxSize"/>; the bytes written. The page's exponents are the core's search
+    /// over a sample of its values; each vector of <see cref="WrittenVector"/> keeps a value's integer
+    /// where the standard's decode gives its very bits, and carries every other value, NaN, an
+    /// infinity, -0 or a value of more digits, as an exception, its slot the first integer kept.
+    /// </summary>
+    internal static int Encode(ReadOnlySpan<float> values, Span<byte> destination, Scratch scratch)
+    {
+        int count = values.Length;
+        int vectors = Header(destination, count);
+        Span<byte> body = destination[HeaderBytes..];
+        int at = vectors * sizeof(uint);
+        (int e, int f) = global::Vorticity.Writing.AlpPlan.BestExponents(values);
+        for (int v = 0; v < vectors; v++)
+        {
+            ReadOnlySpan<float> vector = values.Slice(v * WrittenVector, Math.Min(WrittenVector, count - (v * WrittenVector)));
+            BinaryPrimitives.WriteUInt32LittleEndian(body[(v * sizeof(uint))..], (uint)at);
+            Span<int> encoded = scratch.Ints.AsSpan(0, vector.Length);
+            int exceptions = global::Vorticity.Writing.AlpPlan.Encode(vector, e, f, encoded, scratch.Rows, scratch.Singles);
+            (int least, int most) = Extent(encoded);
+            uint span = unchecked((uint)most - (uint)least);
+            int width = 32 - System.Numerics.BitOperations.LeadingZeroCount(span);
+            Span<byte> output = body[at..];
+            output[0] = (byte)e;
+            output[1] = (byte)f;
+            BinaryPrimitives.WriteUInt16LittleEndian(output[2..], (ushort)exceptions);
+            BinaryPrimitives.WriteInt32LittleEndian(output[4..], least);
+            output[8] = (byte)width;
+            Span<uint> deltas = MemoryMarshal.Cast<int, uint>(encoded);
+            AddReference(deltas, unchecked(0u - (uint)least));
+            int packed = (int)BitPacking.PackedBytes(vector.Length, width);
+            BitPacking.Pack32(deltas, width, output.Slice(9, packed));
+            Span<byte> positions = output.Slice(9 + packed, exceptions * sizeof(ushort));
+            Span<byte> patches = output.Slice(9 + packed + positions.Length, exceptions * sizeof(float));
+            for (int j = 0; j < exceptions; j++)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(positions[(j * sizeof(ushort))..], (ushort)scratch.Rows[j]);
+                BinaryPrimitives.WriteInt32LittleEndian(patches[(j * sizeof(float))..], BitConverter.SingleToInt32Bits(scratch.Singles[j]));
+            }
+
+            at += 9 + packed + positions.Length + patches.Length;
+        }
+
+        return HeaderBytes + at;
+    }
+
+    /// <summary>Encodes <paramref name="values"/>, DOUBLE, as an ALP page: as <see cref="Encode(ReadOnlySpan{float}, Span{byte}, Scratch)"/> does FLOAT's.</summary>
+    internal static int Encode(ReadOnlySpan<double> values, Span<byte> destination, Scratch scratch)
+    {
+        int count = values.Length;
+        int vectors = Header(destination, count);
+        Span<byte> body = destination[HeaderBytes..];
+        int at = vectors * sizeof(uint);
+        (int e, int f) = global::Vorticity.Writing.AlpPlan.BestExponents(values);
+        for (int v = 0; v < vectors; v++)
+        {
+            ReadOnlySpan<double> vector = values.Slice(v * WrittenVector, Math.Min(WrittenVector, count - (v * WrittenVector)));
+            BinaryPrimitives.WriteUInt32LittleEndian(body[(v * sizeof(uint))..], (uint)at);
+            Span<long> encoded = scratch.Longs.AsSpan(0, vector.Length);
+            int exceptions = global::Vorticity.Writing.AlpPlan.Encode(vector, e, f, encoded, scratch.Rows, scratch.Doubles);
+            (long least, long most) = Extent(encoded);
+            ulong span = unchecked((ulong)most - (ulong)least);
+            int width = 64 - System.Numerics.BitOperations.LeadingZeroCount(span);
+            Span<byte> output = body[at..];
+            output[0] = (byte)e;
+            output[1] = (byte)f;
+            BinaryPrimitives.WriteUInt16LittleEndian(output[2..], (ushort)exceptions);
+            BinaryPrimitives.WriteInt64LittleEndian(output[4..], least);
+            output[12] = (byte)width;
+            Span<ulong> deltas = MemoryMarshal.Cast<long, ulong>(encoded);
+            AddReference(deltas, unchecked(0UL - (ulong)least));
+            int packed = (int)BitPacking.PackedBytes(vector.Length, width);
+            BitPacking.Pack64(deltas, width, output.Slice(13, packed));
+            Span<byte> positions = output.Slice(13 + packed, exceptions * sizeof(ushort));
+            Span<byte> patches = output.Slice(13 + packed + positions.Length, exceptions * sizeof(double));
+            for (int j = 0; j < exceptions; j++)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(positions[(j * sizeof(ushort))..], (ushort)scratch.Rows[j]);
+                BinaryPrimitives.WriteInt64LittleEndian(patches[(j * sizeof(double))..], BitConverter.DoubleToInt64Bits(scratch.Doubles[j]));
+            }
+
+            at += 13 + packed + positions.Length + patches.Length;
+        }
+
+        return HeaderBytes + at;
+    }
+
+    /// <summary>Writes the header of a page of <paramref name="count"/> values in vectors of <see cref="WrittenVector"/>; their number.</summary>
+    private static int Header(Span<byte> destination, int count)
+    {
+        destination[0] = 0;
+        destination[1] = 0;
+        destination[2] = WrittenVectorLog;
+        BinaryPrimitives.WriteInt32LittleEndian(destination[3..], count);
+        return (count + WrittenVector - 1) / WrittenVector;
+    }
+
+    /// <summary>The least and the greatest of <paramref name="values"/>, not empty: a vector at a time.</summary>
+    private static (T Least, T Most) Extent<T>(ReadOnlySpan<T> values)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>, System.Numerics.IMinMaxValue<T>
+    {
+        T least = values[0];
+        T most = values[0];
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated && values.Length >= Vector256<T>.Count)
+        {
+            ref T value = ref MemoryMarshal.GetReference(values);
+            Vector256<T> low = Vector256.Create(T.MaxValue);
+            Vector256<T> high = Vector256.Create(T.MinValue);
+            for (; i <= values.Length - Vector256<T>.Count; i += Vector256<T>.Count)
+            {
+                Vector256<T> lanes = Vector256.LoadUnsafe(ref value, (nuint)i);
+                low = Vector256.Min(low, lanes);
+                high = Vector256.Max(high, lanes);
+            }
+
+            for (int lane = 0; lane < Vector256<T>.Count; lane++)
+            {
+                least = T.Min(least, low.GetElement(lane));
+                most = T.Max(most, high.GetElement(lane));
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            least = T.Min(least, values[i]);
+            most = T.Max(most, values[i]);
+        }
+
+        return (least, most);
+    }
+
     /// <summary>The values each vector of <paramref name="page"/> holds but the last: what a decode's scratch holds.</summary>
     /// <exception cref="ParquetFormatException">The header is cut short or declares a size the standard does not allow.</exception>
     internal static int VectorSize(ReadOnlySpan<byte> page)

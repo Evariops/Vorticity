@@ -66,6 +66,12 @@ public enum ParquetEncodingHint : byte
 
     /// <summary>RLE: BOOLEAN.</summary>
     Rle = 7,
+
+    /// <summary>
+    /// ALP: FLOAT and DOUBLE, decimals of few digits as integers, the standard's Preview encoding,
+    /// which a reader that predates it does not read.
+    /// </summary>
+    Alp = 8,
 }
 
 /// <summary>The form of the data pages a Parquet writer writes.</summary>
@@ -165,6 +171,14 @@ public sealed record ParquetWriteOptions
     /// batch's values are. On by default.
     /// </summary>
     public bool AlignUncompressedPages { get; init; } = true;
+
+    /// <summary>
+    /// Whether FLOAT and DOUBLE pages may be written ALP, decimals of few digits as small integers,
+    /// which a trial of each chunk's first page then weighs against PLAIN and BYTE_STREAM_SPLIT. Off
+    /// by default: the standard marks ALP Preview, and a reader that predates it cannot read such a
+    /// page.
+    /// </summary>
+    public bool Alp { get; init; }
 
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }

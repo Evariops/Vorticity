@@ -73,6 +73,7 @@ Vorticity.Parquet:     const ParquetCompression Uncompressed = 0
 Vorticity.Parquet:     const ParquetCompression Zstd = 6
 Vorticity.Parquet:     field byte value__
 Vorticity.Parquet: enum Vorticity.Parquet.ParquetEncodingHint
+Vorticity.Parquet:     const ParquetEncodingHint Alp = 8
 Vorticity.Parquet:     const ParquetEncodingHint Auto = 0
 Vorticity.Parquet:     const ParquetEncodingHint ByteStreamSplit = 6
 Vorticity.Parquet:     const ParquetEncodingHint DeltaBinaryPacked = 3
@@ -211,6 +212,7 @@ Vorticity.Parquet:     property IReadOnlyDictionary<string, string> KeyValueMeta
 Vorticity.Parquet:     property Nullable<ParquetCompression> Compression { get; init; }
 Vorticity.Parquet:     property ParquetWriteOptions Default { get; }
 Vorticity.Parquet:     property bool AlignUncompressedPages { get; init; }
+Vorticity.Parquet:     property bool Alp { get; init; }
 Vorticity.Parquet:     property bool Durable { get; init; }
 Vorticity.Parquet:     property bool WriteChecksums { get; init; }
 Vorticity.Parquet:     property int BlockRows { get; init; }

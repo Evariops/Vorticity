@@ -239,6 +239,12 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The codec of the column's pages.</summary>
     internal CompressionCodec Codec => _codec;
 
+    /// <summary>Whether a FLOAT or DOUBLE page may be written ALP, which joins the trial of its chunk's first page.</summary>
+    internal bool AllowAlp { get; init; }
+
+    /// <summary>What the column's ALP pages encode a vector through, made at the first.</summary>
+    private Encodings.Alp.Scratch? _alp;
+
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
@@ -1187,10 +1193,10 @@ internal sealed class ColumnChunkWriter : IDisposable
             }
 
             case PhysicalType.Float:
-                return Split(ref body, sizeof(float));
+                return AllowAlp ? Smallest(ref body, count, eighth: true) : Split(ref body, sizeof(float));
 
             case PhysicalType.Double:
-                return Split(ref body, sizeof(double));
+                return AllowAlp ? Smallest(ref body, count, eighth: true) : Split(ref body, sizeof(double));
 
             case PhysicalType.FixedLenByteArray:
                 return ChooseFixed(ref body, count);
@@ -1231,12 +1237,15 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// PLAIN page in the fewest bytes, each candidate encoded and compressed by the chunk's codec at
     /// its level, PLAIN among them; every later PLAIN page of the chunk then takes it.
     /// </summary>
-    private ParquetEncoding Smallest(ref ReadOnlySpan<byte> body, int count)
+    private ParquetEncoding Smallest(ref ReadOnlySpan<byte> body, int count, bool eighth = false)
     {
         if (_smallest is null)
         {
+            // Under Auto, a candidate is taken when it saves an eighth of what PLAIN stores, which
+            // pays for its slower decode; under Smallest, when it saves a byte.
             ParquetEncoding best = ParquetEncoding.Plain;
-            long least = Stored(body);
+            long plain = Stored(body);
+            long least = eighth ? plain - (plain / 8) + 1 : plain;
             foreach (ParquetEncoding candidate in Candidates())
             {
                 long stored = Stored(Encode(candidate, body, count));
@@ -1263,6 +1272,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private ReadOnlySpan<ParquetEncoding> Candidates() => _column.Physical switch
     {
         PhysicalType.Int32 or PhysicalType.Int64 => [ParquetEncoding.DeltaBinaryPacked, ParquetEncoding.ByteStreamSplit],
+        PhysicalType.Float or PhysicalType.Double when AllowAlp => [ParquetEncoding.ByteStreamSplit, ParquetEncoding.Alp],
         PhysicalType.Float or PhysicalType.Double => [ParquetEncoding.ByteStreamSplit],
         PhysicalType.ByteArray => [ParquetEncoding.DeltaLengthByteArray, ParquetEncoding.DeltaByteArray],
         PhysicalType.FixedLenByteArray => [ParquetEncoding.DeltaByteArray, ParquetEncoding.ByteStreamSplit],
@@ -1338,6 +1348,20 @@ internal sealed class ColumnChunkWriter : IDisposable
                 break;
             }
 
+            case ParquetEncoding.Alp when _column.Physical == PhysicalType.Float:
+            {
+                ReadOnlySpan<float> values = MemoryMarshal.Cast<byte, float>(body)[..count];
+                _encoded.Truncate(Encodings.Alp.Encode(values, _encoded.Reserve(Encodings.Alp.MaxSize(count, sizeof(float))), _alp ??= new()));
+                break;
+            }
+
+            case ParquetEncoding.Alp:
+            {
+                ReadOnlySpan<double> values = MemoryMarshal.Cast<byte, double>(body)[..count];
+                _encoded.Truncate(Encodings.Alp.Encode(values, _encoded.Reserve(Encodings.Alp.MaxSize(count, sizeof(double))), _alp ??= new()));
+                break;
+            }
+
             case ParquetEncoding.Rle:
                 return Runs(count, RunsSize(body, count));
 
@@ -1357,6 +1381,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         ParquetEncodingHint.DeltaByteArray => ParquetEncoding.DeltaByteArray,
         ParquetEncodingHint.ByteStreamSplit => ParquetEncoding.ByteStreamSplit,
         ParquetEncodingHint.Rle => ParquetEncoding.Rle,
+        ParquetEncodingHint.Alp => ParquetEncoding.Alp,
         _ => ParquetEncoding.Plain,
     };
 
