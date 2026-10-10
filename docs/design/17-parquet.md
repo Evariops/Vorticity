@@ -508,9 +508,11 @@ A scan that delivers its batches reads them as one stream, in row order, and its
 pages instead: a column chunk read whole, compressed and in plaintext has its data pages
 decompressed on them ahead of the read, from the chunk's start, its dictionary page passed over, up
 to eight pages or 8 MiB decompressed ahead a column, eight of the megabyte pages other writers cut,
-and 2 MiB a lane for the scan's columns together, 16 MiB at least, which a column's first page
-ahead may pass; as many at once as the degree, shared by the columns, so that a wide file's columns
-and a narrow one's next pages alike keep them busy. A page worth less than a hand-off to
+and 2 MiB a lane for the scan's columns together, 48 MiB at least, six columns' worth, which a
+column's first page ahead may pass; as many at once as the degree, shared by the columns, so that a
+wide file's columns and a narrow one's next pages alike keep them busy. Under 16 MiB, ClickBench's
+four columns of long text shared two columns' worth on 8 lanes, and its scan took 34 ms against 29.
+A page worth less than a hand-off to
 another thread, about ten microseconds of its codec's work — 64 KiB decompressed under SNAPPY and
 LZ4_RAW, 16 KiB under ZSTD, 4 KiB under GZIP and BROTLI — is decompressed where it is read: the
 report's projection of one column takes 0.28 ms on 32 lanes as on one, where taking its small pages
@@ -529,11 +531,18 @@ page, while the others idle.
 So a row group whose fields are all flat and whose rows are read in place decodes ahead of the read
 a field at a time: each field's batches one after the other, those the page index leaves, each
 after the rows it rules out before it, which the field steps over, up to two past the last the read
-released, each into a context of its own, on as many lanes as the degree, a lane taking the field
-of the earliest batch that may run. The read waits for every field of the batch it asks for and
-releases each batch as it asks for the next, which frees its slot for the batch two on; a reader
-holds the pages a batch retires until the read releases it, and a row group ends with every batch
-released. A row group read in windows (§5.3), a take's among them, decodes a batch at a time.
+released, each into a context of its own. A lane takes first a field it decoded last, of the
+earliest batch it has one of, else the field of the earliest batch that may run: a field's
+dictionary and the blocks its contexts keep from batch to batch stay in one core's cache, where on
+32 lanes a gather of views out of a small dictionary cost 5.3 ns a row taking whichever field came,
+against 0.31 on one lane. The fields decode on the degree's lanes, one for two of the machine's
+threads at most: the read waits on the chains of its slowest fields, not on the sum of their work,
+and a chain whose lane shares its core runs slower, ClickBench's timestamps taking 8.5 ms of each
+scan on 32 lanes of sixteen cores against 3.7 on 10. The read waits for every field of the batch it
+asks for and releases each batch as it asks for the next, which frees its slot for the batch two
+on; a reader holds the pages a batch retires until the read releases it, and a row group ends with
+every batch released. A row group read in windows (§5.3), a take's among them, decodes a batch at a
+time.
 
 A lane of the pipeline runs, before each field, the pages that wait for a lane: they queue to the
 lanes' own queue as well as the pool's, and the pipeline's lanes would otherwise hold the pool's
@@ -543,9 +552,9 @@ lane's cache: cut on another core, each length of the cut's chain waits for its 
 ClickBench's `Title`, a third of its file's bytes, cut its views in 17 ms of each scan on 32 lanes
 against 0.5. The read takes the lane's views where they are its page's values whole, and cuts the
 values again where they are not, which says what is wrong with them. The January 2023 yellow taxi
-trips, every page GZIP's, scan in 24 to 25 ms on 32 lanes and 174 on one; ClickBench's first file,
-105 columns under SNAPPY, in 33 to 34 on 32 lanes and 35 on 8, against 38 to 39 and 41 with its
-views cut where they are read, and 125 on one, 65 of which inflate its pages.
+trips, every page GZIP's, scan in 20 ms on 32 lanes, 30 on 8 and 174 on one; ClickBench's first
+file, 105 columns under SNAPPY, in 27 to 29 on 8 to 32 lanes, against 38 to 41 with its views cut
+where they are read, and 125 on one, 65 of which inflate its pages.
 
 The answers are the same bits at every degree.
 
