@@ -203,6 +203,52 @@ public sealed class StatisticsTests : IDisposable
         Assert.True(maxExact);
     }
 
+    [Fact]
+    public void BoundsByteArraysInTheOrderOfTheirBytes()
+    {
+        // Values whose first eight bytes tie, zeros past a shorter one's end, values of eight bytes
+        // and of nine: what a prefix decides and what it leaves to the bytes.
+        byte[][] values =
+        [
+            [], [0], [0, 0], "a"u8.ToArray(), [0x61, 0], [0x61, 0, 0, 0, 0, 0, 0, 0], [0x61, 0, 0, 0, 0, 0, 0, 0, 0],
+            "ab"u8.ToArray(), "abcdefgh"u8.ToArray(), [.. "abcdefgh"u8, 0], "abcdefghi"u8.ToArray(), [.. "abcdefgg"u8, 0xFF],
+            [0xFF], [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0], "b"u8.ToArray(),
+        ];
+        Comparison<byte[]> order = (a, b) => a.AsSpan().SequenceCompareTo(b);
+        Random random = new(17);
+        for (int trial = 0; trial < 500; trial++)
+        {
+            byte[][] page = new byte[random.Next(1, 12)][];
+            for (int i = 0; i < page.Length; i++)
+            {
+                page[i] = values[random.Next(values.Length)];
+            }
+
+            byte[][] sorted = [.. page];
+            Array.Sort(sorted, order);
+            (byte[] min, byte[] max) = Bounds(page);
+            Assert.Equal(sorted[0], min);
+            Assert.Equal(sorted[^1], max);
+        }
+    }
+
+    /// <summary>The bounds of a page of byte arrays, PLAIN as the writer stages them.</summary>
+    private static (byte[] Min, byte[] Max) Bounds(byte[][] page)
+    {
+        WriteColumn column = new() { Name = "v", Path = ["v"], Physical = PhysicalType.ByteArray, Conversion = ValueConversion.ByteArray, Domain = StatisticsDomain.Binary };
+        ChunkStatistics statistics = new(column);
+        using MemoryStream plain = new();
+        foreach (byte[] value in page)
+        {
+            plain.Write(BitConverter.GetBytes(value.Length));
+            plain.Write(value);
+        }
+
+        statistics.AddPage(plain.ToArray(), page.Length, 0);
+        WrittenStatistics written = statistics.Close();
+        return (written.Min, written.Max);
+    }
+
     /// <summary>The bounds a page of one byte array value gets.</summary>
     private static (byte[] Min, byte[] Max, bool MinExact, bool MaxExact) Bound(StatisticsDomain domain, byte[] value)
     {

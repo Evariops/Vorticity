@@ -68,7 +68,7 @@ public sealed partial class ParquetWriterTests
                 }
                 else
                 {
-                    builder.Column<string?>(2).Append($"name-{i % 100}");
+                    builder.Column<string?>(2).Append(Name(i));
                 }
 
                 builder.Column<bool>(3).Append(i % 3 == 0);
@@ -125,6 +125,15 @@ public sealed partial class ParquetWriterTests
         Assert.Equal(4L, ids.DataPageOffset);
     }
 
+    /// <summary>Row <paramref name="i"/>'s name: some held inline in their views, of twelve bytes at most, some out of line.</summary>
+    private static string Name(int i) => (i % 4) switch
+    {
+        0 => $"name-{i % 100}",
+        1 => $"twelve-b-{i % 10}{i % 10}{i % 10}",
+        2 => $"thirteen-b{i % 10}{i % 10}{i % 10}",
+        _ => $"a name of many more bytes than a view holds, {i % 100}",
+    };
+
     private static void CheckPage(int column, int first, int rows, bool[] valid, ReadOnlySpan<byte> values)
     {
         int at = 0;
@@ -151,7 +160,7 @@ public sealed partial class ParquetWriterTests
                     if (valid[r])
                     {
                         int length = BinaryPrimitives.ReadInt32LittleEndian(values[at..]);
-                        Assert.Equal($"name-{i % 100}", Encoding.UTF8.GetString(values.Slice(at + 4, length)));
+                        Assert.Equal(Name(i), Encoding.UTF8.GetString(values.Slice(at + 4, length)));
                         at += 4 + length;
                     }
 

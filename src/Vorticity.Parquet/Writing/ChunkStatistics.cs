@@ -234,8 +234,14 @@ internal sealed class ChunkStatistics(WriteColumn column)
     /// <summary>
     /// The least and greatest of length-prefixed byte arrays, as unsigned bytes: each value's first
     /// eight bytes, big-endian, an integer whose order is theirs, so that a value is compared whole
-    /// only where its prefix ties a bound's.
+    /// only where its prefix ties a bound's and one of the two runs past it.
     /// </summary>
+    /// <remarks>
+    /// A prefix is one read of a word wherever eight bytes follow the value's start in the page, its
+    /// bytes past the value masked off. Two values of eight bytes or fewer whose prefixes tie hold the
+    /// same bytes up to the shorter's end, past which the longer holds zeros: the shorter is the
+    /// lesser, and two of one length are equal.
+    /// </remarks>
     private static void PrefixedExtremes(ReadOnlySpan<byte> plain, int count, out ReadOnlySpan<byte> low, out ReadOnlySpan<byte> high)
     {
         int at = 0;
@@ -246,9 +252,10 @@ internal sealed class ChunkStatistics(WriteColumn column)
         for (int i = 0; i < count; i++)
         {
             int length = BinaryPrimitives.ReadInt32LittleEndian(plain[at..]);
-            ReadOnlySpan<byte> value = plain.Slice(at + sizeof(int), length);
-            at += sizeof(int) + length;
-            ulong key = Prefix(value);
+            int start = at + sizeof(int);
+            ReadOnlySpan<byte> value = plain.Slice(start, length);
+            ulong key = start <= plain.Length - sizeof(ulong) ? WordPrefix(plain[start..], length) : Prefix(value);
+            at = start + length;
             if (i == 0)
             {
                 low = value;
@@ -258,19 +265,32 @@ internal sealed class ChunkStatistics(WriteColumn column)
                 continue;
             }
 
-            if (key < lowKey || (key == lowKey && value.SequenceCompareTo(low) < 0))
+            if (key < lowKey || (key == lowKey && Below(value, low)))
             {
                 low = value;
                 lowKey = key;
             }
 
-            if (key > highKey || (key == highKey && value.SequenceCompareTo(high) > 0))
+            if (key > highKey || (key == highKey && Below(high, value)))
             {
                 high = value;
                 highKey = key;
             }
         }
     }
+
+    /// <summary>The first <paramref name="length"/> bytes, eight at most, of the eight <paramref name="bytes"/> starts with, as <see cref="Prefix"/> reads them.</summary>
+    private static ulong WordPrefix(ReadOnlySpan<byte> bytes, int length)
+    {
+        ulong word = BinaryPrimitives.ReadUInt64BigEndian(bytes);
+        return length >= sizeof(ulong) ? word : word & ~(ulong.MaxValue >> (length * 8));
+    }
+
+    /// <summary>Whether <paramref name="value"/> orders before <paramref name="bound"/>, whose prefix ties its.</summary>
+    private static bool Below(ReadOnlySpan<byte> value, ReadOnlySpan<byte> bound) =>
+        value.Length <= sizeof(ulong) && bound.Length <= sizeof(ulong)
+            ? value.Length < bound.Length
+            : value.SequenceCompareTo(bound) < 0;
 
     /// <summary>A byte array's first eight bytes as a big-endian integer, zeros past its end.</summary>
     private static ulong Prefix(ReadOnlySpan<byte> value)

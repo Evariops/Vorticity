@@ -6,6 +6,7 @@ using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -1826,9 +1827,39 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// The values of the rows that hold one, PLAIN: each its length's four little-endian bytes, then
+    /// its own, into one reservation of their whole size.
+    /// </summary>
+    /// <remarks>
+    /// A view of a value it holds inline is that value's PLAIN form already, its length then its
+    /// bytes, so it is copied whole, one vector a value; the vector's bytes past the value fall where
+    /// the next value goes, or past the reservation's end, in room taken for them. A value held out
+    /// of line is copied from its buffer, which <see cref="ViewValues"/> resolves and checks.
+    /// </remarks>
     private void StageBytes(CanonicalNode node, int start, int count, bool dense, int first, PooledBytes target)
     {
+        const int ViewSize = CanonicalSupport.ViewSize;
+        ReadOnlySpan<byte> raw = node.Views.Span.Slice(start * ViewSize, count * ViewSize);
+        long bytes = 0;
+        for (int row = 0; row < count; row++)
+        {
+            if (dense || CanonicalSupport.BitAt(_validity, first + row))
+            {
+                bytes += sizeof(int) + (long)BinaryPrimitives.ReadUInt32LittleEndian(raw[(row * ViewSize)..]);
+            }
+        }
+
+        if (bytes > Array.MaxLength - Vector128<byte>.Count)
+        {
+            throw new InvalidOperationException($"The page's values take {bytes} bytes, past what one buffer can hold.");
+        }
+
         ViewValues views = new(node);
+        Span<byte> into = target.GetSpan((int)bytes + Vector128<byte>.Count);
+        ref byte to = ref MemoryMarshal.GetReference(into);
+        ref byte view = ref MemoryMarshal.GetReference(raw);
+        int at = 0;
         for (int row = 0; row < count; row++)
         {
             if (!dense && !CanonicalSupport.BitAt(_validity, first + row))
@@ -1836,11 +1867,22 @@ internal sealed class ColumnChunkWriter : IDisposable
                 continue;
             }
 
-            ReadOnlySpan<byte> value = views.At(start + row);
-            Span<byte> destination = target.Reserve(4 + value.Length);
-            BinaryPrimitives.WriteInt32LittleEndian(destination, value.Length);
-            value.CopyTo(destination[4..]);
+            ref byte here = ref Unsafe.Add(ref view, row * ViewSize);
+            uint size = Unsafe.ReadUnaligned<uint>(ref here);
+            if (size <= CanonicalSupport.MaxInlineViewLength)
+            {
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref to, at), Unsafe.ReadUnaligned<Vector128<byte>>(ref here));
+            }
+            else
+            {
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref to, at), size);
+                views.At(start + row).CopyTo(into[(at + sizeof(int))..]);
+            }
+
+            at += sizeof(int) + (int)size;
         }
+
+        target.Advance((int)bytes);
     }
 
     private void StageConverted(CanonicalNode node, int start, int count, bool dense, int first, int values, PooledBytes target)
