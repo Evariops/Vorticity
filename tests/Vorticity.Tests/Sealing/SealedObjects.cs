@@ -50,6 +50,45 @@ internal static class SealedObjects
         }
     }
 
+    /// <summary>
+    /// <paramref name="sealedBytes"/> with <paramref name="plaintext"/> appended as an epoch, written in
+    /// pieces of <paramref name="chunk"/> bytes; <paramref name="key"/> stays the caller's.
+    /// </summary>
+    internal static async Task<byte[]> AppendSealAsync(
+        byte[] sealedBytes, ReadOnlyMemory<byte> plaintext, DataKey key, int chunk, CancellationToken cancellationToken)
+    {
+        SealedLayout layout;
+        await using (SealedSegmentReader reader = await SealedSegmentReader.OpenAsync(
+            new MemorySegmentSource(sealedBytes), ownsInner: true, (_, _) => new ValueTask<DataKey>(key.Retain()), cancellationToken))
+        {
+            layout = reader.Layout;
+        }
+
+        Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, layout, _ => new ValueTask<DataKey>(key.Retain()));
+        try
+        {
+            if (sink.Position != layout.PlainLength)
+            {
+                throw new InvalidOperationException($"An append starts at plaintext offset {sink.Position}, where the object holds {layout.PlainLength} bytes.");
+            }
+
+            for (int at = 0; at < plaintext.Length; at += chunk)
+            {
+                await sink.WriteAsync(plaintext.Slice(at, Math.Min(chunk, plaintext.Length - at)), cancellationToken);
+            }
+
+            await sink.FinishAsync(cancellationToken);
+            await sink.FlushAsync(cancellationToken);
+            await pipe.Writer.CompleteAsync();
+            return [.. sealedBytes, .. await DrainAsync(pipe.Reader, cancellationToken)];
+        }
+        finally
+        {
+            sink.Release();
+        }
+    }
+
     /// <summary>Writes <paramref name="rows"/> as a Vortex file through a sealing stage; <paramref name="key"/> stays the caller's.</summary>
     internal static async Task<byte[]> WriteAsync(
         IReadOnlyList<Reading> rows, DataKey key, SealParameters parameters, CancellationToken cancellationToken)

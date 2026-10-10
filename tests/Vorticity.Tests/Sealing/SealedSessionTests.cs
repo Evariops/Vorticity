@@ -4,9 +4,9 @@
 // them as plain ones, scans, filters, aggregates and parallel lanes giving the same answers; a
 // session without the key is told the file is sealed; a session that refuses plaintext refuses a
 // plain file and one that does not opens it; a file written to a caller's pipe opens from a source;
-// the keyring is asked once per data key however many files are written or opened; appends to
-// sealed files are refused until epochs come; a sealed file decrypts to a plain one any session
-// opens; a policy without a keyring is refused when the session is created.
+// the keyring is asked once per data key however many files are written or opened; a sealed file
+// decrypts to a plain one any session opens; a policy without a keyring is refused when the session
+// is created. Appends are held in SealedAppendTests.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -195,23 +195,6 @@ public sealed class SealedSessionTests : IDisposable
         }
 
         Assert.Equal((1, 1), (keyring.Generated, keyring.Unwrapped));
-    }
-
-    [Fact]
-    public async Task AppendsToSealedFilesWaitForEpochs()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        using VortexKeyring keyring = SealedObjects.Keyring();
-        string path = Path.Combine(_directory, "sealed.vortex");
-        await using VortexSession sealing = VortexSession.Create(o =>
-        {
-            o.Keyring = keyring;
-            o.EncryptFiles = true;
-        });
-        await WriteAsync(sealing, path, SealedObjects.Rows(1_000), ct);
-
-        await Assert.ThrowsAsync<NotSupportedException>(async () => await sealing.OpenWriterAsync(path, cancellationToken: ct));
-        await Assert.ThrowsAsync<NotSupportedException>(async () => await VortexSession.Default.OpenWriterAsync(path, cancellationToken: ct));
     }
 
     [Fact]

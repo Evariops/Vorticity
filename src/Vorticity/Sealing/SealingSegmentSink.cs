@@ -45,17 +45,26 @@ internal sealed record SealParameters(int FrameLog2, ReadOnlyMemory<byte> Object
 /// <see cref="Position"/> counts plaintext, which is what every offset the writer records means: the
 /// file inside the envelope is byte for byte the one a plain write produces.
 /// </para>
+/// <para>
+/// An append continues a sealed object with an epoch of its own: no header, frames sealed under a key
+/// derived from a fresh salt, and a trailer that lists the old epochs again before the new one. The
+/// pipe then starts at the old object's end, and <see cref="Position"/> at its plaintext's.
+/// </para>
 /// </remarks>
 internal sealed class SealingSegmentSink : ISegmentSink
 {
     private readonly PipeWriter _pipe;
-    private readonly SealParameters _parameters;
+    private readonly SealParameters? _parameters;
+    private readonly SealedLayout? _continued;
     private readonly Func<CancellationToken, ValueTask<DataKey>> _dataKey;
     private readonly int _frameSize;
+    private readonly long _plainStart;
     private SealDescriptor? _descriptor;
     private EpochCipher? _cipher;
     private AesGcm? _aes;
     private NativeSegmentOwner? _frame;
+    private byte[]? _appendedSaltAndCommitment;
+    private long _framesStart;
     private int _filled;
     private long _position;
     private long _frameIndex;
@@ -77,6 +86,33 @@ internal sealed class SealingSegmentSink : ISegmentSink
         _parameters = parameters;
         _dataKey = dataKey;
         _frameSize = 1 << parameters.FrameLog2;
+    }
+
+    /// <summary>A stage that appends an epoch to the sealed object <paramref name="continued"/> describes, through a pipe positioned at its end.</summary>
+    /// <param name="pipe">Where the sealed bytes go, from the old object's last byte on; the writer completes it.</param>
+    /// <param name="continued">The old object's layout: its descriptor, which the epoch keeps, and its epochs.</param>
+    /// <param name="dataKey">The data key the descriptor names, handed over: the stage derives the epoch's key from it and disposes it.</param>
+    /// <exception cref="VortexUnsupportedException">The object already holds as many epochs as a trailer may list.</exception>
+    internal SealingSegmentSink(PipeWriter pipe, SealedLayout continued, Func<CancellationToken, ValueTask<DataKey>> dataKey)
+    {
+        ArgumentNullException.ThrowIfNull(pipe);
+        ArgumentNullException.ThrowIfNull(continued);
+        ArgumentNullException.ThrowIfNull(dataKey);
+        if (continued.Epochs.Length >= SealedFormat.MaxEpochs)
+        {
+            throw new VortexUnsupportedException(
+                "append",
+                ComponentKind.Feature,
+                $"This sealed file holds {continued.Epochs.Length} epochs, the most a trailer lists, and cannot be appended to. Rewrite it instead.");
+        }
+
+        _pipe = pipe;
+        _continued = continued;
+        _dataKey = dataKey;
+        _frameSize = continued.FrameSize;
+        _plainStart = continued.PlainLength;
+        _position = continued.PlainLength;
+        _framesStart = continued.ObjectLength;
     }
 
     /// <summary>The plaintext bytes written so far, the next write's offset in the file inside the envelope.</summary>
@@ -164,13 +200,16 @@ internal sealed class SealingSegmentSink : ISegmentSink
         Write(data.Span);
     }
 
-    /// <summary>Takes the data key, derives the first epoch's key and commitment, and writes the header.</summary>
+    /// <summary>
+    /// Takes the data key and derives the epoch's key and commitment: for a new object the first
+    /// epoch's, and the header written; for an append the next epoch's, from a fresh salt.
+    /// </summary>
     private async ValueTask StartAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_finished, this);
         using DataKey dataKey = await _dataKey(cancellationToken).ConfigureAwait(false);
         Span<byte> salt = stackalloc byte[SealedFormat.SaltBytes];
-        if (_parameters.Salt.IsEmpty)
+        if (_parameters is null || _parameters.Salt.IsEmpty)
         {
             RandomNumberGenerator.Fill(salt);
         }
@@ -179,15 +218,27 @@ internal sealed class SealingSegmentSink : ISegmentSink
             _parameters.Salt.Span.CopyTo(salt);
         }
 
-        SealDescriptor descriptor = SealDescriptor.Create(
-            _parameters.FrameLog2, _parameters.ObjectId.Span, _parameters.Binding.Span, dataKey.KeyId,
+        SealDescriptor descriptor = _continued?.Descriptor ?? SealDescriptor.Create(
+            _parameters!.FrameLog2, _parameters.ObjectId.Span, _parameters.Binding.Span, dataKey.KeyId,
             _parameters.KeyContext.Span, dataKey.WrappedKey.Span, salt);
+        uint epoch = (uint)(_continued?.Epochs.Length ?? 0);
         Span<byte> key = stackalloc byte[SealedFormat.KeyBytes];
         Span<byte> commitment = stackalloc byte[SealedFormat.CommitmentBytes];
         try
         {
-            SealedFormat.Derive(dataKey.Key, salt, descriptor.Hash, epoch: 0, firstOffset: 0, key, commitment);
-            descriptor.SetCommitment(commitment);
+            SealedFormat.Derive(dataKey.Key, salt, descriptor.Hash, epoch, _plainStart, key, commitment);
+            if (_continued is null)
+            {
+                descriptor.SetCommitment(commitment);
+            }
+            else
+            {
+                // An appended epoch's salt and commitment go in its entry of the trailer.
+                _appendedSaltAndCommitment = new byte[SealedFormat.SaltBytes + SealedFormat.CommitmentBytes];
+                salt.CopyTo(_appendedSaltAndCommitment);
+                commitment.CopyTo(_appendedSaltAndCommitment.AsSpan(SealedFormat.SaltBytes));
+            }
+
             _cipher = new EpochCipher(key);
         }
         finally
@@ -198,12 +249,17 @@ internal sealed class SealingSegmentSink : ISegmentSink
         _descriptor = descriptor;
         _aes = _cipher.Rent();
         _frame = AlignedBufferPool.Shared.Rent(_frameSize, VortexLimits.MaxAlignment);
+        if (_continued is not null)
+        {
+            return;
+        }
 
         Span<byte> header = _pipe.GetSpan(SealedFormat.HeaderPrefixBytes + descriptor.Length);
         SealedFormat.HeaderMagic.CopyTo(header);
         BinaryPrimitives.WriteInt32LittleEndian(header[8..], descriptor.Length);
         descriptor.Bytes.CopyTo(header[SealedFormat.HeaderPrefixBytes..]);
         Advance(SealedFormat.HeaderPrefixBytes + descriptor.Length);
+        _framesStart = SealedFormat.HeaderPrefixBytes + descriptor.Length;
     }
 
     private void Write(ReadOnlySpan<byte> data)
@@ -248,22 +304,45 @@ internal sealed class SealingSegmentSink : ISegmentSink
         _frameIndex++;
     }
 
-    /// <summary>The descriptor again, one epoch, the trailer's length, and the magic.</summary>
+    /// <summary>The descriptor again, every epoch, the trailer's length, and the magic.</summary>
     private void WriteTrailer()
     {
         SealDescriptor descriptor = _descriptor!;
-        int length = descriptor.Length + 4 + SealedFormat.EpochEntryBytes + SealedFormat.TrailerSuffixBytes;
+        SealedEpoch[] old = _continued?.Epochs ?? [];
+        int length = checked(descriptor.Length + 4 + SealedFormat.EpochEntryBytes
+            + (old.Length * SealedFormat.AppendedEpochEntryBytes) + SealedFormat.TrailerSuffixBytes);
         Span<byte> trailer = _pipe.GetSpan(length);
         descriptor.Bytes.CopyTo(trailer);
         int at = descriptor.Length;
-        BinaryPrimitives.WriteUInt32LittleEndian(trailer[at..], 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(trailer[at..], (uint)(old.Length + 1));
         at += 4;
-        BinaryPrimitives.WriteInt64LittleEndian(trailer[at..], SealedFormat.HeaderPrefixBytes + descriptor.Length);
-        BinaryPrimitives.WriteInt64LittleEndian(trailer[(at + 8)..], _position);
-        at += SealedFormat.EpochEntryBytes;
+        for (int e = 0; e < old.Length; e++)
+        {
+            at = WriteEpoch(trailer, at, old[e].FramesStart, old[e].PlainLength);
+            if (e > 0)
+            {
+                old[e].Salt.Span.CopyTo(trailer[at..]);
+                old[e].Commitment.Span.CopyTo(trailer[(at + SealedFormat.SaltBytes)..]);
+                at += SealedFormat.SaltBytes + SealedFormat.CommitmentBytes;
+            }
+        }
+
+        // The epoch written now; its salt and commitment when it is not the first.
+        at = WriteEpoch(trailer, at, _framesStart, _position - _plainStart);
+        ReadOnlySpan<byte> appended = _appendedSaltAndCommitment;
+        appended.CopyTo(trailer[at..]);
+        at += appended.Length;
         BinaryPrimitives.WriteUInt32LittleEndian(trailer[at..], (uint)length);
         SealedFormat.TrailerMagic.CopyTo(trailer[(at + 4)..]);
         Advance(length);
+    }
+
+    /// <summary>The fixed part of an epoch's entry: where its frames start and its plaintext length.</summary>
+    private static int WriteEpoch(Span<byte> trailer, int at, long framesStart, long plainLength)
+    {
+        BinaryPrimitives.WriteInt64LittleEndian(trailer[at..], framesStart);
+        BinaryPrimitives.WriteInt64LittleEndian(trailer[(at + 8)..], plainLength);
+        return at + SealedFormat.EpochEntryBytes;
     }
 
     private void Advance(int bytes)

@@ -737,23 +737,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The pipe over the file this writer opened, created or appended to; null over a caller's sink.</summary>
     internal FilePipeWriter? FilePipe => _filePipe;
 
-    /// <summary>An append to <paramref name="path"/>, in <paramref name="session"/>.</summary>
+    /// <summary>
+    /// An append to <paramref name="path"/>, in <paramref name="session"/>: a sealed file is continued
+    /// with an epoch of its own, under the data key it names, which the session's keyring unwraps.
+    /// </summary>
     internal static async ValueTask<VortexFileWriter> AppendInSessionAsync(
         string path, VortexWriteOptions? options, VortexSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
-        if (session.Seals)
-        {
-            throw new NotSupportedException(
-                "A session that seals its files appends to none yet: appends to sealed files come with epochs. Write the file again instead.");
-        }
-
-        if (await Sealing.SealedFiles.IsSealedAsync(path, cancellationToken).ConfigureAwait(false))
-        {
-            throw new NotSupportedException(
-                $"'{path}' is sealed, and appends to sealed files come with epochs. Write the file again instead.");
-        }
-
         VortexFileWriter writer = await AppendAsync(path, options, null, session, cancellationToken).ConfigureAwait(false);
         writer.Session = session;
         return writer;
