@@ -785,9 +785,17 @@ well-formed bytes that lie may produce wrong answers. The fields fall into the c
 | a DELTA_BINARY_PACKED block | a multiple of 128 values, miniblocks of a multiple of 32, widths within the type, its value count the page's |
 | an ALP page | vectors of 2^3 to 2^15, exponents up to 10 and 18, factors up to the exponent, widths up to 32 and 64, offsets inside the page |
 
-The fuzzer of [04-conformance.md](04-conformance.md) §5 gains a Parquet target: structure-aware
-mutations of Thrift (varints, field headers, list sizes, unions), of page headers and of each
-encoding's header, decompression bombs, and Class I fields set to plausible extremes.
+The fuzzer of [04-conformance.md](04-conformance.md) §5 has a Parquet target, `--parquet`: it walks
+a file's footer and each page header the footer places as Thrift compact, notes where every varint
+lies and how long it is, and rewrites one in place at its own length to an edge, zero, one, one
+off, twice, the most its bytes hold, so that the structure stays well formed and the value is the
+one a bounds check exists for; beside it, the footer's length, the first bytes of a page's body
+where an encoding's header lies, a page's decompressed size at its most, truncation, a word in the
+data, and the bit flip as the control. Each mutation is read whole mapped, then by positional reads,
+which cut groups into windows and read ahead, and verified against itself; only
+`ParquetFormatException` and `ParquetUnsupportedException` may escape, within five seconds. Its
+seeds are the standard's suite and this writer's files under every page version, codec and forced
+encoding (`FuzzSeeds`, where `VX_FUZZ_SEEDS` names the directory).
 
 ## 9. Correctness without an external reference
 

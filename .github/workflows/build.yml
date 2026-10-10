@@ -341,6 +341,21 @@ jobs:
           git clone --quiet https://github.com/apache/parquet-testing.git "$RUNNER_TEMP/parquet-testing"
           git -C "$RUNNER_TEMP/parquet-testing" checkout --quiet 56653c437c8092f704a092d0d1d4e600124cd49f
 
+      # The Parquet reader's half of the parser's promise: structure-aware mutations of the suite's
+      # files, their Thrift varints rewritten in place to edges, each read mapped and by positional
+      # reads and verified, with a fixed seed so that a finding is reproducible from the log alone.
+      - name: Fuzz the Parquet reader
+        run: |
+          dotnet run --project tests/Vorticity.Fuzz -c Release --no-build -- \
+            --parquet "$RUNNER_TEMP/parquet-testing/data" 50000 20261010
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: parquet-fuzz-findings
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
       - name: Publish pqdump as Native AOT
         run: dotnet publish tools/pqdump -c Release -r linux-x64
 
