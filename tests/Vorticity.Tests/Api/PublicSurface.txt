@@ -717,6 +717,11 @@ Vorticity:     property int Decoded { get; init; }
 Vorticity:     property int Proven { get; init; }
 Vorticity:     property int Pruned { get; init; }
 Vorticity:     property long Rows { get; init; }
+Vorticity: sealed class Vorticity.DataKey : IDisposable
+Vorticity:     ctor DataKey(string, ReadOnlySpan<byte>, ReadOnlySpan<byte>)
+Vorticity:     method void Dispose()
+Vorticity:     property ReadOnlyMemory<byte> WrappedKey { get; }
+Vorticity:     property string KeyId { get; }
 Vorticity: static class Vorticity.DecimalAggregates
 Vorticity:     method Sym<Nullable<double>> Average<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
 Vorticity:     method Sym<Nullable<double>> Average<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
@@ -1658,6 +1663,16 @@ Vorticity:     method Nullable<VortexEdition> IntroducedIn(ComponentKind, string
 Vorticity:     method bool Contains(VortexEdition, ComponentKind, string)
 Vorticity:     method string MinimumRustVersion(VortexEdition)
 Vorticity:     method string Name(VortexEdition)
+Vorticity: enum Vorticity.VortexEncryptionError
+Vorticity:     const VortexEncryptionError NoKey = 0
+Vorticity:     const VortexEncryptionError Refused = 2
+Vorticity:     const VortexEncryptionError Unauthenticated = 1
+Vorticity:     field int value__
+Vorticity: sealed class Vorticity.VortexEncryptionException : VortexException
+Vorticity:     ctor VortexEncryptionException(VortexEncryptionError, string)
+Vorticity:     ctor VortexEncryptionException(VortexEncryptionError, string, Exception)
+Vorticity:     property VortexEncryptionError Error { get; }
+Vorticity:     property string KeyId { get; init; }
 Vorticity: class Vorticity.VortexException : Exception
 Vorticity:     ctor VortexException()
 Vorticity:     ctor VortexException(string)
@@ -1776,6 +1791,17 @@ Vorticity:     property Nullable<bool> FileHashHolds { get; init; }
 Vorticity:     property bool Holds { get; }
 Vorticity:     property long Bare { get; init; }
 Vorticity:     property long Held { get; init; }
+Vorticity: struct Vorticity.VortexKey
+Vorticity:     ctor VortexKey(string, ReadOnlyMemory<byte>)
+Vorticity:     property ReadOnlyMemory<byte> Key { get; }
+Vorticity:     property string Id { get; }
+Vorticity: abstract class Vorticity.VortexKeyring : IDisposable
+Vorticity:     ctor VortexKeyring()
+Vorticity:     method ValueTask<DataKey> GenerateAsync(ReadOnlyMemory<byte>, CancellationToken)
+Vorticity:     method ValueTask<DataKey> UnwrapAsync(string, ReadOnlyMemory<byte>, ReadOnlyMemory<byte>, CancellationToken)
+Vorticity:     method VortexKeyring FromKeys(ReadOnlySpan<VortexKey>)
+Vorticity:     method void Dispose()
+Vorticity:     method void Dispose(bool)
 Vorticity: sealed class Vorticity.VortexLayout : IEquatable<VortexLayout>
 Vorticity:     ctor VortexLayout(string, long, VortexType, ImmutableArray<int>, int, long, bool, string, ImmutableArray<VortexLayout>)
 Vorticity:     method VortexLayout <Clone>$()

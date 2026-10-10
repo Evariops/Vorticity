@@ -61,7 +61,13 @@ public sealed partial class VortexFileWriter
     /// rows waiting for their chunk.
     /// </summary>
     public long UnflushedBytes =>
-        (_sink is PipeSegmentSink pipe ? pipe.UnflushedBytes : 0) + _pendingBytes + (_root?.CommittedBytes ?? 0);
+        _sink switch
+        {
+            PipeSegmentSink pipe => pipe.UnflushedBytes,
+            Sealing.SealingSegmentSink sealing => sealing.UnflushedBytes,
+            _ => 0,
+        }
+        + _pendingBytes + (_root?.CommittedBytes ?? 0);
 
     /// <summary>Keeps the schema instance the writer was created with.</summary>
     internal void Declare(VortexSchema schema) => _publicSchema = schema;
@@ -515,6 +521,9 @@ public sealed partial class VortexFileWriter
         _chunkRows.Release();
         ReleaseSegments();
         _segmentCount = 0;
+
+        // A sealing stage holds the object's key and a frame of plaintext, completed or not.
+        (_sink as Sealing.SealingSegmentSink)?.Release();
 
         if (!_sinkClosed)
         {

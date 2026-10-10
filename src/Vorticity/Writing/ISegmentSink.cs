@@ -18,4 +18,10 @@ internal interface ISegmentSink
 
     /// <summary>Flushes whatever the sink is buffering.</summary>
     ValueTask FlushAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Writes what the sink adds once the file's last byte is in, before the writer's last flush: a
+    /// sealing stage's last frame and trailer. Nothing for a plain sink.
+    /// </summary>
+    ValueTask FinishAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 }

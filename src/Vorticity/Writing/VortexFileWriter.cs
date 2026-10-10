@@ -1729,6 +1729,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             builder,
             _filePipe is { Durable: true } durable ? durable : null).ConfigureAwait(false);
 
+        await _sink.FinishAsync(cancellationToken).ConfigureAwait(false);
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
 
         // Runs written between chunks sit inside `dataEnd`, and are moved to the index count.
