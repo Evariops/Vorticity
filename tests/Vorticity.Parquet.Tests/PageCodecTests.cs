@@ -148,6 +148,111 @@ public sealed class PageCodecTests
     }
 
     [Fact]
+    public void EveryKindOfSnappyElementDecodesAsItsFormatSays()
+    {
+        // Streams of every element another encoder writes: literals short and long, copies with a
+        // one-byte offset and three bits in the tag, two-byte and four-byte offsets, offsets under
+        // sixteen whose copies repeat themselves, read back as a byte at a time reads them; then
+        // each broken a byte at a time, which only fails as a format.
+        Random random = new(53);
+        for (int round = 0; round < 400; round++)
+        {
+            (byte[] stream, byte[] expected) = SnappyStream(random, random.Next(1, 120));
+            byte[] read = new byte[expected.Length];
+            Snappy.Decompress(stream, read);
+            Assert.True(expected.AsSpan().SequenceEqual(read), $"round {round}");
+
+            for (int mutation = 0; mutation < 8; mutation++)
+            {
+                byte[] broken = (byte[])stream.Clone();
+                broken[random.Next(broken.Length)] ^= (byte)random.Next(1, 256);
+                try
+                {
+                    Snappy.Decompress(broken, new byte[expected.Length]);
+                }
+                catch (ParquetFormatException)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>A valid stream of <paramref name="elements"/> elements of every kind, and the bytes it decodes to.</summary>
+    private static (byte[] Stream, byte[] Expected) SnappyStream(Random random, int elements)
+    {
+        System.Collections.Generic.List<byte> body = [];
+        System.Collections.Generic.List<byte> output = [];
+        for (int e = 0; e < elements; e++)
+        {
+            int kind = output.Count == 0 ? 0 : random.Next(4);
+            if (kind == 0)
+            {
+                int length = random.Next(4) == 0 ? random.Next(61, 300) : random.Next(1, 61);
+                if (length <= 60)
+                {
+                    body.Add((byte)((length - 1) << 2));
+                }
+                else
+                {
+                    body.Add(61 << 2);
+                    body.Add((byte)((length - 1) & 0xFF));
+                    body.Add((byte)((length - 1) >> 8));
+                }
+
+                for (int i = 0; i < length; i++)
+                {
+                    byte value = (byte)random.Next(256);
+                    body.Add(value);
+                    output.Add(value);
+                }
+
+                continue;
+            }
+
+            // A copy: its offset short most of the time, so that it repeats what it writes.
+            int most = kind == 1 ? Math.Min(output.Count, 2047) : output.Count;
+            int offset = random.Next(3) == 0 ? random.Next(1, Math.Min(most, 15) + 1) : random.Next(1, most + 1);
+            int count = kind == 1 ? random.Next(4, 12) : random.Next(1, 65);
+            switch (kind)
+            {
+                case 1:
+                    body.Add((byte)(1 | ((count - 4) << 2) | ((offset >> 8) << 5)));
+                    body.Add((byte)offset);
+                    break;
+                case 2:
+                    body.Add((byte)(2 | ((count - 1) << 2)));
+                    body.Add((byte)offset);
+                    body.Add((byte)(offset >> 8));
+                    break;
+                default:
+                    body.Add((byte)(3 | ((count - 1) << 2)));
+                    body.AddRange(BitConverter.GetBytes(offset));
+                    break;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                output.Add(output[output.Count - offset]);
+            }
+        }
+
+        System.Collections.Generic.List<byte> stream = [];
+        for (uint length = (uint)output.Count; ; length >>= 7)
+        {
+            if (length < 0x80)
+            {
+                stream.Add((byte)length);
+                break;
+            }
+
+            stream.Add((byte)(length | 0x80));
+        }
+
+        stream.AddRange(body);
+        return ([.. stream], [.. output]);
+    }
+
+    [Fact]
     public void RandomStreamsFailOnlyWithAFormatException()
     {
         Random random = new(11);

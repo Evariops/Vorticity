@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -17,8 +18,10 @@ namespace Vorticity.Parquet.Codecs;
 /// <para>
 /// The decoder writes into a destination of exactly the declared length and refuses everything a
 /// hostile stream can claim: a length other than the destination's, a literal or a copy past either
-/// end, an offset of zero or before the start. Inside those checks it copies sixteen bytes at a time
-/// where both sides hold sixteen, and repeats a short pattern by doubling it.
+/// end, an offset of zero or before the start. Where the input holds sixty-four bytes past a tag and
+/// the output eighty, an element is read from a table of its tag and copied whole a vector at a time,
+/// its offset the one length checked; elsewhere each length is checked, and a short pattern is
+/// repeated by doubling it.
 /// </para>
 /// <para>
 /// The encoder is this library's own: blocks of 64 KiB, a hash of four bytes into a table of the
@@ -32,6 +35,35 @@ internal static class Snappy
     private const int BlockSize = 1 << 16;
     private const int HashBits = 14;
     private const int InputMargin = 15;
+
+    /// <summary>The input past a tag the decoder's fast elements read, whatever the tag: a literal's sixty-four bytes.</summary>
+    private const int FastInput = 65;
+
+    /// <summary>The output past an element's start the decoder's fast elements write: a copy of sixty-four, and a short pattern's eight past its end.</summary>
+    private const int FastOutput = 80;
+
+    /// <summary>
+    /// Per tag of a copy of a one-byte or two-byte offset, what the decoder's fast elements read in
+    /// place of the tag's fields: its length in the low byte, and above it the high bits a one-byte
+    /// offset takes from the tag.
+    /// </summary>
+    private static readonly uint[] Elements = CopyElements();
+
+    private static uint[] CopyElements()
+    {
+        uint[] elements = new uint[256];
+        for (uint tag = 0; tag < 256; tag++)
+        {
+            elements[tag] = (tag & 3) switch
+            {
+                1 => (((tag >> 2) & 7) + 4) | ((tag >> 5) << 16),
+                2 => (tag >> 2) + 1,
+                _ => 0,
+            };
+        }
+
+        return elements;
+    }
 
     /// <summary>The most bytes <paramref name="length"/> bytes compress to.</summary>
     internal static int MaxCompressedLength(int length) => 32 + length + length / 6;
@@ -50,7 +82,7 @@ internal static class Snappy
         int declared = ReadLength(source, ref start);
         if (declared != destination.Length)
         {
-            ParquetThrow.Format($"A Snappy page declares {declared} bytes where its header declares {destination.Length}.");
+            ThrowDeclared(declared, destination.Length);
         }
 
         fixed (byte* input = source)
@@ -62,6 +94,15 @@ internal static class Snappy
             byte* opEnd = output + destination.Length;
             while (ip < ipEnd)
             {
+                // As far as the elements go without checks of their own lengths, then one with them.
+                (nint fastIn, nint fastOut) = FastElements(ip, ipEnd - FastInput, op, opEnd - FastOutput, output);
+                ip = (byte*)fastIn;
+                op = (byte*)fastOut;
+                if (ip >= ipEnd)
+                {
+                    break;
+                }
+
                 uint tag = *ip++;
                 nuint length;
                 nuint offset;
@@ -154,6 +195,105 @@ internal static class Snappy
             }
         }
     }
+
+    /// <summary>
+    /// Decodes elements from <paramref name="ip"/> while their tag starts before
+    /// <paramref name="ipFast"/> and their output before <paramref name="opFast"/>, up to a literal
+    /// longer than sixty bytes or a copy of a four-byte offset; where the input and the output are then.
+    /// </summary>
+    /// <remarks>
+    /// Past a tag that starts before <paramref name="ipFast"/> lie the sixty-four bytes a literal
+    /// and a copy's offset read whatever the tag says, and past an output before
+    /// <paramref name="opFast"/> the eighty a copy of sixty-four writes whole and a short pattern
+    /// eight past its end: an element is read from tables in place of its tag's fields and copied a
+    /// vector at a time, with no check of its own lengths but its offset's. A method apart from the
+    /// elements with checks, so that its few values live in registers.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static unsafe (nint In, nint Out) FastElements(byte* ip, byte* ipFast, byte* op, byte* opFast, byte* output)
+    {
+        ref uint elements = ref MemoryMarshal.GetArrayDataReference(Elements);
+        while (ip < ipFast && op < opFast)
+        {
+            uint tag = *ip;
+            uint type = tag & 3;
+            if (type == 0)
+            {
+                nuint literal = (tag >> 2) + 1;
+                if (literal > 60)
+                {
+                    break;
+                }
+
+                Vector128.Store(Vector128.Load(ip + 1), op);
+                if (literal > 16)
+                {
+                    Vector128.Store(Vector128.Load(ip + 17), op + 16);
+                    Vector128.Store(Vector128.Load(ip + 33), op + 32);
+                    Vector128.Store(Vector128.Load(ip + 49), op + 48);
+                }
+
+                ip += literal + 1;
+                op += literal;
+                continue;
+            }
+
+            // A four-byte offset, which no block of snappy's 64 KiB needs, goes with the checks: the
+            // next tag is then the tag and one or two bytes on, which each element waits for.
+            if (type == 3)
+            {
+                break;
+            }
+
+            // The offset's one or two bytes, under the high bits a one-byte offset takes from the tag.
+            uint element = Unsafe.Add(ref elements, (nint)tag);
+            nuint offset = (nuint)(Unsafe.ReadUnaligned<uint>(ip + 1) & ((1u << (int)(8 * type)) - 1)) | (element >> 8);
+            if (offset - 1 >= (nuint)(op - output))
+            {
+                throw Corrupt();
+            }
+
+            ip += type + 1;
+            byte* from = op - offset;
+            nuint length = element & 0xFF;
+            if (offset >= 16)
+            {
+                // Each sixteen bytes read lie before those written: the copy's own, already
+                // written, where it repeats itself.
+                Vector128.Store(Vector128.Load(from), op);
+                Vector128.Store(Vector128.Load(from + 16), op + 16);
+                Vector128.Store(Vector128.Load(from + 32), op + 32);
+                Vector128.Store(Vector128.Load(from + 48), op + 48);
+                op += length;
+                continue;
+            }
+
+            // A pattern shorter than a vector, doubled in place until it is a word, then a word at
+            // a time: each eight bytes read lie before those written.
+            byte* end = op + length;
+            while ((nuint)(op - from) < 8)
+            {
+                Unsafe.WriteUnaligned(op, Unsafe.ReadUnaligned<ulong>(from));
+                op += op - from;
+            }
+
+            while (op < end)
+            {
+                Unsafe.WriteUnaligned(op, Unsafe.ReadUnaligned<ulong>(from));
+                from += 8;
+                op += 8;
+            }
+
+            op = end;
+        }
+
+        return ((nint)ip, (nint)op);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
+    private static void ThrowDeclared(int declared, int length) =>
+        ParquetThrow.Format($"A Snappy page declares {declared} bytes where its header declares {length}.");
 
     /// <summary>
     /// Copies <paramref name="length"/> bytes from <paramref name="offset"/> back, which may overlap
@@ -413,6 +553,11 @@ internal static class Snappy
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowCorrupt() => throw new ParquetFormatException("A Snappy page is corrupt: a literal or a copy reaches past its data.");
+    [DoesNotReturn]
+    private static void ThrowCorrupt() => throw Corrupt();
+
+    /// <summary>What a corrupt stream throws, made apart from the loop that throws it, which then holds nothing past the throw.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ParquetFormatException Corrupt() => new("A Snappy page is corrupt: a literal or a copy reaches past its data.");
 
 }
