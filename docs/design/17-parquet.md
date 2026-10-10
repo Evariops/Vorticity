@@ -867,10 +867,15 @@ comes down. Speed is measured against baselines this repository owns:
   wide filters, take, write — on the same table written once as Parquet and once as Vortex by this
   repository's writers, read through the same `Scan` in one process, each action warmed past the
   JIT's recompiling it, which two calls are not (`--format-cost`, `--columns` for each column
-  alone); the ratio informs and gates nothing. On the report's million rows on one core, Parquet
-  scans in 3.19 ms against 3.49, takes in 3.71 against 3.99 and writes back in 26.4 against 25.1;
-  its monotone column, delta-encoded, projects in 0.68 against 0.33, and on 32 cores its scan
-  stays at 3.2 ms where Vortex's falls to 1.87, a stream's batches read on one lane;
+  alone, `--file` for a file of another writer against its rewrite as Vortex); the ratio informs
+  and gates nothing. On the report's million rows Parquet scans in 2.88 ms on one core against
+  Vortex's 3.56 and in 1.31 on 32 against 1.82, projects its delta-encoded monotone column in 0.34
+  against 0.31, and writes back in 25.6 ms against 25.4 on one core but in 20.9 against 10.8 on 32,
+  its pages closed a block at a time, four columns at most at once. The January 2023 taxi trips,
+  GZIP's, scan in 189 ms on one core against their Vortex rewrite's 22.6, the inflate most of it,
+  and in 48 against 34 on 32; ClickBench's first file of hits, Snappy's, in 214 against 69 and 105
+  against 35, four columns of long strings, kept as plain byte arrays once their dictionaries
+  filled, holding most of the difference;
 - **regressions**, as the ratio of two kept runners across commits (`bench/runners.sh`);
 - **real files**, read from the data disk under §9's metadata oracle: throughput, allocations, and the
   oracle's verdict.
