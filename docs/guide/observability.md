@@ -151,7 +151,7 @@ cache: 8 hits, 19 misses, 0 bytes held
 
 A path passed to `OpenAsync` is memory-mapped by its first scan, unless the session's `MapFiles` is
 false, and a mapping has nothing to cache: its reads never reach the cache or its counters.
-`SegmentCache` exposes `Capacity`, `Size`, `Hits` and `Misses` for the whole session. A file's
+`SegmentCache` exposes `CapacityBytes`, `HeldBytes`, `Hits` and `Misses` for the whole session. A file's
 entries leave the cache when the file is disposed, which is why nothing is held at the end.
 [threads.md](threads.md) explains when a cache is worth its memory.
 

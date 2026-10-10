@@ -6,7 +6,7 @@ the caps in between.
 ```csharp
 await using VortexFile file = await VortexSession.Default.OpenAsync(path, new VortexOpenOptions
 {
-    MaxDecompressedSize = ceiling,
+    MaxDecompressedBytes = ceiling,
     VerifyStatistics = true,
 });
 
@@ -76,8 +76,8 @@ A file past any of them is malformed and reported with `VortexFormatException`.
 
 ## The ceiling you set
 
-`VortexOpenOptions.MaxDecompressedSize` bounds what a single decode may produce, and a decode is at
-most one chunk of one column. The default is `VortexLimits.DefaultMaxDecompressedSize`, 268 435 456
+`VortexOpenOptions.MaxDecompressedBytes` bounds what a single decode may produce, and a decode is at
+most one chunk of one column. The default is `VortexLimits.DefaultMaxDecompressedBytes`, 268 435 456
 bytes. It is a refusal, not a truncation, and it is the defence against a decompression bomb: a few
 bytes on disk that claim to expand to gigabytes.
 
@@ -87,7 +87,7 @@ first decode in the sample produces 131 072 bytes, which is why 4 096 is refused
 plenty. Lower the ceiling for input you did not write, and raise it only for a trusted file whose
 chunks are genuinely large, such as long text values.
 
-`VortexOpenOptions.MaxBatchDecompressedSize` bounds what the decodes of one batch produce together,
+`VortexOpenOptions.MaxBatchDecompressedBytes` bounds what the decodes of one batch produce together,
 across all its columns. It is off by default, because a thousand columns each decoding near the
 ceiling make a batch a thousand times that, which is legitimate for a wide table you wrote and a bomb
 in a file you did not. For untrusted input, set it to a few times the widest batch you expect. A
@@ -136,8 +136,8 @@ declares, each with `Supported`, so a caller can check before scanning.
 * The ceiling applies per decode, not per scan. A scan that decodes a thousand blocks of 1 MiB never
   comes near a 256 MiB ceiling, while a single block that claims 300 MiB trips it. The batch ceiling,
   when set, adds up the decodes of a batch's columns and starts again at the next batch.
-* The open reads the file's tail in one request of `InitialReadSize` bytes, 64 KiB by default and
-  never less. A local file is the exception: it reads its last 8 KiB first, since a read costs it no
+* The open reads the file's tail in one request of `InitialReadBytes`, 64 KiB by default and never
+  less. A local file is the exception: it reads its last 8 KiB first, since a read costs it no
   round trip. A footer larger than the first read costs a second read, not a refusal.
 * `IndexCacheBytes` on the session bounds how much of the decoded index runs each open file keeps.
   It is a memory ceiling rather than a safety one, and 0 keeps nothing.

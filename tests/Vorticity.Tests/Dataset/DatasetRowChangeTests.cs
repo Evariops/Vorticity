@@ -347,7 +347,7 @@ public sealed class DatasetRowChangeTests
         }
 
         List<long> down = [];
-        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
         {
             down.Add(cursor.Key.SignedValue);
         }

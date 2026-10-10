@@ -81,9 +81,9 @@ internal sealed class ExcludingKeySource : KeySource
 
     internal override void Share(ScanSegments held, Arrays.RetainedChunks retained) => _inner.Share(held, retained);
 
-    internal override async ValueTask<bool> SeekAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    internal override async ValueTask<bool> SeekAsync(FilterLiteral key, SeekMode op, CancellationToken cancellationToken)
     {
-        bool forward = op is not (SeekOp.AtOrBefore or SeekOp.Before);
+        bool forward = op is not (SeekMode.AtOrBefore or SeekMode.Before);
         if (!await _inner.SeekAsync(key, op, cancellationToken).ConfigureAwait(false)
             || !await KeptAsync(forward, cancellationToken).ConfigureAwait(false))
         {
@@ -92,7 +92,7 @@ internal sealed class ExcludingKeySource : KeySource
 
         // An exact seek landed on the key's first kept entry, or past the key when every one of
         // its entries is left out, in which case the key is not there.
-        if (op == SeekOp.Exact && KeyOrder.Total(_inner.Key, key) != 0)
+        if (op == SeekMode.Exact && KeyOrder.Total(_inner.Key, key) != 0)
         {
             _inner.Invalidate();
             return false;
@@ -113,16 +113,16 @@ internal sealed class ExcludingKeySource : KeySource
         await _inner.NextAsync(cancellationToken).ConfigureAwait(false)
         && await KeptAsync(forward: true, cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<bool> PrevAsync(CancellationToken cancellationToken) =>
-        await _inner.PrevAsync(cancellationToken).ConfigureAwait(false)
+    internal override async ValueTask<bool> PreviousAsync(CancellationToken cancellationToken) =>
+        await _inner.PreviousAsync(cancellationToken).ConfigureAwait(false)
         && await KeptAsync(forward: false, cancellationToken).ConfigureAwait(false);
 
     internal override async ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken) =>
         await _inner.NextKeyAsync(cancellationToken).ConfigureAwait(false)
         && await KeptAsync(forward: true, cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken) =>
-        await _inner.PrevKeyAsync(cancellationToken).ConfigureAwait(false)
+    internal override async ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken) =>
+        await _inner.PreviousKeyAsync(cancellationToken).ConfigureAwait(false)
         && await KeptAsync(forward: false, cancellationToken).ConfigureAwait(false);
 
     internal override async ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken)
@@ -230,7 +230,7 @@ internal sealed class ExcludingKeySource : KeySource
 
             if (!(forward
                 ? await _inner.NextAsync(cancellationToken).ConfigureAwait(false)
-                : await _inner.PrevAsync(cancellationToken).ConfigureAwait(false)))
+                : await _inner.PreviousAsync(cancellationToken).ConfigureAwait(false)))
             {
                 return false;
             }

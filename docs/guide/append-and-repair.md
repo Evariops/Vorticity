@@ -107,7 +107,7 @@ or that opens files it did not write, should set `Refuse`.
 ## Repairing
 
 ```csharp
-long valid = await VortexFileRepair.ValidLengthAsync(path, ct);
+long valid = await VortexFileRepair.GetValidLengthAsync(path, ct);
 VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);   // truncates to the last version that parses
 ```
 
@@ -116,13 +116,13 @@ valid length 29324; repaired: truncated True, 46919 -> 29324
 the repaired file appends again: 24576 rows
 ```
 
-`ValidLengthAsync` finds the longest prefix that opens, without changing the file. `RepairAsync`
+`GetValidLengthAsync` finds the longest prefix that opens, without changing the file. `RepairAsync`
 truncates the file to it, and leaves a valid file alone. After a repair, `TornTail` is null and the
 file accepts appends like any other.
 
 A file with no complete version has nothing to fall back to. A file cut short rather than appended
 to, such as an interrupted download or a full disk, throws `VortexFormatException` on open, and so do
-`ValidLengthAsync` and `RepairAsync`.
+`GetValidLengthAsync` and `RepairAsync`.
 
 ## Watch out
 

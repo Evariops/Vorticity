@@ -420,7 +420,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         // On several lanes, each range of rows is grouped on its own, and the ranges follow one
         // another here in the order of the rows: the structures are read once for all of them.
-        if (settling is null && pass.Filter is { } filter && pass.Options.Pruning && host.Source is FileScanSource file)
+        if (settling is null && pass.Filter is { } filter && pass.Options.UseStatistics && host.Source is FileScanSource file)
         {
             BlockMask? live = await ZonePruningPlan
                 .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(filter), _cancellationToken, steps: null, host.Counters, pass.Options.UseIndexes)

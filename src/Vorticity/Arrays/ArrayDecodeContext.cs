@@ -821,7 +821,7 @@ internal sealed class ArrayDecodeContext
 
     /// <summary>
     /// Counts <paramref name="byteLength"/> bytes a decode of this batch produces, or stands for,
-    /// against <see cref="VortexReadOptions.MaxBatchDecompressedSize"/>.
+    /// against <see cref="VortexReadOptions.MaxBatchDecompressedBytes"/>.
     /// </summary>
     /// <param name="byteLength">What one decode materializes, already within its own ceiling.</param>
     /// <exception cref="VortexFormatException">The batch would pass its ceiling.</exception>
@@ -829,9 +829,9 @@ internal sealed class ArrayDecodeContext
     internal void ChargeBatch(int byteLength)
     {
         long units = _scan.BatchDecoded + ((byteLength + 63L) >> 6);
-        if (units << 6 > Options.MaxBatchDecompressedSize)
+        if (units << 6 > Options.MaxBatchDecompressedBytes)
         {
-            ThrowOverBatch(Options.MaxBatchDecompressedSize);
+            ThrowOverBatch(Options.MaxBatchDecompressedBytes);
         }
 
         _scan.BatchDecoded = (int)Math.Min(units, int.MaxValue);
@@ -985,7 +985,7 @@ internal sealed class ArrayDecodeContext
     private static void ThrowOverBatch(long ceiling) =>
         throw new VortexFormatException(
             $"The batch would materialize more than the {ceiling}-byte " +
-            "ceiling of VortexOpenOptions.MaxBatchDecompressedSize.");
+            "ceiling of VortexOpenOptions.MaxBatchDecompressedBytes.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]

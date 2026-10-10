@@ -82,7 +82,7 @@ public sealed class VortexDataset : IAsyncDisposable
     public long Lag => Snapshot.Levels.LagAtLevelZero();
 
     /// <summary>The columns the dataset is ordered by, empty when objects are kept in the order they arrived.</summary>
-    public IReadOnlyList<string> ClusteringKeyPaths => Snapshot.Header.ClusteringKey;
+    public IReadOnlyList<string> ClusteringKey => Snapshot.Header.ClusteringKey;
 
     /// <summary>
     /// What the latest compaction run after a commit to fail on this handle raised
@@ -714,7 +714,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// A job is the one <see cref="CompactAsync"/> runs, so a loop is safe against every writer and
     /// every other loop. Loops that know one another spread over the due jobs by
     /// <see cref="CompactionSchedule.Loops"/>; loops that cannot count one another lease a job's
-    /// levels (<see cref="CompactionSchedule.Leases"/>).
+    /// levels (<see cref="CompactionSchedule.UseLeases"/>).
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The schedule's loop index, rate, sleep or lease span is out of range.</exception>
     public Task RunCompactionAsync(CompactionSchedule? schedule = null, CancellationToken cancellationToken = default) =>
@@ -764,7 +764,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 $"This store already holds a dataset at version {existing}; open it rather than creating it.");
         }
 
-        _ = ClusteringKey.Declared(options.ClusteringKey, schema);
+        _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema);
 
         CommitHeader template = new CommitHeader
         {

@@ -349,7 +349,7 @@ internal sealed class FileScanSource : ScanSource
             builder.WithMaxBatchRows(options.BatchRows);
         }
 
-        builder.WithPruning(options.Pruning).WithIndexes(options.UseIndexes);
+        builder.WithPruning(options.UseStatistics).WithIndexes(options.UseIndexes);
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
         builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings, spec.SinkDecodes);

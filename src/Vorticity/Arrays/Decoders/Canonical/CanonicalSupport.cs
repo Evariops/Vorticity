@@ -50,7 +50,7 @@ internal static class CanonicalSupport
 
     /// <summary>
     /// Materializes a buffer, refusing one larger than
-    /// <see cref="Vorticity.File.VortexReadOptions.MaxDecompressedSize"/>.
+    /// <see cref="Vorticity.File.VortexReadOptions.MaxDecompressedBytes"/>.
     /// </summary>
     /// <remarks>
     /// No allocation may be sized directly by a file-supplied value without a cap first. Several of
@@ -94,9 +94,9 @@ internal static class CanonicalSupport
 
     private static void RequireWithinBudget(ArrayDecodeContext context, int byteLength)
     {
-        if (byteLength > context.Options.MaxDecompressedSize)
+        if (byteLength > context.Options.MaxDecompressedBytes)
         {
-            ThrowOverBudget(byteLength, context.Options.MaxDecompressedSize);
+            ThrowOverBudget(byteLength, context.Options.MaxDecompressedBytes);
         }
 
         context.ChargeBatch(byteLength);
@@ -514,7 +514,7 @@ internal static class CanonicalSupport
     private static void ThrowOverBudget(int byteLength, long max) =>
         throw new VortexFormatException(
             $"Decoding this array would materialize {byteLength} bytes in one buffer; " +
-            $"VortexReadOptions.MaxDecompressedSize is {max}.");
+            $"VortexOpenOptions.MaxDecompressedBytes is {max}.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]

@@ -127,13 +127,13 @@ internal sealed class KeyCursor : IKeyWalker
     /// <returns>Whether an entry was found; the cursor is invalid when not.</returns>
     /// <exception cref="ArgumentException">The key is of the wrong domain, or is null.</exception>
     public ValueTask<bool> SeekAsync(
-        FilterLiteral key, SeekOp op, CancellationToken cancellationToken = default)
+        FilterLiteral key, SeekMode op, CancellationToken cancellationToken = default)
     {
         RequireKey(key);
         ObjectDisposedException.ThrowIf(_disposed, this);
         Diagnostics.VortexEventSource.Seek();
         ValueTask<bool> seek = _source.SeekAsync(key, op, cancellationToken);
-        return _distinct && op is SeekOp.AtOrBefore or SeekOp.Before
+        return _distinct && op is SeekMode.AtOrBefore or SeekMode.Before
             ? FirstOfKeyAsync(seek, cancellationToken)
             : seek;
     }
@@ -144,7 +144,7 @@ internal sealed class KeyCursor : IKeyWalker
     /// </summary>
     private async ValueTask<bool> FirstOfKeyAsync(ValueTask<bool> landing, CancellationToken cancellationToken) =>
         await landing.ConfigureAwait(false)
-        && await _source.SeekAsync(_source.Key, SeekOp.AtOrAfter, cancellationToken).ConfigureAwait(false);
+        && await _source.SeekAsync(_source.Key, SeekMode.AtOrAfter, cancellationToken).ConfigureAwait(false);
 
     /// <summary>Positions on the smallest key's first entry.</summary>
     /// <param name="cancellationToken">Cancels the read this makes.</param>
@@ -201,7 +201,7 @@ internal sealed class KeyCursor : IKeyWalker
     /// Over sorted runs, stepping against the direction of the last step re-seeks at the current
     /// entry: a min-heap of run positions does not run backwards.
     /// </remarks>
-    public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default)
+    public ValueTask<bool> PreviousAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (!_source.IsValid)
@@ -212,11 +212,11 @@ internal sealed class KeyCursor : IKeyWalker
         if (_distinct)
         {
             Diagnostics.VortexEventSource.Seek();
-            return FirstOfKeyAsync(_source.PrevKeyAsync(cancellationToken), cancellationToken);
+            return FirstOfKeyAsync(_source.PreviousKeyAsync(cancellationToken), cancellationToken);
         }
 
         Diagnostics.VortexEventSource.Step();
-        return _source.PrevAsync(cancellationToken);
+        return _source.PreviousAsync(cancellationToken);
     }
 
     /// <summary>
@@ -235,11 +235,11 @@ internal sealed class KeyCursor : IKeyWalker
     /// <summary>Steps to the last entry of the previous distinct key.</summary>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>
     /// <returns>Whether there was a previous key.</returns>
-    public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default)
+    public ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         Diagnostics.VortexEventSource.Seek();
-        return _source.IsValid ? _source.PrevKeyAsync(cancellationToken) : new ValueTask<bool>(false);
+        return _source.IsValid ? _source.PreviousKeyAsync(cancellationToken) : new ValueTask<bool>(false);
     }
 
     /// <summary>How many entries have a key below <paramref name="key"/>.</summary>

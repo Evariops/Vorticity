@@ -203,7 +203,7 @@ internal static class EncodedForms
             DictionaryView<double?> temperatures = celsius.AsDictionary();
             RunEndView<int> days = day.AsRunEnd();
             RunEndView<string> cities = city.AsRunEnd();
-            Column<string> decoded = city.Canonical();
+            Column<string> decoded = city.AsCanonical();
             Console.WriteLine($"first batch: {day.Length} rows; Celsius {temperatures.Cardinality} distinct values, {temperatures.Values.NullCount} of them null; Day {days.RunCount} runs, City {cities.RunCount} runs; City.Canonical() is {decoded.Encoding}");
             break;
         }

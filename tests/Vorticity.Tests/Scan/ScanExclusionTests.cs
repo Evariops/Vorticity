@@ -229,7 +229,7 @@ public sealed class ScanExclusionTests
 
             Assert.Equal(kept, up);
             List<(long Key, long Row)> down = [];
-            for (bool at = await cursor.SeekLastAsync(ct); at; at = await cursor.PrevAsync(ct))
+            for (bool at = await cursor.SeekLastAsync(ct); at; at = await cursor.PreviousAsync(ct))
             {
                 down.Add((cursor.Key.SignedValue, cursor.Row));
             }

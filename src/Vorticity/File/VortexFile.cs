@@ -311,8 +311,8 @@ public sealed partial class VortexFile : IAsyncDisposable
 
             // A file longer than the window is read first over what its source asks for, unless the
             // caller raised the window; the window holds any postscript a shorter read misses.
-            int window = InitialReadSize(options.InitialReadSize, fileLength);
-            int wanted = window < fileLength && options.InitialReadSize <= VortexOpenOptions.DefaultInitialReadSize
+            int window = InitialReadSize(options.InitialReadBytes, fileLength);
+            int wanted = window < fileLength && options.InitialReadBytes <= VortexOpenOptions.DefaultInitialReadBytes
                 ? Math.Min(window, source.TailReadSize)
                 : window;
             long tailOffset;

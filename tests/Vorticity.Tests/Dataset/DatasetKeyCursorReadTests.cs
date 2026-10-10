@@ -53,7 +53,7 @@ public sealed class DatasetKeyCursorReadTests
         long opening = store.Requests;
 
         long key = (10L * Middle) + 2;
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(key), down ? SeekOp.AtOrBefore : SeekOp.AtOrAfter, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(key), down ? SeekMode.AtOrBefore : SeekMode.AtOrAfter, ct));
         Assert.Equal(key, cursor.Key.SignedValue);
         Assert.Equal((5L * Middle) + 2, cursor.Row);
         Assert.Equal(1, cursor.Cursors);
@@ -75,7 +75,7 @@ public sealed class DatasetKeyCursorReadTests
         int at = written.IndexOf(key);
         for (int step = 1; step <= 5; step++)
         {
-            Assert.True(down ? await cursor.PrevAsync(ct) : await cursor.NextAsync(ct));
+            Assert.True(down ? await cursor.PreviousAsync(ct) : await cursor.NextAsync(ct));
             long expected = written[down ? at - step : at + step];
             Assert.Equal(expected, cursor.Key.SignedValue);
             Assert.Equal((expected / 10 * 5) + (expected % 10), cursor.Row);
@@ -171,7 +171,7 @@ public sealed class DatasetKeyCursorReadTests
         }
 
         Assert.Equal(count, index);
-        for (bool more = await cursor.SeekLastAsync(ct); more; more = await cursor.PrevAsync(ct))
+        for (bool more = await cursor.SeekLastAsync(ct); more; more = await cursor.PreviousAsync(ct))
         {
             at(--index);
         }
@@ -186,7 +186,7 @@ public sealed class DatasetKeyCursorReadTests
     private static async Task AssertSeeksAsync(
         DatasetKeyCursor cursor, int count, FilterLiteral key, int below, int through, Action<int> at, CancellationToken ct)
     {
-        foreach ((SeekOp op, int expected) in ((SeekOp, int)[])[(SeekOp.AtOrAfter, below), (SeekOp.After, through), (SeekOp.AtOrBefore, through - 1), (SeekOp.Before, below - 1)])
+        foreach ((SeekMode op, int expected) in ((SeekMode, int)[])[(SeekMode.AtOrAfter, below), (SeekMode.After, through), (SeekMode.AtOrBefore, through - 1), (SeekMode.Before, below - 1)])
         {
             bool inside = expected >= 0 && expected < count;
             Assert.Equal(inside, await cursor.SeekAsync(key, op, ct));
@@ -204,7 +204,7 @@ public sealed class DatasetKeyCursorReadTests
         foreach (int step in (int[])[1, 1, 1, -1, -1, -1, -1, -1, -1])
         {
             index += step;
-            bool more = step > 0 ? await cursor.NextAsync(ct) : await cursor.PrevAsync(ct);
+            bool more = step > 0 ? await cursor.NextAsync(ct) : await cursor.PreviousAsync(ct);
             Assert.Equal(index >= 0 && index < count, more);
             if (!more)
             {

@@ -149,7 +149,7 @@ public sealed class LocalFileSourceTests
     {
         Decoders.EnsureRegistered();
         string path = Corpus.Path("encodings/bool");
-        Assert.True(new System.IO.FileInfo(path).Length <= VortexOpenOptions.DefaultInitialReadSize);
+        Assert.True(new System.IO.FileInfo(path).Length <= VortexOpenOptions.DefaultInitialReadBytes);
 
         // A session of its own, for the reason the test above gives.
         await using VortexSession session = VortexSession.Create(_ => { });

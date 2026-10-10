@@ -96,10 +96,10 @@ lands on its lowest row, and `AtOrBefore` on its highest. A range `[a, b)` is `A
 
 ### 3.2 Stepping and direction
 
-`NextAsync` and `PrevAsync` move one entry in `(key, row)` order and return false past the ends.
+`NextAsync` and `PreviousAsync` move one entry in `(key, row)` order and return false past the ends.
 `NextKeyAsync` moves to the first entry of the next distinct key by seeking `After(Key)` rather than
 stepping through the duplicates. That is a loose index scan, one seek per group, so a `GROUP BY` over
-a key with a million rows costs one seek per value. `PrevKeyAsync` is `Before(Key)`.
+a key with a million rows costs one seek per value. `PreviousKeyAsync` is `Before(Key)`.
 
 A cursor has a direction. Stepping the other way seeks again at the current entry, which costs
 `O(r log n)` for `r` runs, because a heap of run positions does not run backwards. Every merging

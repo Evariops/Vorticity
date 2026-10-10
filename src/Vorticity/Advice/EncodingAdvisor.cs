@@ -93,7 +93,7 @@ internal static class EncodingAdvisor
     /// </summary>
     private const double SameBytes = 0.01;
 
-    private static readonly VortexWriteOptions Plain = new() { Compression = CompressionProfile.None, Statistics = false };
+    private static readonly VortexWriteOptions Plain = new() { Compression = CompressionProfile.None, WriteStatistics = false };
 
     /// <summary>Advises on every column of <paramref name="file"/> the advice can measure.</summary>
     internal static async ValueTask<EncodingAdvice> AdviseAsync(

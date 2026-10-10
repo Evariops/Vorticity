@@ -12,7 +12,7 @@ await using (KeyCursor<int> cursor = await file.Scan<Reading>().Keys(r => r.Day)
     await cursor.NextKeyAsync();
     Console.WriteLine($"next distinct key {cursor.Key} at row {cursor.Row}");
 
-    if (await cursor.SeekAsync(900, SeekOp.AtOrAfter))
+    if (await cursor.SeekAsync(900, SeekMode.AtOrAfter))
     {
         Console.WriteLine($"seek to 900 landed on {cursor.Key} at row {cursor.Row}");
     }
@@ -52,8 +52,8 @@ Every move is a `ValueTask<bool>`. `false` means there was nowhere to go, and `I
 | `SeekFirstAsync`, `SeekLastAsync` | go to either end |
 | `SeekAsync(key, op)` | `Exact`, `AtOrAfter`, `After`, `AtOrBefore`, `Before` |
 | `SeekRankAsync(n)` | go to the entry at position *n*, counting from zero |
-| `NextAsync`, `PrevAsync` | move by one entry |
-| `NextKeyAsync`, `PrevKeyAsync` | move to the first entry of the next or previous distinct key |
+| `NextAsync`, `PreviousAsync` | move by one entry |
+| `NextKeyAsync`, `PreviousKeyAsync` | move to the first entry of the next or previous distinct key |
 | `RankAsync(key)` | count the entries whose key is smaller |
 | `CountAtKeyAsync()` | count the entries that share the current key, without moving |
 

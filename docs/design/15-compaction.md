@@ -119,7 +119,7 @@ touches, and needs nothing else.
 the `Idle` sleep, and `Loops` and `Loop` for loops that know one another. The planner ranks the due
 jobs so that no two read or write the same level (a job on levels that share nothing never takes
 another's input), and a loop takes the one ranked at its index. A descent and a read of every leaf
-rank the same jobs. `Leases` turns on leases instead, one per level a job touches,
+rank the same jobs. `UseLeases` turns on leases instead, one per level a job touches,
 `leases/<level>/<end of the span>`, tried job by job in rank order. The key dates the lease, so vacuum
 deletes the ones that ended a window ago without a head request each. A job still running when its
 lease ends may collide with another loop's, which one commit then abandons, so a `LeaseSpan` of a

@@ -106,7 +106,7 @@ internal sealed class DatasetScanSource : ScanSource
             return null;
         }
 
-        SummaryPruner? pruner = spec.Options.Pruning && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
+        SummaryPruner? pruner = spec.Options.UseStatistics && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
         long from = spec.Rows?.Start ?? 0;
         long to = spec.Rows?.End ?? long.MaxValue;
         List<(PositionedObject Held, RowRange Rows)> objects = [];
@@ -220,7 +220,7 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         ScanOptions options = spec.Options;
-        builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.Pruning);
+        builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.UseStatistics);
         return counters is null ? builder : builder.WithCounters(counters);
     }
 }

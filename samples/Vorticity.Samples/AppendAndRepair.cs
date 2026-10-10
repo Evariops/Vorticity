@@ -168,7 +168,7 @@ internal static class AppendAndRepair
             Console.WriteLine($"an append to the torn file: {e.Message}");
         }
 
-        long valid = await VortexFileRepair.ValidLengthAsync(path, ct);
+        long valid = await VortexFileRepair.GetValidLengthAsync(path, ct);
         VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);   // truncates to the last version that parses
         Console.WriteLine($"valid length {valid}; repaired: truncated {repaired.Truncated}, {repaired.OriginalLength} -> {repaired.Length}");
 

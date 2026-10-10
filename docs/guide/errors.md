@@ -60,7 +60,7 @@ Everything else is plain .NET. An argument out of range is an `ArgumentException
 ## `VortexFormatException`
 
 This is a file that does not parse: bad offsets, a truncation, a field out of range, nesting deeper
-than a cap allows, or a block that would decode to more than `MaxDecompressedSize`. It is half of
+than a cap allows, or a block that would decode to more than `MaxDecompressedBytes`. It is half of
 the library's promise about hostile input: a malformed file produces this exception or a
 `VortexUnsupportedException`, never an out-of-bounds read, an unbounded allocation or a hang.
 [limits.md](limits.md) lists the caps and shows a thousand damaged files producing nothing else.

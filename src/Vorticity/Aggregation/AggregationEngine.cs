@@ -3306,7 +3306,7 @@ internal static class AggregationEngine
         // shares the live blocks, not the file's: a filter that keeps a few contiguous blocks keeps
         // every lane busy, rather than the one whose rows hold them. The settling read them already.
         int degree = Degree(source, pass);
-        if (settling is null && degree > 1 && pass.Take is null && pass.Filter is { } kept && pass.Options.Pruning && source is FileScanSource file)
+        if (settling is null && degree > 1 && pass.Take is null && pass.Filter is { } kept && pass.Options.UseStatistics && source is FileScanSource file)
         {
             BlockMask? live = await ZonePruningPlan
                 .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(kept), cancellationToken, steps: null, metrics, pass.Options.UseIndexes)

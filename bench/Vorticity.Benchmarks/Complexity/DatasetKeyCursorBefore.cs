@@ -30,7 +30,7 @@ internal sealed class DatasetKeyCursorBefore : IAsyncDisposable
     private readonly List<int>[] _levels;
     // The walks below start at the first key: no seek sets these.
     private readonly FilterLiteral _target = default;
-    private readonly SeekOp _op = SeekOp.AtOrAfter;
+    private readonly SeekMode _op = SeekMode.AtOrAfter;
     private bool _first;
     private int _current = -1;
     private bool _disposed;

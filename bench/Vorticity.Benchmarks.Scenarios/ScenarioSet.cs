@@ -274,7 +274,7 @@ public static class ScenarioSet
         long found = 0;
         foreach (FilterLiteral probe in prepared.Probes)
         {
-            found += await cursor.SeekAsync(probe, SeekOp.Exact, CancellationToken.None) ? 1 : 0;
+            found += await cursor.SeekAsync(probe, SeekMode.Exact, CancellationToken.None) ? 1 : 0;
         }
 
         return found;

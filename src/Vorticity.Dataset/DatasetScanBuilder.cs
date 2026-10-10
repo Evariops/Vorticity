@@ -1570,7 +1570,7 @@ internal sealed class DatasetScanBuilder
         int degree = _options.DegreeOfParallelism > 0
             ? _options.DegreeOfParallelism
             : _dataset.Session.Options.MaxDegreeOfParallelism;
-        scan.WithPruning(_options.Pruning)
+        scan.WithPruning(_options.UseStatistics)
             .WithIndexes(_indexes)
             .WithDegreeOfParallelism(Math.Max(degree, 1))
             .WithPrefetch(_options.Prefetch)

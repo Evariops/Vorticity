@@ -163,7 +163,7 @@ public sealed class DecoderGuardTests
         // fixed_size_list(i64)[100000] over 8192 rows is 819 200 000 elements. The elements child is
         // a single constant node of a few dozen bytes, so nothing in the file is large: the 6.5 GB
         // is conjured entirely by the row count times the dtype's list size. CheckedMultiply catches
-        // the products that overflow int; MaxDecompressedSize catches the rest.
+        // the products that overflow int; MaxDecompressedBytes catches the rest.
         using DecodeHarness h = new DecodeHarness();
         DType dtype = h.Types.FixedSizeList(
             h.Types.Primitive(PType.I64, Nullability.NonNullable), 100000, Nullability.NonNullable);
@@ -176,10 +176,10 @@ public sealed class DecoderGuardTests
     }
 
     [Fact]
-    public void MaxDecompressedSizeIsHonoured()
+    public void MaxDecompressedBytesIsHonoured()
     {
         using ScanContext scan = new ScanContext(
-            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedSize = 1024 });
+            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedBytes = 1024 });
 
         BlobBuilder b = new BlobBuilder();
         BlobNode node = new BlobNode("vortex.constant")
@@ -204,21 +204,21 @@ public sealed class DecoderGuardTests
     // Four columns of 128 i64 rows stand for 1024 bytes each: each at the ceiling of one decode,
     // together past a batch ceiling of three.
     [Fact]
-    public void MaxBatchDecompressedSizeBoundsTheColumnsOfABatchTogether()
+    public void MaxBatchDecompressedBytesBoundsTheColumnsOfABatchTogether()
     {
         BlobBuilder b = new BlobBuilder();
         BlobNode node = new BlobNode("vortex.struct").WithChildren(Constant(b), Constant(b), Constant(b), Constant(b));
         PinnedSegment segment = b.Build(node);
 
         using ScanContext narrow = new ScanContext(
-            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedSize = 1024, MaxBatchDecompressedSize = 3 * 1024 });
+            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedBytes = 1024, MaxBatchDecompressedBytes = 3 * 1024 });
         ArrayBlobReader.Load(narrow.Nodes, segment.Buffer, narrow.ArrayEncodings);
         VortexFormatException error = Assert.Throws<VortexFormatException>(
             () => narrow.Decode.Decode(narrow.Nodes.Root, FourLongs(narrow), 128));
-        Assert.Contains("MaxBatchDecompressedSize", error.Message, StringComparison.Ordinal);
+        Assert.Contains("MaxBatchDecompressedBytes", error.Message, StringComparison.Ordinal);
 
         using ScanContext wide = new ScanContext(
-            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedSize = 1024, MaxBatchDecompressedSize = 4 * 1024 });
+            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedBytes = 1024, MaxBatchDecompressedBytes = 4 * 1024 });
         for (int batch = 0; batch < 2; batch++)
         {
             // Each batch starts from nothing.

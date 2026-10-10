@@ -88,9 +88,9 @@ internal static class WriterOptions
                     Stopwatch clock = Stopwatch.StartNew();
                     await foreach (var (day, celsius, city) in file.Scan<Reading>())
                     {
-                        day.Canonical();
-                        celsius.Canonical();
-                        city.Canonical();
+                        day.AsCanonical();
+                        celsius.AsCanonical();
+                        city.AsCanonical();
                     }
 
                     read = Math.Min(read, clock.ElapsedMilliseconds);
@@ -163,7 +163,7 @@ internal static class WriterOptions
     private static async Task Rest(VortexSession session, string path, Reading[] readings)
     {
         WriteReport with = await Write(session, path, readings, new VortexWriteOptions());
-        WriteReport without = await Write(session, path, readings, new VortexWriteOptions { Statistics = false });
+        WriteReport without = await Write(session, path, readings, new VortexWriteOptions { WriteStatistics = false });
         await using (VortexFile file = await VortexFile.OpenAsync(path))
         {
             ScanPlan plan = await file.Scan<Reading>().Where(r => r.Day > 2_000).ExplainAsync();

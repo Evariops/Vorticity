@@ -173,7 +173,7 @@ A loop runs the same jobs as `CompactAsync`, so it is safe against every writer 
 loop. What several loops on one dataset can waste is a job that two of them run at once, which one
 commit then abandons. Loops that know about one another say so with `Loops` and `Loop`: each takes
 the due job ranked at its index, and no two ranked jobs read or write the same level. Loops that
-cannot coordinate set `Leases` instead. Before a job, a loop creates `leases/<level>/<end>` for each
+cannot coordinate set `UseLeases` instead. Before a job, a loop creates `leases/<level>/<end>` for each
 of its levels with put-if-absent, holds them until the end of the current `LeaseSpan` (a minute by
 default), and moves to the next job when another loop holds one. A loop remembers the leases it
 created, so it can run the next job on the same levels within the span without asking the store

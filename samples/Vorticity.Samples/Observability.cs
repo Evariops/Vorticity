@@ -59,7 +59,7 @@ internal static class Observability
             Console.WriteLine($"tool scan: {paris} rows, {untyped.Metrics.Requests} requests, {untyped.Metrics.BlocksDecoded} blocks decoded");
         }
 
-        Console.WriteLine($"cache: {session.Options.SegmentCache!.Hits} hits, {session.Options.SegmentCache.Misses} misses, {session.Options.SegmentCache.Size} bytes held");
+        Console.WriteLine($"cache: {session.Options.SegmentCache!.Hits} hits, {session.Options.SegmentCache.Misses} misses, {session.Options.SegmentCache.HeldBytes} bytes held");
 
         await using (VortexFileWriter writer = session.CreateWriter<Reading>(Demo.Path("observed.vortex")))
         {

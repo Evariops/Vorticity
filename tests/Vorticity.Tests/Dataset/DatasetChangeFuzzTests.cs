@@ -145,7 +145,7 @@ public sealed class DatasetChangeFuzzTests
             }
 
             List<long> down = [];
-            for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+            for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
             {
                 down.Add(cursor.Key.SignedValue);
             }
@@ -201,7 +201,7 @@ public sealed class DatasetChangeFuzzTests
 
         long pivot = keys[random.Next(keys.Count)];
         Assert.Equal(keys.Count(key => key < pivot), await cursor.RankAsync(Vorticity.Expressions.FilterLiteral.From(pivot), ct));
-        Assert.True(await cursor.SeekAsync(Vorticity.Expressions.FilterLiteral.From(pivot), SeekOp.AtOrAfter, ct));
+        Assert.True(await cursor.SeekAsync(Vorticity.Expressions.FilterLiteral.From(pivot), SeekMode.AtOrAfter, ct));
         Assert.Equal(keys.Count(key => key == pivot), await cursor.CountAtKeyAsync(ct));
         for (int step = 0; step < 8; step++)
         {

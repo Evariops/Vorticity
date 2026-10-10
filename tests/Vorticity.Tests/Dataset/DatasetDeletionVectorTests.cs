@@ -115,9 +115,9 @@ public sealed class DatasetDeletionVectorTests
 
         await using KeyCursor<string> cursor = await dataset.Scan<ChangeRow>().Keys(r => r.City).OpenAsync(ct);
         Assert.Equal(model.Count(row => string.CompareOrdinal(row.City, "Lyon") < 0), await cursor.RankAsync("Lyon", ct));
-        Assert.True(await cursor.SeekAsync("Lyon", SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync("Lyon", SeekMode.Exact, ct));
         Assert.Equal(model.Count(row => row.City == "Lyon"), await cursor.CountAtKeyAsync(ct));
-        Assert.False(await cursor.SeekAsync("Nice", SeekOp.Exact, ct));
+        Assert.False(await cursor.SeekAsync("Nice", SeekMode.Exact, ct));
 
         List<string> walked = [];
         for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
@@ -348,7 +348,7 @@ public sealed class DatasetDeletionVectorTests
         CompactionPlan plan = await marked.PlanCompactionAsync(null, ct);
         CompactionJob job = Assert.IsType<CompactionJob>(plan.Job);
         Assert.Equal((CompactionTrigger.Marks, before.Level, before.Level), (job.Trigger, job.FromLevel, job.ToLevel));
-        Assert.Equal([held.Key], job.Objects);
+        Assert.Equal([held.Key], job.ObjectKeys);
 
         CompactionResult purged = Assert.IsType<CompactionResult>(await marked.CompactAsync(null, ct));
         Assert.Equal((OperationOutcome.Applied, CompactionTrigger.Marks, 1L, 1L, held.Rows), (purged.Outcome, purged.Trigger, purged.ObjectsIn, purged.ObjectsOut, purged.Rows));
@@ -624,7 +624,7 @@ public sealed class DatasetDeletionVectorTests
         foreach (long key in (long[])[0, 1_040, 1_089, 2_001, 3_500, 4_199, 9_999])
         {
             Assert.Equal(await byRewrites.RankAsync(key, ct), await byMarks.RankAsync(key, ct));
-            foreach (SeekOp op in (SeekOp[])[SeekOp.Exact, SeekOp.AtOrAfter, SeekOp.After, SeekOp.AtOrBefore, SeekOp.Before])
+            foreach (SeekMode op in (SeekMode[])[SeekMode.Exact, SeekMode.AtOrAfter, SeekMode.After, SeekMode.AtOrBefore, SeekMode.Before])
             {
                 bool found = await byRewrites.SeekAsync(key, op, ct);
                 Assert.Equal(found, await byMarks.SeekAsync(key, op, ct));
@@ -697,7 +697,7 @@ public sealed class DatasetDeletionVectorTests
         List<(long Key, long Row)> entries = [];
         for (bool ok = up ? await cursor.SeekFirstAsync(ct) : await cursor.SeekLastAsync(ct);
             ok;
-            ok = up ? await cursor.NextAsync(ct) : await cursor.PrevAsync(ct))
+            ok = up ? await cursor.NextAsync(ct) : await cursor.PreviousAsync(ct))
         {
             entries.Add((cursor.Key, cursor.Row));
         }

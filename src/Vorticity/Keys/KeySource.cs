@@ -54,7 +54,7 @@ internal abstract class KeySource : IAsyncDisposable
     internal abstract long Row { get; }
 
     /// <summary>Positions relative to a key, whose domain the caller has checked.</summary>
-    internal abstract ValueTask<bool> SeekAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken);
+    internal abstract ValueTask<bool> SeekAsync(FilterLiteral key, SeekMode op, CancellationToken cancellationToken);
 
     /// <summary>Positions on the first entry.</summary>
     internal abstract ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken);
@@ -66,13 +66,13 @@ internal abstract class KeySource : IAsyncDisposable
     internal abstract ValueTask<bool> NextAsync(CancellationToken cancellationToken);
 
     /// <summary>Steps backward; the caller has checked the source is positioned.</summary>
-    internal abstract ValueTask<bool> PrevAsync(CancellationToken cancellationToken);
+    internal abstract ValueTask<bool> PreviousAsync(CancellationToken cancellationToken);
 
     /// <summary>The first entry of the next distinct key.</summary>
     internal abstract ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken);
 
     /// <summary>The last entry of the previous distinct key.</summary>
-    internal abstract ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken);
+    internal abstract ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken);
 
     /// <summary>The entries whose key is below <paramref name="key"/>; the position does not move.</summary>
     internal abstract ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken);

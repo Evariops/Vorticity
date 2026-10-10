@@ -30,7 +30,7 @@ public sealed record ScanOptions
     }
 
     /// <summary>Whether statistics and zone maps may skip blocks; off only to check a file's statistics, never to change a result.</summary>
-    public bool Pruning { get; init; } = true;
+    public bool UseStatistics { get; init; } = true;
 
     /// <summary>Whether the file's indexes may skip blocks; off only to check an index, never to change a result.</summary>
     public bool UseIndexes { get; init; } = true;

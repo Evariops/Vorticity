@@ -13,7 +13,7 @@ internal sealed class VortexReadOptions
     /// The per-decode ceiling, kept as an <see cref="int"/>: a decode produces buffers of an
     /// <see cref="int"/>'s length at most, which a larger ceiling bounds no further.
     /// </summary>
-    private readonly int _maxDecompressedSize = (int)VortexLimits.DefaultMaxDecompressedSize;
+    private readonly int _maxDecompressedSize = (int)VortexLimits.DefaultMaxDecompressedBytes;
     private readonly long _maxBatchDecompressedSize = long.MaxValue;
     private readonly long _indexCacheBytes = DefaultIndexCacheBytes;
 
@@ -25,10 +25,10 @@ internal sealed class VortexReadOptions
 
     /// <summary>
     /// Ceiling on the bytes one decompression step may produce. Defaults to
-    /// <see cref="VortexLimits.DefaultMaxDecompressedSize"/>.
+    /// <see cref="VortexLimits.DefaultMaxDecompressedBytes"/>.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
-    public long MaxDecompressedSize
+    public long MaxDecompressedBytes
     {
         get => _maxDecompressedSize;
         init
@@ -43,7 +43,7 @@ internal sealed class VortexReadOptions
     /// <see cref="long.MaxValue"/>, none, by default.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
-    public long MaxBatchDecompressedSize
+    public long MaxBatchDecompressedBytes
     {
         get => _maxBatchDecompressedSize;
         init

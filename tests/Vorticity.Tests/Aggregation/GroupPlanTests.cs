@@ -30,7 +30,7 @@ public sealed partial class GroupPlanTests
             GroupKeyPlan key = Assert.Single(plan.Keys);
             Assert.Equal("Key", key.Column);
             Assert.False(key.Sorted);
-            Assert.Equal(10_000, key.Values);
+            Assert.Equal(10_000, key.ValueRange);
             Assert.Equal(10_000, plan.MostGroups);
             Assert.Null(plan.Streaming);
             Assert.NotNull(plan.NotStreaming);

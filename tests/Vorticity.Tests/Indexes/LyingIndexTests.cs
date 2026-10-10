@@ -238,9 +238,9 @@ public sealed class LyingIndexTests
                 steps++;
             }
 
-            _ = await cursor.SeekAsync(probe, SeekOp.AtOrAfter, timeout.Token);
+            _ = await cursor.SeekAsync(probe, SeekMode.AtOrAfter, timeout.Token);
             _ = await cursor.SeekLastAsync(timeout.Token);
-            _ = await cursor.PrevAsync(timeout.Token);
+            _ = await cursor.PreviousAsync(timeout.Token);
             _ = await cursor.RankAsync(probe, timeout.Token);
             _ = await cursor.CountAtKeyAsync(timeout.Token);
         }

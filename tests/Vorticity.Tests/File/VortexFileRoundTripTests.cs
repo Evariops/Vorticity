@@ -77,7 +77,7 @@ public sealed class VortexFileRoundTripTests
         byte[] bytes = FileWithFooterOutsideTheTailWindow(arena, filler: 70_000);
 
         TestSegmentSource source = new TestSegmentSource(bytes);
-        VortexOpenOptions options = new VortexOpenOptions { InitialReadSize = bytes.Length };
+        VortexOpenOptions options = new VortexOpenOptions { InitialReadBytes = bytes.Length };
         await using VortexFile file = await VortexFile.OpenAsync(source, options, CancellationToken.None);
 
         Assert.Equal(8193, file.RowCount);
@@ -92,7 +92,7 @@ public sealed class VortexFileRoundTripTests
 
         TestSegmentSource lowered = new TestSegmentSource(bytes);
         await using (await VortexFile.OpenAsync(
-            lowered, new VortexOpenOptions { InitialReadSize = 16 }, CancellationToken.None))
+            lowered, new VortexOpenOptions { InitialReadBytes = 16 }, CancellationToken.None))
         {
         }
 

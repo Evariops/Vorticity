@@ -115,21 +115,21 @@ column the statistics cover asks for anything more.
 
 ```csharp
 CountingSource told = new CountingSource(new FileSegmentSource(path));
-VortexOpenOptions wide = new VortexOpenOptions { Length = bytes.Length, InitialReadSize = 256 * 1024 };
+VortexOpenOptions wide = new VortexOpenOptions { Length = bytes.Length, InitialReadBytes = 256 * 1024 };
 await using (VortexFile file = await session.OpenAsync(told, wide))
 ```
 
 ```
-InitialReadSize 256 KiB: 1 request, 262172 bytes
+InitialReadBytes 256 KiB: 1 request, 262172 bytes
 ```
 
 | option | default | what it changes |
 |---|---|---|
-| `InitialReadSize` | 65 536 | the size of the tail read. Raise it for a file with a large footer so the open stays one request, or to fetch a small file whole from a remote source |
+| `InitialReadBytes` | 65 536 | the size of the tail read. Raise it for a file with a large footer so the open stays one request, or to fetch a small file whole from a remote source |
 | `Length` | probed | skips asking the source for its length |
 | `Schema` | the file's | a schema for a file written without one, or to skip reading the embedded one |
 | `TornTail` | `ReadPrevious` | `Refuse` throws on a torn tail instead of opening the version before it |
-| `VerifyStatistics`, `MaxDecompressedSize` | off, 256 MiB | how far the open trusts the bytes ([limits.md](limits.md)) |
+| `VerifyStatistics`, `MaxDecompressedBytes` | off, 256 MiB | how far the open trusts the bytes ([limits.md](limits.md)) |
 | `IndexFragments` | none | indexes built for this file elsewhere ([indexes.md](indexes.md)) |
 
 ## What a scan then reads

@@ -106,7 +106,7 @@ Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cur
 version's rows object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries
 under the current key, here the thousand rows of day 75. It walks both ways like a file's cursor
-(`SeekLastAsync`, `PrevAsync`, `PrevKeyAsync`, `AtOrBefore`, `Before`), and a step against the
+(`SeekLastAsync`, `PreviousAsync`, `PreviousKeyAsync`, `AtOrBefore`, `Before`), and a step against the
 direction of the previous one seeks every object again at the current entry. Walking down, an object
 above level 0 opens only once the walk could reach its keys, while the level 0 objects all open at
 the seek since nothing bounds them from above. See [keys-in-order.md](keys-in-order.md).

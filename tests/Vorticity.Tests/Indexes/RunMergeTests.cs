@@ -557,7 +557,7 @@ public sealed class RunMergeTests
 
         // Backward, and a seek into the middle.
         long middle = expected[rows / 2].Key;
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(middle), SeekOp.AtOrAfter));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(middle), SeekMode.AtOrAfter));
         Assert.Equal(expected[expected.FindIndex(e => e.Key >= middle)].Row, cursor.Row);
         Assert.True(await cursor.SeekLastAsync());
         Assert.Equal(expected[^1].Row, cursor.Row);

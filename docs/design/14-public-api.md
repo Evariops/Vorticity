@@ -279,7 +279,7 @@ guide's writing pages show each form.
 | type | what it says |
 |---|---|
 | `VortexOpenOptions` | the initial tail read, a known length or schema, the decompression cap, statistics verification, a torn tail's policy, index fragments to attach |
-| `ScanOptions` | batch cap, prefetch, degree, `Compact`, and the `Pruning` and `UseIndexes` switches, which exist to check the structures and never change a result |
+| `ScanOptions` | batch cap, prefetch, degree, `Compact`, and the `UseStatistics` and `UseIndexes` switches, which exist to check the structures and never change a result |
 | `VortexWriteOptions` | blocks and chunk targets, the compression profile and per-column hints, the target edition, statistics, string bounds, the index policy, the identity, user metadata, the degree |
 | `IndexPolicy`, `EncodingHint`, `CompressionProfile` | see [the index policy](10-indexes.md#6-the-policy) and [choosing encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials) |
 | `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `GroupPlan`, `GroupKeyPlan`, `GroupOrdering` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, and how a count, an order and a group by will be answered (see [plan and metrics](16-queries.md#10-plan-and-metrics)) |

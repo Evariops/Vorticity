@@ -46,9 +46,9 @@ public class SegmentCacheEvictBenchmarks
         }
 
         Refill();
-        long size = _cache.Size;
+        long size = _cache.HeldBytes;
         Present();
-        if (_cache.Size != size || size != 64L * Entries)
+        if (_cache.HeldBytes != size || size != 64L * Entries)
         {
             throw new InvalidOperationException("The cache does not hold what it was given back.");
         }
@@ -63,7 +63,7 @@ public class SegmentCacheEvictBenchmarks
     public long Absent()
     {
         _cache.Evict(_absent);
-        return _cache.Size;
+        return _cache.HeldBytes;
     }
 
     /// <summary>A file of 16 segments evicted, and its segments kept again.</summary>
@@ -72,7 +72,7 @@ public class SegmentCacheEvictBenchmarks
     {
         _cache.Evict(_closing);
         Refill();
-        return _cache.Size;
+        return _cache.HeldBytes;
     }
 
     private void Refill()

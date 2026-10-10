@@ -227,20 +227,20 @@ public sealed partial class ResultScanTests
                 Assert.Equal(expected, walked);
 
                 long middle = expected[expected.Length / 2].Key;
-                Assert.True(await counts.SeekAsync(middle, SeekOp.Exact, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekMode.Exact, Ct));
                 Assert.Equal(expected.First(e => e.Key == middle).Row, counts.Row);
                 Assert.Equal(expected.Count(e => e.Key == middle), await counts.CountAtKeyAsync(Ct));
                 Assert.Equal(expected.Count(e => e.Key < middle), await counts.RankAsync(middle, Ct));
-                Assert.True(await counts.SeekAsync(middle, SeekOp.Before, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekMode.Before, Ct));
                 Assert.Equal(expected.Last(e => e.Key < middle), (counts.Key, counts.Row));
-                Assert.True(await counts.SeekAsync(middle, SeekOp.After, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekMode.After, Ct));
                 Assert.Equal(expected.First(e => e.Key > middle), (counts.Key, counts.Row));
-                Assert.False(await counts.SeekAsync(expected[^1].Key, SeekOp.After, Ct));
-                Assert.False(await counts.SeekAsync(-1, SeekOp.Exact, Ct));
+                Assert.False(await counts.SeekAsync(expected[^1].Key, SeekMode.After, Ct));
+                Assert.False(await counts.SeekAsync(-1, SeekMode.Exact, Ct));
 
                 // Backwards a key at a time, each on its last entry.
                 List<(long, long)> lasts = [];
-                for (bool on = await counts.SeekLastAsync(Ct); on; on = await counts.PrevKeyAsync(Ct))
+                for (bool on = await counts.SeekLastAsync(Ct); on; on = await counts.PreviousKeyAsync(Ct))
                 {
                     lasts.Add((counts.Key, counts.Row));
                 }
@@ -260,7 +260,7 @@ public sealed partial class ResultScanTests
                 }
 
                 Assert.Equal(delivered.Select(g => g.City).Distinct().Order(StringComparer.Ordinal), walked);
-                Assert.True(await cities.SeekAsync("Caen", SeekOp.Exact, Ct));
+                Assert.True(await cities.SeekAsync("Caen", SeekMode.Exact, Ct));
                 Assert.Equal(delivered.Count(g => g.City == "Caen"), await cities.CountAtKeyAsync(Ct));
             }
 

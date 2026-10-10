@@ -69,9 +69,9 @@ public sealed class SortedColumnLieTests
         await using KeyCursor cursor = await file.Keys("sorted").WithSource(KeySourceKind.SortedColumn).OpenAsync(ct);
 
         // A zone far from the lie decodes and verifies; the lying zone does not.
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(Value(100)), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(Value(100)), SeekMode.Exact, ct));
         await Assert.ThrowsAsync<VortexFormatException>(
-            async () => await cursor.SeekAsync(FilterLiteral.From(Value(Target - 10)), SeekOp.AtOrAfter, ct));
+            async () => await cursor.SeekAsync(FilterLiteral.From(Value(Target - 10)), SeekMode.AtOrAfter, ct));
     }
 
     [Fact]

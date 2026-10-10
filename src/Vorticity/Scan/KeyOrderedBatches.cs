@@ -389,7 +389,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 }
 
                 _positioned = descending
-                    ? await source.PrevAsync(_token).ConfigureAwait(false)
+                    ? await source.PreviousAsync(_token).ConfigureAwait(false)
                     : await source.NextAsync(_token).ConfigureAwait(false);
                 if (!_positioned)
                 {

@@ -34,14 +34,14 @@ public sealed class SegmentCache
     public SegmentCache(long capacityBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(capacityBytes);
-        Capacity = capacityBytes;
+        CapacityBytes = capacityBytes;
     }
 
     /// <summary>The budget in bytes.</summary>
-    public long Capacity { get; }
+    public long CapacityBytes { get; }
 
     /// <summary>The bytes held now.</summary>
-    public long Size => Interlocked.Read(ref _size);
+    public long HeldBytes => Interlocked.Read(ref _size);
 
     /// <summary>Segments served from the cache since it was created.</summary>
     public long Hits => Interlocked.Read(ref _hits);
@@ -107,7 +107,7 @@ public sealed class SegmentCache
     internal void Add(object source, long offset, SegmentOwner owner, VortexBuffer buffer)
     {
         int length = buffer.Length;
-        if (length > Capacity || length == 0)
+        if (length > CapacityBytes || length == 0)
         {
             return;
         }
@@ -119,7 +119,7 @@ public sealed class SegmentCache
             Key key = new Key(source, offset, length);
             if (!_entries.ContainsKey(key))
             {
-                while (_size + length > Capacity && _oldest is { } last)
+                while (_size + length > CapacityBytes && _oldest is { } last)
                 {
                     Unlink(last);
                     UnlinkFromSource(last);

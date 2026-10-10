@@ -97,12 +97,12 @@ public readonly ref struct Column<T>
         // One row of the constant, made canonical, rather than the whole column tiled to read its
         // first value: the value is the element, whatever the length.
         int one = Layouts.CanonicalSlice.SliceAcross(Arena, Arena, Node, 0, 1);
-        return ColumnReader.Read(new Column<T>(Arena, one, Type, Extensions).Canonical(), 0);
+        return ColumnReader.Read(new Column<T>(Arena, one, Type, Extensions).AsCanonical(), 0);
     }
 
     /// <summary>The column in canonical form: the values decoded, once, into contiguous memory.</summary>
     /// <returns>The canonical column; this one when it already is.</returns>
-    public Column<T> Canonical()
+    public Column<T> AsCanonical()
     {
         int canonical = EncodedForms.Canonical(Arena, Node);
         return canonical == Node ? this : new Column<T>(Arena, canonical, Type, Extensions);

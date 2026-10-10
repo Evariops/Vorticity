@@ -49,7 +49,7 @@ public sealed class SegmentCacheTests
                 kept.Release();
             }
 
-            Assert.Equal(4_000, cache.Size);
+            Assert.Equal(4_000, cache.HeldBytes);
         }
         finally
         {
@@ -81,7 +81,7 @@ public sealed class SegmentCacheTests
             await reader.ReadManyAsync(set, CancellationToken.None);
 
             Assert.False(cache.TryGet(source, 0, 1_000, out _, out _));
-            Assert.Equal(1_000, cache.Size);
+            Assert.Equal(1_000, cache.HeldBytes);
         }
         finally
         {
@@ -167,7 +167,7 @@ public sealed class SegmentCacheTests
                 model.RemoveAll(entry => ReferenceEquals(entry.File, file));
             }
 
-            Assert.Equal(model.Count * 64L, cache.Size);
+            Assert.Equal(model.Count * 64L, cache.HeldBytes);
         }
 
         // Each segment the model holds is there; looked up from the oldest, they leave again in
@@ -180,7 +180,7 @@ public sealed class SegmentCacheTests
         }
 
         cache.Clear();
-        Assert.Equal(0, cache.Size);
+        Assert.Equal(0, cache.HeldBytes);
         Assert.False(cache.TryGet(model[0].File, model[0].Offset, 64, out _, out _));
     }
 }

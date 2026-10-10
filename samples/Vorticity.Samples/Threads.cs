@@ -42,7 +42,7 @@ internal static class Threads
         Scan<Reading> again = file.Scan<Reading>();
         await CountRowsAsync(again);
         Console.WriteLine($"a fifth scan: {again.Metrics.Requests} requests, {again.Metrics.CacheHits} served by the cache");
-        Console.WriteLine($"the cache: {cache.Size / 1024} KiB held, {cache.Hits} hits, {cache.Misses} misses");
+        Console.WriteLine($"the cache: {cache.HeldBytes / 1024} KiB held, {cache.Hits} hits, {cache.Misses} misses");
 
         Scan<Reading> once = file.Scan<Reading>();
         await once.CountAsync();

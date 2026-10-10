@@ -727,7 +727,7 @@ internal sealed class StatisticsView
     /// <summary>The view of <paramref name="source"/> for <paramref name="spec"/>, or null when the statistics do not describe the scan's rows.</summary>
     internal static StatisticsView? For(ScanSource source, ScanSpec spec) =>
         source is FileScanSource file && file.File.HasFileStatistics && spec.Filter is null && !spec.MatchesNothing
-        && spec.Rows is null && spec.Take is null && spec.Options.Pruning
+        && spec.Rows is null && spec.Take is null && spec.Options.UseStatistics
             ? new StatisticsView(file.File)
             : null;
 

@@ -106,7 +106,7 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(oracle.Count, index);
         Assert.False(cursor.IsValid);
 
-        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
         {
             AssertAt(cursor, oracle, --index);
         }
@@ -128,11 +128,11 @@ public sealed class SortedRunsCursorTests
         {
             int lower = Lower(oracle, key);
             int upper = Upper(oracle, key);
-            await Check(cursor, oracle, key, SeekOp.AtOrAfter, lower);
-            await Check(cursor, oracle, key, SeekOp.After, upper);
-            await Check(cursor, oracle, key, SeekOp.AtOrBefore, upper - 1);
-            await Check(cursor, oracle, key, SeekOp.Before, lower - 1);
-            await Check(cursor, oracle, key, SeekOp.Exact, lower < upper ? lower : -1);
+            await Check(cursor, oracle, key, SeekMode.AtOrAfter, lower);
+            await Check(cursor, oracle, key, SeekMode.After, upper);
+            await Check(cursor, oracle, key, SeekMode.AtOrBefore, upper - 1);
+            await Check(cursor, oracle, key, SeekMode.Before, lower - 1);
+            await Check(cursor, oracle, key, SeekMode.Exact, lower < upper ? lower : -1);
 
             Assert.Equal(lower, await cursor.RankAsync(key, ct));
         }
@@ -160,7 +160,7 @@ public sealed class SortedRunsCursorTests
             for (int s = 0; s < steps; s++)
             {
                 int next = forward ? index + 1 : index - 1;
-                bool moved = forward ? await cursor.NextAsync(ct) : await cursor.PrevAsync(ct);
+                bool moved = forward ? await cursor.NextAsync(ct) : await cursor.PreviousAsync(ct);
                 Assert.Equal(next >= 0 && next < oracle.Count, moved);
                 if (!moved)
                 {
@@ -231,11 +231,11 @@ public sealed class SortedRunsCursorTests
         Assert.True(await cursor.SeekLastAsync(ct));
         for (int g = firsts.Count - 1; g > 0; g--)
         {
-            Assert.True(await cursor.PrevKeyAsync(ct));
+            Assert.True(await cursor.PreviousKeyAsync(ct));
             AssertAt(cursor, oracle, firsts[g] - 1);
         }
 
-        Assert.False(await cursor.PrevKeyAsync(ct));
+        Assert.False(await cursor.PreviousKeyAsync(ct));
     }
 
     [Fact]
@@ -333,21 +333,21 @@ public sealed class SortedRunsCursorTests
         await using Written written = await Written.CreateAsync();
         await using KeyCursor cursor = await written.File.Keys("f32").OpenAsync(ct);
 
-        await Assert.ThrowsAsync<ArgumentException>(async () => await cursor.SeekAsync(FilterLiteral.From(1L), SeekOp.Exact, ct));
+        await Assert.ThrowsAsync<ArgumentException>(async () => await cursor.SeekAsync(FilterLiteral.From(1L), SeekMode.Exact, ct));
 
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekMode.Exact, ct));
         Assert.True(double.IsNegative(cursor.Key.FloatValue));
         long negative = await cursor.CountAtKeyAsync(ct);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekMode.Exact, ct));
         Assert.False(double.IsNegative(cursor.Key.FloatValue));
         Assert.Equal(Rows / Floats.Length, negative);
         Assert.Equal(Rows / Floats.Length, await cursor.CountAtKeyAsync(ct));
 
         // The NaNs are the ends: nothing after the positive one, nothing before the negative one,
         // and each is a key of its own.
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(PositiveNaN), SeekOp.After, ct));
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekOp.Before, ct));
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekOp.Exact, ct));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(PositiveNaN), SeekMode.After, ct));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekMode.Before, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekMode.Exact, ct));
         Assert.True(double.IsNaN(cursor.Key.FloatValue) && double.IsNegative(cursor.Key.FloatValue));
         Assert.True(await cursor.SeekLastAsync(ct));
         Assert.True(double.IsNaN(cursor.Key.FloatValue) && !double.IsNegative(cursor.Key.FloatValue));
@@ -709,7 +709,7 @@ public sealed class SortedRunsCursorTests
         }
 
         Assert.Equal(firsts.Count, index);
-        for (bool ok = await cursor.SeekLastAsync(); ok; ok = await cursor.PrevAsync())
+        for (bool ok = await cursor.SeekLastAsync(); ok; ok = await cursor.PreviousAsync())
         {
             AssertDistinctAt(cursor, firsts, --index, rows);
         }
@@ -718,9 +718,9 @@ public sealed class SortedRunsCursorTests
 
         // Backward seeks land on the key's first entry too.
         int middle = firsts.Count / 2;
-        Assert.True(await cursor.SeekAsync(firsts[middle].Key, SeekOp.AtOrBefore));
+        Assert.True(await cursor.SeekAsync(firsts[middle].Key, SeekMode.AtOrBefore));
         AssertDistinctAt(cursor, firsts, middle, rows);
-        Assert.True(await cursor.SeekAsync(firsts[middle].Key, SeekOp.Before));
+        Assert.True(await cursor.SeekAsync(firsts[middle].Key, SeekMode.Before));
         AssertDistinctAt(cursor, firsts, middle - 1, rows);
 
         if (!rows)
@@ -1048,7 +1048,7 @@ public sealed class SortedRunsCursorTests
         }
     }
 
-    private static async Task Check(KeyCursor cursor, List<Entry> oracle, FilterLiteral key, SeekOp op, int expected)
+    private static async Task Check(KeyCursor cursor, List<Entry> oracle, FilterLiteral key, SeekMode op, int expected)
     {
         bool found = await cursor.SeekAsync(key, op);
         bool exists = expected >= 0 && expected < oracle.Count;

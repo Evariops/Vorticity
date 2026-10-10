@@ -22,7 +22,7 @@ internal readonly struct ZstdFrameMetadata : IEquatable<ZstdFrameMetadata>
 
     /// <summary>
     /// Uncompressed byte size of this frame (tag 1). The value comes from the file, so the decoder
-    /// must check it against <see cref="VortexLimits.DefaultMaxDecompressedSize"/> <b>before</b>
+    /// must check it against <see cref="VortexLimits.DefaultMaxDecompressedBytes"/> <b>before</b>
     /// allocating.
     /// </summary>
     public ulong UncompressedSize { get; }

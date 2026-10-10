@@ -22,7 +22,7 @@ internal static class Datasets
         {
             ClusteringKey = [Reading.ColumnNames.Day],
         });
-        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, clustered by {string.Join(", ", dataset.ClusteringKeyPaths)}");
+        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, clustered by {string.Join(", ", dataset.ClusteringKey)}");
 
         await using (ObjectDraft draft = dataset.StartObject())
         {
@@ -74,12 +74,12 @@ internal static class Datasets
 
         await using (KeyCursor<int> cursor = await dataset.Scan<Reading>().Keys(r => r.Day).OpenAsync())
         {
-            bool found = await cursor.SeekAsync(75, SeekOp.AtOrAfter);
+            bool found = await cursor.SeekAsync(75, SeekMode.AtOrAfter);
             Console.WriteLine($"key cursor: seek 75 found {found}, key {cursor.Key} at row {cursor.Row}; {await cursor.CountAtKeyAsync()} entries");
 
             await cursor.SeekLastAsync();
             (int last, long lastRow) = (cursor.Key, cursor.Row);
-            await cursor.PrevKeyAsync();
+            await cursor.PreviousKeyAsync();
             Console.WriteLine($"walking down: last key {last} at row {lastRow}; the key before it {cursor.Key}, its last entry at row {cursor.Row}");
         }
 

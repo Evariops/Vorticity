@@ -148,7 +148,7 @@ own, with what they cost to consult.
 * `Blocks` and `LiveBlocks` follow `Rows(...)`: a range of ten rows plans 1 block of 1, and a take of
   two rows 2 of 2, with `Rows` equal to 2 ([read-rows-by-index.md](read-rows-by-index.md)).
 * `Metrics` read before the sink has run are zeros, and a scan runs only one sink.
-* `ScanOptions.Pruning = false` and `UseIndexes = false` turn the structures off, to check them, never
+* `ScanOptions.UseStatistics = false` and `UseIndexes = false` turn the structures off, to check them, never
   to change a result.
 
 What each statistic allows is defined in

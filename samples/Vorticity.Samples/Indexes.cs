@@ -77,7 +77,7 @@ internal static partial class Indexes
             await Pruned(file, "Score == a value that exists", r => r.Score == score);
             await Pruned(file, "Score between 1000 and 1100", r => r.Score.Between(1_000, 1_100));
             await using KeyCursor<int> cursor = await file.Scan<Hit>().Keys(r => r.Score).OpenAsync(ct);
-            await cursor.SeekAsync(1_000, SeekOp.AtOrAfter, ct);
+            await cursor.SeekAsync(1_000, SeekMode.AtOrAfter, ct);
             Console.WriteLine($"  a key cursor on Score: the first key at or after 1000 is {cursor.Key}, at row {cursor.Row}; {await cursor.RankAsync(1_000, ct)} rows hold a smaller one");
         }
 
@@ -103,7 +103,7 @@ internal static partial class Indexes
         await using (VortexFile file = await VortexFile.OpenAsync(later))
         {
             await using KeyCursor<int> cursor = await file.Scan<Hit>().Keys(r => r.Score).OpenAsync(ct);
-            await cursor.SeekAsync(1_000, SeekOp.AtOrAfter, ct);
+            await cursor.SeekAsync(1_000, SeekMode.AtOrAfter, ct);
             Console.WriteLine($"  added afterwards: {added[0].Kind} {added[0].Outcome}, {added[0].Bytes} bytes; the file grew from {before} to {file.Length} bytes; " +
                 $"the cursor finds {cursor.Key} at row {cursor.Row}");
         }

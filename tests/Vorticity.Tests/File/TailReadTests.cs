@@ -29,7 +29,7 @@ public sealed class TailReadTests
         Decoders.EnsureRegistered();
         CancellationToken ct = TestContext.Current.CancellationToken;
         byte[] bytes = global::System.IO.File.ReadAllBytes(Corpus.Path(Entry));
-        Assert.True(bytes.Length > VortexOpenOptions.DefaultInitialReadSize);
+        Assert.True(bytes.Length > VortexOpenOptions.DefaultInitialReadBytes);
 
         TailSized source = new TailSized(new MemorySegmentSource(bytes), tailReadSize);
         await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default, ct);
@@ -53,7 +53,7 @@ public sealed class TailReadTests
         byte[] bytes = global::System.IO.File.ReadAllBytes(Corpus.Path(Entry));
         TailSized source = new TailSized(new MemorySegmentSource(bytes), 16);
 
-        await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default with { InitialReadSize = 1 << 20 }, ct);
+        await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default with { InitialReadBytes = 1 << 20 }, ct);
         Assert.Equal(1, source.RangeReads);
         Assert.Equal(bytes.Length, source.RangeBytes);
     }

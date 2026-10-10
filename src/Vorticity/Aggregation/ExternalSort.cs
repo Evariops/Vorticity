@@ -34,7 +34,7 @@ internal readonly record struct SortKey(FieldExpr Field, VortexType Type, bool D
 /// </remarks>
 internal sealed class ExternalSort : IAsyncDisposable
 {
-    private static readonly VortexWriteOptions RunOptions = new VortexWriteOptions { Compression = CompressionProfile.Fastest, Statistics = false };
+    private static readonly VortexWriteOptions RunOptions = new VortexWriteOptions { Compression = CompressionProfile.Fastest, WriteStatistics = false };
 
     private readonly VortexSession _session;
     private readonly VortexSchema _schema;

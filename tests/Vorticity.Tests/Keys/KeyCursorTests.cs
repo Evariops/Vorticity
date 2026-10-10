@@ -64,11 +64,11 @@ public sealed class KeyCursorTests
             long upper = UpperBound(oracle, key);
             bool present = lower < oracle.Count && Same(oracle[(int)lower], key);
 
-            await Check(cursor, key, SeekOp.Exact, present ? lower : -1, oracle);
-            await Check(cursor, key, SeekOp.AtOrAfter, lower < oracle.Count ? lower : -1, oracle);
-            await Check(cursor, key, SeekOp.After, upper < oracle.Count ? upper : -1, oracle);
-            await Check(cursor, key, SeekOp.AtOrBefore, upper - 1, oracle);
-            await Check(cursor, key, SeekOp.Before, lower - 1, oracle);
+            await Check(cursor, key, SeekMode.Exact, present ? lower : -1, oracle);
+            await Check(cursor, key, SeekMode.AtOrAfter, lower < oracle.Count ? lower : -1, oracle);
+            await Check(cursor, key, SeekMode.After, upper < oracle.Count ? upper : -1, oracle);
+            await Check(cursor, key, SeekMode.AtOrBefore, upper - 1, oracle);
+            await Check(cursor, key, SeekMode.Before, lower - 1, oracle);
         }
     }
 
@@ -102,7 +102,7 @@ public sealed class KeyCursorTests
 
         // Backward is the exact reverse, and a direction flip after a step needs no re-seek here.
         at = oracle.Count;
-        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
         {
             at--;
             Assert.True(Same(oracle[at], cursor.Key), $"{column} reversed at {at}");
@@ -112,7 +112,7 @@ public sealed class KeyCursorTests
 
         Assert.True(await cursor.SeekRankAsync(oracle.Count / 2, ct));
         Assert.True(await cursor.NextAsync(ct));
-        Assert.True(await cursor.PrevAsync(ct));
+        Assert.True(await cursor.PreviousAsync(ct));
         Assert.True(Same(oracle[oracle.Count / 2], cursor.Key));
     }
 
@@ -182,7 +182,7 @@ public sealed class KeyCursorTests
         // just before the last key's first, the last group being short.
         Assert.True(await cursor.SeekLastAsync(ct));
         long lastGroupStart = LowerBound(oracle, oracle[^1]);
-        Assert.True(await cursor.PrevKeyAsync(ct));
+        Assert.True(await cursor.PreviousKeyAsync(ct));
         Assert.Equal(lastGroupStart - 1, cursor.Row - FirstRow(column));
     }
 
@@ -201,9 +201,9 @@ public sealed class KeyCursorTests
         Assert.Equal(0L, cursor.Key.SignedValue);
 
         // And a seek below every key lands on the first entry, never inside the null run.
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekOp.AtOrAfter, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekMode.AtOrAfter, ct));
         Assert.Equal(Nulls, cursor.Row);
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekOp.Before, ct));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekMode.Before, ct));
     }
 
     [Fact]
@@ -222,12 +222,12 @@ public sealed class KeyCursorTests
         // Row 0 is -0.0 and rows 1 and 2 are +0.0, so the key holds three entries and its first is
         // the negative zero: one key, and the walk starts where IEEE says it does.
         await using KeyCursor cursor = await written.File.Keys("floats_f64").OpenAsync(ct);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekMode.Exact, ct));
         Assert.Equal(0, cursor.Row);
         Assert.Equal(3L, await cursor.CountAtKeyAsync(ct));
         Assert.True(double.IsNegative(cursor.Key.FloatValue));
 
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekMode.Exact, ct));
         Assert.Equal(0, cursor.Row);
     }
 
@@ -266,7 +266,7 @@ public sealed class KeyCursorTests
         }
 
         Assert.Equal(firsts.Count, index);
-        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
         {
             index--;
             Assert.True(SameIeee(firsts[index].Key, cursor.Key), $"key {index}: {Describe(cursor.Key)}");
@@ -322,9 +322,9 @@ public sealed class KeyCursorTests
 
         await using KeyCursor cursor = await written.File.Keys("strict_i64").OpenAsync(ct);
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await cursor.SeekAsync(FilterLiteral.From("nope"), SeekOp.Exact, ct));
+            async () => await cursor.SeekAsync(FilterLiteral.From("nope"), SeekMode.Exact, ct));
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await cursor.SeekAsync(FilterLiteral.Null, SeekOp.Exact, ct));
+            async () => await cursor.SeekAsync(FilterLiteral.Null, SeekMode.Exact, ct));
         Assert.Throws<InvalidOperationException>(() => cursor.Key);
     }
 
@@ -339,7 +339,7 @@ public sealed class KeyCursorTests
         await using Written written = await Written.CreateAsync();
 
         await using KeyCursor cursor = await written.File.Keys("keys_utf8").OpenAsync(ct);
-        Assert.True(await cursor.SeekAsync(Utf8Key(200), SeekOp.AtOrAfter, ct));
+        Assert.True(await cursor.SeekAsync(Utf8Key(200), SeekMode.AtOrAfter, ct));
 
         // Warm the path, then measure steps that stay inside the zone the seek loaded.
         long bytes = 0;
@@ -349,7 +349,7 @@ public sealed class KeyCursorTests
             bytes += cursor.KeyBytes.Length;
         }
 
-        Assert.True(await cursor.SeekAsync(Utf8Key(200), SeekOp.AtOrAfter, ct));
+        Assert.True(await cursor.SeekAsync(Utf8Key(200), SeekMode.AtOrAfter, ct));
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int step = 0; step < 64; step++)
         {
@@ -527,7 +527,7 @@ public sealed class KeyCursorTests
     }
 
     private static async Task Check(
-        KeyCursor cursor, FilterLiteral key, SeekOp op, long expected, List<FilterLiteral> oracle)
+        KeyCursor cursor, FilterLiteral key, SeekMode op, long expected, List<FilterLiteral> oracle)
     {
         bool found = await cursor.SeekAsync(key, op);
         Assert.True(

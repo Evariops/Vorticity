@@ -120,7 +120,7 @@ public sealed class TornTailTests
         try
         {
             await System.IO.File.WriteAllBytesAsync(path, torn, ct);
-            Assert.Equal(whole.LongLength, await VortexFileRepair.ValidLengthAsync(path, ct));
+            Assert.Equal(whole.LongLength, await VortexFileRepair.GetValidLengthAsync(path, ct));
         }
         finally
         {

@@ -35,8 +35,8 @@ public sealed record GroupPlan(
 /// <summary>A component of a group by's key, as the statistics describe it.</summary>
 /// <param name="Column">The column it reads.</param>
 /// <param name="Sorted">Whether the statistics say the column is sorted, so that its rows come in runs of one value.</param>
-/// <param name="Values">The values between its smallest and its largest, when the statistics hold them for an integer column: what a table of its groups indexes directly.</param>
-public sealed record GroupKeyPlan(string Column, bool Sorted, long? Values);
+/// <param name="ValueRange">The values between its smallest and its largest, when the statistics hold them for an integer column: what a table of its groups indexes directly.</param>
+public sealed record GroupKeyPlan(string Column, bool Sorted, long? ValueRange);
 
 /// <summary>How the groups of a group by are ordered before they are delivered.</summary>
 public enum GroupOrdering

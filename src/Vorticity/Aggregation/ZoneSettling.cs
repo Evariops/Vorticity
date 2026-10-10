@@ -211,7 +211,7 @@ internal sealed class ZoneSettling
     /// </summary>
     private static bool Applies(ScanSpec pass, AggregationPlan plan)
     {
-        if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.Pruning
+        if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.UseStatistics
             || plan.Filters.Filters.Length > 0 || plan.Chosen.Length > 0
             || !Array.Exists(plan.Keys, key => key.Field is FunctionFieldExpr))
         {

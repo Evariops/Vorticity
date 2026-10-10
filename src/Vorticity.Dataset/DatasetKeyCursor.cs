@@ -68,8 +68,8 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     // the object a step against the heap's direction starts from; it steps rather than seeks.
     private Anchor _anchor;
     private FilterLiteral _target;
-    private SeekOp _beforePivot;
-    private SeekOp _fromPivot;
+    private SeekMode _beforePivot;
+    private SeekMode _fromPivot;
     private Slot? _pivot;
     private Slot? _current;
     private bool _disposed;
@@ -252,14 +252,14 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
 
     /// <summary>
     /// Positions relative to a key, given in the key's domain: the row encoding of the tuple for a
-    /// composite key. <see cref="SeekOp.AtOrBefore"/> and <see cref="SeekOp.Before"/> walk down from
+    /// composite key. <see cref="SeekMode.AtOrBefore"/> and <see cref="SeekMode.Before"/> walk down from
     /// where they land, and on a distinct walk land on that key's first entry.
     /// </summary>
     public async ValueTask<bool> SeekAsync(
-        FilterLiteral key, SeekOp op = SeekOp.AtOrAfter, CancellationToken cancellationToken = default)
+        FilterLiteral key, SeekMode op = SeekMode.AtOrAfter, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (op is SeekOp.AtOrBefore or SeekOp.Before)
+        if (op is SeekMode.AtOrBefore or SeekMode.Before)
         {
             return await SeekDownAsync(key, op, cancellationToken).ConfigureAwait(false)
                 && (!_distinct || await FirstOfKeyAsync(cancellationToken).ConfigureAwait(false));
@@ -268,12 +268,12 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         // Every cursor goes to the lower bound even for an exact seek, exactness being decided on
         // the winner afterwards: seeking each one exactly would invalidate the cursors whose object
         // does not hold the key, and truncate their rows out of the rest of the merge.
-        if (!await SeekUpAsync(key, op == SeekOp.Exact ? SeekOp.AtOrAfter : op, cancellationToken).ConfigureAwait(false))
+        if (!await SeekUpAsync(key, op == SeekMode.Exact ? SeekMode.AtOrAfter : op, cancellationToken).ConfigureAwait(false))
         {
             return false;
         }
 
-        if (op == SeekOp.Exact && KeyCursor.Compare(Key, key) != 0)
+        if (op == SeekMode.Exact && KeyCursor.Compare(Key, key) != 0)
         {
             _current = null;
             return false;
@@ -576,7 +576,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// Moves to the previous entry in key order; on a distinct walk, to the previous key's first
     /// entry.
     /// </summary>
-    public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default)
+    public ValueTask<bool> PreviousAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_current is null)
@@ -605,14 +605,14 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             return new ValueTask<bool>(false);
         }
 
-        return _direction > 0 ? PastKeyAsync(cancellationToken) : SeekUpAsync(Key, SeekOp.After, cancellationToken);
+        return _direction > 0 ? PastKeyAsync(cancellationToken) : SeekUpAsync(Key, SeekMode.After, cancellationToken);
     }
 
     /// <summary>
     /// Moves to the last entry of the previous distinct key: walking down, every object positioned
     /// on the current key steps past it; walking up, the walk turns and seeks before it.
     /// </summary>
-    public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default)
+    public ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_current is null)
@@ -620,7 +620,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             return new ValueTask<bool>(false);
         }
 
-        return _direction < 0 ? PastKeyAsync(cancellationToken) : SeekDownAsync(Key, SeekOp.Before, cancellationToken);
+        return _direction < 0 ? PastKeyAsync(cancellationToken) : SeekDownAsync(Key, SeekMode.Before, cancellationToken);
     }
 
     /// <summary>
@@ -796,7 +796,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         // The current entry is the top's: its cursor moves on and sinks to its place, or leaves.
         slot.Live = _direction > 0
             ? await slot.Cursor!.NextAsync(cancellationToken).ConfigureAwait(false)
-            : await slot.Cursor!.PrevAsync(cancellationToken).ConfigureAwait(false);
+            : await slot.Cursor!.PreviousAsync(cancellationToken).ConfigureAwait(false);
         if (slot.Live)
         {
             SiftDown(0);
@@ -824,14 +824,14 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         byte[]? sought = _bounded ? Encoded(key) : null;
         if (_direction > 0)
         {
-            _beforePivot = SeekOp.AtOrBefore;
-            _fromPivot = SeekOp.Before;
+            _beforePivot = SeekMode.AtOrBefore;
+            _fromPivot = SeekMode.Before;
             await BeginAsync(-1, Anchor.Target, sought, inclusive: true, cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            _beforePivot = SeekOp.After;
-            _fromPivot = SeekOp.AtOrAfter;
+            _beforePivot = SeekMode.After;
+            _fromPivot = SeekMode.AtOrAfter;
             await BeginAsync(1, Anchor.Target, sought, inclusive: true, cancellationToken).ConfigureAwait(false);
         }
 
@@ -840,7 +840,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>Positions every object at or after <paramref name="key"/> by <paramref name="op"/>, walking up.</summary>
-    private async ValueTask<bool> SeekUpAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    private async ValueTask<bool> SeekUpAsync(FilterLiteral key, SeekMode op, CancellationToken cancellationToken)
     {
         _target = key;
         _fromPivot = op;
@@ -851,19 +851,19 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>Positions every object at or before <paramref name="key"/> by <paramref name="op"/>, walking down.</summary>
-    private async ValueTask<bool> SeekDownAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    private async ValueTask<bool> SeekDownAsync(FilterLiteral key, SeekMode op, CancellationToken cancellationToken)
     {
         _target = key;
         _fromPivot = op;
         _pivot = null;
-        await BeginAsync(-1, Anchor.Target, _bounded ? Encoded(key) : null, inclusive: op != SeekOp.Before, cancellationToken).ConfigureAwait(false);
+        await BeginAsync(-1, Anchor.Target, _bounded ? Encoded(key) : null, inclusive: op != SeekMode.Before, cancellationToken).ConfigureAwait(false);
         await ResolveAsync(cancellationToken).ConfigureAwait(false);
         return Choose();
     }
 
     /// <summary>A distinct walk's step down: the previous key's last entry, then that key's first.</summary>
     private async ValueTask<bool> PrevDistinctAsync(CancellationToken cancellationToken) =>
-        await PrevKeyAsync(cancellationToken).ConfigureAwait(false)
+        await PreviousKeyAsync(cancellationToken).ConfigureAwait(false)
         && await FirstOfKeyAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
@@ -871,7 +871,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// a key's last entry, and a distinct entry is the key's first.
     /// </summary>
     private ValueTask<bool> FirstOfKeyAsync(CancellationToken cancellationToken) =>
-        SeekUpAsync(Key, SeekOp.AtOrAfter, cancellationToken);
+        SeekUpAsync(Key, SeekMode.AtOrAfter, cancellationToken);
 
     /// <summary>
     /// Moves every object on the current key past it in the heap's direction: each leaves the heap
@@ -891,7 +891,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
             Slot slot = _moved[i];
             slot.Live = _direction > 0
                 ? await slot.Cursor!.NextKeyAsync(cancellationToken).ConfigureAwait(false)
-                : await slot.Cursor!.PrevKeyAsync(cancellationToken).ConfigureAwait(false);
+                : await slot.Cursor!.PreviousKeyAsync(cancellationToken).ConfigureAwait(false);
             if (slot.Live)
             {
                 Push(slot);
@@ -989,7 +989,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     {
         Anchor.First => cursor.SeekFirstAsync(cancellationToken),
         Anchor.Last => cursor.SeekLastAsync(cancellationToken),
-        _ when slot == _pivot => _direction > 0 ? cursor.NextAsync(cancellationToken) : cursor.PrevAsync(cancellationToken),
+        _ when slot == _pivot => _direction > 0 ? cursor.NextAsync(cancellationToken) : cursor.PreviousAsync(cancellationToken),
         _ => cursor.SeekAsync(_target, _pivot is not null && Order(slot, _pivot) < 0 ? _beforePivot : _fromPivot, cancellationToken),
     };
 
