@@ -56,7 +56,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly WriteColumn _column;
     private readonly CompressionCodec _codec;
     private readonly int _level;
-    private readonly ZstdCompressor? _zstd;
+    private readonly Compressors? _compressors;
     private readonly int _blockRows;
     private readonly PooledBytes _values;
     private readonly PooledBytes _levels;
@@ -149,13 +149,19 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The fewest rows a page of a block cut into fractions holds: below them, a page is cut by bytes.</summary>
     internal const int MinimumPageRows = 1_024;
 
+    /// <summary>
+    /// Whether a page that fills its block is left staged for the writer to close, on its threads,
+    /// beside the other columns': a writer of more than one lane.
+    /// </summary>
+    internal bool DefersPages { get; init; }
+
     /// <summary>Whether each page gets a <c>crc</c>: the CRC-32 of its bytes as stored past its header.</summary>
     internal bool WriteChecksums { get; init; }
 
     /// <summary>The bytes a block's staged values may reach in one page before the block is cut into fractions of itself.</summary>
     internal int PageBytes { get; init; } = 1 << 20;
 
-    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
+    internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
         if (column.Nested)
@@ -168,7 +174,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _column = column;
         _codec = codec;
         _level = level;
-        _zstd = zstd;
+        _compressors = compressors;
         _blockRows = blockRows;
         _values = new PooledBytes(pool);
         _levels = new PooledBytes(pool);
@@ -239,7 +245,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             Stage(arena, node, start, take);
             start += take;
             count -= take;
-            if (_pageRows == _blockRows)
+            if (_pageRows == _blockRows && !DefersPages)
             {
                 ClosePage();
             }
@@ -661,7 +667,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             _pageNestedRows += take;
             start += take;
             count -= take;
-            if (_pageNestedRows == _blockRows)
+            if (_pageNestedRows == _blockRows && !DefersPages)
             {
                 ClosePage();
             }
@@ -1129,8 +1135,19 @@ internal sealed class ColumnChunkWriter : IDisposable
     {
         _compressed.Clear();
         Span<byte> destination = _compressed.GetSpan(PageCodecs.MaxCompressedLength(_codec, body.Length));
-        int size = PageCodecs.Compress(_codec, _level, body, destination, _zstd);
-        return destination[..size];
+        ZstdCompressor? zstd = _codec == CompressionCodec.Zstd ? _compressors!.Rent() : null;
+        try
+        {
+            int size = PageCodecs.Compress(_codec, _level, body, destination, zstd);
+            return destination[..size];
+        }
+        finally
+        {
+            if (zstd is not null)
+            {
+                _compressors!.Return(zstd);
+            }
+        }
     }
 
     /// <summary>The values of the rows that hold one, in their PLAIN form, appended to <paramref name="target"/>.</summary>

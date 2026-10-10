@@ -29,7 +29,7 @@ namespace Vorticity.Parquet;
 /// to the sink one after the other and the sink is flushed, the only I/O before
 /// <see cref="CompleteAsync"/>. A write that fails part way leaves the file to be abandoned.
 /// </remarks>
-public sealed class ParquetFileWriter : IAsyncDisposable
+public sealed class ParquetFileWriter : IAsyncDisposable, IFanWork
 {
     private static readonly byte[] Magic = "PAR1"u8.ToArray();
 
@@ -43,8 +43,11 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     private readonly WriteSchema _map;
     private readonly ParquetWriteOptions _options;
     private readonly CompressionCodec _codec;
-    private readonly ZstdCompressor? _zstd;
-    private readonly bool _zstdRented;
+    private readonly Compressors? _compressors;
+
+    /// <summary>The threads the columns close their pages on, the writing one included.</summary>
+    private readonly int _lanes;
+    private WorkFan? _fan;
     private readonly ColumnChunkWriter[] _columns;
 
     /// <summary>Per column, its node in the batch being taken.</summary>
@@ -100,12 +103,8 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _callerPipe = callerPipe;
         _codec = (CompressionCodec)options.ResolvedCompression;
         int level = options.ResolvedLevel;
-        if (_codec == CompressionCodec.Zstd)
-        {
-            // The pool's compressors are at the default level, which most files take.
-            _zstdRented = level == ZstdCompressor.DefaultLevel;
-            _zstd = _zstdRented ? ZstdEncoders.Rent() : new ZstdCompressor(level);
-        }
+        _compressors = _codec == CompressionCodec.Zstd ? new Compressors(level) : null;
+        _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session.Options.MaxDegreeOfParallelism;
 
         _columns = new ColumnChunkWriter[map.Columns.Length];
         HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
@@ -115,10 +114,11 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             string path = string.Join('.', map.Columns[i].Path);
             double rate = options.BloomFilters is { } rates && rates.TryGetValue(path, out double asked) ? asked : 0;
             blooms.Remove(path);
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
+            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _compressors, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
             {
                 WriteChecksums = options.WriteChecksums,
                 PageBytes = options.PageBytes,
+                DefersPages = _lanes > 1 && map.Columns.Length > 1,
             };
         }
 
@@ -411,13 +411,27 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             column.Dispose();
         }
 
-        if (_zstdRented)
+        _compressors?.Release();
+        if (_fan is { } fan)
         {
-            ZstdEncoders.Return(_zstd!);
+            WorkFan.Return(fan);
+            _fan = null;
         }
 
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Closes the page every column staged for the block just filled, side by side on the writer's threads.</summary>
+    private void ClosePages()
+    {
+        if (_lanes > 1 && _columns.Length > 1)
+        {
+            (_fan ??= WorkFan.Rent(_lanes)).Run(this, _columns.Length);
+        }
+    }
+
+    /// <summary>Closes column <paramref name="item"/>'s page, on whichever of the writer's threads claimed it.</summary>
+    void IFanWork.Run(WorkFan fan, int item) => _columns[item].ClosePage();
 
     /// <summary>
     /// The file's key-value metadata: the Vortex schema it is written from, from which a reader of this
@@ -535,7 +549,15 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             start += take;
             _groupRows += take;
             _rowCount += take;
-            if (_groupRows % blockRows == 0 && (_groupRows >= _options.RowGroupRows || BufferedBytes() >= _options.RowGroupBytes))
+            if (_groupRows % blockRows != 0)
+            {
+                continue;
+            }
+
+            // The block is whole in every column: their pages close, on the writer's threads when it
+            // has more than one, each column's its own.
+            ClosePages();
+            if (_groupRows >= _options.RowGroupRows || BufferedBytes() >= _options.RowGroupBytes)
             {
                 await CloseRowGroupAsync(partial: false, cancellationToken).ConfigureAwait(false);
             }

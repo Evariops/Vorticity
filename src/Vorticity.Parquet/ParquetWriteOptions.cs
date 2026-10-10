@@ -81,6 +81,13 @@ public sealed record ParquetWriteOptions
     public bool Durable { get; init; }
 
     /// <summary>
+    /// How many threads the columns close their pages on, encoding and compressing them side by side;
+    /// 0, the default, for the session's <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/>. The file
+    /// is the same bytes whatever the degree.
+    /// </summary>
+    public int DegreeOfParallelism { get; init; }
+
+    /// <summary>
     /// The columns that get a Bloom filter in every row group, by name — a nested column by its
     /// dotted path — each with the false-positive rate it is sized for, above 0 and below 1. None by
     /// default. A filter is the standard's split-block filter of xxHash64, which a reader probes for
@@ -136,6 +143,7 @@ public sealed record ParquetWriteOptions
 
         ArgumentOutOfRangeException.ThrowIfLessThan(RowGroupBytes, 1, nameof(RowGroupBytes));
         ArgumentOutOfRangeException.ThrowIfLessThan(PageBytes, 1, nameof(PageBytes));
+        ArgumentOutOfRangeException.ThrowIfNegative(DegreeOfParallelism, nameof(DegreeOfParallelism));
         if (!Enum.IsDefined(Profile))
         {
             throw new ArgumentOutOfRangeException(nameof(Profile), Profile, "Not a profile.");

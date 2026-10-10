@@ -27,7 +27,7 @@ public class ParquetWriteBenchmarks
     private readonly ParquetTable _table = new();
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-bloom", "parquet-crc")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-zstd-8", "parquet-bloom", "parquet-crc")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -244,6 +244,7 @@ internal sealed class ParquetTable
             Compression = compression,
             BloomFilters = format == "parquet-bloom" ? new Dictionary<string, double> { ["id"] = 0.01, ["label"] = 0.01 } : null,
             WriteChecksums = format == "parquet-crc",
+            DegreeOfParallelism = format == "parquet-zstd-8" ? 8 : 0,
         });
         Fill(parquet.Builder());
         await parquet.WriteAsync(parquet.Builder(), CancellationToken.None).ConfigureAwait(false);
