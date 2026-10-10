@@ -204,7 +204,7 @@ internal static class EncodedForms
             RunEndView<int> days = day.AsRunEnd();
             RunEndView<string> cities = city.AsRunEnd();
             Column<string> decoded = city.AsCanonical();
-            Console.WriteLine($"first batch: {day.Length} rows; Celsius {temperatures.Cardinality} distinct values, {temperatures.Values.NullCount} of them null; Day {days.RunCount} runs, City {cities.RunCount} runs; City.Canonical() is {decoded.Encoding}");
+            Console.WriteLine($"first batch: {day.Length} rows; Celsius {temperatures.Cardinality} distinct values, {temperatures.Values.NullCount} of them null; Day {days.RunCount} runs, City {cities.RunCount} runs; City.AsCanonical() is {decoded.Encoding}");
             break;
         }
     }
