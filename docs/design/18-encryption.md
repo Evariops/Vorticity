@@ -170,9 +170,10 @@ fresh key, and ends with a trailer that lists every epoch. The plaintext the cor
 one after the other, exactly the plaintext append. An abandoned append is truncated back to the
 previous trailer, and the file is again what it was.
 
-Readers handle any number of epochs from the first version, since the cost is a short table. Writers
-write one epoch until appends to sealed files are built (see [the order of the work](#11-the-order-of-the-work)),
-and an append to a sealed file fails until then with an exception that says so.
+Readers handle any number of epochs, since the cost is a short table. An append needs the data key the
+file names, so it runs in a session whose keyring unwraps it, whether or not that session seals the
+files it writes. A session that seals them refuses to append to a plain file, which would add
+plaintext to it.
 
 ## 4. Keys
 
@@ -356,10 +357,12 @@ and appends the tag, so sealing adds the cipher's pass and no copy to the ones a
 completion, it seals the last frame and writes the trailer. Like the writer, the stage only moves
 forward.
 
-A sealed file whose last append was torn by a crash behaves as a plain one does. The open walks back to
-the last trailer whose epochs all verify, reads the version that trailer describes, and reports the tear
-in `VortexFile.TornTail`, unless `VortexOpenOptions.TornTail` refuses it. `VortexFileRepair` truncates
-the file to that trailer's end.
+A sealed file whose last append was torn by a crash behaves as a plain one does. It ends with neither
+magic, and its header still says it is sealed. The open walks back to the last whole trailer, one whose
+layout reads under the header's descriptor, checks the commitments of its epochs, reads the version
+that trailer describes, and reports the tear in `VortexFile.TornTail`, unless
+`VortexOpenOptions.TornTail` refuses it. `VortexFileRepair` truncates the file to that trailer's end,
+without the key, since finding the trailer needs none.
 
 ### 6.3 Datasets
 
@@ -399,9 +402,11 @@ trailer and the Vortex tail.
 ### 6.4 Scratch
 
 A group by that spills, and a sort that writes runs, put the data they hold on local disk. When the
-session seals its files, its scratch is sealed too, in the same format, under a data key the process
-draws when it starts, which no keyring wraps, held in native memory and never written anywhere. After a
-crash the scratch is unreadable, which is what scratch should be. A spill reads its sections by
+session seals its files, its scratch is sealed too: frames of 64 KiB under AES-256-GCM, each written
+once when it is full, with the frame index as its nonce, under a key drawn for that scratch file, which
+no keyring wraps, held in native memory and never written anywhere. Nothing outside the process reads
+the file, so it has no header and no trailer, and the frame being filled is served from memory. After
+a crash the scratch is unreadable, which is what scratch should be. A spill reads its sections by
 offset, which maps onto frames as any range does.
 
 ## 7. What it costs

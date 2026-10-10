@@ -369,13 +369,15 @@ public sealed class VortexSession : IAsyncDisposable
         ThrowIfDisposed();
         ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true, Options.EnginePool);
         VortexOpenOptions effective = Effective(options);
+        VortexTornTail? torn = null;
         if (Keys is not null)
         {
             bool ownsSource = !effective.LeaveSourceOpen;
             ISegmentReader opened;
             try
             {
-                opened = await Sealing.SealedFiles.ReaderAsync(reader, ownsSource, this, source.GetType().Name, cancellationToken).ConfigureAwait(false);
+                (opened, torn) = await Sealing.SealedFiles.ReaderAsync(
+                    reader, ownsSource, this, source.GetType().Name, effective.TornTail, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -396,6 +398,11 @@ public sealed class VortexSession : IAsyncDisposable
         }
 
         VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(reader, this), effective, cancellationToken).ConfigureAwait(false);
+        if (torn is not null)
+        {
+            file.TornTail = torn;
+        }
+
         await AttachAsync(file, source.GetType().Name).ConfigureAwait(false);
         return file;
     }

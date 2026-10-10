@@ -167,9 +167,10 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         FileSegmentSource file = new FileSegmentSource(path);
         ISegmentReader reader;
+        VortexTornTail? torn;
         try
         {
-            reader = await Sealing.SealedFiles.ReaderAsync(file, ownsReader: true, session, path, cancellationToken).ConfigureAwait(false);
+            (reader, torn) = await Sealing.SealedFiles.ReaderAsync(file, ownsReader: true, session, path, options.TornTail, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -184,9 +185,15 @@ public sealed partial class VortexFile : IAsyncDisposable
         }
 
         ValueTask<VortexFile> open = OpenCoreAsync(SessionReader.Wrap(reader, session), options, ownsSource: true, cancellationToken);
-        return options.PreloadIndexes
+        VortexFile opened = options.PreloadIndexes
             ? await FinishOpenAsync(open, null, preload: true, cancellationToken).ConfigureAwait(false)
             : await open.ConfigureAwait(false);
+        if (torn is not null)
+        {
+            opened.TornTail = torn;
+        }
+
+        return opened;
     }
 
     /// <summary>Opens a plain file from a path: mapped by its first scan, or read positionally.</summary>
@@ -304,8 +311,22 @@ public sealed partial class VortexFile : IAsyncDisposable
         long length = options.FileLength >= 0
             ? options.FileLength
             : await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-        if (!await VortexFileRepair.BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false)
-            || await VortexFileRepair.ForeignVersionAsync(source, length, cancellationToken).ConfigureAwait(false) is not null)
+        (bool vortex, bool sealedHeader) = await VortexFileRepair.BeginsAsync(source, length, cancellationToken).ConfigureAwait(false);
+        if (!vortex)
+        {
+            // A sealed file whose last append was torn ends with neither magic: its header says what it is.
+            if (sealedHeader)
+            {
+                throw VortexEncryptionException.NoKey(
+                    string.Empty,
+                    "The file is sealed, and its tail is torn: open it in a session whose keyring holds its key (VortexSessionOptions.Keyring), which reads the version before the tear.",
+                    torn);
+            }
+
+            return null;
+        }
+
+        if (await VortexFileRepair.ForeignVersionAsync(source, length, cancellationToken).ConfigureAwait(false) is not null)
         {
             return null;
         }
@@ -1183,7 +1204,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     public VortexTornTail? TornTail
     {
         get => TornTails.TryGetValue(this, out VortexTornTail? torn) ? torn : null;
-        private set
+        internal set
         {
             if (value is not null)
             {

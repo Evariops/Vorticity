@@ -193,7 +193,8 @@ public sealed class SealedFormatTests
     /// </summary>
     private const string KnownAnswer = "8087393891495280B79C1FCC109CE89A9352F9B8914ED28A9677B48468604FB6";
 
-    private static async Task AssertRefusedAsync(byte[] altered, DataKey key, CancellationToken ct, string what)
+    /// <summary>That <paramref name="altered"/> fails to open or to read with <paramref name="key"/>, whatever the reason.</summary>
+    internal static async Task AssertRefusedAsync(byte[] altered, DataKey key, CancellationToken ct, string what)
     {
         Exception? refused = null;
         try
@@ -217,7 +218,8 @@ public sealed class SealedFormatTests
         Assert.NotNull(refused);
     }
 
-    private static async Task<byte[]> OpenWithAsync(byte[] sealedBytes, DataKey key, CancellationToken ct)
+    /// <summary>The whole plaintext of <paramref name="sealedBytes"/>, opened with <paramref name="key"/> only.</summary>
+    internal static async Task<byte[]> OpenWithAsync(byte[] sealedBytes, DataKey key, CancellationToken ct)
     {
         await using SealedSegmentReader reader = await SealedSegmentReader.OpenAsync(
             new Vorticity.IO.MemorySegmentSource(sealedBytes),
