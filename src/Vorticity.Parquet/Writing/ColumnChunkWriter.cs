@@ -1232,6 +1232,12 @@ internal sealed class ColumnChunkWriter : IDisposable
     {
         switch (_column.Physical)
         {
+            // Under a codec, an integer's encodings are priced by what the codec makes of them, on the
+            // chunk's first PLAIN page: deltas a codec cannot compress further can store more than
+            // the plain values or their split bytes it does, timestamps a few seconds apart among them.
+            case PhysicalType.Int32 or PhysicalType.Int64 when _codec != CompressionCodec.Uncompressed:
+                return Smallest(ref body, count, eighth: true);
+
             case PhysicalType.Int32:
             {
                 // Priced by writing it, and dropped when it does not pay.
