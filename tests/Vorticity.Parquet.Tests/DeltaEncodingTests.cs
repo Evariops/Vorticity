@@ -240,6 +240,47 @@ public sealed class DeltaEncodingTests
     }
 
     [Fact]
+    public void RebuildsLongSharedPrefixesAVectorAtATime()
+    {
+        // Each value the head of the one before and a suffix of its own: prefixes of every length to
+        // 120 bytes, some just short of the value before, which a copy of sixteen bytes at a time
+        // reads up to the bytes it writes; into a heap of the values' bytes exactly, and with slack.
+        Random random = new(10);
+        foreach (int count in (int[])[1, 2, 7, 100, 3_000])
+        {
+            List<byte[]> values = [];
+            byte[] previous = [];
+            for (int i = 0; i < count; i++)
+            {
+                int shared = random.Next(3) == 0 ? previous.Length : random.Next(previous.Length + 1);
+                byte[] value = [.. previous.AsSpan(0, Math.Min(shared, 120)), .. Enumerable.Range(0, random.Next(0, 41)).Select(_ => (byte)random.Next(256))];
+                values.Add(value);
+                previous = value;
+            }
+
+            byte[] data = values.SelectMany(v => v).ToArray();
+            int[] lengths = values.Select(v => v.Length).ToArray();
+            int[] prefixes = new int[count];
+            int[] suffixes = new int[count];
+            int rest = DeltaByteArrays.Prefixes(data, lengths, prefixes, suffixes);
+            byte[] encoded = new byte[DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest)];
+            DeltaByteArrays.EncodePrefixes(data, lengths, prefixes, suffixes, encoded);
+
+            foreach (int slack in (int[])[0, DeltaByteArrays.RebuildSlack])
+            {
+                int[] readPrefixes = new int[count];
+                int[] readSuffixes = new int[count];
+                long total = DeltaByteArrays.DecodePrefixes(encoded, readPrefixes, readSuffixes, out int start);
+                byte[] heap = new byte[total + slack];
+                int[] readLengths = new int[count];
+                DeltaByteArrays.Rebuild(encoded.AsSpan(start), readPrefixes, readSuffixes, heap, readLengths);
+                Assert.Equal(lengths, readLengths);
+                Assert.Equal(data, heap.AsSpan(0, (int)total).ToArray());
+            }
+        }
+    }
+
+    [Fact]
     public void RebuildsFrontCodedValuesOfEveryShape()
     {
         Random random = new(9);

@@ -2394,7 +2394,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Span<int> rebuilt = all.Slice(2 * valid, valid);
             long total = DeltaByteArrays.DecodePrefixes(source, prefixes, suffixes, out int suffixStart);
             Cap(total);
-            heap = _pool.Rent((int)Math.Max(total, 1), 64);
+            heap = _pool.Rent((int)total + DeltaByteArrays.RebuildSlack, 64);
             DeltaByteArrays.Rebuild(source[suffixStart..], prefixes, suffixes, heap.WritableSpan, rebuilt);
             if (_views)
             {
