@@ -331,6 +331,9 @@ internal sealed class ScratchFrames : IDisposable
     // frame being filled holds plaintext, and is wiped before it goes back.
     private readonly byte[] _pending = ArrayPool<byte>.Shared.Rent(FrameBytes);
     private readonly byte[] _sealed = ArrayPool<byte>.Shared.Rent(SealedFrameBytes);
+
+    /// <summary>Held while the writer moves to the next frame, and while a reader copies out of the one being filled.</summary>
+    private readonly object _gate = new object();
     private int _filled;
     private long _written;
     private int _disposed;
@@ -357,8 +360,14 @@ internal sealed class ScratchFrames : IDisposable
             {
                 Seal();
                 await RandomAccess.WriteAsync(file, _sealed.AsMemory(0, SealedFrameBytes), _written * SealedFrameBytes, cancellationToken).ConfigureAwait(false);
-                _written++;
-                _filled = 0;
+
+                // The frame is on disk before a reader is sent there, and the buffer is refilled only
+                // once no reader can still be copying the frame out of it.
+                lock (_gate)
+                {
+                    _written++;
+                    _filled = 0;
+                }
             }
         }
     }
@@ -367,7 +376,21 @@ internal sealed class ScratchFrames : IDisposable
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ReadAsync(SafeFileHandle file, long offset, Memory<byte> destination, CancellationToken cancellationToken)
     {
-        long writtenBytes = _written * FrameBytes;
+        // What lies past the frames written is copied out of the frame being filled under the gate the
+        // writer moves to the next frame under, so that the bytes copied are that frame's and not the
+        // next one's. The frames written are on disk for good, and read after.
+        long writtenBytes;
+        lock (_gate)
+        {
+            writtenBytes = _written * FrameBytes;
+            long from = Math.Max(offset, writtenBytes);
+            long end = offset + destination.Length;
+            if (end > from)
+            {
+                _pending.AsSpan((int)(from - writtenBytes), (int)(end - from)).CopyTo(destination.Span[(int)(from - offset)..]);
+            }
+        }
+
         if (offset < writtenBytes && !destination.IsEmpty)
         {
             long first = offset / FrameBytes;
@@ -404,15 +427,6 @@ internal sealed class ScratchFrames : IDisposable
 
                 ArrayPool<byte>.Shared.Return(sealedRun);
             }
-
-            offset += count;
-            destination = destination[count..];
-        }
-
-        // What lies past the frames written is in the frame being filled.
-        if (!destination.IsEmpty)
-        {
-            _pending.AsSpan((int)(offset - writtenBytes), destination.Length).CopyTo(destination.Span);
         }
     }
 
