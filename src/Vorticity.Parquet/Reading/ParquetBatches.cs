@@ -64,6 +64,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private readonly bool _bloom;
     private readonly SegmentRequestSet _indexes = new();
 
+    /// <summary>The pruning of row groups by the dictionaries of the filter's columns, or null when no part of it reads one alone.</summary>
+    private readonly DictionaryPruning? _dictionaries;
+
     /// <summary>The batches of the row group being read the page index leaves, or null when it rules none out.</summary>
     private BlockMask? _live;
     private RecordBatch? _current;
@@ -126,6 +129,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _nodes = new int[fields.Length];
         _pruning = FilterColumns.For(file, spec);
         _bloom = _pruning is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
+        _dictionaries = DictionaryPruning.For(_pruning, _context);
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -196,6 +200,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _chunks.Dispose();
         _indexes.Release();
         _indexes.Dispose();
+        _dictionaries?.Dispose();
         _context.Dispose();
         return ValueTask.CompletedTask;
     }
@@ -231,23 +236,31 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 _anticipated = true;
             }
 
-            // The Bloom filters of the columns the filter's equalities ask about rule a group out whole.
+            // The page index of the filter's columns rules batches out; a group it leaves none of
+            // is not read.
+            _live = _pruning is null ? null
+                : await PagePruning.LiveAsync(_pruning, _rowGroup, group.RowCount, _batchRows, _indexes, _metrics, _cancellationToken).ConfigureAwait(false);
+            if (_live is { LiveCount: 0 })
+            {
+                _metrics.AddBlocksPruned(_live.BlockCount);
+                continue;
+            }
+
+            // Then the Bloom filters of the columns the filter's equalities ask about, and the
+            // dictionaries of the columns it reads, each of which rules a group out whole.
             if (_bloom && await BloomPruning.RulesOutAsync(_pruning!, _rowGroup, _indexes, _metrics, _cancellationToken).ConfigureAwait(false))
             {
                 _metrics.AddBlocksPruned((int)((group.RowCount + _batchRows - 1) / _batchRows));
                 continue;
             }
 
-            // The page index of the filter's columns rules batches out; a group it leaves none of
-            // is not read.
-            _live = _pruning is null ? null
-                : await PagePruning.LiveAsync(_pruning, _rowGroup, group.RowCount, _batchRows, _indexes, _metrics, _cancellationToken).ConfigureAwait(false);
-            if (_live is not { LiveCount: 0 })
+            if (_dictionaries is not null && await _dictionaries.RulesOutAsync(_rowGroup, _metrics, _cancellationToken).ConfigureAwait(false))
             {
-                break;
+                _metrics.AddBlocksPruned((int)((group.RowCount + _batchRows - 1) / _batchRows));
+                continue;
             }
 
-            _metrics.AddBlocksPruned(_live.BlockCount);
+            break;
         }
 
         long bytes = 0;

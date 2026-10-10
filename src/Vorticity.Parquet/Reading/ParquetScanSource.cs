@@ -94,9 +94,9 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
 
     internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
-        // Every row group the plan reads, its Bloom filters and its page index read as the scan
-        // reads them, and every chunk of the columns read of a group they leave a batch of: a
-        // block is a batch.
+        // Every row group the plan reads, its page index, its Bloom filters and its dictionaries read
+        // as the scan reads them, and every chunk of the columns read of a group they leave a batch
+        // of: a block is a batch.
         ParquetFooter footer = file.Footer;
         RowGroupPlan plan = RowGroupPlan.For(file, spec);
         FilterColumns? filter = FilterColumns.For(file, spec);
@@ -104,6 +104,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         ScanCounters blooms = new();
         ScanCounters indexes = new();
         bool bloom = filter is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
+        using DictionaryPruning? dictionaries = DictionaryPruning.For(filter);
+        ScanCounters dictionaryReads = new();
         using SegmentRequestSet requests = new();
         long rows = 0;
         int segments = 0;
@@ -113,6 +115,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         int decoded = 0;
         int bloomPruned = 0;
         int pagePruned = 0;
+        int dictionaryPruned = 0;
         int undecidedPruned = 0;
         int[] leaves = Leaves(spec);
         for (int group = 0; group < footer.RowGroups.Length; group++)
@@ -125,19 +128,24 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             RowGroupEntry entry = footer.RowGroups[group];
             int blocks = (int)((entry.RowCount + batchRows - 1) / batchRows);
             rows += entry.RowCount;
-            if (bloom && await BloomPruning.RulesOutAsync(filter!, group, requests, blooms, cancellationToken).ConfigureAwait(false))
-            {
-                bloomPruned += blocks;
-                undecidedPruned += plan.Proven[group] >= 0 ? 0 : blocks;
-                proven += plan.Proven[group] >= 0 ? blocks : 0;
-                provenRows += Math.Max(plan.Proven[group], 0);
-                continue;
-            }
-
             BlockMask? mask = filter is null ? null
                 : await PagePruning.LiveAsync(filter, group, entry.RowCount, batchRows, requests, indexes, cancellationToken).ConfigureAwait(false);
             int liveBlocks = mask?.LiveCount ?? blocks;
             pagePruned += blocks - liveBlocks;
+            if (liveBlocks > 0 && bloom
+                && await BloomPruning.RulesOutAsync(filter!, group, requests, blooms, cancellationToken).ConfigureAwait(false))
+            {
+                bloomPruned += liveBlocks;
+                liveBlocks = 0;
+            }
+
+            if (liveBlocks > 0 && dictionaries is not null
+                && await dictionaries.RulesOutAsync(group, dictionaryReads, cancellationToken).ConfigureAwait(false))
+            {
+                dictionaryPruned += liveBlocks;
+                liveBlocks = 0;
+            }
+
             if (plan.Proven[group] >= 0)
             {
                 proven += blocks;
@@ -166,17 +174,20 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         long indexBytes = indexes.BytesRequested;
         int bloomSegments = (int)blooms.SegmentRequests;
         long bloomBytes = blooms.BytesRequested;
-        int live = plan.Blocks - plan.PrunedBlocks - bloomPruned - pagePruned;
+        int dictionarySegments = (int)dictionaryReads.SegmentRequests;
+        long dictionaryBytes = dictionaryReads.BytesRequested;
+        int live = plan.Blocks - plan.PrunedBlocks - bloomPruned - pagePruned - dictionaryPruned;
         ImmutableArray<PruningStep> pruning = spec.Filter is not null && spec.Options.UseStatistics
             ?
             [
                 new PruningStep("row group statistics", plan.PrunedBlocks, 0, 0),
-                new PruningStep("bloom filter", bloomPruned, bloomSegments, bloomBytes),
                 new PruningStep("page index", pagePruned, indexSegments, indexBytes),
+                new PruningStep("bloom filter", bloomPruned, bloomSegments, bloomBytes),
+                new PruningStep("dictionary", dictionaryPruned, dictionarySegments, dictionaryBytes),
             ]
             : ImmutableArray<PruningStep>.Empty;
-        segments += bloomSegments;
-        bytes += bloomBytes;
+        segments += bloomSegments + dictionarySegments;
+        bytes += bloomBytes + dictionaryBytes;
         bool unfiltered = spec.Filter is null && spec.Take is null;
         CountPlan count = unfiltered
             ? new CountPlan(true, rows, 0, 0, 0)

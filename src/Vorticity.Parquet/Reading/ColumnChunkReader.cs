@@ -157,6 +157,24 @@ internal sealed partial class ColumnChunkReader : IDisposable
         _pastFirstPage = false;
     }
 
+    /// <summary>
+    /// The dictionary page <paramref name="bytes"/> hold, a chunk's first page, decoded as a node of
+    /// its entries, none null; the reader holds the page until <see cref="Release"/>.
+    /// </summary>
+    internal int ReadDictionary(ScanContext context, VortexBuffer bytes, CompressionCodec codec)
+    {
+        Start(bytes, codec, 0);
+        ReadOnlySpan<byte> page = bytes.Span;
+        PageHeader header = PageHeader.Read(page);
+        if (header.Type != PageType.DictionaryPage || header.CompressedPageSize > page.Length - header.HeaderLength)
+        {
+            ParquetThrow.Format($"The column chunk of '{Name}' does not start with the dictionary page its metadata places there.");
+        }
+
+        _dictionary = DecodeDictionary(context, header, header.HeaderLength);
+        return Whole(context.Canonical, _dictionary);
+    }
+
     /// <summary>The next <paramref name="rows"/> rows, as a node of <paramref name="context"/>'s arena.</summary>
     internal int Read(ScanContext context, int rows)
     {

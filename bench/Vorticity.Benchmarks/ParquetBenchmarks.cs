@@ -100,6 +100,21 @@ public class ParquetScanBenchmarks
         }
 
         Console.WriteLine($"// {Format}: {new FileInfo(_path).Length:N0} bytes");
+        if (Format != "vortex")
+        {
+            // What each structure the filter's pruning reads costs it, and spares it.
+            ParquetFile parquet = ParquetFile.OpenAsync(_path, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            foreach ((string name, Scan scan) in (ReadOnlySpan<(string, Scan)>)[("value > 900", parquet.Scan("id").Where($"value > {900.0}")), ("label = label-0500", parquet.Scan("id").Where($"label = {"label-0500"}"))])
+            {
+                ScanPlan plan = scan.ExplainAsync(CancellationToken.None).AsTask().GetAwaiter().GetResult();
+                foreach (PruningStep step in plan.Pruning)
+                {
+                    Console.WriteLine($"// {Format}, {name}: {step.Structure}: {step.BlocksPruned} blocks pruned, {step.SegmentsRead} reads of {step.BytesRead:N0} bytes");
+                }
+            }
+
+            parquet.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
 
     [GlobalCleanup]
@@ -140,6 +155,23 @@ public class ParquetScanBenchmarks
 
         await using ParquetFile parquet = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
         return await parquet.Scan("id").Where($"value > {900.0}").CountAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A label every row group holds: in Parquet, a column of dictionary codes whose dictionary the
+    /// pruning reads and rules nothing out by, what pruning by dictionaries costs where it fails.
+    /// </summary>
+    [Benchmark(Description = "filter label = label-0500")]
+    public async Task<long> FilterLabel()
+    {
+        if (Format == "vortex")
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+            return await file.Scan("id").Where($"label = {"label-0500"}").CountAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+
+        await using ParquetFile parquet = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+        return await parquet.Scan("id").Where($"label = {"label-0500"}").CountAsync(CancellationToken.None).ConfigureAwait(false);
     }
 }
 

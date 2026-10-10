@@ -273,9 +273,15 @@ the core's order — cheapest first, stopping when nothing is left:
    read for every chunk the scan keeps, and most often inside the tail the open read. Pages whose
    bounds rule the predicate out drop their rows from the selection.
 3. **Bloom filters**, for equality and `In` only: one read per chunk and column.
-4. **The dictionary**, when the chunk's `encoding_stats` show every data page dictionary-encoded:
-   the predicate is evaluated once per distinct value, and a chunk none of whose values matches is
-   dropped. Its page is the one read the chunk would have needed anyway.
+4. **The dictionary**, when the chunk's `encoding_stats` show every data page dictionary-encoded,
+   or, without them, its encodings are the first version's dictionary encoding and the levels'
+   alone: each part of the predicate that reads that column alone is evaluated by the core's
+   evaluator over the dictionary's entries, once per distinct value, for whether it can come out
+   true on a row and whether it can come out false; the parts combine as the predicate does, an AND
+   true only where both sides can be, an OR false only where both can be, a NOT swapping the two,
+   and a null check stays open over a chunk that may hold a null. A row group the predicate cannot
+   select is dropped. The dictionary page is read on its own, up to 8 MiB, and again with its chunk
+   when the group is read after all.
 
 A statistic prunes only where the standard makes it a bound:
 
