@@ -92,11 +92,10 @@ public sealed partial class VortexFileWriter
 
             // A sealed file is continued with an epoch under the data key it names; a session that
             // seals what it writes adds no plaintext to a plain one.
-            sealedLayout = (SessionReader.Unwrap(file.Source) as Sealing.SealedSegmentReader)?.Layout;
+            sealedLayout = file.SealedLayout;
             if (sealedLayout is null && session.Seals)
             {
-                throw VortexEncryptionException.Refused(
-                    $"'{path}' is not sealed, and the session seals every file it writes (VortexSessionOptions.EncryptFiles): an append would add plaintext to it. Write it again in the session instead.");
+                throw RefusedPlainAppend(path, "an append");
             }
 
             plan = await AppendPlan.ReadAsync(file, options, sealedLayout is not null, cancellationToken).ConfigureAwait(false);
@@ -147,6 +146,13 @@ public sealed partial class VortexFileWriter
 
         return writer;
     }
+
+    /// <summary>The refusal of a session that seals what it writes to add plaintext to a plain file.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="what">What would have been written: "an append", "an index".</param>
+    internal static VortexEncryptionException RefusedPlainAppend(string path, string what) =>
+        VortexEncryptionException.Refused(
+            $"'{path}' is not sealed, and the session seals every file it writes (VortexSessionOptions.EncryptFiles): {what} would add plaintext to it. Write it again in the session instead.");
 
     /// <summary>
     /// The append's writer over a pipe on the file's handle, positioned at its end. A sealed file's

@@ -1910,6 +1910,8 @@ Vorticity:     method ValueTask DecryptAsync(string, Stream, CancellationToken =
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync(VortexFile, EncodingGoal = default, CancellationToken = default)
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync<TRecord>(ReadOnlyMemory<TRecord>, EncodingGoal = default, CancellationToken = default)
+Vorticity:     method ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(string, IndexPolicy, CancellationToken = default)
+Vorticity:     method ValueTask<IndexFragment> BuildFragmentAsync(string, IndexPolicy, Nullable<RowRange> = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(ISegmentSource, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(string, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFileWriter> OpenWriterAsync(string, VortexWriteOptions = default, CancellationToken = default)

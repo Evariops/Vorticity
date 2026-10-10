@@ -304,14 +304,19 @@ public sealed partial class VortexFile
         for (int i = 0; i < blobs.Count; i++)
         {
             // Bound by the identity or the store token the fragment records: a fragment of another
-            // object, or of another version of this one, is refused whole.
-            MemorySegmentSource source = new MemorySegmentSource(blobs[i]);
-            IndexDirectory? fragment;
+            // object, or of another version of this one, is refused whole. A sealed one is read
+            // through the session's keys.
+            ISegmentReader source = new MemorySegmentSource(blobs[i]);
+            IndexDirectory? fragment = null;
             string? why;
             try
             {
-                (fragment, why) = await IndexContainer
-                    .ReadAsync(source, blobs[i].Length, this, cancellationToken).ConfigureAwait(false);
+                (source, long length, why) = await OpenFragmentAsync(source, blobs[i].Length, cancellationToken).ConfigureAwait(false);
+                if (why is null)
+                {
+                    (fragment, why) = await IndexContainer
+                        .ReadAsync(source, length, this, cancellationToken).ConfigureAwait(false);
+                }
             }
             catch
             {
@@ -327,6 +332,50 @@ public sealed partial class VortexFile
 
         IndexDirectory? merged = IndexFragmentMerge.Merge(named, fragments, refusals, (ulong)RowCount, EntryName);
         return new IndexState(merged, refusal, origins, refusals);
+    }
+
+    /// <summary>
+    /// The reader a fragment's container is read through, and its length: the fragment itself when it
+    /// is plain, the plaintext of a sealed one, opened with the keys of the file's session. A fragment
+    /// the session cannot open, or a plain one a session that refuses plaintext was handed, comes back
+    /// with the reason it is left out, since a fragment never fails the file.
+    /// </summary>
+    /// <param name="blob">The fragment's bytes; on success the reader returned owns it.</param>
+    /// <param name="length">Their length.</param>
+    /// <param name="cancellationToken">Cancels the reads and the unwrap.</param>
+    private async ValueTask<(ISegmentReader Source, long Length, string? Refusal)> OpenFragmentAsync(
+        ISegmentReader blob, long length, CancellationToken cancellationToken)
+    {
+        if (!await Sealing.SealedFiles.EndsSealedAsync(blob, cancellationToken).ConfigureAwait(false))
+        {
+            return Session.Options.RefusePlaintext && !ReadOptions.IndexFragmentsAuthenticated
+                ? (blob, length, "the fragment is not sealed, and the session refuses plaintext")
+                : (blob, length, null);
+        }
+
+        if (Session.Keys is not { } keys)
+        {
+            return (blob, length, "the fragment is sealed, and the file's session holds no keyring");
+        }
+
+        try
+        {
+            Sealing.SealedSegmentReader reader = await Sealing.SealedSegmentReader
+                .OpenAsync(blob, ownsInner: true, keys.UnwrapAsync, cancellationToken).ConfigureAwait(false);
+            return (reader, reader.Layout.PlainLength, null);
+        }
+        catch (VortexEncryptionException e)
+        {
+            return (blob, length, $"the sealed fragment does not open: {e.Message}");
+        }
+        catch (VortexFormatException e)
+        {
+            return (blob, length, $"the sealed fragment does not open: {e.Message}");
+        }
+        catch (VortexUnsupportedException e)
+        {
+            return (blob, length, $"the sealed fragment does not open: {e.Message}");
+        }
     }
 
     /// <summary>The file's own directory, or none.</summary>

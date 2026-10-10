@@ -343,7 +343,10 @@ await using VortexSession session = VortexSession.Create(o =>
 | `RefusePlaintext` | a plain file or a plain dataset is refused at open, so a reader that expects sealed data cannot be handed plain bytes in their place |
 
 Nothing else in the API changes. `OpenAsync`, `CreateWriter`, `OpenWriterAsync`, every scan, query and
-sink behave on a sealed file as on a plain one.
+sink behave on a sealed file as on a plain one. Indexing a file after its write is the one place where a
+static entry point, `VortexFileIndexer`, works in the default session, so the session gains the two
+calls that take a path, `AppendIndexesAsync` and `BuildFragmentAsync`, which index a sealed file
+through its keys.
 
 ### 6.2 Files
 
@@ -363,6 +366,15 @@ layout reads under the header's descriptor, checks the commitments of its epochs
 that trailer describes, and reports the tear in `VortexFile.TornTail`, unless
 `VortexOpenOptions.TornTail` refuses it. `VortexFileRepair` truncates the file to that trailer's end,
 without the key, since finding the trailer needs none.
+
+Indexes added after the write follow the same rules. Appended to a sealed file, the runs and the new
+tail are an epoch, built in a scratch that holds the sealed bytes only and copied behind the file. A
+fragment holds column values, so the fragment of a sealed file, or one built in a session that seals
+what it writes, is sealed in the same format under the session's keys, and a reader opens it with its
+own. A fragment a session cannot open is left out with its reason, as a fragment of another file is,
+since an index is only a hint and never fails the open. A session that refuses plaintext leaves out a
+plain fragment too, which could otherwise steer its pruning, except those an encrypted dataset reads
+from its own sealed commits.
 
 ### 6.3 Datasets
 
