@@ -9,8 +9,8 @@ using Vorticity.Parquet.Codecs;
 namespace Vorticity.Parquet.Reading;
 
 /// <summary>
-/// A row group's batches decoded a field at a time ahead of the scan's read, on as many lanes of the
-/// pool as the scan's degree: each field's batches one after the other, up to <see cref="Slots"/>
+/// A row group's batches decoded a field at a time ahead of the scan's read, on the lanes of the pool
+/// the scan gives it: each field's batches one after the other, up to <see cref="Slots"/>
 /// batches past the last one the read released, each into a context of its own, so that a batch no
 /// longer waits for the field that begins a page in it while the others idle.
 /// </summary>
