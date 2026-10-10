@@ -508,12 +508,21 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 readers[i] = _readers[_flat[i]];
             }
 
-            _pipeline = new FieldPipeline(readers, _context.Options, _degree, _lanes);
+            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes);
         }
 
         _pipeline.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_steps));
         _piped = 0;
     }
+
+    /// <summary>
+    /// The lanes a row group's fields decode on ahead of the read: the scan's degree, one for two of the
+    /// machine's threads at most. The read waits on the chains of its slowest fields, not on the sum of
+    /// their work, and where a core runs two threads a chain that shares its core runs slower:
+    /// ClickBench's first file scanned in 31 ms on 32 lanes against 27 on 16. The pages, most of the
+    /// work, still decompress on every lane of the degree.
+    /// </summary>
+    private static int PipelineLanes(int degree) => Math.Min(degree, Math.Max(1, Environment.ProcessorCount / 2));
 
     /// <summary>A context a field, with the batch's read options, taken from the pool of detached contexts.</summary>
     private ScanContext[] FieldContexts()
