@@ -28,16 +28,23 @@ public sealed partial class GroupRoundTripTests
     /// Measured on 2026-10-06: 25 chunks read in 22 requests, the
     /// reader joining neighbours, at any degree. The steps are not exact: the scan reads ahead, and
     /// whether a read joins the step of the one before or opens the next depends on which timer of
-    /// the source fires first. Measured 8 to 11 at one lane, at 20 ms a request as at 50; the
-    /// ceiling is the highest, and a regression that waits on the store a batch more than now adds
-    /// some twenty. At four lanes, 5 or 6, which the lanes' interleaving decides, so not held.
+    /// the source fires first. Measured 8 to 11 at one lane, at 20 ms a request as at 50, and a
+    /// regression that waits on the store a batch more than now adds some twenty. At four lanes, 5
+    /// or 6, which the lanes' interleaving decides, so not held.
+    /// <para>
+    /// The ceiling was the highest, 11, and the whole suite's load pushed a count distinct to 12
+    /// once in a few runs (2026-10-08 to 2026-10-10). Swept on 2026-10-10, eighteen runs alone and
+    /// beside a run of the aggregation tests: the group by 9 to 11, the order 9 to 11, the count
+    /// distinct 6 to 11. The ceiling is the highest seen and two, clear of the timers' edge and far
+    /// under the twenty steps of a regression.
+    /// </para>
     /// </remarks>
     private static readonly (string Query, int Degree, int Requests, int Steps)[] Ceilings =
     [
-        ("group by a key of 10^4 values, count sum", 1, 22, 11),
+        ("group by a key of 10^4 values, count sum", 1, 22, 14),
         ("group by a key of 10^4 values, count sum", 4, 22, 0),
-        ("order by count take 10", 1, 22, 11),
-        ("count distinct over the scan", 1, 22, 11),
+        ("order by count take 10", 1, 22, 14),
+        ("count distinct over the scan", 1, 22, 14),
     ];
 
     [Fact]
