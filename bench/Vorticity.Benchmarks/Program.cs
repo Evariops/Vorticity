@@ -290,6 +290,16 @@ internal static class Program
             return await FormatCost.RunAsync(args).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--page-codecs")
+        {
+            return await PageCodecCost.RunAsync(args).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "--nested-file")
+        {
+            return await NestedFile.RunAsync(args).ConfigureAwait(false);
+        }
+
         if (args.Length > 0 && args[0] == "--probe")
         {
             // The write, decomposed into its separate costs: one line per file, five columns.
@@ -605,11 +615,22 @@ internal static class Program
                                                        instead, against its rewrite as Vortex
                                      --keep            leave both files, and say where
                                      --columns         each column alone too, on one core
+                                     --degrees <n,…>   the degrees timed, default 1 and every
+                                                       processor
+                                     --actions <a,…>   the actions timed, default all of them
                                      --loop <format> <action> [secs]
                                                        one action in a bare loop, for a trace
                                      --degree N        the loop's lanes, default 1
                                      --warm-maps       keep a file's mapping from one open to
                                                        the next, its pages faulted in once
+          --page-codecs <x.parquet>
+                                   a Parquet file's pages decompressed by the package's codecs,
+                                     and GZIP's by the base class library's too, the outputs
+                                     compared: GB/s for the file and its largest columns
+                                     --runs N          timed passes, default 9
+          --nested-file <path>     write the Parquet benchmark page's nested file: events of
+                                     22 fields, six lists, under SNAPPY
+                                     --rows N          its rows, default 2,000,000
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
           --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,

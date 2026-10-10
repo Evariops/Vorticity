@@ -40,6 +40,18 @@ internal static class FormatCost
         int rows = Count(args, "--rows", 1 << 20);
         int runs = Count(args, "--runs", 5);
         bool keep = Array.IndexOf(args, "--keep") >= 0;
+
+        // The degrees and the actions the table times: one core and all by default, and every action.
+        int[] degrees = Items(args, "--degrees") is { } listed
+            ? [.. listed.Select(d => int.TryParse(d, CultureInfo.InvariantCulture, out int degree) && degree > 0 ? degree : 0)]
+            : [1, Environment.ProcessorCount];
+        string[]? asked = Items(args, "--actions");
+        if (degrees.Length == 0 || degrees.Contains(0) || asked?.Except(Actions).Any() == true)
+        {
+            Console.Error.WriteLine("usage: --degrees takes degrees above zero and --actions the report's actions, each list separated by commas");
+            return 2;
+        }
+
         int prefetchAt = Array.IndexOf(args, "--prefetch");
         Prefetch = prefetchAt >= 0 && prefetchAt + 1 < args.Length && int.TryParse(args[prefetchAt + 1], CultureInfo.InvariantCulture, out int ahead) ? ahead : null;
         string directory = Path.Combine(Path.GetTempPath(), $"vx-format-cost-{Guid.NewGuid():N}");
@@ -71,6 +83,12 @@ internal static class FormatCost
                 await Report.WriteFixtureAsync(vortex, rows).ConfigureAwait(false);
                 await RewriteAsync(session, vortex, parquet).ConfigureAwait(false);
             }
+
+            if (asked is not null)
+            {
+                actions = [.. actions.Where(asked.Contains)];
+            }
+
             Format[] formats =
             [
                 new("Vortex", vortex, async path => new VortexSide(await session.OpenAsync(path, options: null, CancellationToken.None).ConfigureAwait(false))),
@@ -101,7 +119,7 @@ internal static class FormatCost
             Console.Out.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{"action",-14} {"cores",-6} {"Vortex ms",10} {"Parquet ms",11} {"ratio",7} {"Vortex alloc",13} {"Parquet alloc",14}"));
-            foreach (int degree in (int[])[1, Environment.ProcessorCount])
+            foreach (int degree in degrees)
             {
                 foreach (string action in actions)
                 {
@@ -275,6 +293,15 @@ internal static class FormatCost
         }
 
         return [.. indices];
+    }
+
+    /// <summary>The comma-separated items after <paramref name="flag"/>, or null when it is absent.</summary>
+    private static string[]? Items(string[] args, string flag)
+    {
+        int at = Array.IndexOf(args, flag);
+        return at >= 0 && at + 1 < args.Length
+            ? args[at + 1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : null;
     }
 
     private static int Count(string[] args, string flag, int fallback)
