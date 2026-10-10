@@ -226,6 +226,28 @@ internal sealed partial class ColumnChunkReader : IDisposable
         Begin(length, map, codec, rows);
     }
 
+    /// <summary>
+    /// Adds <paramref name="runs"/> of the chunk started last, each at its place in the chunk and past
+    /// the runs before it: the pages of a windowed read's next window, read since.
+    /// </summary>
+    internal void Extend(ReadOnlySpan<(int Start, VortexBuffer Bytes)> runs)
+    {
+        foreach ((int Start, VortexBuffer Bytes) run in runs)
+        {
+            if (_runs.Count > 0 && run.Start < _runs[^1].Start + _runs[^1].Bytes.Length)
+            {
+                throw new InvalidOperationException($"A window of '{Name}' reads bytes of its chunk a window before it read.");
+            }
+
+            _runs.Add(run);
+            if (_runs.Count == 1)
+            {
+                // The chunk's first window read nothing of it: its first run is this one.
+                (_runStart, _chunk) = run;
+            }
+        }
+    }
+
     private void Begin(int length, PageLocation[]? map, CompressionCodec codec, long rows)
     {
         _run = 0;

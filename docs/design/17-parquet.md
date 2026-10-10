@@ -327,7 +327,21 @@ lie, is read whole. The column reader then steps over a page it never read by it
 index, never by its header, and a page of an indexed chunk starts a row, as the standard requires.
 Each range is requested at most once per scan, and the plan counts the same ranges in the same
 units as the execution, so the core's gates hold unchanged ([14-public-api.md](14-public-api.md) §9).
-Reading a large chunk in windows, so that it does not delay the first batch, is not done yet. The
+
+From a source that does not read in place, a row group whose chunks hold more than 4 MiB is read in
+windows of batches, so that its first batch waits for its own pages and not its group's: each
+window the pages its batches need that the windows before it did not read, the first with what
+precedes each chunk's first page, and twice as many batches as the window before it from one, so
+that a group of n batches is log₂ n requests a chunk. A page goes with the window of its first row.
+The next window is read while one is decoded, and given to the column readers before the batch
+that needs it, or before a skip that ends inside one of its pages. Their offset indexes are read
+for it, in the one request a sparse read makes, and a group whose chunks lack them, or an encrypted
+one, is read in one request. The plan cuts the same windows. Over positional reads of a file of
+four million rows, 39 MB in one row group, the first batch takes 268 µs where a read of the group in
+one request took 6.08 ms, and the whole scan 7.85 ms against 13.2, its reads under its decoding;
+groups sixteen times smaller, each read whole, give their first batch in 328 µs.
+
+The
 predicate's columns are decoded first for each batch; the other columns are decoded only for the
 rows the filter keeps — a skipped run of a page is stepped over, not decoded, where its encoding
 lets it be: plain values by arithmetic, RLE runs by their lengths, whole pages by the offset index.
@@ -786,7 +800,7 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 | a range is requested at most once per scan | `Requests` equals the plan's distinct ranges |
 | what the footer answers reads nothing more | no request after the open for a count, and for a minimum or a maximum under exact statistics |
 | the open is the schema and the row groups, not their product | the opens of footers of 50 and 200 columns by 50 and 200 row groups: the widest costs what the two mixed ones do less the smallest, within 2 KiB, where a cost per chunk would leave 22 500 chunks over |
-| the first batch waits for its pages, not its row group | the time to first batch flat over row groups sixteen times apart, locally and over the HTTP source with latency |
+| the first batch waits for its pages, not its row group | from a source that does not read in place, the first batch of a group sixteen times another's asks for no more bytes than the smaller group whole, and less than an eighth of its own: 377 KB of 15.7 MB against 984 KB; `ParquetWindowBenchmarks` times both, 268 µs against 328 |
 | no dispatch per value | `PerRowDispatchTests` counts the package's calls to the per-value readers beside the core's, at the same ceilings |
 | every kernel has a scalar twin | the package's suite, run whole by `tests/scalar-pass.sh` with hardware intrinsics disabled |
 | Native AOT | `pqdump`, the inspection tool, built on the public surface alone and published ahead of time, opens, scans and verifies every file of the standard's test suite at a pinned commit; its surface is on record beside the core's, rendered the same way |

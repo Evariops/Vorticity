@@ -15,11 +15,15 @@ namespace Vorticity.Parquet.Reading;
 /// What the read of a row group asks of its source, chunk by chunk: the whole chunk, or, from a
 /// source that does not read in place, the pages the batches the scan reads need, placed by the
 /// chunk's offset index, and what precedes the first page, the dictionary's. A mapped file is read
-/// whole, since its pages cost nothing until they are touched. The scan and its plan count the same
+/// whole, since its pages cost nothing until they are touched. From a source that does not read in
+/// place, a group of more than <see cref="WindowedBytes"/> is read in windows of batches, so that
+/// its first batch waits for its own pages and not the group's. The scan and its plan count the same
 /// ranges.
 /// </summary>
 internal static class ChunkReads
 {
+    /// <summary>The bytes of a group's chunks past which a read that does not read in place is cut into windows.</summary>
+    internal const long WindowedBytes = 4L << 20;
     /// <summary>
     /// The rows of a group of <paramref name="rows"/> rows starting at <paramref name="firstRow"/> that a
     /// scan of <paramref name="range"/> reads, from its first batch it reaches to the end of its last.
@@ -167,6 +171,138 @@ internal static class ChunkReads
     }
 
     /// <summary>
+    /// Whether the read of the chunks of <paramref name="leaves"/> in row group <paramref name="group"/>
+    /// may be cut into windows, for which their offset indexes are read: from a source that does not
+    /// read in place, more than <see cref="WindowedBytes"/> of them.
+    /// </summary>
+    internal static bool MayWindow(ParquetFile file, int group, int[] leaves)
+    {
+        if (file.Reader.ReadsInPlace)
+        {
+            return false;
+        }
+
+        long bytes = 0;
+        foreach (int leaf in leaves)
+        {
+            bytes += file.ChunkRange(file.Footer.Chunk(group, leaf)).Length;
+        }
+
+        return bytes > WindowedBytes;
+    }
+
+    /// <summary>
+    /// Cuts the read of row group <paramref name="group"/> into <paramref name="windows"/>: each the pages
+    /// of a run of batches its rows from <paramref name="first"/> to <paramref name="end"/> need, which
+    /// <paramref name="live"/> leaves, twice as many batches as the window before it from one, the first
+    /// with what precedes each chunk's first page; and places each reader's pages in
+    /// <paramref name="maps"/>, from its chunk's start. A page goes with the window of its first row:
+    /// a batch's pages are all read once the windows up to its own are. False, and nothing cut, where the
+    /// group is read in one request: from a source that reads in place, under
+    /// <see cref="WindowedBytes"/> of pages to read, or where a chunk has no offset index that tiles it, an
+    /// encrypted one among them.
+    /// </summary>
+    internal static bool Windows(
+        ParquetFile file,
+        int group,
+        int[] leaves,
+        PageLocation[]?[] locations,
+        BlockMask? live,
+        long first,
+        long end,
+        int batchRows,
+        long rows,
+        List<ReadWindow> windows,
+        PageLocation[]?[] maps)
+    {
+        windows.Clear();
+        if (file.Reader.ReadsInPlace)
+        {
+            return false;
+        }
+
+        ParquetFooter footer = file.Footer;
+        long bytes = 0;
+        foreach (int leaf in leaves)
+        {
+            ColumnChunkMetadata chunk = footer.Chunk(group, leaf);
+            (long start, int length) = file.ChunkRange(chunk);
+            if (chunk.IsEncrypted || locations[leaf] is not { } pages || !Tiles(pages, start, length))
+            {
+                return false;
+            }
+
+            bytes += pages[0].Offset - start;
+            for (int p = 0; p < pages.Length; p++)
+            {
+                long to = p + 1 < pages.Length ? pages[p + 1].FirstRow : rows;
+                bytes += Needed(pages[p].FirstRow, to, first, end, live, batchRows) ? pages[p].Size : 0;
+            }
+        }
+
+        if (bytes <= WindowedBytes)
+        {
+            return false;
+        }
+
+        int[] next = new int[leaves.Length];
+        int firstBatch = (int)(first / batchRows);
+        int endBatch = (int)((end + batchRows - 1) / batchRows);
+        for (int from = firstBatch, size = 1; from < endBatch; from += size, size = Math.Min(size * 2, endBatch))
+        {
+            long limit = Math.Min((long)from + size, endBatch) * batchRows;
+            ReadWindow window = new() { FirstBatch = from };
+            for (int i = 0; i < leaves.Length; i++)
+            {
+                PageLocation[] pages = locations[leaves[i]]!;
+                long start = file.ChunkRange(footer.Chunk(group, leaves[i])).Start;
+                long runStart = start;
+                long runEnd = from == firstBatch ? pages[0].Offset : start;
+                int p = next[i];
+                for (; p < pages.Length && pages[p].FirstRow < limit; p++)
+                {
+                    long to = p + 1 < pages.Length ? pages[p + 1].FirstRow : rows;
+                    if (!Needed(pages[p].FirstRow, to, first, end, live, batchRows))
+                    {
+                        continue;
+                    }
+
+                    if (pages[p].Offset != runEnd)
+                    {
+                        window.Add(i, runStart, runEnd);
+                        runStart = pages[p].Offset;
+                    }
+
+                    runEnd = pages[p].Offset + pages[p].Size;
+                }
+
+                next[i] = p;
+                window.Add(i, runStart, runEnd);
+            }
+
+            if (window.Runs.Count > 0)
+            {
+                windows.Add(window);
+            }
+        }
+
+        for (int i = 0; i < leaves.Length; i++)
+        {
+            PageLocation[] pages = locations[leaves[i]]!;
+            long start = file.ChunkRange(footer.Chunk(group, leaves[i])).Start;
+            PageLocation[] map = new PageLocation[pages.Length];
+            for (int p = 0; p < map.Length; p++)
+            {
+                map[p] = pages[p] with { Offset = pages[p].Offset - start };
+            }
+
+            maps[i] = map;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Whether the batches the scan reads, from row <paramref name="first"/> of the group to row
     /// <paramref name="end"/>, need a page of the rows from <paramref name="from"/> to
     /// <paramref name="to"/>: one of them that the page index left live covers a row of it.
@@ -219,5 +355,26 @@ internal static class ChunkReads
         }
 
         return true;
+    }
+}
+
+/// <summary>A window of a row group's read: the batch it serves first, and the ranges of the file it asks for.</summary>
+internal sealed class ReadWindow
+{
+    /// <summary>The group's first batch the window's pages serve; the windows before it read those of the batches before.</summary>
+    internal int FirstBatch { get; init; }
+
+    /// <summary>The ranges, each its reader's and its offsets in the file: the readers in order, and each reader's ranges rising.</summary>
+    internal List<(int Reader, long From, long To)> Runs { get; } = [];
+
+    /// <summary>The slot of each range in the request that reads the window, as the scan made it.</summary>
+    internal List<int> Slots { get; } = [];
+
+    internal void Add(int reader, long from, long to)
+    {
+        if (to > from)
+        {
+            Runs.Add((reader, from, to));
+        }
     }
 }

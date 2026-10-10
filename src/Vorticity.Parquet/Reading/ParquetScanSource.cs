@@ -434,6 +434,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         PageLocation[]?[] locations = new PageLocation[]?[file.Compiled.Columns.Length];
         ScanCounters offsets = new();
         List<(long From, long To)> runs = [];
+        List<ReadWindow> windows = [];
+        PageLocation[]?[] maps = new PageLocation[]?[leaves.Length];
         for (int group = 0; group < footer.RowGroups.Length; group++)
         {
             if (!plan.Read[group])
@@ -483,12 +485,24 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             // place, the pages its batches need, placed by offset indexes it reads for them.
             (long first, long end) = ChunkReads.Window(spec.Rows, entry.FirstRow, entry.RowCount, batchRows);
             bool sparse = ChunkReads.Sparse(file, first, end, entry.RowCount, mask);
-            if (sparse)
+            bool windowed = false;
+            windows.Clear();
+            if (sparse || ChunkReads.MayWindow(file, group, leaves))
             {
                 await ChunkReads.OffsetsAsync(file, group, leaves, locations, requests, offsets, cancellationToken).ConfigureAwait(false);
+                windowed = ChunkReads.Windows(file, group, leaves, locations, mask, first, end, batchRows, entry.RowCount, windows, maps);
             }
 
-            foreach (int leaf in leaves)
+            foreach (ReadWindow window in windows)
+            {
+                foreach ((int _, long from, long to) in window.Runs)
+                {
+                    bytes += to - from;
+                    segments++;
+                }
+            }
+
+            foreach (int leaf in windowed ? [] : leaves)
             {
                 runs.Clear();
                 ChunkReads.Plan(file, footer.Chunk(group, leaf), locations[leaf], sparse, mask, first, end, batchRows, entry.RowCount, runs);
