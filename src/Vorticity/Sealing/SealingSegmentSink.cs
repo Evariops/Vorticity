@@ -65,7 +65,7 @@ internal sealed class SealingSegmentSink : ISegmentSink
     /// <summary>A stage over <paramref name="pipe"/>, which takes the data key from <paramref name="dataKey"/> when the first byte arrives.</summary>
     /// <param name="pipe">Where the sealed bytes go; the writer completes it.</param>
     /// <param name="parameters">The frame size and the ids.</param>
-    /// <param name="dataKey">The data key, borrowed: the stage derives the object's key from it and never disposes it.</param>
+    /// <param name="dataKey">The data key, handed over: the stage derives the object's key from it and disposes it.</param>
     internal SealingSegmentSink(PipeWriter pipe, SealParameters parameters, Func<CancellationToken, ValueTask<DataKey>> dataKey)
     {
         ArgumentNullException.ThrowIfNull(pipe);
@@ -168,7 +168,7 @@ internal sealed class SealingSegmentSink : ISegmentSink
     private async ValueTask StartAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_finished, this);
-        DataKey dataKey = await _dataKey(cancellationToken).ConfigureAwait(false);
+        using DataKey dataKey = await _dataKey(cancellationToken).ConfigureAwait(false);
         Span<byte> salt = stackalloc byte[SealedFormat.SaltBytes];
         if (_parameters.Salt.IsEmpty)
         {

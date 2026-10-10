@@ -1906,6 +1906,7 @@ Vorticity:     property int Alignment { get; init; }
 Vorticity:     property int Length { get; init; }
 Vorticity:     property long Offset { get; init; }
 Vorticity: sealed class Vorticity.VortexSession : IAsyncDisposable
+Vorticity:     method ValueTask DecryptAsync(string, Stream, CancellationToken = default)
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync(VortexFile, EncodingGoal = default, CancellationToken = default)
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync<TRecord>(ReadOnlyMemory<TRecord>, EncodingGoal = default, CancellationToken = default)
@@ -1925,7 +1926,10 @@ Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
+Vorticity:     property VortexKeyring Keyring { get; set; }
+Vorticity:     property bool EncryptFiles { get; set; }
 Vorticity:     property bool MapFiles { get; set; }
+Vorticity:     property bool RefusePlaintext { get; set; }
 Vorticity:     property int MappedFileCacheCount { get; set; }
 Vorticity:     property int MaxConcurrentReads { get; set; }
 Vorticity:     property int MaxDegreeOfParallelism { get; set; }
