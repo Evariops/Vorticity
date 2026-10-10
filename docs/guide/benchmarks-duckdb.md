@@ -53,37 +53,37 @@ Warm: our file kept mapped, DuckDB's own table.
 
 | query | rows | ours (ms) | DuckDB (ms) | speedup | 95 % | pairs |
 |---|---:|---:|---:|---:|---:|---:|
-| count and sum by 10³ keys | 40M | 31.1 | 119 | 3.81x | 3.60–3.83 | 6 |
-| count and sum by 10⁶ keys | 40M | 114.0 | 717 | 6.28x | 5.95–6.53 | 9 |
-| count and sum by 10⁷ keys | 40M | 554.3 | 1 328 | 2.40x | 2.39–2.41 | 6 |
-| count, least and largest by 10⁶ keys | 40M | 274.8 | 866 | 3.15x | 3.10–3.18 | 6 |
-| count and sum by 10⁶ hashed keys | 40M | 254.7 | 741 | 2.90x | 2.75–3.04 | 9 |
-| count and sum by 10⁷ hashed keys | 40M | 679.5 | 1 332 | 1.96x | 1.95–1.98 | 6 |
-| db q1: sum v1 by id1 | 10M | 39.3 | 73.5 | 1.87x | 1.85–1.87 | 6 |
-| db q2: sum v1 by id1, id2 | 10M | 83.3 | 138 | 1.66x | 1.64–1.66 | 6 |
-| db q3: sum v1, mean v3 by id3 | 10M | 102.5 | 177 | 1.73x | 1.59–1.73 | 6 |
-| db q4: mean v1:v3 by id4 | 10M | 23.3 | 43.5 | 1.86x | 1.80–1.89 | 6 |
-| db q5: sum v1:v3 by id6 | 10M | 47.4 | 118 | 2.48x | 2.45–2.51 | 6 |
-| db q7: max v1 − min v2 by id3 | 10M | 86.0 | 176 | 2.04x | 2.02–2.06 | 6 |
-| db q10: sum v3, count by id1:id6 | 10M | 586.4 | 814 | 1.39x | 1.38–1.40 | 6 |
+| count and sum by 10³ keys | 40M | 31.2 | 115 | 3.69x | 3.56–3.76 | 6 |
+| count and sum by 10⁶ keys | 40M | 117.0 | 723 | 6.15x | 6.02–6.36 | 6 |
+| count and sum by 10⁷ keys | 40M | 553.2 | 1 333 | 2.41x | 2.39–2.42 | 6 |
+| count, least and largest by 10⁶ keys | 40M | 277.1 | 866 | 3.12x | 3.09–3.24 | 6 |
+| count and sum by 10⁶ hashed keys | 40M | 292.2 | 737 | 2.52x | 2.45–2.66 | 6 |
+| count and sum by 10⁷ hashed keys | 40M | 598.8 | 1 334 | 2.23x | 2.17–2.25 | 6 |
+| db q1: sum v1 by id1 | 10M | 35.5 | 72.5 | 2.05x | 2.02–2.08 | 6 |
+| db q2: sum v1 by id1, id2 | 10M | 76.1 | 138 | 1.81x | 1.78–1.83 | 6 |
+| db q3: sum v1, mean v3 by id3 | 10M | 102.6 | 177 | 1.72x | 1.69–1.75 | 6 |
+| db q4: mean v1:v3 by id4 | 10M | 23.3 | 43.0 | 1.85x | 1.79–1.90 | 6 |
+| db q5: sum v1:v3 by id6 | 10M | 47.2 | 117 | 2.48x | 2.47–2.49 | 6 |
+| db q7: max v1 − min v2 by id3 | 10M | 86.2 | 175 | 2.02x | 2.02–2.06 | 6 |
+| db q10: sum v3, count by id1:id6 | 10M | 569.0 | 813 | 1.43x | 1.42–1.45 | 6 |
 
 Cold: our file mapped anew at every run, DuckDB's Vortex reader.
 
 | query | rows | ours (ms) | DuckDB (ms) | speedup | 95 % | pairs |
 |---|---:|---:|---:|---:|---:|---:|
-| count and sum by 10³ keys | 40M | 50.6 | 246 | 4.84x | 4.72–4.96 | 6 |
-| count and sum by 10⁶ keys | 40M | 148.0 | 812 | 5.54x | 5.12–5.71 | 10 |
-| count and sum by 10⁷ keys | 40M | 580.1 | 1 422 | 2.44x | 2.42–2.45 | 6 |
-| count, least and largest by 10⁶ keys | 40M | 304.1 | 943 | 3.10x | 3.01–3.15 | 6 |
-| count and sum by 10⁶ hashed keys | 40M | 294.6 | 889 | 3.00x | 2.93–3.06 | 6 |
-| count and sum by 10⁷ hashed keys | 40M | 718.2 | 1 451 | 2.02x | 1.99–2.03 | 6 |
-| db q1: sum v1 by id1 | 10M | 41.3 | 136 | 3.30x | 3.24–3.37 | 6 |
-| db q2: sum v1 by id1, id2 | 10M | 86.2 | 262 | 3.05x | 2.80–3.08 | 6 |
-| db q3: sum v1, mean v3 by id3 | 10M | 108.6 | 195 | 1.79x | 1.75–1.84 | 6 |
-| db q4: mean v1:v3 by id4 | 10M | 31.5 | 65.0 | 2.08x | 2.02–2.11 | 6 |
-| db q5: sum v1:v3 by id6 | 10M | 54.8 | 124 | 2.26x | 2.19–2.31 | 6 |
-| db q7: max v1 − min v2 by id3 | 10M | 90.3 | 199 | 2.20x | 2.09–2.33 | 6 |
-| db q10: sum v3, count by id1:id6 | 10M | 596.2 | 917 | 1.53x | 1.52–1.58 | 6 |
+| count and sum by 10³ keys | 40M | 49.7 | 241 | 4.84x | 4.79–4.91 | 6 |
+| count and sum by 10⁶ keys | 40M | 145.3 | 819 | 5.65x | 5.29–5.86 | 9 |
+| count and sum by 10⁷ keys | 40M | 575.6 | 1 428 | 2.48x | 2.47–2.51 | 6 |
+| count, least and largest by 10⁶ keys | 40M | 303.6 | 943 | 3.10x | 3.07–3.16 | 6 |
+| count and sum by 10⁶ hashed keys | 40M | 321.5 | 887 | 2.76x | 2.63–2.81 | 6 |
+| count and sum by 10⁷ hashed keys | 40M | 634.0 | 1 461 | 2.30x | 2.28–2.32 | 6 |
+| db q1: sum v1 by id1 | 10M | 37.5 | 135 | 3.60x | 3.56–3.64 | 6 |
+| db q2: sum v1 by id1, id2 | 10M | 78.1 | 261 | 3.34x | 3.30–3.36 | 6 |
+| db q3: sum v1, mean v3 by id3 | 10M | 108.9 | 197 | 1.77x | 1.71–1.87 | 6 |
+| db q4: mean v1:v3 by id4 | 10M | 30.6 | 64.5 | 2.12x | 2.09–2.14 | 6 |
+| db q5: sum v1:v3 by id6 | 10M | 53.8 | 124 | 2.30x | 2.18–2.35 | 6 |
+| db q7: max v1 − min v2 by id3 | 10M | 89.8 | 193 | 2.14x | 2.06–2.16 | 6 |
+| db q10: sum v3, count by id1:id6 | 10M | 580.4 | 915 | 1.58x | 1.57–1.60 | 6 |
 
 ## Fourteen threads
 
@@ -91,59 +91,62 @@ Warm: our file kept mapped, DuckDB's own table.
 
 | query | rows | ours (ms) | DuckDB (ms) | speedup | 95 % | pairs |
 |---|---:|---:|---:|---:|---:|---:|
-| count and sum by 10³ keys | 40M | 3.6 | 13.2 | 3.66x | 3.47–3.77 | 9 |
-| count and sum by 10⁶ keys | 40M | 61.9 | 146 | 2.36x | 2.10–2.48 | 11 |
-| count and sum by 10⁷ keys | 40M | 65.3 | 179 | 2.73x | 2.65–2.88 | 6 |
-| count, least and largest by 10⁶ keys | 40M | 84.8 | 171 | 2.04x | 1.95–2.16 | 6 |
-| count and sum by 10⁶ hashed keys | 40M | 76.6 | 144 | 1.88x | 1.84–1.91 | 6 |
-| count and sum by 10⁷ hashed keys | 40M | 102.3 | 181 | 1.76x | 1.74–1.80 | 6 |
-| db q1: sum v1 by id1 | 10M | 5.2 | 11.1 | 2.09x | 2.03–2.16 | 6 |
-| db q2: sum v1 by id1, id2 | 10M | 12.4 | 16.6 | 1.35x | 1.26–1.37 | 9 |
-| db q3: sum v1, mean v3 by id3 | 10M | 35.4 | 45.5 | 1.29x | 1.24–1.30 | 6 |
-| db q4: mean v1:v3 by id4 | 10M | 3.0 | 5.2 | 1.72x | 1.67–1.80 | 10 |
-| db q5: sum v1:v3 by id6 | 10M | 17.2 | 44.5 | 2.60x | 2.50–2.65 | 6 |
-| db q7: max v1 − min v2 by id3 | 10M | 22.9 | 48.0 | 2.11x | 1.95–2.13 | 6 |
-| db q10: sum v3, count by id1:id6 | 10M | 97.4 | 103 | 1.05x | 1.02–1.07 | 6 |
+| count and sum by 10³ keys | 40M | 3.7 | 12.8 | 3.50x | 3.26–3.60 | 7 |
+| count and sum by 10⁶ keys | 40M | 58.9 | 145 | 2.46x | 2.35–2.58 | 9 |
+| count and sum by 10⁷ keys | 40M | 65.9 | 176 | 2.66x | 2.50–2.90 | 9 |
+| count, least and largest by 10⁶ keys | 40M | 84.3 | 173 | 2.06x | 1.88–2.09 | 6 |
+| count and sum by 10⁶ hashed keys | 40M | 77.6 | 146 | 1.87x | 1.82–1.92 | 6 |
+| count and sum by 10⁷ hashed keys | 40M | 104.0 | 180 | 1.75x | 1.66–1.78 | 6 |
+| db q1: sum v1 by id1 | 10M | 4.9 | 11.3 | 2.31x | 2.22–2.43 | 6 |
+| db q2: sum v1 by id1, id2 | 10M | 11.6 | 16.6 | 1.44x | 1.31–1.51 | 15 |
+| db q3: sum v1, mean v3 by id3 | 10M | 33.6 | 46.0 | 1.35x | 1.32–1.39 | 6 |
+| db q4: mean v1:v3 by id4 | 10M | 3.0 | 5.1 | 1.66x | 1.59–1.75 | 6 |
+| db q5: sum v1:v3 by id6 | 10M | 17.2 | 44.0 | 2.56x | 2.40–2.60 | 6 |
+| db q7: max v1 − min v2 by id3 | 10M | 21.7 | 48.5 | 2.21x | 2.13–2.24 | 6 |
+| db q10: sum v3, count by id1:id6 | 10M | 87.2 | 103 | 1.18x | 1.15–1.20 | 6 |
 
 Cold: our file mapped anew at every run, DuckDB's Vortex reader.
 
 | query | rows | ours (ms) | DuckDB (ms) | speedup | 95 % | pairs |
 |---|---:|---:|---:|---:|---:|---:|
-| count and sum by 10³ keys | 40M | 12.0 | 51.5 | 4.29x | 3.39–4.75 | 16 |
-| count and sum by 10⁶ keys | 40M | 66.4 | 187 | 2.81x | 2.75–2.89 | 6 |
-| count and sum by 10⁷ keys | 40M | 71.4 | 231 | 3.19x | 2.99–3.33 | 10 |
-| count, least and largest by 10⁶ keys | 40M | 90.6 | 201 | 2.24x | 2.11–2.31 | 6 |
-| count and sum by 10⁶ hashed keys | 40M | 84.2 | 189 | 2.23x | 2.09–2.26 | 6 |
-| count and sum by 10⁷ hashed keys | 40M | 111.3 | 229 | 2.04x | 1.94–2.14 | 10 |
-| db q1: sum v1 by id1 | 10M | 6.7 | 21.0 | 3.15x | 3.04–3.31 | 6 |
-| db q2: sum v1 by id1, id2 | 10M | 14.4 | 34.5 | 2.39x | 2.30–2.48 | 6 |
-| db q3: sum v1, mean v3 by id3 | 10M | 38.1 | 58.5 | 1.55x | 1.48–1.58 | 6 |
-| db q4: mean v1:v3 by id4 | 10M | 6.1 | 17.6 | 2.90x | 2.82–2.97 | 6 |
-| db q5: sum v1:v3 by id6 | 10M | 19.5 | 55.0 | 2.82x | 2.70–2.86 | 6 |
-| db q7: max v1 − min v2 by id3 | 10M | 26.0 | 60.2 | 2.28x | 2.00–2.42 | 14 |
-| db q10: sum v3, count by id1:id6 | 10M | 101.8 | 128 | 1.26x | 1.21–1.29 | 6 |
+| count and sum by 10³ keys | 40M | 11.9 | 53.0 | 4.47x | 4.26–5.41 | 11 |
+| count and sum by 10⁶ keys | 40M | 64.9 | 184 | 2.79x | 2.68–2.92 | 6 |
+| count and sum by 10⁷ keys | 40M | 71.4 | 227 | 3.16x | 2.82–3.35 | 16 |
+| count, least and largest by 10⁶ keys | 40M | 89.8 | 202 | 2.24x | 2.18–2.34 | 6 |
+| count and sum by 10⁶ hashed keys | 40M | 83.8 | 184 | 2.19x | 2.14–2.26 | 6 |
+| count and sum by 10⁷ hashed keys | 40M | 110.8 | 226 | 2.03x | 1.95–2.18 | 15 |
+| db q1: sum v1 by id1 | 10M | 6.1 | 21.0 | 3.44x | 3.26–3.49 | 9 |
+| db q2: sum v1 by id1, id2 | 10M | 13.8 | 34.0 | 2.46x | 2.27–2.53 | 6 |
+| db q3: sum v1, mean v3 by id3 | 10M | 36.7 | 58.0 | 1.60x | 1.56–1.62 | 6 |
+| db q4: mean v1:v3 by id4 | 10M | 5.9 | 17.7 | 3.00x | 2.93–3.06 | 6 |
+| db q5: sum v1:v3 by id6 | 10M | 19.4 | 56.0 | 2.89x | 2.80–2.97 | 6 |
+| db q7: max v1 − min v2 by id3 | 10M | 24.4 | 60.0 | 2.47x | 2.36–2.52 | 6 |
+| db q10: sum v3, count by id1:id6 | 10M | 91.5 | 129 | 1.39x | 1.31–1.42 | 6 |
 
 ## Where Vorticity leads, and where it trails
 
-* **On one thread it leads every query on both bases**: 1.39x to 6.28x over DuckDB's own table, 1.53x
-  to 5.54x over its reader. db-benchmark's q10, six keys of which three are texts and a group for
-  nearly every one of 10⁷ rows, leads by the least: 1.39x and 1.53x.
-* **On fourteen threads it leads every query on both bases**: 1.05x to 3.66x over DuckDB's own table
-  and 1.26x to 4.29x over its reader. Integer keys of 10³ to 10⁷ values lead by 2.04x to 3.66x warm,
-  hashed ones by 1.76x and 1.88x, and db-benchmark's q1 to q7 by 1.29x to 2.60x warm, 1.55x to 3.15x
+* **On one thread it leads every query on both bases**: 1.43x to 6.15x over DuckDB's own table, 1.58x
+  to 5.65x over its reader. db-benchmark's q10, six keys of which three are texts and a group for
+  nearly every one of 10⁷ rows, leads by the least: 1.43x and 1.58x.
+* **On fourteen threads it leads every query on both bases**: 1.18x to 3.50x over DuckDB's own table
+  and 1.39x to 4.47x over its reader. Integer keys of 10³ to 10⁷ values lead by 2.06x to 3.50x warm,
+  hashed ones by 1.75x and 1.87x, and db-benchmark's q1 to q7 by 1.35x to 2.56x warm, 1.60x to 3.44x
   cold.
-* **db-benchmark's q10 leads by the least on fourteen threads**: 1.05x over DuckDB's own table, its
-  interval 1.02x to 1.07x, and 1.26x over its reader. Its six keys are held as one tuple of their
-  values, which the lanes hand to a shared table of groups by parts; DuckDB writes rows nearly all
-  unique straight to its partitions. It trailed at 0.51x on 2026-10-09, as 10⁷ hashed keys did at
-  0.96x (1.76x now): the memory of the groups is now kept from one query to the next rather than made
-  anew, and each part of the shared table is held whole rather than split as it grows.
+* **db-benchmark's q10 leads by the least on fourteen threads**: 1.18x over DuckDB's own table, its
+  interval 1.15x to 1.20x, and 1.39x over its reader. Its six keys are held as one tuple of their
+  values, 64 bytes, which the lanes hand to a shared table of groups by parts; DuckDB packs the same
+  keys into 38 bytes before it groups them, and writes rows nearly all unique straight to its
+  partitions. It trailed at 0.51x on 2026-10-09, as 10⁷ hashed keys did at 0.96x (1.75x now): the
+  memory of the groups is now kept from one query to the next rather than made anew, each part of the
+  shared table is held whole rather than split as it grows, a key is hashed once on its way, and the
+  keys are written into the result a part at a time.
 
 Measured on 2026-10-10 on an Apple M4 Pro (14 cores: 10 performance, 4 efficiency) under macOS, at
-commit `7445c2a5`: two sessions one after the other, from 03:45 to 03:56 and from 03:56 to 04:08, which
-agreed within 10 % on every row. The machine was near rest: the canaries strayed up to 7.6 % and 8.0 %
-from their first values, another process held a query back 24 s and 6 s in all, and two rows of the
-second session ran again.
+commit `7734c472`: two sessions one after the other, from 05:45 to 05:57 and from 05:57 to 06:07, and a
+third for the one row they did not agree on (10³ keys on fourteen threads, cold, which took 3.85x and
+4.64x, then 4.31x). The machine was near rest: the canaries strayed up to 9.8 % and 10.3 % from their
+first values, another process held a query back 8 s and 6 s in all, and one row of the first session
+ran again.
 
 Until 2026-10-09 this page timed every DuckDB query, then every one of ours: a perturbation of the
 machine weighed on one side unseen, and DuckDB's q10 on fourteen threads read 257 ms where it took 102
