@@ -185,7 +185,7 @@ internal static class ParquetVerifier
         ScanSpec spec = new ScanSpec { Rows = new RowRange(entry.FirstRow, entry.FirstRow + entry.RowCount) };
         FieldExpr path = new FieldExpr(column.DottedPath);
         bool decimals = ColumnBounds.IsDecimal(column);
-        ParquetBatches batches = new ParquetBatches(file, spec, [field], groups, new ScanCounters(), cancellationToken);
+        ParquetBatches batches = new ParquetBatches(file, spec, [field], groups, new ScanCounters(), cancellationToken, storage: true);
         await using (batches.ConfigureAwait(false))
         {
             while (await batches.MoveNextAsync().ConfigureAwait(false))

@@ -156,6 +156,10 @@ once, from the standard's own text, and held by a test.
 | 14 | DECIMAL's order is given [for fixed lengths](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/LogicalTypes.md#L244-L251) | a BYTE_ARRAY decimal's | compared sign-extended to the longer of the two lengths |
 | 15 | a truncated bound ["must still be valid values within the column's logical type"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L295-L301) | how to cut a STRING | at a code point boundary, an upper bound raising its last code point past the surrogates, so that both stay UTF-8; a bound that cannot be raised is written whole |
 | 16 | a page's ordinal in the encryption AAD is ["2-byte short"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encryption.md#L254-L259) | a chunk of more than 32 767 pages | its low 16 bits, little-endian, on read; the writer encrypts no column chunk of more than 32 767 pages |
+| 17 | a field both shredded and in a partially shredded object's `value` makes reads that ["may be inconsistent"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L171-L173) | which one a read returns | the shredded one, whether or not the row defines it: the `value`'s field of a shredded name is dropped, as a field the typed columns hold may not be in `value` |
+| 18 | an array's elements ["must be present"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L145-L147) | an element both of whose columns are null | the variant null, as where a value is required at the top |
+| 19 | a variant group holds a `value` that ["must be annotated"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantEncoding.md#L50) required or optional, and a shredded field's group [is required](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L193) | a group without its `value`, a field's group that is optional | read: a column that is not there is null in every row, and a null field's group is a missing field |
+| 20 | a shredded decimal's [physical type](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L94-L96) names decimal4, decimal8 or decimal16, and so does [its precision](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantEncoding.md#L444-L446) | a DECIMAL(5, 2) stored in INT64, which the two tables place apart | the precision's: the variant's width is the one the encoding's decimal table gives, and the value is the same either way |
 
 Two more are not gaps but choices the standard leaves to a writer, and are §6's: a page whose
 values do not shrink is stored uncompressed in a compressed chunk, which
@@ -196,7 +200,8 @@ physical type ([LogicalTypes.md][lt], *Unsupported Logical Types*).
 | a group | `Struct`, its validity from the definition levels | levels |
 | `LIST`, and a repeated field outside `LIST` and `MAP` | `List` of the element, the latter a required list of required elements | levels |
 | `MAP` | `Map`, a list view of key-value entries as the core holds one | levels |
-| `VARIANT`, `GEOMETRY`, `GEOGRAPHY`, `FILE` | phase 3 (§11): a variant column, binary with its CRS and edges, a struct | — |
+| `VARIANT` | `Variant`: the core's struct of the `metadata` and `value` binaries, under the variant dtype | the metadata a view; the value a view where nothing is shredded, else rebuilt (§5.6) |
+| `GEOMETRY`, `GEOGRAPHY`, `FILE` | phase 3 (§11): binary with its CRS and edges, a struct | — |
 
 A file this writer made carries its Vortex schema in its key-value metadata (§6.1). Top-level column
 by top-level column, where that schema agrees with the Parquet schema, it restores what Parquet
@@ -219,6 +224,7 @@ are kept and shown by `Metadata`.
 | `FixedSizeList<u8, n>` of non-null bytes | FIXED_LEN_BYTE_ARRAY(n) |
 | `vortex.uuid`, `vortex.date`, `vortex.time`, `vortex.timestamp` | `UUID`, `DATE`, `TIME`, `TIMESTAMP` adjusted to UTC when the dtype has a zone |
 | `Struct`; `List`, other fixed-size lists; the map | a group; the three-level `LIST`; the three-level `MAP` |
+| `Variant` | a group annotated `VARIANT(1)` of a required BYTE_ARRAY `metadata` and a required BYTE_ARRAY `value`: the unshredded form |
 | `Null` | INT32 with `UNKNOWN` |
 | `parquet.interval` | FIXED_LEN_BYTE_ARRAY(12) with the `INTERVAL` converted type |
 | `parquet.int96` | refused: INT96 is deprecated |
@@ -392,6 +398,37 @@ becomes defined and repeats, are compiled at the open.
   rules of [LogicalTypes.md][lt], and `MAP_KEY_VALUE` as `MAP`.
 
 A batch of a nested column ends on a row: where the repetition level is 0.
+
+**A variant** is assembled as the struct of its group's fields, at any depth, and read as the
+core's variant: the `metadata` column as it is, and the `value` rebuilt from the columns shredded
+out of it as [`construct_variant`](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L289-L343) builds it. The core does the rebuilding
+(`ShreddedVariant`, beside its Parquet variant encoding), from the group's type and canonical nodes
+alone, so that the Vortex `vortex.parquet.variant` encoding's shredded child can take the same path.
+
+- **Nothing shredded**, a group of a required `value`, costs nothing: the `value` node is the
+  variant's, its views over the page. A million rows of 45 bytes read in 14 to 19 ms.
+- **A row a typed column leaves null** takes its `value` as it is: its 16-byte view is copied, its
+  bytes are not.
+- **A row a typed column defines** is written into a scratch the plan keeps from batch to batch,
+  which the arena takes in one copy. An object takes its fields in name order, the unsigned order of
+  their UTF-8 bytes: the shredded fields, sorted once at the open of the scan, merged with those of a
+  partially shredded row's `value`. Field ids are the row's metadata's, looked up again only when a
+  row's metadata differs from the last row's: a view equal to the last row's, sixteen bytes, is
+  enough, which a metadata column of one dictionary value always is.
+- **Counts, ids and offsets take the fewest bytes** that hold them, the encoding the standard's test
+  files carry, so that a rebuilt value is compared byte for byte with theirs. An object or array of
+  leaves knows every field's size before it writes one, and writes its header first at its final
+  widths; one with a nested object or array reserves four bytes an offset and moves its values back
+  once, by the size of the header it did not need.
+- **Measured**: a million rows of an object of three INT32 fields read in 46 to 51 ms, against 20
+  to 25 ms for the same columns as a plain struct; with a third of the rows partially shredded, a
+  string field in their `value`, 67 to 72 ms against 24 to 30. A column at a time would leave the
+  row loop for one over each field's column, which this has not needed yet.
+- **Refused**: a primitive or array whose `value` and `typed_value` are both non-null, a `value`
+  that is not an object beside a typed object, an object field a row's metadata does not name, and
+  an object whose fields are out of name order, as malformed; a typed column of a type the
+  [shredding table](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L85-L107) does not have, as unsupported when the variant is read, not when
+  the file opens.
 
 ### 5.7 Batches
 
@@ -665,8 +702,9 @@ comes down. Speed is measured against baselines this repository owns:
    index, Bloom filter and dictionary; `ParquetScanSource` and the type mapping; checksums on request.
 2. **Write.** §6, but ALP and encryption.
 3. **The rest of the standard.** ALP in both directions, the writer's behind its option while the
-   standard says Preview; `VARIANT`, unshredded then shredded, through the core's Parquet variant
-   decoding; `GEOMETRY` and `GEOGRAPHY` with their bounding-box statistics; `FILE`; modular encryption,
+   standard says Preview; `VARIANT`, read unshredded and shredded and written unshredded, through
+   the core's Parquet variant encoding; `GEOMETRY` and `GEOGRAPHY` with their bounding-box
+   statistics; `FILE`; modular encryption,
    `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1` with AES in counter mode over `Aes.EncryptEcb`,
    keys from a resolver the caller gives; ordered reads on declared `sorting_columns`.
 

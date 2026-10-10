@@ -92,7 +92,7 @@ public sealed partial class PerRowDispatchTests
         ("Compute/ComparisonKernels.cs", 0, 0, "F-4 done: the integer-against-float pair joined CompareOp"),
         ("Compute/LiteralReader.cs", 2, 0, "legitimate: a single literal"),
         ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
-        ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
+        ("Types/Variant/ParquetVariant.cs", 0, 0, "done: its own reader of one to four bytes is Unsigned, not a method of the same name"),
         ("Writing/ArrayBlobWriter.cs", 0, 0, "W-13 done: a block with nulls takes the lanes and clears its nulls by their bits"),
         ("Writing/BitPackPlan.cs", 0, 0, "W-11 done: the minimum is read at the element's own width"),
         ("Vorticity.Parquet/Metadata/SchemaElement.cs", 2, 0, "a local method of the same name, not these"),
@@ -103,7 +103,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 44;
+    private const int TotalCalls = 42;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>

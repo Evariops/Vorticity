@@ -87,7 +87,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private long _groupRead;
     private bool _anticipated;
 
-    internal ParquetBatches(ParquetFile file, ScanSpec spec, int[]? columns, bool[] groups, ScanCounters metrics, CancellationToken cancellationToken)
+    /// <summary>
+    /// The batches of <paramref name="columns"/>, or every field, in the row groups
+    /// <paramref name="groups"/> marks; a variant as its group of the columns the file holds when
+    /// <paramref name="storage"/>, as a check of the columns' own values reads it.
+    /// </summary>
+    internal ParquetBatches(ParquetFile file, ScanSpec spec, int[]? columns, bool[] groups, ScanCounters metrics, CancellationToken cancellationToken, bool storage = false)
     {
         _file = file;
         _rows = spec.Rows;
@@ -101,7 +106,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < fields.Length; i++)
         {
             ParquetField field = schema.Fields[fields[i]];
-            read[i] = new VortexField(field.Name, field.Type);
+            read[i] = new VortexField(field.Name, storage ? field.StorageType : field.Type);
         }
 
         DTypeArena types = new();
@@ -123,7 +128,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
             else
             {
-                NestedFieldReader nested = new(field, _struct.GetField(i), schema, types, validity, pool, cap);
+                NestedFieldReader nested = new(field, _struct.GetField(i), schema, types, validity, pool, cap, storage);
                 _nested[i] = nested;
                 readers.AddRange(nested.Readers);
             }

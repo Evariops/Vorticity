@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Types;
@@ -46,6 +47,9 @@ internal enum FieldShape : byte
     Struct,
     List,
     Map,
+
+    /// <summary>A VARIANT-annotated group, assembled as the struct of its fields and read as the variant they hold.</summary>
+    Variant,
 }
 
 /// <summary>A leaf of the schema: a column, with its levels and the form its values take.</summary>
@@ -125,7 +129,27 @@ internal sealed class ParquetField
     /// </summary>
     internal bool RefusesNull { get; set; }
 
+    /// <summary>A variant's group: the struct of its metadata, its value and its typed value, as the file holds them.</summary>
+    internal VortexType? Storage { get; init; }
+
+    /// <summary>Why a variant cannot be read, which a read of it says and an open does not; null when it can.</summary>
+    internal string? Refusal { get; init; }
+
     internal bool IsNullable => Type.IsNullable;
+
+    /// <summary>The field's type with every variant under it its group's, the type of the columns the file holds.</summary>
+    internal VortexType StorageType => Shape switch
+    {
+        FieldShape.Variant => Storage!,
+        FieldShape.Struct when HasVariant(this) => Typed(VortexType.Struct([.. Children.Select(c => new VortexField(c.Name, c.StorageType))])),
+        FieldShape.List when HasVariant(this) => Typed(VortexType.List(Children[0].StorageType)),
+        FieldShape.Map when HasVariant(this) => Typed(VortexType.Map(Children[0].StorageType, Children[1].StorageType)),
+        _ => Type,
+    };
+
+    private VortexType Typed(VortexType type) => IsNullable ? type.Nullable : type;
+
+    private static bool HasVariant(ParquetField field) => field.Shape == FieldShape.Variant || field.Children.Any(HasVariant);
 }
 
 /// <summary>
@@ -808,8 +832,121 @@ internal sealed class ParquetSchema
             {
                 LogicalTypeKind.List => ListOf(index, name, nullable),
                 LogicalTypeKind.Map => MapOf(index, name, nullable),
+                LogicalTypeKind.Variant => VariantOf(index, name, nullable),
                 _ => Struct(index, name, nullable),
             };
+        }
+
+        /// <summary>
+        /// A VARIANT-annotated group: its fields compile as a struct's, which a read assembles and
+        /// then puts the variant back together from. A typed column of a type the standard does not
+        /// shred to is refused when the field is read, not when the file opens.
+        /// </summary>
+        private ParquetField VariantOf(int index, string name, bool nullable)
+        {
+            ParquetField[] children = Children(index);
+            VortexField[] fields = new VortexField[children.Length];
+            string? refusal = null;
+            for (int i = 0; i < children.Length; i++)
+            {
+                fields[i] = new VortexField(children[i].Name, children[i].Type);
+                if (children[i].Name == "typed_value")
+                {
+                    refusal ??= Unshreddable(children[i]);
+                }
+            }
+
+            VortexType storage = VortexType.Struct(fields);
+            ref readonly Node node = ref nodes[index];
+            return new ParquetField
+            {
+                Name = name,
+                Type = VortexType.Variant(nullable),
+                Shape = FieldShape.Variant,
+                Children = children,
+                Storage = nullable ? storage.Nullable : storage,
+                Refusal = refusal,
+                DefinedAt = node.DefinitionLevel,
+                FirstLeaf = node.FirstLeaf,
+                LeafCount = node.LeafCount,
+            };
+        }
+
+        /// <summary>
+        /// The first column under the typed value <paramref name="typed"/> of a type the standard's
+        /// table of shredded types does not have, as a refusal; null when there is none. An object's
+        /// fields and an array's element are each a group of a value and a typed value.
+        /// </summary>
+        private string? Unshreddable(ParquetField typed)
+        {
+            if (typed.Shape == FieldShape.Leaf)
+            {
+                ParquetColumn column = columns[typed.Column];
+                return Shreddable(column) ? null
+                    : $"The column '{column.DottedPath}' shreds a variant as {Describe(column)}, which the standard does not shred to.";
+            }
+
+            if (typed.Shape is not (FieldShape.Struct or FieldShape.List))
+            {
+                return null;
+            }
+
+            foreach (ParquetField group in typed.Children)
+            {
+                foreach (ParquetField part in group.Children)
+                {
+                    if (part.Name == "typed_value" && Unshreddable(part) is { } refusal)
+                    {
+                        return refusal;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Whether the standard shreds a variant value to <paramref name="column"/>'s physical type and annotation.</summary>
+        private static bool Shreddable(ParquetColumn column)
+        {
+            LogicalTypeInfo logical = column.Logical;
+            if (column.IsInterval)
+            {
+                return false;
+            }
+
+            return column.Physical switch
+            {
+                PhysicalType.Boolean or PhysicalType.Float or PhysicalType.Double => logical.Kind == LogicalTypeKind.None,
+                PhysicalType.Int32 => logical.Kind switch
+                {
+                    LogicalTypeKind.None or LogicalTypeKind.Decimal or LogicalTypeKind.Date => true,
+                    LogicalTypeKind.Integer => logical.IsSigned && logical.BitWidth is 8 or 16 or 32,
+                    _ => false,
+                },
+                PhysicalType.Int64 => logical.Kind switch
+                {
+                    LogicalTypeKind.None or LogicalTypeKind.Decimal => true,
+                    LogicalTypeKind.Integer => logical.IsSigned && logical.BitWidth == 64,
+                    LogicalTypeKind.Time => !logical.IsAdjustedToUtc && logical.Unit == ParquetTimeUnit.Micros,
+                    LogicalTypeKind.Timestamp => logical.Unit is ParquetTimeUnit.Micros or ParquetTimeUnit.Nanos,
+                    _ => false,
+                },
+                PhysicalType.ByteArray => logical.Kind is LogicalTypeKind.None or LogicalTypeKind.String or LogicalTypeKind.Decimal,
+                PhysicalType.FixedLenByteArray => logical.Kind is LogicalTypeKind.Decimal or LogicalTypeKind.Uuid,
+                _ => false,
+            };
+        }
+
+        /// <summary>A column's physical type, its length when it has one, and its annotation, as the standard spells them.</summary>
+        private static string Describe(ParquetColumn column)
+        {
+            string physical = ParquetMetadata.Physical(column.Physical);
+            if (column.Physical == PhysicalType.FixedLenByteArray)
+            {
+                physical += string.Create(CultureInfo.InvariantCulture, $"({column.TypeLength})");
+            }
+
+            return ParquetMetadata.Logical(column.Logical) is { } logical ? $"{physical} {logical}" : physical;
         }
 
         /// <summary>The node as a required element: its own type, its repetition set aside.</summary>

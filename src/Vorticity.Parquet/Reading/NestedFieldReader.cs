@@ -1,17 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Parquet.Schema;
 using Vorticity.Types;
+using Vorticity.Types.Variant;
 
 namespace Vorticity.Parquet.Reading;
 
 /// <summary>
-/// A field of lists, maps or structs, assembled a batch at a time from the levels of the columns
-/// under it: the standard's shredding of records into columns, read backwards.
+/// A field of lists, maps, structs or variants, assembled a batch at a time from the levels of the
+/// columns under it: the standard's shredding of records into columns, read backwards.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -31,18 +33,26 @@ namespace Vorticity.Parquet.Reading;
 /// and checked against what the node made of them, so that a file whose columns disagree is refused
 /// rather than read past a node's end.
 /// </para>
+/// <para>
+/// A variant's group is assembled as the struct of its fields, from which the variant is put back
+/// together: its metadata as it is, and its value rebuilt from the columns shredded out of it.
+/// </para>
 /// </remarks>
 internal sealed class NestedFieldReader
 {
     private readonly Part _root;
     private readonly DType _validity;
 
-    /// <summary>A reader of <paramref name="field"/>, of the dtype <paramref name="type"/>, and of a reader per column under it.</summary>
-    internal NestedFieldReader(ParquetField field, DType type, ParquetSchema schema, DTypeArena types, DType validity, AlignedBufferPool pool, long cap)
+    /// <summary>
+    /// A reader of <paramref name="field"/>, of the dtype <paramref name="type"/>, and of a reader per
+    /// column under it; a variant read as its group when <paramref name="storage"/>, its columns'
+    /// values as the file holds them.
+    /// </summary>
+    internal NestedFieldReader(ParquetField field, DType type, ParquetSchema schema, DTypeArena types, DType validity, AlignedBufferPool pool, long cap, bool storage = false)
     {
         _validity = validity;
         List<ColumnChunkReader> readers = [];
-        _root = Plan(field, type, new Columns(schema, types, validity, pool, cap, readers), 0, 0);
+        _root = Plan(field, type, new Columns(schema, types, validity, pool, cap, readers, storage), 0, 0);
         Readers = readers.ToArray();
     }
 
@@ -88,6 +98,7 @@ internal sealed class NestedFieldReader
                 return part;
 
             case FieldShape.Struct:
+            case FieldShape.Variant when columns.Storage:
                 part.Children = new Part[field.Children.Length];
                 part.Nodes = new int[field.Children.Length];
                 for (int i = 0; i < part.Children.Length; i++)
@@ -97,6 +108,35 @@ internal sealed class NestedFieldReader
 
                 part.Levels = part.Children[0].Levels;
                 return part;
+
+            case FieldShape.Variant:
+            {
+                if (field.Refusal is { } refusal)
+                {
+                    ParquetThrow.Unsupported("VARIANT", ParquetComponentKind.LogicalType, refusal);
+                }
+
+                DType storage = VortexTypes.ToDType(field.Storage!, columns.Types);
+                part.Storage = storage;
+                part.Children = new Part[field.Children.Length];
+                part.Nodes = new int[field.Children.Length];
+                for (int i = 0; i < part.Children.Length; i++)
+                {
+                    part.Children[i] = Plan(field.Children[i], storage.GetField(i), columns, repetition, definition);
+                }
+
+                part.Levels = part.Children[0].Levels;
+                try
+                {
+                    part.Variant = ShreddedVariant.Compile(field.Storage!, columns.Types);
+                }
+                catch (VortexException e)
+                {
+                    Refuse(field, e);
+                }
+
+                return part;
+            }
 
             case FieldShape.List:
                 RequireLevels(field, repetition, definition);
@@ -158,6 +198,7 @@ internal sealed class NestedFieldReader
             }
 
             case FieldShape.Struct:
+            case FieldShape.Variant when part.Variant is null:
             {
                 Validity validity = Validity.NonNullable;
                 if (part.Type.IsNullable || field.RefusesNull)
@@ -175,6 +216,33 @@ internal sealed class NestedFieldReader
                 }
 
                 return arena.AddStruct(part.Type, length, validity, part.Nodes);
+            }
+
+            case FieldShape.Variant:
+            {
+                Validity validity = Validity.NonNullable;
+                if (part.Type.IsNullable)
+                {
+                    VortexBuffer present = Bitmap(context, bitmapBytes, out Span<byte> bits);
+                    int valid = Mark(rep, def, repetition, definition, field.DefinedAt, bits, length, levels);
+                    validity = Of(arena, part.Type, present, valid, length);
+                }
+
+                for (int i = 0; i < part.Children.Length; i++)
+                {
+                    part.Nodes[i] = Build(context, part.Children[i], repetition, definition, length);
+                }
+
+                int group = arena.AddStruct(part.Storage, length, validity, part.Nodes);
+                try
+                {
+                    return part.Variant!.Assemble(arena, part.Type, group);
+                }
+                catch (VortexException e) when (e is VortexFormatException or VortexUnsupportedException)
+                {
+                    Refuse(field, e);
+                    return 0;
+                }
             }
 
             default:
@@ -288,11 +356,24 @@ internal sealed class NestedFieldReader
         }
     }
 
+    /// <summary>The core's refusal of a variant, as the Parquet one it is: a malformed one or one this build does not read.</summary>
+    [DoesNotReturn]
+    private static void Refuse(ParquetField field, VortexException e)
+    {
+        if (e is VortexUnsupportedException)
+        {
+            ParquetThrow.Unsupported("VARIANT", ParquetComponentKind.LogicalType, $"The variant '{field.Name}' cannot be read: {e.Message}");
+        }
+
+        ParquetThrow.Format($"The variant '{field.Name}' is malformed: {e.Message}");
+    }
+
     private static void Disagree(ColumnChunkReader levels, int found, int expected) =>
         ParquetThrow.Format($"The levels of '{levels.Column.DottedPath}' give a field {found} slots where its holder gives {expected}.");
 
     /// <summary>What the plan of a field's parts is made with.</summary>
-    private sealed record Columns(ParquetSchema Schema, DTypeArena Types, DType Validity, AlignedBufferPool Pool, long Cap, List<ColumnChunkReader> Readers);
+    /// <summary>What the plan of a field's parts is made with; <c>Storage</c> reads a variant as its group.</summary>
+    private sealed record Columns(ParquetSchema Schema, DTypeArena Types, DType Validity, AlignedBufferPool Pool, long Cap, List<ColumnChunkReader> Readers, bool Storage);
 
     /// <summary>A node of the field's tree: its dtype, its children, and the column that describes its structure.</summary>
     private sealed class Part
@@ -303,6 +384,12 @@ internal sealed class NestedFieldReader
 
         /// <summary>A map's key-value struct.</summary>
         internal DType Entries { get; set; }
+
+        /// <summary>A variant's group, as the struct of its fields.</summary>
+        internal DType Storage { get; set; }
+
+        /// <summary>What puts a variant back together from its group.</summary>
+        internal ShreddedVariant? Variant { get; set; }
 
         internal Part[] Children { get; set; } = [];
 

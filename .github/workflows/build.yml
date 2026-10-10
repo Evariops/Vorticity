@@ -344,9 +344,11 @@ jobs:
       - name: Publish pqdump as Native AOT
         run: dotnet publish tools/pqdump -c Release -r linux-x64
 
-      # Exit 3 (unsupported) and 4 (malformed) are expected answers for twelve of these files: four
-      # use what this build does not read, the deprecated LZ4 among them, and eight are malformed on
-      # purpose. A verify that finds something exits 1, which ten files do by design.
+      # Exit 3 (unsupported) and 4 (malformed) are expected answers for eighteen of these files: six
+      # use what this build does not read, the deprecated LZ4 among them and two variants shredded to
+      # types the standard does not shred to, and twelve are malformed on purpose, four of them
+      # variants the suite says are errors. A verify that finds something exits 1, which four files, the
+      # suite's checksum cases, do by design.
       - name: Scan and verify every Parquet test file with the AOT pqdump
         run: |
           BIN=tools/pqdump/bin/Release/net11.0/linux-x64/publish/pqdump
@@ -369,8 +371,8 @@ jobs:
           done < <(find "$RUNNER_TEMP/parquet-testing" -name '*.parquet')
           echo "AOT pqdump: $scanned scanned ($clean true to their footers, $found not), $refused refused, $crashed crashed"
           test "$crashed" = 0
-          test "$refused" -le 12
-          test "$scanned" -ge 228
+          test "$refused" -le 18
+          test "$scanned" -ge 222
 
   crosscheck:
     name: cross-check with the reference

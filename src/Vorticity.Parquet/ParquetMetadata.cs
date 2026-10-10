@@ -203,7 +203,7 @@ public sealed class ParquetMetadata
         _ => "unknown",
     };
 
-    private static string? Logical(in LogicalTypeInfo logical) => logical.Kind switch
+    internal static string? Logical(in LogicalTypeInfo logical) => logical.Kind switch
     {
         LogicalTypeKind.None => null,
         LogicalTypeKind.String => "STRING",

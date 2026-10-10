@@ -29,10 +29,13 @@ internal sealed class HandBuiltFile
     /// <summary>The rows the footer and its row group declare.</summary>
     internal long Rows { get; set; }
 
-    /// <summary>Adds a group of <paramref name="children"/> elements, which the next elements are.</summary>
-    internal HandBuiltFile Group(string name, FieldRepetition repetition, int children, ConvertedType? converted = null)
+    /// <summary>
+    /// Adds a group of <paramref name="children"/> elements, which the next elements are, annotated
+    /// by its converted type or by a logical type whose member is an empty struct, as VARIANT's may be.
+    /// </summary>
+    internal HandBuiltFile Group(string name, FieldRepetition repetition, int children, ConvertedType? converted = null, LogicalTypeKind? logical = null)
     {
-        _schema.Add(new Element(name, null, repetition, children, converted, -1, -1, -1, null));
+        _schema.Add(new Element(name, null, repetition, children, converted, -1, -1, -1, logical));
         return this;
     }
 
@@ -195,6 +198,33 @@ internal sealed class HandBuiltFile
         }
 
         return bytes;
+    }
+
+    /// <summary>INT32 values, PLAIN.</summary>
+    internal static byte[] Ints(params int[] values)
+    {
+        byte[] bytes = new byte[values.Length * sizeof(int)];
+        for (int i = 0; i < values.Length; i++)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(i * sizeof(int)), values[i]);
+        }
+
+        return bytes;
+    }
+
+    /// <summary>BYTE_ARRAY values of any bytes, PLAIN: each behind its length.</summary>
+    internal static byte[] Binaries(params byte[][] values)
+    {
+        List<byte> bytes = [];
+        byte[] length = new byte[4];
+        foreach (byte[] value in values)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(length, value.Length);
+            bytes.AddRange(length);
+            bytes.AddRange(value);
+        }
+
+        return bytes.ToArray();
     }
 
     /// <summary>BYTE_ARRAY values, PLAIN: each behind its length.</summary>

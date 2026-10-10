@@ -29,6 +29,14 @@ internal static class Render
             return;
         }
 
+        if (column.DType.Kind == DTypeKind.Variant)
+        {
+            StructColumn parts = column.AsStruct();
+            text.Append("variant(0x").Append(Convert.ToHexString(parts.GetField(0).AsBinary().GetSpan(row)))
+                .Append(", 0x").Append(Convert.ToHexString(parts.GetField(1).AsBinary().GetSpan(row))).Append(')');
+            return;
+        }
+
         switch (column.Kind)
         {
             case CanonicalKind.Null:

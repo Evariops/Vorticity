@@ -191,7 +191,8 @@ internal sealed class WriteSchema
     /// optional or required group annotated <c>LIST</c> around a repeated group <c>list</c> around
     /// the <c>element</c>; a fixed-size list of other than bytes is one too, its size not kept. A
     /// map is a group annotated <c>MAP</c> around a repeated group <c>key_value</c> of a required
-    /// <c>key</c> and the <c>value</c>.
+    /// <c>key</c> and the <c>value</c>. A variant is a group annotated <c>VARIANT(1)</c> of its
+    /// <c>metadata</c> and its <c>value</c>, both required binary: the standard's unshredded form.
     /// </remarks>
     internal static WriteSchema Map(VortexSchema schema)
     {
@@ -252,6 +253,21 @@ internal sealed class WriteSchema
                 ShredStep step = new(kind, 0, nullable, definedAt, place.Repetition + 1, definedAt + 1);
                 Place element = new([.. place.Path, "list", "element"], [.. place.Steps, step], definedAt + 1, place.Repetition + 1);
                 Field("element", type.ElementType!, field, element, elements, columns);
+                return;
+            }
+
+            case VortexTypeKind.Variant:
+            {
+                LogicalTypeInfo logical = Logical(LogicalTypeKind.Variant);
+                logical.VariantVersion = 1;
+                elements.Add(Group(name, repetition, 2, logical, -1));
+                ReadOnlySpan<string> parts = ["metadata", "value"];
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    ShredStep step = new(ShredKind.Struct, i, nullable, definedAt, 0, 0);
+                    Field(parts[i], VortexType.Binary, field, new Place([.. place.Path, parts[i]], [.. place.Steps, step], definedAt, place.Repetition), elements, columns);
+                }
+
                 return;
             }
 

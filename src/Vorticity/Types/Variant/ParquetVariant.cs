@@ -75,26 +75,28 @@ internal readonly ref struct VariantValue
 /// JSON-like value.
 /// </summary>
 /// <remarks>
-/// Only the primitives and strings are encoded and decoded, in both directions; an object, an
-/// array, a decimal or a uuid raises <see cref="VortexUnsupportedException"/> naming what was
-/// found, rather than yielding a wrong value or a silent null.
+/// <see cref="Read"/> and <see cref="WriteValue"/> decode and encode the primitives and strings; an
+/// object, an array, a decimal or a uuid raises <see cref="VortexUnsupportedException"/> naming
+/// what was found, rather than yielding a wrong value or a silent null. Every value has a size,
+/// which <see cref="SizeOf"/> reads, and <see cref="VariantNested"/> and
+/// <see cref="VariantDictionary"/> read objects, arrays and metadata in place.
 /// </remarks>
 internal static class ParquetVariant
 {
-    /// <summary>The only metadata version this encoding has ever had.</summary>
-    private const byte Version = 1;
-
     /// <summary>Basic type 0: the header's remaining six bits name a primitive.</summary>
-    private const int BasicPrimitive = 0;
+    internal const int BasicPrimitive = 0;
 
     /// <summary>Basic type 1: the header's remaining six bits are the string's length.</summary>
-    private const int BasicShortString = 1;
+    internal const int BasicShortString = 1;
 
     /// <summary>Basic type 2: an object.</summary>
-    private const int BasicObject = 2;
+    internal const int BasicObject = 2;
 
     /// <summary>Basic type 3: an array.</summary>
-    private const int BasicArray = 3;
+    internal const int BasicArray = 3;
+
+    /// <summary>The longest string the short form holds: its length fills the header's six bits.</summary>
+    internal const int MaxShortString = 63;
 
     /// <summary>
     /// The metadata of a variant whose value names no dictionary string: version 1, no entries.
@@ -111,42 +113,53 @@ internal static class ParquetVariant
     /// <returns>How many strings the dictionary holds.</returns>
     /// <exception cref="VortexFormatException">The metadata is malformed.</exception>
     /// <exception cref="VortexUnsupportedException">The version is not 1.</exception>
-    internal static int ReadDictionarySize(ReadOnlySpan<byte> metadata)
+    internal static int ReadDictionarySize(ReadOnlySpan<byte> metadata) => VariantDictionary.Read(metadata).Count;
+
+    /// <summary>The bytes the value <paramref name="value"/> starts with takes, its header included.</summary>
+    /// <param name="value">A value, and possibly bytes after it.</param>
+    /// <exception cref="VortexFormatException">The value is empty or cut short.</exception>
+    /// <exception cref="VortexUnsupportedException">The value is a primitive whose type this build does not know.</exception>
+    internal static int SizeOf(ReadOnlySpan<byte> value)
     {
-        if (metadata.Length < 1)
+        if (value.IsEmpty)
         {
-            throw new VortexFormatException("A variant's metadata is empty.");
+            throw new VortexFormatException("A variant's value is empty.");
         }
 
-        byte header = metadata[0];
-        int version = header & 0x0F;
-        if (version != Version)
+        byte header = value[0];
+        long size = (header & 0x03) switch
         {
-            throw new VortexUnsupportedException(
-                "vortex.parquet.variant",
-                VortexComponentKind.Array,
-                $"the variant metadata declares version {version}; only version 1 is defined.");
+            BasicPrimitive => 1L + PrimitiveSize(header >> 2, value[1..]),
+            BasicShortString => 1L + (header >> 2),
+            _ => VariantNested.Read(value).Size,
+        };
+
+        if (size > value.Length)
+        {
+            throw new VortexFormatException($"A variant value of {size} bytes is cut short at {value.Length}.");
         }
 
-        int offsetSize = ((header >> 6) & 0x03) + 1;
-        if (metadata.Length < 1 + offsetSize)
-        {
-            throw new VortexFormatException(
-                $"A variant's metadata is {metadata.Length} bytes; its {offsetSize}-byte " +
-                "dictionary size does not fit.");
-        }
-
-        long size = ReadUnsigned(metadata.Slice(1, offsetSize));
-        long offsetsEnd = 1L + offsetSize + ((size + 1) * offsetSize);
-        if (size < 0 || offsetsEnd > metadata.Length)
-        {
-            throw new VortexFormatException(
-                $"A variant's metadata declares {size} dictionary entries, whose offsets do not " +
-                $"fit in {metadata.Length} bytes.");
-        }
-
-        return checked((int)size);
+        return (int)size;
     }
+
+    /// <summary>The bytes the data of a primitive of type <paramref name="typeId"/> takes.</summary>
+    private static long PrimitiveSize(int typeId, ReadOnlySpan<byte> payload) => typeId switch
+    {
+        0 or 1 or 2 => 0,
+        3 => 1,
+        4 => 2,
+        5 or 11 or 14 => 4,
+        6 or 7 or 12 or 13 or 17 or 18 or 19 => 8,
+        8 => 5,
+        9 => 9,
+        10 => 17,
+        15 or 16 => 4L + BinaryPrimitives.ReadUInt32LittleEndian(Take(payload, 4)),
+        20 => 16,
+        _ => throw new VortexUnsupportedException(
+            "vortex.parquet.variant",
+            VortexComponentKind.Array,
+            $"the value is primitive type {typeId}, which this build does not know the size of."),
+    };
 
     /// <summary>Decodes one variant value.</summary>
     /// <param name="metadata">The row's metadata; validated, and needed only by nested values.</param>
@@ -284,7 +297,7 @@ internal static class ParquetVariant
             case DTypeKind.Binary:
             {
                 int length = scalar.AsBinary.Length;
-                bool shortForm = dtype.Kind == DTypeKind.Utf8 && length <= 63;
+                bool shortForm = dtype.Kind == DTypeKind.Utf8 && length <= MaxShortString;
                 return shortForm ? 1 + length : 5 + length;
             }
 
@@ -320,7 +333,7 @@ internal static class ParquetVariant
             case DTypeKind.Binary:
             {
                 ReadOnlySpan<byte> bytes = scalar.AsBinary;
-                if (dtype.Kind == DTypeKind.Utf8 && bytes.Length <= 63)
+                if (dtype.Kind == DTypeKind.Utf8 && bytes.Length <= MaxShortString)
                 {
                     destination[0] = (byte)((bytes.Length << 2) | BasicShortString);
                     bytes.CopyTo(destination[1..]);
@@ -430,7 +443,8 @@ internal static class ParquetVariant
         }
     }
 
-    private static byte Primitive(int typeId) => (byte)((typeId << 2) | BasicPrimitive);
+    /// <summary>The header of a primitive of type <paramref name="typeId"/>.</summary>
+    internal static byte Primitive(int typeId) => (byte)((typeId << 2) | BasicPrimitive);
 
     private static ReadOnlySpan<byte> Take(ReadOnlySpan<byte> payload, int count)
     {
@@ -443,14 +457,32 @@ internal static class ParquetVariant
         return payload[..count];
     }
 
-    private static long ReadUnsigned(ReadOnlySpan<byte> bytes)
+    /// <summary>The little-endian unsigned number of one to four bytes the encoding sizes its counts, ids and offsets with.</summary>
+    internal static uint Unsigned(ReadOnlySpan<byte> bytes) => bytes.Length switch
     {
-        long value = 0;
-        for (int i = bytes.Length - 1; i >= 0; i--)
+        1 => bytes[0],
+        2 => BinaryPrimitives.ReadUInt16LittleEndian(bytes),
+        3 => (uint)(bytes[0] | (bytes[1] << 8) | (bytes[2] << 16)),
+        _ => BinaryPrimitives.ReadUInt32LittleEndian(bytes),
+    };
+
+    /// <summary>The fewest bytes, one to four, that hold <paramref name="value"/>.</summary>
+    internal static int WidthOf(uint value) => value <= 0xFF ? 1 : value <= 0xFFFF ? 2 : value <= 0xFF_FFFF ? 3 : 4;
+
+    /// <summary>Writes <paramref name="value"/> little-endian in <paramref name="width"/> bytes at <paramref name="at"/>, which it advances.</summary>
+    internal static void Put(Span<byte> destination, ref int at, uint value, int width)
+    {
+        if (width == 1)
         {
-            value = (value << 8) | bytes[i];
+            destination[at++] = (byte)value;
+            return;
         }
 
-        return value;
+        for (int i = 0; i < width; i++)
+        {
+            destination[at + i] = (byte)(value >> (8 * i));
+        }
+
+        at += width;
     }
 }
