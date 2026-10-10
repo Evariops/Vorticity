@@ -1,5 +1,7 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -23,6 +25,7 @@ public sealed class ParquetFile : IAsyncDisposable
 {
     private ParquetScanSource? _source;
     private int _disposed;
+    private KeyValuePair<string, string?>[]? _keyValues;
 
     private ParquetFile(ISegmentReader reader, VortexSession session, ParquetOpenOptions options, long length, ParquetFooter footer, ParquetSchema schema)
     {
@@ -42,6 +45,32 @@ public sealed class ParquetFile : IAsyncDisposable
 
     /// <summary>The file's row groups.</summary>
     public int RowGroupCount => Footer.RowGroups.Length;
+
+    /// <summary>
+    /// The key-value pairs the file's footer carries, in its order, a pair given no value with a null
+    /// one: those of its writer and of its writer's caller. A file this package wrote holds
+    /// <c>vorticity.schema</c>, the Vortex schema it was written from.
+    /// </summary>
+    public IReadOnlyList<KeyValuePair<string, string?>> KeyValueMetadata
+    {
+        get
+        {
+            if (_keyValues is { } known)
+            {
+                return known;
+            }
+
+            ReadOnlySpan<byte> bytes = Footer.Bytes;
+            KeyValuePair<string, string?>[] pairs = new KeyValuePair<string, string?>[Footer.KeyValues.Length];
+            for (int i = 0; i < pairs.Length; i++)
+            {
+                (ByteRange key, ByteRange value) = Footer.KeyValues[i];
+                pairs[i] = new(Encoding.UTF8.GetString(key.Of(bytes)), value.IsPresent ? Encoding.UTF8.GetString(value.Of(bytes)) : null);
+            }
+
+            return _keyValues = pairs;
+        }
+    }
 
     internal ISegmentReader Reader { get; }
 
@@ -175,11 +204,10 @@ public sealed class ParquetFile : IAsyncDisposable
                 "The file encrypts its columns; this version of the reader reads plaintext files.");
         }
 
-        ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders);
+        ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
         return new ParquetFile(reader, session, options, length, metadata, schema);
     }
 
-    /// <summary>Where a column chunk's pages lie, its dictionary page first; checked against the file's bytes.</summary>
     /// <summary>
     /// Whether <paramref name="length"/> bytes at <paramref name="offset"/> lie between the leading
     /// magic and the footer's length: where a structure the footer points to may be. A page index or
@@ -188,6 +216,7 @@ public sealed class ParquetFile : IAsyncDisposable
     internal bool Holds(long offset, long length) =>
         offset >= 4 && length > 0 && length <= int.MaxValue && offset <= Length - 8 - length;
 
+    /// <summary>Where a column chunk's pages lie, its dictionary page first; checked against the file's bytes.</summary>
     internal (long Start, int Length) ChunkRange(ColumnChunkMetadata chunk)
     {
         if (chunk.IsEncrypted)

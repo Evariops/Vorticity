@@ -8,9 +8,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Parquet.Metadata;
+using Vorticity.Parquet.Schema;
 using Vorticity.Parquet.Thrift;
 using Vorticity.Parquet.Writing;
 using Vorticity.Types;
+using Vorticity.Types.Serialization;
 using Vorticity.Writing;
 using Vorticity.Zstd;
 
@@ -35,6 +37,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
     private readonly VortexSession _session;
     private readonly DType _dtype;
+
+    /// <summary>The key-value metadata the footer carries.</summary>
+    private readonly KeyValuePair<string, string>[] _keyValues;
     private readonly WriteSchema _map;
     private readonly ParquetWriteOptions _options;
     private readonly CompressionCodec _codec;
@@ -86,6 +91,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     {
         Schema = schema;
         _dtype = VortexTypes.ToDType(schema, new DTypeArena());
+        _keyValues = KeyValues(_dtype, options);
         _map = map;
         _options = options;
         _session = session;
@@ -412,6 +418,26 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>
+    /// The file's key-value metadata: the Vortex schema it is written from, from which a reader of this
+    /// package restores what Parquet cannot say, then the caller's pairs, by key.
+    /// </summary>
+    private static KeyValuePair<string, string>[] KeyValues(DType dtype, ParquetWriteOptions options)
+    {
+        List<KeyValuePair<string, string>> pairs = [new(ParquetSchema.VortexSchemaKey, Convert.ToBase64String(DTypeFlatBuffers.Serialize(dtype)))];
+        if (options.KeyValueMetadata is { } caller)
+        {
+            string[] keys = [.. caller.Keys];
+            Array.Sort(keys, StringComparer.Ordinal);
+            foreach (string key in keys)
+            {
+                pairs.Add(new(key, caller[key]));
+            }
+        }
+
+        return [.. pairs];
+    }
+
     /// <summary><c>Vorticity.Parquet version &lt;version&gt; (build &lt;commit&gt;)</c>, the form the standard asks a writer for.</summary>
     internal static string CreatedByOf(Assembly assembly)
     {
@@ -617,7 +643,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         int footer = tail.Length;
-        FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, [], CreatedBy, _map.Columns);
+        FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns);
         writer.Flush();
         int length = tail.Length - footer;
         Span<byte> end = tail.Reserve(8);

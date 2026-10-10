@@ -86,8 +86,28 @@ public sealed record ParquetWriteOptions
     /// </summary>
     public bool WriteChecksums { get; init; }
 
+    /// <summary>
+    /// Key-value pairs the footer carries, written in the ordinal order of their keys after the one this
+    /// package writes itself, <c>vorticity.schema</c>: the Vortex schema the file is written from, which
+    /// no pair may name. None by default.
+    /// </summary>
+    public IReadOnlyDictionary<string, string>? KeyValueMetadata { get; init; }
+
     internal void Validate()
     {
+        if (KeyValueMetadata is { } pairs)
+        {
+            foreach ((string key, string value) in pairs)
+            {
+                if (key == Schema.ParquetSchema.VortexSchemaKey)
+                {
+                    throw new ArgumentException($"The key '{key}' is this package's own: it carries the Vortex schema the file is written from.", nameof(KeyValueMetadata));
+                }
+
+                ArgumentNullException.ThrowIfNull(value, nameof(KeyValueMetadata));
+            }
+        }
+
         if (BloomFilters is { } blooms)
         {
             foreach ((string column, double rate) in blooms)

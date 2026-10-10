@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Text;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Types;
+using Vorticity.Types.Serialization;
 
 namespace Vorticity.Parquet.Schema;
 
@@ -84,7 +85,7 @@ internal sealed class ParquetColumn
     internal PType Storage { get; init; }
 
     /// <summary>The leaf's Vortex type, nullable when the leaf is optional.</summary>
-    internal required VortexType Type { get; init; }
+    internal required VortexType Type { get; set; }
 
     internal string DottedPath => string.Join('.', Path);
 }
@@ -94,7 +95,7 @@ internal sealed class ParquetField
 {
     internal required string Name { get; init; }
 
-    internal required VortexType Type { get; init; }
+    internal required VortexType Type { get; set; }
 
     internal FieldShape Shape { get; init; }
 
@@ -150,6 +151,12 @@ internal sealed class ParquetSchema
     /// <summary>The extension id an INTERVAL reads as: its three little-endian unsigned counts of months, days and milliseconds.</summary>
     internal const string IntervalExtensionId = "parquet.interval";
 
+    /// <summary>
+    /// The key-value pair under which this package's writer keeps the Vortex schema a file was written
+    /// from: its dtype's FlatBuffers bytes in base64.
+    /// </summary>
+    internal const string VortexSchemaKey = "vorticity.schema";
+
     private ParquetSchema(ParquetColumn[] columns, ParquetField[] fields, VortexSchema vortex)
     {
         Columns = columns;
@@ -187,6 +194,89 @@ internal sealed class ParquetSchema
         }
 
         return new ParquetSchema(leaves, fields, VortexSchema.Create(vortexFields));
+    }
+
+    /// <summary>
+    /// This schema with what the Vortex schema a file was written from says and Parquet cannot
+    /// restored where the two agree, a top-level column at a time: a timestamp's zone, which Parquet
+    /// keeps as UTC, and an extension Parquet has no annotation for, over the type the column reads
+    /// as. A column that disagrees reads as Parquet says it is; a schema this build cannot read, or one
+    /// of other fields, is ignored whole.
+    /// </summary>
+    /// <param name="written">The <see cref="VortexSchemaKey"/> pair's value, or null.</param>
+    /// <remarks>It changes the schema in place: one compiled for the open that publishes it.</remarks>
+    internal ParquetSchema Restored(string? written)
+    {
+        if (written is null)
+        {
+            return this;
+        }
+
+        VortexSchema stored;
+        try
+        {
+            stored = VortexTypes.SchemaOf(DTypeFlatBuffers.Read(Convert.FromBase64String(written), new DTypeArena()));
+        }
+        catch (Exception e) when (e is FormatException or VortexException)
+        {
+            return this;
+        }
+
+        if (stored.Count != Fields.Length)
+        {
+            return this;
+        }
+
+        bool restored = false;
+        for (int i = 0; i < Fields.Length; i++)
+        {
+            ParquetField field = Fields[i];
+            if (field.Column < 0 || !string.Equals(stored[i].Name, field.Name, StringComparison.Ordinal) || Restore(stored[i].Type, field.Type) is not { } type)
+            {
+                continue;
+            }
+
+            field.Type = type;
+            Columns[field.Column].Type = type;
+            restored = true;
+        }
+
+        if (!restored)
+        {
+            return this;
+        }
+
+        VortexField[] vortexFields = new VortexField[Fields.Length];
+        for (int i = 0; i < Fields.Length; i++)
+        {
+            vortexFields[i] = new VortexField(Fields[i].Name, Fields[i].Type);
+        }
+
+        return new ParquetSchema(Columns, Fields, VortexSchema.Create(vortexFields));
+    }
+
+    /// <summary>The type <paramref name="written"/> restores of a column Parquet reads as <paramref name="read"/>; null when it restores nothing.</summary>
+    private static VortexType? Restore(VortexType written, VortexType read)
+    {
+        if (written.Equals(read) || written.Kind != VortexTypeKind.Extension || written.IsNullable != read.IsNullable)
+        {
+            return null;
+        }
+
+        // A timestamp in a zone of its own, which Parquet keeps as adjusted to UTC.
+        if (written.ExtensionId == ExtensionIds.Timestamp)
+        {
+            return read.ExtensionId == ExtensionIds.Timestamp && read.TimeZone == "UTC" && written.TimeZone is not null
+                && written.Unit == read.Unit && Equals(written.StorageType, read.StorageType)
+                ? written
+                : null;
+        }
+
+        // An extension Parquet has no annotation for, written as its storage.
+        return written.ExtensionId is not (ExtensionIds.Date or ExtensionIds.Time or ExtensionIds.Uuid or IntervalExtensionId or Int96ExtensionId)
+            && Equals(written.StorageType, read)
+            ? written
+            : null;
     }
 
     private struct Node

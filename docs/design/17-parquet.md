@@ -197,9 +197,12 @@ physical type ([LogicalTypes.md][lt], *Unsupported Logical Types*).
 | `MAP` | `Map`, a list view of key-value entries as the core holds one | levels |
 | `VARIANT`, `GEOMETRY`, `GEOGRAPHY`, `FILE` | phase 3 (§11): a variant column, binary with its CRS and edges, a struct | — |
 
-A file this writer made carries its Vortex schema in its key-value metadata (§6.1). When that schema
-agrees with the Parquet schema leaf by leaf, it restores what Parquet cannot say — a time zone's
-name, a fixed-size list of other than bytes, an extension's id — and is ignored otherwise. Field ids
+A file this writer made carries its Vortex schema in its key-value metadata (§6.1). Top-level column
+by top-level column, where that schema agrees with the Parquet schema, it restores what Parquet
+cannot say: a timestamp's zone, which Parquet keeps as UTC, and an extension Parquet has no
+annotation for, over the type the column reads as. A column that disagrees reads as Parquet says, and
+a schema this build cannot read, or of other columns, is ignored. A fixed-size list of other than
+bytes reads back as the list Parquet holds. The pairs are `ParquetFile.KeyValueMetadata`; field ids
 are kept and shown by `Metadata`.
 
 ### 4.2 Writing
