@@ -601,10 +601,13 @@ internal static class Program
                                      warm, on one core and on all; time, ratio, allocations
                                      --rows N          rows of the table, default 2^20
                                      --runs N          timed calls an action, default 5
+                                     --file <x.parquet> a Parquet file of another writer
+                                                       instead, against its rewrite as Vortex
                                      --keep            leave both files, and say where
                                      --columns         each column alone too, on one core
                                      --loop <format> <action> [secs]
                                                        one action in a bare loop, for a trace
+                                     --degree N        the loop's lanes, default 1
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
           --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,

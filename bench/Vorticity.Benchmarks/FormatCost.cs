@@ -32,6 +32,9 @@ internal static class FormatCost
     /// <summary>The batches a scan decodes ahead, when <c>--prefetch</c> sets it; the scan's default otherwise.</summary>
     private static int? Prefetch;
 
+    /// <summary>The column a projection keeps: the report's monotone one, or a given file's first.</summary>
+    private static string Projected = Set.Field;
+
     internal static async Task<int> RunAsync(string[] args)
     {
         int rows = Count(args, "--rows", 1 << 20);
@@ -45,10 +48,24 @@ internal static class FormatCost
         {
             // The report's session: no mapping kept past a close, so every open maps its file anew.
             await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
+            // The report's table, written as Vortex then rewritten as Parquet; or, with --file, a
+            // Parquet file of another writer as it is, rewritten as Vortex by ours.
+            int fileAt = Array.IndexOf(args, "--file");
             string vortex = Path.Combine(directory, "table.vortex");
-            string parquet = Path.Combine(directory, "table.parquet");
-            await Report.WriteFixtureAsync(vortex, rows).ConfigureAwait(false);
-            await RewriteAsync(session, vortex, parquet).ConfigureAwait(false);
+            string parquet = fileAt >= 0 && fileAt + 1 < args.Length ? Path.GetFullPath(args[fileAt + 1]) : Path.Combine(directory, "table.parquet");
+            string[] actions = Actions;
+            if (fileAt >= 0)
+            {
+                rows = await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
+                await using ParquetFile given = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
+                Projected = given.Schema[0].Name;
+                actions = given.Schema.Any(f => f.Name == Set.Field) ? Actions : [.. Actions.Where(a => !a.StartsWith("filter", StringComparison.Ordinal))];
+            }
+            else
+            {
+                await Report.WriteFixtureAsync(vortex, rows).ConfigureAwait(false);
+                await RewriteAsync(session, vortex, parquet).ConfigureAwait(false);
+            }
             Format[] formats =
             [
                 new("Vortex", vortex, async path => new VortexSide(await session.OpenAsync(path, options: null, CancellationToken.None).ConfigureAwait(false))),
@@ -65,7 +82,7 @@ internal static class FormatCost
                 Stopwatch clock = Stopwatch.StartNew();
                 while (clock.Elapsed.TotalSeconds < seconds)
                 {
-                    await RunAsync(looped, args[loop + 2], rows, 1).ConfigureAwait(false);
+                    await RunAsync(looped, args[loop + 2], rows, Count(args, "--degree", 1)).ConfigureAwait(false);
                     calls++;
                 }
 
@@ -81,7 +98,7 @@ internal static class FormatCost
                 $"{"action",-14} {"cores",-6} {"Vortex ms",10} {"Parquet ms",11} {"ratio",7} {"Vortex alloc",13} {"Parquet alloc",14}"));
             foreach (int degree in (int[])[1, Environment.ProcessorCount])
             {
-                foreach (string action in Actions)
+                foreach (string action in actions)
                 {
                     Measure[] measures = new Measure[formats.Length];
                     for (int f = 0; f < formats.Length; f++)
@@ -157,6 +174,23 @@ internal static class FormatCost
         await writer.CompleteAsync().ConfigureAwait(false);
     }
 
+    /// <summary>A Parquet file rewritten as Vortex by this repository's writer, with its defaults; its rows.</summary>
+    private static async Task<int> RewriteAsVortexAsync(VortexSession session, string parquet, string vortex)
+    {
+        await using ParquetFile source = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
+        await using VortexFileWriter writer = session.CreateWriter(vortex, source.Schema);
+        await foreach (RecordBatch batch in source.Scan().ToBatchesAsync().ConfigureAwait(false))
+        {
+            using (batch)
+            {
+                await writer.WriteAsync(batch).ConfigureAwait(false);
+            }
+        }
+
+        await writer.CompleteAsync().ConfigureAwait(false);
+        return checked((int)source.RowCount);
+    }
+
     /// <summary>
     /// The median time and allocation of <paramref name="runs"/> calls, after a second and 32 calls
     /// at least that warm: past the calls after which the JIT recompiles a method optimized, and the
@@ -196,7 +230,7 @@ internal static class FormatCost
         {
             "open" => file.RowCount,
             "scan" => await CountAsync(file.Scan().With(options)).ConfigureAwait(false),
-            "project" => await CountAsync(file.Scan(Set.Field).With(options)).ConfigureAwait(false),
+            "project" => await CountAsync(file.Scan(Projected).With(options)).ConfigureAwait(false),
             "filter-narrow" => await CountAsync(file.Scan().Where(Band(Set.BandLow, rows / 100)).With(options)).ConfigureAwait(false),
             "filter-wide" => await CountAsync(file.Scan().Where(Band(Set.BandLow, rows / 2)).With(options)).ConfigureAwait(false),
             "take" => await CountAsync(file.Scan().Rows(Spread(file.RowCount, Set.ReportTakeCount, rows / Set.ReportTakeCount)).With(options)).ConfigureAwait(false),
