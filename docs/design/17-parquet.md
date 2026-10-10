@@ -471,11 +471,20 @@ each of its buffers is the page's own: the mapping for a plain page stored uncom
 decompression's destination otherwise. On any other file, a batch's rows are cut on the same grid; a
 page is decoded whole, and a batch it holds whole reads its slots, views and validity in place, sliced
 at the batch's rows, so that a page of a million rows, as other writers cut them by bytes, is decoded
-once and copied never. Decoding a dictionary page's rows batch by batch instead, straight into each
-batch's buffers, was measured slower: on the January 2023 yellow taxi trips, read a column at a time,
-333 ms against 248, a narrow column's whole-page gather being one vectorized pass where a batch's pays
-its allocation and its spread each time. A column whose values for one batch come from two pages
-copies them once into one buffer, since a column's values are one span.
+once and copied never.
+
+A dictionary-encoded page of a flat column is the exception: it keeps its codes' runs and a cursor at
+the first, and each batch decodes the codes of its own rows, gathers their values into its arena and
+spreads them over its nulls, every row written once, a null one zero, into a block nothing clears
+first. A column that compresses well is a few pages of millions of rows to such a writer: the trips'
+store-and-forward flag is one page of 3.07 million rows, whose values gathered whole were 49 MB of
+views written out to memory and read back, where a batch's are 128 KB, in cache. Read a column at a
+time, the January 2023 yellow taxi trips take 202.5 ms against 223.2 decoded page by page, the flag
+2.9 ms against 19.3, and scanned whole 197 to 200 ms against 225 to 230. A batch's gather was once
+measured slower, 333 ms against 248, while each batch cleared its rows before spreading its values
+over them, grew its scratch on the managed heap, and spread a view's sixteen bytes a row at a time;
+it does none of these now. A column whose values for one batch come from two pages copies them once
+into one buffer, since a column's values are one span.
 
 A batch is borrowed, valid until the next `MoveNextAsync`; its buffers belong to the batch's arena or
 to the split's context, which holds the dictionaries and the page buffers views point into. An owned

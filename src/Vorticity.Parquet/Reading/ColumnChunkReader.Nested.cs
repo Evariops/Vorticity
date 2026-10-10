@@ -252,14 +252,21 @@ internal sealed partial class ColumnChunkReader
         }
 
         int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(slots) : checked(slots * _slot);
-        VortexBuffer spread = CanonicalSupport.Allocate(context.Decode, Math.Max(bytes, 1), 64, out Span<byte> into);
+        VortexBuffer spread;
         if (_slot == 0)
         {
-            SpreadBits(_dense.Span, present.Span, into, slots);
+            spread = CanonicalSupport.Allocate(context.Decode, Math.Max(bytes, 1), 64, out Span<byte> bits);
+            SpreadBits(_dense.Span, present.Span, bits, slots);
         }
         else if (valid > 0)
         {
-            ValidRows.Spread(_dense.Span, into, ValidityMask.Bitmap(present.Span, 0), slots, _slot, Encoding);
+            // Every slot written, a null one zero: nothing to clear first.
+            spread = CanonicalSupport.AllocateUninitialized(context.Decode, bytes, 64, out Span<byte> into);
+            ValidRows.SpreadOver(_dense.Span, into, ValidityMask.Bitmap(present.Span, 0), slots, _slot, Encoding);
+        }
+        else
+        {
+            spread = CanonicalSupport.Allocate(context.Decode, Math.Max(bytes, 1), 64);
         }
 
         return Node(arena, slots, validity, spread.Slice(0, bytes), data);

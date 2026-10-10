@@ -126,6 +126,15 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     private VortexBuffer[] _gathered = new VortexBuffer[4];
 
+    /// <summary>The codes of a batch's valid rows, decoded from a page read a batch at a time.</summary>
+    private NativeSegmentOwner? _batchCodes;
+
+    /// <summary>A batch's values gathered from the dictionary, before they are spread over its rows.</summary>
+    private NativeSegmentOwner? _batchValues;
+
+    /// <summary>A piece of a page read a batch at a time, gathered and spread, before its views are rebased into a batch that spans pages.</summary>
+    private NativeSegmentOwner? _batchRows;
+
     /// <summary>A reader of <paramref name="leaf"/>'s chunks.</summary>
     /// <param name="leaf">The column.</param>
     /// <param name="type">The column's dtype where it sits in the schema read.</param>
@@ -478,7 +487,17 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         _page ??= NextPage(context);
         int node;
-        if (_page.Read == 0 && _page.Rows == rows)
+        if (_page.Lazy && _page.Rows - _page.Read >= rows)
+        {
+            // A batch of a page read a batch at a time: its own codes decoded, its values gathered.
+            node = Lazily(context, _page, rows);
+            _page.Read += rows;
+            if (_page.Read == _page.Rows)
+            {
+                Retire();
+            }
+        }
+        else if (_page.Read == 0 && _page.Rows == rows)
         {
             node = Whole(context.Canonical, _page);
             Retire();
@@ -530,6 +549,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             Page page = _page ??= NextPage(context);
             int take = Math.Min(rows, page.Rows - page.Read);
+            if (page.Lazy)
+            {
+                SkipCodes(page, take);
+            }
+
             page.Read += take;
             rows -= take;
             if (page.Read == page.Rows)
@@ -652,6 +676,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
     public void Dispose()
     {
         Release();
+        _batchCodes?.Dispose();
+        _batchValues?.Dispose();
+        _batchRows?.Dispose();
+        _batchCodes = null;
+        _batchValues = null;
+        _batchRows = null;
         _levels?.Dispose();
         _levels = null;
     }
@@ -704,19 +734,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private int Slice(CanonicalArena arena, Page page, int rows)
     {
         int from = page.Read;
-        Validity validity = Validity.NonNullable;
-        if (_type.IsNullable)
-        {
-            validity = Validity.AllValid;
-            if (page.Validity is { } bits)
-            {
-                int nulls = rows - BitmapKernels.CountSet(bits.Buffer.Span, from, rows);
-                validity = nulls == 0 ? Validity.AllValid
-                    : nulls == rows ? Validity.AllInvalid
-                    : Validity.Bitmap(arena.AddBool(_validityType, rows, Validity.NonNullable, bits.Buffer.Slice(from >> 3), from & 7));
-            }
-        }
-
+        Validity validity = SliceValidity(arena, page, from, rows, out _);
         if (page.Codes is { } codes)
         {
             Page dictionary = _dictionary!;
@@ -764,8 +782,15 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
             }
 
-            Materialize(page);
-            CopySlots(page, take, into, done, ref buffers);
+            if (page.Lazy)
+            {
+                CopyLazily(page, take, into, done, ref buffers);
+            }
+            else
+            {
+                Materialize(page);
+                CopySlots(page, take, into, done, ref buffers);
+            }
             page.Read += take;
             done += take;
             if (page.Read == page.Rows)
@@ -792,32 +817,203 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// </summary>
     private void CopySlots(Page page, int take, Span<byte> into, int done, ref int buffers)
     {
-        ReadOnlySpan<byte> from = page.Values.Span;
         if (_slot == 0)
         {
-            BitmapKernels.CopyRange(from, page.Read, into, done, take);
+            BitmapKernels.CopyRange(page.Values.Span, page.Read, into, done, take);
+            return;
         }
-        else if (_views)
-        {
-            // Pages whose views point into one buffer, the dictionary's, share its entry.
-            int bufferBase = buffers > 0 && Same(_gathered[buffers - 1], page.Data) ? buffers - 1 : buffers;
-            if (bufferBase == buffers)
-            {
-                if (buffers == _gathered.Length)
-                {
-                    Array.Resize(ref _gathered, buffers * 2);
-                }
 
-                _gathered[buffers++] = page.Data;
+        CopyRows(page.Values.Span.Slice(page.Read * _slot, take * _slot), page.Data, take, into, done, ref buffers);
+    }
+
+    /// <summary>
+    /// Copies <paramref name="take"/> slots of <paramref name="from"/> into <paramref name="into"/>
+    /// from slot <paramref name="done"/>: values, or views rebased onto the gathered buffers, which
+    /// <paramref name="data"/>, the buffer they point into, joins unless it is the one before it.
+    /// </summary>
+    private void CopyRows(ReadOnlySpan<byte> from, VortexBuffer data, int take, Span<byte> into, int done, ref int buffers)
+    {
+        if (!_views)
+        {
+            from.CopyTo(into[(done * _slot)..]);
+            return;
+        }
+
+        // Pages whose views point into one buffer, the dictionary's, share its entry.
+        int bufferBase = buffers > 0 && Same(_gathered[buffers - 1], data) ? buffers - 1 : buffers;
+        if (bufferBase == buffers)
+        {
+            if (buffers == _gathered.Length)
+            {
+                Array.Resize(ref _gathered, buffers * 2);
             }
 
-            CanonicalConcat.RebaseInto(
-                from.Slice(page.Read * _slot, take * _slot), into.Slice(done * _slot, take * _slot), take, bufferBase, 1, 0);
+            _gathered[buffers++] = data;
+        }
+
+        CanonicalConcat.RebaseInto(from, into.Slice(done * _slot, take * _slot), take, bufferBase, 1, 0);
+    }
+
+    /// <summary>
+    /// The validity of <paramref name="rows"/> rows of <paramref name="page"/> from row
+    /// <paramref name="from"/>, its bitmap sliced in place; <paramref name="valid"/>, the rows that
+    /// hold a value.
+    /// </summary>
+    private Validity SliceValidity(CanonicalArena arena, Page page, int from, int rows, out int valid)
+    {
+        valid = rows;
+        if (!_type.IsNullable)
+        {
+            return Validity.NonNullable;
+        }
+
+        if (page.Validity is not { } bits)
+        {
+            return Validity.AllValid;
+        }
+
+        valid = BitmapKernels.CountSet(bits.Buffer.Span, from, rows);
+        return valid == rows ? Validity.AllValid
+            : valid == 0 ? Validity.AllInvalid
+            : Validity.Bitmap(arena.AddBool(_validityType, rows, Validity.NonNullable, bits.Buffer.Slice(from >> 3), from & 7));
+    }
+
+    /// <summary>
+    /// The next <paramref name="rows"/> rows of a page read a batch at a time: the codes of their
+    /// valid rows decoded and held to the dictionary, then kept, spread over the rows, for a scan that
+    /// keeps encodings, or their values gathered into the batch's arena.
+    /// </summary>
+    private int Lazily(ScanContext context, Page page, int rows)
+    {
+        CanonicalArena arena = context.Canonical;
+        int from = page.Read;
+        Validity validity = SliceValidity(arena, page, from, rows, out int valid);
+        ReadOnlySpan<uint> codes = NextCodes(page, valid);
+        Page dictionary = _dictionary!;
+        _data[0] = dictionary.Data;
+        if (KeepEncodings && _form != LeafForm.FixedBytes)
+        {
+            int outside = RowKernels.FirstCodeOutside(codes, (uint)dictionary.Rows);
+            if (outside >= 0)
+            {
+                ParquetThrow.Format($"A code of '{Name}', {codes[outside]}, passes its dictionary's {dictionary.Rows} entries.");
+            }
+
+            VortexBuffer kept = CanonicalSupport.AllocateUninitialized(context.Decode, rows * sizeof(uint), 64, out Span<byte> spread);
+            SpreadRows(page, MemoryMarshal.AsBytes(codes), spread[..(rows * sizeof(uint))], from, rows, sizeof(uint));
+            int entries = Storage(arena, dictionary.Rows, _values.IsNullable ? Validity.AllValid : Validity.NonNullable, dictionary.Values, _data);
+            return Wrap(arena, rows, arena.AddDictionary(_values, rows, validity, kept, entries));
+        }
+
+        VortexBuffer values = CanonicalSupport.AllocateUninitialized(context.Decode, rows * _slot, 64, out Span<byte> into);
+        GatherRows(page, codes, into[..(rows * _slot)], from, rows);
+        return Node(arena, rows, validity, values, _data);
+    }
+
+    /// <summary>
+    /// Copies the next <paramref name="take"/> rows of a page read a batch at a time into a batch that
+    /// spans pages: their values gathered straight into <paramref name="into"/>, or, for views, which
+    /// point into the dictionary's bytes, gathered and then rebased onto the batch's buffers.
+    /// </summary>
+    private void CopyLazily(Page page, int take, Span<byte> into, int done, ref int buffers)
+    {
+        int valid = page.Validity is { } bits ? BitmapKernels.CountSet(bits.Buffer.Span, page.Read, take) : take;
+        ReadOnlySpan<uint> codes = NextCodes(page, valid);
+        if (!_views)
+        {
+            GatherRows(page, codes, into.Slice(done * _slot, take * _slot), page.Read, take);
+            return;
+        }
+
+        Span<byte> rows = Room(ref _batchRows, take * _slot);
+        GatherRows(page, codes, rows, page.Read, take);
+        CopyRows(rows, _dictionary!.Data, take, into, done, ref buffers);
+    }
+
+    /// <summary>The codes of the next <paramref name="count"/> valid rows of a page read a batch at a time.</summary>
+    private ReadOnlySpan<uint> NextCodes(Page page, int count)
+    {
+        Span<uint> codes = MemoryMarshal.Cast<byte, uint>(Room(ref _batchCodes, count * sizeof(uint)));
+        if (page.Cursor.BitWidth == 0)
+        {
+            // Codes of no width: every one names the dictionary's first entry.
+            codes.Clear();
         }
         else
         {
-            from.Slice(page.Read * _slot, take * _slot).CopyTo(into[(done * _slot)..]);
+            page.Cursor.Read(page.CodeRuns.Span, codes);
         }
+
+        return codes;
+    }
+
+    /// <summary>
+    /// <paramref name="bytes"/> bytes of <paramref name="block"/>, a block of the pool the reader keeps
+    /// from one batch to the next, rented again larger when it is short and given back with the reader.
+    /// </summary>
+    private Span<byte> Room(ref NativeSegmentOwner? block, int bytes)
+    {
+        if (block is null || block.WritableSpan.Length < bytes)
+        {
+            block?.Dispose();
+            block = null;
+            block = _pool.Rent(Math.Max(bytes, 1), 64);
+        }
+
+        return block.WritableSpan[..bytes];
+    }
+
+    /// <summary>Steps a page read a batch at a time over the codes of its next <paramref name="rows"/> rows.</summary>
+    private static void SkipCodes(Page page, int rows)
+    {
+        int valid = page.Validity is { } bits ? BitmapKernels.CountSet(bits.Buffer.Span, page.Read, rows) : rows;
+        if (valid > 0 && page.Cursor.BitWidth != 0)
+        {
+            page.Cursor.Skip(page.CodeRuns.Span, valid);
+        }
+    }
+
+    /// <summary>
+    /// The dictionary's values <paramref name="codes"/>, one per valid row of the page's
+    /// <paramref name="rows"/> rows from <paramref name="from"/>, name: gathered into
+    /// <paramref name="into"/> and spread over the rows' nulls, every code held to the dictionary.
+    /// </summary>
+    private void GatherRows(Page page, ReadOnlySpan<uint> codes, Span<byte> into, int from, int rows)
+    {
+        Page dictionary = _dictionary!;
+        int bytes = codes.Length * _slot;
+        Span<byte> dense = into;
+        if (page.Validity is not null)
+        {
+            dense = Room(ref _batchValues, bytes);
+        }
+
+        int bad = RowKernels.Gather(MemoryMarshal.AsBytes(codes), PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, dense[..bytes], codes.Length);
+        if (bad >= 0)
+        {
+            ParquetThrow.Format($"A code of '{Name}', {codes[bad]}, passes its dictionary's {dictionary.Rows} entries.");
+        }
+
+        if (page.Validity is not null)
+        {
+            SpreadRows(page, dense[..bytes], into, from, rows, _slot);
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="dense"/>, a value of <paramref name="width"/> bytes per valid row of the page's
+    /// <paramref name="rows"/> rows from <paramref name="from"/>, spread over them into
+    /// <paramref name="into"/>, a null row's bytes zero; copied as it is when the page has no null.
+    /// </summary>
+    private static void SpreadRows(Page page, ReadOnlySpan<byte> dense, Span<byte> into, int from, int rows, int width)
+    {
+        if (page.Validity is not { } bits)
+        {
+            dense.CopyTo(into);
+            return;
+        }
+
+        ValidRows.SpreadOver(dense, into, ValidityMask.Bitmap(bits.Buffer.Span, from), rows, width, Encoding);
     }
 
     /// <summary>The node of the column's type over <paramref name="values"/>.</summary>
@@ -1230,8 +1426,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
                 NativeSegmentOwner slots = Slots(page, rows * _slot);
                 Span<byte> into = slots.WritableSpan;
-                into.Clear();
-                ValidRows.Spread(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _width, Encoding);
+                ValidRows.SpreadOver(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _width, Encoding);
                 owner?.Dispose();
                 return;
         }
@@ -1260,8 +1455,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             try
             {
                 Cut(values.Span, dense.WritableSpan, valid);
-                into.Clear();
-                ValidRows.Spread(dense.WritableSpan[..(valid * CanonicalSupport.ViewSize)], into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, CanonicalSupport.ViewSize, Encoding);
+                ValidRows.SpreadOver(dense.WritableSpan[..(valid * CanonicalSupport.ViewSize)], into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, CanonicalSupport.ViewSize, Encoding);
             }
             finally
             {
@@ -1463,8 +1657,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        into.Clear();
-        ValidRows.Spread(dense, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _slot, Encoding);
+        ValidRows.SpreadOver(dense, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _slot, Encoding);
     }
 
     /// <summary>
@@ -1568,6 +1761,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 return;
             case ParquetEncoding.DeltaLengthByteArray:
                 Lengths(page, values, owner, valid);
+                return;
+            case ParquetEncoding.RleDictionary or ParquetEncoding.PlainDictionary when !_nested && _slot != 0:
+                Lazy(page, values, owner, valid);
                 return;
         }
 
@@ -1866,8 +2062,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             if (dense is not null)
             {
-                into.Clear();
-                ValidRows.Spread(cut, into, ValidityMask.Bitmap(page.Validity!.Buffer.Span, 0), rows, CanonicalSupport.ViewSize, Encoding);
+                ValidRows.SpreadOver(cut, into, ValidityMask.Bitmap(page.Validity!.Buffer.Span, 0), rows, CanonicalSupport.ViewSize, Encoding);
             }
         }
         finally
@@ -1958,6 +2153,45 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>
+    /// A dictionary-encoded page of a flat column, read a batch at a time: it keeps its codes' run data,
+    /// in <paramref name="owner"/>'s block or the chunk's, and a cursor at the first, and each batch
+    /// decodes the codes of its own rows. Other writers cut a column that compresses well into pages
+    /// of millions of rows, whose values, gathered whole, would be a buffer of the page's size written
+    /// out to memory and read back; a batch's are its own, in cache.
+    /// </summary>
+    private void Lazy(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
+    {
+        if (_dictionary is not { } dictionary)
+        {
+            owner?.Dispose();
+            ParquetThrow.Format($"A page of '{Name}' is dictionary-encoded and its chunk holds no dictionary page before it.");
+            return;
+        }
+
+        if (valid == 0)
+        {
+            // Every row is null: no code to read.
+            owner?.Dispose();
+        }
+        else
+        {
+            ReadOnlySpan<byte> source = values.Span;
+            if (source.IsEmpty || source[0] > 32)
+            {
+                owner?.Dispose();
+                ParquetThrow.Format($"A dictionary-encoded page of '{Name}' lacks its codes' width, or declares one past 32 bits.");
+            }
+
+            page.Cursor = new RleHybridDecoder(source[0]);
+            page.CodeRuns = values.Slice(1, values.Length - 1);
+            page.CodesOwner = owner;
+        }
+
+        page.Lazy = true;
+        page.Data = dictionary.Data;
+    }
+
+    /// <summary>
     /// A dictionary-encoded page: its codes, behind their width, decoded and gathered from the
     /// chunk's dictionary into one slot per row, every code checked against the dictionary's size.
     /// </summary>
@@ -2044,8 +2278,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             if (page.Validity is not null)
             {
                 Span<byte> into = slots.WritableSpan;
-                into.Clear();
-                ValidRows.Spread(target[..(valid * _slot)], into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _slot, Encoding);
+                ValidRows.SpreadOver(target[..(valid * _slot)], into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _slot, Encoding);
             }
 
             // Gathered views point into the dictionary's bytes, which the chunk keeps.
@@ -2081,8 +2314,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
         else
         {
-            into.Clear();
-            ValidRows.Spread(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, sizeof(uint), Encoding);
+            ValidRows.SpreadOver(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, sizeof(uint), Encoding);
         }
 
         page.Codes = codes;
@@ -2176,6 +2408,21 @@ internal sealed partial class ColumnChunkReader : IDisposable
         /// <summary>A byte array page's bytes, which its views point into.</summary>
         internal VortexBuffer Data;
 
+        /// <summary>
+        /// Whether the page is read a batch at a time, as a dictionary-encoded page of a flat column
+        /// is: its codes stay in <see cref="CodeRuns"/>, and each batch decodes its own.
+        /// </summary>
+        internal bool Lazy;
+
+        /// <summary>The block holding <see cref="CodeRuns"/>, or null when they lie in the chunk.</summary>
+        internal NativeSegmentOwner? CodesOwner;
+
+        /// <summary>A page read a batch at a time: its codes' run data, past their width.</summary>
+        internal VortexBuffer CodeRuns;
+
+        /// <summary>A page read a batch at a time: the cursor at the code of its first unread valid row.</summary>
+        internal RleHybridDecoder Cursor;
+
         /// <summary>The repetition level of each entry; empty when the column does not repeat.</summary>
         internal ReadOnlySpan<byte> Repetition(bool repeats) => repeats ? Levels!.WritableSpan[..Entries] : default;
 
@@ -2189,6 +2436,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Codes?.Dispose();
             Codes = null;
             DataOwner?.Dispose();
+            CodesOwner?.Dispose();
+            CodesOwner = null;
+            CodeRuns = default;
+            Cursor = default;
+            Lazy = false;
             Levels?.Dispose();
             Validity = null;
             Slots = null;
