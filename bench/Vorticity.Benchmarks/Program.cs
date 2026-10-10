@@ -193,6 +193,12 @@ internal static class Program
                 .. args.Where((a, i) =>
                     i >= 3 && i != afterFlag + 1 && !a.StartsWith("--", StringComparison.Ordinal))
             ];
+            // Both sides open alike. A side loaded from a worktree opens through its library's
+            // default session, which keeps a file's mapping for the next open; this build's side
+            // was given the cold session above, and so paid for a mapping every round the other
+            // took over: a scan of a million plain integers read 4.8 times slower on it, the same
+            // library on both sides.
+            Vorticity.Bench.Scenarios.ScenarioSet.Session = null;
             return await AbCheck.RunAsync(args[1], after, args[2], scenarios).ConfigureAwait(false);
         }
 
