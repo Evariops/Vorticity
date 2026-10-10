@@ -13,6 +13,7 @@ internal sealed class PageCounters
     private long _dictionaries;
     private long _decompressions;
     private long _gathers;
+    private long _ahead;
 
     /// <summary>Data pages decoded: their levels and values made into the page's slots.</summary>
     internal long Pages => Interlocked.Read(ref _pages);
@@ -26,6 +27,9 @@ internal sealed class PageCounters
     /// <summary>Batches whose values were copied out of the pages they span: any other batch is one page's slots, in place.</summary>
     internal long Gathers => Interlocked.Read(ref _gathers);
 
+    /// <summary>Data pages a lane of the scan decompressed while the pages before them were read.</summary>
+    internal long Ahead => Interlocked.Read(ref _ahead);
+
     internal void AddPage() => Interlocked.Increment(ref _pages);
 
     internal void AddDictionary() => Interlocked.Increment(ref _dictionaries);
@@ -34,6 +38,8 @@ internal sealed class PageCounters
 
     internal void AddGather() => Interlocked.Increment(ref _gathers);
 
+    internal void AddAhead() => Interlocked.Increment(ref _ahead);
+
     /// <summary>Starts every count again from zero.</summary>
     internal void Reset()
     {
@@ -41,5 +47,6 @@ internal sealed class PageCounters
         Interlocked.Exchange(ref _dictionaries, 0);
         Interlocked.Exchange(ref _decompressions, 0);
         Interlocked.Exchange(ref _gathers, 0);
+        Interlocked.Exchange(ref _ahead, 0);
     }
 }

@@ -166,10 +166,16 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _readers = readers.ToArray();
+
+        // A scan given lanes decompresses each column's next pages on them while the pages before are
+        // read: as many at once as its degree, shared by the columns.
+        int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : file.Session.Options.MaxDegreeOfParallelism;
+        PageLanes? lanes = degree > 1 ? new PageLanes(degree) : null;
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.VerifyChecksums = file.Options.VerifyChecksums;
             reader.Counters = file.Counters;
+            reader.Lanes = lanes;
         }
 
         // A scan that keeps encodings reads a flat column's dictionary pages as dictionary nodes.

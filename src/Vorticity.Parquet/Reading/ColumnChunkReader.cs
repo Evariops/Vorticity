@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
+using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -135,6 +137,18 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A piece of a page read a batch at a time, gathered and spread, before its views are rebased into a batch that spans pages.</summary>
     private NativeSegmentOwner? _batchRows;
 
+    /// <summary>The data pages after the one read, decompressed or being decompressed on the scan's lanes, in the chunk's order.</summary>
+    private readonly Queue<AheadPage> _ahead = new();
+
+    /// <summary>The block a lane decompressed the page being decoded into, until its decode takes it.</summary>
+    private NativeSegmentOwner? _decompressed;
+
+    /// <summary>
+    /// The ZSTD decompressors the reader's pages decompressed ahead use, one a page in flight, kept from
+    /// one page to the next: the core's pool keeps sixteen, and a scan's lanes may be more.
+    /// </summary>
+    private readonly Zstd.ZstdDecompressor?[] _laneZstd = new Zstd.ZstdDecompressor?[PageLanes.Depth];
+
     /// <summary>A reader of <paramref name="leaf"/>'s chunks.</summary>
     /// <param name="leaf">The column.</param>
     /// <param name="type">The column's dtype where it sits in the schema read.</param>
@@ -202,6 +216,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     /// <summary>What counts the pages this reader decodes and decompresses, and the batches it gathers; null for none.</summary>
     internal PageCounters? Counters { get; set; }
+
+    /// <summary>
+    /// The lanes the scan lends its readers to decompress pages ahead of those read, or null for a scan
+    /// that reads on one: of a chunk read whole and in plaintext, the next data pages, while the pages
+    /// before them are read.
+    /// </summary>
+    internal PageLanes? Lanes { get; set; }
 
     /// <summary>
     /// Whether a dictionary-encoded page of a flat column is kept as its codes over the dictionary's
@@ -637,6 +658,22 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>Gives every page back to the pool: at the end of the row group, or of the scan.</summary>
     internal void Release()
     {
+        // The pages decompressed ahead read the chunk's bytes: none is left reading them past its end.
+        while (_ahead.Count > 0)
+        {
+            Drop(_ahead.Dequeue());
+        }
+
+        _decompressed?.Dispose();
+        _decompressed = null;
+        for (int i = 0; i < _laneZstd.Length; i++)
+        {
+            if (Interlocked.Exchange(ref _laneZstd[i], null) is { } zstd)
+            {
+                ZstdDecoders.Return(zstd);
+            }
+        }
+
         ReleaseRetired();
         if (_page is { } page)
         {
@@ -1066,24 +1103,316 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 return null;
             }
 
-            PageHeader header = NextHeader(rest, out int at, out int stored);
+            // A page decompressed ahead is the one here, or one a skip has stepped past since.
+            while (_ahead.Count > 0 && _ahead.Peek().Position < _position)
+            {
+                Drop(_ahead.Dequeue());
+            }
+
+            PageHeader header;
+            int at;
+            int stored;
+            if (_ahead.Count > 0 && _ahead.Peek().Position == _position)
+            {
+                AheadPage ahead = _ahead.Dequeue();
+                (header, at, stored) = (ahead.Header, ahead.At, ahead.Stored);
+                _decompressed = Wait(ahead);
+            }
+            else
+            {
+                header = NextHeader(rest, out at, out stored);
+            }
+
             Mapped(_position, header.Type);
             _position = at + stored;
             NativeSegmentOwner? owner;
+            Page decoded;
             switch (header.Type)
             {
                 case PageType.DataPageV2:
                     Counters?.AddPage();
-                    return Placed(DecodeV2(context, header, Body(header, at, stored, out owner), owner), at);
+                    try
+                    {
+                        decoded = Placed(DecodeV2(context, header, Body(header, at, stored, out owner), owner), at);
+                    }
+                    finally
+                    {
+                        _decompressed?.Dispose();
+                        _decompressed = null;
+                    }
+
+                    Prefetch();
+                    return decoded;
                 case PageType.DataPage:
                     Counters?.AddPage();
-                    return Placed(DecodeV1(context, header, Body(header, at, stored, out owner), owner), at);
+                    try
+                    {
+                        decoded = Placed(DecodeV1(context, header, Body(header, at, stored, out owner), owner), at);
+                    }
+                    finally
+                    {
+                        _decompressed?.Dispose();
+                        _decompressed = null;
+                    }
+
+                    Prefetch();
+                    return decoded;
                 case PageType.DictionaryPage:
                     _dictionary = Dictionary(context, header, at, stored);
                     continue;
                 default:
                     // An index page, or a kind a later version of the standard adds: not data.
                     continue;
+            }
+        }
+    }
+
+    /// <summary>
+    /// <paramref name="size"/> bytes of <paramref name="source"/> decompressed: the block a lane
+    /// decompressed them into while the pages before were read, or a block they are decompressed into
+    /// now.
+    /// </summary>
+    private NativeSegmentOwner Decompressed(ScanContext context, ReadOnlySpan<byte> source, int size)
+    {
+        if (_decompressed is { } ahead)
+        {
+            _decompressed = null;
+            Counters?.AddDecompression();
+            return ahead;
+        }
+
+        Cap(size);
+        NativeSegmentOwner values = _pool.Rent(size, 64);
+        try
+        {
+            Counters?.AddDecompression();
+            PageCodecs.Decompress(_codec, source, values.WritableSpan, context.Zstd);
+        }
+        catch
+        {
+            values.Dispose();
+            throw;
+        }
+
+        return values;
+    }
+
+    /// <summary>
+    /// Starts the decompression of the data pages after the one read on the scan's lanes, where one is
+    /// free, up to <see cref="PageLanes.Depth"/> pages ahead: of a chunk read whole, compressed and in
+    /// plaintext, whose bytes stay where they lie until the chunk ends. A header this cannot take as it
+    /// is, a dictionary page, or a page of no compressed values ends the walk or is passed, and is the
+    /// read's to decide.
+    /// </summary>
+    private void Prefetch()
+    {
+        if (Lanes is not { } lanes || _decryption is not null || _codec == CompressionCodec.Uncompressed
+            || _map is not null || _runs.Count != 1 || _runStart != 0 || _chunk.Length != _chunkLength)
+        {
+            return;
+        }
+
+        int position = _position;
+        foreach (AheadPage queued in _ahead)
+        {
+            position = queued.At + queued.Stored;
+        }
+
+        while (_ahead.Count < PageLanes.Depth && position < _chunkLength)
+        {
+            ReadOnlySpan<byte> rest = _chunk.Span[position..];
+            PageHeader header;
+            try
+            {
+                header = PageHeader.Read(rest);
+            }
+            catch (ParquetFormatException)
+            {
+                return;
+            }
+
+            int stored = header.CompressedPageSize;
+            if (stored < 0 || stored > rest.Length - header.HeaderLength)
+            {
+                return;
+            }
+
+            int at = position + header.HeaderLength;
+            int offset = 0;
+            int size;
+            switch (header.Type)
+            {
+                case PageType.DataPageV2:
+                    offset = header.RepetitionLevelsLength + header.DefinitionLevelsLength;
+                    if (header.RepetitionLevelsLength < 0 || header.DefinitionLevelsLength < 0 || offset > stored || offset > header.UncompressedPageSize)
+                    {
+                        return;
+                    }
+
+                    size = header.IsCompressed ? header.UncompressedPageSize - offset : 0;
+                    break;
+                case PageType.DataPage:
+                    size = header.UncompressedPageSize;
+                    break;
+                default:
+                    return;
+            }
+
+            if (size > 0 && size <= _cap)
+            {
+                if (!lanes.TryTake())
+                {
+                    return;
+                }
+
+                AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes);
+                ThreadPool.UnsafeQueueUserWorkItem(page, preferLocal: false);
+                _ahead.Enqueue(page);
+            }
+
+            position = at + stored;
+        }
+    }
+
+    /// <summary>A ZSTD decompressor for a page decompressed ahead: one of the reader's, or the core pool's.</summary>
+    private Zstd.ZstdDecompressor TakeZstd()
+    {
+        for (int i = 0; i < _laneZstd.Length; i++)
+        {
+            if (Interlocked.Exchange(ref _laneZstd[i], null) is { } zstd)
+            {
+                return zstd;
+            }
+        }
+
+        return ZstdDecoders.Rent();
+    }
+
+    /// <summary>Keeps a decompressor for the reader's next page decompressed ahead, or gives it back to the core's pool.</summary>
+    private void GiveZstd(Zstd.ZstdDecompressor zstd)
+    {
+        for (int i = 0; i < _laneZstd.Length; i++)
+        {
+            if (Interlocked.CompareExchange(ref _laneZstd[i], zstd, null) is null)
+            {
+                return;
+            }
+        }
+
+        ZstdDecoders.Return(zstd);
+    }
+
+    /// <summary>The block a page was decompressed into ahead: here, when its lane has not begun it, else once its lane has.</summary>
+    private static NativeSegmentOwner Wait(AheadPage page)
+    {
+        if (page.Claim())
+        {
+            page.Run();
+        }
+        else
+        {
+            page.Join();
+        }
+
+        if (page.Error is { } error)
+        {
+            page.Block.Dispose();
+            error.Throw();
+        }
+
+        return page.Block;
+    }
+
+    /// <summary>Drops a page decompressed ahead that no read takes: its lane is waited for, if it began, and its block given back.</summary>
+    private static void Drop(AheadPage page)
+    {
+        if (!page.Claim())
+        {
+            page.Join();
+        }
+
+        page.Block.Dispose();
+    }
+
+    /// <summary>
+    /// A data page whose stored bytes a lane decompresses while the pages before it are read: claimed
+    /// by the lane when it begins, or by the read when it comes to the page first, which then
+    /// decompresses it itself rather than waiting for a lane the pool has not yet run.
+    /// </summary>
+    private sealed class AheadPage(ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block, PageLanes lanes)
+        : IThreadPoolWorkItem
+    {
+        private readonly object _gate = new();
+        private int _claimed;
+        private bool _done;
+
+        internal int Position { get; } = position;
+
+        internal PageHeader Header { get; } = header;
+
+        internal int At { get; } = at;
+
+        internal int Stored { get; } = stored;
+
+        internal NativeSegmentOwner Block { get; } = block;
+
+        internal ExceptionDispatchInfo? Error { get; private set; }
+
+        /// <summary>Claims the decompression; false when a lane or the read has already.</summary>
+        internal bool Claim() => Interlocked.Exchange(ref _claimed, 1) == 0;
+
+        /// <summary>The lane's work: the decompression, unless the read claimed it first, and the lane given back.</summary>
+        public void Execute()
+        {
+            try
+            {
+                if (Claim())
+                {
+                    Run();
+                    reader.Counters?.AddAhead();
+                    lock (_gate)
+                    {
+                        _done = true;
+                        Monitor.PulseAll(_gate);
+                    }
+                }
+            }
+            finally
+            {
+                lanes.Give();
+            }
+        }
+
+        /// <summary>Waits for the lane that claimed the decompression to finish it: a page's decompression, begun.</summary>
+        internal void Join()
+        {
+            lock (_gate)
+            {
+                while (!_done)
+                {
+                    Monitor.Wait(_gate);
+                }
+            }
+        }
+
+        /// <summary>Decompresses the page's bytes into its block, with a decompressor of the pool's for ZSTD.</summary>
+        internal void Run()
+        {
+            Zstd.ZstdDecompressor? zstd = codec == CompressionCodec.Zstd ? reader.TakeZstd() : null;
+            try
+            {
+                PageCodecs.Decompress(codec, source.Span, Block.WritableSpan, zstd);
+            }
+            catch (Exception exception)
+            {
+                Error = ExceptionDispatchInfo.Capture(exception);
+            }
+            finally
+            {
+                if (zstd is not null)
+                {
+                    reader.GiveZstd(zstd);
+                }
             }
         }
     }
@@ -1158,19 +1487,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
             else if (header.IsCompressed && _codec != CompressionCodec.Uncompressed)
             {
-                Cap(size);
-                NativeSegmentOwner values = _pool.Rent(size, 64);
-                try
-                {
-                    Counters?.AddDecompression();
-                    PageCodecs.Decompress(_codec, stored.Span, values.WritableSpan, context.Zstd);
-                }
-                catch
-                {
-                    values.Dispose();
-                    throw;
-                }
-
+                NativeSegmentOwner values = Decompressed(context, stored.Span, size);
                 owner?.Dispose();
                 owner = null;
                 Decode(page, header.Encoding, values.Buffer, values, valid);
@@ -1218,19 +1535,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             int size = header.UncompressedPageSize;
             if (_codec != CompressionCodec.Uncompressed)
             {
-                Cap(size);
-                NativeSegmentOwner decompressed = _pool.Rent(size, 64);
-                try
-                {
-                    Counters?.AddDecompression();
-                    PageCodecs.Decompress(_codec, body.Span, decompressed.WritableSpan, context.Zstd);
-                }
-                catch
-                {
-                    decompressed.Dispose();
-                    throw;
-                }
-
+                NativeSegmentOwner decompressed = Decompressed(context, body.Span, size);
                 owner?.Dispose();
                 owner = decompressed;
                 body = decompressed.Buffer;

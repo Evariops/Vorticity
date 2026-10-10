@@ -36,7 +36,7 @@ public sealed partial class FuzzSmokeTests : IDisposable
         }
     }
 
-    /// <summary>The invariant: only a format or unsupported exception may escape a mutated file, read mapped or by positional reads, or verified.</summary>
+    /// <summary>The invariant: only a format or unsupported exception may escape a mutated file, read mapped on four lanes or by positional reads, or verified.</summary>
     [Fact]
     public async Task MutatedFilesFailCleanlyOrReadWhole()
     {
@@ -58,7 +58,7 @@ public sealed partial class FuzzSmokeTests : IDisposable
             await System.IO.File.WriteAllBytesAsync(path, mutated, Ct);
             try
             {
-                await using (VortexSession mapped = VortexSession.Create(options => options.MapFiles = true))
+                await using (VortexSession mapped = VortexSession.Create(options => { options.MapFiles = true; options.MaxDegreeOfParallelism = 4; }))
                 {
                     await using ParquetFile file = await mapped.OpenParquetAsync(path, null, Ct);
                     deep++;

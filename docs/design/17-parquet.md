@@ -501,10 +501,19 @@ groups of a quarter million rows, a scan goes from 7.05 ms to 4.14.
 ### 5.8 Parallelism
 
 The degree is the session's or the scan's, 1 unless set ([09-contracts.md](09-contracts.md) §2).
-Splits decode side by side, each on a context and arenas of its own, nothing shared, and batches are
-delivered in row order by the core's machinery; a large row group is cut into splits at its page
-boundaries so that it spreads. Within a split, the pages of a column are decompressed ahead of their
-decode within the read-ahead window. The answers are the same bits at every degree.
+An aggregation's lanes decode splits side by side, each on a context and arenas of its own, nothing
+shared; a large row group is cut into splits at its page boundaries so that it spreads.
+
+A scan that delivers its batches reads them as one stream, in row order, and its lanes decompress
+pages instead: a column chunk read whole, compressed and in plaintext has its next two data pages
+decompressed on them while the pages before are read, as many at once as the degree, shared by the
+columns, so that a wide file's columns and a narrow one's next pages alike keep them busy. A page
+whose lane has not begun when its read comes to it is decompressed by the read itself, which never
+waits for a lane the pool has not run, and a page a skip steps over is dropped. The January 2023
+yellow taxi trips, every page GZIP's, scan in 68 ms on 32 lanes against 197 to 200 on one. A chunk
+read in windows has its own read-ahead (§5.3), an encrypted one none.
+
+The answers are the same bits at every degree.
 
 ### 5.9 Answers from the footer
 
@@ -807,8 +816,9 @@ lies and how long it is, and rewrites one in place at its own length to an edge,
 off, twice, the most its bytes hold, so that the structure stays well formed and the value is the
 one a bounds check exists for; beside it, the footer's length, the first bytes of a page's body
 where an encoding's header lies, a page's decompressed size at its most, truncation, a word in the
-data, and the bit flip as the control. Each mutation is read whole mapped, then by positional reads,
-which cut groups into windows and read ahead, and verified against itself; only
+data, and the bit flip as the control. Each mutation is read whole mapped, on four lanes that
+decompress its pages ahead, then by positional reads, which cut groups into windows and read ahead,
+and verified against itself; only
 `ParquetFormatException` and `ParquetUnsupportedException` may escape, within five seconds. Its
 seeds are the standard's suite, its encrypted files read with the keys its README publishes, and
 this writer's files under every page version, codec and forced encoding (`FuzzSeeds`, where

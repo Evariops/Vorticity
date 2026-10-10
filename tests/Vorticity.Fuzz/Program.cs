@@ -23,7 +23,8 @@
 //     dotnet run --project tests/Vorticity.Fuzz -c Release -- <corpus-dir> [iterations] [seed]
 //
 // and over Parquet files, whose only clean failures are ParquetFormatException and
-// ParquetUnsupportedException, each mutation read mapped and by positional reads and verified:
+// ParquetUnsupportedException, each mutation read mapped on four lanes, which decompress pages
+// ahead, and by positional reads, and verified:
 //
 //     dotnet run --project tests/Vorticity.Fuzz -c Release -- --parquet <corpus-dir> [iterations] [seed]
 using System;
@@ -145,8 +146,8 @@ internal static class Program
 
     /// <summary>
     /// The Parquet campaign: mutations of the corpus's Parquet files, structure-aware over their
-    /// Thrift, each read mapped and by positional reads, which cut and read ahead otherwise, and
-    /// verified against itself.
+    /// Thrift, each read mapped on four lanes, which decompress pages ahead of their read, and by
+    /// positional reads, which cut and read ahead otherwise, and verified against itself.
     /// </summary>
     private static async Task<int> ParquetCampaign(string[] args)
     {
@@ -234,7 +235,7 @@ internal static class Program
 
     /// <summary>
     /// Opens, scans and verifies the Parquet file at <paramref name="path"/>, mapped in a session of
-    /// its own, which lets the file go when it is disposed, then by positional reads.
+    /// its own on four lanes, which lets the file go when it is disposed, then by positional reads.
     /// </summary>
     private static async Task<(Finding?, Reach)> RunParquet(string path, VortexSession positional, ParquetOpenOptions? options)
     {
@@ -242,7 +243,7 @@ internal static class Program
         Reach reach = Reach.RejectedAtOpen;
         try
         {
-            await using (VortexSession mapped = VortexSession.Create(options => options.MapFiles = true))
+            await using (VortexSession mapped = VortexSession.Create(options => { options.MapFiles = true; options.MaxDegreeOfParallelism = 4; }))
             {
                 await using ParquetFile file = await mapped.OpenParquetAsync(path, options, CancellationToken.None).ConfigureAwait(false);
                 reach = Reach.RejectedWhileDecoding;
