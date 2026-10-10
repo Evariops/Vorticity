@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Vorticity.Buffers;
+using Vorticity.File;
 
 namespace Vorticity.Arrays;
 
@@ -81,6 +82,34 @@ internal sealed class ScanContexts : ISweptAfterCollections
         }
 
         context.Rebind(file);
+        return context;
+    }
+
+    /// <summary>
+    /// A context an earlier scan gave back, bound to no file and to <paramref name="options"/>, or a
+    /// new one: what a reader of another format decodes into. A pool keeps the contexts of one kind,
+    /// detached or bound to files, never both.
+    /// </summary>
+    /// <param name="options">The read options the scan decodes under.</param>
+    internal ScanContext RentDetached(VortexReadOptions options)
+    {
+        ScanContext? context = null;
+        lock (_gate)
+        {
+            _taken = true;
+            if (_count > 0)
+            {
+                context = _contexts[--_count];
+                _contexts[_count] = null;
+            }
+        }
+
+        if (context is null)
+        {
+            return new ScanContext([], options);
+        }
+
+        context.RebindDetached(options);
         return context;
     }
 

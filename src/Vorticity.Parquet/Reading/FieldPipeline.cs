@@ -63,7 +63,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         _contexts = new ScanContext[readers.Length * Slots];
         for (int i = 0; i < _contexts.Length; i++)
         {
-            _contexts[i] = new ScanContext([], options);
+            _contexts[i] = DetachedContexts.Shared.RentDetached(options);
         }
 
         _nodes = new int[readers.Length * Slots];
@@ -215,7 +215,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     {
         foreach (ScanContext context in _contexts)
         {
-            context.Dispose();
+            DetachedContexts.Shared.Return(context);
         }
     }
 

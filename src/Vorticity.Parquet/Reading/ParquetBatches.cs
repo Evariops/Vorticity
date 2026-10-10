@@ -438,7 +438,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         {
             foreach (ScanContext context in contexts)
             {
-                context.Dispose();
+                DetachedContexts.Shared.Return(context);
             }
         }
 
@@ -478,13 +478,13 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _piped = 0;
     }
 
-    /// <summary>A context a field, with the batch's read options.</summary>
+    /// <summary>A context a field, with the batch's read options, taken from the pool of detached contexts.</summary>
     private ScanContext[] FieldContexts()
     {
         ScanContext[] contexts = new ScanContext[_nodes.Length];
         for (int i = 0; i < contexts.Length; i++)
         {
-            contexts[i] = new ScanContext([], _context.Options);
+            contexts[i] = DetachedContexts.Shared.RentDetached(_context.Options);
         }
 
         return contexts;

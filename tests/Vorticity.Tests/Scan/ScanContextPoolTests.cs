@@ -137,6 +137,29 @@ public sealed class ScanContextPoolTests
     }
 
     [Fact]
+    public void ADetachedContextComesBackUnderTheOptionsItIsTakenWith()
+    {
+        // A pool of detached contexts, which a reader of another format decodes into: a context
+        // given back is taken again bound to no file, under the options of the scan that takes it.
+        ScanContexts pool = new ScanContexts(4);
+        VortexReadOptions first = new() { MaxDecompressedBytes = 1 << 20 };
+        VortexReadOptions second = new() { MaxDecompressedBytes = 2 << 20 };
+        ScanContext context = pool.RentDetached(first);
+        Assert.False(context.HasFile);
+        Assert.Same(first, context.Options);
+        context.Canonical.AddNull(context.Types.Primitive(PType.I32, Nullability.Nullable), 4);
+        pool.Return(context);
+        Assert.Equal(1, pool.Count);
+
+        ScanContext again = pool.RentDetached(second);
+        Assert.Same(context, again);
+        Assert.False(again.HasFile);
+        Assert.Same(second, again.Options);
+        Assert.Equal(0, again.Canonical.NodeCount);
+        pool.Return(again);
+    }
+
+    [Fact]
     public void APoolIsSweptByACollection()
     {
         ScanContexts pool = new ScanContexts(4).Swept();
