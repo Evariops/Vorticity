@@ -42,8 +42,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     private readonly KeyValuePair<string, string>[] _keyValues;
     private readonly WriteSchema _map;
     private readonly ParquetWriteOptions _options;
-    private readonly CompressionCodec _codec;
-    private readonly Compressors? _compressors;
+
+    /// <summary>Per ZSTD level a column compresses at, the compressors its columns share.</summary>
+    private readonly Dictionary<int, Compressors> _compressors = [];
 
     /// <summary>The threads the columns close their pages on, the writing one included.</summary>
     private readonly int _lanes;
@@ -102,30 +103,44 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _sink = sink;
         _filePipe = filePipe;
         _callerPipe = callerPipe;
-        _codec = (CompressionCodec)options.ResolvedCompression;
-        int level = options.ResolvedLevel;
-        _compressors = _codec == CompressionCodec.Zstd ? new Compressors(level) : null;
         _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session.Options.MaxDegreeOfParallelism;
 
         _columns = new ColumnChunkWriter[map.Columns.Length];
         HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
-        for (int i = 0; i < _columns.Length; i++)
+        HashSet<string> codecs = options.ColumnCompression is { } own ? new(own.Keys, StringComparer.Ordinal) : [];
+        HashSet<string> hints = options.Hints is { } pinned ? new(pinned.Keys, StringComparer.Ordinal) : [];
+        try
         {
-            // A column's Bloom filter by its dotted path, which a top-level column's name is.
-            string path = string.Join('.', map.Columns[i].Path);
-            double rate = options.BloomFilters is { } rates && rates.TryGetValue(path, out double asked) ? asked : 0;
-            blooms.Remove(path);
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _compressors, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
+            for (int i = 0; i < _columns.Length; i++)
             {
-                WriteChecksums = options.WriteChecksums,
-                PageBytes = options.PageBytes,
-                DefersPages = _lanes > 1 && map.Columns.Length > 1,
-            };
-        }
+                // A column's options by its dotted path, which a top-level column's name is.
+                WriteColumn column = map.Columns[i];
+                string path = string.Join('.', column.Path);
+                double rate = options.BloomFilters is { } rates && rates.TryGetValue(path, out double asked) ? asked : 0;
+                ParquetEncodingHint hint = options.Hints is { } given && given.TryGetValue(path, out ParquetEncodingHint wanted) ? wanted : ParquetEncodingHint.Auto;
+                RequireTakes(column, path, hint);
+                ParquetCodec codec = options.CodecOf(path);
+                blooms.Remove(path);
+                codecs.Remove(path);
+                hints.Remove(path);
+                _columns[i] = new ColumnChunkWriter(
+                    column, (CompressionCodec)codec.Compression, codec.Level, CompressorsOf(codec), options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
+                {
+                    WriteChecksums = options.WriteChecksums,
+                    PageBytes = options.PageBytes,
+                    DefersPages = _lanes > 1 && map.Columns.Length > 1,
+                    Hint = hint,
+                };
+            }
 
-        if (blooms.Count > 0)
+            RequireColumns(blooms, "Bloom filters");
+            RequireColumns(codecs, "column codecs");
+            RequireColumns(hints, "hints");
+        }
+        catch
         {
-            throw new ArgumentException($"The Bloom filters name '{string.Join("', '", blooms)}', which no column of the schema is.", nameof(options));
+            ReleaseColumns();
+            throw;
         }
 
         _nodes = new int[_columns.Length];
@@ -407,12 +422,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             Abandon();
         }
 
-        foreach (ColumnChunkWriter column in _columns)
-        {
-            column.Dispose();
-        }
-
-        _compressors?.Release();
+        ReleaseColumns();
         if (_fan is { } fan)
         {
             WorkFan.Return(fan);
@@ -420,6 +430,72 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Throws unless the column at <paramref name="path"/> takes <paramref name="hint"/>: the encodings
+    /// the standard gives its physical type, and a dictionary where this writer builds one.
+    /// </summary>
+    private static void RequireTakes(WriteColumn column, string path, ParquetEncodingHint hint)
+    {
+        bool takes = hint switch
+        {
+            ParquetEncodingHint.Auto or ParquetEncodingHint.Plain => true,
+            ParquetEncodingHint.Dictionary => column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements,
+            ParquetEncodingHint.DeltaBinaryPacked => column.Physical is PhysicalType.Int32 or PhysicalType.Int64,
+            ParquetEncodingHint.DeltaLengthByteArray => column.Physical == PhysicalType.ByteArray,
+            ParquetEncodingHint.DeltaByteArray => column.Physical is PhysicalType.ByteArray or PhysicalType.FixedLenByteArray,
+            ParquetEncodingHint.ByteStreamSplit => column.Physical is PhysicalType.Int32 or PhysicalType.Int64 or PhysicalType.Float or PhysicalType.Double or PhysicalType.FixedLenByteArray,
+            _ => column.Physical == PhysicalType.Boolean,
+        };
+        if (!takes)
+        {
+            throw new ArgumentException(
+                $"The column '{path}' is {ParquetMetadata.Physical(column.Physical)}, which is not written as {ParquetMetadata.EncodingName(ColumnChunkWriter.EncodingOf(hint))}.",
+                "options");
+        }
+    }
+
+    /// <summary>Throws when an option names columns the schema does not have.</summary>
+    private static void RequireColumns(HashSet<string> unknown, string what)
+    {
+        if (unknown.Count > 0)
+        {
+            throw new ArgumentException($"The {what} name '{string.Join("', '", unknown)}', which no column of the schema is.", "options");
+        }
+    }
+
+    /// <summary>The compressors of a column's codec: one pool for the columns that share a ZSTD level, none for another codec.</summary>
+    private Compressors? CompressorsOf(ParquetCodec codec)
+    {
+        if (codec.Compression != ParquetCompression.Zstd)
+        {
+            return null;
+        }
+
+        if (!_compressors.TryGetValue(codec.Level, out Compressors? compressors))
+        {
+            compressors = new Compressors(codec.Level);
+            _compressors.Add(codec.Level, compressors);
+        }
+
+        return compressors;
+    }
+
+    /// <summary>Gives back what the column writers and their compressors hold.</summary>
+    private void ReleaseColumns()
+    {
+        foreach (ColumnChunkWriter? column in _columns)
+        {
+            column?.Dispose();
+        }
+
+        foreach (Compressors compressors in _compressors.Values)
+        {
+            compressors.Release();
+        }
+
+        _compressors.Clear();
     }
 
     /// <summary>Closes the page every column staged for the block just filled, side by side on the writer's threads.</summary>
@@ -591,7 +667,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             Debug.Assert(chunk.Rows == rows, "Every column closes the same rows.");
             await column.WriteChunkAsync(_sink, cancellationToken).ConfigureAwait(false);
             column.Reset();
-            chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = _codec };
+            chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = column.Codec };
         }
 
         // The row group's Bloom filters after its chunks, the standard's other place for them: a

@@ -26,6 +26,48 @@ public enum ParquetCompression : byte
     Lz4Raw = 7,
 }
 
+/// <summary>A codec and its level, which a column may name in place of the file's.</summary>
+/// <param name="Compression">The codec.</param>
+/// <param name="Level">
+/// The codec's level, for the codecs that take one; 0 for the codec's default: 3 for ZSTD, 19 under
+/// <see cref="CompressionProfile.Smallest"/>, 4 for BROTLI and 6 for GZIP.
+/// </param>
+public readonly record struct ParquetCodec(ParquetCompression Compression, int Level = 0);
+
+/// <summary>
+/// The encoding a column's data pages are written with, when the caller pins one, named as the
+/// standard spells it.
+/// </summary>
+public enum ParquetEncodingHint : byte
+{
+    /// <summary>No hint: the writer prices the candidates, which is the default.</summary>
+    Auto = 0,
+
+    /// <summary>PLAIN: the values as they are, for every type.</summary>
+    Plain = 1,
+
+    /// <summary>
+    /// RLE_DICTIONARY: a dictionary page and each value's code, while the dictionary stays within
+    /// its bound, and PLAIN past it; for every type but BOOLEAN and a fixed-size list's bytes.
+    /// </summary>
+    Dictionary = 2,
+
+    /// <summary>DELTA_BINARY_PACKED: INT32 and INT64.</summary>
+    DeltaBinaryPacked = 3,
+
+    /// <summary>DELTA_LENGTH_BYTE_ARRAY: BYTE_ARRAY.</summary>
+    DeltaLengthByteArray = 4,
+
+    /// <summary>DELTA_BYTE_ARRAY: BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY.</summary>
+    DeltaByteArray = 5,
+
+    /// <summary>BYTE_STREAM_SPLIT: INT32, INT64, FLOAT, DOUBLE and FIXED_LEN_BYTE_ARRAY.</summary>
+    ByteStreamSplit = 6,
+
+    /// <summary>RLE: BOOLEAN.</summary>
+    Rle = 7,
+}
+
 /// <summary>What a Parquet file looks like: its row groups, its pages and its compression.</summary>
 public sealed record ParquetWriteOptions
 {
@@ -76,6 +118,22 @@ public sealed record ParquetWriteOptions
     /// under <see cref="CompressionProfile.Smallest"/>, 4 for BROTLI and 6 for GZIP.
     /// </summary>
     public int CompressionLevel { get; init; }
+
+    /// <summary>
+    /// The codecs of the columns that name their own, by name — a nested column by its dotted path —
+    /// in place of <see cref="Compression"/> and <see cref="CompressionLevel"/>. None by default. A
+    /// name no column has throws when the writer is created.
+    /// </summary>
+    public IReadOnlyDictionary<string, ParquetCodec>? ColumnCompression { get; init; }
+
+    /// <summary>
+    /// The encoding to write a column's data pages with, by name — a nested column by its dotted path —
+    /// for a caller who knows, as the core's hints pin a scheme. A pinned encoding is written on every
+    /// page under every profile, unpriced: a dictionary while it stays within its bound and PLAIN past
+    /// it, any other always. None by default. An encoding the column's type does not take, or a name
+    /// no column has, throws when the writer is created.
+    /// </summary>
+    public IReadOnlyDictionary<string, ParquetEncodingHint>? Hints { get; init; }
 
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }
@@ -154,19 +212,29 @@ public sealed record ParquetWriteOptions
             throw new ArgumentOutOfRangeException(nameof(Compression), codec, "Not a codec this library writes.");
         }
 
-        (int least, int most) = ResolvedCompression switch
+        RequireLevel(ResolvedCompression, CompressionLevel, nameof(CompressionLevel));
+        if (ColumnCompression is { } columns)
         {
-            ParquetCompression.Zstd => (ZstdCompressor.MinLevel, ZstdCompressor.MaxLevel),
-            ParquetCompression.Brotli => (0, 11),
-            ParquetCompression.Gzip => (0, 9),
-            _ => (0, 0),
-        };
-        if (CompressionLevel < least || CompressionLevel > most)
+            foreach ((string column, ParquetCodec own) in columns)
+            {
+                if (!Enum.IsDefined(own.Compression))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(ColumnCompression), own.Compression, $"The column '{column}' names no codec this library writes.");
+                }
+
+                RequireLevel(own.Compression, own.Level, nameof(ColumnCompression));
+            }
+        }
+
+        if (Hints is { } hints)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(CompressionLevel),
-                CompressionLevel,
-                most == 0 ? $"{ResolvedCompression} takes no level." : $"{ResolvedCompression} takes a level from {least} to {most}.");
+            foreach ((string column, ParquetEncodingHint hint) in hints)
+            {
+                if (!Enum.IsDefined(hint))
+                {
+                    throw new ArgumentOutOfRangeException(nameof(Hints), hint, $"The column '{column}' names no encoding.");
+                }
+            }
         }
     }
 
@@ -179,7 +247,16 @@ public sealed record ParquetWriteOptions
     };
 
     /// <summary>The level the pages are compressed at: the one asked for, or the codec's default.</summary>
-    internal int ResolvedLevel => CompressionLevel != 0 ? CompressionLevel : ResolvedCompression switch
+    internal int ResolvedLevel => LevelOf(ResolvedCompression, CompressionLevel);
+
+    /// <summary>The codec of the column at <paramref name="path"/>: its own, or the file's.</summary>
+    internal ParquetCodec CodecOf(string path) =>
+        ColumnCompression is { } columns && columns.TryGetValue(path, out ParquetCodec own)
+            ? own with { Level = LevelOf(own.Compression, own.Level) }
+            : new ParquetCodec(ResolvedCompression, ResolvedLevel);
+
+    /// <summary><paramref name="level"/>, or the default of <paramref name="codec"/> when it is 0.</summary>
+    private int LevelOf(ParquetCompression codec, int level) => level != 0 ? level : codec switch
     {
         ParquetCompression.Zstd => Profile == CompressionProfile.Smallest ? 19 : ZstdCompressor.DefaultLevel,
         ParquetCompression.Brotli => 4,
@@ -187,6 +264,24 @@ public sealed record ParquetWriteOptions
         _ => 0,
     };
 
+    /// <summary>Throws unless <paramref name="codec"/> takes <paramref name="level"/>, 0 meaning its default.</summary>
+    private static void RequireLevel(ParquetCompression codec, int level, string name)
+    {
+        (int least, int most) = codec switch
+        {
+            ParquetCompression.Zstd => (ZstdCompressor.MinLevel, ZstdCompressor.MaxLevel),
+            ParquetCompression.Brotli => (0, 11),
+            ParquetCompression.Gzip => (0, 9),
+            _ => (0, 0),
+        };
+        if (level < least || level > most)
+        {
+            throw new ArgumentOutOfRangeException(
+                name,
+                level,
+                most == 0 ? $"{codec} takes no level." : $"{codec} takes a level from {least} to {most}.");
+        }
+    }
 }
 
 /// <summary>What a Parquet writer wrote.</summary>

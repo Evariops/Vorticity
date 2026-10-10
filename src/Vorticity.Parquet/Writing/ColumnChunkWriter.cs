@@ -69,8 +69,11 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly ulong[] _mask;
     private readonly List<PageLocation> _pages = [];
 
-    /// <summary>Whether the column's values are of a kind a dictionary serves.</summary>
+    /// <summary>Whether the column's values are of a kind a dictionary serves, under the profile or the hint.</summary>
     private readonly bool _eligible;
+
+    /// <summary>The encoding the caller pinned the column's data pages to, or <see cref="ParquetEncodingHint.Auto"/>.</summary>
+    private readonly ParquetEncodingHint _hint;
 
     /// <summary>The dictionary's values in their PLAIN form, in code order, the null left out.</summary>
     private readonly PooledBytes _entries;
@@ -163,6 +166,28 @@ internal sealed class ColumnChunkWriter : IDisposable
 
     /// <summary>The bytes a block's staged values may reach in one page before the block is cut into fractions of itself.</summary>
     internal int PageBytes { get; init; } = 1 << 20;
+
+    /// <summary>
+    /// The encoding the caller pinned the column to, which the writer checked the column takes: a
+    /// dictionary is then built whatever the profile and kept while it stays within its bound, and
+    /// any other encoding builds none.
+    /// </summary>
+    internal ParquetEncodingHint Hint
+    {
+        get => _hint;
+        init
+        {
+            _hint = value;
+            if (value != ParquetEncodingHint.Auto)
+            {
+                _eligible = value == ParquetEncodingHint.Dictionary;
+                _dictionary = _eligible;
+            }
+        }
+    }
+
+    /// <summary>The codec of the column's pages.</summary>
+    internal CompressionCodec Codec => _codec;
 
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
@@ -429,9 +454,16 @@ internal sealed class ColumnChunkWriter : IDisposable
             _bloom?.AddPage(body, values);
         }
 
-        if (encoding == ParquetEncoding.Plain && _encodings && values > 0)
+        if (encoding == ParquetEncoding.Plain && values > 0)
         {
-            encoding = Choose(ref body, values);
+            if (_hint is ParquetEncodingHint.Auto)
+            {
+                encoding = _encodings ? Choose(ref body, values) : encoding;
+            }
+            else if (_hint is not (ParquetEncodingHint.Plain or ParquetEncodingHint.Dictionary))
+            {
+                encoding = Pin(ref body, values);
+            }
         }
 
         _pagesBy[(int)encoding]++;
@@ -943,8 +975,8 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         // The dictionary pays while the chunk's codes and the dictionary page together take fewer
         // bytes than the values they stand for: a column of values that seldom repeat stops here,
-        // its dictionary as large as its values.
-        if (_entries.Length + _codeBytes + size >= _plainBytes + plain)
+        // its dictionary as large as its values. A column pinned to it keeps it within its bound.
+        if (_hint != ParquetEncodingHint.Dictionary && _entries.Length + _codeBytes + size >= _plainBytes + plain)
         {
             return Coding.Fallback;
         }
@@ -1015,25 +1047,138 @@ internal sealed class ColumnChunkWriter : IDisposable
 
             case PhysicalType.Boolean:
             {
-                Span<byte> values = _levelBytes.AsSpan(0, count);
-                BitPacking.Unpack8(body, 1, values);
-                int size = sizeof(int) + RleHybridEncoder.Size(values, 1);
+                int size = RunsSize(body, count);
                 if (size >= body.Length)
                 {
                     return ParquetEncoding.Plain;
                 }
 
-                _encoded.Clear();
-                Span<byte> into = _encoded.Reserve(size);
-                BinaryPrimitives.WriteInt32LittleEndian(into, size - sizeof(int));
-                RleHybridEncoder.Encode(values, 1, into[sizeof(int)..]);
-                body = _encoded.WrittenSpan;
+                body = Runs(count, size);
                 return ParquetEncoding.Rle;
             }
 
             default:
                 return ParquetEncoding.Plain;
         }
+    }
+
+    /// <summary>
+    /// The page in the encoding the caller pinned its column to, <paramref name="body"/> then its
+    /// bytes, unpriced: the writer checked the column's type takes it.
+    /// </summary>
+    private ParquetEncoding Pin(ref ReadOnlySpan<byte> body, int count)
+    {
+        switch (_hint)
+        {
+            case ParquetEncodingHint.DeltaBinaryPacked when _column.Physical == PhysicalType.Int32:
+            {
+                ReadOnlySpan<int> values = MemoryMarshal.Cast<byte, int>(body);
+                _encoded.Clear();
+                DeltaBinaryPacked.Encode32(values, _encoded.Reserve(DeltaBinaryPacked.Size32(values)));
+                break;
+            }
+
+            case ParquetEncodingHint.DeltaBinaryPacked:
+            {
+                ReadOnlySpan<long> values = MemoryMarshal.Cast<byte, long>(body);
+                _encoded.Clear();
+                DeltaBinaryPacked.Encode64(values, _encoded.Reserve(DeltaBinaryPacked.Size64(values)));
+                break;
+            }
+
+            case ParquetEncodingHint.ByteStreamSplit:
+                _encoded.Clear();
+                ByteStreamSplit.Encode(body, _column.ValueWidth, _encoded.Reserve(body.Length));
+                break;
+
+            case ParquetEncodingHint.DeltaLengthByteArray:
+            {
+                ReadOnlySpan<byte> data = Unprefix(body, count);
+                ReadOnlySpan<int> lengths = _lengths.AsSpan(0, count);
+                _encoded.Clear();
+                DeltaByteArrays.EncodeLengths(lengths, data, _encoded.Reserve(DeltaByteArrays.SizeLengths(lengths, data.Length)));
+                break;
+            }
+
+            case ParquetEncodingHint.DeltaByteArray:
+            {
+                // A fixed-length array's values lie back to back, each the type's length.
+                ReadOnlySpan<byte> data = body;
+                if (_column.Physical == PhysicalType.ByteArray)
+                {
+                    data = Unprefix(body, count);
+                }
+                else
+                {
+                    _lengths.AsSpan(0, count).Fill(_column.ValueWidth);
+                }
+
+                ReadOnlySpan<int> lengths = _lengths.AsSpan(0, count);
+                Span<int> prefixes = _prefixes.AsSpan(0, count);
+                Span<int> suffixes = _suffixes.AsSpan(0, count);
+                int rest = DeltaByteArrays.Prefixes(data, lengths, prefixes, suffixes);
+                _encoded.Clear();
+                DeltaByteArrays.EncodePrefixes(data, lengths, prefixes, suffixes, _encoded.Reserve(DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest)));
+                break;
+            }
+
+            default:
+                body = Runs(count, RunsSize(body, count));
+                return ParquetEncoding.Rle;
+        }
+
+        body = _encoded.WrittenSpan;
+        return EncodingOf(_hint);
+    }
+
+    /// <summary>The encoding a hint names.</summary>
+    internal static ParquetEncoding EncodingOf(ParquetEncodingHint hint) => hint switch
+    {
+        ParquetEncodingHint.Dictionary => ParquetEncoding.RleDictionary,
+        ParquetEncodingHint.DeltaBinaryPacked => ParquetEncoding.DeltaBinaryPacked,
+        ParquetEncodingHint.DeltaLengthByteArray => ParquetEncoding.DeltaLengthByteArray,
+        ParquetEncodingHint.DeltaByteArray => ParquetEncoding.DeltaByteArray,
+        ParquetEncodingHint.ByteStreamSplit => ParquetEncoding.ByteStreamSplit,
+        ParquetEncodingHint.Rle => ParquetEncoding.Rle,
+        _ => ParquetEncoding.Plain,
+    };
+
+    /// <summary>
+    /// The bytes of a boolean page as RLE, behind its four-byte length: its bits unpacked into a byte
+    /// each first, which <see cref="Runs"/> then encodes.
+    /// </summary>
+    private int RunsSize(ReadOnlySpan<byte> body, int count)
+    {
+        Span<byte> values = _levelBytes.AsSpan(0, count);
+        BitPacking.Unpack8(body, 1, values);
+        return sizeof(int) + RleHybridEncoder.Size(values, 1);
+    }
+
+    /// <summary>The booleans <see cref="RunsSize"/> unpacked, as RLE behind their length in <paramref name="size"/> bytes.</summary>
+    private ReadOnlySpan<byte> Runs(int count, int size)
+    {
+        _encoded.Clear();
+        Span<byte> into = _encoded.Reserve(size);
+        BinaryPrimitives.WriteInt32LittleEndian(into, size - sizeof(int));
+        RleHybridEncoder.Encode(_levelBytes.AsSpan(0, count), 1, into[sizeof(int)..]);
+        return _encoded.WrittenSpan;
+    }
+
+    /// <summary>A PLAIN byte array page's values without their lengths, which go to <see cref="_lengths"/>.</summary>
+    private ReadOnlySpan<byte> Unprefix(ReadOnlySpan<byte> body, int count)
+    {
+        Span<int> lengths = _lengths.AsSpan(0, count);
+        _data.Clear();
+        int at = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int length = BinaryPrimitives.ReadInt32LittleEndian(body[at..]);
+            lengths[i] = length;
+            _data.Write(body.Slice(at + sizeof(int), length));
+            at += sizeof(int) + length;
+        }
+
+        return _data.WrittenSpan;
     }
 
     /// <summary>
@@ -1098,18 +1243,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private ParquetEncoding ChooseBytes(ref ReadOnlySpan<byte> body, int count)
     {
+        ReadOnlySpan<byte> data = Unprefix(body, count);
         Span<int> lengths = _lengths.AsSpan(0, count);
-        _data.Clear();
-        int at = 0;
-        for (int i = 0; i < count; i++)
-        {
-            int length = BinaryPrimitives.ReadInt32LittleEndian(body[at..]);
-            lengths[i] = length;
-            _data.Write(body.Slice(at + sizeof(int), length));
-            at += sizeof(int) + length;
-        }
-
-        ReadOnlySpan<byte> data = _data.WrittenSpan;
         int byLength = DeltaByteArrays.SizeLengths(lengths, data.Length);
         Span<int> prefixes = _prefixes.AsSpan(0, count);
         Span<int> suffixes = _suffixes.AsSpan(0, count);

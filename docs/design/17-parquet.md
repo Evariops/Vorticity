@@ -483,13 +483,15 @@ core's plan memory does.
 ALP stays behind an option while the standard marks it Preview, as the standard recommends of a
 writer. `CompressionProfile` changes the arithmetic, not the pass: `Auto` weighs bytes against decode
 speed, `Smallest` prices by bytes after compression and runs every trial, `Fastest` writes PLAIN and
-dictionaries, `None` writes PLAIN. A column can be pinned to an encoding by path, as the core's hints
-pin a scheme.
+dictionaries, `None` writes PLAIN. `Hints` pins a column to an encoding by path, as the core's hints pin a
+scheme: on every page, under every profile, unpriced, a dictionary while it stays within its bound;
+an encoding the column's type does not take is refused when the writer is created.
 
 ### 6.4 Compression
 
 A column chunk has one codec, ZSTD at level 3 under `Auto`, LZ4_RAW under `Fastest`, ZSTD at level
-19 under `Smallest`, none under `None`; a column may name its own. A v2 page whose values do not
+19 under `Smallest`, none under `None`; a column may name its own codec and level in
+`ColumnCompression`, the columns of one ZSTD level sharing their compressors. A v2 page whose values do not
 shrink by an eighth is stored with `is_compressed` false, so its reader skips the codec; a dictionary
 page, which has no such flag, takes the chunk's codec. ZSTD goes through `Vorticity.Zstd`, one frame
 per page. SNAPPY and LZ4_RAW are this package's own, each a valid stream of its format by its own

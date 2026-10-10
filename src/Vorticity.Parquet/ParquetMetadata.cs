@@ -154,7 +154,7 @@ public sealed class ParquetMetadata
         };
     }
 
-    private static string Physical(PhysicalType type) => type switch
+    internal static string Physical(PhysicalType type) => type switch
     {
         PhysicalType.Boolean => "BOOLEAN",
         PhysicalType.Int32 => "INT32",
@@ -180,7 +180,7 @@ public sealed class ParquetMetadata
         _ => ((int)codec).ToString(CultureInfo.InvariantCulture),
     };
 
-    private static string EncodingName(ParquetEncoding encoding) => encoding switch
+    internal static string EncodingName(ParquetEncoding encoding) => encoding switch
     {
         ParquetEncoding.Plain => "PLAIN",
         ParquetEncoding.PlainDictionary => "PLAIN_DICTIONARY",
