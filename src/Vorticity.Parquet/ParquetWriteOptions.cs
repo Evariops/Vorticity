@@ -158,6 +158,14 @@ public sealed record ParquetWriteOptions
     /// </summary>
     public DataPageVersion DataPageVersion { get; init; } = DataPageVersion.V2;
 
+    /// <summary>
+    /// Whether a page whose values are stored as they are, uncompressed, starts them on a 64-byte
+    /// boundary of the file, behind an extension of its header that every reader skips: 21 to 84
+    /// bytes a page, for a reader that maps the file to take the values where they lie, aligned as a
+    /// batch's values are. On by default.
+    /// </summary>
+    public bool AlignUncompressedPages { get; init; } = true;
+
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }
 

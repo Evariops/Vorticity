@@ -210,6 +210,7 @@ Vorticity.Parquet:     property IReadOnlyDictionary<string, double> BloomFilters
 Vorticity.Parquet:     property IReadOnlyDictionary<string, string> KeyValueMetadata { get; init; }
 Vorticity.Parquet:     property Nullable<ParquetCompression> Compression { get; init; }
 Vorticity.Parquet:     property ParquetWriteOptions Default { get; }
+Vorticity.Parquet:     property bool AlignUncompressedPages { get; init; }
 Vorticity.Parquet:     property bool Durable { get; init; }
 Vorticity.Parquet:     property bool WriteChecksums { get; init; }
 Vorticity.Parquet:     property int BlockRows { get; init; }

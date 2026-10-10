@@ -78,6 +78,38 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The dictionary's values in their PLAIN form, in code order, the null left out.</summary>
     private readonly PooledBytes _entries;
 
+    /// <summary>
+    /// The 16 bytes that open this writer's extension of a page header, the identifier the standard
+    /// asks an extension to start with, then room for 63 bytes of padding, zero.
+    /// </summary>
+    private static readonly byte[] Extension =
+    [
+        0x56, 0x6F, 0x72, 0x74, 0x69, 0x63, 0x69, 0x74, 0x79, 0x2E, 0x61, 0x6C, 0x69, 0x67, 0x6E, 0x01,
+        .. new byte[63],
+    ];
+
+    /// <summary>The identifier's bytes, and the field's own: its type, its long-form id and its length.</summary>
+    private const int ExtensionBytes = 16 + 1 + 3 + 1;
+
+    /// <summary>
+    /// The chunk's first data page's header, written as the chunk closes, where its place in the file
+    /// is known: its length then puts every aligned page of the chunk on its boundary.
+    /// </summary>
+    private PageHeader _first;
+    private readonly PooledBytes _firstHeader;
+
+    /// <summary>
+    /// Where, counted from a 64-byte boundary, the chunk's data pages were laid out as starting: the
+    /// residue the first page's header brings the chunk's place in the file to.
+    /// </summary>
+    private int _origin;
+
+    /// <summary>Whether a page of the chunk stores its values as they are, aligned.</summary>
+    private bool _aligned;
+
+    /// <summary>A header measured before its extension is sized.</summary>
+    private readonly PooledBytes _measured;
+
     /// <summary>A v1 page's levels and values, assembled to be compressed together.</summary>
     private readonly PooledBytes _page;
 
@@ -180,6 +212,12 @@ internal sealed class ColumnChunkWriter : IDisposable
     internal DataPageVersion DataPages { get; init; } = DataPageVersion.V2;
 
     /// <summary>
+    /// Whether a page whose values are stored as they are starts them on a 64-byte boundary of the
+    /// file, behind an extension of its header that a reader skips.
+    /// </summary>
+    internal bool AlignUncompressedPages { get; init; } = true;
+
+    /// <summary>
     /// The encoding the caller pinned the column to, which the writer checked the column takes: a
     /// dictionary is then built whatever the profile and kept while it stays within its bound, and
     /// any other encoding builds none.
@@ -224,6 +262,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         _codes = new PooledBytes(pool);
         _page = new PooledBytes(pool);
         _dictionaryPage = new PooledBytes(pool);
+        _firstHeader = new PooledBytes(pool);
+        _measured = new PooledBytes(pool);
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _levelBytes = new byte[blockRows];
         _mask = new ulong[(blockRows + 63) >> 6];
@@ -263,6 +303,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             await sink.LendAsync(_dictionaryPage.Written, cancellationToken).ConfigureAwait(false);
         }
 
+        await sink.LendAsync(_firstHeader.Written, cancellationToken).ConfigureAwait(false);
         await _chunk.LendToAsync(sink, cancellationToken).ConfigureAwait(false);
     }
 
@@ -543,11 +584,28 @@ internal sealed class ColumnChunkWriter : IDisposable
             header.Crc = Checksum(levels, stored);
         }
 
+        // Values stored as they are start on a 64-byte boundary of the file, behind the header's
+        // extension; what lies between the header and them is the levels, inside a v1 page's bytes.
+        bool aligned = AlignUncompressedPages && !compressed && body.Length > 0;
+        int lead = levels.Length + (stored.Length - body.Length);
         long pageStart = _chunk.Length;
-        ThriftCompactWriter writer = new(_chunk);
-        header.Write(ref writer, default);
-        writer.Flush();
-        int headerLength = (int)(_chunk.Length - pageStart);
+        int headerLength = 0;
+        if (_pages.Count == 0)
+        {
+            // The chunk's first data page: its header waits for the close, and the pages count their
+            // places from where its values start, a boundary when they are aligned.
+            _first = header;
+            _origin = aligned ? -lead & 63 : 0;
+        }
+        else
+        {
+            ThriftCompactWriter writer = new(_chunk);
+            header.Write(ref writer, aligned ? Padding(header, _origin + pageStart, lead) : default);
+            writer.Flush();
+            headerLength = (int)(_chunk.Length - pageStart);
+        }
+
+        _aligned |= aligned;
         _chunk.Write(levels);
         _chunk.Write(stored);
         _pages.Add(new PageLocation(pageStart, (int)(_chunk.Length - pageStart), _chunkRows));
@@ -555,6 +613,21 @@ internal sealed class ColumnChunkWriter : IDisposable
         _chunkRows += rows;
         _chunkEntries += entries;
         _chunkNulls += nulls;
+    }
+
+    /// <summary>
+    /// This writer's extension of <paramref name="header"/>, its identifier then as many zeros as put
+    /// the values it heads, <paramref name="lead"/> bytes past it, on a 64-byte boundary, when the
+    /// header starts <paramref name="at"/> bytes past one.
+    /// </summary>
+    private ReadOnlySpan<byte> Padding(scoped in PageHeader header, long at, int lead)
+    {
+        _measured.Clear();
+        ThriftCompactWriter writer = new(_measured);
+        header.Write(ref writer, default);
+        writer.Flush();
+        int pad = (int)(-(at + _measured.Length + ExtensionBytes + lead) & 63);
+        return Extension.AsSpan(0, 16 + pad);
     }
 
     /// <summary>
@@ -815,13 +888,17 @@ internal sealed class ColumnChunkWriter : IDisposable
             ClosePage();
         }
 
-        WriteDictionaryPage();
+        WriteDictionaryPage(offset);
         long dictionary = _dictionaryPage.Length;
+        WriteFirstHeader(offset + dictionary);
+        long first = _firstHeader.Length;
         PageLocation[] pages = new PageLocation[_pages.Count];
         for (int i = 0; i < pages.Length; i++)
         {
             PageLocation page = _pages[i];
-            pages[i] = page with { Offset = offset + dictionary + page.Offset };
+            pages[i] = i == 0
+                ? page with { Offset = offset + dictionary, Size = (int)first + page.Size }
+                : page with { Offset = offset + dictionary + first + page.Offset };
         }
 
         uint encodings = dictionary > 0 ? 1u << (int)ParquetEncoding.Plain : 0;
@@ -848,7 +925,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             _chunkEntries,
             _chunkNulls,
             _chunkUncompressed,
-            _chunk.Length + dictionary,
+            _chunk.Length + dictionary + first,
             encodings,
             _statistics.Close(),
             pages,
@@ -861,6 +938,10 @@ internal sealed class ColumnChunkWriter : IDisposable
     internal void Reset()
     {
         _chunk.Clear();
+        _firstHeader.Clear();
+        _first = default;
+        _origin = 0;
+        _aligned = false;
         _pages.Clear();
         _chunkRows = 0;
         _chunkEntries = 0;
@@ -893,6 +974,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         _codes.Dispose();
         _page.Dispose();
         _dictionaryPage.Dispose();
+        _firstHeader.Dispose();
+        _measured.Dispose();
         _encoded.Dispose();
         _data.Dispose();
         _repetitionLevels?.Dispose();
@@ -1413,8 +1496,27 @@ internal sealed class ColumnChunkWriter : IDisposable
         return unchecked((int)hash);
     }
 
+    /// <summary>
+    /// The chunk's first data page's header, which starts at <paramref name="start"/> in the file: with
+    /// an extension, when a page of the chunk is aligned, as long as brings the place the pages were
+    /// laid out from to a 64-byte boundary.
+    /// </summary>
+    private void WriteFirstHeader(long start)
+    {
+        _firstHeader.Clear();
+        if (_pages.Count == 0)
+        {
+            return;
+        }
+
+        ThriftCompactWriter writer = new(_firstHeader);
+        _first.Write(ref writer, _aligned ? Padding(_first, start - _origin, 0) : default);
+        writer.Flush();
+        _chunkUncompressed += _firstHeader.Length;
+    }
+
     /// <summary>The dictionary page, when a data page used the dictionary: the values coded until the last such page.</summary>
-    private void WriteDictionaryPage()
+    private void WriteDictionaryPage(long offset)
     {
         _dictionaryPage.Clear();
         if (_pagesBy[(int)ParquetEncoding.RleDictionary] == 0)
@@ -1441,8 +1543,10 @@ internal sealed class ColumnChunkWriter : IDisposable
             header.Crc = Checksum(default, stored);
         }
 
+        // Its values start on a 64-byte boundary when they are stored as they are.
+        bool aligned = AlignUncompressedPages && _codec == CompressionCodec.Uncompressed && !values.IsEmpty;
         ThriftCompactWriter writer = new(_dictionaryPage);
-        header.Write(ref writer, default);
+        header.Write(ref writer, aligned ? Padding(header, offset, 0) : default);
         writer.Flush();
         _chunkUncompressed += _dictionaryPage.Length + values.Length;
         _dictionaryPage.Write(stored);

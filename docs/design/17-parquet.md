@@ -522,8 +522,14 @@ Over a caller's `PipeWriter`, it is copied once, into the pipe's memory.
 with field 32767, the extension slot the standard reserves in every structure
 ([BinaryProtocolExtensions.md][ext]), carrying a 16-byte identifier of this writer, as the standard
 requires of an extension, and padding sized so that the values start on a 64-byte boundary of the
-file. Every reader skips the field. It costs 21 to 84 bytes per uncompressed page and buys a reader
-of the file its values in place; `AlignUncompressedPages` turns it off.
+file. Every reader skips the field. A chunk's place in the file is known only as its row group closes,
+after its pages were compressed, so its pages are laid out from a boundary of their own, and the
+header of its first data page, written last, takes the padding that brings that boundary onto the
+file's; a dictionary page, written at the close, is aligned where it lies. It costs 21 to 84 bytes
+per uncompressed page and buys a reader that maps the file its values in place, aligned as the
+core's `Values` must be, which an unaligned page has copied at its first read: summing a PLAIN key
+of a million rows through `Values` takes 294 µs aligned, 529 µs unaligned, and 312 µs from a Vortex
+file. `AlignUncompressedPages` turns it off.
 
 ### 6.6 Row groups, memory and order on disk
 

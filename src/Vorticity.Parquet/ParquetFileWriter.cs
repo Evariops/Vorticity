@@ -131,6 +131,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                     PageBytes = options.PageBytes,
                     DefersPages = _lanes > 1 && map.Columns.Length > 1,
                     DataPages = options.DataPageVersion,
+                    AlignUncompressedPages = options.AlignUncompressedPages,
                     Hint = hint,
                 };
             }

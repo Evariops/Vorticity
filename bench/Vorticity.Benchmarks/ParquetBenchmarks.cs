@@ -86,7 +86,7 @@ public class ParquetScanBenchmarks
     private string _path = string.Empty;
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-crc", "parquet-zstd-v1")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-crc", "parquet-zstd-v1", "parquet-plain")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -146,6 +146,45 @@ public class ParquetScanBenchmarks
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The key read through the typed surface and summed: on a mapped file, what a page read where it
+    /// lies gives a consumer of <c>Values</c>, which an unaligned one copies to align.
+    /// </summary>
+    [Benchmark(Description = "sum id through Values")]
+    public async Task<long> SumValues()
+    {
+        long sum = 0;
+        if (Format == "vortex")
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+            await foreach (BatchView batch in file.Scan("id"))
+            {
+                sum += Sum(batch.Column<long>(0).Values);
+            }
+        }
+        else
+        {
+            await using ParquetFile file = await OpenAsync().ConfigureAwait(false);
+            await foreach (BatchView batch in file.Scan("id"))
+            {
+                sum += Sum(batch.Column<long>(0).Values);
+            }
+        }
+
+        return sum;
+
+        static long Sum(ReadOnlySpan<long> values)
+        {
+            long total = 0;
+            foreach (long value in values)
+            {
+                total += value;
+            }
+
+            return total;
+        }
     }
 
     [Benchmark(Description = "filter value > 900")]
@@ -235,14 +274,14 @@ internal sealed class ParquetTable
 
         ParquetCompression compression = format switch
         {
-            "parquet-none" or "parquet-bloom" or "parquet-crc" => ParquetCompression.Uncompressed,
+            "parquet-none" or "parquet-bloom" or "parquet-crc" or "parquet-plain" => ParquetCompression.Uncompressed,
             "parquet-snappy" => ParquetCompression.Snappy,
             _ => ParquetCompression.Zstd,
         };
         await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter(pipe, Schema, new ParquetWriteOptions
         {
             Compression = compression,
-            Profile = format == "parquet-smallest" ? CompressionProfile.Smallest : CompressionProfile.Auto,
+            Profile = format switch { "parquet-smallest" => CompressionProfile.Smallest, "parquet-plain" => CompressionProfile.None, _ => CompressionProfile.Auto },
             BloomFilters = format == "parquet-bloom" ? new Dictionary<string, double> { ["id"] = 0.01, ["label"] = 0.01 } : null,
             WriteChecksums = format == "parquet-crc",
             DegreeOfParallelism = format == "parquet-zstd-8" ? 8 : 0,
