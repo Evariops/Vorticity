@@ -88,6 +88,9 @@ internal sealed class QueryMemory : IDisposable
         budget.Enter();
     }
 
+    /// <summary>When the query began, in <see cref="System.Diagnostics.Stopwatch"/> ticks: what the process's shelf held from before it is another query's.</summary>
+    internal long Started { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
+
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);
 

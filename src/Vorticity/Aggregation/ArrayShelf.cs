@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -309,7 +310,18 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         if (Lane)
         {
-            if (!_forgotten && (long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+            // A result delivered offers its arrays: kept in place of what queries before its own left, never
+            // of what its own used. A table larger than the process's budget, given back whole at the end,
+            // let go the arrays the next query's table takes first as it grows, and that query then let go
+            // of these (q10 at one lane, 722 MB a query against 517 when the table went to the collector);
+            // kept only where there was room, it found the shelf full of the queries' before it.
+            if (_forgotten)
+            {
+                Retained.Offer(array, _memory!.Started);
+                return;
+            }
+
+            if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
                 Unreserve(_memory!, bytes);
             }
@@ -318,6 +330,28 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return;
         }
 
+        Clean(array);
+
+        // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.
+        if (Drops || !Give(typeof(T), array, Unsafe.SizeOf<T>()))
+        {
+            Leave(array.Length * (long)Unsafe.SizeOf<T>());
+        }
+    }
+
+    /// <summary>
+    /// An array put on the process's shelf where its budget has room, or in place of arrays of lengths
+    /// no one took or gave since <paramref name="since"/>, in <see cref="Stopwatch"/> ticks.
+    /// </summary>
+    private void Offer<T>(T[] array, long since)
+    {
+        Clean(array);
+        Give(typeof(T), array, Unsafe.SizeOf<T>(), since);
+    }
+
+    /// <summary>An array given back made safe to keep: poisoned under the tests, its references cleared.</summary>
+    private static void Clean<T>(T[] array)
+    {
         // An array of references kept would keep what it points to: the objects of the query that gave it.
         if (PoisonsGiven)
         {
@@ -326,12 +360,6 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         else if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
         {
             Array.Clear(array);
-        }
-
-        // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.
-        if (Drops || !Give(typeof(T), array, Unsafe.SizeOf<T>()))
-        {
-            Leave(array.Length * (long)Unsafe.SizeOf<T>());
         }
     }
 
@@ -522,10 +550,11 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>
     /// An array of elements of <paramref name="type"/>, <paramref name="elementBytes"/> each, on the shelf,
     /// within its budget: whether it kept it. Past the budget, the arrays of the lengths taken or given
-    /// least recently go first: a shelf full of another query's lengths kept them while every query
-    /// went on taking from it, and the arrays of the queries running now could not come in.
+    /// least recently go first, those last used before <paramref name="before"/> only: a shelf full of
+    /// another query's lengths kept them while every query went on taking from it, and the arrays of the
+    /// queries running now could not come in.
     /// </summary>
-    private bool Give(Type type, Array array, int elementBytes)
+    private bool Give(Type type, Array array, int elementBytes, long before = long.MaxValue)
     {
         int length = array.Length;
         if (length == 0)
@@ -544,7 +573,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             Touch(pile);
             long budget = pile.Small ? _smallBudget : _budget;
             long held = pile.Small ? _heldSmall : _held - _heldSmall;
-            if (held + pile.Bytes > budget && (pile.Bytes > budget || !Evict(held + pile.Bytes - budget, pile)))
+            if (held + pile.Bytes > budget && (pile.Bytes > budget || !Evict(held + pile.Bytes - budget, pile, before)))
             {
                 return false;
             }
@@ -567,15 +596,16 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
     /// <summary>
     /// Lets go of <paramref name="bytes"/> at least of the arrays on the piles of <paramref name="kept"/>'s
-    /// kind taken from or given to least recently, never <paramref name="kept"/>'s, under the lock:
-    /// whether it could. Past <see cref="MostPiles"/>, a pile emptied goes, so that the lengths a process
+    /// kind taken from or given to least recently, never <paramref name="kept"/>'s nor one used since
+    /// <paramref name="before"/>, under the lock: whether it could. Past <see cref="MostPiles"/>, a pile emptied goes, so that the lengths a process
     /// once met do not pile up; short of them it stays, its next array a push.
     /// </summary>
-    private bool Evict(long bytes, Pile kept)
+    private bool Evict(long bytes, Pile kept, long before)
     {
+        // The piles lie in the order of their last use: the first one used since the bound ends the walk.
         ref PileOrder order = ref OrderOf(kept);
         Pile? pile = order.Oldest;
-        while (bytes > 0 && pile is not null)
+        while (bytes > 0 && pile is not null && pile.Touched < before)
         {
             Pile? newer = pile.Newer;
             if (pile != kept)
@@ -606,6 +636,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>Makes <paramref name="pile"/> the one of its kind used most recently, under the lock.</summary>
     private void Touch(Pile pile)
     {
+        pile.Touched = Stopwatch.GetTimestamp();
         ref PileOrder order = ref OrderOf(pile);
         if (order.Newest == pile)
         {
@@ -695,6 +726,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
         /// <summary>Whether its arrays lie on the small object heap.</summary>
         internal bool Small => Bytes < LargeBytes;
+
+        /// <summary>When it was last taken from or given to, in <see cref="Stopwatch"/> ticks.</summary>
+        internal long Touched { get; set; }
 
         /// <summary>The pile used next more recently, null for the newest.</summary>
         internal Pile? Newer { get; set; }
