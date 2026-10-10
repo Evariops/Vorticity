@@ -638,7 +638,10 @@ the worst case, and dropped when they do not pay, so that nothing priced is walk
 A column chunk keeps one distinct table, codes assigned as rows arrive. While the dictionary holds —
 it wins on the formulas and its page stays under `DictionaryPageBytes`, 1 MiB — the chunk's pages are
 RLE_DICTIONARY; once it stops holding, the rest of the chunk's pages take the best other encoding,
-and the dictionary page holds the values coded so far.
+and the dictionary page holds the values coded so far. A page of byte arrays coded into a dictionary
+of 64 entries or fewer is bounded by the entries it takes, a bit each in one pass over its codes,
+rather than by each of its values: on the report's label column, one of five short strings, its
+bounds no longer take a measurable time, where every value's took 1.85 ms a million rows.
 
 **Why no plan memory.** The core remembers a column's plan from one chunk to the next; this writer
 re-weighs each row group. What a row group re-weighs is the dictionary on its first page and a trial

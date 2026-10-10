@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -171,6 +172,67 @@ public sealed class StatisticsTests : IDisposable
     }
 
     [Fact]
+    public async Task BoundsAPageOfCodesAsItsValues()
+    {
+        // Pages of codes into a dictionary of few entries: some rows null, a page all null, words
+        // longer than a bound among them, and new words in the later pages and row groups.
+        string[] words = new string[40];
+        for (int w = 0; w < words.Length; w++)
+        {
+            words[w] = w % 7 == 0 ? new string((char)('a' + w % 26), 70) + w : $"w{w * 37 % 100:D2}";
+        }
+
+        const int Rows = 3_000;
+        string?[] names = new string?[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            names[i] = i is >= 600 and < 700 || i % 11 == 0 ? null : words[i * 7 % Math.Min(words.Length, 5 + (i % 1_500 / 100))];
+        }
+
+        VortexSchema schema = [("name", VortexType.Utf8.Nullable)];
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(_path, schema, new ParquetWriteOptions { BlockRows = 100, RowGroupRows = 1_500 }))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            foreach (string? name in names)
+            {
+                if (name is null)
+                {
+                    builder.Column<string?>(0).AppendNull();
+                }
+                else
+                {
+                    builder.Column<string?>(0).Append(name);
+                }
+            }
+
+            await writer.WriteAsync(builder, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        byte[] bytes = await System.IO.File.ReadAllBytesAsync(_path, Ct);
+        await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
+        for (int group = 0; group < 2; group++)
+        {
+            ColumnChunkMetadata chunk = file.Footer.Chunk(group, 0);
+            Assert.True(chunk.DictionaryPageOffset >= 0, "the names are coded");
+            ColumnIndex index = ColumnIndex.Read(bytes.AsMemory((int)chunk.ColumnIndexOffset, chunk.ColumnIndexLength), 15);
+            for (int page = 0; page < 15; page++)
+            {
+                int first = (group * 1_500) + (page * 100);
+                byte[][] values = [.. names.AsSpan(first, 100).ToArray().OfType<string>().Select(Encoding.UTF8.GetBytes)];
+                Assert.Equal(100 - values.Length, index.NullCounts![page]);
+                Assert.Equal(values.Length == 0, index.NullPages[page]);
+                if (values.Length > 0)
+                {
+                    (byte[] min, byte[] max) = Bounds(values, StatisticsDomain.Utf8);
+                    Assert.Equal(min, index.Min(page));
+                    Assert.Equal(max, index.Max(page));
+                }
+            }
+        }
+    }
+
+    [Fact]
     public void CutsALongBoundAndRaisesItWhereItCan()
     {
         // Bytes: the last unit short of 0xFF is raised, those after it dropped.
@@ -226,16 +288,16 @@ public sealed class StatisticsTests : IDisposable
 
             byte[][] sorted = [.. page];
             Array.Sort(sorted, order);
-            (byte[] min, byte[] max) = Bounds(page);
+            (byte[] min, byte[] max) = Bounds(page, StatisticsDomain.Binary);
             Assert.Equal(sorted[0], min);
             Assert.Equal(sorted[^1], max);
         }
     }
 
     /// <summary>The bounds of a page of byte arrays, PLAIN as the writer stages them.</summary>
-    private static (byte[] Min, byte[] Max) Bounds(byte[][] page)
+    private static (byte[] Min, byte[] Max) Bounds(byte[][] page, StatisticsDomain domain)
     {
-        WriteColumn column = new() { Name = "v", Path = ["v"], Physical = PhysicalType.ByteArray, Conversion = ValueConversion.ByteArray, Domain = StatisticsDomain.Binary };
+        WriteColumn column = new() { Name = "v", Path = ["v"], Physical = PhysicalType.ByteArray, Conversion = ValueConversion.ByteArray, Domain = domain };
         ChunkStatistics statistics = new(column);
         using MemoryStream plain = new();
         foreach (byte[] value in page)

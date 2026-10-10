@@ -268,6 +268,18 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The most bytes the pages in <see cref="_pending"/> add to the chunk.</summary>
     private long _pendingBound;
 
+    /// <summary>The most entries a dictionary holds for a page of its codes to be bounded by the entries it takes.</summary>
+    private const int BoundedEntries = 64;
+
+    /// <summary>Where each of the dictionary's first <see cref="BoundedEntries"/> entries starts in its PLAIN bytes; null for a column not bounded so.</summary>
+    private int[]? _entryStarts;
+
+    /// <summary>The entries the page last coded takes, a bit each; zero when it is not bounded by them.</summary>
+    private ulong _codedEntries;
+
+    /// <summary>The PLAIN values of a page's entries, its bounds' input.</summary>
+    private PooledBytes? _entriesBounded;
+
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
@@ -530,7 +542,15 @@ internal sealed class ColumnChunkWriter : IDisposable
         ReadOnlySpan<byte> body = _column.Conversion == ValueConversion.Bool
             ? _values.WrittenSpan[..((_boolBits + 7) / 8)]
             : _values.WrittenSpan[range.FirstByte..range.EndByte];
-        _statistics.AddPage(body, values, nulls);
+        if (coding == Coding.Codes && _codedEntries != 0)
+        {
+            // The page's distinct values bound it as its values do, and are few.
+            _statistics.AddPage(EntryValues(_codedEntries), BitOperations.PopCount(_codedEntries), nulls);
+        }
+        else
+        {
+            _statistics.AddPage(body, values, nulls);
+        }
         _sizes.AddPage(
             body,
             values,
@@ -1127,6 +1147,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _dictionaryPage.Dispose();
         _firstHeader.Dispose();
         _plain?.Dispose();
+        _entriesBounded?.Dispose();
         _measured.Dispose();
         _encoded.Dispose();
         _data.Dispose();
@@ -1253,7 +1274,9 @@ internal sealed class ColumnChunkWriter : IDisposable
             try
             {
                 int entries = CanonicalFilter.Apply(gathered, gathered.ReferenceFrom(arena, index), firsts[..found]);
+                int at = _entries.Length;
                 StageValues(gathered, gathered.GetNode(entries), 0, found, found, _entries);
+                NoteEntries(at, found);
             }
             finally
             {
@@ -1275,18 +1298,33 @@ internal sealed class ColumnChunkWriter : IDisposable
         ReadOnlySpan<int> codes = table.Codes.Slice(_pageFirstCode, rows);
         int nullCode = table.NullCode;
         int count = 0;
-        Span<uint> kept = Scratch<uint>(ref _pageCodes, rows);
-        for (int row = 0; row < rows; row++)
+        ReadOnlySpan<uint> pageCodes;
+        if (nullCode < 0)
         {
-            if (_rowValidity && !CanonicalSupport.BitAt(_validity, row))
+            // No row of the chunk so far is null, this page's neither: its codes are the entries'
+            // indices as they are.
+            pageCodes = MemoryMarshal.Cast<int, uint>(codes);
+            count = rows;
+        }
+        else
+        {
+            // The null rows hold no index, and the null's code holds no entry.
+            Span<uint> kept = Scratch<uint>(ref _pageCodes, rows);
+            for (int row = 0; row < rows; row++)
             {
-                continue;
+                if (_rowValidity && !CanonicalSupport.BitAt(_validity, row))
+                {
+                    continue;
+                }
+
+                int code = codes[row];
+                kept[count++] = (uint)(code > nullCode ? code - 1 : code);
             }
 
-            int code = codes[row];
-            kept[count++] = (uint)(nullCode >= 0 && code > nullCode ? code - 1 : code);
+            pageCodes = kept[..count];
         }
 
+        _codedEntries = 0;
         if (count == 0)
         {
             // A page of nulls has no value for either encoding to weigh.
@@ -1299,8 +1337,6 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
 
         int width = Math.Max(1, 32 - BitOperations.LeadingZeroCount((uint)(_entryCount - 1)));
-        ReadOnlySpan<uint> pageCodes = Held<uint>(_pageCodes)[..count];
-
         // Priced by writing them, and dropped when the dictionary stops here.
         _codes.Clear();
         Span<byte> into = _codes.Reserve(1 + RleHybridEncoder.MaxSize(count, width));
@@ -1316,9 +1352,77 @@ internal sealed class ColumnChunkWriter : IDisposable
             return Coding.Fallback;
         }
 
+        if (_entryStarts is not null && _entryCount <= BoundedEntries)
+        {
+            _codedEntries = EntriesOf(pageCodes);
+        }
+
         _codeBytes += size;
         _plainBytes += plain;
         return Coding.Codes;
+    }
+
+    /// <summary>The entries <paramref name="codes"/> take, a bit each, all below <see cref="BoundedEntries"/>.</summary>
+    private static ulong EntriesOf(ReadOnlySpan<uint> codes)
+    {
+        // Four masks, so that each code's bit waits on no other's.
+        ulong a = 0;
+        ulong b = 0;
+        ulong c = 0;
+        ulong d = 0;
+        int i = 0;
+        for (; i <= codes.Length - 4; i += 4)
+        {
+            a |= 1UL << (int)codes[i];
+            b |= 1UL << (int)codes[i + 1];
+            c |= 1UL << (int)codes[i + 2];
+            d |= 1UL << (int)codes[i + 3];
+        }
+
+        for (; i < codes.Length; i++)
+        {
+            a |= 1UL << (int)codes[i];
+        }
+
+        return a | b | c | d;
+    }
+
+    /// <summary>
+    /// The PLAIN values of the dictionary's entries <paramref name="entries"/> holds a bit of, in
+    /// <see cref="_entriesBounded"/>: a page's distinct values, whose bounds are its own.
+    /// </summary>
+    private ReadOnlySpan<byte> EntryValues(ulong entries)
+    {
+        PooledBytes values = _entriesBounded ??= new PooledBytes(_pool);
+        values.Clear();
+        ReadOnlySpan<byte> all = _entries.WrittenSpan;
+        for (ulong rest = entries; rest != 0; rest &= rest - 1)
+        {
+            int at = _entryStarts![BitOperations.TrailingZeroCount(rest)];
+            values.Write(all.Slice(at, sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(all[at..])));
+        }
+
+        return values.WrittenSpan;
+    }
+
+    /// <summary>
+    /// Notes where the dictionary's entries from <see cref="_entryCount"/> on start in its PLAIN bytes,
+    /// the first at <paramref name="at"/>, while it holds no more than <see cref="BoundedEntries"/>.
+    /// </summary>
+    private void NoteEntries(int at, int count)
+    {
+        if (_column.Conversion != ValueConversion.ByteArray || !_statistics.BoundsByEntries || _entryCount >= BoundedEntries)
+        {
+            return;
+        }
+
+        int[] starts = _entryStarts ??= new int[BoundedEntries];
+        ReadOnlySpan<byte> entries = _entries.WrittenSpan;
+        for (int code = _entryCount; code < Math.Min(_entryCount + count, BoundedEntries); code++)
+        {
+            starts[code] = at;
+            at += sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(entries[at..]);
+        }
     }
 
     /// <summary>

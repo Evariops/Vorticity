@@ -73,8 +73,13 @@ internal sealed class ChunkStatistics(WriteColumn column)
 
     private bool CountsNans => _domain is StatisticsDomain.Float32 or StatisticsDomain.Float64 or StatisticsDomain.Float16;
 
-    /// <summary>Adds a closed page: <paramref name="values"/> PLAIN values in <paramref name="plain"/>, and its entries without one.</summary>
+    /// <summary>
+    /// Whether a page's bounds and counts are those of its distinct values: byte arrays, whose order
+    /// is their bytes', with no NaN to count and no box to grow from each value.
+    /// </summary>
+    internal bool BoundsByEntries => _box is null && _domain is StatisticsDomain.Binary or StatisticsDomain.Utf8;
 
+    /// <summary>Adds a closed page: <paramref name="values"/> PLAIN values in <paramref name="plain"/>, and its entries without one.</summary>
     internal void AddPage(ReadOnlySpan<byte> plain, int values, int nulls)
     {
         _nulls += nulls;
