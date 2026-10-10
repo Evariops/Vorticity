@@ -1741,17 +1741,34 @@ internal sealed class CorePart
     /// </summary>
     internal bool Silent;
 
-    /// <summary>Doubles the directory: one more bit of the hash, each sub-table at both places its old one gave.</summary>
+    /// <summary>
+    /// Doubles the directory: one more bit of the hash, each sub-table at both places its old one gave;
+    /// the directories from the process's shelf, which the next part's take again.
+    /// </summary>
     internal void Grow()
     {
-        int[] grown = new int[Directory.Length * 2];
+        int[] grown = ArrayShelf.Retained.Take<int>(Directory.Length * 2, zeroed: false);
         for (int j = 0; j < grown.Length; j++)
         {
             grown[j] = Directory[j >> 1];
         }
 
+        ArrayShelf.Retained.Give(Directory);
         Directory = grown;
         Depth++;
+    }
+
+    /// <summary>The part's directory back to one place, its first sub-table's, the one it held given back to the process's shelf.</summary>
+    internal void Restart()
+    {
+        if (Directory.Length > 1)
+        {
+            ArrayShelf.Retained.Give(Directory);
+            Directory = ArrayShelf.Retained.Take<int>(1, zeroed: false);
+        }
+
+        Directory[0] = 0;
+        Depth = 0;
     }
 }
 

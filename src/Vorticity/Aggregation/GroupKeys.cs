@@ -15,9 +15,11 @@ namespace Vorticity.Aggregating;
 /// <summary>Row ranges of one batch that each belong to a single group, for the aggregates to fold a range at a time.</summary>
 internal sealed class GroupRanges
 {
-    private int[] _starts = new int[16];
-    private int[] _ends = new int[16];
-    private int[] _groups = new int[16];
+    // Made at the first range: a key that is not in runs never adds one, and every partition made three
+    // arrays for them all the same.
+    private int[] _starts = [];
+    private int[] _ends = [];
+    private int[] _groups = [];
 
     internal int Count { get; private set; }
 
@@ -48,7 +50,7 @@ internal sealed class GroupRanges
 
         if (Count == _starts.Length)
         {
-            int grown = Count * 2;
+            int grown = Math.Max(16, Count * 2);
             Array.Resize(ref _starts, grown);
             Array.Resize(ref _ends, grown);
             Array.Resize(ref _groups, grown);
@@ -1841,6 +1843,25 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Scratch.Return(ref _homes);
         Scratch.Return(ref _left);
         Scratch.Return(ref _values);
+
+        // The slabs of the pages of a key numbered by value, each given once, by the page that starts it.
+        if (_pages is not null)
+        {
+            for (int at = 0; at < _pages.Length; at++)
+            {
+                if (_pages[at] != Unmet && _pageStarts![at] == 0)
+                {
+                    _shelf?.Give(_pages[at]);
+                }
+
+                _pages[at] = Unmet;
+            }
+
+            _slab = null;
+            _slabUsed = 0;
+            _slabsHeld = 0;
+            _slabPages = 1;
+        }
     }
 
     internal override int NullNumber => _null;

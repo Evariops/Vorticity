@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,7 +26,10 @@ internal sealed class PartBuilder
     private readonly AggregationQuery _query;
     private readonly int _batchRows;
     private readonly ScanSpec _spec;
-    private readonly ConcurrentBag<ResultColumn[]> _columns = [];
+
+    // The column sets the workers build with, one taken at a time under the gate: a concurrent bag made a
+    // queue and a slot for each thread that gave one back, two dozen objects a query.
+    private readonly Stack<ResultColumn[]> _columns = [];
     private readonly Lock _gate = new Lock();
     private readonly Stack<PartSlate> _slates = [];
     private DType _dtype;
@@ -57,9 +59,8 @@ internal sealed class PartBuilder
             _until = order;
             _sortColumns = columns;
             _dtype = VortexTypes.ToDType(schema, new DTypeArena());
+            _columns.Clear();
         }
-
-        _columns.Clear();
     }
 
     /// <summary>
@@ -72,10 +73,13 @@ internal sealed class PartBuilder
         // every group its operators keep.
         (int[] groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false, until: _until).ConfigureAwait(false);
         PartResult result = new PartResult(outcome.Keys?.Count ?? 0);
-        if (!_columns.TryTake(out ResultColumn[]? columns))
+        ResultColumn[]? columns;
+        lock (_gate)
         {
-            columns = _sortColumns is { } sort ? sort() : _query.NewColumns();
+            _columns.TryPop(out columns);
         }
+
+        columns ??= _sortColumns is { } sort ? sort() : _query.NewColumns();
 
         try
         {
@@ -94,7 +98,11 @@ internal sealed class PartBuilder
         }
         finally
         {
-            _columns.Add(columns);
+            lock (_gate)
+            {
+                _columns.Push(columns);
+            }
+
             outcome.LetChosen();
         }
 
@@ -135,13 +143,23 @@ internal sealed class PartBuilder
             _released = true;
         }
 
-        // Past the flag, no store comes back to the pool: the ones on it are the last.
+        // Past the flag, no store comes back to the pool: the ones on it are the last. The workers are done
+        // building: their columns' scratch goes back to the process's shelf.
         foreach (PartSlate slate in _slates)
         {
             slate.Release();
         }
 
         _slates.Clear();
+        foreach (ResultColumn[] columns in _columns)
+        {
+            foreach (ResultColumn column in columns)
+            {
+                column.Release();
+            }
+        }
+
+        _columns.Clear();
     }
 
     /// <summary>A store of the pool, or a new one.</summary>

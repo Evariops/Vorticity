@@ -660,9 +660,13 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         _cut?.Reset();
 
         // The outcome held in memory holds the query's memory and its spilled parts: given back last,
-        // then the parts' stores.
+        // then the parts' stores, and the scratch of the result's columns.
         _outcome?.Delivered();
         _builder?.Release();
+        foreach (ResultColumn column in _query.Columns)
+        {
+            column.Release();
+        }
     }
 }
 

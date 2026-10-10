@@ -414,8 +414,23 @@ internal sealed class AggregationPlan
                 $"'{symbol}' is neither an aggregate nor a component of the key: a result is an aggregate of the group, or g.Key.");
     }
 
-    /// <summary>The slot of <paramref name="node"/>: the one aggregate of the plan it is the same as.</summary>
-    internal int IndexOf(IAggregateNode node) => Array.FindIndex(Aggregates, known => known.Identity.Equals(node.Identity));
+    /// <summary>
+    /// The slot of <paramref name="node"/>: the one aggregate of the plan it is the same as. A loop, where a
+    /// predicate capturing the node made a closure and a delegate at each call: two a result column a
+    /// part of the core's result, 1 024 a query of two aggregates.
+    /// </summary>
+    internal int IndexOf(IAggregateNode node)
+    {
+        for (int i = 0; i < Aggregates.Length; i++)
+        {
+            if (Aggregates[i].Identity.Equals(node.Identity))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
 
     private static void Add(List<IAggregateNode> aggregates, IAggregateNode aggregate)
     {
@@ -1315,9 +1330,6 @@ internal sealed class AggregationPartition
         }
     }
 
-    // The map of the first batch's values over the span, 4 096 bits.
-    private ulong[]? _spreadMap;
-
     /// <summary>
     /// Judges the key on the lane's first batch, before a row of it is folded: its selected values
     /// placed in 4 096 bins over the span, a bit each, and compared to the B (1 − e^(−n/B)) of B bins n
@@ -1347,8 +1359,9 @@ internal sealed class AggregationPartition
             node = arena.GetNode(node).StorageIndex;
         }
 
-        _spreadMap ??= new ulong[4096 / 64];
-        if (keys.Spread(arena, [node], batch.RowCount, batch.SelectionWords, AggregationPlan.ScatteredSpan, _spreadMap) is not { } spread || spread.Values == 0)
+        // The map of the first batch's values over the span, 4 096 bits, on the stack: it is read once.
+        Span<ulong> map = stackalloc ulong[4096 / 64];
+        if (keys.Spread(arena, [node], batch.RowCount, batch.SelectionWords, AggregationPlan.ScatteredSpan, map) is not { } spread || spread.Values == 0)
         {
             return;
         }
@@ -1788,7 +1801,7 @@ internal sealed class AggregationPartition
             arrays.Exact = true;
         }
         int[]? numbers = null;
-        cache.MergeFrom(this, ref numbers, apart: null);
+        cache.MergeFrom(this, ref numbers);
         ReturnArrays();
         GiveBack();
         lane.Turning = false;
@@ -2372,6 +2385,13 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>
+    /// The lane folds no more rows: the group of each row back to the process's shelf now, where it went
+    /// back with the partition's release, which the partition a merge in series keeps as the result
+    /// never has: the next query's lane made another, half a megabyte.
+    /// </summary>
+    internal void FoldsNoMore() => GiveBackRowGroups();
+
     /// <summary>The groups the partition held at most since its top last counted them.</summary>
     internal int PeakGroups { get; set; }
 
@@ -2917,33 +2937,48 @@ internal sealed class AggregationPartition
     /// <param name="numbers">The numbers of the groups of a partition past those every thread shares (<see cref="Numbers"/>), the caller's.</param>
     /// <param name="apart">The slots left to merge apart, by parts of their pairs (<see cref="IPairedSlot"/>); null for none.</param>
     /// <returns>The map of the other's groups onto this one's.</returns>
-    internal int[] MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart = null)
+    internal int[] MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart) =>
+        MergeFrom(other, ref numbers, apart, kept: true)!;
+
+    /// <summary>
+    /// <see cref="MergeFrom(AggregationPartition, ref int[], bool[])"/> for a caller that keeps no map: the
+    /// map lent by the process's shelf and given back, where every lane merged in series made one.
+    /// </summary>
+    internal void MergeFrom(AggregationPartition other, ref int[]? numbers) => MergeFrom(other, ref numbers, apart: null, kept: false);
+
+    private int[]? MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart, bool kept)
     {
-        int[] map;
-        if (Keys is null)
+        int count = Keys is null ? 1 : other.Keys!.Count;
+        int[] map = Keys is null ? [0] : kept ? new int[count] : ArrayShelf.Rent<int>(count);
+        if (Keys is not null)
         {
-            map = [0];
-        }
-        else
-        {
-            map = new int[other.Keys!.Count];
-            other.Keys.MergeInto(Keys, Numbers.Upto(map.Length, ref numbers), map);
+            other.Keys!.MergeInto(Keys, Numbers.Upto(count, ref numbers), map.AsSpan(0, count));
             foreach (AggregateSlot slot in Slots)
             {
                 slot.EnsureGroups(Keys.Count);
             }
         }
 
-        ReadOnlySpan<int> all = Numbers.Upto(map.Length, ref numbers);
+        ReadOnlySpan<int> all = Numbers.Upto(count, ref numbers);
         for (int i = 0; i < Slots.Length; i++)
         {
             if (_inputs[i] != Settled && (apart is null || !apart[i]))
             {
-                Slots[i].MergeFrom(other.Slots[i], all, map);
+                Slots[i].MergeFrom(other.Slots[i], all, map.AsSpan(0, count));
             }
         }
 
-        return map;
+        if (kept)
+        {
+            return map;
+        }
+
+        if (Keys is not null)
+        {
+            ArrayShelf.Return(map);
+        }
+
+        return null;
     }
 
     /// <summary>The input of an aggregate settled before the scan, which is never stepped.</summary>
@@ -3302,6 +3337,7 @@ internal static class AggregationEngine
                 plan.Watch?.Invoke(partitions);
                 await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
                 only.DropUnmet();
+                only.FoldsNoMore();
             }
             else
             {
@@ -3815,7 +3851,7 @@ internal static class AggregationEngine
         {
             if (partition.Core is null && partition.Keys is not null && (!ended || partition.HasEnded) && !ReferenceEquals(partition, largest))
             {
-                largest!.MergeFrom(partition, ref numbers, apart: null);
+                largest!.MergeFrom(partition, ref numbers);
                 largest.Recount();
                 partition.LetGo();
                 partition.Gave();
@@ -3898,19 +3934,30 @@ internal static class AggregationEngine
             // are many, apart, by parts of the pairs taken side by side.
             int[]? numbers = null;
             bool[]? apart = partitions.Length > 1 && degree > 1 ? Paired(partitions, inputs) : null;
-            int[][] maps = new int[partitions.Length][];
+            int[][]? maps = apart is null ? null : new int[partitions.Length][];
             for (int p = 0; p < partitions.Length; p++)
             {
-                if (p != largest)
+                if (p == largest)
+                {
+                    continue;
+                }
+
+                // The maps kept for the pairs merged apart; with none, each lent and given back.
+                if (maps is not null)
                 {
                     maps[p] = biggest.MergeFrom(partitions[p], ref numbers, apart);
-                    biggest.Recount();
                 }
+                else
+                {
+                    biggest.MergeFrom(partitions[p], ref numbers);
+                }
+
+                biggest.Recount();
             }
 
             if (apart is not null)
             {
-                await MergePairedAsync(partitions, largest, maps, apart, degree, memory, cancellationToken).ConfigureAwait(false);
+                await MergePairedAsync(partitions, largest, maps!, apart, degree, memory, cancellationToken).ConfigureAwait(false);
             }
 
             return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0, null, serial);
@@ -4683,6 +4730,7 @@ internal static class AggregationEngine
                         }
 
                         await partition.EndedAsync(token).ConfigureAwait(false);
+                        partition.FoldsNoMore();
                     }
                     catch
                     {

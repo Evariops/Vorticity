@@ -113,8 +113,7 @@ internal sealed partial class GroupCore
         {
             taken = [.. part.Tables];
             part.Tables.Clear();
-            part.Directory = [0];
-            part.Depth = 0;
+            part.Restart();
             Volatile.Write(ref part.Groups, 0);
 
             // Its keys written, a key new to its sub-tables may be one of them; and those it made
@@ -329,8 +328,7 @@ internal sealed partial class GroupCore
         {
             silent = [.. part.Tables];
             part.Tables.Clear();
-            part.Directory = [0];
-            part.Depth = 0;
+            part.Restart();
             Volatile.Write(ref part.Groups, 0);
         }
 
@@ -408,8 +406,7 @@ internal sealed partial class GroupCore
         }
 
         part.Tables.Clear();
-        part.Directory = [0];
-        part.Depth = 0;
+        part.Restart();
         Volatile.Write(ref part.Groups, 0);
         if (!_shelf.Drops && Volatile.Read(ref _allApplied))
         {
