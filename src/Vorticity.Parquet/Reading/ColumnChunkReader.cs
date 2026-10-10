@@ -1241,7 +1241,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    /// <summary>INT32 values narrowed to the column's width, the range of an annotated integer checked.</summary>
+    /// <summary>
+    /// INT32 values narrowed to the column's width, the range of an annotated integer checked: by the
+    /// values' extremes, a register at a time, then each truncated, a register at a time, by the core's
+    /// kernels; an unsigned width's bits are its signed twin's.
+    /// </summary>
     private void Narrow(Page page, ReadOnlySpan<byte> source, int valid)
     {
         if (source.Length != (long)valid * sizeof(int))
@@ -1250,103 +1254,118 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         ReadOnlySpan<int> ints = MemoryMarshal.Cast<byte, int>(source);
-        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * _slot, 64);
-        try
+        if (valid > 0)
         {
-            Span<byte> narrow = dense.WritableSpan;
-            bool fits = true;
-            switch (_ptype)
+            Vorticity.Writing.BlockStatsPass.Bounds(ints, out int least, out int most);
+            (int Low, int High) range = _ptype switch
             {
-                case PType.I8:
-                    for (int i = 0; i < valid; i++)
-                    {
-                        fits &= ints[i] is >= sbyte.MinValue and <= sbyte.MaxValue;
-                        narrow[i] = (byte)ints[i];
-                    }
-
-                    break;
-                case PType.U8:
-                    for (int i = 0; i < valid; i++)
-                    {
-                        fits &= (uint)ints[i] <= byte.MaxValue;
-                        narrow[i] = (byte)ints[i];
-                    }
-
-                    break;
-                case PType.I16:
-                    Span<short> shorts = MemoryMarshal.Cast<byte, short>(narrow);
-                    for (int i = 0; i < valid; i++)
-                    {
-                        fits &= ints[i] is >= short.MinValue and <= short.MaxValue;
-                        shorts[i] = (short)ints[i];
-                    }
-
-                    break;
-                default:
-                    Span<ushort> ushorts = MemoryMarshal.Cast<byte, ushort>(narrow);
-                    for (int i = 0; i < valid; i++)
-                    {
-                        fits &= (uint)ints[i] <= ushort.MaxValue;
-                        ushorts[i] = (ushort)ints[i];
-                    }
-
-                    break;
-            }
-
-            if (!fits)
+                PType.I8 => (sbyte.MinValue, sbyte.MaxValue),
+                PType.U8 => (byte.MinValue, byte.MaxValue),
+                PType.I16 => (short.MinValue, short.MaxValue),
+                _ => (ushort.MinValue, ushort.MaxValue),
+            };
+            if (least < range.Low || most > range.High)
             {
                 ParquetThrow.Format($"A value of '{Name}' is out of the range of its {_ptype} annotation.");
             }
+        }
 
-            Place(page, narrow[..(valid * _slot)], valid);
+        Span<byte> dense = Dense(page, valid, out NativeSegmentOwner? spread);
+        try
+        {
+            IntegerNarrowing.Truncate(ints, _slot == sizeof(byte) ? PType.I8 : PType.I16, dense);
+            Spread(page, dense, valid, spread);
         }
         finally
         {
-            dense.Dispose();
+            spread?.Dispose();
         }
     }
 
-    /// <summary>Big-endian two's-complement decimals sign-extended into the column's little-endian storage.</summary>
+    /// <summary>
+    /// Where <paramref name="valid"/> values of the slot's width are decoded: the page's own slots when
+    /// it holds no null, so that nothing is copied after; else a block of <paramref name="spread"/>,
+    /// which <see cref="Spread"/> spreads over the page's rows and the caller gives back.
+    /// </summary>
+    private Span<byte> Dense(Page page, int valid, out NativeSegmentOwner? spread)
+    {
+        if (page.Validity is null)
+        {
+            spread = null;
+            return Slots(page, page.Rows * _slot).WritableSpan[..(valid * _slot)];
+        }
+
+        spread = _pool.Rent(Math.Max(valid, 1) * _slot, 64);
+        return spread.WritableSpan[..(valid * _slot)];
+    }
+
+    /// <summary>The values <see cref="Dense"/> gave a block for spread over the page's rows; nothing where they are its slots.</summary>
+    private void Spread(Page page, ReadOnlySpan<byte> dense, int valid, NativeSegmentOwner? spread)
+    {
+        if (spread is not null)
+        {
+            Place(page, dense, valid);
+        }
+    }
+
+    /// <summary>
+    /// Big-endian two's-complement decimals sign-extended into the column's little-endian storage: a
+    /// fixed-length array's all at once, a length-prefixed one's each where its length says.
+    /// </summary>
     private void Widen(Page page, ReadOnlySpan<byte> source, int valid)
     {
-        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * _slot, 64);
+        if (_width > 0)
+        {
+            if (source.Length != (long)valid * _width)
+            {
+                ParquetThrow.Format(source.Length < (long)valid * _width
+                    ? $"A decimal of '{Name}' runs past its page."
+                    : $"A page of '{Name}' holds bytes past its {valid} decimals.");
+            }
+
+            Wide(_width);
+        }
+
+        Span<byte> wide = Dense(page, valid, out NativeSegmentOwner? spread);
         try
         {
-            Span<byte> wide = dense.WritableSpan;
-            int position = 0;
-            for (int i = 0; i < valid; i++)
+            if (_width > 0)
             {
-                int length = _width;
-                if (length == 0)
+                BigEndianDecimals.WidenFixed(source, _width, wide, _slot, valid);
+            }
+            else
+            {
+                int position = 0;
+                for (int i = 0; i < valid; i++)
                 {
                     if (source.Length - position < sizeof(int))
                     {
                         ParquetThrow.Format($"A decimal of '{Name}' runs past its page.");
                     }
 
-                    length = BinaryPrimitives.ReadInt32LittleEndian(source[position..]);
+                    int length = BinaryPrimitives.ReadInt32LittleEndian(source[position..]);
                     position += sizeof(int);
+                    if (length < 0 || length > source.Length - position)
+                    {
+                        ParquetThrow.Format($"A decimal of '{Name}' runs past its page.");
+                    }
+
+                    Wide(length);
+                    BigEndianDecimals.Widen(source, position, length, wide.Slice(i * _slot, _slot));
+                    position += length;
                 }
 
-                if (length < 0 || length > source.Length - position)
+                if (position != source.Length)
                 {
-                    ParquetThrow.Format($"A decimal of '{Name}' runs past its page.");
+                    ParquetThrow.Format($"A page of '{Name}' holds bytes past its {valid} decimals.");
                 }
-
-                WidenOne(source.Slice(position, length), wide.Slice(i * _slot, _slot));
-                position += length;
             }
 
-            if (position != source.Length)
-            {
-                ParquetThrow.Format($"A page of '{Name}' holds bytes past its {valid} decimals.");
-            }
-
-            Place(page, wide[..(valid * _slot)], valid);
+            Spread(page, wide, valid, spread);
         }
         finally
         {
-            dense.Dispose();
+            spread?.Dispose();
         }
     }
 
@@ -1357,10 +1376,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// </summary>
     private void Widen(Page page, ReadOnlySpan<byte> heap, ReadOnlySpan<int> lengths, int valid)
     {
-        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * _slot, 64);
+        Span<byte> wide = Dense(page, valid, out NativeSegmentOwner? spread);
         try
         {
-            Span<byte> wide = dense.WritableSpan;
             int position = 0;
             for (int i = 0; i < valid; i++)
             {
@@ -1370,31 +1388,26 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     ParquetThrow.Format($"A decimal of '{Name}' takes {length} bytes where its type's length is {_width}.");
                 }
 
-                WidenOne(heap.Slice(position, length), wide.Slice(i * _slot, _slot));
+                Wide(length);
+                BigEndianDecimals.Widen(heap, position, length, wide.Slice(i * _slot, _slot));
                 position += length;
             }
 
-            Place(page, wide[..(valid * _slot)], valid);
+            Spread(page, wide, valid, spread);
         }
         finally
         {
-            dense.Dispose();
+            spread?.Dispose();
         }
     }
 
     /// <summary>One big-endian two's-complement decimal sign-extended into its little-endian slot.</summary>
-    private void WidenOne(ReadOnlySpan<byte> bigEndian, Span<byte> into)
+    /// <summary>Refuses a decimal of <paramref name="length"/> bytes that its storage does not hold.</summary>
+    private void Wide(int length)
     {
-        if (bigEndian.Length > into.Length)
+        if (length > _slot)
         {
             ParquetThrow.Format($"A decimal of '{Name}' is wider than its precision allows.");
-        }
-
-        byte sign = bigEndian.Length > 0 && (bigEndian[0] & 0x80) != 0 ? (byte)0xFF : (byte)0;
-        into.Fill(sign);
-        for (int b = 0; b < bigEndian.Length; b++)
-        {
-            into[b] = bigEndian[bigEndian.Length - 1 - b];
         }
     }
 

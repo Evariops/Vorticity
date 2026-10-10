@@ -74,10 +74,9 @@ public class ParquetWindowBenchmarks
     {
         await using ParquetFile file = await _session.OpenParquetAsync(_path, null, CancellationToken.None).ConfigureAwait(false);
         long rows = 0;
-        await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(CancellationToken.None).ConfigureAwait(false))
+        await foreach (BatchView batch in file.Scan().WithCancellation(CancellationToken.None))
         {
             rows += batch.RowCount;
-            batch.Dispose();
         }
 
         return rows;

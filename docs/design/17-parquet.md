@@ -732,14 +732,14 @@ again with hardware intrinsics disabled and compares bit for bit
 | RLE runs | levels, codes, booleans | broadcast stores; to encode, runs found where neighbours differ, a vector of pairs compared at a time, 32 levels or 8 codes |
 | levels to validity | maximum definition level 1 | bit-packed runs copied as bitmaps with a shift, RLE runs filled by words, population count |
 | levels to offsets and validity | nesting | comparison masks per level, positions compressed out of them, prefix sums |
-| expand | dense values to the rows' slots | a mask-driven expand, `VPEXPAND` where the runtime exposes it, shuffle tables otherwise |
+| expand | dense values to the rows' slots | the core's: a word of 64 rows at a time, all valid a copy, all null nothing, a mixed one by `VPEXPAND` under AVX-512, a branch-free scatter otherwise |
 | delta decode | DELTA_BINARY_PACKED, the lengths of the delta byte arrays | unpack, add the minimum delta, an in-register prefix sum with a carried lane, wrapping |
 | delta encode | the same | deltas by a shifted subtraction, minimum and width by reductions and a leading-zero count |
 | stream split | BYTE_STREAM_SPLIT | 16 values a step for 2, 4 and 8 streams: byte interleaves (`PUNPCK`, `ZIP`) to decode, even bytes pulled from odd ones (`PACKUSWB` over a mask or a shift, `UZP`) to encode, at 25 GB/s and more either way |
 | ALP | FLOAT, DOUBLE | unpack, add the frame, convert (`VCVTQQ2PD` under AVX-512DQ), two multiplications never fused, exceptions patched |
 | plain byte arrays | PLAIN BYTE_ARRAY | serial, since each length gives the next value's place; unrolled, values inlined into views by 16-byte loads within the slack |
-| big-endian decimals | DECIMAL on fixed and variable byte arrays | a byte-reversing shuffle and a sign extension |
-| checked narrowing | `INT(8)`, `INT(16)` | a range comparison folded into the pack |
+| big-endian decimals | DECIMAL on fixed and variable byte arrays | in 16 bytes, a value a register: a byte shuffle that reverses its bytes and repeats its first, whose sign a comparison spreads over the bytes past it; in 4 or 8, and a length-prefixed value in 16, a big-endian load and an arithmetic shift. A page with no null widens into its slots, nothing copied after: a column of four million decimal(28, 4) values reads in 3.24 ms, against 43.3 a byte at a time |
+| checked narrowing | `INT(8)`, `INT(16)` | the core's kernels: the page's extremes against the annotation's range, two accumulators a register, then truncation by vector narrowing: four million values in 0.62 ms against 2.2 |
 | dictionary gather | materializing a dictionary column | gathers of 4 and 8 bytes, views by pairs of 8 |
 | UTF-8 | text | `System.Text.Unicode.Utf8.IsValid` |
 | SNAPPY, LZ4_RAW | the codecs | copies as overlapping 16-byte stores within the slack, short match offsets by pattern shuffles; encoders by a hash table, greedy, LZ4's end-of-block rules kept |
