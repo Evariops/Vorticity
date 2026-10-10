@@ -791,7 +791,7 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 | every kernel has a scalar twin | the package's suite, run whole by `tests/scalar-pass.sh` with hardware intrinsics disabled |
 | Native AOT | `pqdump`, the inspection tool, built on the public surface alone and published ahead of time, opens, scans and verifies every file of the standard's test suite at a pinned commit; its surface is on record beside the core's, rendered the same way |
 | a file is the same bytes at every degree | written at degrees 1, 2, 4 and 8 and compared |
-| the writer allocates per file, not per row | a ceiling per written file and per column of a wide schema |
+| the writer allocates per file, not per row | warm, a file of four times the batches costs at most 288 bytes a page more, its bounds and its place kept for the indexes (251 measured), and a schema four times as wide at most 7 KiB a column more (6.6 measured), the columns PLAIN: a dictionary's table rents from the shared array pool, whose capacity follows the machine's cores |
 
 The ratchets are counted as the core's are ([05-benchmarks.md](05-benchmarks.md) §5): a ceiling only
 comes down. Speed is measured against baselines this repository owns:
