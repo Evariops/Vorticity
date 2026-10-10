@@ -1,8 +1,8 @@
 # The format, condensed
 
 The Vortex file format as this library reads and writes it, condensed from the primary sources of
-[99-sources.md](99-sources.md); the schemas themselves are vendored in [spec/](../../spec/).
-**Everything is little-endian.**
+[99-sources.md](99-sources.md). The schemas themselves are vendored in [spec/](../../spec/).
+Everything is little-endian.
 
 ## 1. File structure
 
@@ -17,11 +17,11 @@ The Vortex file format as this library reads and writes it, condensed from the p
 ├────────────────────────────┤
 │      DType flatbuffer      │  optional (may be supplied out of band)
 ├────────────────────────────┤
-│      Layout flatbuffer     │  required — root layout tree
+│      Layout flatbuffer     │  required: the root layout tree
 ├────────────────────────────┤
-│    Statistics flatbuffer   │  optional — per-field, file-level statistics
+│    Statistics flatbuffer   │  optional: per-field, file-level statistics
 ├────────────────────────────┤
-│      Footer flatbuffer     │  required — dictionaries (segments, encodings, ...)
+│      Footer flatbuffer     │  required: dictionaries (segments, encodings, ...)
 ├────────────────────────────┤
 │         Postscript         │  ≤ 65527 bytes
 ├────────────────────────────┤
@@ -29,7 +29,7 @@ The Vortex file format as this library reads and writes it, condensed from the p
 └────────────────────────────┘
 ```
 
-Frozen constants (these never change):
+Frozen constants, which never change:
 
 | Constant | Value |
 |---|---|
@@ -40,17 +40,17 @@ Frozen constants (these never change):
 | `V1_FOOTER_FBS_SIZE` | 32 |
 | Extension | `.vortex` |
 
-**Open sequence (2 round trips worst case, 1 best case):**
+Opening a file takes one round trip at best and two at worst:
 
-1. Read the 64 KiB tail (or the whole file if smaller). By construction this always covers the
+1. Read the 64 KiB tail, or the whole file if it is smaller. By construction this always covers the
    postscript (`MAX_POSTSCRIPT_SIZE` + `EOF_SIZE` ≤ 64 KiB). A local file, whose reads are copies
-   and cost no round trip, reads its last 8 KiB first; one whose postscript reaches past them reads
-   the 64 KiB next.
-2. Validate magic and version from the last 8 bytes, read the postscript length.
-3. Parse the postscript → locate dtype / layout / statistics / footer / metadata.
+   and cost no round trip, reads its last 8 KiB first, and reads the 64 KiB next only if its
+   postscript reaches past them.
+2. Validate the magic and the version in the last 8 bytes, and read the postscript length.
+3. Parse the postscript to locate the dtype, layout, statistics, footer and metadata.
 4. If any of those segments falls outside the window already read, issue one targeted second read.
 
-This is exactly why the postscript exists: without it, locating a large DType would cost three
+That is exactly why the postscript exists: without it, locating a large DType would cost three
 round trips.
 
 ## 2. Postscript (`footer.fbs`)
@@ -70,10 +70,10 @@ table PostscriptSegment {
 }
 ```
 
-Compression and encryption are **inline** in the postscript (rather than indices into the footer)
-so a reader does not need the footer before it can decrypt.
+Compression and encryption are inline in the postscript, rather than indices into the footer, so a
+reader does not need the footer before it can decrypt.
 
-User metadata values are **not** loaded by default: each locator is resolved on demand.
+User metadata values are not loaded by default. Each locator is resolved on demand.
 
 ## 3. Footer (`footer.fbs`)
 
@@ -100,17 +100,17 @@ table FileStatistics { field_stats: [ArrayStats]; }  // one entry per root field
 ```
 
 `segment_specs` is a vector of fixed-size structs, so it is read as a reinterpreted
-`ReadOnlySpan<SegmentSpec>` with no traversal and no allocation, which matters on wide files; so is
-`Buffer` (8 bytes) in `array.fbs`.
+`ReadOnlySpan<SegmentSpec>` with no traversal and no allocation, which matters on wide files. The
+same goes for `Buffer` (8 bytes) in `array.fbs`.
 
 ## 4. DType (`dtype.fbs` + `dtype.proto`)
 
-The root DType is a FlatBuffer; the Protobuf variant is used in scalars and statistics. Both
-define the same union, with identical and **stable** tags:
+The root DType is a FlatBuffer, and the Protobuf variant is used in scalars and statistics. Both
+define the same union, with identical and stable tags:
 
 | Tag | Type | Fields |
 |---|---|---|
-| 1 | `Null` | — |
+| 1 | `Null` | none |
 | 2 | `Bool` | nullable |
 | 3 | `Primitive` | ptype, nullable |
 | 4 | `Decimal` | precision (u8), scale (i8), nullable |
@@ -119,18 +119,19 @@ define the same union, with identical and **stable** tags:
 | 7 | `Struct_` | names[], dtypes[], nullable |
 | 8 | `List` | element_type, nullable |
 | 9 | `Extension` | id, storage_dtype, metadata[] |
-| 10 | `FixedSizeList` | element_type, size (u32), nullable — *placed after Extension for backward compatibility* |
+| 10 | `FixedSizeList` | element_type, size (u32), nullable. Placed after Extension for backward compatibility |
 | 11 | `Variant` | nullable |
 | 12 | `Union` | names[], dtypes[], type_ids[], nullable |
 | 13 | `Map` | key_type, value_type, keys_sorted, nullable |
 
 `PType`: `U8=0, U16, U32, U64, I8, I16, I32, I64, F16, F32, F64=10`.
 
-Two parsers therefore share one model, and a property test holds them equivalent: a generated
-DType serialized both ways parses back to the same value (`DTypeEquivalenceTests`).
+Two parsers therefore share one model, and a property test keeps them equivalent: a generated DType
+serialized both ways parses back to the same value (`DTypeEquivalenceTests`).
 
-A file's root DType is **not required to be a Struct**: a file may hold a bare `Float64` or `Bool`,
-and a reader must not assume a tabular schema ([07-dotnet-mapping.md](07-dotnet-mapping.md) §5).
+A file's root DType does not have to be a struct. A file may hold a bare `Float64` or `Bool`, and a
+reader must not assume a tabular schema (see [a root that is not a
+struct](07-dotnet-mapping.md#5-a-root-that-is-not-a-struct)).
 
 Core-edition extension dtypes: `vortex.date`, `vortex.time`, `vortex.timestamp`, `vortex.uuid`.
 
@@ -142,13 +143,13 @@ Core-edition extension dtypes: `vortex.date`, `vortex.time`, `vortex.timestamp`,
 [padding] [buffer 0] [padding] [buffer 1] ... [padding] [Array flatbuffer] [u32 flatbuffer length]
 ```
 
-Reading: read the last 4 bytes → `fb_length`; the FlatBuffer occupies
-`[len-4-fb_length, len-4)`; everything before it is the buffer region. Each buffer's offset is
+To read one, take the last 4 bytes as `fb_length`. The FlatBuffer occupies
+`[len-4-fb_length, len-4)`, and everything before it is the buffer region. Each buffer's offset is
 reconstructed by accumulating `padding + length` from 0.
 
 The FlatBuffer is 8-byte aligned. Each buffer carries its own required alignment (up to 16 for
-`varbinview` views), and the written padding guarantees that a memory-mapped segment is directly
-usable — **this is what makes zero-copy possible**.
+`varbinview` views), and the written padding guarantees that a memory-mapped segment is usable as
+is. This is what makes zero-copy reads possible.
 
 ### 5.2 Schema (`array.fbs`)
 
@@ -180,14 +181,14 @@ table ArrayStats {
 enum Precision : uint8 { Inexact = 0, Exact = 1 }
 ```
 
-**Key point:** an `ArrayNode` does **not** carry its DType. The type is inherited or derived from
-the parent (the root DType comes from the file). Decoding is therefore a type-guided top-down
+The key point is that an `ArrayNode` does not carry its DType. The type is inherited or derived from
+the parent, and the root DType comes from the file. Decoding is therefore a type-guided top-down
 traversal, and every decoder must know how to compute its children's DTypes.
 
 ### 5.3 Per-encoding metadata
 
-Each encoding serializes its metadata as **Protobuf** (`prost`) with stable tags. There is no
-single `.proto` file upstream: messages are declared beside each encoding. A few examples:
+Each encoding serializes its metadata as Protobuf (`prost`) with stable tags. There is no single
+`.proto` file upstream: messages are declared next to each encoding. A few examples:
 
 ```proto
 // vortex.dict
@@ -215,52 +216,52 @@ message PatchesMetadata { uint64 len = 1; uint64 offset = 2; PType indices_ptype
 ```
 
 `vortex.primitive`, `vortex.varbinview`, `vortex.struct`, `vortex.chunked`, `vortex.null`,
-`vortex.masked`, `vortex.fixed_size_list`, `vortex.ext`, `vortex.bytebool`, `vortex.zigzag` and
-`fastlanes.for`: empty metadata.
+`vortex.masked`, `vortex.fixed_size_list`, `vortex.ext`, `vortex.bytebool` and `vortex.zigzag` have
+empty metadata.
 
-Two traps in that neighbourhood, in opposite directions. `vortex.constant` **is** empty — but its
-scalar is not absent, it lives in **buffer 0** as a Protobuf `ScalarValue`, so a decoder that reads
-the metadata and stops finds nothing. `fastlanes.for` is **not** empty: its metadata is a bare
+Two traps sit nearby, in opposite directions. `vortex.constant` has empty metadata, but its scalar
+is not absent: it lives in buffer 0 as a Protobuf `ScalarValue`, so a decoder that reads the
+metadata and stops finds nothing. `fastlanes.for` does not have empty metadata: it is a bare
 `ScalarValue` holding the frame-of-reference value, with zero buffers and one child. And
 `vortex.zoned`'s layout metadata is a version byte followed by a protobuf, not a bare message.
 
-The complete transcription of every metadata message, with the upstream source path of each, is
+The complete transcription of every metadata message, with the upstream source path of each, is in
 [spec/METADATA.md](../../spec/METADATA.md). Its tag numbers are the contract.
 
 #### Unknown Protobuf fields: skip, never reject
 
-The Protobuf runtime **skips fields with unknown numbers**, dispatching on the wire type (varint,
-fixed32, fixed64, length-delimited; groups, wire types 3 and 4, are rejected, as proto3 never emits
-them).
+The Protobuf runtime skips fields with unknown numbers, dispatching on the wire type (varint,
+fixed32, fixed64, length-delimited). Groups, wire types 3 and 4, are rejected, since proto3 never
+emits them.
 
-This protects the read-forever promise. Upstream may add an *optional* field to a metadata message
-without it being a reader-visible evolution: old readers ignore it and the semantics are unchanged,
-so upstream need not mint a new id. A parser that rejected unknown fields would fail on legal files,
+This protects the read-forever promise. Upstream may add an optional field to a metadata message
+without it being a reader-visible change: old readers ignore it and the semantics are unchanged, so
+upstream does not need a new id. A parser that rejected unknown fields would fail on legal files,
 and a corpus pinned to one version would not notice until its next regeneration.
 
 The distinction to keep sharp:
 
-* **Reject** = a value outside the contract's domain (a forbidden ptype, `lower_part_count != 0`,
-  an out-of-range exponent).
-* **Tolerate** = a field number the wire format does not recognize.
+* Reject a value outside the contract's domain (a forbidden ptype, `lower_part_count != 0`, an
+  out-of-range exponent).
+* Tolerate a field number the wire format does not recognize.
 
-**An encoding id is a frozen contract.** A reader-visible evolution gets a **new id**
-(`vortex.foo` → `vortex.foo_v2`), never a silent extension. A decoder therefore rejects a payload
-outside the contract of the id it read, even when it could decode the successor's: `vortex.pco`
-refuses an 8-bit dtype, which belongs to `vortex.pco.v2`.
+An encoding id is a frozen contract. A reader-visible change gets a new id (`vortex.foo` becomes
+`vortex.foo_v2`), never a silent extension. A decoder therefore rejects a payload outside the
+contract of the id it read, even when it could decode the successor's: `vortex.pco` refuses an 8-bit
+dtype, which belongs to `vortex.pco.v2`.
 
 ### 5.4 Validity (nullability)
 
-Validity is not a mandatory bitmap. Four states: `NonNullable`, `AllValid`, `AllInvalid`, or a
-**boolean array** (itself possibly encoded: constant, dict, runend…). `true` = valid. The validity
-array's DType is always non-nullable `Bool`.
+Validity is not a mandatory bitmap. It has four states: `NonNullable`, `AllValid`, `AllInvalid`, or
+a boolean array, which may itself be encoded (constant, dict, runend…). `true` means valid. The
+validity array's DType is always a non-nullable `Bool`.
 
 ## 6. Layouts (`layout.fbs`)
 
 ```fbs
 table Layout {
     encoding: uint16;     // index into Footer.layout_specs
-    row_count: uint64;    // rows represented — the basis for pruning
+    row_count: uint64;    // rows represented, the basis for pruning
     metadata: [ubyte];    // opaque, layout-specific
     children: [Layout];
     segments: [uint32];   // indices into Footer.segment_specs
@@ -269,55 +270,55 @@ table Layout {
 
 | ID | Role | Children | Segments | Metadata |
 |---|---|---|---|---|
-| `vortex.flat` | one serialized array | 0 | exactly 1 | `optional bytes array_encoding_tree` — when present the array FlatBuffer is inlined in the layout and the segment holds only buffers |
-| `vortex.chunked` | row-wise partition | ≥ 1 | 0 | empty (chunk offsets derive from children `row_count`s, whose sum must equal the parent's) |
-| `vortex.struct` | one child per field (+ validity) | n fields | 0 | empty |
-| `vortex.dict` | dictionary shared with a child | codes + values | — | `PType codes_ptype = 1; optional bool is_nullable_codes = 2; optional bool all_values_referenced = 3;` |
-| `vortex.zoned` | statistics zone map for pruning | data + stats table | — | `[u8 version = 1] ++ proto { uint32 zone_len = 1; repeated AggregateSpec aggregate_specs = 2; }` |
-| `vortex.stats` | legacy ancestor of `zoned` | same | — | must stay readable (read by the same machinery as `zoned`) |
+| `vortex.flat` | one serialized array | 0 | exactly 1 | `optional bytes array_encoding_tree`. When present, the array FlatBuffer is inlined in the layout and the segment holds only buffers |
+| `vortex.chunked` | row-wise partition | ≥ 1 | 0 | empty. Chunk offsets derive from the children's `row_count`s, whose sum must equal the parent's |
+| `vortex.struct` | one child per field (plus validity) | n fields | 0 | empty |
+| `vortex.dict` | dictionary shared with a child | codes + values | | `PType codes_ptype = 1; optional bool is_nullable_codes = 2; optional bool all_values_referenced = 3;` |
+| `vortex.zoned` | statistics zone map for pruning | data + stats table | | `[u8 version = 1] ++ proto { uint32 zone_len = 1; repeated AggregateSpec aggregate_specs = 2; }` |
+| `vortex.stats` | legacy ancestor of `zoned` | same | | must stay readable, and is read by the same machinery as `zoned` |
 
 Aggregates allowed in zone maps (core edition): `vortex.min`, `vortex.max`, `vortex.bounded_min`,
-`vortex.bounded_max`, `vortex.nan_count`, `vortex.null_count`.
-An unknown aggregate must **not** invalidate the file: it disables the affected pruning only.
+`vortex.bounded_max`, `vortex.nan_count`, `vortex.null_count`. An unknown aggregate must not
+invalidate the file. It only disables the pruning that depends on it.
 
 ## 7. What the Rust writer produces
 
-What a default Rust writer emits is what most files contain. Its pipeline is **split structs →
-repartition into 8 192-row blocks → zone maps → dictionary where useful → coalesce toward ~1 MiB →
-BtrBlocks compression → flat leaves**.
+What a default Rust writer emits is what most files contain. Its pipeline splits structs,
+repartitions into 8 192-row blocks, adds zone maps, applies a dictionary where useful, coalesces
+toward about 1 MiB, compresses with BtrBlocks and writes flat leaves.
 
-Compression schemes enabled by default, in this order (order breaks ties):
-FoR, ZigZag, BitPacking, Sparse, IntDict, RunEnd, Sequence, IntRLE, Delta; ALP, ALPrd, FloatDict,
-NullDominatedSparse, FloatRLE; StringDict, FSST, OnPair; BinaryDict, VarBin; Decimal; Temporal.
+Compression schemes enabled by default, in this order (the order breaks ties): FoR, ZigZag,
+BitPacking, Sparse, IntDict, RunEnd, Sequence, IntRLE, Delta, ALP, ALPrd, FloatDict,
+NullDominatedSparse, FloatRLE, StringDict, FSST, OnPair, BinaryDict, VarBin, Decimal, Temporal.
 
 Two caveats:
 
-* **Zstd and Pco are not enabled by default** (`with_compact()`, the `zstd` and `pco` features), so
-  ordinary files need neither. This library reads both, every type, mode and delta pco has, and
-  writes both: zstd costs it no third-party dependency, since its frames go through
-  `Vorticity.Zstd`, this repository's managed Zstandard, which writes libzstd's frames byte for
-  byte, and pco is ported, its encoder tried by the size-first profile as `with_compact()` tries
-  it.
-* **`fastlanes.delta` belongs to no edition.** The Delta scheme is in the list, but the edition
-  allowlist forbids its id, so it appears only in files written with enforcement turned off.
+* Zstd and Pco are not enabled by default (they need `with_compact()` and the `zstd` and `pco`
+  features), so ordinary files need neither. This library reads both, including every type, mode and
+  delta pco has, and writes both. Zstd costs it no third-party dependency, since its frames go
+  through `Vorticity.Zstd`, this repository's managed Zstandard, which writes libzstd's frames byte
+  for byte. Pco is ported, and its encoder is tried by the size-first profile the way
+  `with_compact()` tries it.
+* `fastlanes.delta` belongs to no edition. The Delta scheme is in the list, but the edition allowlist
+  forbids its id, so it only appears in files written with enforcement turned off.
 
 ## 8. Algorithmic details that are easy to get wrong
 
-* **FastLanes**: 1024-element **transposed** blocks. Bit-packing operates in that order, not
-  logical order — which is what allows unpacking without cross-lane shuffles, and any access by
-  logical index must go through the inverse transposition. There are **two** permutations, not one,
-  and they are easy to conflate: the bit-packing index
-  `FL_ORDER[row / 8] * 16 + (row % 8) * 128 + lane` (lane over `1024 / bitwidth(T)` lanes), and the
-  element transposition `lane * 64 + FL_ORDER[order] * 8 + row` (lane always `idx % 16`). Only
-  `FL_ORDER = [0,4,2,6,1,5,3,7]` is its own inverse; the transposition itself is not, so
-  `untranspose` is the inverse mapping and not a second `transpose`. Both derivations, their
-  inverses, and the known-value table to test against are in
+* FastLanes uses 1024-element transposed blocks. Bit-packing operates in that order, not in logical
+  order, which is what allows unpacking without cross-lane shuffles, and any access by logical index
+  must go through the inverse transposition. There are two permutations, not one, and they are easy
+  to conflate: the bit-packing index `FL_ORDER[row / 8] * 16 + (row % 8) * 128 + lane` (lane over
+  `1024 / bitwidth(T)` lanes), and the element transposition `lane * 64 + FL_ORDER[order] * 8 + row`
+  (lane always `idx % 16`). Only `FL_ORDER = [0,4,2,6,1,5,3,7]` is its own inverse. The transposition
+  is not, so `untranspose` is the inverse mapping and not a second `transpose`. Both derivations,
+  their inverses and the known-value table to test against are in
   [spec/REFERENCE.md](../../spec/REFERENCE.md).
-* **FSST**: 255-entry symbol table; code 255 is the escape code. Symbol buffers are padded to that
-  fixed size.
-* **ALP**: the encoded integer is `i32` or `i64`; `exp_e`/`exp_f` must be validated in range for
-  the target float type. Patches in a modern ALP are read as a `Patched` array wrapping a
+* FSST uses a 255-entry symbol table, and code 255 is the escape code. Symbol buffers are padded to
+  that fixed size.
+* In ALP the encoded integer is an `i32` or an `i64`, and `exp_e` and `exp_f` must be validated in
+  range for the target float type. Patches in a modern ALP are read as a `Patched` array wrapping a
   patch-free ALP.
-* **VarBinView**: 16-byte views (Arrow StringView compatible), `views` buffer aligned to 16.
-* **Patches**: one shared structure (indices, values and optional chunk offsets) that BitPacked,
-  ALP and Sparse all use, implemented once here.
+* VarBinView uses 16-byte views (compatible with Arrow's StringView), with the `views` buffer aligned
+  to 16.
+* Patches are one shared structure (indices, values and optional chunk offsets) that BitPacked, ALP
+  and Sparse all use, implemented once here.
