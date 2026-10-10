@@ -16,8 +16,8 @@ namespace Vorticity.Benchmarks.Queries;
 internal sealed record DatasetScenario(string Name, Func<VortexDataset, Run, Task<long>> Query, int ProbeEvery = 1);
 
 /// <summary>
-/// The queries of the datasets' stage (PLAN-QUERIES-STREAMING.md, 6e): the readings as one object,
-/// as sixteen, and as sixteen with an eighth of every object deleted. The first batch of a scan is
+/// The queries a dataset is judged on: the readings as one object, as sixteen, and as sixteen with
+/// an eighth of every object deleted. The first batch of a scan is
 /// to stay flat from one object to sixteen; a group by on sixteen at a degree of many lanes within
 /// 15 % of the file's.
 /// </summary>
