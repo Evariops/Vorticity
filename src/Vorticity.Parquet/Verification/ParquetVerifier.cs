@@ -286,7 +286,6 @@ internal static class ParquetVerifier
         bool[] groups = new bool[footer.RowGroups.Length];
         groups[group] = true;
         ScanSpec spec = new ScanSpec { Rows = new RowRange(entry.FirstRow, entry.FirstRow + entry.RowCount) };
-        FieldExpr path = new FieldExpr(column.DottedPath);
         bool decimals = ColumnBounds.IsDecimal(column);
         ParquetBatches batches = new ParquetBatches(file, spec, [field], groups, new ScanCounters(), cancellationToken, storage: true);
         await using (batches.ConfigureAwait(false))
@@ -295,17 +294,53 @@ internal static class ParquetVerifier
             {
                 RecordBatch batch = batches.Current;
                 int offset = (int)(batch.StartRow - entry.FirstRow);
-                Read(batch, path, decimals, offset, values);
+                Read(batch, file.Compiled.Fields[field], column, decimals, offset, values);
             }
         }
 
         return values;
     }
 
-    private static void Read(RecordBatch batch, FieldExpr path, bool decimals, int offset, ChunkValues values)
+    /// <summary>
+    /// The node of <paramref name="column"/> in a batch of its top field <paramref name="top"/> alone:
+    /// the struct's children followed by position down to the leaf, each the one whose leaves hold it,
+    /// whatever the names, which may hold a dot, and through the extensions over a group.
+    /// </summary>
+    private static int Node(CanonicalArena arena, int root, ParquetField top, ParquetColumn column)
+    {
+        int node = Storage(arena, arena.GetNode(root).GetFieldIndex(0));
+        ParquetField field = top;
+        while (field.Column != column.Ordinal)
+        {
+            int child = Array.FindIndex(field.Children, c => column.Ordinal >= c.FirstLeaf && column.Ordinal < c.FirstLeaf + c.LeafCount);
+            if (child < 0)
+            {
+                throw new InvalidOperationException($"No field under '{field.Name}' holds the column '{column.DottedPath}'.");
+            }
+
+            node = Storage(arena, arena.GetNode(node).GetFieldIndex(child));
+            field = field.Children[child];
+        }
+
+        return node;
+    }
+
+    /// <summary>A node's canonical form, an extension's storage for it.</summary>
+    private static int Storage(CanonicalArena arena, int node)
+    {
+        node = EncodedForms.Canonical(arena, node);
+        while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+        {
+            node = EncodedForms.Canonical(arena, arena.GetNode(node).StorageIndex);
+        }
+
+        return node;
+    }
+
+    private static void Read(RecordBatch batch, ParquetField top, ParquetColumn column, bool decimals, int offset, ChunkValues values)
     {
         CanonicalArena arena = batch.Arena;
-        int node = FilterEvaluator.Resolve(arena, batch.RootIndex, path, batch.RowCount);
+        int node = Node(arena, batch.RootIndex, top, column);
         ValidityMask mask = ValidityMask.From(arena, arena.GetNode(node).Validity);
         for (int row = 0; row < batch.RowCount; row++)
         {

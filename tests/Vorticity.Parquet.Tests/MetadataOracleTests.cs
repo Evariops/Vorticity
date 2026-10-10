@@ -26,6 +26,47 @@ public sealed partial class MetadataOracleTests : IDisposable
 
     public void Dispose() => System.IO.File.Delete(_path);
 
+    /// <summary>
+    /// Columns whose names hold a dot, at the top and in a struct, which a path of names joined by
+    /// dots would cut in the wrong places: the oracle finds their values by position, and nothing to
+    /// say of them.
+    /// </summary>
+    [Fact]
+    public async Task VerifiesColumnsWhoseNamesHoldADot()
+    {
+        VortexSchema schema =
+        [
+            ("a.b", VortexType.Int64),
+            ("s", VortexType.Struct([("x.y", VortexType.Int32.Nullable), ("z", VortexType.Utf8)])),
+        ];
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(_path, schema))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            for (int i = 0; i < 1_000; i++)
+            {
+                builder.Column<long>(0).Append(i);
+                ColumnsBuilder s = builder.Struct(1);
+                if (i % 7 == 0)
+                {
+                    s.Column<int?>(0).AppendNull();
+                }
+                else
+                {
+                    s.Column<int?>(0).Append(i * 3);
+                }
+
+                s.Column<string>(1).Append($"z-{i % 13}");
+            }
+
+            await writer.WriteAsync(builder, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
+        Assert.Equal(["a.b", "s.x.y", "s.z"], file.Metadata.Columns.Select(c => c.Path));
+        Assert.Empty(await file.VerifyAsync(Ct));
+    }
+
     [Theory]
     [InlineData(ParquetCompression.Zstd, 8_192, 1 << 20)]
     [InlineData(ParquetCompression.Snappy, 1_024, 16 << 10)]
