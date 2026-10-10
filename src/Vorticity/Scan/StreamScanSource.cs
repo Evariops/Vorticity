@@ -174,9 +174,13 @@ internal abstract class StreamScanSource : ScanSource
         return SortedColumnSource.TryKeyKind(column, out kind) ? null : $"a {column.Kind} column has no key order a cursor can walk";
     }
 
-    /// <summary>The batches of <paramref name="spec"/> left whole, with a selection of the rows kept: what a count or an extreme reads.</summary>
+    /// <summary>
+    /// The batches of <paramref name="spec"/> left whole, with a selection of the rows kept: what a count
+    /// or an extreme reads. Nothing past the count or the extreme sees them, so a source may keep its
+    /// columns encoded, which a filter then answers once per distinct value.
+    /// </summary>
     private Batches SelectedAsync(ScanSpec spec, ScanCounters metrics, object? part = null) =>
-        new Batches(this, spec with { Options = spec.Options with { Compact = false } }, metrics, part);
+        new Batches(this, spec with { KeepEncodings = true, Options = spec.Options with { Compact = false } }, metrics, part);
 
     /// <summary>
     /// The columns a spec reads, ascending: those it projects, and the top-level column of every path

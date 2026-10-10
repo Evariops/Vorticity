@@ -152,6 +152,14 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// </summary>
     internal bool VerifyChecksums { get; set; }
 
+    /// <summary>
+    /// Whether a dictionary-encoded page of a flat column is kept as its codes over the dictionary's
+    /// entries, read as a dictionary node by a batch that is the page whole, for a scan that keeps
+    /// encodings: a predicate is then answered once per entry, and a group keyed by its code. Any
+    /// other batch gathers the page's values.
+    /// </summary>
+    internal bool KeepEncodings { get; set; }
+
     /// <summary>Starts the chunk of a row group: its bytes, its codec and its rows.</summary>
     internal void Start(VortexBuffer chunk, CompressionCodec codec, long rows)
     {
@@ -372,6 +380,15 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 : Validity.AllValid;
         }
 
+        if (page.Codes is { } codes)
+        {
+            // The codes, held to the dictionary as they were kept, over its entries.
+            Page dictionary = _dictionary!;
+            _data[0] = dictionary.Data;
+            int entries = Storage(arena, dictionary.Rows, _values.IsNullable ? Validity.AllValid : Validity.NonNullable, dictionary.Values, _data);
+            return Wrap(arena, page.Rows, arena.AddDictionary(_values, page.Rows, validity, codes.Buffer.Slice(0, page.Rows * sizeof(uint)), entries));
+        }
+
         _data[0] = page.Data;
         return Node(arena, page.Rows, validity, page.Values, _data);
     }
@@ -410,6 +427,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
             }
 
+            Materialize(page);
             CopySlots(page, take, into, done, ref buffers);
             page.Read += take;
             done += take;
@@ -466,7 +484,15 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>The node of the column's type over <paramref name="values"/>.</summary>
-    private int Node(CanonicalArena arena, int rows, Validity validity, VortexBuffer values, ReadOnlySpan<VortexBuffer> data)
+    private int Node(CanonicalArena arena, int rows, Validity validity, VortexBuffer values, ReadOnlySpan<VortexBuffer> data) =>
+        Wrap(arena, rows, Storage(arena, rows, validity, values, data));
+
+    /// <summary>An extension column's node over its storage's; any other's itself.</summary>
+    private int Wrap(CanonicalArena arena, int rows, int node) =>
+        _type.Kind == DTypeKind.Extension ? arena.AddExtension(_type, rows, node) : node;
+
+    /// <summary>The node of the column's storage over <paramref name="values"/>.</summary>
+    private int Storage(CanonicalArena arena, int rows, Validity validity, VortexBuffer values, ReadOnlySpan<VortexBuffer> data)
     {
         int node;
         switch (_form)
@@ -489,7 +515,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 break;
         }
 
-        return _type.Kind == DTypeKind.Extension ? arena.AddExtension(_type, rows, node) : node;
+        return node;
     }
 
     /// <summary>Parses pages until a data page, which it decodes whole.</summary>
@@ -1450,6 +1476,14 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 new RleHybridDecoder(width).Read(source[1..], span);
             }
 
+            // The core keeps a dictionary over booleans, primitives, decimals and views; a fixed-size
+            // list of bytes is gathered.
+            if (KeepEncodings && _form is not (LeafForm.Bool or LeafForm.FixedBytes or LeafForm.Null))
+            {
+                Keep(page, span, dictionary.Rows);
+                return;
+            }
+
             if (_slot == 0)
             {
                 // Booleans: a bit per entry, gathered a bit at a time.
@@ -1507,6 +1541,63 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
+    /// <summary>
+    /// Keeps a dictionary-encoded page as a code per row: its <paramref name="dense"/> codes, one a value,
+    /// held to the dictionary's <paramref name="entries"/> and spread over its rows, a null one coding 0.
+    /// </summary>
+    private void Keep(Page page, ReadOnlySpan<uint> dense, int entries)
+    {
+        int outside = RowKernels.FirstCodeOutside(dense, (uint)entries);
+        if (outside >= 0)
+        {
+            ParquetThrow.Format($"A code of '{Name}', {dense[outside]}, passes its dictionary's {entries} entries.");
+        }
+
+        int rows = page.Rows;
+        Cap((long)rows * sizeof(uint));
+        NativeSegmentOwner codes = _pool.Rent(Math.Max(rows * sizeof(uint), 1), 64);
+        Span<byte> into = codes.WritableSpan[..(rows * sizeof(uint))];
+        ReadOnlySpan<byte> source = MemoryMarshal.AsBytes(dense);
+        if (page.Validity is null)
+        {
+            source.CopyTo(into);
+        }
+        else
+        {
+            into.Clear();
+            ValidRows.Spread(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, sizeof(uint), Encoding);
+        }
+
+        page.Codes = codes;
+    }
+
+    /// <summary>Gathers the values of a page kept as its codes: for a batch that is not the page whole.</summary>
+    private void Materialize(Page page)
+    {
+        if (page.Codes is not { } codes)
+        {
+            return;
+        }
+
+        Page dictionary = _dictionary!;
+        int rows = page.Rows;
+        Span<byte> into = Slots(page, rows * _slot).WritableSpan[..(rows * _slot)];
+        if (dictionary.Rows == 0)
+        {
+            // Every row is null, and names no entry.
+            into.Clear();
+        }
+        else
+        {
+            // The codes were held to the dictionary when they were kept; a null row's names entry 0.
+            RowKernels.Gather(codes.Buffer.Span[..(rows * sizeof(uint))], PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, into, rows);
+        }
+
+        page.Data = dictionary.Data;
+        page.Codes = null;
+        codes.Dispose();
+    }
+
     private static bool Same(VortexBuffer a, VortexBuffer b) =>
         a.Length == b.Length && Unsafe.AreSame(ref MemoryMarshal.GetReference(a.Span), ref MemoryMarshal.GetReference(b.Span));
 
@@ -1547,6 +1638,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
         /// <summary>The block holding <see cref="Values"/>, or null when they lie in the chunk.</summary>
         internal NativeSegmentOwner? Slots;
 
+        /// <summary>A dictionary-encoded page's code per row, kept for a scan that keeps encodings, until its values are gathered.</summary>
+        internal NativeSegmentOwner? Codes;
+
         /// <summary>One slot per row: the values, the bits or the views.</summary>
         internal VortexBuffer Values;
 
@@ -1566,6 +1660,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
         {
             Validity?.Dispose();
             Slots?.Dispose();
+            Codes?.Dispose();
+            Codes = null;
             DataOwner?.Dispose();
             Levels?.Dispose();
             Validity = null;

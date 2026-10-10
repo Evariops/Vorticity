@@ -24,8 +24,8 @@ public partial class ParquetAggregateBenchmarks
 
     private string _path = string.Empty;
 
-    /// <summary>The format: <c>vortex</c> or <c>parquet</c>.</summary>
-    [Params("vortex", "parquet")]
+    /// <summary>The format: <c>vortex</c>, <c>parquet</c> under its default codec, ZSTD, or <c>parquet-none</c>, uncompressed.</summary>
+    [Params("vortex", "parquet", "parquet-none")]
     public string Format { get; set; } = "parquet";
 
     /// <summary>The lanes.</summary>
@@ -41,7 +41,7 @@ public partial class ParquetAggregateBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        _path = Path.Combine(Path.GetTempPath(), $"vorticity-aggregate-{Format}-{Environment.ProcessId}.{Format}");
+        _path = Path.Combine(Path.GetTempPath(), $"vorticity-aggregate-{Format}-{Environment.ProcessId}.{(Format == "vortex" ? "vortex" : "parquet")}");
         Random random = new(23);
         string[] labels = new string[1_000];
         for (int i = 0; i < labels.Length; i++)
@@ -103,7 +103,7 @@ public partial class ParquetAggregateBenchmarks
             return;
         }
 
-        await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter<Sale>(_path, new ParquetWriteOptions { RowGroupRows = GroupRows });
+        await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter<Sale>(_path, new ParquetWriteOptions { RowGroupRows = GroupRows, Compression = Format == "parquet-none" ? ParquetCompression.Uncompressed : null });
         await parquet.WriteAsync<Sale>(rows, CancellationToken.None).ConfigureAwait(false);
         await parquet.CompleteAsync(CancellationToken.None).ConfigureAwait(false);
     }

@@ -124,6 +124,15 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             reader.VerifyChecksums = file.Options.VerifyChecksums;
         }
 
+        // A scan that keeps encodings reads a flat column's dictionary pages as dictionary nodes.
+        for (int i = 0; i < fields.Length; i++)
+        {
+            if (_nested[i] is null)
+            {
+                _readers[_flat[i]].KeepEncodings = spec.KeepEncodings;
+            }
+        }
+
         _leaves = new int[_readers.Length];
         for (int i = 0; i < _readers.Length; i++)
         {
