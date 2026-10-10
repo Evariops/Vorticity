@@ -485,8 +485,10 @@ And the classic mistakes with GCM:
   offset, frames reordered or taken from another object, objects swapped in a dataset, the descriptor
   or the epochs altered, a plain object put in place of a sealed one. Each case must fail at the first
   read that uses the altered bytes, before any plaintext is used, and verification must find every one.
-- Transparency: the scan and query suites run again over sealed files and over an encrypted dataset,
-  and every answer is the same bits as over plain ones.
+- Transparency: every kind of query, from the rows and a filter to a group by, an ordered top-k and a
+  walk of a key index, runs over a sealed file and over the plain file its plaintext is, at one and at
+  many lanes, and over an encrypted dataset and a plain one of the same objects, and every answer is
+  the same bits.
 - Ratchets: the same requests and dependent steps for sealed and plain reads, held by the counting
   store, a single call to the key service per data key, and no allocation per batch on a sealed scan.
 - Throughput: the platform's cipher per frame size, and a sealed scan against a plain one, each measured
