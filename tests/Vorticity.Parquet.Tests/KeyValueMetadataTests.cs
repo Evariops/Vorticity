@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
 using Xunit;
 
@@ -54,21 +55,63 @@ public sealed class KeyValueMetadataTests : IDisposable
         Assert.Equal(["first", "last"], file.KeyValueMetadata.Skip(1).Select(pair => pair.Value));
 
         // The values read as written, through the restored types.
-        List<string> rows = [];
-        await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
-        {
-            using (batch)
-            {
-                for (int r = 0; r < batch.RowCount; r++)
-                {
-                    rows.Add(string.Join(" | ", Enumerable.Range(0, batch.Schema.Count).Select(c => Render.Row(batch, c, r))));
-                }
-            }
-        }
-
+        List<string> rows = await RowsAsync(file.Scan().ToBatchesAsync(Ct));
         Assert.Equal(2, rows.Count);
         Assert.Contains("1234", rows[0], StringComparison.Ordinal);
         Assert.Contains("null", rows[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task WritesTimesInUnitsParquetLacksAsTheirValuesAndRestoresThem()
+    {
+        // Parquet has no date that counts milliseconds and no time or timestamp that counts seconds:
+        // each is written as the integers it holds, unannotated, rather than converted to a unit
+        // that would change them, and reads back as it was.
+        VortexSchema schema =
+        [
+            ("day", VortexType.Extension("vortex.date", VortexType.Int64, new[] { (byte)TimeUnit.Milliseconds }).Nullable),
+            ("clock", VortexType.Time(TimeUnit.Seconds)),
+            ("at", VortexType.Timestamp(TimeUnit.Seconds)),
+            ("zoned", VortexType.Timestamp(TimeUnit.Seconds, "Europe/Paris").Nullable),
+        ];
+        DateTimeOffset at = new(2026, 10, 9, 12, 30, 15, TimeSpan.FromHours(2));
+        Action<ColumnsBuilder> fill = builder =>
+        {
+            builder.Column<DateOnly?>(0).Append(new DateOnly(2026, 10, 9));
+            builder.Column<TimeOnly>(1).Append(new TimeOnly(23, 59, 58));
+            builder.Column<DateTime>(2).Append(new DateTime(2026, 10, 9, 12, 30, 15, DateTimeKind.Unspecified));
+            builder.Column<DateTimeOffset?>(3).Append(at);
+            builder.Column<DateOnly?>(0).AppendNull();
+            builder.Column<TimeOnly>(1).Append(TimeOnly.MinValue);
+            builder.Column<DateTime>(2).Append(new DateTime(1969, 12, 31, 23, 59, 59, DateTimeKind.Unspecified));
+            builder.Column<DateTimeOffset?>(3).AppendNull();
+        };
+        await WriteAsync(schema, ParquetWriteOptions.Default, fill);
+
+        string vortex = _path + ".vortex";
+        try
+        {
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(vortex, schema))
+            {
+                ColumnsBuilder builder = writer.Builder();
+                fill(builder);
+                await writer.WriteAsync(builder, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
+            Assert.Equal(schema, file.Schema);
+            Assert.Equal(
+                [(PhysicalType.Int64, LogicalTypeKind.None), (PhysicalType.Int32, LogicalTypeKind.None), (PhysicalType.Int64, LogicalTypeKind.None), (PhysicalType.Int64, LogicalTypeKind.None)],
+                file.Compiled.Columns.Select(column => (column.Physical, column.Logical.Kind)));
+
+            await using VortexFile expected = await VortexFile.OpenAsync(vortex, Ct);
+            Assert.Equal(await RowsAsync(expected.Scan().ToBatchesAsync(Ct)), await RowsAsync(file.Scan().ToBatchesAsync(Ct)));
+        }
+        finally
+        {
+            System.IO.File.Delete(vortex);
+        }
     }
 
     [Fact]
@@ -98,6 +141,24 @@ public sealed class KeyValueMetadataTests : IDisposable
     {
         ParquetWriteOptions options = new() { KeyValueMetadata = new Dictionary<string, string> { [ParquetSchema.VortexSchemaKey] = "mine" } };
         await Assert.ThrowsAsync<ArgumentException>(() => WriteAsync([("n", VortexType.Int64)], options, builder => builder.Column<long>(0).Append(1)));
+    }
+
+    /// <summary>Every row of the batches, each value rendered and the columns joined.</summary>
+    private static async Task<List<string>> RowsAsync(IAsyncEnumerable<RecordBatch> batches)
+    {
+        List<string> rows = [];
+        await foreach (RecordBatch batch in batches)
+        {
+            using (batch)
+            {
+                for (int r = 0; r < batch.RowCount; r++)
+                {
+                    rows.Add(string.Join(" | ", Enumerable.Range(0, batch.Schema.Count).Select(c => Render.Row(batch, c, r))));
+                }
+            }
+        }
+
+        return rows;
     }
 
     private async Task WriteAsync(VortexSchema schema, ParquetWriteOptions options, Action<ColumnsBuilder> fill)

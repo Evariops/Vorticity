@@ -209,8 +209,8 @@ physical type ([LogicalTypes.md][lt], *Unsupported Logical Types*).
 
 A file this writer made carries its Vortex schema in its key-value metadata (§6.1). Top-level column
 by top-level column, where that schema agrees with the Parquet schema, it restores what Parquet
-cannot say: a timestamp's zone, which Parquet keeps as UTC, and an extension Parquet has no
-annotation for, over the type the column reads as. A column that disagrees reads as Parquet says, and
+cannot say: a timestamp's zone, which Parquet keeps as UTC, and an extension the writer gives no
+annotation (§4.2), over the type the column reads as. A column that disagrees reads as Parquet says, and
 a schema this build cannot read, or of other columns, is ignored. A fixed-size list of other than
 bytes reads back as the list Parquet holds. The pairs are `ParquetFile.KeyValueMetadata`; field ids
 are kept and shown by `Metadata`.
@@ -226,7 +226,8 @@ are kept and shown by `Metadata`.
 | `Decimal(p, s)` | INT32 up to 9 digits, INT64 up to 18, then FIXED_LEN_BYTE_ARRAY of the fewest bytes, big-endian |
 | `Utf8`; `Binary` | BYTE_ARRAY with `STRING`; BYTE_ARRAY |
 | `FixedSizeList<u8, n>` of non-null bytes | FIXED_LEN_BYTE_ARRAY(n) |
-| `vortex.uuid`, `vortex.date`, `vortex.time`, `vortex.timestamp` | `UUID`, `DATE`, `TIME`, `TIMESTAMP` adjusted to UTC when the dtype has a zone |
+| `vortex.uuid`, `vortex.date` in days, `vortex.time` and `vortex.timestamp` in milliseconds, microseconds or nanoseconds | `UUID`, `DATE`, `TIME`, `TIMESTAMP` adjusted to UTC when the dtype has a zone |
+| `vortex.date` in milliseconds, `vortex.time` and `vortex.timestamp` in seconds; an extension of no annotation | its storage, unannotated: the standard has no such unit, and one it has would change the values, a date that is not a whole day lost; the reader restores the type (§4.1) |
 | `Struct`; `List`, other fixed-size lists; the map | a group; the three-level `LIST`; the three-level `MAP` |
 | `Variant` | a group annotated `VARIANT(1)` of a required BYTE_ARRAY `metadata` and a required BYTE_ARRAY `value`: the unshredded form |
 | `Null` | INT32 with `UNKNOWN` |

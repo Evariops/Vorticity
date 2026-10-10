@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Types;
@@ -497,17 +498,39 @@ internal sealed class WriteSchema
     private static int Digits(int bytes) =>
         (int)Math.Floor(System.Numerics.BigInteger.Log10((System.Numerics.BigInteger.One << (8 * bytes - 1)) - 1) + 1e-9);
 
+    /// <summary>
+    /// Whether an extension is written under an annotation of its own: a date that counts days, a
+    /// time or timestamp in a unit Parquet has, a UUID, an interval, a shape. Any other is written as
+    /// its storage, the values it holds, unannotated: a date that counts milliseconds and a time that
+    /// counts seconds included, whose values a Parquet unit would change. Its type is restored from
+    /// the Vortex schema the file keeps.
+    /// </summary>
+    internal static bool Annotates(VortexType type) => type.ExtensionId switch
+    {
+        ExtensionIds.Date => type.Unit == TimeUnit.Days,
+        ExtensionIds.Time or ExtensionIds.Timestamp => (type.Unit ?? TimeUnit.Microseconds) is TimeUnit.Milliseconds or TimeUnit.Microseconds or TimeUnit.Nanoseconds,
+        ExtensionIds.Uuid or Schema.ParquetSchema.IntervalExtensionId or Schema.ParquetSchema.Int96ExtensionId
+            or Schema.ParquetSchema.GeometryExtensionId or Schema.ParquetSchema.GeographyExtensionId => true,
+        _ => false,
+    };
+
     private static WriteColumn Extension(string name, string[] path, int field, VortexType type, bool nullable)
     {
+        if (!Annotates(type))
+        {
+            WriteColumn storage = Leaf(name, field, type.StorageType!);
+            return new WriteColumn
+            {
+                Name = storage.Name, Path = storage.Path, Field = field, Physical = storage.Physical, TypeLength = storage.TypeLength,
+                Nullable = nullable, Logical = storage.Logical, ConvertedType = storage.ConvertedType, Scale = storage.Scale,
+                Precision = storage.Precision, Conversion = storage.Conversion, ValueWidth = storage.ValueWidth,
+                SourceWidth = storage.SourceWidth, ThroughStorage = true, FixedElements = storage.FixedElements, Domain = storage.Domain,
+            };
+        }
+
         switch (type.ExtensionId)
         {
             case ExtensionIds.Date:
-                if (type.Unit != TimeUnit.Days)
-                {
-                    throw new ParquetUnsupportedException("DATE", ParquetComponentKind.LogicalType,
-                        $"The column '{name}' counts its dates in {type.Unit}; a Parquet DATE counts days.");
-                }
-
                 return new WriteColumn
                 {
                     Name = name, Path = path, Field = field, Physical = PhysicalType.Int32, Nullable = nullable, Logical = Logical(LogicalTypeKind.Date),
@@ -537,14 +560,7 @@ internal sealed class WriteSchema
             case Schema.ParquetSchema.GeographyExtensionId:
                 return Geospatial(name, path, field, type, nullable);
             default:
-                WriteColumn storage = Leaf(name, field, type.StorageType!);
-                return new WriteColumn
-                {
-                    Name = storage.Name, Path = storage.Path, Field = field, Physical = storage.Physical, TypeLength = storage.TypeLength,
-                    Nullable = nullable, Logical = storage.Logical, ConvertedType = storage.ConvertedType, Scale = storage.Scale,
-                    Precision = storage.Precision, Conversion = storage.Conversion, ValueWidth = storage.ValueWidth,
-                    SourceWidth = storage.SourceWidth, ThroughStorage = true, FixedElements = storage.FixedElements, Domain = storage.Domain,
-                };
+                throw new UnreachableException($"The extension {type.ExtensionId} is annotated and has no column.");
         }
     }
 
@@ -582,8 +598,7 @@ internal sealed class WriteSchema
             TimeUnit.Milliseconds => ParquetTimeUnit.Millis,
             TimeUnit.Microseconds => ParquetTimeUnit.Micros,
             TimeUnit.Nanoseconds => ParquetTimeUnit.Nanos,
-            _ => throw new ParquetUnsupportedException(unit.ToString(), ParquetComponentKind.LogicalType,
-                $"The column '{name}' counts {unit}, a unit Parquet's TIME and TIMESTAMP do not have."),
+            _ => throw new UnreachableException($"A time in {unit} is written as its storage."),
         };
         LogicalTypeInfo logical = Logical(timestamp ? LogicalTypeKind.Timestamp : LogicalTypeKind.Time);
         logical.Unit = parquetUnit;

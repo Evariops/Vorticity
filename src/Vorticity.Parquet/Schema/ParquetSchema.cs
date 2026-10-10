@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text;
 using Vorticity.Parquet.Metadata;
+using Vorticity.Parquet.Writing;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
@@ -303,19 +304,15 @@ internal sealed class ParquetSchema
             return null;
         }
 
-        // A timestamp in a zone of its own, which Parquet keeps as adjusted to UTC.
-        if (written.ExtensionId == ExtensionIds.Timestamp)
+        // An extension the writer gives no annotation, written as its storage.
+        if (!WriteSchema.Annotates(written))
         {
-            return read.ExtensionId == ExtensionIds.Timestamp && read.TimeZone == "UTC" && written.TimeZone is not null
-                && written.Unit == read.Unit && Equals(written.StorageType, read.StorageType)
-                ? written
-                : null;
+            return Equals(written.StorageType, read) ? written : null;
         }
 
-        // An extension Parquet has no annotation for, written as its storage.
-        return written.ExtensionId is not (ExtensionIds.Date or ExtensionIds.Time or ExtensionIds.Uuid or IntervalExtensionId or Int96ExtensionId
-                or GeometryExtensionId or GeographyExtensionId)
-            && Equals(written.StorageType, read)
+        // A timestamp in a zone of its own, which Parquet keeps as adjusted to UTC.
+        return written.ExtensionId == ExtensionIds.Timestamp && read.ExtensionId == ExtensionIds.Timestamp && read.TimeZone == "UTC"
+            && written.TimeZone is not null && written.Unit == read.Unit && Equals(written.StorageType, read.StorageType)
             ? written
             : null;
     }
