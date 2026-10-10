@@ -45,19 +45,19 @@ public sealed class RealFilePruningTests
             }
 
             await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
+            // In batches of the scan's default and of 128 rows, which a file's small pages rule out
+            // a batch at a time.
             foreach ((string column, FilterLiteral value) in samples)
             {
-                foreach (VortexExpr filter in (VortexExpr[])[
-                    Expr.Eq(Expr.Field(column), Expr.Literal(value)),
-                    Expr.Lt(Expr.Field(column), Expr.Literal(value)),
-                    Expr.Ge(Expr.Field(column), Expr.Literal(value))])
+                foreach ((int batchRows, VortexExpr filter) in Filters(column, value))
                 {
                     long pruned;
                     long whole;
                     try
                     {
-                        pruned = await file.Scan().Where(filter).CountAsync(Ct);
-                        whole = await file.Scan().Where(filter).With(new ScanOptions { UseStatistics = false }).CountAsync(Ct);
+                        ScanOptions options = new() { BatchRows = batchRows };
+                        pruned = await file.Scan().Where(filter).With(options).CountAsync(Ct);
+                        whole = await file.Scan().Where(filter).With(options with { UseStatistics = false }).CountAsync(Ct);
                     }
                     catch (Exception e) when (e is ArgumentException or NotSupportedException or VortexSchemaException)
                     {
@@ -68,11 +68,11 @@ public sealed class RealFilePruningTests
                     compared++;
                     if (pruned != whole)
                     {
-                        failures.Add($"{name}: {filter} counts {pruned} pruned and {whole} read whole");
+                        failures.Add($"{name}: {filter} in batches of {batchRows} counts {pruned} pruned and {whole} read whole");
                     }
 
                     // What the statistics did, so that a run shows they were put to the test.
-                    CountPlan plan = (await file.Scan().Where(filter).ExplainAsync(Ct)).Count;
+                    CountPlan plan = (await file.Scan().Where(filter).With(new ScanOptions { BatchRows = batchRows }).ExplainAsync(Ct)).Count;
                     blocksPruned += plan.Pruned;
                     blocksProven += plan.Proven;
                     report?.WriteLine($"{name}: {filter} {pruned} {whole}, {plan.Pruned} pruned, {plan.Proven} proven");
@@ -82,6 +82,17 @@ public sealed class RealFilePruningTests
 
         report?.WriteLine($"{compared} filters compared, {failures.Count} differ; {blocksPruned} blocks pruned, {blocksProven} proven");
         Assert.Empty(failures);
+    }
+
+    /// <summary>Equal, less, and not less than the value, each in batches of the default and of 128 rows.</summary>
+    private static IEnumerable<(int BatchRows, VortexExpr Filter)> Filters(string column, FilterLiteral value)
+    {
+        foreach (int batchRows in (int[])[0, 128])
+        {
+            yield return (batchRows, Expr.Eq(Expr.Field(column), Expr.Literal(value)));
+            yield return (batchRows, Expr.Lt(Expr.Field(column), Expr.Literal(value)));
+            yield return (batchRows, Expr.Ge(Expr.Field(column), Expr.Literal(value)));
+        }
     }
 
     /// <summary>A value of each top-level column the first batch holds one of, from its middle row.</summary>

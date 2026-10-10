@@ -87,6 +87,56 @@ internal sealed partial class ColumnChunkReader
             ParquetThrow.Format($"The column chunk of '{Name}' holds fewer rows than its row group.");
         }
 
+        (long entries, long values) = Plan(context, rows);
+        Cap(2 * entries);
+        Gather(context, (int)entries, (int)values, _leaf.MaxRepetitionLevel > 0, _leaf.MaxDefinitionLevel > 0);
+        _rowsLeft -= rows;
+    }
+
+    /// <summary>
+    /// Steps over the next <paramref name="rows"/> rows: whole v2 pages by their headers alone, which
+    /// say their rows, and the rest by their levels, no value gathered.
+    /// </summary>
+    internal void SkipNested(ScanContext context, int rows)
+    {
+        ReleaseRetired();
+        if (rows > _rowsLeft)
+        {
+            ParquetThrow.Format($"The column chunk of '{Name}' holds fewer rows than its row group.");
+        }
+
+        _rowsLeft -= rows;
+        int left = rows;
+        while (left > 0 && _page is null && TrySkipPage(context, left, out int skipped))
+        {
+            left -= skipped;
+        }
+
+        if (left > 0)
+        {
+            Plan(context, left);
+            foreach (Segment segment in _plan)
+            {
+                segment.Page.Read += segment.Values;
+                segment.Page.EntriesRead = segment.To;
+            }
+
+            _plan.Clear();
+        }
+
+        Entries = 0;
+        ValueCount = 0;
+        _batchPage = null;
+        _dense = default;
+        _denseBuffers = 0;
+    }
+
+    /// <summary>
+    /// Plans the entries of the next <paramref name="rows"/> rows, page by page, the pages the plan
+    /// takes whole retired; their entries, and their values.
+    /// </summary>
+    private (long Entries, long Values) Plan(ScanContext context, int rows)
+    {
         bool repeats = _leaf.MaxRepetitionLevel > 0;
         bool optional = _leaf.MaxDefinitionLevel > 0;
         byte defined = (byte)_leaf.MaxDefinitionLevel;
@@ -160,9 +210,7 @@ internal sealed partial class ColumnChunkReader
             ParquetThrow.Format($"A batch of '{Name}' spans {entries} entries, more than a batch holds.");
         }
 
-        Cap(2 * entries);
-        Gather(context, (int)entries, (int)values, repeats, optional);
-        _rowsLeft -= rows;
+        return (entries, values);
     }
 
     /// <summary>

@@ -60,6 +60,15 @@ internal sealed class NestedFieldReader
         return Build(context, _root, 0, 0, rows);
     }
 
+    /// <summary>Steps over the field's next <paramref name="rows"/> rows in every column under it.</summary>
+    internal void Skip(ScanContext context, int rows)
+    {
+        foreach (ColumnChunkReader reader in Readers)
+        {
+            reader.SkipNested(context, rows);
+        }
+    }
+
     private static Part Plan(ParquetField field, DType type, Columns columns, int repetition, int definition)
     {
         Part part = new() { Field = field, Type = type };

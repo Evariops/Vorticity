@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
+using Vorticity.Compute;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Parquet.Metadata;
@@ -55,6 +56,13 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private readonly int[] _flat;
     private readonly int[] _slots;
     private readonly int[] _nodes;
+
+    /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
+    private readonly FilterColumns? _pruning;
+    private readonly SegmentRequestSet _indexes = new();
+
+    /// <summary>The batches of the row group being read the page index leaves, or null when it rules none out.</summary>
+    private BlockMask? _live;
     private RecordBatch? _current;
     private int _rowGroup = -1;
     private long _groupStart;
@@ -69,7 +77,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _read = groups;
         _metrics = metrics;
         _cancellationToken = cancellationToken;
-        _batchRows = spec.Options.BatchRows is > 0 and < BatchRows ? spec.Options.BatchRows : BatchRows;
+        _batchRows = RowsOf(spec);
         ParquetSchema schema = file.Compiled;
         int[] fields = columns ?? Every(schema.Fields.Length);
         VortexField[] read = new VortexField[fields.Length];
@@ -113,6 +121,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
         _slots = new int[_readers.Length];
         _nodes = new int[fields.Length];
+        _pruning = FilterColumns.For(file, spec);
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -122,15 +131,41 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // The batch handed out last is dead: what it read goes back before the next is cut.
         _current?.Dispose();
         _context.ResetBatch();
-        while (_groupRead == _groupRows)
+        int rows;
+        while (true)
         {
-            if (!await NextRowGroupAsync().ConfigureAwait(false))
+            while (_groupRead == _groupRows)
             {
-                return false;
+                if (!await NextRowGroupAsync().ConfigureAwait(false))
+                {
+                    return false;
+                }
             }
+
+            rows = (int)Math.Min(_batchRows, _groupRows - _groupRead);
+            if (_live is null || _live.IsLive((int)(_groupRead / _batchRows)))
+            {
+                break;
+            }
+
+            // A batch the page index rules out: every column steps over its rows, a page it covers
+            // whole by its header alone.
+            for (int i = 0; i < _nodes.Length; i++)
+            {
+                if (_nested[i] is { } nested)
+                {
+                    nested.Skip(_context, rows);
+                }
+                else
+                {
+                    _readers[_flat[i]].Skip(_context, rows);
+                }
+            }
+
+            _groupRead += rows;
+            _metrics.AddBlocksPruned(1);
         }
 
-        int rows = (int)Math.Min(_batchRows, _groupRows - _groupRead);
         for (int i = 0; i < _nodes.Length; i++)
         {
             _nodes[i] = _nested[i] is { } nested ? nested.Read(_context, rows) : _readers[_flat[i]].Read(_context, rows);
@@ -155,6 +190,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
         _chunks.Release();
         _chunks.Dispose();
+        _indexes.Release();
+        _indexes.Dispose();
         _context.Dispose();
         return ValueTask.CompletedTask;
     }
@@ -170,22 +207,36 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _chunks.Release();
         ParquetFooter footer = _file.Footer;
         RowGroupEntry group;
-        do
+        while (true)
         {
-            if (++_rowGroup >= footer.RowGroups.Length)
+            do
             {
-                return false;
+                if (++_rowGroup >= footer.RowGroups.Length)
+                {
+                    return false;
+                }
+
+                group = footer.RowGroups[_rowGroup];
+            }
+            while (!_read[_rowGroup] || group.RowCount == 0 || (_rows is { } range && (group.FirstRow >= range.End || group.FirstRow + group.RowCount <= range.Start)));
+
+            if (!_anticipated)
+            {
+                // A file the session maps is mapped now, so that the chunks are read in place.
+                (_file.Reader as IReadAnticipation)?.AnticipateData();
+                _anticipated = true;
             }
 
-            group = footer.RowGroups[_rowGroup];
-        }
-        while (!_read[_rowGroup] || group.RowCount == 0 || (_rows is { } range && (group.FirstRow >= range.End || group.FirstRow + group.RowCount <= range.Start)));
+            // The page index of the filter's columns rules batches out; a group it leaves none of
+            // is not read.
+            _live = _pruning is null ? null
+                : await PagePruning.LiveAsync(_pruning, _rowGroup, group.RowCount, _batchRows, _indexes, _metrics, _cancellationToken).ConfigureAwait(false);
+            if (_live is not { LiveCount: 0 })
+            {
+                break;
+            }
 
-        if (!_anticipated)
-        {
-            // A file the session maps is mapped now, so that the chunks are read in place.
-            (_file.Reader as IReadAnticipation)?.AnticipateData();
-            _anticipated = true;
+            _metrics.AddBlocksPruned(_live.BlockCount);
         }
 
         long bytes = 0;
@@ -210,6 +261,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _groupRead = 0;
         return true;
     }
+
+    /// <summary>The rows of a batch of <paramref name="spec"/>: <see cref="BatchRows"/>, or fewer when the scan asks for fewer.</summary>
+    internal static int RowsOf(ScanSpec spec) => spec.Options.BatchRows is > 0 and < BatchRows ? spec.Options.BatchRows : BatchRows;
 
     private static int[] Every(int count)
     {

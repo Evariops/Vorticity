@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Compute;
+using Vorticity.IO;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Scanning;
 
@@ -90,17 +92,24 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         return await base.AnyAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
     }
 
-    internal override ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
+    internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
-        // Every row group the plan reads, every chunk of the columns read: a block is a batch.
+        // Every row group the plan reads, its page index read as the scan reads it, and every chunk
+        // of the columns read of a group the index leaves a batch of: a block is a batch.
         ParquetFooter footer = file.Footer;
         RowGroupPlan plan = RowGroupPlan.For(file, spec);
+        FilterColumns? filter = FilterColumns.For(file, spec);
+        int batchRows = ParquetBatches.RowsOf(spec);
+        ScanCounters indexes = new();
+        using SegmentRequestSet requests = new();
         long rows = 0;
         int segments = 0;
         long bytes = 0;
         int proven = 0;
         long provenRows = 0;
         int decoded = 0;
+        int pagePruned = 0;
+        int undecidedPruned = 0;
         int[] leaves = Leaves(spec);
         for (int group = 0; group < footer.RowGroups.Length; group++)
         {
@@ -110,8 +119,12 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             }
 
             RowGroupEntry entry = footer.RowGroups[group];
-            int blocks = (int)((entry.RowCount + ParquetBatches.BatchRows - 1) / ParquetBatches.BatchRows);
+            int blocks = (int)((entry.RowCount + batchRows - 1) / batchRows);
             rows += entry.RowCount;
+            BlockMask? mask = filter is null ? null
+                : await PagePruning.LiveAsync(filter, group, entry.RowCount, batchRows, requests, indexes, cancellationToken).ConfigureAwait(false);
+            int liveBlocks = mask?.LiveCount ?? blocks;
+            pagePruned += blocks - liveBlocks;
             if (plan.Proven[group] >= 0)
             {
                 proven += blocks;
@@ -119,7 +132,13 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             }
             else
             {
-                decoded += blocks;
+                decoded += liveBlocks;
+                undecidedPruned += blocks - liveBlocks;
+            }
+
+            if (liveBlocks == 0)
+            {
+                continue;
             }
 
             foreach (int leaf in leaves)
@@ -129,16 +148,19 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             }
         }
 
-        int live = plan.Blocks - plan.PrunedBlocks;
+        requests.Release();
+        int indexSegments = (int)indexes.SegmentRequests;
+        long indexBytes = indexes.BytesRequested;
+        int live = plan.Blocks - plan.PrunedBlocks - pagePruned;
         ImmutableArray<PruningStep> pruning = spec.Filter is not null && spec.Options.UseStatistics
-            ? [new PruningStep("row group statistics", plan.PrunedBlocks, 0, 0)]
+            ? [new PruningStep("row group statistics", plan.PrunedBlocks, 0, 0), new PruningStep("page index", pagePruned, indexSegments, indexBytes)]
             : ImmutableArray<PruningStep>.Empty;
         bool unfiltered = spec.Filter is null && spec.Take is null;
         CountPlan count = unfiltered
             ? new CountPlan(true, rows, 0, 0, 0)
-            : new CountPlan(decoded == 0, decoded == 0 ? provenRows : 0, plan.PrunedBlocks, proven, decoded);
-        return new ValueTask<ScanPlan>(new ScanPlan(
-            rows, plan.Blocks, live, segments, bytes, !spec.MatchesNothing && (live > 0 || plan.Blocks == 0), pruning, count, null));
+            : new CountPlan(decoded == 0, decoded == 0 ? provenRows : 0, plan.PrunedBlocks + undecidedPruned, proven, decoded);
+        return new ScanPlan(
+            rows, plan.Blocks, live, segments + indexSegments, bytes + indexBytes, !spec.MatchesNothing && (live > 0 || plan.Blocks == 0), pruning, count, null);
     }
 
     private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken)

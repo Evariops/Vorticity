@@ -189,6 +189,101 @@ internal sealed partial class ColumnChunkReader : IDisposable
         return node;
     }
 
+    /// <summary>
+    /// Steps over the next <paramref name="rows"/> rows of a flat column: whole pages by their
+    /// headers alone, never decompressed, and the rest of a decoded page by its count.
+    /// </summary>
+    internal void Skip(ScanContext context, int rows)
+    {
+        ReleaseRetired();
+        if (rows > _rowsLeft)
+        {
+            ParquetThrow.Format($"The column chunk of '{Name}' holds fewer rows than its row group.");
+        }
+
+        _rowsLeft -= rows;
+        if (_form == LeafForm.Null)
+        {
+            return;
+        }
+
+        while (rows > 0)
+        {
+            if (_page is null && TrySkipPage(context, rows, out int skipped))
+            {
+                rows -= skipped;
+                continue;
+            }
+
+            Page page = _page ??= NextPage(context);
+            int take = Math.Min(rows, page.Rows - page.Read);
+            page.Read += take;
+            rows -= take;
+            if (page.Read == page.Rows)
+            {
+                Retire();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Steps over the next data page by its header alone when a skip of <paramref name="rows"/> rows
+    /// takes its every row: a dictionary page on the way decoded, since later pages need it, an
+    /// index page stepped over. False when the next data page is not one the skip takes whole, as a
+    /// nested column's v1 page, whose rows only its levels say, never is, or when the chunk has ended.
+    /// </summary>
+    private bool TrySkipPage(ScanContext context, int rows, out int skipped)
+    {
+        skipped = 0;
+        while (true)
+        {
+            ReadOnlySpan<byte> rest = _chunk.Span[_position..];
+            if (rest.IsEmpty)
+            {
+                return false;
+            }
+
+            PageHeader header = PageHeader.Read(rest);
+            if (header.CompressedPageSize > rest.Length - header.HeaderLength)
+            {
+                ParquetThrow.Format($"A page of '{Name}' runs past its column chunk.");
+            }
+
+            int at = _position + header.HeaderLength;
+            int pageRows;
+            switch (header.Type)
+            {
+                case PageType.DictionaryPage:
+                    _position = at + header.CompressedPageSize;
+                    _dictionary = DecodeDictionary(context, header, at);
+                    continue;
+                case PageType.DataPageV2 when _nested || header.ValueCount == header.RowCount:
+                    pageRows = header.RowCount;
+                    break;
+                case PageType.DataPage when !_nested:
+                    pageRows = header.ValueCount;
+                    break;
+                case PageType.DataPage:
+                case PageType.DataPageV2:
+                    return false;
+                default:
+                    _position = at + header.CompressedPageSize;
+                    continue;
+            }
+
+            if (pageRows <= 0 || pageRows > rows || pageRows > _rowsUnread)
+            {
+                return false;
+            }
+
+            _position = at + header.CompressedPageSize;
+            _rowsUnread -= pageRows;
+            _pastFirstPage = true;
+            skipped = pageRows;
+            return true;
+        }
+    }
+
     /// <summary>Gives every page back to the pool: at the end of the row group, or of the scan.</summary>
     internal void Release()
     {

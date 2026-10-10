@@ -59,7 +59,8 @@ internal sealed class RowGroupPlan
         bool[] read = new bool[groups];
         long[] proven = new long[groups];
         Array.Fill(proven, -1);
-        Pruning? pruning = spec.Filter is { } filter && spec.Options.UseStatistics ? Pruning.For(file, filter) : null;
+        FilterColumns? pruning = FilterColumns.For(file, spec);
+        int batchRows = ParquetBatches.RowsOf(spec);
         int prunedBlocks = 0;
         int blocks = 0;
         for (int group = 0; group < groups; group++)
@@ -72,7 +73,7 @@ internal sealed class RowGroupPlan
                 continue;
             }
 
-            int groupBlocks = (int)((entry.RowCount + ParquetBatches.BatchRows - 1) / ParquetBatches.BatchRows);
+            int groupBlocks = (int)((entry.RowCount + batchRows - 1) / batchRows);
             blocks += groupBlocks;
             read[group] = true;
             if (pruning is null)
@@ -98,69 +99,6 @@ internal sealed class RowGroupPlan
         }
 
         return new RowGroupPlan(read, proven, prunedBlocks, blocks);
-    }
-
-    /// <summary>The filter's columns that statistics bound, and the pruner of a row group over them.</summary>
-    private sealed class Pruning
-    {
-        private readonly ParquetFile _file;
-        private readonly VortexExpr _filter;
-        private readonly FieldExpr[] _fields;
-        private readonly int[] _columns;
-
-        private Pruning(ParquetFile file, VortexExpr filter, FieldExpr[] fields, int[] columns)
-        {
-            _file = file;
-            _filter = filter;
-            _fields = fields;
-            _columns = columns;
-        }
-
-        /// <summary>The columns of <paramref name="filter"/> a row group's statistics may bound, or null when there is none.</summary>
-        internal static Pruning? For(ParquetFile file, VortexExpr filter)
-        {
-            List<FieldExpr> paths = [];
-            ScanBuilder.FieldsOf(filter, paths);
-            List<FieldExpr> fields = [];
-            List<int> columns = [];
-            HashSet<string> seen = new(StringComparer.Ordinal);
-            foreach (FieldExpr path in paths)
-            {
-                if (!seen.Add(path.Path))
-                {
-                    continue;
-                }
-
-                // A column under a list has bounds over its elements, not its rows: none of a row's.
-                foreach (ParquetColumn column in file.Compiled.Columns)
-                {
-                    if (column.MaxRepetitionLevel == 0 && column.Form != LeafForm.Null && string.Equals(column.DottedPath, path.Path, StringComparison.Ordinal))
-                    {
-                        fields.Add(new FieldExpr(path.Path));
-                        columns.Add(column.Ordinal);
-                        break;
-                    }
-                }
-            }
-
-            return fields.Count == 0 ? null : new Pruning(file, filter, [.. fields], [.. columns]);
-        }
-
-        /// <summary>The pruner of row group <paramref name="group"/>, of <paramref name="rows"/> rows, one zone over its rows.</summary>
-        internal ZonePruner Of(int group, long rows)
-        {
-            ParquetFooter footer = _file.Footer;
-            ZoneColumn[] zones = new ZoneColumn[_fields.Length];
-            for (int i = 0; i < zones.Length; i++)
-            {
-                ParquetColumn column = _file.Compiled.Columns[_columns[i]];
-                ColumnChunkMetadata chunk = footer.Chunk(group, _columns[i]);
-                ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, footer.Bytes);
-                zones[i] = new ZoneColumn(_fields[i], rows, rows, [bounds], ColumnBounds.IsDecimal(column));
-            }
-
-            return new ZonePruner(_filter, zones);
-        }
     }
 }
 

@@ -136,6 +136,77 @@ public sealed partial class PruningTests : IDisposable
             await file.Scan<Keyed>().Where(k => !(k.Score < 30_000.0)).CountAsync(Ct));
     }
 
+    [VortexRecord]
+    public partial record struct Tagged(long Id, ReadOnlyMemory<long> Tags, string? Note);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3_000)]
+    public async Task SkipsThePagesItsIndexRulesOutInsideARowGroup(int batchRows)
+    {
+        // One row group of a hundred thousand rows, a page every 8 192: the index bounds each page.
+        Tagged[] rows = new Tagged[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            long[] tags = new long[i % 4];
+            for (int k = 0; k < tags.Length; k++)
+            {
+                tags[k] = i * 10L + k;
+            }
+
+            rows[i] = new Tagged(i, tags, i % 5 == 0 ? null : $"note {i}");
+        }
+
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Tagged>(
+            _path, new ParquetWriteOptions { RowGroupRows = GroupRows * 16, BlockRows = GroupRows }))
+        {
+            await writer.WriteAsync<Tagged>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
+        Assert.Equal(1, file.RowGroupCount);
+        ScanOptions options = batchRows > 0 ? new ScanOptions { BatchRows = batchRows } : new ScanOptions();
+        Func<Probe<Tagged>, Predicate>[] filters =
+        [
+            t => t.Id >= 50_000 & t.Id < 50_100,
+            t => t.Id < 100 | t.Id > 99_900,
+            t => t.Note >= "note 7",
+            t => t.Note.IsNull & t.Id > 99_000,
+        ];
+        foreach (Func<Probe<Tagged>, Predicate> filter in filters)
+        {
+            Scan<Tagged> pruned = file.Scan<Tagged>().Where(filter).With(options);
+            List<string> kept = await RenderAsync(pruned);
+            List<string> whole = await RenderAsync(file.Scan<Tagged>().Where(filter).With(options with { UseStatistics = false }));
+            Assert.Equal(whole, kept);
+        }
+
+        // Ids in one page: the index rules out every other one, and each is stepped over unread.
+        Scan<Tagged> narrow = file.Scan<Tagged>().Where(t => t.Id >= 50_000 & t.Id < 50_100).With(options);
+        Assert.Equal(100, (await RenderAsync(narrow)).Count);
+        int blocks = (Rows + (batchRows > 0 ? batchRows : GroupRows) - 1) / (batchRows > 0 ? batchRows : GroupRows);
+        // The page that holds them, of 8 192 rows, overlaps one batch of as many, four of 3 000.
+        Assert.Equal(batchRows > 0 ? 4 : 1, narrow.Metrics.BlocksDecoded);
+        Assert.Equal(blocks - narrow.Metrics.BlocksDecoded, narrow.Metrics.BlocksPruned);
+        ScanPlan plan = await file.Scan<Tagged>().Where(t => t.Id >= 50_000 & t.Id < 50_100).With(options).ExplainAsync(Ct);
+        Assert.Equal(narrow.Metrics.BlocksDecoded, plan.LiveBlocks);
+        Assert.Equal(blocks - plan.LiveBlocks, plan.Pruning.Single(step => step.Structure == "page index").BlocksPruned);
+        Assert.Equal(plan.Segments, narrow.Metrics.Requests);
+    }
+
+    /// <summary>Every row a scan keeps, each column written out.</summary>
+    private static async Task<List<string>> RenderAsync(Scan<Tagged> scan)
+    {
+        List<string> rows = [];
+        await foreach (Tagged row in scan.ToRecordsAsync(Ct))
+        {
+            rows.Add($"{row.Id} [{string.Join(", ", row.Tags.ToArray())}] {row.Note}");
+        }
+
+        return rows;
+    }
+
     private async Task<ParquetFile> OpenAsync()
     {
         Event[] rows = new Event[Rows];
