@@ -48,6 +48,14 @@ internal abstract class StreamScanSource : ScanSource
     /// <summary>Whether <see cref="Stream(ScanSpec, int[], ScanCounters, CancellationToken)"/> delivers the columns it is asked for alone, rather than every column whatever it is asked.</summary>
     private protected virtual bool ReadsColumns => false;
 
+    /// <summary>
+    /// Whether the source's own stream brings its rows in the order <paramref name="spec"/> asks for
+    /// (<see cref="ScanSpec.OrderPath"/>, <see cref="ScanSpec.Descending"/>), ties in the source's order:
+    /// a file sorted on the column, as its metadata declares and its statistics bear out. The scan then
+    /// streams its rows unsorted; otherwise it sorts them, a blocking stage.
+    /// </summary>
+    private protected virtual bool ArrivesInOrder(ScanSpec spec) => false;
+
     /// <summary>What the source is, as a refusal names it: "result", "Parquet file".</summary>
     private protected abstract string Kind { get; }
 
@@ -247,8 +255,8 @@ internal abstract class StreamScanSource : ScanSource
                 : source.Stream(spec, columns, metrics, part, cancellationToken);
 
             // An order the source does not arrive in is a sort of the rows kept, held whole.
-            return spec.OrderPath is null
-                ? new Enumerator(source, spec, stream, columns)
+            return spec.OrderPath is null ? new Enumerator(source, spec, stream, columns)
+                : source.ArrivesInOrder(spec) ? new Enumerator(source, spec with { OrderPath = null, Descending = false }, stream, columns)
                 : new SortedEnumerator(source, spec, stream, columns, cancellationToken);
         }
     }

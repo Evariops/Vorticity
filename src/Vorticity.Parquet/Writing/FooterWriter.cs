@@ -61,7 +61,8 @@ internal static class FooterWriter
         string createdBy,
         WriteColumn[] columns,
         Encryption.FileEncryptor? encryptor = null,
-        PooledBytes? scratch = null)
+        PooledBytes? scratch = null,
+        SortingColumn[]? sorting = null)
     {
         short saved = writer.BeginStruct();
         writer.WriteI32Field(1, 1);
@@ -75,7 +76,7 @@ internal static class FooterWriter
         writer.WriteListField(4, ThriftType.Struct, rowGroups.Count);
         foreach (WrittenRowGroup rowGroup in rowGroups)
         {
-            WriteRowGroup(ref writer, rowGroup, scratch);
+            WriteRowGroup(ref writer, rowGroup, scratch, sorting);
         }
 
         if (keyValues.Count > 0)
@@ -114,7 +115,7 @@ internal static class FooterWriter
         writer.EndStruct(saved);
     }
 
-    private static void WriteRowGroup(ref ThriftCompactWriter writer, WrittenRowGroup rowGroup, PooledBytes? scratch)
+    private static void WriteRowGroup(ref ThriftCompactWriter writer, WrittenRowGroup rowGroup, PooledBytes? scratch, SortingColumn[]? sorting)
     {
         long uncompressed = 0;
         long compressed = 0;
@@ -133,6 +134,19 @@ internal static class FooterWriter
 
         writer.WriteI64Field(2, uncompressed);
         writer.WriteI64Field(3, rowGroup.Rows);
+        if (sorting is { Length: > 0 })
+        {
+            writer.WriteListField(4, ThriftType.Struct, sorting.Length);
+            foreach (SortingColumn column in sorting)
+            {
+                short entry = writer.BeginStruct();
+                writer.WriteI32Field(1, column.Column);
+                writer.WriteBooleanField(2, column.Descending);
+                writer.WriteBooleanField(3, column.NullsFirst);
+                writer.EndStruct(entry);
+            }
+        }
+
         if (rowGroup.Chunks.Length > 0)
         {
             writer.WriteI64Field(5, rowGroup.Chunks[0].Chunk.Offset);

@@ -5,6 +5,9 @@ using Vorticity.Parquet.Thrift;
 
 namespace Vorticity.Parquet.Metadata;
 
+/// <summary>A row group's sorting column: its leaf's ordinal, and the order its rows hold it in.</summary>
+internal readonly record struct SortingColumn(int Column, bool Descending, bool NullsFirst);
+
 /// <summary>Where a row group lies in the footer, and the counts the plan needs before its columns.</summary>
 internal struct RowGroupEntry
 {
@@ -232,6 +235,69 @@ internal sealed class ParquetFooter
         }
 
         return Interlocked.CompareExchange(ref _chunkStarts[rowGroup], starts, null) ?? starts;
+    }
+
+    /// <summary>
+    /// The sorting columns row group <paramref name="rowGroup"/> declares, the first of most
+    /// precedence; empty when it declares none.
+    /// </summary>
+    /// <exception cref="ParquetFormatException">A sorting column lacks one of its three fields.</exception>
+    internal SortingColumn[] SortingColumns(int rowGroup)
+    {
+        ByteRange range = RowGroups[rowGroup].SortingColumns;
+        if (!range.IsPresent)
+        {
+            return [];
+        }
+
+        ThriftCompactReader reader = new(range.Of(Bytes));
+        int count = reader.ReadListHeader(out ThriftType element);
+        ThriftCompactReader.Expect(element, ThriftType.Struct);
+        if (count > range.Length)
+        {
+            ParquetThrow.Format($"Row group {rowGroup} declares {count} sorting columns in {range.Length} bytes.");
+        }
+
+        SortingColumn[] columns = new SortingColumn[count];
+        for (int i = 0; i < count; i++)
+        {
+            int column = -1;
+            bool descending = false;
+            bool nullsFirst = false;
+            int found = 0;
+            short saved = reader.EnterStruct();
+            while (reader.ReadFieldHeader(out ThriftType type, out short id))
+            {
+                switch (id)
+                {
+                    case 1 when type == ThriftType.I32:
+                        column = reader.ReadI32();
+                        found |= 1;
+                        break;
+                    case 2:
+                        descending = ThriftCompactReader.BooleanField(type);
+                        found |= 2;
+                        break;
+                    case 3:
+                        nullsFirst = ThriftCompactReader.BooleanField(type);
+                        found |= 4;
+                        break;
+                    default:
+                        reader.Skip(type);
+                        break;
+                }
+            }
+
+            reader.ExitStruct(saved);
+            if (found != 7)
+            {
+                ParquetThrow.Format($"A sorting column of row group {rowGroup} lacks its column, its order or its nulls' place.");
+            }
+
+            columns[i] = new SortingColumn(column, descending, nullsFirst);
+        }
+
+        return columns;
     }
 
     /// <summary>The metadata of column <paramref name="column"/>'s chunk in row group <paramref name="rowGroup"/>.</summary>

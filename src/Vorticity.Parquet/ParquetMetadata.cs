@@ -56,7 +56,15 @@ public sealed class ParquetMetadata
                 chunks[c] = Chunk(file, leaves[c], footer.Chunk(g, c));
             }
 
-            groups[g] = new ParquetRowGroupInfo(g, entry.FirstRow, entry.RowCount, chunks);
+            SortingColumn[] sorting = footer.SortingColumns(g);
+            ParquetSortingColumn[] sorted = new ParquetSortingColumn[sorting.Length];
+            for (int s = 0; s < sorting.Length; s++)
+            {
+                string name = (uint)sorting[s].Column < (uint)leaves.Length ? leaves[sorting[s].Column].DottedPath : $"#{sorting[s].Column}";
+                sorted[s] = new ParquetSortingColumn(name, sorting[s].Descending, sorting[s].NullsFirst);
+            }
+
+            groups[g] = new ParquetRowGroupInfo(g, entry.FirstRow, entry.RowCount, chunks, sorted);
         }
 
         RowGroups = groups;
@@ -281,7 +289,14 @@ public sealed record ParquetColumnInfo(
 /// <param name="FirstRow">The file's row it starts at.</param>
 /// <param name="RowCount">Its rows.</param>
 /// <param name="Chunks">Its column chunks, one per leaf column, in their order.</param>
-public sealed record ParquetRowGroupInfo(int Ordinal, long FirstRow, long RowCount, IReadOnlyList<ParquetChunkInfo> Chunks);
+/// <param name="SortingColumns">The columns its rows are sorted on, as it declares them, the first of most precedence; empty for none.</param>
+public sealed record ParquetRowGroupInfo(int Ordinal, long FirstRow, long RowCount, IReadOnlyList<ParquetChunkInfo> Chunks, IReadOnlyList<ParquetSortingColumn> SortingColumns);
+
+/// <summary>A column rows are sorted on, and how: what a row group's <c>sorting_columns</c> declares.</summary>
+/// <param name="Column">The column's path, its names joined by dots.</param>
+/// <param name="Descending">Whether the greatest value comes first.</param>
+/// <param name="NullsFirst">Whether the nulls come before every value.</param>
+public sealed record ParquetSortingColumn(string Column, bool Descending = false, bool NullsFirst = false);
 
 /// <summary>A column chunk, as the footer describes it.</summary>
 /// <param name="Column">Its column's path.</param>

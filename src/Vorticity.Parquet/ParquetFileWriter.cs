@@ -67,6 +67,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// <summary>What encrypts the file, or null for a file in plaintext.</summary>
     private readonly Encryption.FileEncryptor? _encryptor;
 
+    /// <summary>What holds the rows to the order the file declares, or null for rows in no order.</summary>
+    private readonly SortedRows? _sorted;
+
     /// <summary>The rows of the writer's builder, until a write takes them.</summary>
     private StructStore? _root;
     private ColumnsBuilder? _builder;
@@ -147,6 +150,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                 };
             }
 
+            _sorted = SortedRows.For(options.SortingColumns, map, schema);
             RequireColumns(keys, "column keys");
             RequireColumns(blooms, "Bloom filters");
             RequireColumns(codecs, "column codecs");
@@ -632,6 +636,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             _nodes[c] = node;
         }
 
+        // Rows out of the declared order are refused before any column holds them.
+        _sorted?.Check(arena, root, rows);
+
         // Until every column holds the batch's rows, the columns disagree: a failure past here
         // leaves the file to be abandoned.
         _broken = true;
@@ -808,14 +815,14 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             plain.Clear();
             ThriftCompactWriter inner = new(plain);
             using PooledBytes scratch = new(_session.Options.EnginePool);
-            FooterWriter.WriteFileMetaData(ref inner, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, sealedFooter, scratch);
+            FooterWriter.WriteFileMetaData(ref inner, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, sealedFooter, scratch, _sorted?.Declared);
             inner.Flush();
             sealedFooter.WriteEncryptedFooter(tail, plain.Written.Span);
         }
         else
         {
             using PooledBytes scratch = new(_session.Options.EnginePool);
-            FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, _encryptor, scratch);
+            FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, _encryptor, scratch, _sorted?.Declared);
             writer.Flush();
             if (_encryptor is { } signer)
             {

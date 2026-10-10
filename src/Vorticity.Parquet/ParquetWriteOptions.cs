@@ -186,6 +186,13 @@ public sealed record ParquetWriteOptions
     /// </summary>
     public ParquetEncryption? Encryption { get; init; }
 
+    /// <summary>
+    /// The columns the rows are sorted on, the first of most precedence, which every row group then
+    /// declares: flat columns of integers, decimals, booleans, text, bytes or times. The writer holds
+    /// the rows it is given to the order, and refuses a row out of it; null for rows in no order.
+    /// </summary>
+    public IReadOnlyList<ParquetSortingColumn>? SortingColumns { get; init; }
+
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }
 

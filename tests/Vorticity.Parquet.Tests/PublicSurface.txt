@@ -240,7 +240,7 @@ Vorticity.Parquet:     property bool VerifyChecksums { get; init; }
 Vorticity.Parquet:     property int MaxFooterBytes { get; init; }
 Vorticity.Parquet:     property long MaxDecompressedSize { get; init; }
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetRowGroupInfo : IEquatable<ParquetRowGroupInfo>
-Vorticity.Parquet:     ctor ParquetRowGroupInfo(int, long, long, IReadOnlyList<ParquetChunkInfo>)
+Vorticity.Parquet:     ctor ParquetRowGroupInfo(int, long, long, IReadOnlyList<ParquetChunkInfo>, IReadOnlyList<ParquetSortingColumn>)
 Vorticity.Parquet:     method ParquetRowGroupInfo <Clone>$()
 Vorticity.Parquet:     method bool Equals(ParquetRowGroupInfo)
 Vorticity.Parquet:     method bool Equals(object)
@@ -248,8 +248,9 @@ Vorticity.Parquet:     method bool op_Equality(ParquetRowGroupInfo, ParquetRowGr
 Vorticity.Parquet:     method bool op_Inequality(ParquetRowGroupInfo, ParquetRowGroupInfo)
 Vorticity.Parquet:     method int GetHashCode()
 Vorticity.Parquet:     method string ToString()
-Vorticity.Parquet:     method void Deconstruct(out int, out long, out long, out IReadOnlyList<ParquetChunkInfo>)
+Vorticity.Parquet:     method void Deconstruct(out int, out long, out long, out IReadOnlyList<ParquetChunkInfo>, out IReadOnlyList<ParquetSortingColumn>)
 Vorticity.Parquet:     property IReadOnlyList<ParquetChunkInfo> Chunks { get; init; }
+Vorticity.Parquet:     property IReadOnlyList<ParquetSortingColumn> SortingColumns { get; init; }
 Vorticity.Parquet:     property int Ordinal { get; init; }
 Vorticity.Parquet:     property long FirstRow { get; init; }
 Vorticity.Parquet:     property long RowCount { get; init; }
@@ -265,6 +266,19 @@ Vorticity.Parquet:     method ParquetFileWriter CreateParquetWriter<TRecord>(str
 Vorticity.Parquet:     method ValueTask<ParquetFile> OpenParquetAsync(string, ParquetOpenOptions = default, CancellationToken = default)
 Vorticity.Parquet: static class Vorticity.Parquet.ParquetSessionExtensions.<G>$CDE60D1596AFAE314E1B2F5BE885EF79.<M>$4A5C559B24E794EF1B1D150C48FAFE9A
 Vorticity.Parquet:     method void <Extension>$(VortexSession)
+Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetSortingColumn : IEquatable<ParquetSortingColumn>
+Vorticity.Parquet:     ctor ParquetSortingColumn(string, bool = default, bool = default)
+Vorticity.Parquet:     method ParquetSortingColumn <Clone>$()
+Vorticity.Parquet:     method bool Equals(ParquetSortingColumn)
+Vorticity.Parquet:     method bool Equals(object)
+Vorticity.Parquet:     method bool op_Equality(ParquetSortingColumn, ParquetSortingColumn)
+Vorticity.Parquet:     method bool op_Inequality(ParquetSortingColumn, ParquetSortingColumn)
+Vorticity.Parquet:     method int GetHashCode()
+Vorticity.Parquet:     method string ToString()
+Vorticity.Parquet:     method void Deconstruct(out string, out bool, out bool)
+Vorticity.Parquet:     property bool Descending { get; init; }
+Vorticity.Parquet:     property bool NullsFirst { get; init; }
+Vorticity.Parquet:     property string Column { get; init; }
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetStatisticsInfo : IEquatable<ParquetStatisticsInfo>
 Vorticity.Parquet:     ctor ParquetStatisticsInfo(Nullable<long>, Nullable<long>, string, string, bool, bool, Nullable<long>)
 Vorticity.Parquet:     method ParquetStatisticsInfo <Clone>$()
@@ -302,6 +316,7 @@ Vorticity.Parquet:     property IReadOnlyDictionary<string, ParquetCodec> Column
 Vorticity.Parquet:     property IReadOnlyDictionary<string, ParquetEncodingHint> Hints { get; init; }
 Vorticity.Parquet:     property IReadOnlyDictionary<string, double> BloomFilters { get; init; }
 Vorticity.Parquet:     property IReadOnlyDictionary<string, string> KeyValueMetadata { get; init; }
+Vorticity.Parquet:     property IReadOnlyList<ParquetSortingColumn> SortingColumns { get; init; }
 Vorticity.Parquet:     property Nullable<ParquetCompression> Compression { get; init; }
 Vorticity.Parquet:     property ParquetEncryption Encryption { get; init; }
 Vorticity.Parquet:     property ParquetWriteOptions Default { get; }

@@ -36,6 +36,86 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
 
     private protected override bool ReadsColumns => true;
 
+    /// <summary>A scan in the order of a column the file lies in streams it as it lies: no sort.</summary>
+    private protected override bool ArrivesInOrder(ScanSpec spec) => spec.OrderPath is { } path && Ordered(path, spec.Descending);
+
+    /// <summary>A group by on a column the file lies in, ascending, closes its groups as the scan reaches past them.</summary>
+    internal override bool OrdersOnAsking(FieldExpr column) => Ordered(column.Path, descending: false);
+
+    /// <summary>
+    /// Whether the file's rows lie in the order of the column at <paramref name="path"/>, ascending or
+    /// <paramref name="descending"/>, ties in the file's order: every row group declares its rows sorted
+    /// on it first, in that direction; its statistics hold no null and, for a float, no NaN; and each
+    /// row group's bounds come at or after the last one's. A cut bound is a bound still: the last
+    /// group's upper bound at or before the next one's lower bound orders them whatever the cut.
+    /// </summary>
+    internal bool Ordered(string path, bool descending)
+    {
+        ParquetSchema schema = file.Compiled;
+        int leaf = -1;
+        foreach (ParquetField field in schema.Fields)
+        {
+            if (string.Equals(field.Name, path, StringComparison.Ordinal))
+            {
+                leaf = field.Column;
+                break;
+            }
+        }
+
+        if (leaf < 0)
+        {
+            return false;
+        }
+
+        ParquetColumn column = schema.Columns[leaf];
+        bool floats = column.Physical is PhysicalType.Float or PhysicalType.Double || column.Form == LeafForm.Float16;
+        bool decimals = ColumnBounds.IsDecimal(column);
+        ParquetFooter footer = file.Footer;
+        FilterLiteral last = default;
+        bool any = false;
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            if (footer.RowGroups[group].RowCount == 0)
+            {
+                continue;
+            }
+
+            // A declaration is a hint the rows are read without: one malformed orders nothing.
+            SortingColumn[] sorting;
+            try
+            {
+                sorting = footer.SortingColumns(group);
+            }
+            catch (ParquetFormatException)
+            {
+                return false;
+            }
+
+            if (sorting.Length == 0 || sorting[0].Column != leaf || sorting[0].Descending != descending)
+            {
+                return false;
+            }
+
+            ColumnChunkMetadata chunk = footer.Chunk(group, leaf);
+            ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, chunk.Source.Span);
+            if (!bounds.HasNullCount || bounds.NullCount != 0 || !bounds.HasMin || !bounds.HasMax || (floats && (!bounds.HasNanCount || bounds.NanCount != 0)))
+            {
+                return false;
+            }
+
+            FilterLiteral first = descending ? bounds.Max : bounds.Min;
+            if (any && (!ColumnBounds.TryOrder(last, first, decimals, out int order) || (descending ? order < 0 : order > 0)))
+            {
+                return false;
+            }
+
+            last = descending ? bounds.Min : bounds.Max;
+            any = true;
+        }
+
+        return any;
+    }
+
     internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing)
@@ -125,7 +205,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     /// </remarks>
     internal override async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
     {
-        if (degree <= 1 || spec.Take is not null || spec.MatchesNothing)
+        // An ordered read is one stream: pieces read side by side would come in no order.
+        if (degree <= 1 || spec.Take is not null || spec.MatchesNothing || spec.OrderPath is not null)
         {
             return null;
         }
@@ -442,8 +523,13 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         CountPlan count = unfiltered
             ? new CountPlan(true, rows, 0, 0, 0)
             : new CountPlan(decoded == 0, decoded == 0 ? provenRows : 0, plan.PrunedBlocks + undecidedPruned, proven, decoded);
+        // An ordered scan streams a file that lies in its order, a column its sorting columns and
+        // statistics say is sorted, and sorts the rows of any other in memory, or by runs past it.
+        OrderPlan? order = spec.OrderPath is { } path
+            ? new OrderPlan((Ordered(path, spec.Descending) ? KeySourceKind.SortedColumn : KeySourceKind.InMemory).ToString(), 0, null, spec.Descending)
+            : null;
         return new ScanPlan(
-            rows, plan.Blocks, live, segments + indexSegments, bytes + indexBytes, !spec.MatchesNothing && (live > 0 || plan.Blocks == 0), pruning, count, null);
+            rows, plan.Blocks, live, segments + indexSegments, bytes + indexBytes, !spec.MatchesNothing && (live > 0 || plan.Blocks == 0), pruning, count, order);
     }
 
     private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken)

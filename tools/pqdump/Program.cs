@@ -131,6 +131,11 @@ internal static class Program
         {
             Line(output, string.Empty);
             Line(output, $"row group {group.Ordinal}: rows {group.FirstRow} to {group.FirstRow + group.RowCount}");
+            if (group.SortingColumns.Count > 0)
+            {
+                Line(output, "  sorted on " + string.Join(", ", System.Linq.Enumerable.Select(group.SortingColumns, s => $"{s.Column} {(s.Descending ? "descending" : "ascending")}, nulls {(s.NullsFirst ? "first" : "last")}")));
+            }
+
             foreach (ParquetChunkInfo chunk in group.Chunks)
             {
                 Line(output, $"  {chunk.Column}: {chunk.Codec} [{string.Join(", ", chunk.Encodings)}] {chunk.Values} values, {chunk.CompressedBytes} bytes of {chunk.UncompressedBytes} at {chunk.Offset}");

@@ -108,6 +108,24 @@ internal static class ColumnBounds
     /// <summary>Whether the column's bounds are decimals, unscaled at its scale.</summary>
     internal static bool IsDecimal(ParquetColumn column) => column.Logical.Kind == LogicalTypeKind.Decimal;
 
+    /// <summary>The order of two values of a column, decimals at their scale; false where they do not compare.</summary>
+    internal static bool TryOrder(FilterLiteral a, FilterLiteral b, bool decimals, out int order)
+    {
+        if (decimals)
+        {
+            order = 0;
+            if (!ComparisonKernels.TryDecimal(a, out Int256 x) || !ComparisonKernels.TryDecimal(b, out Int256 y))
+            {
+                return false;
+            }
+
+            order = x.CompareTo(y);
+            return true;
+        }
+
+        return ZonePruner.TryCompare(a, b, out order);
+    }
+
     /// <summary>The bounds and counts <paramref name="statistics"/> give <paramref name="column"/>, those it does not believe left out.</summary>
     internal static ZoneBounds Of(ParquetColumn column, in ColumnStatistics statistics, ReadOnlySpan<byte> footer)
     {

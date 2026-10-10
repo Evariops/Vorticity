@@ -29,6 +29,9 @@ internal sealed class HandBuiltFile
     /// <summary>The rows the footer and its row group declare.</summary>
     internal long Rows { get; set; }
 
+    /// <summary>The sorting columns the row group declares: each leaf's ordinal, its direction and its nulls' place; null for none.</summary>
+    internal (int Column, bool Descending, bool NullsFirst)[]? Sorting { get; set; }
+
     /// <summary>
     /// Adds a group of <paramref name="children"/> elements, which the next elements are, annotated
     /// by its converted type or by a logical type whose member is an empty struct, as VARIANT's may be.
@@ -177,6 +180,19 @@ internal sealed class HandBuiltFile
 
         writer.WriteI64Field(2, total);
         writer.WriteI64Field(3, Rows);
+        if (Sorting is { } sorting)
+        {
+            writer.WriteListField(4, ThriftType.Struct, sorting.Length);
+            foreach ((int column, bool descending, bool nullsFirst) in sorting)
+            {
+                short entry = writer.BeginStruct();
+                writer.WriteI32Field(1, column);
+                writer.WriteBooleanField(2, descending);
+                writer.WriteBooleanField(3, nullsFirst);
+                writer.EndStruct(entry);
+            }
+        }
+
         writer.EndStruct(group);
         writer.WriteStringField(6, "hand");
         writer.EndStruct(file);

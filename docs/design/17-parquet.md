@@ -507,6 +507,32 @@ pipelines, and the 4 KiB of keystream XORed in a vector at a time.
 The suite's encrypted files, 128-bit and 256-bit keys, every footer mode, both algorithms, a prefix
 stored and one supplied, read as the rows of the C++ writer's test generator, every one.
 
+### 5.11 Ordered reads
+
+A scan in the order of a column, `OrderBy` or the pass of a group by on it, reads a file that lies
+in that order as it lies, with no sort. The file lies in it when every row group with rows declares
+the column first among its [`sorting_columns`](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L1061-L1064),
+in the scan's direction; its statistics give its minimum and maximum, no null and, for a float, no
+NaN; and each row group's first bound, its minimum ascending or its maximum descending, is at or
+past the last group's other bound, so that the groups follow one another. A bound cut short is
+still a bound. The plan's order says `SortedColumn` where the file streams and `InMemory` where it
+is sorted, and an ordered read is never cut into pieces read side by side.
+
+- **A null** in the column sorts the file: a scan places nulls last, which a file may have first,
+  and a row group's statistics count its nulls without saying where they lie.
+- **The other way**, an order backwards on a file sorted forwards, is a sort too: a row group read
+  backwards would need its rows reversed, held whole.
+- **A group by** on the column streams, each group out once the scan reads past it: the source
+  says the order comes on asking (`OrdersOnAsking`), which the core asks of a dataset's clustering
+  key.
+- **A declaration** is believed, as statistics are (§8); the verifier holds a row group's rows to
+  it. One malformed orders nothing.
+
+Measured on four million rows in sixteen row groups, on a key of one to five rows each: ordering
+by the key and summing a column takes 28.6 ms streamed against 234 ms sorted, allocating 46 KB
+against 16 MB; a group by on the key, 1.4 million groups, takes 91 ms streamed against 115 ms by
+hash, allocating 1.5 MB against 340 MB.
+
 ## 6. Writing
 
 ### 6.1 The files it writes
@@ -661,6 +687,21 @@ Read back, the five arrangements the tests write hold the rows their plaintext t
 it does, statistics, page index and Bloom filters alike, and are refused without their keys, under
 another prefix, or with a byte altered.
 
+### 6.8 Sorted files
+
+`ParquetWriteOptions.SortingColumns` declares the columns the rows are sorted on, the first of most
+precedence, in every row group's `sorting_columns`: flat columns of integers, decimals, booleans,
+text, bytes or times, each ascending or descending, its nulls first or last. A float is refused:
+its order has a NaN and two zeros to place, which the standard leaves to each writer.
+
+The writer holds the rows it is given to the declaration before any column takes them. A first key
+of integers with no null, the common declaration, is walked a register at a time by the core's pair
+kernel, the one the Vortex writer's `is_sorted` statistic uses, strictly where keys follow it so
+that its ties are handed to them; any other batch a pair at a time through the core's column
+orders. A batch's first row is held to the last batch's last, kept as literals. A row out of order
+refuses its batch whole, naming its place, and the file goes on from the rows it holds. Writing
+four million rows sorted on an integer key takes 264 ms with the declaration and 264 ms without.
+
 ## 7. Kernels
 
 Each is generic over its physical type and specialized by the compiler, vectorized with `Vector128`
@@ -776,7 +817,8 @@ comes down. Speed is measured against baselines this repository owns:
    spatial predicate; `FILE`, read and written as the struct of its fields, its references left to
    the caller to resolve; modular encryption, `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1`
    with AES in counter mode over `Aes.EncryptEcb`, keys from a resolver the caller gives, read
-   (§5.10) and written (§6.7); ordered reads on declared `sorting_columns`.
+   (§5.10) and written (§6.7); ordered reads on declared `sorting_columns` (§5.11), which the
+   writer declares and holds its rows to (§6.8).
 
 LZ4 and LZO are in no phase: the standard gives neither format (§3.2 #8).
 

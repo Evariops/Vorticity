@@ -15,7 +15,6 @@ using Vorticity.Parquet.Reading;
 using Vorticity.Parquet.Schema;
 using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
-using Vorticity.Types.Numerics;
 
 namespace Vorticity.Parquet.Verification;
 
@@ -81,10 +80,97 @@ internal static class ParquetVerifier
                         findings.Add(Finding(group, column, "pages", e.Message));
                     }
                 }
+
+                try
+                {
+                    await SortingAsync(file, group, findings, cancellationToken).ConfigureAwait(false);
+                }
+                catch (ParquetFormatException e)
+                {
+                    findings.Add(new ParquetFinding(group, null, "sorting_columns", e.Message));
+                }
             }
         }
 
         return findings;
+    }
+
+    /// <summary>
+    /// The order a row group's <c>sorting_columns</c> declare against its rows: each row at or after
+    /// the one before it, by the chain of its flat columns, nulls first or last as each says. A column
+    /// that is not flat, or whose values no literal reads, ends the chain where it stands.
+    /// </summary>
+    private static async ValueTask SortingAsync(ParquetFile file, int group, List<ParquetFinding> findings, CancellationToken cancellationToken)
+    {
+        ParquetFooter footer = file.Footer;
+        SortingColumn[] declared = footer.SortingColumns(group);
+        List<(SortingColumn Key, ChunkValues Values, bool Decimals)> keys = [];
+        foreach (SortingColumn key in declared)
+        {
+            if ((uint)key.Column >= (uint)file.Compiled.Columns.Length)
+            {
+                findings.Add(new ParquetFinding(group, null, "sorting_columns", $"a sorting column names column {key.Column} of {file.Compiled.Columns.Length}"));
+                return;
+            }
+
+            ParquetColumn column = file.Compiled.Columns[key.Column];
+            if (column.MaxRepetitionLevel > 0 || column.Form == LeafForm.Null || footer.Chunk(group, key.Column) is { Hidden: true })
+            {
+                break;
+            }
+
+            ChunkValues values = await ValuesAsync(file, group, column, cancellationToken).ConfigureAwait(false);
+            if (values.Unbounded)
+            {
+                break;
+            }
+
+            keys.Add((key, values, ColumnBounds.IsDecimal(column)));
+        }
+
+        if (keys.Count == 0)
+        {
+            return;
+        }
+
+        long rows = footer.RowGroups[group].RowCount;
+        for (int row = 1; row < rows; row++)
+        {
+            foreach ((SortingColumn key, ChunkValues values, bool decimals) in keys)
+            {
+                bool left = values.Valid[row - 1];
+                bool right = values.Valid[row];
+                int order;
+                if (!left || !right)
+                {
+                    if (left == right)
+                    {
+                        continue;
+                    }
+
+                    order = (left ? -1 : 1) * (key.NullsFirst ? -1 : 1);
+                }
+                else if (!ColumnBounds.TryOrder(values.Values[row - 1], values.Values[row], decimals, out order))
+                {
+                    return;
+                }
+                else if (key.Descending)
+                {
+                    order = -order;
+                }
+
+                if (order > 0)
+                {
+                    findings.Add(new ParquetFinding(group, file.Compiled.Columns[key.Column].DottedPath, "sorting_columns", $"row {row} comes before row {row - 1} in the order the row group declares"));
+                    return;
+                }
+
+                if (order < 0)
+                {
+                    break;
+                }
+            }
+        }
     }
 
     private static ParquetFinding Finding(int group, ParquetColumn column, string structure, string message) =>
@@ -287,7 +373,7 @@ internal static class ParquetVerifier
                 continue;
             }
 
-            if (TryOrder(value, min, decimals, out int low) && TryOrder(value, max, decimals, out int high))
+            if (ColumnBounds.TryOrder(value, min, decimals, out int low) && ColumnBounds.TryOrder(value, max, decimals, out int high))
             {
                 min = low < 0 ? value : min;
                 max = high > 0 ? value : max;
@@ -299,23 +385,6 @@ internal static class ParquetVerifier
         }
 
         return (min, max, bounded && has, nulls, nans);
-    }
-
-    private static bool TryOrder(FilterLiteral a, FilterLiteral b, bool decimals, out int order)
-    {
-        if (decimals)
-        {
-            order = 0;
-            if (!ComparisonKernels.TryDecimal(a, out Int256 x) || !ComparisonKernels.TryDecimal(b, out Int256 y))
-            {
-                return false;
-            }
-
-            order = x.CompareTo(y);
-            return true;
-        }
-
-        return ZonePruner.TryCompare(a, b, out order);
     }
 
     /// <summary>The chunk's statistics against its values: its null and NaN counts, and its bounds, equal to the extremes where exact and around them otherwise.</summary>
@@ -436,7 +505,7 @@ internal static class ParquetVerifier
     /// <summary>A bound against the extreme of the values it bounds: equal to it when exact, on its outer side otherwise.</summary>
     private static void Bound(int group, ParquetColumn column, string structure, bool has, FilterLiteral bound, FilterLiteral extreme, bool lower, bool exact, bool decimals, List<ParquetFinding> findings)
     {
-        if (!has || !TryOrder(bound, extreme, decimals, out int order))
+        if (!has || !ColumnBounds.TryOrder(bound, extreme, decimals, out int order))
         {
             return;
         }
@@ -492,7 +561,7 @@ internal static class ParquetVerifier
             Bound(group, column, $"column index, page {page}, min", true, low, min, lower: true, exact: false, decimals, findings);
             Bound(group, column, $"column index, page {page}, max", true, high, max, lower: false, exact: false, decimals, findings);
             if (previous && index.Order != BoundaryOrder.Unordered
-                && TryOrder(low, previousMin, decimals, out int byMin) && TryOrder(high, previousMax, decimals, out int byMax)
+                && ColumnBounds.TryOrder(low, previousMin, decimals, out int byMin) && ColumnBounds.TryOrder(high, previousMax, decimals, out int byMax)
                 && (index.Order == BoundaryOrder.Ascending ? byMin < 0 || byMax < 0 : byMin > 0 || byMax > 0))
             {
                 findings.Add(Finding(group, column, "column index", $"page {page}'s bounds break the {index.Order} order"));
