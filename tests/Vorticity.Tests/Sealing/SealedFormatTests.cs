@@ -169,6 +169,22 @@ public sealed class SealedFormatTests
     }
 
     [Fact]
+    public void ALengthNoTrailerCanHaveIsRefusedBeforeAByteOfItIsRead()
+    {
+        // A trailer lists at most every epoch a trailer may, under the longest descriptor: a length past
+        // that, in an object large enough to hold it, is refused from the eight bytes that carry it, so a
+        // corrupt length never makes a reader fetch megabytes it cannot use.
+        Span<byte> suffix = stackalloc byte[SealedFormat.TrailerSuffixBytes];
+        SealedFormat.TrailerMagic.CopyTo(suffix[4..]);
+        BitConverter.TryWriteBytes(suffix, (uint)SealedFormat.MaxTrailerBytes);
+        Assert.Equal(SealedFormat.MaxTrailerBytes, SealedLayout.TrailerLength(suffix, 1L << 40));
+
+        BitConverter.TryWriteBytes(suffix, (uint)SealedFormat.MaxTrailerBytes + 1);
+        byte[] tooLong = suffix.ToArray();
+        Assert.Throws<VortexFormatException>(() => SealedLayout.TrailerLength(tooLong, 1L << 40));
+    }
+
+    [Fact]
     public async Task AFrameFromAnotherObjectFails()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

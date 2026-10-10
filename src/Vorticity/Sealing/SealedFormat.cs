@@ -63,6 +63,13 @@ internal static class SealedFormat
     /// <summary>An appended epoch's entry also carries its salt and its commitment.</summary>
     internal const int AppendedEpochEntryBytes = EpochEntryBytes + SaltBytes + CommitmentBytes;
 
+    /// <summary>The longest descriptor: the fixed fields, and a key id, a context and a wrapped key each as long as allowed.</summary>
+    internal const int MaxDescriptorBytes = 2 + 1 + ObjectIdBytes + BindingBytes + 1 + MaxKeyIdBytes + 1 + MaxKeyContextBytes + 2
+        + MaxWrappedKeyBytes + SaltBytes + CommitmentBytes;
+
+    /// <summary>The longest trailer: the longest descriptor and every epoch a trailer may list, a bound on what a hostile length makes a reader fetch.</summary>
+    internal const int MaxTrailerBytes = MaxDescriptorBytes + 4 + EpochEntryBytes + ((MaxEpochs - 1) * AppendedEpochEntryBytes) + TrailerSuffixBytes;
+
     /// <summary>The bytes an open reads first from the end of a sealed file: a trailer of usual length and two frames of the default size.</summary>
     internal const int OpenReadBytes = 4096 + (2 * ((1 << DefaultFrameLog2) + TagBytes));
 

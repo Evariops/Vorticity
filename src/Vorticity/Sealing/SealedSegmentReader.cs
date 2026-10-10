@@ -153,6 +153,12 @@ internal sealed class SealedSegmentReader : ISegmentReader
             {
                 tail = Decrypt(layout, ciphers, end.Buffer.Span, endStart, tailStart, layout.PlainLength);
             }
+            else if (layout.Epochs[^1] is { PlainLength: 0 } empty && empty.FramesStart >= endStart)
+            {
+                // The last frame is checked at the open, as the decrypted tail checks it otherwise: an
+                // empty epoch's is its tag alone, which no read would ever reach.
+                OpenEmpty(ciphers[^1], empty, end.Buffer.Span[(int)(empty.FramesStart - endStart)..]);
+            }
 
             SealedSegmentReader reader = new SealedSegmentReader(inner, ownsInner, layout, ciphers, tail, tailStart, options ?? SegmentReadOptions.Default);
             ciphers = null;
@@ -345,6 +351,20 @@ internal sealed class SealedSegmentReader : ISegmentReader
         finally
         {
             CryptographicOperations.ZeroMemory(key);
+        }
+    }
+
+    /// <summary>Checks the one frame of an empty epoch, its tag over no plaintext, final.</summary>
+    private static void OpenEmpty(EpochCipher cipher, SealedEpoch epoch, ReadOnlySpan<byte> frame)
+    {
+        AesGcm aes = cipher.Rent();
+        try
+        {
+            EpochCipher.Open(aes, 0, final: true, ReadOnlySpan<byte>.Empty, frame[..SealedFormat.TagBytes], Span<byte>.Empty, epoch.FramesStart);
+        }
+        finally
+        {
+            cipher.Return(aes);
         }
     }
 
