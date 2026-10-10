@@ -282,7 +282,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
-        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired)
+        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
+        bool sealScratch = false)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -329,7 +330,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes = IndexWriter.Asks(indexes)
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
-                scratchDirectory, scratchMemoryBytes, wideRowsAbove)
+                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch)
             {
                 Fences = fences,
                 BudgetSparesRequired = budgetSparesRequired,
@@ -549,7 +550,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired)
+            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
+            options.SealScratch)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _metadata = UserMetadata.Ordered(options.Metadata),
@@ -711,7 +713,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// entry records against the one its envelope binds.
     /// </summary>
     private static VortexWriteOptions Identified(VortexWriteOptions options, VortexSession session) =>
-        session.Seals && options.Identity is null ? options.WithIdentity(Guid.NewGuid()) : options;
+        !session.Seals
+            ? options
+            : (options.Identity is null ? options.WithIdentity(Guid.NewGuid()) : options) with { SealScratch = true };
 
     /// <summary>The sink over <paramref name="pipe"/>: a sealing stage when the session seals its files, a plain one otherwise.</summary>
     private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session, VortexWriteOptions options)
