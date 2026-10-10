@@ -55,7 +55,7 @@ internal static class SealedObjects
     /// pieces of <paramref name="chunk"/> bytes; <paramref name="key"/> stays the caller's.
     /// </summary>
     internal static async Task<byte[]> AppendSealAsync(
-        byte[] sealedBytes, ReadOnlyMemory<byte> plaintext, DataKey key, int chunk, CancellationToken cancellationToken)
+        byte[] sealedBytes, ReadOnlyMemory<byte> plaintext, DataKey key, int chunk, CancellationToken cancellationToken, DataKey? appendWith = null)
     {
         SealedLayout layout;
         await using (SealedSegmentReader reader = await SealedSegmentReader.OpenAsync(
@@ -65,7 +65,7 @@ internal static class SealedObjects
         }
 
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, layout, _ => new ValueTask<DataKey>(key.Retain()));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, layout, _ => new ValueTask<DataKey>((appendWith ?? key).Retain()));
         try
         {
             if (sink.Position != layout.PlainLength)

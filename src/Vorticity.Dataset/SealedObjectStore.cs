@@ -502,7 +502,7 @@ internal sealed class SealedObjectStore : IObjectStore
             }
 
             int descriptorLength = BinaryPrimitives.ReadInt32LittleEndian(bytes[8..]);
-            if (descriptorLength <= 0 || descriptorLength > 4 * HeaderAllowance)
+            if (descriptorLength <= 0 || descriptorLength > SealedFormat.MaxDescriptorBytes)
             {
                 throw new CommitFormatException($"'{key}' claims a descriptor of {descriptorLength} bytes.");
             }

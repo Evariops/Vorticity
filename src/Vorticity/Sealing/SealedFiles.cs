@@ -158,7 +158,7 @@ internal static class SealedFiles
             prefix.Release();
         }
 
-        if (descriptorLength <= 0 || descriptorLength > length - SealedFormat.HeaderPrefixBytes)
+        if (descriptorLength <= 0 || descriptorLength > SealedFormat.MaxDescriptorBytes || descriptorLength > length - SealedFormat.HeaderPrefixBytes)
         {
             return null;
         }

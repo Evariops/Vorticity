@@ -226,6 +226,18 @@ internal sealed class SealingSegmentSink : ISegmentSink
         Span<byte> commitment = stackalloc byte[SealedFormat.CommitmentBytes];
         try
         {
+            if (_continued is not null)
+            {
+                // An epoch sealed under another data key than the object's would make the whole object
+                // unreadable: the key handed over is checked against the first epoch's commitment first.
+                SealedFormat.Derive(dataKey.Key, descriptor.Salt, descriptor.Hash, 0, 0, key, commitment);
+                if (!CryptographicOperations.FixedTimeEquals(commitment, descriptor.Commitment))
+                {
+                    throw VortexEncryptionException.Unauthenticated(
+                        "The data key handed to the append is not the one the sealed object was sealed under: no epoch is written.");
+                }
+            }
+
             SealedFormat.Derive(dataKey.Key, salt, descriptor.Hash, epoch, _plainStart, key, commitment);
             if (_continued is null)
             {

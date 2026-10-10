@@ -2,7 +2,8 @@
 //
 // WHAT IS HELD: epochs appended to a sealed object read back as one plaintext, across their seams and
 // an empty epoch, each under a salt of its own; every byte of an append flipped fails but the old
-// trailer's, which nothing reads any more; epochs reordered or dropped from the middle fail; a sealed
+// trailer's, which nothing reads any more; epochs reordered or dropped from the middle fail; an append
+// handed another data key than the object's is refused before it seals a frame; a sealed
 // file appended to through a session reads as the rows written, holds none of them in plain, and
 // needs the key, not the sealing policy; a session that seals adds no plaintext to a plain file; an
 // abandoned append leaves the file byte for byte as it was; a torn append opens at the version before
@@ -124,6 +125,41 @@ public sealed class SealedAppendTests : IDisposable
         Assert.Equal(plaintext, await SealedFormatTests.OpenWithAsync(WithEpochs(sealedBytes, trailerStart, descriptor, first, middle, last), key, ct));
         await SealedFormatTests.AssertRefusedAsync(WithEpochs(sealedBytes, trailerStart, descriptor, first, last, middle), key, ct, "the last two epochs swapped");
         await SealedFormatTests.AssertRefusedAsync(WithEpochs(sealedBytes, trailerStart, descriptor, first, last), key, ct, "the middle epoch dropped");
+    }
+
+    [Fact]
+    public async Task AnEmptyLastEpochIsCheckedAtTheOpen()
+    {
+        // The open checks the last frame, which for an empty epoch is a tag over nothing that no read
+        // would reach: a tag altered there fails the open, as an altered last frame of plaintext does.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using DataKey key = new DataKey("kat", SealedObjects.Key(7), SealedObjects.Key(9));
+        byte[] once = await SealedObjects.SealAsync(SealedObjects.Pattern(5_000), key, SealParameters.ForFile(12), 5_000, ct);
+        byte[] emptied = await SealedObjects.AppendSealAsync(once, ReadOnlyMemory<byte>.Empty, key, 1, ct);
+        Assert.Equal(SealedObjects.Pattern(5_000), await SealedFormatTests.OpenWithAsync(emptied, key, ct));
+
+        for (int at = once.Length; at < once.Length + SealedFormat.TagBytes; at++)
+        {
+            byte[] flipped = (byte[])emptied.Clone();
+            flipped[at] ^= 0x01;
+            await SealedFormatTests.AssertRefusedAsync(flipped, key, ct, $"the empty epoch's tag byte {at - once.Length} flipped");
+        }
+    }
+
+    [Fact]
+    public async Task AnAppendUnderAnotherDataKeyIsRefusedBeforeItSealsAFrame()
+    {
+        // An epoch under another key than the object's would make every epoch unreadable: the stage
+        // checks the key against the first epoch's commitment before it seals a byte.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using DataKey key = new DataKey("kat", SealedObjects.Key(7), SealedObjects.Key(9));
+        using DataKey other = new DataKey("kat", SealedObjects.Key(8), SealedObjects.Key(9));
+        byte[] sealedBytes = await SealedObjects.SealAsync(SealedObjects.Pattern(5_000), key, SealParameters.ForFile(12), 5_000, ct);
+
+        VortexEncryptionException refused = await Assert.ThrowsAsync<VortexEncryptionException>(
+            async () => await SealedObjects.AppendSealAsync(sealedBytes, SealedObjects.Pattern(100), key, 100, ct, appendWith: other));
+        Assert.Equal(VortexEncryptionError.Unauthenticated, refused.Error);
+        Assert.Equal(SealedObjects.Pattern(5_000), await SealedFormatTests.OpenWithAsync(sealedBytes, key, ct));
     }
 
     [Fact]

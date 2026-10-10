@@ -69,7 +69,7 @@ internal sealed class SealedLayout
         }
 
         uint length = BinaryPrimitives.ReadUInt32LittleEndian(end[^SealedFormat.TrailerSuffixBytes..]);
-        if (length < SealedFormat.TrailerSuffixBytes || length > objectLength - SealedFormat.HeaderPrefixBytes || length > int.MaxValue)
+        if (length < SealedFormat.TrailerSuffixBytes || length > objectLength - SealedFormat.HeaderPrefixBytes || length > SealedFormat.MaxTrailerBytes)
         {
             throw new VortexFormatException($"Malformed sealed object: a trailer of {length} bytes does not fit an object of {objectLength}.");
         }
