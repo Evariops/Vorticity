@@ -758,6 +758,12 @@ internal sealed class ParquetSchema
         return algorithm > MaxEdgeAlgorithm ? null : VortexType.Extension(GeographyExtensionId, VortexType.Binary, (byte[])[(byte)algorithm, .. crs]);
     }
 
+    /// <summary>
+    /// The extension id a FILE reads as: the struct of its fields, a reference to bytes inline or at
+    /// a URI, which the standard names.
+    /// </summary>
+    internal const string FileExtensionId = "parquet.file";
+
     /// <summary>The prefix of a CRS that names a key of the file's key-value metadata holding its PROJJSON.</summary>
     internal const string ProjjsonPrefix = "projjson:";
 
@@ -880,9 +886,39 @@ internal sealed class ParquetSchema
                 LogicalTypeKind.List => ListOf(index, name, nullable),
                 LogicalTypeKind.Map => MapOf(index, name, nullable),
                 LogicalTypeKind.Variant => VariantOf(index, name, nullable),
+                LogicalTypeKind.File => FileOf(index, name, nullable),
                 _ => Struct(index, name, nullable),
             };
         }
+
+        /// <summary>
+        /// A FILE-annotated group: the struct of its fields under <c>parquet.file</c> where each is one
+        /// the standard names, of its type, and optional; else the struct alone, the annotation
+        /// dropped as one on a type it does not fit.
+        /// </summary>
+        private ParquetField FileOf(int index, string name, bool nullable)
+        {
+            ParquetField field = Struct(index, name, nullable);
+            foreach (ParquetField child in field.Children)
+            {
+                if (child.Shape != FieldShape.Leaf || !child.IsNullable || !IsFileField(child.Name, columns[child.Column]))
+                {
+                    return field;
+                }
+            }
+
+            field.Type = VortexType.Extension(FileExtensionId, field.Type);
+            return field;
+        }
+
+        /// <summary>Whether <paramref name="column"/> is the FILE field <paramref name="name"/>, of the type the standard gives it.</summary>
+        private static bool IsFileField(string name, ParquetColumn column) => name switch
+        {
+            "uri" or "content_type" or "checksum" => column.Physical == PhysicalType.ByteArray && column.Logical.Kind == LogicalTypeKind.String,
+            "offset" or "size" => column.Physical == PhysicalType.Int64 && column.Logical.Kind == LogicalTypeKind.None,
+            "inline" => column.Physical == PhysicalType.ByteArray && column.Logical.Kind == LogicalTypeKind.None,
+            _ => false,
+        };
 
         /// <summary>
         /// A VARIANT-annotated group: its fields compile as a struct's, which a read assembles and

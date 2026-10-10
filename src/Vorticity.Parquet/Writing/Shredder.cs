@@ -79,6 +79,12 @@ internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
             Define(arena, field, step.Nullable, step.DefinedAt, column);
             if (step.Kind == ShredKind.Struct)
             {
+                // An extension over a struct, a FILE's, holds its fields in its storage, whose validity is its own.
+                if (field.Kind == CanonicalKind.Extension)
+                {
+                    field = arena.GetNode(EncodedForms.Canonical(arena, field.StorageIndex));
+                }
+
                 current = EncodedForms.Canonical(arena, field.GetFieldIndex(step.Child));
                 continue;
             }

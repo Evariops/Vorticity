@@ -260,6 +260,10 @@ internal sealed class WriteSchema
                 return;
             }
 
+            case VortexTypeKind.Extension when type.ExtensionId == Schema.ParquetSchema.FileExtensionId:
+                File(name, type, field, place, elements, columns);
+                return;
+
             case VortexTypeKind.Variant:
             {
                 LogicalTypeInfo logical = Logical(LogicalTypeKind.Variant);
@@ -319,6 +323,45 @@ internal sealed class WriteSchema
                     LogicalType = column.Logical,
                 });
                 return;
+        }
+    }
+
+    /// <summary>
+    /// A FILE: a group annotated <c>FILE</c> of its fields, each one the standard names, of its type,
+    /// and optional, through the extension's node to its struct's.
+    /// </summary>
+    private static void File(string name, VortexType type, int field, Place place, List<SchemaElement> elements, List<WriteColumn> columns)
+    {
+        VortexType storage = type.StorageType!;
+        ReadOnlySpan<VortexField> fields = storage.Kind == VortexTypeKind.Struct ? storage.Fields : [];
+        foreach (VortexField part in fields)
+        {
+            bool fits = part.Type.IsNullable && part.Name switch
+            {
+                "uri" or "content_type" or "checksum" => part.Type.Kind == VortexTypeKind.Utf8,
+                "offset" or "size" => part.Type.Kind == VortexTypeKind.Primitive && part.Type.PrimitiveType == PType.I64,
+                "inline" => part.Type.Kind == VortexTypeKind.Binary,
+                _ => false,
+            };
+            if (!fits)
+            {
+                throw new ParquetUnsupportedException("FILE", ParquetComponentKind.LogicalType,
+                    $"The FILE '{name}' holds a field '{part.Name}' of {part.Type}; a FILE's are uri, content_type and checksum of text, offset and size of i64, and inline of binary, each nullable.");
+            }
+        }
+
+        if (fields.IsEmpty)
+        {
+            throw new ParquetUnsupportedException("FILE", ParquetComponentKind.LogicalType, $"The FILE '{name}' holds no field.");
+        }
+
+        bool nullable = type.IsNullable;
+        int definedAt = place.Definition + (nullable ? 1 : 0);
+        elements.Add(Group(name, nullable ? FieldRepetition.Optional : FieldRepetition.Required, fields.Length, Logical(LogicalTypeKind.File), -1));
+        for (int i = 0; i < fields.Length; i++)
+        {
+            ShredStep step = new(ShredKind.Struct, i, nullable, definedAt, 0, 0);
+            Field(fields[i].Name, fields[i].Type, field, new Place([.. place.Path, fields[i].Name], [.. place.Steps, step], definedAt, place.Repetition), elements, columns);
         }
     }
 

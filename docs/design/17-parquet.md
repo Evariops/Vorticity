@@ -205,7 +205,7 @@ physical type ([LogicalTypes.md][lt], *Unsupported Logical Types*).
 | `MAP` | `Map`, a list view of key-value entries as the core holds one | levels |
 | `VARIANT` | `Variant`: the core's struct of the `metadata` and `value` binaries, under the variant dtype | the metadata a view; the value a view where nothing is shredded, else rebuilt (§5.6) |
 | `GEOMETRY`, `GEOGRAPHY` | `parquet.geometry`, `parquet.geography` over `Binary`: its WKB, the extension's metadata the CRS's UTF-8, a GEOGRAPHY's after a byte of its edge algorithm (§3.2 #21) | views over the page |
-| `FILE` | phase 3 (§11): a struct | — |
+| `FILE` | `parquet.file` over the struct of its fields, where each is one the standard names, of its type, and optional; else the struct alone, the annotation dropped | levels |
 
 A file this writer made carries its Vortex schema in its key-value metadata (§6.1). Top-level column
 by top-level column, where that schema agrees with the Parquet schema, it restores what Parquet
@@ -232,6 +232,7 @@ are kept and shown by `Metadata`.
 | `Null` | INT32 with `UNKNOWN` |
 | `parquet.interval` | FIXED_LEN_BYTE_ARRAY(12) with the `INTERVAL` converted type |
 | `parquet.geometry`, `parquet.geography` | BYTE_ARRAY with `GEOMETRY` or `GEOGRAPHY`, its CRS and edge algorithm; no bounds, and the chunk's `GeospatialStatistics` (§6.1) |
+| `parquet.file` over a struct of the fields `FILE` names | a group annotated `FILE` of them, each optional; any other field is refused |
 | `parquet.int96` | refused: INT96 is deprecated |
 | a union | unsupported |
 
@@ -711,9 +712,10 @@ comes down. Speed is measured against baselines this repository owns:
    standard says Preview; `VARIANT`, read unshredded and shredded and written unshredded, through
    the core's Parquet variant encoding; `GEOMETRY` and `GEOGRAPHY` with their bounding-box
    statistics, written and verified, which no filter prunes by until the core's expressions have a
-   spatial predicate; `FILE`; modular encryption,
-   `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1` with AES in counter mode over `Aes.EncryptEcb`,
-   keys from a resolver the caller gives; ordered reads on declared `sorting_columns`.
+   spatial predicate; `FILE`, read and written as the struct of its fields, its references left to
+   the caller to resolve; modular encryption, `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1`
+   with AES in counter mode over `Aes.EncryptEcb`, keys from a resolver the caller gives; ordered
+   reads on declared `sorting_columns`.
 
 LZ4 and LZO are in no phase: the standard gives neither format (§3.2 #8).
 

@@ -81,7 +81,15 @@ internal sealed class NestedFieldReader
 
     private static Part Plan(ParquetField field, DType type, Columns columns, int repetition, int definition)
     {
-        Part part = new() { Field = field, Type = type };
+        // An extension over a group, a FILE's: the group's struct, wrapped once it is built.
+        DType wrapper = default;
+        if (field.Shape == FieldShape.Struct && type.Kind == DTypeKind.Extension)
+        {
+            wrapper = type;
+            type = type.StorageType;
+        }
+
+        Part part = new() { Field = field, Type = type, Wrapper = wrapper };
         switch (field.Shape)
         {
             case FieldShape.Leaf:
@@ -215,7 +223,8 @@ internal sealed class NestedFieldReader
                     part.Nodes[i] = Build(context, part.Children[i], repetition, definition, length);
                 }
 
-                return arena.AddStruct(part.Type, length, validity, part.Nodes);
+                int node = arena.AddStruct(part.Type, length, validity, part.Nodes);
+                return part.Wrapper.IsDefault ? node : arena.AddExtension(part.Wrapper, length, node);
             }
 
             case FieldShape.Variant:
@@ -384,6 +393,9 @@ internal sealed class NestedFieldReader
 
         /// <summary>A map's key-value struct.</summary>
         internal DType Entries { get; set; }
+
+        /// <summary>The extension a group's struct is wrapped in, or the default dtype.</summary>
+        internal DType Wrapper { get; init; }
 
         /// <summary>A variant's group, as the struct of its fields.</summary>
         internal DType Storage { get; set; }
