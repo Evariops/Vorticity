@@ -128,17 +128,29 @@ internal static class SealedFormat
         Span<byte> commitInfo = stackalloc byte[6 + InfoBytes];
         try
         {
-            HKDF.Extract(HashAlgorithmName.SHA256, dataKey, salt, prk);
+            Extract(dataKey, salt, prk);
             int keyInfoLength = Info(KeyLabel, descriptorHash, epoch, firstOffset, keyInfo);
             int commitInfoLength = Info(CommitLabel, descriptorHash, epoch, firstOffset, commitInfo);
-            HKDF.Expand(HashAlgorithmName.SHA256, prk, key[..KeyBytes], keyInfo[..keyInfoLength]);
-            HKDF.Expand(HashAlgorithmName.SHA256, prk, commitment[..CommitmentBytes], commitInfo[..commitInfoLength]);
+            Expand(prk, keyInfo[..keyInfoLength], key[..KeyBytes]);
+            Expand(prk, commitInfo[..commitInfoLength], commitment[..CommitmentBytes]);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(prk);
         }
     }
+
+    /// <summary>
+    /// HKDF-Extract with SHA-256 (RFC 5869): the pseudorandom key of <paramref name="inputKey"/> under
+    /// <paramref name="salt"/>. The platform's arguments come in another order than the RFC's, which
+    /// the RFC's vectors check here.
+    /// </summary>
+    internal static void Extract(ReadOnlySpan<byte> inputKey, ReadOnlySpan<byte> salt, Span<byte> pseudorandomKey) =>
+        HKDF.Extract(HashAlgorithmName.SHA256, inputKey, salt, pseudorandomKey);
+
+    /// <summary>HKDF-Expand with SHA-256 (RFC 5869): <paramref name="output"/> filled from <paramref name="pseudorandomKey"/> and <paramref name="info"/>.</summary>
+    internal static void Expand(ReadOnlySpan<byte> pseudorandomKey, ReadOnlySpan<byte> info, Span<byte> output) =>
+        HKDF.Expand(HashAlgorithmName.SHA256, pseudorandomKey, output, info);
 
     private static int Info(ReadOnlySpan<byte> label, ReadOnlySpan<byte> descriptorHash, uint epoch, long firstOffset, Span<byte> info)
     {
