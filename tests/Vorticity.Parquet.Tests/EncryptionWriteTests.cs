@@ -59,7 +59,7 @@ public sealed class EncryptionWriteTests : IDisposable
         string encrypted = await WriteAsync(options);
 
         byte[] bytes = await System.IO.File.ReadAllBytesAsync(encrypted, Ct);
-        string magic = options.Encryption!.PlaintextFooter ? "PAR1" : "PARE";
+        string magic = options.Encryption!.WritePlaintextFooter ? "PAR1" : "PARE";
         Assert.Equal(magic, Encoding.ASCII.GetString(bytes, 0, 4));
         Assert.Equal(magic, Encoding.ASCII.GetString(bytes, bytes.Length - 4, 4));
         Assert.Equal(-1, bytes.AsSpan().IndexOf("label-7"u8));
@@ -173,7 +173,7 @@ public sealed class EncryptionWriteTests : IDisposable
         {
             "uniform" => (new ParquetWriteOptions { Encryption = new ParquetEncryption { FooterKey = FooterKey } }, decryption),
             "columns-ctr" => (new ParquetWriteOptions { Encryption = new ParquetEncryption { FooterKey = FooterKey, ColumnKeys = columns, Algorithm = ParquetEncryptionAlgorithm.AesGcmCtr } }, decryption),
-            "plaintext-footer" => (new ParquetWriteOptions { Encryption = new ParquetEncryption { FooterKey = FooterKey, FooterKeyMetadata = Encoding.UTF8.GetBytes("footer"), ColumnKeys = columns, PlaintextFooter = true } }, decryption),
+            "plaintext-footer" => (new ParquetWriteOptions { Encryption = new ParquetEncryption { FooterKey = FooterKey, FooterKeyMetadata = Encoding.UTF8.GetBytes("footer"), ColumnKeys = columns, WritePlaintextFooter = true } }, decryption),
             "hidden-prefix" => (new ParquetWriteOptions { Encryption = new ParquetEncryption { FooterKey = FooterKey, AadPrefix = Encoding.UTF8.GetBytes("table-1"), StoreAadPrefix = false } }, decryption with { AadPrefix = Encoding.UTF8.GetBytes("table-1") }),
             _ => (new ParquetWriteOptions { DataPageVersion = DataPageVersion.V1, Compression = ParquetCompression.Zstd, Encryption = new ParquetEncryption { FooterKey = FooterKey, ColumnKeys = columns } }, decryption),
         };

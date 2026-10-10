@@ -131,8 +131,8 @@ public sealed partial class MetadataOracleTests : IDisposable
         Assert.Equal(0, id.Statistics!.NullCount);
         long first = metadata.RowGroups[0].RowCount;
         Assert.Equal(rows.Take((int)first).Min(r => r.Id).ToString(System.Globalization.CultureInfo.InvariantCulture), id.Statistics.Min);
-        Assert.True(id.Statistics.MinExact);
-        Assert.Contains(metadata.KeyValues, pair => pair.Key == "vorticity.schema");
+        Assert.True(id.Statistics.IsMinExact);
+        Assert.Contains(metadata.KeyValueMetadata, pair => pair.Key == "vorticity.schema");
     }
 
     [Theory]

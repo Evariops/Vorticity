@@ -63,7 +63,7 @@ public sealed class PagesOutTests : IDisposable
             }
 
             ParquetWriteReport report = await writer.CompleteAsync(Ct);
-            Assert.Equal(5, report.RowGroups);
+            Assert.Equal(5, report.RowGroupCount);
         }
 
         // Five row groups went out from the buffers they were compressed into; the pipe held the

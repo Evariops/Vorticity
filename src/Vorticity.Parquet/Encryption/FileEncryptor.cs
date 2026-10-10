@@ -32,7 +32,7 @@ internal sealed class FileEncryptor : IDisposable
     }
 
     /// <summary>Whether the footer is in plaintext, signed.</summary>
-    internal bool PlaintextFooter => _options.PlaintextFooter;
+    internal bool PlaintextFooter => _options.WritePlaintextFooter;
 
     /// <summary>The AAD's file parts: the prefix, then <see cref="Unique"/>.</summary>
     internal byte[] FileAad { get; }

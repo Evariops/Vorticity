@@ -47,7 +47,7 @@ public sealed record ParquetEncryption
     public ParquetEncryptionAlgorithm Algorithm { get; init; }
 
     /// <summary>Whether the footer is written in plaintext, signed, rather than encrypted.</summary>
-    public bool PlaintextFooter { get; init; }
+    public bool WritePlaintextFooter { get; init; }
 
     /// <summary>The file's AAD prefix, which a reader may be held to; empty for none.</summary>
     public ReadOnlyMemory<byte> AadPrefix { get; init; }

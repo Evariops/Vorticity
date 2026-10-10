@@ -77,7 +77,7 @@ public sealed partial class ParquetWriterTests
             await writer.WriteAsync(builder, Ct);
             ParquetWriteReport report = await writer.CompleteAsync(Ct);
             Assert.Equal(Rows, report.RowCount);
-            Assert.Equal(1, report.RowGroups);
+            Assert.Equal(1, report.RowGroupCount);
             Assert.Equal(new FileInfo(path.Value).Length, report.Bytes);
         }
 
@@ -322,7 +322,7 @@ public sealed partial class ParquetWriterTests
             await writer.WriteAsync(builder, Ct);
             Assert.Equal(2, writer.RowGroupCount);
             ParquetWriteReport report = await writer.CompleteAsync(Ct);
-            Assert.Equal(3, report.RowGroups);
+            Assert.Equal(3, report.RowGroupCount);
             Assert.Equal(8_000, report.RowCount);
 
             void Append(int rows)
@@ -616,7 +616,7 @@ public sealed partial class ParquetWriterTests
         await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Reading>(empty.Value))
         {
             ParquetWriteReport report = await writer.CompleteAsync(Ct);
-            Assert.Equal(0, report.RowGroups);
+            Assert.Equal(0, report.RowGroupCount);
         }
 
         WrittenFile none = new(await System.IO.File.ReadAllBytesAsync(empty.Value, Ct));

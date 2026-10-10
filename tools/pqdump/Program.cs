@@ -156,15 +156,15 @@ internal static class Program
                     chunk.HasColumnIndex ? "column-index" : string.Empty,
                     chunk.HasOffsetIndex ? "offset-index" : string.Empty,
                     chunk.HasBloomFilter ? "bloom" : string.Empty,
-                    chunk.AllDataPagesDictionary == true ? "all-codes" : string.Empty).Trim();
+                    chunk.IsFullyDictionaryEncoded == true ? "all-codes" : string.Empty).Trim();
                 if (chunk.Statistics is not { } statistics)
                 {
                     Line(output, $"  {chunk.Column}: none {beside}");
                 }
                 else
                 {
-                    string min = statistics.Min is { } low ? (statistics.MinExact ? low : low + " (bound)") : "-";
-                    string max = statistics.Max is { } high ? (statistics.MaxExact ? high : high + " (bound)") : "-";
+                    string min = statistics.Min is { } low ? (statistics.IsMinExact ? low : low + " (bound)") : "-";
+                    string max = statistics.Max is { } high ? (statistics.IsMaxExact ? high : high + " (bound)") : "-";
                     string nulls = statistics.NullCount?.ToString(CultureInfo.InvariantCulture) ?? "?";
                     string nans = statistics.NanCount is { } count ? $" nan {count}" : string.Empty;
                     Line(output, $"  {chunk.Column}: min {min} max {max} nulls {nulls}{nans} {beside}");
@@ -187,7 +187,7 @@ internal static class Program
     {
         Line(output, string.Empty);
         Line(output, "key-value metadata");
-        foreach (KeyValuePair<string, string?> pair in metadata.KeyValues)
+        foreach (KeyValuePair<string, string?> pair in metadata.KeyValueMetadata)
         {
             string value = pair.Value is null ? "(none)" : pair.Value.Length > 120 ? pair.Value[..120] + "..." : pair.Value;
             Line(output, $"  {pair.Key} = {value}");

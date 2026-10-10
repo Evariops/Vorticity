@@ -166,7 +166,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                     DefersPages = _lanes > 1 && map.Columns.Length > 1,
                     DataPages = options.DataPageVersion,
                     AlignUncompressedPages = options.AlignUncompressedPages,
-                    AllowAlp = options.Alp,
+                    AllowAlp = options.AllowAlp,
                     Hint = hint,
                     Encryptor = _encryptor?.Column(path, column.Path, i),
                     Lanes = lanes,

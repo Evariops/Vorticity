@@ -698,7 +698,7 @@ encoding takes 178 ms of 2 081, nearly all of it the encoding a remembered plan 
 |---|---|
 | BOOLEAN | PLAIN; RLE when runs make it smaller |
 | INT32, INT64 | PLAIN, RLE_DICTIONARY, DELTA_BINARY_PACKED; BYTE_STREAM_SPLIT under a codec, by trial |
-| FLOAT, DOUBLE | PLAIN, RLE_DICTIONARY; BYTE_STREAM_SPLIT under a codec, by trial; ALP when `Alp` is enabled, by the same trial, which then weighs all three on the chunk's first PLAIN page |
+| FLOAT, DOUBLE | PLAIN, RLE_DICTIONARY; BYTE_STREAM_SPLIT under a codec, by trial; ALP when `AllowAlp` is set, by the same trial, which then weighs all three on the chunk's first PLAIN page |
 | BYTE_ARRAY | PLAIN, RLE_DICTIONARY, DELTA_LENGTH_BYTE_ARRAY, DELTA_BYTE_ARRAY |
 | FIXED_LEN_BYTE_ARRAY | PLAIN, RLE_DICTIONARY, DELTA_BYTE_ARRAY; BYTE_STREAM_SPLIT under a codec, by trial |
 | levels | the RLE/bit-packing hybrid, the only encoding v2 allows |

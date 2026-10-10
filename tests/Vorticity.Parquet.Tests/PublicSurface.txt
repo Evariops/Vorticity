@@ -31,7 +31,7 @@ Vorticity.Parquet:     method int GetHashCode()
 Vorticity.Parquet:     method string ToString()
 Vorticity.Parquet:     method void Deconstruct(out string, out string, out IReadOnlyList<string>, out long, out long, out long, out long, out ParquetStatisticsInfo, out bool, out bool, out bool, out Nullable<bool>, out ParquetGeospatialInfo)
 Vorticity.Parquet:     property IReadOnlyList<string> Encodings { get; init; }
-Vorticity.Parquet:     property Nullable<bool> AllDataPagesDictionary { get; init; }
+Vorticity.Parquet:     property Nullable<bool> IsFullyDictionaryEncoded { get; init; }
 Vorticity.Parquet:     property ParquetGeospatialInfo Geospatial { get; init; }
 Vorticity.Parquet:     property ParquetStatisticsInfo Statistics { get; init; }
 Vorticity.Parquet:     property bool HasBloomFilter { get; init; }
@@ -141,8 +141,8 @@ Vorticity.Parquet:     property ParquetEncryptionAlgorithm Algorithm { get; init
 Vorticity.Parquet:     property ReadOnlyMemory<byte> AadPrefix { get; init; }
 Vorticity.Parquet:     property ReadOnlyMemory<byte> FooterKey { get; init; }
 Vorticity.Parquet:     property ReadOnlyMemory<byte> FooterKeyMetadata { get; init; }
-Vorticity.Parquet:     property bool PlaintextFooter { get; init; }
 Vorticity.Parquet:     property bool StoreAadPrefix { get; init; }
+Vorticity.Parquet:     property bool WritePlaintextFooter { get; init; }
 Vorticity.Parquet: enum Vorticity.Parquet.ParquetEncryptionAlgorithm
 Vorticity.Parquet:     const ParquetEncryptionAlgorithm AesGcm = 0
 Vorticity.Parquet:     const ParquetEncryptionAlgorithm AesGcmCtr = 1
@@ -219,7 +219,7 @@ Vorticity.Parquet:     method IAsyncResult BeginInvoke(ParquetKeyRequest, AsyncC
 Vorticity.Parquet:     method ReadOnlyMemory<byte> EndInvoke(IAsyncResult)
 Vorticity.Parquet:     method ReadOnlyMemory<byte> Invoke(ParquetKeyRequest)
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetMetadata
-Vorticity.Parquet:     property IReadOnlyList<KeyValuePair<string, string>> KeyValues { get; }
+Vorticity.Parquet:     property IReadOnlyList<KeyValuePair<string, string>> KeyValueMetadata { get; }
 Vorticity.Parquet:     property IReadOnlyList<ParquetColumnInfo> Columns { get; }
 Vorticity.Parquet:     property IReadOnlyList<ParquetRowGroupInfo> RowGroups { get; }
 Vorticity.Parquet:     property int Version { get; }
@@ -238,7 +238,7 @@ Vorticity.Parquet:     property ParquetDecryption Decryption { get; init; }
 Vorticity.Parquet:     property ParquetOpenOptions Default { get; }
 Vorticity.Parquet:     property bool VerifyChecksums { get; init; }
 Vorticity.Parquet:     property int MaxFooterBytes { get; init; }
-Vorticity.Parquet:     property long MaxDecompressedSize { get; init; }
+Vorticity.Parquet:     property long MaxDecompressedBytes { get; init; }
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetRowGroupInfo : IEquatable<ParquetRowGroupInfo>
 Vorticity.Parquet:     ctor ParquetRowGroupInfo(int, long, long, IReadOnlyList<ParquetChunkInfo>, IReadOnlyList<ParquetSortingColumn>)
 Vorticity.Parquet:     method ParquetRowGroupInfo <Clone>$()
@@ -292,8 +292,8 @@ Vorticity.Parquet:     method void Deconstruct(out Nullable<long>, out Nullable<
 Vorticity.Parquet:     property Nullable<long> DistinctCount { get; init; }
 Vorticity.Parquet:     property Nullable<long> NanCount { get; init; }
 Vorticity.Parquet:     property Nullable<long> NullCount { get; init; }
-Vorticity.Parquet:     property bool MaxExact { get; init; }
-Vorticity.Parquet:     property bool MinExact { get; init; }
+Vorticity.Parquet:     property bool IsMaxExact { get; init; }
+Vorticity.Parquet:     property bool IsMinExact { get; init; }
 Vorticity.Parquet:     property string Max { get; init; }
 Vorticity.Parquet:     property string Min { get; init; }
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetUnsupportedException : VortexException
@@ -321,7 +321,7 @@ Vorticity.Parquet:     property Nullable<ParquetCompression> Compression { get; 
 Vorticity.Parquet:     property ParquetEncryption Encryption { get; init; }
 Vorticity.Parquet:     property ParquetWriteOptions Default { get; }
 Vorticity.Parquet:     property bool AlignUncompressedPages { get; init; }
-Vorticity.Parquet:     property bool Alp { get; init; }
+Vorticity.Parquet:     property bool AllowAlp { get; init; }
 Vorticity.Parquet:     property bool Durable { get; init; }
 Vorticity.Parquet:     property bool WriteChecksums { get; init; }
 Vorticity.Parquet:     property int BlockRows { get; init; }
@@ -340,6 +340,6 @@ Vorticity.Parquet:     method bool op_Inequality(ParquetWriteReport, ParquetWrit
 Vorticity.Parquet:     method int GetHashCode()
 Vorticity.Parquet:     method string ToString()
 Vorticity.Parquet:     method void Deconstruct(out long, out int, out long)
-Vorticity.Parquet:     property int RowGroups { get; init; }
+Vorticity.Parquet:     property int RowGroupCount { get; init; }
 Vorticity.Parquet:     property long Bytes { get; init; }
 Vorticity.Parquet:     property long RowCount { get; init; }

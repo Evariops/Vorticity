@@ -5,7 +5,7 @@ namespace Vorticity.Parquet;
 /// <summary>How a Parquet file is opened and read.</summary>
 public sealed record ParquetOpenOptions
 {
-    private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedBytes;
+    private readonly long _maxDecompressedBytes = VortexLimits.DefaultMaxDecompressedBytes;
     private readonly int _maxFooterBytes = 256 * 1024 * 1024;
 
     /// <summary>The options an open takes when it is given none.</summary>
@@ -32,13 +32,13 @@ public sealed record ParquetOpenOptions
     /// by default.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
-    public long MaxDecompressedSize
+    public long MaxDecompressedBytes
     {
-        get => _maxDecompressedSize;
+        get => _maxDecompressedBytes;
         init
         {
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
-            _maxDecompressedSize = value;
+            _maxDecompressedBytes = value;
         }
     }
 

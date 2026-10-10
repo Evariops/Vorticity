@@ -178,7 +178,7 @@ public sealed record ParquetWriteOptions
     /// by default: the standard marks ALP Preview, and a reader that predates it cannot read such a
     /// page.
     /// </summary>
-    public bool Alp { get; init; }
+    public bool AllowAlp { get; init; }
 
     /// <summary>
     /// The file's modular encryption, the standard's: its keys, the columns it encrypts, its footer
@@ -349,6 +349,6 @@ public sealed record ParquetWriteOptions
 
 /// <summary>What a Parquet writer wrote.</summary>
 /// <param name="RowCount">The rows.</param>
-/// <param name="RowGroups">The row groups.</param>
+/// <param name="RowGroupCount">The row groups.</param>
 /// <param name="Bytes">The file's bytes.</param>
-public sealed record ParquetWriteReport(long RowCount, int RowGroups, long Bytes);
+public sealed record ParquetWriteReport(long RowCount, int RowGroupCount, long Bytes);

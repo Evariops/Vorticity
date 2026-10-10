@@ -25,7 +25,7 @@ public sealed class ParquetMetadata
         CreatedBy = footer.CreatedBy.IsPresent ? Encoding.UTF8.GetString(footer.CreatedBy.Of(bytes)) : null;
         Version = footer.Version;
         RowCount = footer.RowCount;
-        KeyValues = file.KeyValueMetadata;
+        KeyValueMetadata = file.KeyValueMetadata;
 
         ParquetColumn[] leaves = file.Compiled.Columns;
         ParquetColumnInfo[] columns = new ParquetColumnInfo[leaves.Length];
@@ -86,7 +86,7 @@ public sealed class ParquetMetadata
     public IReadOnlyList<ParquetRowGroupInfo> RowGroups { get; }
 
     /// <summary>The key-value pairs the footer carries, as <see cref="ParquetFile.KeyValueMetadata"/> gives them.</summary>
-    public IReadOnlyList<KeyValuePair<string, string?>> KeyValues { get; }
+    public IReadOnlyList<KeyValuePair<string, string?>> KeyValueMetadata { get; }
 
     private static ParquetChunkInfo Chunk(ParquetFile file, ParquetColumn column, ColumnChunkMetadata chunk)
     {
@@ -310,7 +310,7 @@ public sealed record ParquetSortingColumn(string Column, bool Descending = false
 /// <param name="HasColumnIndex">Whether a column index bounds its pages.</param>
 /// <param name="HasOffsetIndex">Whether an offset index places its pages.</param>
 /// <param name="HasBloomFilter">Whether a Bloom filter holds its values.</param>
-/// <param name="AllDataPagesDictionary">Whether its <c>encoding_stats</c> say every data page is dictionary codes; null without them.</param>
+/// <param name="IsFullyDictionaryEncoded">Whether its <c>encoding_stats</c> say every data page is dictionary codes; null without them.</param>
 /// <param name="Geospatial">A GEOMETRY's or GEOGRAPHY's bounding box and types, or null when its metadata has none.</param>
 public sealed record ParquetChunkInfo(
     string Column,
@@ -324,7 +324,7 @@ public sealed record ParquetChunkInfo(
     bool HasColumnIndex,
     bool HasOffsetIndex,
     bool HasBloomFilter,
-    bool? AllDataPagesDictionary,
+    bool? IsFullyDictionaryEncoded,
     ParquetGeospatialInfo? Geospatial);
 
 /// <summary>A GEOMETRY or GEOGRAPHY column chunk's geospatial statistics.</summary>
@@ -352,10 +352,10 @@ public sealed record ParquetBoundingBox(double XMin, double XMax, double YMin, d
 /// <param name="DistinctCount">Its distinct values, or null when not counted.</param>
 /// <param name="Min">Its least value, rendered, where a column order this build knows makes it a bound; else null.</param>
 /// <param name="Max">Its greatest value, likewise.</param>
-/// <param name="MinExact">Whether <see cref="Min"/> is the least value itself rather than a bound below it.</param>
-/// <param name="MaxExact">Whether <see cref="Max"/> is the greatest value itself.</param>
+/// <param name="IsMinExact">Whether <see cref="Min"/> is the least value itself rather than a bound below it.</param>
+/// <param name="IsMaxExact">Whether <see cref="Max"/> is the greatest value itself.</param>
 /// <param name="NanCount">Its NaN values, or null when not counted.</param>
-public sealed record ParquetStatisticsInfo(long? NullCount, long? DistinctCount, string? Min, string? Max, bool MinExact, bool MaxExact, long? NanCount);
+public sealed record ParquetStatisticsInfo(long? NullCount, long? DistinctCount, string? Min, string? Max, bool IsMinExact, bool IsMaxExact, long? NanCount);
 
 /// <summary>Something a file says of itself that its rows do not bear out.</summary>
 /// <param name="RowGroup">The row group it is said of, or -1 for the file.</param>

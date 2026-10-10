@@ -70,7 +70,7 @@ public sealed class DataPageVersionTests : IDisposable
         {
             Assert.Equal(await RowsAsync(v2), await RowsAsync(file));
             Assert.Empty(await file.VerifyAsync(Ct));
-            Assert.True(file.Metadata.RowGroups[0].Chunks.Single(chunk => chunk.Column == "label").AllDataPagesDictionary);
+            Assert.True(file.Metadata.RowGroups[0].Chunks.Single(chunk => chunk.Column == "label").IsFullyDictionaryEncoded);
         }
     }
 

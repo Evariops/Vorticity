@@ -155,7 +155,7 @@ internal sealed class DictionaryPruning : IDisposable
 
         ScanCounters.Note(metrics, asked, bytes);
         await file.Reader.ReadManyAsync(_requests, cancellationToken).ConfigureAwait(false);
-        ScanContext context = _shared ?? (_owned ??= new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = file.Options.MaxDecompressedSize }));
+        ScanContext context = _shared ?? (_owned ??= new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = file.Options.MaxDecompressedBytes }));
         context.ResetBatch();
         _arena = context.Canonical;
         bool kept = false;
@@ -245,7 +245,7 @@ internal sealed class DictionaryPruning : IDisposable
         ParquetColumn column = file.Compiled.Columns[_filter.Columns[i]];
         DTypeArena types = new();
         return _readers[i] = new ColumnChunkReader(
-            column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), file.Session.Options.EnginePool, file.Options.MaxDecompressedSize)
+            column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), file.Session.Options.EnginePool, file.Options.MaxDecompressedBytes)
         {
             VerifyChecksums = file.Options.VerifyChecksums,
             Counters = file.Counters,

@@ -65,7 +65,7 @@ public sealed partial class FuzzSeeds
                         BlockRows = 1_024,
                         RowGroupRows = 2_048,
                         PageBytes = 4 << 10,
-                        Alp = hint == ParquetEncodingHint.Auto,
+                        AllowAlp = hint == ParquetEncodingHint.Auto,
                         WriteChecksums = n % 2 == 0,
                         BloomFilters = new Dictionary<string, double> { ["Id"] = 0.05, ["Label"] = 0.05 },
                         SortingColumns = [new ParquetSortingColumn("Id")],

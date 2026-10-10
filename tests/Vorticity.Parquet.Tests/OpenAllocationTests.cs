@@ -104,7 +104,7 @@ public sealed class OpenAllocationTests : IDisposable
 
         await writer.WriteAsync(builder, Ct);
         ParquetWriteReport report = await writer.CompleteAsync(Ct);
-        Assert.Equal(groups, report.RowGroups);
+        Assert.Equal(groups, report.RowGroupCount);
         return path;
     }
 }

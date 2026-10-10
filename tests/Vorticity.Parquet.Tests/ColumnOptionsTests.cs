@@ -81,7 +81,7 @@ public sealed class ColumnOptionsTests : IDisposable
                 // Unique values, which the writer would never code, coded on every page.
                 ParquetChunkInfo unique = group.Chunks.Single(chunk => chunk.Column == "unique");
                 Assert.Contains("RLE_DICTIONARY", unique.Encodings);
-                Assert.True(unique.AllDataPagesDictionary);
+                Assert.True(unique.IsFullyDictionaryEncoded);
             }
 
             Assert.Empty(await file.VerifyAsync(Ct));

@@ -144,7 +144,7 @@ public sealed class AlpTests
     }
 
     /// <summary>
-    /// With <see cref="ParquetWriteOptions.Alp"/>, decimals of few digits are written ALP, and read
+    /// With <see cref="ParquetWriteOptions.AllowAlp"/>, decimals of few digits are written ALP, and read
     /// back to their very bits, a NaN's payload, the infinities, -0, subnormals and values too large
     /// for an integer among them as exceptions; noise of full mantissas is left to the encodings that
     /// pay for it.
@@ -172,7 +172,7 @@ public sealed class AlpTests
         string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vx-alp-{Guid.NewGuid():N}.parquet");
         try
         {
-            await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path, schema, new ParquetWriteOptions { Alp = true, Compression = compression, DataPageVersion = pages }))
+            await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path, schema, new ParquetWriteOptions { AllowAlp = true, Compression = compression, DataPageVersion = pages }))
             {
                 ColumnsBuilder builder = writer.Builder();
                 for (int i = 0; i < Rows; i++)
