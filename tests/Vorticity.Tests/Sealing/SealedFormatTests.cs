@@ -3,7 +3,8 @@
 //
 // WHAT IS HELD: any plaintext length round-trips, the empty one and the exact multiples of a frame
 // included, however the writer cuts its writes; a Vortex file written through the stage scans as
-// the rows written, at every frame size; a known answer pins the format; every byte flipped and
+// the rows written, at every frame size; the key derivation takes its arguments in the order RFC 5869
+// gives, as its vectors check; a known answer pins the format; every byte flipped and
 // every truncation of a small object fails before any plaintext is used, but for the header's
 // copy of the descriptor, which a file opened by its tail never reads; a frame taken from another
 // object fails; a missing key and a wrong key are told apart.
@@ -72,6 +73,45 @@ public sealed class SealedFormatTests
         Assert.Equal(rows, await SealedObjects.ReadRowsAsync(sealedBytes, keyring, ct));
         Assert.True(SealedLayout.EndsSealed(sealedBytes));
         Assert.Equal("VXSEALED"u8.ToArray(), sealedBytes.AsSpan(0, 8).ToArray());
+    }
+
+    public static TheoryData<string, string, string, string, string> Rfc5869 => new TheoryData<string, string, string, string, string>
+    {
+        // RFC 5869, appendix A, test cases 1 to 3: input key, salt, info, pseudorandom key, output.
+        {
+            "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+            "000102030405060708090a0b0c",
+            "f0f1f2f3f4f5f6f7f8f9",
+            "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5",
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+        },
+        {
+            Range(0x00, 0x50),
+            Range(0x60, 0xb0),
+            Range(0xb0, 0x100),
+            "06a6b88c5853361a06104c9ceb35b45cef760014904671014a193f40c15fc244",
+            "b11e398dc80327a1c8e7f78c596a49344f012eda2d4efad8a050cc4c19afa97c59045a99cac7827271cb41c65e590e09da3275600c2f09b8367793a9aca3db71cc30c58179ec3e87c14c01d5c1f3434f1d87"
+        },
+        {
+            "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+            "",
+            "",
+            "19ef24a32c717b167f33a91d6f648bdf96596776afdb6377ac434c1c293ccb04",
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8"
+        },
+    };
+
+    [Theory]
+    [MemberData(nameof(Rfc5869))]
+    public void TheDerivationPassesItsArgumentsToTheKeyDerivationAsTheRfcOrdersThem(string inputKey, string salt, string info, string pseudorandomKey, string output)
+    {
+        byte[] prk = new byte[32];
+        SealedFormat.Extract(Convert.FromHexString(inputKey), Convert.FromHexString(salt), prk);
+        Assert.Equal(pseudorandomKey, Convert.ToHexStringLower(prk));
+
+        byte[] okm = new byte[output.Length / 2];
+        SealedFormat.Expand(prk, Convert.FromHexString(info), okm);
+        Assert.Equal(output, Convert.ToHexStringLower(okm));
     }
 
     [Fact]
@@ -243,4 +283,16 @@ public sealed class SealedFormatTests
         SealedFormat.HeaderPrefixBytes + (2 * DescriptorLength(sealedBytes)) + 4 + SealedFormat.EpochEntryBytes + SealedFormat.TrailerSuffixBytes;
 
     private static int DescriptorLength(byte[] sealedBytes) => BitConverter.ToInt32(sealedBytes, 8);
+
+    /// <summary>The bytes <c>[from, to)</c>, in hex: the long inputs of the RFC's second case.</summary>
+    private static string Range(int from, int to)
+    {
+        byte[] bytes = new byte[to - from];
+        for (int i = 0; i < bytes.Length; i++)
+        {
+            bytes[i] = (byte)(from + i);
+        }
+
+        return Convert.ToHexStringLower(bytes);
+    }
 }
