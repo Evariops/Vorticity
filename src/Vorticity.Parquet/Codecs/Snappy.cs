@@ -178,15 +178,23 @@ internal static class Snappy
             return end;
         }
 
-        if (offset >= 8 && (nuint)(opEnd - op) >= length + 8)
+        if ((nuint)(opEnd - op) >= length + 16)
         {
-            do
+            // A pattern shorter than a word is doubled in place until it is one: each copy of eight
+            // bytes reads the pattern as far as it is written, and lays down as many bytes as the
+            // distance between the two, which then doubles.
+            while ((nuint)(op - from) < 8)
+            {
+                Unsafe.WriteUnaligned(op, Unsafe.ReadUnaligned<ulong>(from));
+                op += op - from;
+            }
+
+            while (op < end)
             {
                 Unsafe.WriteUnaligned(op, Unsafe.ReadUnaligned<ulong>(from));
                 from += 8;
                 op += 8;
             }
-            while (op < end);
 
             return end;
         }
