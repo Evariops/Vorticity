@@ -516,7 +516,10 @@ an encrypted one none.
 
 The fields of a batch decode side by side on the scan's lanes, each into a context and an arena of
 its own, the longest first by what each took the batch before; the batch's arena then references
-their nodes, whose bytes stay where they were decoded until the batch is dead. A batch waits for
+their nodes, whose bytes stay where they were decoded until the batch is dead. They do when they
+are eight or more, or when the batches before took 50 µs to decode on average: below, waking the
+threads costs more than the decode they would share, and the report's table of four fields decodes
+one field after the other. A batch waits for
 its slowest field, the one that begins a page: on ClickBench's first file, 105 columns under
 SNAPPY, a scan takes 46 to 47 ms on 32 lanes against 93 when only the pages decompressed side by
 side, and its `Title` column, a third of its bytes, holds 58 of its 124 batches. The January 2023
