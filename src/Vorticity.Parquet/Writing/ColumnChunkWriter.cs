@@ -4,6 +4,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -63,7 +64,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private readonly PooledBytes _compressed;
     private readonly ChunkBytes _chunk;
     private readonly byte[] _validity;
-    private byte[] _levelBytes = [];
+    private NativeSegmentOwner? _levelBytes;
 
     /// <summary>The page's validity as the words the compressing kernel takes, a block's worth.</summary>
     private readonly ulong[] _mask;
@@ -119,8 +120,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>The dictionary page, written ahead of the data pages when the chunk closes.</summary>
     private readonly PooledBytes _dictionaryPage;
 
-    private uint[] _pageCodes = [];
-    private int[] _firstOccurrences = [];
+    private NativeSegmentOwner? _pageCodes;
+    private NativeSegmentOwner? _firstOccurrences;
     private DistinctTable? _table;
 
     /// <summary>Whether the chunk's pages are still dictionary-encoded.</summary>
@@ -148,9 +149,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>A page encoded otherwise than PLAIN, and a byte array page's values without their lengths.</summary>
     private readonly PooledBytes _encoded;
     private readonly PooledBytes _data;
-    private int[] _lengths = [];
-    private int[] _prefixes = [];
-    private int[] _suffixes = [];
+    private NativeSegmentOwner? _lengths;
+    private NativeSegmentOwner? _prefixes;
+    private NativeSegmentOwner? _suffixes;
 
     /// <summary>Per encoding, the chunk's data pages that took it.</summary>
     private readonly int[] _pagesBy = new int[16];
@@ -376,7 +377,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         if (!nested && _column.Nullable)
         {
             // Every row's level, of which each page encodes its own.
-            BitPacking.Unpack8(_validity, 1, Scratch(ref _levelBytes, rows));
+            BitPacking.Unpack8(_validity, 1, Scratch<byte>(ref _levelBytes, rows));
         }
 
         // The dictionary weighs the whole page first: a page it codes is never cut.
@@ -498,7 +499,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
         else if (_column.Nullable)
         {
-            _levels.Truncate(RleHybridEncoder.Encode(_levelBytes.AsSpan(range.From, rows), 1, _levels.Reserve(RleHybridEncoder.MaxSize(rows, 1))));
+            _levels.Truncate(RleHybridEncoder.Encode(Held<byte>(_levelBytes).Slice(range.From, rows), 1, _levels.Reserve(RleHybridEncoder.MaxSize(rows, 1))));
         }
 
         ReadOnlySpan<byte> body = _column.Conversion == ValueConversion.Bool
@@ -861,15 +862,27 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// a column allocates only the arrays its encodings use, a fixed-width one with no null and no
     /// dictionary none.
     /// </summary>
-    private Span<T> Scratch<T>(ref T[] array, int count)
+    private Span<T> Scratch<T>(ref NativeSegmentOwner? block, int count)
+        where T : unmanaged
     {
-        if (array.Length < count)
+        int held = Held<T>(block).Length;
+        if (held < count)
         {
-            array = new T[Math.Max(count, Math.Max(_blockRows, array.Length * 2))];
+            // A block of the engine's pool, which the writer gives back as it closes: the next
+            // writer's columns rent the same blocks rather than allocate their arrays again.
+            int grown = Math.Max(count, Math.Max(_blockRows, held * 2));
+            block?.Dispose();
+            block = null;
+            block = _pool.Rent(checked(grown * Unsafe.SizeOf<T>()), 64);
         }
 
-        return array.AsSpan(0, count);
+        return Held<T>(block)[..count];
     }
+
+    /// <summary>The elements one of the scratch arrays holds; empty before its first use.</summary>
+    private static Span<T> Held<T>(NativeSegmentOwner? block)
+        where T : unmanaged =>
+        block is null ? default : MemoryMarshal.Cast<byte, T>(block.WritableSpan);
 
     /// <summary>
     /// Appends a nested column's rows: each block's worth shredded into entries, whose levels the
@@ -1048,6 +1061,12 @@ internal sealed class ColumnChunkWriter : IDisposable
         _shredder?.Dispose();
         _definitionLevels?.Dispose();
         _table?.Reset();
+        _levelBytes?.Dispose();
+        _pageCodes?.Dispose();
+        _firstOccurrences?.Dispose();
+        _lengths?.Dispose();
+        _prefixes?.Dispose();
+        _suffixes?.Dispose();
     }
 
     private void Stage(CanonicalArena arena, int index, int start, int count)
@@ -1141,23 +1160,19 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         int nullCode = table.NullCode;
         ReadOnlySpan<int> first = table.FirstRows;
-        if (_firstOccurrences.Length < distinct - distinctBefore)
-        {
-            _firstOccurrences = new int[Math.Max(distinct - distinctBefore, _firstOccurrences.Length * 2)];
-        }
-
+        Span<int> firsts = Scratch<int>(ref _firstOccurrences, distinct - distinctBefore);
         int found = 0;
         for (int code = distinctBefore; code < distinct; code++)
         {
             if (code != nullCode)
             {
-                _firstOccurrences[found++] = start + (first[code] - rowsBefore);
+                firsts[found++] = start + (first[code] - rowsBefore);
             }
         }
 
         if (found > 0)
         {
-            int entries = CanonicalFilter.Apply(arena, index, _firstOccurrences.AsSpan(0, found));
+            int entries = CanonicalFilter.Apply(arena, index, firsts[..found]);
             StageValues(arena, arena.GetNode(entries), 0, found, found, _entries);
             _entryCount += found;
         }
@@ -1174,7 +1189,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         ReadOnlySpan<int> codes = table.Codes.Slice(_pageFirstCode, rows);
         int nullCode = table.NullCode;
         int count = 0;
-        Span<uint> kept = Scratch(ref _pageCodes, rows);
+        Span<uint> kept = Scratch<uint>(ref _pageCodes, rows);
         for (int row = 0; row < rows; row++)
         {
             if (_rowValidity && !CanonicalSupport.BitAt(_validity, row))
@@ -1198,7 +1213,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
 
         int width = Math.Max(1, 32 - BitOperations.LeadingZeroCount((uint)(_entryCount - 1)));
-        ReadOnlySpan<uint> pageCodes = _pageCodes.AsSpan(0, count);
+        ReadOnlySpan<uint> pageCodes = Held<uint>(_pageCodes)[..count];
 
         // Priced by writing them, and dropped when the dictionary stops here.
         _codes.Clear();
@@ -1399,7 +1414,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             case ParquetEncoding.DeltaLengthByteArray:
             {
                 ReadOnlySpan<byte> data = Unprefix(body, count);
-                ReadOnlySpan<int> lengths = _lengths.AsSpan(0, count);
+                ReadOnlySpan<int> lengths = Held<int>(_lengths)[..count];
                 DeltaByteArrays.EncodeLengths(lengths, data, _encoded.Reserve(DeltaByteArrays.SizeLengths(lengths, data.Length)));
                 break;
             }
@@ -1414,12 +1429,12 @@ internal sealed class ColumnChunkWriter : IDisposable
                 }
                 else
                 {
-                    Scratch(ref _lengths, count).Fill(_column.ValueWidth);
+                    Scratch<int>(ref _lengths, count).Fill(_column.ValueWidth);
                 }
 
-                ReadOnlySpan<int> lengths = _lengths.AsSpan(0, count);
-                Span<int> prefixes = Scratch(ref _prefixes, count);
-                Span<int> suffixes = Scratch(ref _suffixes, count);
+                ReadOnlySpan<int> lengths = Held<int>(_lengths)[..count];
+                Span<int> prefixes = Scratch<int>(ref _prefixes, count);
+                Span<int> suffixes = Scratch<int>(ref _suffixes, count);
                 int rest = DeltaByteArrays.Prefixes(data, lengths, prefixes, suffixes);
                 DeltaByteArrays.EncodePrefixes(data, lengths, prefixes, suffixes, _encoded.Reserve(DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest)));
                 break;
@@ -1468,7 +1483,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private int RunsSize(ReadOnlySpan<byte> body, int count)
     {
-        Span<byte> values = Scratch(ref _levelBytes, count);
+        Span<byte> values = Scratch<byte>(ref _levelBytes, count);
         BitPacking.Unpack8(body, 1, values);
         return sizeof(int) + RleHybridEncoder.Size(values, 1);
     }
@@ -1479,14 +1494,14 @@ internal sealed class ColumnChunkWriter : IDisposable
         _encoded.Clear();
         Span<byte> into = _encoded.Reserve(size);
         BinaryPrimitives.WriteInt32LittleEndian(into, size - sizeof(int));
-        RleHybridEncoder.Encode(_levelBytes.AsSpan(0, count), 1, into[sizeof(int)..]);
+        RleHybridEncoder.Encode(Held<byte>(_levelBytes)[..count], 1, into[sizeof(int)..]);
         return _encoded.WrittenSpan;
     }
 
     /// <summary>A PLAIN byte array page's values without their lengths, which go to <see cref="_lengths"/>.</summary>
     private ReadOnlySpan<byte> Unprefix(ReadOnlySpan<byte> body, int count)
     {
-        Span<int> lengths = Scratch(ref _lengths, count);
+        Span<int> lengths = Scratch<int>(ref _lengths, count);
         _data.Clear();
         int at = 0;
         for (int i = 0; i < count; i++)
@@ -1538,10 +1553,10 @@ internal sealed class ColumnChunkWriter : IDisposable
     private ParquetEncoding ChooseFixed(ref ReadOnlySpan<byte> body, int count)
     {
         int width = _column.ValueWidth;
-        Span<int> lengths = Scratch(ref _lengths, count);
+        Span<int> lengths = Scratch<int>(ref _lengths, count);
         lengths.Fill(width);
-        Span<int> prefixes = Scratch(ref _prefixes, count);
-        Span<int> suffixes = Scratch(ref _suffixes, count);
+        Span<int> prefixes = Scratch<int>(ref _prefixes, count);
+        Span<int> suffixes = Scratch<int>(ref _suffixes, count);
         int rest = DeltaByteArrays.Prefixes(body, lengths, prefixes, suffixes);
         int size = DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest);
         if (size > body.Length - (body.Length / 8))
@@ -1563,10 +1578,10 @@ internal sealed class ColumnChunkWriter : IDisposable
     private ParquetEncoding ChooseBytes(ref ReadOnlySpan<byte> body, int count)
     {
         ReadOnlySpan<byte> data = Unprefix(body, count);
-        Span<int> lengths = _lengths.AsSpan(0, count);
+        Span<int> lengths = Held<int>(_lengths)[..count];
         int byLength = DeltaByteArrays.SizeLengths(lengths, data.Length);
-        Span<int> prefixes = Scratch(ref _prefixes, count);
-        Span<int> suffixes = Scratch(ref _suffixes, count);
+        Span<int> prefixes = Scratch<int>(ref _prefixes, count);
+        Span<int> suffixes = Scratch<int>(ref _suffixes, count);
         int rest = DeltaByteArrays.Prefixes(data, lengths, prefixes, suffixes);
         int byPrefix = DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest);
         _encoded.Clear();
