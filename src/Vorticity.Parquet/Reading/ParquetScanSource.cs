@@ -185,7 +185,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         if (spec is { Filter: null, Rows: null, Take: null, Live: null, MatchesNothing: false, Options.UseStatistics: true }
             && column is not FunctionFieldExpr
             && Leaf(column.Path) is int leaf
-            && TryExtremes(leaf, out FilterLiteral low, out FilterLiteral high))
+            && TryExtremes(leaf, exact: true, out FilterLiteral low, out FilterLiteral high))
         {
             return min ? low : high;
         }
@@ -351,8 +351,46 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         return path.Length == 1
             && (uint)path[0] < (uint)file.Compiled.Fields.Length
             && Leaf(file.Compiled.Fields[path[0]].Name) is int leaf
-            && TryExtremes(leaf, out min, out max)
+            && TryExtremes(leaf, exact: true, out min, out max)
             && min.Kind != FilterLiteralKind.Null;
+    }
+
+    /// <summary>
+    /// The least and the greatest value of an integer key over the file, from its row groups'
+    /// statistics: what lets a table of its groups number them by value, where a hashed one would
+    /// hold each key twice over. A bound need not be exact to bound; a value past one, which a
+    /// writer's wrong statistics would let through, goes to the hashed table.
+    /// </summary>
+    internal override Aggregating.KeyBounds? Bounds(Aggregating.ColumnShape key)
+    {
+        if (key.Kind != Aggregating.StorageKind.Primitive || !Vorticity.Types.PTypeExtensions.IsInteger(key.PType) || key.Column.FieldPath.Length != 1
+            || (uint)key.Column.FieldPath[0] >= (uint)file.Compiled.Fields.Length
+            || Leaf(file.Compiled.Fields[key.Column.FieldPath[0]].Name) is not int leaf
+            || !TryExtremes(leaf, exact: false, out FilterLiteral min, out FilterLiteral max)
+            || !Integer(min, out long least)
+            || !Integer(max, out long most))
+        {
+            return null;
+        }
+
+        return new Aggregating.KeyBounds(least, most);
+    }
+
+    /// <summary>An integer literal as a long, an unsigned one past the longs saturated, which no table takes.</summary>
+    private static bool Integer(FilterLiteral value, out long result)
+    {
+        switch (value.Kind)
+        {
+            case FilterLiteralKind.Signed:
+                result = value.SignedValue;
+                return true;
+            case FilterLiteralKind.Unsigned:
+                result = long.CreateSaturating(value.UnsignedValue);
+                return true;
+            default:
+                result = 0;
+                return false;
+        }
     }
 
     /// <summary>The leaf at <paramref name="path"/>, one value a row: none under a list.</summary>
@@ -370,11 +408,11 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     }
 
     /// <summary>
-    /// The least and the greatest value of <paramref name="leaf"/> over the file, from the footer:
-    /// false unless every row group bounds it exactly or holds only nulls in it; both null when every
-    /// row is.
+    /// The least and the greatest value of <paramref name="leaf"/> over the file, from the footer, or
+    /// bounds around them unless <paramref name="exact"/>: false unless every row group bounds it,
+    /// exactly where asked, or holds only nulls in it; both null when every row is.
     /// </summary>
-    private bool TryExtremes(int leaf, out FilterLiteral min, out FilterLiteral max)
+    private bool TryExtremes(int leaf, bool exact, out FilterLiteral min, out FilterLiteral max)
     {
         min = FilterLiteral.Null;
         max = FilterLiteral.Null;
@@ -391,7 +429,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
                 continue;
             }
 
-            if (!bounds.IsExact)
+            if (exact ? !bounds.IsExact : !bounds.HasMin || !bounds.HasMax)
             {
                 return false;
             }
