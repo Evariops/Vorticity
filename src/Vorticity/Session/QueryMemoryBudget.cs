@@ -240,10 +240,11 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// The process's shelf keeps an array of <paramref name="bytes"/> for the next query: reserved and
     /// measured as the queries' tables are, within the ceiling and with no collection asked for; false,
-    /// and nothing counted, past it. <paramref name="fromQuery"/>: whether its query had counted it and
-    /// given it back as let go, which it no longer is. The process's own budget.
+    /// and nothing counted, past it. Every array given to it was let go to the rest first: a query's,
+    /// when it gave it back; another's, when the shelf handed it out (<see cref="Unkeep"/>) or made it
+    /// new for code that counts nothing. The process's own budget.
     /// </summary>
-    internal bool TryKeep(long bytes, bool fromQuery)
+    internal bool TryKeep(long bytes)
     {
         Observe();
         if (!TryAdd(ref _reserved, bytes, Available()))
@@ -252,11 +253,7 @@ public sealed class QueryMemoryBudget
         }
 
         Interlocked.Add(ref _measured, bytes);
-        if (fromQuery)
-        {
-            Interlocked.Add(ref _pending, -bytes);
-        }
-
+        Interlocked.Add(ref _pending, -bytes);
         return true;
     }
 

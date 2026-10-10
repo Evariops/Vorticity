@@ -448,18 +448,26 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             counts = true;
         }
 
-        return _parent is not null ? _parent.Take<T>(length, zeroed, counted: counts)
-            : zeroed ? new T[length]
-            : GC.AllocateUninitializedArray<T>(length);
+        if (_parent is not null)
+        {
+            return _parent.Take<T>(length, zeroed, counted: counts);
+        }
+
+        // Made new for code that counts nothing: the rest of the process, which the shelf takes it out of
+        // when it is given back.
+        if (_governed && !counted && (long)length * Unsafe.SizeOf<T>() is long made and >= LargeBytes)
+        {
+            QueryMemoryBudget.Process.Discard(made);
+        }
+
+        return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
     }
 
     /// <summary>
     /// Puts an array nothing holds any more back on the shelf; past the shelf's budget, lets it go.
     /// A lane's shelf gives its bytes back to the query's memory and the array to the process's shelf.
-    /// <paramref name="counted"/>: whether the giver counted it in its query's memory, which it gave back
-    /// as let go, so that the process's shelf counts it as kept instead.
     /// </summary>
-    internal void Give<T>(T[] array, bool counted = false)
+    internal void Give<T>(T[] array)
     {
         if (Lane)
         {
@@ -474,20 +482,19 @@ internal sealed class ArrayShelf : ISweptAfterCollections
                 return;
             }
 
-            bool lent = (long)array.Length * Unsafe.SizeOf<T>() >= LeastCounted;
-            if (lent)
+            if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
-                Unreserve(_memory!, (long)array.Length * Unsafe.SizeOf<T>());
+                Unreserve(_memory!, bytes);
             }
 
-            Retained.Give(array, lent);
+            Retained.Give(array);
             return;
         }
 
         Clean(array);
 
         // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.
-        if (Drops || !Give(typeof(T), array, Unsafe.SizeOf<T>(), fromQuery: counted))
+        if (Drops || !Give(typeof(T), array, Unsafe.SizeOf<T>()))
         {
             Leave(array.Length * (long)Unsafe.SizeOf<T>());
         }
@@ -500,7 +507,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private void Offer<T>(T[] array, long since)
     {
         Clean(array);
-        Give(typeof(T), array, Unsafe.SizeOf<T>(), since, fromQuery: true);
+        Give(typeof(T), array, Unsafe.SizeOf<T>(), since);
     }
 
     /// <summary>An array given back made safe to keep: poisoned under the tests, its references cleared.</summary>
@@ -692,8 +699,8 @@ internal sealed class ArrayShelf : ISweptAfterCollections
                     {
                         Array array = pile.Arrays.Pop();
                         long bytes = (long)array.Length * pile.ElementBytes;
-                        _parent.Give(entry.Key.Type, array, pile.ElementBytes, fromQuery: _memory is not null && bytes >= LeastCounted);
                         Leave(bytes);
+                        _parent.Give(entry.Key.Type, array, pile.ElementBytes);
                     }
                 }
             }
@@ -708,10 +715,9 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// least recently go first, those last used before <paramref name="before"/> only: a shelf full of
     /// another query's lengths kept them while every query went on taking from it, and the arrays of the
     /// queries running now could not come in. The process's shelf counts a large one in the process's
-    /// budget, and lets it go when the budget has no room for it; <paramref name="fromQuery"/>: whether
-    /// its giver had counted it, and given it back as let go.
+    /// budget, and lets it go when the budget has no room for it.
     /// </summary>
-    private bool Give(Type type, Array array, int elementBytes, long before = long.MaxValue, bool fromQuery = false)
+    private bool Give(Type type, Array array, int elementBytes, long before = long.MaxValue)
     {
         int length = array.Length;
         if (length == 0)
@@ -752,7 +758,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
             if (_governed && !pile.Small)
             {
-                if (!QueryMemoryBudget.Process.TryKeep(pile.Bytes, fromQuery))
+                if (!QueryMemoryBudget.Process.TryKeep(pile.Bytes))
                 {
                     return false;
                 }
