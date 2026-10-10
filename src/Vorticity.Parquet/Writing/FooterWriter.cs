@@ -189,7 +189,7 @@ internal static class FooterWriter
         {
             if (chunk.PagesByEncoding[encoding] > 0)
             {
-                WriteEncodingStats(ref writer, PageType.DataPageV2, (ParquetEncoding)encoding, chunk.PagesByEncoding[encoding]);
+                WriteEncodingStats(ref writer, chunk.DataPageType, (ParquetEncoding)encoding, chunk.PagesByEncoding[encoding]);
             }
         }
 

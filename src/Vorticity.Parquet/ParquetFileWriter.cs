@@ -129,6 +129,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                     WriteChecksums = options.WriteChecksums,
                     PageBytes = options.PageBytes,
                     DefersPages = _lanes > 1 && map.Columns.Length > 1,
+                    DataPages = options.DataPageVersion,
                     Hint = hint,
                 };
             }

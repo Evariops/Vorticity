@@ -1,3 +1,7 @@
+Vorticity.Parquet: enum Vorticity.Parquet.DataPageVersion
+Vorticity.Parquet:     const DataPageVersion V1 = 1
+Vorticity.Parquet:     const DataPageVersion V2 = 2
+Vorticity.Parquet:     field byte value__
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetChunkInfo : IEquatable<ParquetChunkInfo>
 Vorticity.Parquet:     ctor ParquetChunkInfo(string, string, IReadOnlyList<string>, long, long, long, long, ParquetStatisticsInfo, bool, bool, bool, Nullable<bool>)
 Vorticity.Parquet:     method ParquetChunkInfo <Clone>$()
@@ -199,6 +203,7 @@ Vorticity.Parquet:     method bool op_Inequality(ParquetWriteOptions, ParquetWri
 Vorticity.Parquet:     method int GetHashCode()
 Vorticity.Parquet:     method string ToString()
 Vorticity.Parquet:     property CompressionProfile Profile { get; init; }
+Vorticity.Parquet:     property DataPageVersion DataPageVersion { get; init; }
 Vorticity.Parquet:     property IReadOnlyDictionary<string, ParquetCodec> ColumnCompression { get; init; }
 Vorticity.Parquet:     property IReadOnlyDictionary<string, ParquetEncodingHint> Hints { get; init; }
 Vorticity.Parquet:     property IReadOnlyDictionary<string, double> BloomFilters { get; init; }

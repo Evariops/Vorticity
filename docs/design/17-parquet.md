@@ -426,7 +426,7 @@ data otherwise.
 |---|---|
 | version and magic | 1 and `PAR1` |
 | row groups | whole blocks, `RowGroupRows` 1 048 576 by default; a row group closes sooner when its buffered pages reach `RowGroupBytes`, 256 MiB, and at `FlushAsync` |
-| pages | data pages v2, rows never split; a page is one block of `BlockRows`, 8 192 counted from the file's first row in every column, or a power-of-two fraction of one, down to 1 024 rows, when a block's page would pass `PageBytes`, 1 MiB, each range halved while it passes; below that, a page is cut by bytes and leaves the grid for that column alone. A page the dictionary codes stays whole, its codes far smaller than its values |
+| pages | data pages v2, or v1 when `DataPageVersion.V1` asks for them, rows never split in either; a page is one block of `BlockRows`, 8 192 counted from the file's first row in every column, or a power-of-two fraction of one, down to 1 024 rows, when a block's page would pass `PageBytes`, 1 MiB, each range halved while it passes; below that, a page is cut by bytes and leaves the grid for that column alone. A page the dictionary codes stays whole, its codes far smaller than its values |
 | dictionary | at most one page per column chunk, first, as the standard requires |
 | page index | an `OffsetIndex` for every column chunk; a `ColumnIndex` wherever bounds are defined |
 | statistics | `min_value` and `max_value` with their exactness, `null_count` always, `nan_count` for floats; byte arrays bounded at `StatisticsBoundBytes`, 64 (§3.2 #15); neither the legacy `min` and `max` nor statistics in page headers, which readers of the page index ignore ([PageIndex.md][pi]) |

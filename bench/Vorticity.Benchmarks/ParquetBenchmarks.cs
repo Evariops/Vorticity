@@ -27,7 +27,7 @@ public class ParquetWriteBenchmarks
     private readonly ParquetTable _table = new();
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-zstd-8", "parquet-bloom", "parquet-crc", "parquet-smallest")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-zstd-8", "parquet-bloom", "parquet-crc", "parquet-smallest", "parquet-zstd-v1")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -86,7 +86,7 @@ public class ParquetScanBenchmarks
     private string _path = string.Empty;
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-crc")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-crc", "parquet-zstd-v1")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -246,6 +246,7 @@ internal sealed class ParquetTable
             BloomFilters = format == "parquet-bloom" ? new Dictionary<string, double> { ["id"] = 0.01, ["label"] = 0.01 } : null,
             WriteChecksums = format == "parquet-crc",
             DegreeOfParallelism = format == "parquet-zstd-8" ? 8 : 0,
+            DataPageVersion = format == "parquet-zstd-v1" ? DataPageVersion.V1 : DataPageVersion.V2,
         });
         Fill(parquet.Builder());
         await parquet.WriteAsync(parquet.Builder(), CancellationToken.None).ConfigureAwait(false);

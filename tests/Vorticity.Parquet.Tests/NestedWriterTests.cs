@@ -35,15 +35,17 @@ public sealed class NestedWriterTests
     ];
 
     [Theory]
-    [InlineData(ParquetCompression.Uncompressed, 8_192)]
-    [InlineData(ParquetCompression.Zstd, 1)]
-    public async Task RewritesTheDocumentsToTheSameRows(ParquetCompression compression, int blockRows)
+    [InlineData(ParquetCompression.Uncompressed, 8_192, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Zstd, 1, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Uncompressed, 8_192, DataPageVersion.V1)]
+    [InlineData(ParquetCompression.Zstd, 1, DataPageVersion.V1)]
+    public async Task RewritesTheDocumentsToTheSameRows(ParquetCompression compression, int blockRows, DataPageVersion pages)
     {
         using Temp source = new();
         await System.IO.File.WriteAllBytesAsync(source.Path, NestedReaderTests.DocumentBytes(), Ct);
         List<string> before = await RowsAsync(source.Path);
         using Temp target = new();
-        await RewriteAsync(source.Path, target.Path, new ParquetWriteOptions { Compression = compression, BlockRows = blockRows, RowGroupRows = blockRows });
+        await RewriteAsync(source.Path, target.Path, new ParquetWriteOptions { Compression = compression, BlockRows = blockRows, RowGroupRows = blockRows, DataPageVersion = pages });
         Assert.Equal(before, await RowsAsync(target.Path));
     }
 
@@ -56,9 +58,12 @@ public sealed class NestedWriterTests
         List<string> before = await RowsAsync(source);
         foreach (int blockRows in (int[])[8_192, 2])
         {
-            using Temp target = new();
-            await RewriteAsync(source, target.Path, new ParquetWriteOptions { BlockRows = blockRows, RowGroupRows = 2 * blockRows });
-            Assert.Equal(before, await RowsAsync(target.Path));
+            foreach (DataPageVersion pages in (DataPageVersion[])[DataPageVersion.V2, DataPageVersion.V1])
+            {
+                using Temp target = new();
+                await RewriteAsync(source, target.Path, new ParquetWriteOptions { BlockRows = blockRows, RowGroupRows = 2 * blockRows, DataPageVersion = pages });
+                Assert.Equal(before, await RowsAsync(target.Path));
+            }
         }
     }
 

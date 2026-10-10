@@ -68,6 +68,22 @@ public enum ParquetEncodingHint : byte
     Rle = 7,
 }
 
+/// <summary>The form of the data pages a Parquet writer writes.</summary>
+public enum DataPageVersion : byte
+{
+    /// <summary>
+    /// Data pages v1, for readers that read no other: the levels inside the compressed bytes, each
+    /// kind behind its length, and every page compressed whatever it saves.
+    /// </summary>
+    V1 = 1,
+
+    /// <summary>
+    /// Data pages v2, the default: the levels ahead of the compressed values, which a reader then
+    /// decompresses straight into place, and a page that does not shrink stored as it is.
+    /// </summary>
+    V2 = 2,
+}
+
 /// <summary>What a Parquet file looks like: its row groups, its pages and its compression.</summary>
 public sealed record ParquetWriteOptions
 {
@@ -134,6 +150,13 @@ public sealed record ParquetWriteOptions
     /// no column has, throws when the writer is created.
     /// </summary>
     public IReadOnlyDictionary<string, ParquetEncodingHint>? Hints { get; init; }
+
+    /// <summary>
+    /// The form of the data pages: <see cref="Parquet.DataPageVersion.V2"/> by default, which a reader
+    /// decompresses into place; <see cref="Parquet.DataPageVersion.V1"/> for a reader that reads no other.
+    /// Rows are never split across pages in either.
+    /// </summary>
+    public DataPageVersion DataPageVersion { get; init; } = DataPageVersion.V2;
 
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }
@@ -205,6 +228,11 @@ public sealed record ParquetWriteOptions
         if (!Enum.IsDefined(Profile))
         {
             throw new ArgumentOutOfRangeException(nameof(Profile), Profile, "Not a profile.");
+        }
+
+        if (!Enum.IsDefined(DataPageVersion))
+        {
+            throw new ArgumentOutOfRangeException(nameof(DataPageVersion), DataPageVersion, "Not a data page version.");
         }
 
         if (Compression is { } codec && !Enum.IsDefined(codec))
