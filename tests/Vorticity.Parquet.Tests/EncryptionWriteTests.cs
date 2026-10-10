@@ -66,6 +66,7 @@ public sealed class EncryptionWriteTests : IDisposable
 
         string[][] expected = await RowsAsync(plain, null);
         Assert.Equal(expected, await RowsAsync(encrypted, decryption));
+        Assert.Equal(expected, await RowsAsync(encrypted, decryption, mapped: false));
     }
 
     [Fact]
@@ -213,10 +214,12 @@ public sealed class EncryptionWriteTests : IDisposable
         return path;
     }
 
-    private static async Task<string[][]> RowsAsync(string path, ParquetDecryption? decryption)
+    /// <summary>The file's rows, rendered; read by positional reads where not <paramref name="mapped"/>, each row group chosen and read while the one before it is decoded.</summary>
+    private static async Task<string[][]> RowsAsync(string path, ParquetDecryption? decryption, bool mapped = true)
     {
         List<string[]> rows = [];
-        await using ParquetFile file = await VortexSession.Default.OpenParquetAsync(path, new ParquetOpenOptions { Decryption = decryption }, Ct);
+        await using VortexSession session = VortexSession.Create(options => options.MapFiles = mapped);
+        await using ParquetFile file = await session.OpenParquetAsync(path, new ParquetOpenOptions { Decryption = decryption }, Ct);
         await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
         {
             using (batch)

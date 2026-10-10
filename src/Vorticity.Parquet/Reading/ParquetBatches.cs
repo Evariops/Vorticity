@@ -19,7 +19,8 @@ namespace Vorticity.Parquet.Reading;
 /// A Parquet file's rows as batches of the columns a scan reads, a row group after the other: every
 /// column chunk of the row group read in one request, or, from a source that does not read in place,
 /// a large group in windows of batches, each read while the window before it is decoded; then cut a
-/// batch at a time, each borrowed until the next is asked for.
+/// batch at a time, each borrowed until the next is asked for. From a source that does not read in
+/// place, the next row group is chosen and read while one is decoded.
 /// </summary>
 /// <remarks>
 /// A batch holds <see cref="BatchRows"/> rows, or fewer at the end of a row group, which a batch never
@@ -43,9 +44,14 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private readonly DType _struct;
     private readonly ScanCounters _metrics;
     private readonly CancellationToken _cancellationToken;
+
+    /// <summary>
+    /// Cancels the reads made ahead, of the next group and of the next window, when the scan is
+    /// disposed: an early end waits for no transfer it no longer needs. The scan's token cancels it too.
+    /// </summary>
+    private readonly CancellationTokenSource _abandon;
     private readonly int _batchRows;
     private readonly ScanContext _context;
-    private readonly SegmentRequestSet _chunks = new();
 
     /// <summary>Every column the scan reads: a flat field's own, and those under a nested field.</summary>
     private readonly ColumnChunkReader[] _readers;
@@ -69,26 +75,27 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The batches of the row group being read the page index leaves, or null when it rules none out.</summary>
     private BlockMask? _live;
-
-    /// <summary>Per leaf of the file, the offset index of its chunk in the row group being read, where one was read.</summary>
-    private readonly PageLocation[]?[] _locations;
     private readonly SegmentRequestSet _offsets = new();
-
-    /// <summary>Per reader, the pages of its chunk placed for a read of some of them; null for a chunk read whole.</summary>
-    private readonly PageLocation[]?[] _maps;
 
     /// <summary>Per reader, what decrypts its column's pages, made the first time a chunk of it is encrypted.</summary>
     private readonly Encryption.PageDecryption?[] _decryptions;
-
-    /// <summary>The ranges of the chunks the row group reads: whose they are, where each starts in its chunk, and its slot.</summary>
-    private readonly List<(int Reader, int Start, int Slot)> _runSlots = [];
     private readonly List<(int Start, VortexBuffer Bytes)> _runs = [];
     private readonly List<(long From, long To)> _ranges = [];
+
+    /// <summary>The row group being read, and the one chosen and read while it is decoded.</summary>
+    private GroupRead _group;
+    private GroupRead _spare;
+
     /// <summary>
-    /// The windows the row group being read is cut into, when it is: the first read with the group,
-    /// each other ahead of the batches it serves, while the window before it is decoded.
+    /// The choice and read of the row group after the one being read, in flight while it is decoded:
+    /// false when none is left. Only from a source that does not read in place, and for a scan that
+    /// takes no number of rows, which a group past it would read for nothing.
     /// </summary>
-    private readonly List<ReadWindow> _windows = [];
+    private Task<bool>? _planned;
+    private readonly bool _readsAhead;
+
+    /// <summary>The last row group chosen, to be read or being read.</summary>
+    private int _chosen = -1;
 
     /// <summary>Per window past the first, the request that reads it, released with the group.</summary>
     private readonly List<SegmentRequestSet> _windowReads = [];
@@ -116,6 +123,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _read = groups;
         _metrics = metrics;
         _cancellationToken = cancellationToken;
+        _abandon = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _batchRows = RowsOf(spec);
         ParquetSchema schema = file.Compiled;
         int[] fields = columns ?? Every(schema.Fields.Length);
@@ -173,13 +181,16 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             _leaves[i] = _readers[i].Column.Ordinal;
         }
 
-        _maps = new PageLocation[]?[_readers.Length];
         _decryptions = new Encryption.PageDecryption?[_readers.Length];
-        _locations = new PageLocation[]?[schema.Columns.Length];
+        _group = new GroupRead(schema.Columns.Length, _readers.Length);
+        _spare = new GroupRead(schema.Columns.Length, _readers.Length);
+        _readsAhead = !file.Reader.ReadsInPlace && spec.Take is null;
         _nodes = new int[fields.Length];
         _pruning = FilterColumns.For(file, spec);
         _bloom = _pruning is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
-        _dictionaries = DictionaryPruning.For(_pruning, _context);
+
+        // A group chosen while another is decoded decodes its dictionaries apart from the batch's arena.
+        _dictionaries = DictionaryPruning.For(_pruning, _readsAhead ? null : _context);
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -218,7 +229,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
 
             // A skip that ends inside a page reads it: the windows up to the batch it ends at come first.
-            if (_window < _windows.Count && _groupRead < _groupRows)
+            if (_window < _group.Windows.Count && _groupRead < _groupRows)
             {
                 await WindowsAsync((int)(_groupRead / _batchRows)).ConfigureAwait(false);
             }
@@ -227,7 +238,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             _metrics.AddBlocksPruned(pruned);
         }
 
-        if (_window < _windows.Count)
+        if (_window < _group.Windows.Count)
         {
             await WindowsAsync((int)(_groupRead / _batchRows)).ConfigureAwait(false);
         }
@@ -248,6 +259,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     public async ValueTask DisposeAsync()
     {
+        await _abandon.CancelAsync().ConfigureAwait(false);
         _current?.Dispose();
         foreach (ColumnChunkReader reader in _readers)
         {
@@ -260,22 +272,44 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             set.Dispose();
         }
 
+        // The group chosen ahead, and its read, waited for: their bytes go back with their requests.
+        if (_planned is { } planned)
+        {
+            _planned = null;
+            try
+            {
+                await planned.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // A read nobody waits for has no one to report to.
+            }
+        }
+
+        await _group.SettleAsync().ConfigureAwait(false);
+        await _spare.SettleAsync().ConfigureAwait(false);
+        _group.Dispose();
+        _spare.Dispose();
+
         foreach (Encryption.PageDecryption? decryption in _decryptions)
         {
             decryption?.Dispose();
         }
 
-        _chunks.Release();
-        _chunks.Dispose();
         _indexes.Release();
         _indexes.Dispose();
         _offsets.Release();
         _offsets.Dispose();
         _dictionaries?.Dispose();
         _context.Dispose();
+        _abandon.Dispose();
     }
 
-    /// <summary>Reads the next row group the scan's rows reach: every chunk it reads, in one request, or the first of its windows.</summary>
+    /// <summary>
+    /// Starts the next row group the scan's rows reach: the one chosen and read while the last was
+    /// decoded, or chosen and read now; then, from a source that does not read in place, the choice
+    /// and read of the one after it.
+    /// </summary>
     private async ValueTask<bool> NextRowGroupAsync()
     {
         foreach (ColumnChunkReader reader in _readers)
@@ -283,22 +317,104 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             reader.Release();
         }
 
-        _chunks.Release();
         await DropWindowsAsync().ConfigureAwait(false);
+        _group.Release();
+        bool chosen;
+        if (_planned is { } planned)
+        {
+            _planned = null;
+            chosen = await planned.ConfigureAwait(false);
+            (_group, _spare) = (_spare, _group);
+        }
+        else
+        {
+            chosen = await ChooseAsync(_group, _cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!chosen)
+        {
+            return false;
+        }
+
+        GroupRead read = _group;
+        ParquetFooter footer = _file.Footer;
+        _rowGroup = read.RowGroup;
+        _live = read.Live;
+        Task reading = read.Reading!;
+        read.Reading = null;
+        await reading.ConfigureAwait(false);
+        int next = 0;
+        for (int i = 0; i < _readers.Length; i++)
+        {
+            ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
+            _readers[i].Encrypted(chunk.IsEncrypted ? Decryption(i, chunk) : null);
+            if (read.Maps[i] is not { } map)
+            {
+                _readers[i].Start(read.Chunks.GetBuffer(read.RunSlots[next++].Slot), chunk.Codec, read.Group.RowCount);
+                _dictionaries?.Hand(_leaves[i], _readers[i]);
+                continue;
+            }
+
+            _runs.Clear();
+            for (; next < read.RunSlots.Count && read.RunSlots[next].Reader == i; next++)
+            {
+                _runs.Add((read.RunSlots[next].Start, read.Chunks.GetBuffer(read.RunSlots[next].Slot)));
+            }
+
+            _readers[i].Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_runs), _file.ChunkRange(chunk).Length, map, chunk.Codec, read.Group.RowCount);
+            _dictionaries?.Hand(_leaves[i], _readers[i]);
+        }
+
+        if (read.Windowed)
+        {
+            _window = 1;
+            _ahead = read.Windows.Count > 1 ? ReadAheadAsync(read.Windows[1], WindowRead(1)) : null;
+        }
+
+        // The next group chosen and read now, on a thread of the pool, while this one is decoded: a
+        // read the source completes before it returns, from the system's cache, then delays no batch.
+        // Its dictionaries handed over above, the pruning holds none of this one's.
+        if (_readsAhead)
+        {
+            GroupRead spare = _spare;
+            CancellationToken abandon = _abandon.Token;
+            _planned = Task.Run(() => ChooseAsync(spare, abandon), abandon);
+        }
+
+        _groupStart = read.Group.FirstRow;
+        _groupRows = read.End;
+        _groupRead = 0;
+        if (read.First > 0)
+        {
+            SkipRows((int)read.First);
+            _groupRead = read.First;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Chooses the next row group the scan's rows reach that its statistics, page index, Bloom
+    /// filters and dictionaries leave rows of, into <paramref name="read"/>, and starts the read of
+    /// its chunks, or of the first of its windows: false when none is left.
+    /// </summary>
+    private async Task<bool> ChooseAsync(GroupRead read, CancellationToken cancellationToken)
+    {
         ParquetFooter footer = _file.Footer;
         RowGroupEntry group;
+        BlockMask? live;
         while (true)
         {
             do
             {
-                if (++_rowGroup >= footer.RowGroups.Length)
+                if (++_chosen >= footer.RowGroups.Length)
                 {
                     return false;
                 }
 
-                group = footer.RowGroups[_rowGroup];
+                group = footer.RowGroups[_chosen];
             }
-            while (!_read[_rowGroup] || group.RowCount == 0 || (_rows is { } range && (group.FirstRow >= range.End || group.FirstRow + group.RowCount <= range.Start)));
+            while (!_read[_chosen] || group.RowCount == 0 || (_rows is { } range && (group.FirstRow >= range.End || group.FirstRow + group.RowCount <= range.Start)));
 
             if (!_anticipated)
             {
@@ -309,24 +425,24 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
             // The page index of the filter's columns rules batches out; a group it leaves none of
             // is not read. The offset indexes it reads place those columns' pages for the read.
-            Array.Clear(_locations);
-            _live = _pruning is null ? null
-                : await PagePruning.LiveAsync(_pruning, _rowGroup, group.RowCount, _batchRows, _indexes, _metrics, _cancellationToken, _locations).ConfigureAwait(false);
-            if (_live is { LiveCount: 0 })
+            Array.Clear(read.Locations);
+            live = _pruning is null ? null
+                : await PagePruning.LiveAsync(_pruning, _chosen, group.RowCount, _batchRows, _indexes, _metrics, cancellationToken, read.Locations).ConfigureAwait(false);
+            if (live is { LiveCount: 0 })
             {
-                _metrics.AddBlocksPruned(_live.BlockCount);
+                _metrics.AddBlocksPruned(live.BlockCount);
                 continue;
             }
 
             // Then the Bloom filters of the columns the filter's equalities ask about, and the
             // dictionaries of the columns it reads, each of which rules a group out whole.
-            if (_bloom && await BloomPruning.RulesOutAsync(_pruning!, _rowGroup, _indexes, _metrics, _cancellationToken).ConfigureAwait(false))
+            if (_bloom && await BloomPruning.RulesOutAsync(_pruning!, _chosen, _indexes, _metrics, cancellationToken).ConfigureAwait(false))
             {
                 _metrics.AddBlocksPruned((int)((group.RowCount + _batchRows - 1) / _batchRows));
                 continue;
             }
 
-            if (_dictionaries is not null && await _dictionaries.RulesOutAsync(_rowGroup, _metrics, _cancellationToken).ConfigureAwait(false))
+            if (_dictionaries is not null && await _dictionaries.RulesOutAsync(_chosen, _metrics, cancellationToken).ConfigureAwait(false))
             {
                 _metrics.AddBlocksPruned((int)((group.RowCount + _batchRows - 1) / _batchRows));
                 continue;
@@ -338,92 +454,61 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // A range of rows that starts or ends inside the group: the batches before it stepped over,
         // and none read past it. Its first and last batches hold rows outside it, which the scan trims.
         (long first, long end) = ChunkReads.Window(_rows, group.FirstRow, group.RowCount, _batchRows);
-        bool sparse = ChunkReads.Sparse(_file, first, end, group.RowCount, _live);
-        bool windowed = false;
-        if (sparse || ChunkReads.MayWindow(_file, _rowGroup, _leaves))
+        read.RowGroup = _chosen;
+        read.Group = group;
+        read.Live = live;
+        read.First = first;
+        read.End = end;
+        bool sparse = ChunkReads.Sparse(_file, first, end, group.RowCount, live);
+        read.Windowed = false;
+        read.Windows.Clear();
+        if (sparse || ChunkReads.MayWindow(_file, _chosen, _leaves))
         {
-            await ChunkReads.OffsetsAsync(_file, _rowGroup, _leaves, _locations, _offsets, _metrics, _cancellationToken).ConfigureAwait(false);
-            windowed = ChunkReads.Windows(_file, _rowGroup, _leaves, _locations, _live, first, end, _batchRows, group.RowCount, _windows, _maps);
+            await ChunkReads.OffsetsAsync(_file, _chosen, _leaves, read.Locations, _offsets, _metrics, cancellationToken).ConfigureAwait(false);
+            read.Windowed = ChunkReads.Windows(_file, _chosen, _leaves, read.Locations, live, first, end, _batchRows, group.RowCount, read.Windows, read.Maps);
         }
 
         long bytes = 0;
-        _runSlots.Clear();
+        read.RunSlots.Clear();
         for (int i = 0; i < _readers.Length; i++)
         {
-            ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
+            ColumnChunkMetadata chunk = footer.Chunk(_chosen, _leaves[i]);
             if (chunk.Hidden)
             {
                 throw new ParquetUnsupportedException("column key", ParquetComponentKind.Encryption,
                     $"The column '{footer.ColumnPaths[_leaves[i]]}' is encrypted with {Encryption.FileDecryptor.Describe(chunk.KeyMetadata.Of(footer.Bytes))}, whose key is not given.");
             }
 
-            if (windowed)
+            if (read.Windowed)
             {
                 // Its ranges are the windows'.
                 continue;
             }
 
             _ranges.Clear();
-            _maps[i] = ChunkReads.Plan(_file, chunk, _locations[_leaves[i]], sparse, _live, first, end, _batchRows, group.RowCount, _ranges);
+            read.Maps[i] = ChunkReads.Plan(_file, chunk, read.Locations[_leaves[i]], sparse, live, first, end, _batchRows, group.RowCount, _ranges);
             long start = _file.ChunkRange(chunk).Start;
             foreach ((long from, long to) in _ranges)
             {
-                int slot = _chunks.Add(new SegmentSpec((ulong)from, (uint)(to - from), 0, 0, 0));
-                _runSlots.Add((i, (int)(from - start), slot));
+                int slot = read.Chunks.Add(new SegmentSpec((ulong)from, (uint)(to - from), 0, 0, 0));
+                read.RunSlots.Add((i, (int)(from - start), slot));
                 bytes += to - from;
             }
         }
 
-        if (windowed)
+        if (read.Windowed)
         {
-            // The first window with the group; the next read now, while the first is decoded.
-            foreach ((int reader, long from, long to) in _windows[0].Runs)
+            // The first window with the group; the next read once the group starts, while the first is decoded.
+            foreach ((int reader, long from, long to) in read.Windows[0].Runs)
             {
-                int slot = _chunks.Add(new SegmentSpec((ulong)from, (uint)(to - from), 0, 0, 0));
-                _runSlots.Add((reader, (int)(from - _file.ChunkRange(footer.Chunk(_rowGroup, _leaves[reader])).Start), slot));
+                int slot = read.Chunks.Add(new SegmentSpec((ulong)from, (uint)(to - from), 0, 0, 0));
+                read.RunSlots.Add((reader, (int)(from - _file.ChunkRange(footer.Chunk(_chosen, _leaves[reader])).Start), slot));
                 bytes += to - from;
             }
         }
 
-        ScanCounters.Note(_metrics, _runSlots.Count, bytes);
-        await _file.Reader.ReadManyAsync(_chunks, _cancellationToken).ConfigureAwait(false);
-        int next = 0;
-        for (int i = 0; i < _readers.Length; i++)
-        {
-            ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
-            _readers[i].Encrypted(chunk.IsEncrypted ? Decryption(i, chunk) : null);
-            if (_maps[i] is not { } map)
-            {
-                _readers[i].Start(_chunks.GetBuffer(_runSlots[next++].Slot), chunk.Codec, group.RowCount);
-                _dictionaries?.Hand(_leaves[i], _readers[i]);
-                continue;
-            }
-
-            _runs.Clear();
-            for (; next < _runSlots.Count && _runSlots[next].Reader == i; next++)
-            {
-                _runs.Add((_runSlots[next].Start, _chunks.GetBuffer(_runSlots[next].Slot)));
-            }
-
-            _readers[i].Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_runs), _file.ChunkRange(chunk).Length, map, chunk.Codec, group.RowCount);
-            _dictionaries?.Hand(_leaves[i], _readers[i]);
-        }
-
-        if (windowed)
-        {
-            _window = 1;
-            _ahead = _windows.Count > 1 ? ReadAheadAsync(_windows[1], WindowRead(1)) : null;
-        }
-
-        _groupStart = group.FirstRow;
-        _groupRows = end;
-        _groupRead = 0;
-        if (first > 0)
-        {
-            SkipRows((int)first);
-            _groupRead = first;
-        }
-
+        ScanCounters.Note(_metrics, read.RunSlots.Count, bytes);
+        read.Reading = _file.Reader.ReadManyAsync(read.Chunks, cancellationToken).AsTask();
         return true;
     }
 
@@ -435,9 +520,10 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private async ValueTask WindowsAsync(int batch)
     {
         ParquetFooter footer = _file.Footer;
-        while (_window < _windows.Count && _windows[_window].FirstBatch <= batch)
+        List<ReadWindow> windows = _group.Windows;
+        while (_window < windows.Count && windows[_window].FirstBatch <= batch)
         {
-            ReadWindow window = _windows[_window];
+            ReadWindow window = windows[_window];
             SegmentRequestSet read = _windowReads[_window - 1];
             Task ahead = _ahead!;
             _ahead = null;
@@ -459,9 +545,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
 
             _window++;
-            if (_window < _windows.Count)
+            if (_window < windows.Count)
             {
-                _ahead = ReadAheadAsync(_windows[_window], WindowRead(_window));
+                _ahead = ReadAheadAsync(windows[_window], WindowRead(_window));
             }
         }
     }
@@ -477,8 +563,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             bytes += to - from;
         }
 
+        // On a thread of the pool: a read the source completes before it returns, from the system's
+        // cache, then runs beside the decoding of the window before it.
         ScanCounters.Note(_metrics, window.Runs.Count, bytes);
-        return _file.Reader.ReadManyAsync(read, _cancellationToken).AsTask();
+        CancellationToken abandon = _abandon.Token;
+        ISegmentReader source = _file.Reader;
+        return Task.Run(() => source.ReadManyAsync(read, abandon).AsTask(), abandon);
     }
 
     /// <summary>The request that reads window <paramref name="window"/>, past the first, made the first time a group has so many.</summary>
@@ -516,8 +606,68 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             read.Release();
         }
 
-        _windows.Clear();
         _window = 0;
+    }
+
+    /// <summary>
+    /// A row group chosen and read: where it is, the batches its page index leaves, its chunks'
+    /// pages placed, its windows, and the request that reads its chunks, or the first of its windows.
+    /// </summary>
+    private sealed class GroupRead(int leaves, int readers) : IDisposable
+    {
+        internal int RowGroup { get; set; }
+
+        internal RowGroupEntry Group { get; set; }
+
+        /// <summary>The rows of the group the scan reads, from the first batch they reach to the end of the last.</summary>
+        internal long First { get; set; }
+
+        internal long End { get; set; }
+
+        /// <summary>The batches the page index leaves, or null when it rules none out.</summary>
+        internal BlockMask? Live { get; set; }
+
+        /// <summary>Per leaf of the file, the offset index of its chunk, where one was read.</summary>
+        internal PageLocation[]?[] Locations { get; } = new PageLocation[]?[leaves];
+
+        /// <summary>Per reader, the pages of its chunk placed for a read of some of them; null for a chunk read whole.</summary>
+        internal PageLocation[]?[] Maps { get; } = new PageLocation[]?[readers];
+
+        /// <summary>Whether the group is read in windows, and the windows: the first read with the group.</summary>
+        internal bool Windowed { get; set; }
+
+        internal List<ReadWindow> Windows { get; } = [];
+
+        /// <summary>The request that reads the group's chunks, or its first window.</summary>
+        internal SegmentRequestSet Chunks { get; } = new();
+
+        /// <summary>The ranges of the chunks the request reads: whose they are, where each starts in its chunk, and its slot.</summary>
+        internal List<(int Reader, int Start, int Slot)> RunSlots { get; } = [];
+
+        /// <summary>The request's read, in flight until the group starts.</summary>
+        internal Task? Reading { get; set; }
+
+        /// <summary>Waits for a read the scan no longer needs, its failure dropped.</summary>
+        internal async ValueTask SettleAsync()
+        {
+            if (Reading is { } reading)
+            {
+                Reading = null;
+                try
+                {
+                    await reading.ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // A read nobody waits for has no one to report to.
+                }
+            }
+        }
+
+        /// <summary>Gives back what the group read, for the next group it is chosen for.</summary>
+        internal void Release() => Chunks.Release();
+
+        public void Dispose() => Chunks.Dispose();
     }
 
     /// <summary>

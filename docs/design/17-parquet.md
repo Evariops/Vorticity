@@ -470,6 +470,14 @@ A batch is borrowed, valid until the next `MoveNextAsync`; its buffers belong to
 to the split's context, which holds the dictionaries and the page buffers views point into. An owned
 `RecordBatch` copies once, as for a Vortex file.
 
+From a source that does not read in place, the next row group is chosen and read while one is
+decoded: its page index, Bloom filters and dictionaries consulted, its chunks or its first window
+read, on a thread of the pool, since a positional read the system's cache serves completes before it
+returns and would otherwise run on the scan's own. The dictionaries it decodes to prune go into a
+context of the pruning's own, never the batch's arena. A scan that takes a number of rows reads no
+group ahead, and a disposed scan cancels what it reads ahead. Over positional reads of sixteen row
+groups of a quarter million rows, a scan goes from 7.05 ms to 4.14.
+
 ### 5.8 Parallelism
 
 The degree is the session's or the scan's, 1 unless set ([09-contracts.md](09-contracts.md) §2).

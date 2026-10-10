@@ -113,12 +113,14 @@ public sealed class PageCountTests : IDisposable
     /// not decoded nor decompressed again.
     /// </summary>
     [Theory]
-    [InlineData(ParquetCompression.Zstd)]
-    [InlineData(ParquetCompression.Uncompressed)]
-    public async Task ADictionaryDecodedToPruneIsNotDecodedAgain(ParquetCompression compression)
+    [InlineData(ParquetCompression.Zstd, true)]
+    [InlineData(ParquetCompression.Uncompressed, true)]
+    [InlineData(ParquetCompression.Zstd, false)]
+    public async Task ADictionaryDecodedToPruneIsNotDecodedAgain(ParquetCompression compression, bool mapped)
     {
         string path = await WriteAsync(new ParquetWriteOptions { Compression = compression, RowGroupRows = GroupRows });
-        await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
+        await using VortexSession session = VortexSession.Create(options => options.MapFiles = mapped);
+        await using ParquetFile file = await ParquetFile.OpenAsync(path, ParquetOpenOptions.Default, session, Ct);
         Expected whole = Walk(file, path, (group, column, start, end) => true);
         Assert.True(whole.Dictionaries >= file.Footer.RowGroups.Length, $"{whole.Dictionaries} dictionaries");
 
