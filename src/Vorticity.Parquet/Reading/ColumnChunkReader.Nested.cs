@@ -189,10 +189,11 @@ internal sealed partial class ColumnChunkReader
             }
 
             // The page is taken whole: its buffers stay until the next batch, and the page after it
-            // says whether its last row goes on.
+            // says whether its last row goes on, but where the offset index places the pages, each
+            // of which then starts a row, as the standard requires of an indexed chunk.
             _retired.Add(page);
             _page = null;
-            if (!repeats && started == rows)
+            if ((!repeats || _map is not null) && started == rows)
             {
                 break;
             }
@@ -377,12 +378,12 @@ internal sealed partial class ColumnChunkReader
         Span<byte> levels = LevelBlock(page, entries);
         if (_leaf.MaxRepetitionLevel > 0)
         {
-            new RleHybridDecoder(_repetitionWidth).Read(_chunk.Slice(at, header.RepetitionLevelsLength).Span, levels[..entries]);
+            new RleHybridDecoder(_repetitionWidth).Read(Bytes(at, header.RepetitionLevelsLength).Span, levels[..entries]);
         }
 
         if (_leaf.MaxDefinitionLevel > 0)
         {
-            ReadOnlySpan<byte> runs = _chunk.Slice(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span;
+            ReadOnlySpan<byte> runs = Bytes(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span;
             new RleHybridDecoder(_definitionWidth).Read(runs, levels.Slice(entries, entries));
         }
 

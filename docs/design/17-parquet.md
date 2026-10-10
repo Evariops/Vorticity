@@ -300,11 +300,17 @@ A statistic prunes only where the standard makes it a bound:
 | `INTERVAL`, `GEOMETRY`, `GEOGRAPHY`, `LIST`, `MAP`, `VARIANT`, `FILE`, an unknown logical type | never |
 | `null_count` | only when present: an absent count is not 0 |
 
-Then the I/O. Per split, every range the selection needs is registered in one batch read of the
-`ISegmentSource`, which coalesces it: the pages of the selection when the column has an offset index,
-the column chunk otherwise, read in windows so that a large chunk does not delay the first batch.
-Each range is requested at most once per scan, and the plan counts in the same units as the
-execution, so the core's gates hold unchanged ([14-public-api.md](14-public-api.md) §9). The
+Then the I/O. Per row group, every range the selection needs is registered in one batch read of the
+`ISegmentSource`, which coalesces it. A source that reads in place, a mapped file, is asked for the
+chunks whole, since a page costs nothing until it is touched. Any other is asked, of a chunk whose
+offset index tiles it, for what precedes its first data page, the dictionary page, and the pages the
+selection needs, those that touch as one range; the offset indexes the page index did not read are
+read first, in one request, and a chunk without one, or whose index does not place its pages as they
+lie, is read whole. The column reader then steps over a page it never read by its place in the
+index, never by its header, and a page of an indexed chunk starts a row, as the standard requires.
+Each range is requested at most once per scan, and the plan counts the same ranges in the same
+units as the execution, so the core's gates hold unchanged ([14-public-api.md](14-public-api.md) §9).
+Reading a large chunk in windows, so that it does not delay the first batch, is not done yet. The
 predicate's columns are decoded first for each batch; the other columns are decoded only for the
 rows the filter keeps — a skipped run of a page is stepped over, not decoded, where its encoding
 lets it be: plain values by arithmetic, RLE runs by their lengths, whole pages by the offset index.

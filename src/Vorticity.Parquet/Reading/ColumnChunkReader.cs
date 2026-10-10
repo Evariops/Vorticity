@@ -76,7 +76,34 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private readonly VortexBuffer[] _data = new VortexBuffer[1];
 
     private CompressionCodec _codec;
+
+    /// <summary>
+    /// The chunk's bytes the scan read, each run at its place counted from the chunk's start: the whole
+    /// chunk, or the pages its batches need and what comes before the first, the dictionary's.
+    /// </summary>
+    private readonly List<(int Start, VortexBuffer Bytes)> _runs = [];
+
+    /// <summary>The run the reader is in, and where it starts in the chunk.</summary>
+    private int _run;
+    private int _runStart;
     private VortexBuffer _chunk;
+
+    /// <summary>The chunk's bytes, read or not.</summary>
+    private int _chunkLength;
+
+    /// <summary>The chunk's rows.</summary>
+    private long _rowsTotal;
+
+    /// <summary>
+    /// Where each data page starts, counted from the chunk's start, and its first row, from the offset
+    /// index: what lets a skip step over a page whose bytes it never read; null without one.
+    /// </summary>
+    private PageLocation[]? _map;
+
+    /// <summary>The next page of the map.</summary>
+    private int _mapped;
+
+    /// <summary>Where the reader is in the chunk, counted from its start.</summary>
     private int _position;
     private long _rowsLeft;
     private long _rowsUnread;
@@ -164,12 +191,88 @@ internal sealed partial class ColumnChunkReader : IDisposable
     internal void Start(VortexBuffer chunk, CompressionCodec codec, long rows)
     {
         Release();
-        _chunk = chunk;
+        _runs.Add((0, chunk));
+        Begin(chunk.Length, null, codec, rows);
+    }
+
+    /// <summary>
+    /// Starts the chunk of a row group of which the scan read <paramref name="runs"/> alone, each at its
+    /// place in the chunk's <paramref name="length"/> bytes: a page outside them is one the scan steps
+    /// over, by its place in <paramref name="map"/>, never by its header.
+    /// </summary>
+    internal void Start(ReadOnlySpan<(int Start, VortexBuffer Bytes)> runs, int length, PageLocation[] map, CompressionCodec codec, long rows)
+    {
+        Release();
+        foreach ((int Start, VortexBuffer Bytes) run in runs)
+        {
+            _runs.Add(run);
+        }
+
+        Begin(length, map, codec, rows);
+    }
+
+    private void Begin(int length, PageLocation[]? map, CompressionCodec codec, long rows)
+    {
+        _run = 0;
+        (_runStart, _chunk) = _runs.Count > 0 ? _runs[0] : (0, default);
+        _chunkLength = length;
+        _map = map;
+        _mapped = 0;
         _codec = codec;
         _position = 0;
+        _rowsTotal = rows;
         _rowsLeft = rows;
         _rowsUnread = rows;
         _pastFirstPage = false;
+    }
+
+    /// <summary>
+    /// The bytes from <paramref name="position"/> of the chunk to the end of the run read there: empty
+    /// at the chunk's end.
+    /// </summary>
+    private ReadOnlySpan<byte> From(int position)
+    {
+        Seek(position);
+        if (position == _runStart + _chunk.Length && position < _chunkLength)
+        {
+            Unread();
+        }
+
+        return _chunk.Span[(position - _runStart)..];
+    }
+
+    /// <summary><paramref name="length"/> bytes at <paramref name="position"/> of the chunk, which a run read.</summary>
+    private VortexBuffer Bytes(int position, int length)
+    {
+        Seek(position);
+        return _chunk.Slice(position - _runStart, length);
+    }
+
+    /// <summary>Moves to the run that holds <paramref name="position"/>: forward, as the pages are visited.</summary>
+    private void Seek(int position)
+    {
+        while (_run + 1 < _runs.Count && position >= _runs[_run + 1].Start)
+        {
+            _run++;
+            (_runStart, _chunk) = _runs[_run];
+        }
+
+        if (position < _runStart || position > _runStart + _chunk.Length)
+        {
+            Unread();
+        }
+    }
+
+    private void Unread() =>
+        throw new InvalidOperationException($"The scan of '{Name}' reached bytes of its chunk it did not read.");
+
+    /// <summary>Moves the map past the data page at <paramref name="position"/>, when it is the one the map holds next.</summary>
+    private void Mapped(int position, PageType type)
+    {
+        if (_map is { } map && _mapped < map.Length && position == map[_mapped].Offset && type is PageType.DataPage or PageType.DataPageV2)
+        {
+            _mapped++;
+        }
     }
 
     /// <summary>
@@ -280,7 +383,25 @@ internal sealed partial class ColumnChunkReader : IDisposable
         skipped = 0;
         while (true)
         {
-            ReadOnlySpan<byte> rest = _chunk.Span[_position..];
+            if (_map is { } map && _mapped < map.Length && _position == map[_mapped].Offset)
+            {
+                // A page the offset index places is stepped over by its place, unread.
+                long next = _mapped + 1 < map.Length ? map[_mapped + 1].FirstRow : _rowsTotal;
+                long mappedRows = next - map[_mapped].FirstRow;
+                if (mappedRows <= 0 || mappedRows > rows || mappedRows > _rowsUnread)
+                {
+                    return false;
+                }
+
+                _position = _mapped + 1 < map.Length ? (int)map[_mapped + 1].Offset : _chunkLength;
+                _mapped++;
+                _rowsUnread -= mappedRows;
+                _pastFirstPage = true;
+                skipped = (int)mappedRows;
+                return true;
+            }
+
+            ReadOnlySpan<byte> rest = From(_position);
             if (rest.IsEmpty)
             {
                 return false;
@@ -319,6 +440,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 return false;
             }
 
+            Mapped(_position, header.Type);
             _position = at + header.CompressedPageSize;
             _rowsUnread -= pageRows;
             _pastFirstPage = true;
@@ -353,6 +475,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
         Entries = 0;
         ValueCount = 0;
         _chunk = default;
+        _runs.Clear();
+        _map = null;
     }
 
     public void Dispose()
@@ -569,7 +693,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     {
         while (true)
         {
-            ReadOnlySpan<byte> rest = _chunk.Span[_position..];
+            ReadOnlySpan<byte> rest = From(_position);
             if (rest.IsEmpty)
             {
                 return null;
@@ -582,6 +706,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
 
             int at = _position + header.HeaderLength;
+            Mapped(_position, header.Type);
             _position = at + header.CompressedPageSize;
             switch (header.Type)
             {
@@ -633,7 +758,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 page.Rows = rows;
                 valid = _leaf.MaxDefinitionLevel == 0
                     ? rows
-                    : Levels(page, _chunk.Slice(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
+                    : Levels(page, Bytes(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
                 if (header.NullCount != rows - valid)
                 {
                     ParquetThrow.Format($"A page of '{Name}' declares {header.NullCount} nulls where its levels hold {rows - valid}.");
@@ -642,7 +767,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             RequireEncoding(header.Encoding);
             int size = header.UncompressedPageSize - levels;
-            VortexBuffer stored = _chunk.Slice(at + levels, header.CompressedPageSize - levels);
+            VortexBuffer stored = Bytes(at + levels, header.CompressedPageSize - levels);
 
             // A page of nulls may have no values at all, and no bytes the codec would make of none.
             if (size == 0)
@@ -689,7 +814,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
 
             int size = header.UncompressedPageSize;
-            VortexBuffer body = _chunk.Slice(at, header.CompressedPageSize);
+            VortexBuffer body = Bytes(at, header.CompressedPageSize);
             if (_codec != CompressionCodec.Uncompressed)
             {
                 Cap(size);
@@ -1483,7 +1608,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>Holds the page at <paramref name="at"/> to its checksum, when the reader verifies them and the page has one.</summary>
     private void Check(in PageHeader header, int at)
     {
-        if (VerifyChecksums && header.HasCrc && Crc32.HashToUInt32(_chunk.Span.Slice(at, header.CompressedPageSize)) != unchecked((uint)header.Crc))
+        if (VerifyChecksums && header.HasCrc && Crc32.HashToUInt32(Bytes(at, header.CompressedPageSize).Span) != unchecked((uint)header.Crc))
         {
             ParquetThrow.Format($"A page of '{Name}' does not match its checksum: its bytes are not the ones written.");
         }
@@ -1508,7 +1633,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         try
         {
             int size = header.UncompressedPageSize;
-            VortexBuffer body = _chunk.Slice(at, header.CompressedPageSize);
+            VortexBuffer body = Bytes(at, header.CompressedPageSize);
             if (_codec != CompressionCodec.Uncompressed)
             {
                 // A dictionary page has no flag that keeps it out of the codec: it is always compressed.

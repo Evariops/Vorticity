@@ -54,7 +54,6 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>A flat field's reader.</summary>
     private readonly int[] _flat;
-    private readonly int[] _slots;
     private readonly int[] _nodes;
 
     /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
@@ -69,6 +68,18 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The batches of the row group being read the page index leaves, or null when it rules none out.</summary>
     private BlockMask? _live;
+
+    /// <summary>Per leaf of the file, the offset index of its chunk in the row group being read, where one was read.</summary>
+    private readonly PageLocation[]?[] _locations;
+    private readonly SegmentRequestSet _offsets = new();
+
+    /// <summary>Per reader, the pages of its chunk placed for a read of some of them; null for a chunk read whole.</summary>
+    private readonly PageLocation[]?[] _maps;
+
+    /// <summary>The ranges of the chunks the row group reads: whose they are, where each starts in its chunk, and its slot.</summary>
+    private readonly List<(int Reader, int Start, int Slot)> _runSlots = [];
+    private readonly List<(int Start, VortexBuffer Bytes)> _runs = [];
+    private readonly List<(long From, long To)> _ranges = [];
     private RecordBatch? _current;
     private int _rowGroup = -1;
     private long _groupStart;
@@ -139,7 +150,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             _leaves[i] = _readers[i].Column.Ordinal;
         }
 
-        _slots = new int[_readers.Length];
+        _maps = new PageLocation[]?[_readers.Length];
+        _locations = new PageLocation[]?[schema.Columns.Length];
         _nodes = new int[fields.Length];
         _pruning = FilterColumns.For(file, spec);
         _bloom = _pruning is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
@@ -170,10 +182,19 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 break;
             }
 
-            // A batch the page index rules out: every column steps over its rows.
-            SkipRows(rows);
-            _groupRead += rows;
-            _metrics.AddBlocksPruned(1);
+            // The batches the page index rules out, as many as follow one another: every column steps
+            // over their rows at once, so that a page they cover whole, which a sparse read did not
+            // read, is stepped over whole.
+            long from = _groupRead;
+            int pruned = 0;
+            while (_groupRead < _groupRows && !_live.IsLive((int)(_groupRead / _batchRows)))
+            {
+                _groupRead += Math.Min(_batchRows, _groupRows - _groupRead);
+                pruned++;
+            }
+
+            SkipRows(checked((int)(_groupRead - from)));
+            _metrics.AddBlocksPruned(pruned);
         }
 
         for (int i = 0; i < _nodes.Length; i++)
@@ -202,6 +223,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _chunks.Dispose();
         _indexes.Release();
         _indexes.Dispose();
+        _offsets.Release();
+        _offsets.Dispose();
         _dictionaries?.Dispose();
         _context.Dispose();
         return ValueTask.CompletedTask;
@@ -239,9 +262,10 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
 
             // The page index of the filter's columns rules batches out; a group it leaves none of
-            // is not read.
+            // is not read. The offset indexes it reads place those columns' pages for the read.
+            Array.Clear(_locations);
             _live = _pruning is null ? null
-                : await PagePruning.LiveAsync(_pruning, _rowGroup, group.RowCount, _batchRows, _indexes, _metrics, _cancellationToken).ConfigureAwait(false);
+                : await PagePruning.LiveAsync(_pruning, _rowGroup, group.RowCount, _batchRows, _indexes, _metrics, _cancellationToken, _locations).ConfigureAwait(false);
             if (_live is { LiveCount: 0 })
             {
                 _metrics.AddBlocksPruned(_live.BlockCount);
@@ -265,43 +289,59 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             break;
         }
 
-        long bytes = 0;
-        for (int i = 0; i < _readers.Length; i++)
+        // A range of rows that starts or ends inside the group: the batches before it stepped over,
+        // and none read past it. Its first and last batches hold rows outside it, which the scan trims.
+        (long first, long end) = ChunkReads.Window(_rows, group.FirstRow, group.RowCount, _batchRows);
+        bool sparse = ChunkReads.Sparse(_file, first, end, group.RowCount, _live);
+        if (sparse)
         {
-            ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
-            (long start, int length) = _file.ChunkRange(chunk);
-            _slots[i] = _chunks.Add(new SegmentSpec((ulong)start, (uint)length, 0, 0, 0));
-            bytes += length;
+            await ChunkReads.OffsetsAsync(_file, _rowGroup, _leaves, _locations, _offsets, _metrics, _cancellationToken).ConfigureAwait(false);
         }
 
-        ScanCounters.Note(_metrics, _readers.Length, bytes);
-        await _file.Reader.ReadManyAsync(_chunks, _cancellationToken).ConfigureAwait(false);
+        long bytes = 0;
+        _runSlots.Clear();
         for (int i = 0; i < _readers.Length; i++)
         {
             ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
-            _readers[i].Start(_chunks.GetBuffer(_slots[i]), chunk.Codec, group.RowCount);
+            _ranges.Clear();
+            _maps[i] = ChunkReads.Plan(_file, chunk, _locations[_leaves[i]], sparse, _live, first, end, _batchRows, group.RowCount, _ranges);
+            long start = _file.ChunkRange(chunk).Start;
+            foreach ((long from, long to) in _ranges)
+            {
+                int slot = _chunks.Add(new SegmentSpec((ulong)from, (uint)(to - from), 0, 0, 0));
+                _runSlots.Add((i, (int)(from - start), slot));
+                bytes += to - from;
+            }
+        }
+
+        ScanCounters.Note(_metrics, _runSlots.Count, bytes);
+        await _file.Reader.ReadManyAsync(_chunks, _cancellationToken).ConfigureAwait(false);
+        int next = 0;
+        for (int i = 0; i < _readers.Length; i++)
+        {
+            ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
+            if (_maps[i] is not { } map)
+            {
+                _readers[i].Start(_chunks.GetBuffer(_runSlots[next++].Slot), chunk.Codec, group.RowCount);
+                continue;
+            }
+
+            _runs.Clear();
+            for (; next < _runSlots.Count && _runSlots[next].Reader == i; next++)
+            {
+                _runs.Add((_runSlots[next].Start, _chunks.GetBuffer(_runSlots[next].Slot)));
+            }
+
+            _readers[i].Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_runs), _file.ChunkRange(chunk).Length, map, chunk.Codec, group.RowCount);
         }
 
         _groupStart = group.FirstRow;
-        _groupRows = group.RowCount;
+        _groupRows = end;
         _groupRead = 0;
-
-        // A range of rows that starts or ends inside the group: the batches before it stepped over,
-        // and none read past it. Its first and last batches hold rows outside it, which the scan trims.
-        if (_rows is { } asked)
+        if (first > 0)
         {
-            if (asked.End < group.FirstRow + group.RowCount)
-            {
-                long end = asked.End - group.FirstRow;
-                _groupRows = Math.Min(group.RowCount, (end + _batchRows - 1) / _batchRows * _batchRows);
-            }
-
-            long before = (asked.Start - group.FirstRow) / _batchRows * _batchRows;
-            if (before > 0)
-            {
-                SkipRows((int)before);
-                _groupRead = before;
-            }
+            SkipRows((int)first);
+            _groupRead = first;
         }
 
         return true;

@@ -106,10 +106,11 @@ internal static class PagePruning
     /// <summary>
     /// The live batches of <paramref name="rows"/> rows, of <paramref name="batchRows"/> each, of row
     /// group <paramref name="group"/>, the indexes of the filter's columns read in one request; null
-    /// when no column has an index.
+    /// when no column has an index. Each offset index read is kept in <paramref name="locations"/>, by
+    /// column, when given, for the reads that follow.
     /// </summary>
     internal static async ValueTask<BlockMask?> LiveAsync(
-        FilterColumns filter, int group, long rows, int batchRows, SegmentRequestSet requests, ScanCounters? metrics, CancellationToken cancellationToken)
+        FilterColumns filter, int group, long rows, int batchRows, SegmentRequestSet requests, ScanCounters? metrics, CancellationToken cancellationToken, PageLocation[]?[]? locations = null)
     {
         ParquetFile file = filter.File;
         ParquetFooter footer = file.Footer;
@@ -154,6 +155,11 @@ internal static class PagePruning
             else
             {
                 PageLocation[] pages = OffsetIndex.Read(requests.GetBuffer(offsetSlots[i]).Span, rows);
+                if (locations is not null)
+                {
+                    locations[filter.Columns[i]] = pages;
+                }
+
                 ColumnIndex index = ColumnIndex.Read(requests.GetBuffer(columnSlots[i]).Span.ToArray(), pages.Length);
                 if (Believable(column, pages, index, rows))
                 {

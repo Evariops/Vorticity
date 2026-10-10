@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
@@ -12,7 +13,10 @@ namespace Vorticity.Parquet.Tests;
 /// <summary>
 /// Other writers' statistics read as bounds: on every real file, for a value of each comparable
 /// column, the rows a filter of it selects counted with the statistics pruning and proving, and
-/// counted again reading every row. A bound read wrong, or a count proven wrong, is a difference.
+/// counted again reading every row, and counted through a positional read, which reads of each chunk
+/// the pages its live batches need alone; on a file of 100 000 rows or fewer, the rows of a filter are
+/// compared whole between that read and the mapped one. A bound read wrong, a count proven wrong, or a page
+/// placed wrong is a difference.
 /// <c>VORTICITY_PARQUET_DATA</c> names the files' directory.
 /// </summary>
 public sealed class RealFilePruningTests
@@ -31,6 +35,8 @@ public sealed class RealFilePruningTests
         int compared = 0;
         long blocksPruned = 0;
         long blocksProven = 0;
+        int rowsCompared = 0;
+        await using VortexSession positional = VortexSession.Create(options => options.MapFiles = false);
         foreach (string path in Directory.EnumerateFiles(Root!, "*.parquet", SearchOption.AllDirectories))
         {
             string name = Path.GetRelativePath(Root!, path);
@@ -45,19 +51,25 @@ public sealed class RealFilePruningTests
             }
 
             await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
+            await using ParquetFile read = await ParquetFile.OpenAsync(path, ParquetOpenOptions.Default, positional, Ct);
+            bool rowsToo = file.RowCount <= 100_000;
+
             // In batches of the scan's default and of 128 rows, which a file's small pages rule out
             // a batch at a time.
             foreach ((string column, FilterLiteral value, bool decimalColumn) in samples)
             {
+                int kind = 0;
                 foreach ((int batchRows, VortexExpr filter) in Filters(column, value, decimalColumn))
                 {
                     long pruned;
                     long whole;
+                    long sparse;
                     try
                     {
                         ScanOptions options = new() { BatchRows = batchRows };
                         pruned = await file.Scan().Where(filter).With(options).CountAsync(Ct);
                         whole = await file.Scan().Where(filter).With(options with { UseStatistics = false }).CountAsync(Ct);
+                        sparse = await read.Scan().Where(filter).With(options).CountAsync(Ct);
                     }
                     catch (Exception e) when (e is ArgumentException or NotSupportedException or VortexSchemaException)
                     {
@@ -66,9 +78,19 @@ public sealed class RealFilePruningTests
                     }
 
                     compared++;
-                    if (pruned != whole)
+                    if (pruned != whole || sparse != whole)
                     {
-                        failures.Add($"{name}: {filter} in batches of {batchRows} counts {pruned} pruned and {whole} read whole");
+                        failures.Add($"{name}: {filter} in batches of {batchRows} counts {pruned} pruned, {sparse} read positionally and {whole} read whole");
+                    }
+
+                    // An equality and an order at the default batch, every column's rows.
+                    if (rowsToo && batchRows == 0 && kind++ < 2)
+                    {
+                        rowsCompared++;
+                        if (!(await RowsAsync(file, filter)).SequenceEqual(await RowsAsync(read, filter)))
+                        {
+                            failures.Add($"{name}: {filter} reads other rows positionally than mapped");
+                        }
                     }
 
                     // What the statistics did, so that a run shows they were put to the test.
@@ -80,7 +102,7 @@ public sealed class RealFilePruningTests
             }
         }
 
-        report?.WriteLine($"{compared} filters compared, {failures.Count} differ; {blocksPruned} blocks pruned, {blocksProven} proven");
+        report?.WriteLine($"{compared} filters compared, {rowsCompared} by their rows, {failures.Count} differ; {blocksPruned} blocks pruned, {blocksProven} proven");
         Assert.Empty(failures);
     }
 
@@ -123,6 +145,34 @@ public sealed class RealFilePruningTests
             default:
                 return null;
         }
+    }
+
+    /// <summary>The rows <paramref name="filter"/> keeps, every column rendered.</summary>
+    private static async Task<List<string>> RowsAsync(ParquetFile file, VortexExpr filter)
+    {
+        List<string> rows = [];
+        await foreach (RecordBatch batch in file.Scan().Where(filter).ToBatchesAsync(Ct))
+        {
+            using (batch)
+            {
+                ReadOnlySpan<ulong> kept = batch.SelectionWords;
+                for (int r = 0; r < batch.RowCount; r++)
+                {
+                    if (kept.IsEmpty || ((kept[r >> 6] >> (r & 63)) & 1) != 0)
+                    {
+                        System.Text.StringBuilder row = new();
+                        for (int c = 0; c < batch.Schema.Count; c++)
+                        {
+                            row.Append(Render.Row(batch, c, r)).Append('|');
+                        }
+
+                        rows.Add(row.ToString());
+                    }
+                }
+            }
+        }
+
+        return rows;
     }
 
     /// <summary>A value of each top-level column the first batch holds one of, from its middle row.</summary>

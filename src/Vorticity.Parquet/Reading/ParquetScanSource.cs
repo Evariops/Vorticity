@@ -349,6 +349,9 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         int dictionaryPruned = 0;
         int undecidedPruned = 0;
         int[] leaves = Leaves(spec);
+        PageLocation[]?[] locations = new PageLocation[]?[file.Compiled.Columns.Length];
+        ScanCounters offsets = new();
+        List<(long From, long To)> runs = [];
         for (int group = 0; group < footer.RowGroups.Length; group++)
         {
             if (!plan.Read[group])
@@ -359,8 +362,9 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             RowGroupEntry entry = footer.RowGroups[group];
             int blocks = (int)((entry.RowCount + batchRows - 1) / batchRows);
             rows += entry.RowCount;
+            Array.Clear(locations);
             BlockMask? mask = filter is null ? null
-                : await PagePruning.LiveAsync(filter, group, entry.RowCount, batchRows, requests, indexes, cancellationToken).ConfigureAwait(false);
+                : await PagePruning.LiveAsync(filter, group, entry.RowCount, batchRows, requests, indexes, cancellationToken, locations).ConfigureAwait(false);
             int liveBlocks = mask?.LiveCount ?? blocks;
             pagePruned += blocks - liveBlocks;
             if (liveBlocks > 0 && bloom
@@ -393,10 +397,24 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
                 continue;
             }
 
+            // The ranges the read asks for, as the scan plans them: from a source that does not read in
+            // place, the pages its batches need, placed by offset indexes it reads for them.
+            (long first, long end) = ChunkReads.Window(spec.Rows, entry.FirstRow, entry.RowCount, batchRows);
+            bool sparse = ChunkReads.Sparse(file, first, end, entry.RowCount, mask);
+            if (sparse)
+            {
+                await ChunkReads.OffsetsAsync(file, group, leaves, locations, requests, offsets, cancellationToken).ConfigureAwait(false);
+            }
+
             foreach (int leaf in leaves)
             {
-                bytes += file.ChunkRange(footer.Chunk(group, leaf)).Length;
-                segments++;
+                runs.Clear();
+                ChunkReads.Plan(file, footer.Chunk(group, leaf), locations[leaf], sparse, mask, first, end, batchRows, entry.RowCount, runs);
+                foreach ((long from, long to) in runs)
+                {
+                    bytes += to - from;
+                    segments++;
+                }
             }
         }
 
@@ -417,8 +435,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
                 new PruningStep("dictionary", dictionaryPruned, dictionarySegments, dictionaryBytes),
             ]
             : ImmutableArray<PruningStep>.Empty;
-        segments += bloomSegments + dictionarySegments;
-        bytes += bloomBytes + dictionaryBytes;
+        segments += bloomSegments + dictionarySegments + (int)offsets.SegmentRequests;
+        bytes += bloomBytes + dictionaryBytes + offsets.BytesRequested;
         bool unfiltered = spec.Filter is null && spec.Take is null;
         CountPlan count = unfiltered
             ? new CountPlan(true, rows, 0, 0, 0)
