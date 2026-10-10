@@ -200,19 +200,15 @@ public sealed class ParquetFile : IAsyncDisposable
         SegmentOwner? held = null;
         VortexBuffer footerBytes = default;
         int footerLength;
+        bool encryptedFooter;
         try
         {
             ReadOnlySpan<byte> bytes = read.Buffer.Span;
             ReadOnlySpan<byte> end = bytes[^8..];
-            if (end[4..].SequenceEqual("PARE"u8))
+            encryptedFooter = end[4..].SequenceEqual("PARE"u8);
+            if (!encryptedFooter && !end[4..].SequenceEqual("PAR1"u8))
             {
-                throw new ParquetUnsupportedException("PARE", ParquetComponentKind.Encryption,
-                    "The file's footer is encrypted; this version of the reader reads plaintext footers.");
-            }
-
-            if (!end[4..].SequenceEqual("PAR1"u8))
-            {
-                ParquetThrow.Format("The file does not end with the magic PAR1: it is not a Parquet file, or it is cut short.");
+                ParquetThrow.Format("The file does not end with the magic PAR1, nor PARE: it is not a Parquet file, or it is cut short.");
             }
 
             footerLength = BinaryPrimitives.ReadInt32LittleEndian(end);
@@ -226,9 +222,9 @@ public sealed class ParquetFile : IAsyncDisposable
                 ParquetThrow.Format($"The footer's length, {footerLength}, passes the {options.MaxFooterBytes} bytes the open allows.");
             }
 
-            if (tail == length && !bytes[..4].SequenceEqual("PAR1"u8))
+            if (tail == length && !bytes[..4].SequenceEqual(end[4..]))
             {
-                ParquetThrow.Format("The file does not begin with the magic PAR1.");
+                ParquetThrow.Format("The file does not begin with the magic it ends with.");
             }
 
             if (footerLength <= tail - 8)
@@ -251,25 +247,111 @@ public sealed class ParquetFile : IAsyncDisposable
             footerBytes = held.Buffer;
         }
 
+        if (encryptedFooter)
+        {
+            return OpenEncrypted(reader, options, session, length, held, footerBytes);
+        }
+
         // The footer is read where it lies, a mapped file's in the mapping, for the file's life: an
         // open copies nothing that grows with the footer, which grows with the chunks.
         SegmentOwnerMemory memory = new(held, footerBytes);
         try
         {
             ParquetFooter metadata = ParquetFooter.Read(memory.Memory);
-            if (metadata.IsEncrypted)
+            if (metadata.Algorithm is { } algorithm)
             {
-                throw new ParquetUnsupportedException("encrypted columns", ParquetComponentKind.Encryption,
-                    "The file encrypts its columns; this version of the reader reads plaintext files.");
+                Signed(metadata, algorithm, options, footerBytes.Span);
             }
 
-            ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders, metadata.Value).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
+            ParquetSchema schema = Compile(metadata);
             return new ParquetFile(reader, session, options, length, metadata, schema, memory);
         }
         catch
         {
             ((IDisposable)memory).Dispose();
             throw;
+        }
+    }
+
+    /// <summary>The schema a footer compiles to, its columns' paths given to it where it decrypts their keys.</summary>
+    private static ParquetSchema Compile(ParquetFooter metadata)
+    {
+        ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders, metadata.Value).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
+        if (metadata.Decryptor is not null || metadata.IsEncrypted)
+        {
+            string[] paths = new string[schema.Columns.Length];
+            for (int i = 0; i < paths.Length; i++)
+            {
+                paths[i] = schema.Columns[i].DottedPath;
+            }
+
+            metadata.ColumnPaths = paths;
+        }
+
+        return schema;
+    }
+
+    /// <summary>
+    /// A plaintext footer of an encrypted file: its signature, the 28 bytes past its
+    /// <c>FileMetaData</c>, held to the footer's key where the caller asks for decryption; the
+    /// decryptor kept for the columns it reads. A caller who asks for none reads its plaintext columns.
+    /// </summary>
+    private static void Signed(ParquetFooter metadata, Encryption.FileCrypto algorithm, ParquetOpenOptions options, ReadOnlySpan<byte> footer)
+    {
+        if (footer.Length - metadata.StructLength != Encryption.ModuleCipher.NonceLength + Encryption.ModuleCipher.TagLength)
+        {
+            ParquetThrow.Format($"A plaintext footer of an encrypted file holds {footer.Length - metadata.StructLength} bytes past its metadata where its signature takes 28.");
+        }
+
+        if (options.Decryption is not { } decryption)
+        {
+            return;
+        }
+
+        Encryption.FileDecryptor decryptor = Encryption.FileDecryptor.Create(algorithm, decryption, footerKeyRequired: false);
+        if (decryption.VerifyFooterSignature)
+        {
+            if (decryptor.FooterKey is null)
+            {
+                throw new ParquetUnsupportedException("footer key", ParquetComponentKind.Encryption,
+                    $"The footer's signature needs its key, named by {Encryption.FileDecryptor.Describe(algorithm.KeyMetadata)}: give it, or set VerifyFooterSignature false.");
+            }
+
+            if (!decryptor.Signs(footer[..metadata.StructLength], footer[metadata.StructLength..]))
+            {
+                ParquetThrow.Format("The footer does not match its signature: it was altered, or the key or the AAD prefix is not its own.");
+            }
+        }
+
+        metadata.Decryptor = decryptor;
+    }
+
+    /// <summary>
+    /// A file whose footer is encrypted: its <c>FileCryptoMetaData</c>, then the footer's module,
+    /// decrypted under the footer's key into bytes the file holds for its life.
+    /// </summary>
+    private static ParquetFile OpenEncrypted(ISegmentReader reader, ParquetOpenOptions options, VortexSession session, long length, SegmentOwner held, VortexBuffer tail)
+    {
+        try
+        {
+            if (options.Decryption is not { } decryption)
+            {
+                throw new ParquetUnsupportedException("PARE", ParquetComponentKind.Encryption,
+                    "The file's footer is encrypted: give its keys as ParquetOpenOptions.Decryption.");
+            }
+
+            ReadOnlySpan<byte> bytes = tail.Span;
+            Encryption.FileCrypto crypto = Encryption.FileCrypto.ReadFileCryptoMetaData(bytes, out int cryptoLength);
+            Encryption.FileDecryptor decryptor = Encryption.FileDecryptor.Create(crypto, decryption, footerKeyRequired: true);
+            byte[] plaintext = decryptor.Decrypt(decryptor.FooterKey!, bytes[cryptoLength..], Encryption.ModuleType.Footer, -1, -1);
+            ParquetFooter metadata = ParquetFooter.Read(plaintext);
+            metadata.Decryptor = decryptor;
+            ParquetSchema schema = Compile(metadata);
+            return new ParquetFile(reader, session, options, length, metadata, schema);
+        }
+        finally
+        {
+            held.Release();
         }
     }
 
@@ -284,10 +366,16 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <summary>Where a column chunk's pages lie, its dictionary page first; checked against the file's bytes.</summary>
     internal (long Start, int Length) ChunkRange(ColumnChunkMetadata chunk)
     {
-        if (chunk.IsEncrypted)
+        if (chunk.Hidden)
+        {
+            throw new ParquetUnsupportedException("column key", ParquetComponentKind.Encryption,
+                "A column is encrypted with a key of its own, which is not given: set it in ParquetDecryption.ColumnKeys, or a KeyResolver that knows its key metadata.");
+        }
+
+        if (chunk.IsEncrypted && Footer.Decryptor is null)
         {
             throw new ParquetUnsupportedException("encrypted columns", ParquetComponentKind.Encryption,
-                "A column chunk is encrypted; this version of the reader reads plaintext files.");
+                "A column is encrypted: give the file's keys as ParquetOpenOptions.Decryption.");
         }
 
         if (chunk.HasFilePath)

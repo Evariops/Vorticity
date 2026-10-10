@@ -82,7 +82,7 @@ internal sealed class FilterColumns
         {
             ParquetColumn column = File.Compiled.Columns[Columns[i]];
             ColumnChunkMetadata chunk = footer.Chunk(group, Columns[i]);
-            ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, footer.Bytes);
+            ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, chunk.Source.Span);
             zones[i] = new ZoneColumn(Fields[i], rows, rows, [bounds], ColumnBounds.IsDecimal(column));
         }
 
@@ -124,7 +124,9 @@ internal static class PagePruning
         {
             ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
             columnSlots[i] = -1;
-            if (!file.Holds(chunk.ColumnIndexOffset, chunk.ColumnIndexLength) || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
+
+            // An encrypted chunk's page index is a module of its own, which this reader does not decrypt.
+            if (chunk.IsEncrypted || !file.Holds(chunk.ColumnIndexOffset, chunk.ColumnIndexLength) || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
             {
                 continue;
             }

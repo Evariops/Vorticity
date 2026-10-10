@@ -67,7 +67,7 @@ internal static class ChunkReads
         {
             ColumnChunkMetadata chunk = footer.Chunk(group, leaves[i]);
             slots[i] = -1;
-            if (locations[leaves[i]] is not null || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
+            if (locations[leaves[i]] is not null || chunk.IsEncrypted || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
             {
                 continue;
             }

@@ -247,8 +247,8 @@ written as a `ConvertedType` alone: its `LogicalType` is reserved and has no def
 
 The open reads the tail as the core's open does: the last 8 KiB of a local file positionally, else
 64 KiB, or the whole file when it is smaller. The last eight bytes give the footer's length and the
-magic; `PARE`, an encrypted footer, is unsupported until phase 3. A footer the tail does not cover
-costs one more read, of exactly its bytes. The magic at offset 0 is checked when the read already
+magic; `PARE` is an encrypted footer (§5.10). A footer the tail does not cover costs one more read,
+of exactly its bytes. The magic at offset 0, the same as the last, is checked when the read already
 covers it or the file is mapped, and not at the price of a request.
 
 The footer is then **indexed, not materialized**. One pass over `FileMetaData` compiles the schema —
@@ -469,6 +469,40 @@ row group the statistics prove entirely inside the predicate — exact bounds, n
 `num_rows` without a decode, one proven outside counts nothing, and only the others are read. A
 minimum or a maximum comes from the statistics when every row group's bound is exact, and from the
 data otherwise.
+
+### 5.10 Encrypted files
+
+A file of the standard's [modular encryption](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Encryption.md) is read with the keys
+`ParquetOpenOptions.Decryption` gives: a column's from `ColumnKeys` by its dotted path, the footer's
+from `FooterKey`, else what `KeyResolver` makes of the key metadata the file stores. `AES_GCM_V1`
+decrypts every module through .NET's `AesGcm`; `AES_GCM_CTR_V1`'s pages are in counter mode, which
+.NET does not have: a run of 256 counter blocks is encrypted in one `Aes.EncryptEcb`, which AES-NI
+pipelines, and the 4 KiB of keystream XORed in a vector at a time.
+
+- **An encrypted footer**, `PARE`, is its `FileCryptoMetaData` then its module, decrypted once at the
+  open into bytes the file holds for its life: the one copy of the footer an open makes.
+- **A plaintext footer** of an encrypted file reads without a key, as a reader older than encryption
+  does: its plaintext columns read as any file's, and an encrypted one is refused until its key is
+  given. Given keys, the open holds the footer to its signature, the 28 bytes past its
+  `FileMetaData`, unless `VerifyFooterSignature` is off.
+- **A column's metadata** encrypted under its own key is decrypted the first time a plan asks for the
+  chunk, and kept: its statistics then prune as a plaintext chunk's do. Without its key, the chunk's
+  plaintext copy, stripped of its statistics, places it, and a scan of it is refused by name.
+- **A page** is two modules, its header and its body. The header is decrypted to be read, the body
+  into a block of the pool when the page is decoded: one copy, as a decompression is, after which a
+  compressed page decompresses as any. A page's `compressed_page_size` is [its module's](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/src/main/thrift/parquet.thrift#L837-L838),
+  length to tag, its plaintext that less 32 bytes, or 16 in counter mode. A module's AAD carries the
+  page's ordinal among the chunk's data pages, which follows the pages' places: a header a skip
+  looks at and leaves is the same page when it is read.
+- **Refused**: a module that fails its authentication, as malformed, since the file was altered or
+  the key or the AAD prefix is not its own; a footer, a column or an AAD prefix the file needs and the
+  caller does not give, as unsupported, naming it.
+- **Not yet**: an encrypted chunk's column index, offset index and Bloom filter are modules this
+  reader does not decrypt: such a chunk is read whole and pruned by its statistics alone. The suite's
+  file whose keys are wrapped by a KMS, in key material outside it, needs a resolver that unwraps them.
+
+The suite's encrypted files, 128-bit and 256-bit keys, every footer mode, both algorithms, a prefix
+stored and one supplied, read as the rows of the C++ writer's test generator, every one.
 
 ## 6. Writing
 
@@ -714,8 +748,8 @@ comes down. Speed is measured against baselines this repository owns:
    statistics, written and verified, which no filter prunes by until the core's expressions have a
    spatial predicate; `FILE`, read and written as the struct of its fields, its references left to
    the caller to resolve; modular encryption, `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1`
-   with AES in counter mode over `Aes.EncryptEcb`, keys from a resolver the caller gives; ordered
-   reads on declared `sorting_columns`.
+   with AES in counter mode over `Aes.EncryptEcb`, keys from a resolver the caller gives, read
+   (§5.10) and then written; ordered reads on declared `sorting_columns`.
 
 LZ4 and LZO are in no phase: the standard gives neither format (§3.2 #8).
 

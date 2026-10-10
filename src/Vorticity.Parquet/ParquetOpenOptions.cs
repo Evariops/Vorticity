@@ -48,4 +48,10 @@ public sealed record ParquetOpenOptions
     /// default, since a check reads every byte of a page where a view of it would not.
     /// </summary>
     public bool VerifyChecksums { get; init; }
+
+    /// <summary>
+    /// The keys of a file encrypted by the standard's modular encryption, and the identity it is held
+    /// to; null to read a plaintext file, or a file's plaintext footer and columns.
+    /// </summary>
+    public ParquetDecryption? Decryption { get; init; }
 }

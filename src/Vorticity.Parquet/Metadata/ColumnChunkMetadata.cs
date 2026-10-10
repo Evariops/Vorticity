@@ -145,12 +145,40 @@ internal struct ColumnStatistics
     }
 }
 
+/// <summary>How a column chunk is encrypted, as its <c>crypto_metadata</c> says.</summary>
+internal enum ChunkCrypto : byte
+{
+    None,
+
+    /// <summary>With the footer's key.</summary>
+    FooterKey,
+
+    /// <summary>With a key of its own, which its key metadata names.</summary>
+    ColumnKey,
+}
+
 /// <summary>
 /// A column chunk's <c>ColumnChunk</c> and <c>ColumnMetaData</c> flattened: where its pages and
-/// indexes lie, how it is compressed, and where its statistics lie in the footer.
+/// indexes lie, how it is compressed, and where its statistics lie: in <see cref="Source"/>, the
+/// footer, or the plaintext of its encrypted metadata.
 /// </summary>
 internal struct ColumnChunkMetadata
 {
+    /// <summary>The bytes the chunk's ranges point into.</summary>
+    internal ReadOnlyMemory<byte> Source;
+
+    /// <summary>How the chunk is encrypted.</summary>
+    internal ChunkCrypto Crypto;
+
+    /// <summary>The metadata naming a column key, in the footer.</summary>
+    internal ByteRange KeyMetadata;
+
+    /// <summary>The chunk's <c>ColumnMetaData</c> encrypted with its column's key, in the footer.</summary>
+    internal ByteRange EncryptedMetadata;
+
+    /// <summary>Whether the chunk's metadata is encrypted and was not decrypted: its key was not given.</summary>
+    internal bool Hidden;
+
     internal PhysicalType Type;
 
     /// <summary>The encodings the chunk declares, a bit per <see cref="ParquetEncoding"/> number.</summary>
@@ -203,16 +231,19 @@ internal struct ColumnChunkMetadata
     internal bool HasFilePath;
 
     /// <summary>Whether the chunk is encrypted.</summary>
-    internal bool IsEncrypted;
+    internal readonly bool IsEncrypted => Crypto != ChunkCrypto.None;
 
     /// <summary>Where the chunk's first page lies: its dictionary page when it has one.</summary>
     internal readonly long Start => DictionaryPageOffset >= 0 && DictionaryPageOffset < DataPageOffset ? DictionaryPageOffset : DataPageOffset;
 
     /// <summary>Reads a <c>ColumnChunk</c> whose struct starts at <paramref name="origin"/> in the footer.</summary>
-    internal static ColumnChunkMetadata Read(ReadOnlySpan<byte> footer, int origin)
+    internal static ColumnChunkMetadata Read(ReadOnlyMemory<byte> source, int origin)
     {
-        ThriftCompactReader reader = new(footer.Slice(origin));
+        ThriftCompactReader reader = new(source.Span.Slice(origin));
         ColumnChunkMetadata chunk = default;
+        chunk.Source = source;
+        chunk.KeyMetadata = ByteRange.None;
+        chunk.EncryptedMetadata = ByteRange.None;
         chunk.DictionaryPageOffset = -1;
         chunk.BloomFilterOffset = -1;
         chunk.BloomFilterLength = -1;
@@ -247,10 +278,12 @@ internal struct ColumnChunkMetadata
                 case 7 when type == ThriftType.I32:
                     chunk.ColumnIndexLength = reader.ReadI32();
                     break;
-                case 8:
-                case 9:
-                    chunk.IsEncrypted = true;
-                    reader.Skip(type);
+                case 8 when type == ThriftType.Struct:
+                    ReadCrypto(ref reader, ref chunk, origin);
+                    break;
+                case 9 when type == ThriftType.Binary:
+                    int length = reader.ReadBinary().Length;
+                    chunk.EncryptedMetadata = new ByteRange(origin + reader.Position - length, length);
                     break;
                 default:
                     reader.Skip(type);
@@ -259,12 +292,77 @@ internal struct ColumnChunkMetadata
         }
 
         reader.ExitStruct(saved);
-        if (!hasMetadata && !chunk.IsEncrypted)
+        if (!hasMetadata && !chunk.EncryptedMetadata.IsPresent)
         {
             ParquetThrow.Format("A column chunk carries no metadata.");
         }
 
+        if (chunk.EncryptedMetadata.IsPresent && chunk.Crypto == ChunkCrypto.None)
+        {
+            ParquetThrow.Format("A column chunk's metadata is encrypted, and its crypto metadata does not say with what key.");
+        }
+
+        chunk.Hidden = !hasMetadata;
         return chunk;
+    }
+
+    /// <summary>
+    /// Takes the chunk's <c>ColumnMetaData</c> from <paramref name="plaintext"/>, its encrypted
+    /// metadata decrypted, the ranges from then on pointing there.
+    /// </summary>
+    internal void Decrypted(ReadOnlyMemory<byte> plaintext)
+    {
+        ThriftCompactReader reader = new(plaintext.Span);
+        Source = plaintext;
+        SizeStatistics = ByteRange.None;
+        GeospatialStatistics = ByteRange.None;
+        Statistics = default;
+        ReadColumnMetaData(ref reader, ref this, 0);
+        Hidden = false;
+    }
+
+    /// <summary>Reads a <c>ColumnCryptoMetaData</c> union: the footer's key, or a column's with the metadata that names it.</summary>
+    private static void ReadCrypto(ref ThriftCompactReader reader, ref ColumnChunkMetadata chunk, int origin)
+    {
+        short saved = reader.EnterStruct();
+        while (reader.ReadFieldHeader(out ThriftType type, out short id))
+        {
+            switch (id)
+            {
+                case 1 when type == ThriftType.Struct:
+                    chunk.Crypto = ChunkCrypto.FooterKey;
+                    reader.Skip(type);
+                    break;
+                case 2 when type == ThriftType.Struct:
+                    chunk.Crypto = ChunkCrypto.ColumnKey;
+                    short inner = reader.EnterStruct();
+                    while (reader.ReadFieldHeader(out ThriftType memberType, out short member))
+                    {
+                        if (member == 2 && memberType == ThriftType.Binary)
+                        {
+                            int length = reader.ReadBinary().Length;
+                            chunk.KeyMetadata = new ByteRange(origin + reader.Position - length, length);
+                        }
+                        else
+                        {
+                            reader.Skip(memberType);
+                        }
+                    }
+
+                    reader.ExitStruct(inner);
+                    break;
+                default:
+                    reader.Skip(type);
+                    break;
+            }
+        }
+
+        reader.ExitStruct(saved);
+        if (chunk.Crypto == ChunkCrypto.None)
+        {
+            throw new ParquetUnsupportedException("crypto_metadata", ParquetComponentKind.Encryption,
+                "A column chunk is encrypted by a means the standard does not define.");
+        }
     }
 
     private static void ReadColumnMetaData(ref ThriftCompactReader reader, ref ColumnChunkMetadata chunk, int origin)

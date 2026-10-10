@@ -99,12 +99,12 @@ public sealed class ParquetMetadata
             chunk.Start,
             chunk.TotalCompressedSize,
             chunk.TotalUncompressedSize,
-            Statistics(file, column, chunk.Statistics),
+            Statistics(column, chunk.Statistics, chunk.Source.Span),
             chunk.ColumnIndexOffset >= 0,
             chunk.OffsetIndexOffset >= 0,
             chunk.BloomFilterOffset >= 0,
             chunk.HasEncodingStats ? chunk.AllDataPagesDictionary : null,
-            Geospatial(chunk.GeospatialStatistics.Of(file.Footer.Bytes)));
+            Geospatial(chunk.GeospatialStatistics.Of(chunk.Source.Span)));
     }
 
     /// <summary>A chunk's geospatial statistics, or null when its metadata has none.</summary>
@@ -125,14 +125,14 @@ public sealed class ParquetMetadata
         return new ParquetGeospatialInfo(box, statistics.Types ?? []);
     }
 
-    private static ParquetStatisticsInfo? Statistics(ParquetFile file, ParquetColumn column, in ColumnStatistics statistics)
+    private static ParquetStatisticsInfo? Statistics(ParquetColumn column, in ColumnStatistics statistics, ReadOnlySpan<byte> source)
     {
         if (!statistics.IsPresent)
         {
             return null;
         }
 
-        ZoneBounds bounds = ColumnBounds.Of(column, statistics, file.Footer.Bytes);
+        ZoneBounds bounds = ColumnBounds.Of(column, statistics, source);
         bool decimals = ColumnBounds.IsDecimal(column);
         return new ParquetStatisticsInfo(
             statistics.HasNullCount ? statistics.NullCount : null,

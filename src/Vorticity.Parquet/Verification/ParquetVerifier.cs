@@ -95,6 +95,20 @@ internal static class ParquetVerifier
         ParquetFooter footer = file.Footer;
         RowGroupEntry entry = footer.RowGroups[group];
         ColumnChunkMetadata chunk = footer.Chunk(group, column.Ordinal);
+        if (chunk.IsEncrypted)
+        {
+            // An encrypted chunk's pages and indexes are modules this check does not decrypt: its statistics
+            // alone are held to its values, which a scan decrypts, where its key is given.
+            if (!chunk.Hidden && file.Footer.Decryptor is not null && column.MaxRepetitionLevel == 0 && column.Form != LeafForm.Null)
+            {
+                ChunkValues encrypted = await ValuesAsync(file, group, column, cancellationToken).ConfigureAwait(false);
+                Statistics(group, column, chunk, footer, encrypted, findings);
+                Geospatial(group, column, chunk, footer, encrypted, findings);
+            }
+
+            return;
+        }
+
         (long start, int length) = file.ChunkRange(chunk);
         using SegmentRequestSet requests = new();
         int slot = requests.Add(new SegmentSpec((ulong)start, (uint)length, 0, 0, 0));
@@ -307,7 +321,7 @@ internal static class ParquetVerifier
     /// <summary>The chunk's statistics against its values: its null and NaN counts, and its bounds, equal to the extremes where exact and around them otherwise.</summary>
     private static void Statistics(int group, ParquetColumn column, ColumnChunkMetadata chunk, ParquetFooter footer, ChunkValues values, List<ParquetFinding> findings)
     {
-        ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, footer.Bytes);
+        ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, chunk.Source.Span);
         bool decimals = ColumnBounds.IsDecimal(column);
         (FilterLiteral min, FilterLiteral max, bool bounded, long nulls, long nans) = Summarize(values, 0, values.Valid.Length, decimals);
         if (bounds.HasNullCount && bounds.NullCount != nulls)
@@ -350,7 +364,7 @@ internal static class ParquetVerifier
         GeospatialStatistics declared;
         try
         {
-            declared = GeospatialStatistics.Read(chunk.GeospatialStatistics.Of(footer.Bytes));
+            declared = GeospatialStatistics.Read(chunk.GeospatialStatistics.Of(chunk.Source.Span));
         }
         catch (ParquetFormatException e)
         {

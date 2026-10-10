@@ -91,6 +91,20 @@ Vorticity.Parquet:     const ParquetCompression Snappy = 1
 Vorticity.Parquet:     const ParquetCompression Uncompressed = 0
 Vorticity.Parquet:     const ParquetCompression Zstd = 6
 Vorticity.Parquet:     field byte value__
+Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetDecryption : IEquatable<ParquetDecryption>
+Vorticity.Parquet:     ctor ParquetDecryption()
+Vorticity.Parquet:     method ParquetDecryption <Clone>$()
+Vorticity.Parquet:     method bool Equals(ParquetDecryption)
+Vorticity.Parquet:     method bool Equals(object)
+Vorticity.Parquet:     method bool op_Equality(ParquetDecryption, ParquetDecryption)
+Vorticity.Parquet:     method bool op_Inequality(ParquetDecryption, ParquetDecryption)
+Vorticity.Parquet:     method int GetHashCode()
+Vorticity.Parquet:     method string ToString()
+Vorticity.Parquet:     property IReadOnlyDictionary<string, ReadOnlyMemory<byte>> ColumnKeys { get; init; }
+Vorticity.Parquet:     property ParquetKeyResolver KeyResolver { get; init; }
+Vorticity.Parquet:     property ReadOnlyMemory<byte> AadPrefix { get; init; }
+Vorticity.Parquet:     property ReadOnlyMemory<byte> FooterKey { get; init; }
+Vorticity.Parquet:     property bool VerifyFooterSignature { get; init; }
 Vorticity.Parquet: enum Vorticity.Parquet.ParquetEncodingHint
 Vorticity.Parquet:     const ParquetEncodingHint Alp = 8
 Vorticity.Parquet:     const ParquetEncodingHint Auto = 0
@@ -157,6 +171,22 @@ Vorticity.Parquet:     method string ToString()
 Vorticity.Parquet:     method void Deconstruct(out ParquetBoundingBox, out IReadOnlyList<int>)
 Vorticity.Parquet:     property IReadOnlyList<int> Types { get; init; }
 Vorticity.Parquet:     property ParquetBoundingBox Box { get; init; }
+Vorticity.Parquet: struct Vorticity.Parquet.ParquetKeyRequest : IEquatable<ParquetKeyRequest>
+Vorticity.Parquet:     ctor ParquetKeyRequest(string, ReadOnlyMemory<byte>)
+Vorticity.Parquet:     method bool Equals(ParquetKeyRequest)
+Vorticity.Parquet:     method bool Equals(object)
+Vorticity.Parquet:     method bool op_Equality(ParquetKeyRequest, ParquetKeyRequest)
+Vorticity.Parquet:     method bool op_Inequality(ParquetKeyRequest, ParquetKeyRequest)
+Vorticity.Parquet:     method int GetHashCode()
+Vorticity.Parquet:     method string ToString()
+Vorticity.Parquet:     method void Deconstruct(out string, out ReadOnlyMemory<byte>)
+Vorticity.Parquet:     property ReadOnlyMemory<byte> KeyMetadata { get; init; }
+Vorticity.Parquet:     property string Column { get; init; }
+Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetKeyResolver : MulticastDelegate
+Vorticity.Parquet:     ctor ParquetKeyResolver(object, nint)
+Vorticity.Parquet:     method IAsyncResult BeginInvoke(ParquetKeyRequest, AsyncCallback, object)
+Vorticity.Parquet:     method ReadOnlyMemory<byte> EndInvoke(IAsyncResult)
+Vorticity.Parquet:     method ReadOnlyMemory<byte> Invoke(ParquetKeyRequest)
 Vorticity.Parquet: sealed class Vorticity.Parquet.ParquetMetadata
 Vorticity.Parquet:     property IReadOnlyList<KeyValuePair<string, string>> KeyValues { get; }
 Vorticity.Parquet:     property IReadOnlyList<ParquetColumnInfo> Columns { get; }
@@ -173,6 +203,7 @@ Vorticity.Parquet:     method bool op_Equality(ParquetOpenOptions, ParquetOpenOp
 Vorticity.Parquet:     method bool op_Inequality(ParquetOpenOptions, ParquetOpenOptions)
 Vorticity.Parquet:     method int GetHashCode()
 Vorticity.Parquet:     method string ToString()
+Vorticity.Parquet:     property ParquetDecryption Decryption { get; init; }
 Vorticity.Parquet:     property ParquetOpenOptions Default { get; }
 Vorticity.Parquet:     property bool VerifyChecksums { get; init; }
 Vorticity.Parquet:     property int MaxFooterBytes { get; init; }

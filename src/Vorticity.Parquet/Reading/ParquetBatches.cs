@@ -76,6 +76,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>Per reader, the pages of its chunk placed for a read of some of them; null for a chunk read whole.</summary>
     private readonly PageLocation[]?[] _maps;
 
+    /// <summary>Per reader, what decrypts its column's pages, made the first time a chunk of it is encrypted.</summary>
+    private readonly Encryption.PageDecryption?[] _decryptions;
+
     /// <summary>The ranges of the chunks the row group reads: whose they are, where each starts in its chunk, and its slot.</summary>
     private readonly List<(int Reader, int Start, int Slot)> _runSlots = [];
     private readonly List<(int Start, VortexBuffer Bytes)> _runs = [];
@@ -156,6 +159,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _maps = new PageLocation[]?[_readers.Length];
+        _decryptions = new Encryption.PageDecryption?[_readers.Length];
         _locations = new PageLocation[]?[schema.Columns.Length];
         _nodes = new int[fields.Length];
         _pruning = FilterColumns.For(file, spec);
@@ -222,6 +226,11 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.Dispose();
+        }
+
+        foreach (Encryption.PageDecryption? decryption in _decryptions)
+        {
+            decryption?.Dispose();
         }
 
         _chunks.Release();
@@ -308,6 +317,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < _readers.Length; i++)
         {
             ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
+            if (chunk.Hidden)
+            {
+                throw new ParquetUnsupportedException("column key", ParquetComponentKind.Encryption,
+                    $"The column '{footer.ColumnPaths[_leaves[i]]}' is encrypted with {Encryption.FileDecryptor.Describe(chunk.KeyMetadata.Of(footer.Bytes))}, whose key is not given.");
+            }
+
             _ranges.Clear();
             _maps[i] = ChunkReads.Plan(_file, chunk, _locations[_leaves[i]], sparse, _live, first, end, _batchRows, group.RowCount, _ranges);
             long start = _file.ChunkRange(chunk).Start;
@@ -325,6 +340,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < _readers.Length; i++)
         {
             ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
+            _readers[i].Encrypted(chunk.IsEncrypted ? Decryption(i, chunk) : null);
             if (_maps[i] is not { } map)
             {
                 _readers[i].Start(_chunks.GetBuffer(_runSlots[next++].Slot), chunk.Codec, group.RowCount);
@@ -350,6 +366,31 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// What decrypts the pages of reader <paramref name="reader"/>'s chunk <paramref name="chunk"/> of
+    /// the row group being read: the reader's own, made again only where the chunk's key is another.
+    /// </summary>
+    private Encryption.PageDecryption Decryption(int reader, in ColumnChunkMetadata chunk)
+    {
+        ParquetFooter footer = _file.Footer;
+        Encryption.FileDecryptor decryptor = footer.Decryptor!;
+        int leaf = _leaves[reader];
+        byte[] key = decryptor.ColumnKey(footer.ColumnPaths[leaf], chunk.KeyMetadata.Of(footer.Bytes), chunk.Crypto == ChunkCrypto.FooterKey)
+            ?? throw new ParquetUnsupportedException("column key", ParquetComponentKind.Encryption,
+                $"The column '{footer.ColumnPaths[leaf]}' is encrypted with {Encryption.FileDecryptor.Describe(chunk.KeyMetadata.Of(footer.Bytes))}, whose key is not given.");
+        Encryption.PageDecryption? decryption = _decryptions[reader];
+        if (decryption is null || !decryption.Under(key))
+        {
+            decryption?.Dispose();
+            decryption = new Encryption.PageDecryption(key, decryptor);
+            _decryptions[reader] = decryption;
+        }
+
+        bool dictionary = chunk.DictionaryPageOffset > 0 && chunk.DictionaryPageOffset < chunk.DataPageOffset;
+        decryption.Start(footer.Ordinal(_rowGroup), leaf, dictionary);
+        return decryption;
     }
 
     /// <summary>Steps every column over its next <paramref name="rows"/> rows: a page they cover whole by its header alone.</summary>

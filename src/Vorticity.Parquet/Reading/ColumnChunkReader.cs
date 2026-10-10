@@ -88,6 +88,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private int _runStart;
     private VortexBuffer _chunk;
 
+    /// <summary>What decrypts the pages of the chunk being read, or null for a chunk in plaintext.</summary>
+    private Encryption.PageDecryption? _decryption;
+
     /// <summary>The chunk's bytes, read or not.</summary>
     private int _chunkLength;
 
@@ -227,6 +230,65 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>
+    /// Decrypts the pages of the chunks started next with <paramref name="decryption"/>, or reads them
+    /// in plaintext when it is null.
+    /// </summary>
+    internal void Encrypted(Encryption.PageDecryption? decryption) => _decryption = decryption;
+
+    /// <summary>
+    /// The header of the page at <see cref="_position"/>, <paramref name="rest"/> the chunk's bytes
+    /// from there: decrypted from its module where the chunk is encrypted. <paramref name="body"/> is
+    /// where the page's stored bytes start in the chunk and <paramref name="bytes"/> how many it holds
+    /// of them, an encrypted body's module whole.
+    /// </summary>
+    private PageHeader NextHeader(ReadOnlySpan<byte> rest, out int body, out int bytes)
+    {
+        if (_decryption is not { } decryption)
+        {
+            PageHeader header = PageHeader.Read(rest);
+            if (header.CompressedPageSize > rest.Length - header.HeaderLength)
+            {
+                ParquetThrow.Format($"A page of '{Name}' runs past its column chunk.");
+            }
+
+            body = _position + header.HeaderLength;
+            bytes = header.CompressedPageSize;
+            return header;
+        }
+
+        // An encrypted page's size is its module's, length to tag: the page's own is that less what the
+        // module adds, which the decoders read as its stored bytes. Its checksum, if any, is of bytes
+        // the module authenticates.
+        PageHeader decrypted = decryption.Header(rest, _position, out int headerBytes);
+        body = _position + headerBytes;
+        bytes = Encryption.ModuleCipher.ModuleBytes(From(body), decryption.BodyOverhead);
+        if (bytes != decrypted.CompressedPageSize)
+        {
+            ParquetThrow.Format($"An encrypted page of '{Name}' is a module of {bytes} bytes where its header declares {decrypted.CompressedPageSize}.");
+        }
+
+        decrypted.CompressedPageSize -= decryption.BodyOverhead;
+        decrypted.HasCrc = false;
+        return decrypted;
+    }
+
+    /// <summary>
+    /// The stored bytes of the page <see cref="NextHeader"/> read: a view of the chunk, or its module
+    /// decrypted into a block <paramref name="owner"/> holds, which the caller takes.
+    /// </summary>
+    private VortexBuffer Body(in PageHeader header, int body, int bytes, out NativeSegmentOwner? owner)
+    {
+        if (_decryption is not { } decryption)
+        {
+            owner = null;
+            return Bytes(body, bytes);
+        }
+
+        owner = decryption.Body(header, Bytes(body, bytes).Span, _pool);
+        return owner.Buffer.Slice(0, header.CompressedPageSize);
+    }
+
+    /// <summary>
     /// The bytes from <paramref name="position"/> of the chunk to the end of the run read there: empty
     /// at the chunk's end.
     /// </summary>
@@ -289,7 +351,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             ParquetThrow.Format($"The column chunk of '{Name}' does not start with the dictionary page its metadata places there.");
         }
 
-        _dictionary = DecodeDictionary(context, header, header.HeaderLength);
+        _dictionary = DecodeDictionary(context, header, Bytes(header.HeaderLength, header.CompressedPageSize), null);
         return Whole(context.Canonical, _dictionary);
     }
 
@@ -407,19 +469,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 return false;
             }
 
-            PageHeader header = PageHeader.Read(rest);
-            if (header.CompressedPageSize > rest.Length - header.HeaderLength)
-            {
-                ParquetThrow.Format($"A page of '{Name}' runs past its column chunk.");
-            }
-
-            int at = _position + header.HeaderLength;
+            PageHeader header = NextHeader(rest, out int at, out int stored);
             int pageRows;
             switch (header.Type)
             {
                 case PageType.DictionaryPage:
-                    _position = at + header.CompressedPageSize;
-                    _dictionary = DecodeDictionary(context, header, at);
+                    _position = at + stored;
+                    _dictionary = DecodeDictionary(context, header, Body(header, at, stored, out NativeSegmentOwner? owner), owner);
                     continue;
                 case PageType.DataPageV2 when _nested || header.ValueCount == header.RowCount:
                     pageRows = header.RowCount;
@@ -431,7 +487,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 case PageType.DataPageV2:
                     return false;
                 default:
-                    _position = at + header.CompressedPageSize;
+                    _position = at + stored;
                     continue;
             }
 
@@ -441,7 +497,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
 
             Mapped(_position, header.Type);
-            _position = at + header.CompressedPageSize;
+            _position = at + stored;
             _rowsUnread -= pageRows;
             _pastFirstPage = true;
             skipped = pageRows;
@@ -699,23 +755,18 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 return null;
             }
 
-            PageHeader header = PageHeader.Read(rest);
-            if (header.CompressedPageSize > rest.Length - header.HeaderLength)
-            {
-                ParquetThrow.Format($"A page of '{Name}' runs past its column chunk.");
-            }
-
-            int at = _position + header.HeaderLength;
+            PageHeader header = NextHeader(rest, out int at, out int stored);
             Mapped(_position, header.Type);
-            _position = at + header.CompressedPageSize;
+            _position = at + stored;
+            NativeSegmentOwner? owner;
             switch (header.Type)
             {
                 case PageType.DataPageV2:
-                    return DecodeV2(context, header, at);
+                    return DecodeV2(context, header, Body(header, at, stored, out owner), owner);
                 case PageType.DataPage:
-                    return DecodeV1(context, header, at);
+                    return DecodeV1(context, header, Body(header, at, stored, out owner), owner);
                 case PageType.DictionaryPage:
-                    _dictionary = DecodeDictionary(context, header, at);
+                    _dictionary = DecodeDictionary(context, header, Body(header, at, stored, out owner), owner);
                     continue;
                 default:
                     // An index page, or a kind a later version of the standard adds: not data.
@@ -724,14 +775,28 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    private Page DecodeV2(ScanContext context, in PageHeader header, int at)
+    /// <summary>
+    /// A v2 data page of stored bytes <paramref name="body"/>, which <paramref name="owner"/> holds
+    /// where they are not the chunk's: the page takes the block, or gives it back.
+    /// </summary>
+    private Page DecodeV2(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? owner)
     {
-        Check(header, at);
+        try
+        {
+            Check(header, body);
+        }
+        catch
+        {
+            owner?.Dispose();
+            throw;
+        }
+
         // A flat column's repetition levels say nothing, and a required one's definition levels
         // neither: some writers write them anyway, and they are stepped over.
         int levels = header.RepetitionLevelsLength + header.DefinitionLevelsLength;
         if (header.RepetitionLevelsLength < 0 || header.DefinitionLevelsLength < 0 || levels > header.CompressedPageSize || levels > header.UncompressedPageSize)
         {
+            owner?.Dispose();
             ParquetThrow.Format($"A page of '{Name}' declares levels its bytes do not hold.");
         }
 
@@ -741,9 +806,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
             int valid;
             if (_nested)
             {
-                valid = NestedLevelsV2(page, header, at);
+                valid = NestedLevelsV2(page, header, body);
                 if (_form == LeafForm.Null)
                 {
+                    owner?.Dispose();
                     return page;
                 }
             }
@@ -758,7 +824,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 page.Rows = rows;
                 valid = _leaf.MaxDefinitionLevel == 0
                     ? rows
-                    : Levels(page, Bytes(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
+                    : Levels(page, body.Slice(header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span, rows);
                 if (header.NullCount != rows - valid)
                 {
                     ParquetThrow.Format($"A page of '{Name}' declares {header.NullCount} nulls where its levels hold {rows - valid}.");
@@ -767,19 +833,32 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             RequireEncoding(header.Encoding);
             int size = header.UncompressedPageSize - levels;
-            VortexBuffer stored = Bytes(at + levels, header.CompressedPageSize - levels);
+            VortexBuffer stored = body.Slice(levels, header.CompressedPageSize - levels);
 
             // A page of nulls may have no values at all, and no bytes the codec would make of none.
             if (size == 0)
             {
+                owner?.Dispose();
+                owner = null;
                 Decode(page, header.Encoding, default, null, valid);
             }
             else if (header.IsCompressed && _codec != CompressionCodec.Uncompressed)
             {
                 Cap(size);
-                NativeSegmentOwner owner = _pool.Rent(size, 64);
-                PageCodecs.Decompress(_codec, stored.Span, owner.WritableSpan, context.Zstd);
-                Decode(page, header.Encoding, owner.Buffer, owner, valid);
+                NativeSegmentOwner values = _pool.Rent(size, 64);
+                try
+                {
+                    PageCodecs.Decompress(_codec, stored.Span, values.WritableSpan, context.Zstd);
+                }
+                catch
+                {
+                    values.Dispose();
+                    throw;
+                }
+
+                owner?.Dispose();
+                owner = null;
+                Decode(page, header.Encoding, values.Buffer, values, valid);
             }
             else
             {
@@ -788,39 +867,57 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     ParquetThrow.Format($"An uncompressed page of '{Name}' holds {stored.Length} bytes of values where its header declares {size}.");
                 }
 
-                Decode(page, header.Encoding, stored, null, valid);
+                // The page's values are its stored bytes: the block that holds them is the page's.
+                NativeSegmentOwner? taken = owner;
+                owner = null;
+                Decode(page, header.Encoding, stored, taken, valid);
             }
 
             return page;
         }
         catch
         {
+            owner?.Dispose();
             page.Release();
             _free.Push(page);
             throw;
         }
     }
 
-    private Page DecodeV1(ScanContext context, in PageHeader header, int at)
+    /// <summary>
+    /// A v1 data page of stored bytes <paramref name="body"/>, which <paramref name="stored"/> holds
+    /// where they are not the chunk's: the page takes the block, or gives it back.
+    /// </summary>
+    private Page DecodeV1(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? stored)
     {
-        Check(header, at);
+        NativeSegmentOwner? owner = stored;
         Page page = Rent(0);
-        NativeSegmentOwner? owner = null;
         try
         {
+            Check(header, body);
             if (_form != LeafForm.Null)
             {
                 RequireEncoding(header.Encoding);
             }
 
             int size = header.UncompressedPageSize;
-            VortexBuffer body = Bytes(at, header.CompressedPageSize);
             if (_codec != CompressionCodec.Uncompressed)
             {
                 Cap(size);
-                owner = _pool.Rent(size, 64);
-                PageCodecs.Decompress(_codec, body.Span, owner.WritableSpan, context.Zstd);
-                body = owner.Buffer;
+                NativeSegmentOwner decompressed = _pool.Rent(size, 64);
+                try
+                {
+                    PageCodecs.Decompress(_codec, body.Span, decompressed.WritableSpan, context.Zstd);
+                }
+                catch
+                {
+                    decompressed.Dispose();
+                    throw;
+                }
+
+                owner?.Dispose();
+                owner = decompressed;
+                body = decompressed.Buffer;
             }
             else if (body.Length != size)
             {
@@ -1646,42 +1743,61 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    /// <summary>Holds the page at <paramref name="at"/> to its checksum, when the reader verifies them and the page has one.</summary>
-    private void Check(in PageHeader header, int at)
+    /// <summary>Holds the page of stored bytes <paramref name="body"/> to its checksum, when the reader verifies them and the page has one.</summary>
+    private void Check(in PageHeader header, VortexBuffer body)
     {
-        if (VerifyChecksums && header.HasCrc && Crc32.HashToUInt32(Bytes(at, header.CompressedPageSize).Span) != unchecked((uint)header.Crc))
+        if (VerifyChecksums && header.HasCrc && Crc32.HashToUInt32(body.Span) != unchecked((uint)header.Crc))
         {
             ParquetThrow.Format($"A page of '{Name}' does not match its checksum: its bytes are not the ones written.");
         }
     }
 
     /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
-    private Page DecodeDictionary(ScanContext context, in PageHeader header, int at)
+    private Page DecodeDictionary(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? stored)
     {
-        Check(header, at);
-        if (_dictionary is not null)
+        NativeSegmentOwner? owner = stored;
+        try
         {
-            ParquetThrow.Format($"The column chunk of '{Name}' holds a second dictionary page.");
-        }
+            Check(header, body);
+            if (_dictionary is not null)
+            {
+                ParquetThrow.Format($"The column chunk of '{Name}' holds a second dictionary page.");
+            }
 
-        if (header.Encoding is not (ParquetEncoding.Plain or ParquetEncoding.PlainDictionary))
+            if (header.Encoding is not (ParquetEncoding.Plain or ParquetEncoding.PlainDictionary))
+            {
+                throw new ParquetUnsupportedException(header.Encoding.ToString(), ParquetComponentKind.Encoding,
+                    $"The dictionary page of '{Name}' is {header.Encoding}; the standard writes a dictionary PLAIN.");
+            }
+        }
+        catch
         {
-            throw new ParquetUnsupportedException(header.Encoding.ToString(), ParquetComponentKind.Encoding,
-                $"The dictionary page of '{Name}' is {header.Encoding}; the standard writes a dictionary PLAIN.");
+            owner?.Dispose();
+            throw;
         }
 
         Page page = Rent(header.ValueCount);
         try
         {
             int size = header.UncompressedPageSize;
-            VortexBuffer body = Bytes(at, header.CompressedPageSize);
             if (_codec != CompressionCodec.Uncompressed)
             {
                 // A dictionary page has no flag that keeps it out of the codec: it is always compressed.
                 Cap(size);
-                NativeSegmentOwner owner = _pool.Rent(size, 64);
-                PageCodecs.Decompress(_codec, body.Span, owner.WritableSpan, context.Zstd);
-                Values(page, owner.Buffer, owner, header.ValueCount);
+                NativeSegmentOwner values = _pool.Rent(size, 64);
+                try
+                {
+                    PageCodecs.Decompress(_codec, body.Span, values.WritableSpan, context.Zstd);
+                }
+                catch
+                {
+                    values.Dispose();
+                    throw;
+                }
+
+                owner?.Dispose();
+                owner = null;
+                Values(page, values.Buffer, values, header.ValueCount);
             }
             else
             {
@@ -1690,13 +1806,16 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     ParquetThrow.Format($"The dictionary page of '{Name}' holds {body.Length} bytes where its header declares {size}.");
                 }
 
-                Values(page, body, null, header.ValueCount);
+                NativeSegmentOwner? taken = owner;
+                owner = null;
+                Values(page, body, taken, header.ValueCount);
             }
 
             return page;
         }
         catch
         {
+            owner?.Dispose();
             page.Release();
             _free.Push(page);
             throw;

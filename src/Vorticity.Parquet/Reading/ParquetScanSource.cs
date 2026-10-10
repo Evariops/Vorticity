@@ -214,7 +214,7 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             for (int i = 0; i < leaves.Length && indexed; i++)
             {
                 ColumnChunkMetadata chunk = footer.Chunk(group, leaves[i]);
-                indexed = file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength);
+                indexed = !chunk.IsEncrypted && file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength);
                 slots[i] = indexed ? requests.Add(new SegmentSpec((ulong)chunk.OffsetIndexOffset, (uint)chunk.OffsetIndexLength, 0, 0, 0)) : -1;
             }
 
@@ -303,7 +303,8 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         for (int group = 0; group < footer.RowGroups.Length; group++)
         {
             long rows = footer.RowGroups[group].RowCount;
-            ZoneBounds bounds = ColumnBounds.Of(column, footer.Chunk(group, leaf).Statistics, footer.Bytes);
+            ColumnChunkMetadata chunk = footer.Chunk(group, leaf);
+            ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, chunk.Source.Span);
             if (rows == 0 || (bounds.HasNullCount && bounds.NullCount == rows))
             {
                 continue;

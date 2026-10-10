@@ -61,7 +61,7 @@ internal static class BloomPruning
         {
             slots[i] = -1;
             ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
-            if (chunk.BloomFilterOffset < 0 || !Asks(filter.Filter, filter.Fields[i].Path))
+            if (chunk.BloomFilterOffset < 0 || chunk.IsEncrypted || !Asks(filter.Filter, filter.Fields[i].Path))
             {
                 continue;
             }

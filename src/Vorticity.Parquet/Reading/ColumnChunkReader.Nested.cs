@@ -372,18 +372,18 @@ internal sealed partial class ColumnChunkReader
     }
 
     /// <summary>A nested column's v2 page: its levels, ahead of its values and never compressed; the entries that hold a value.</summary>
-    private int NestedLevelsV2(Page page, in PageHeader header, int at)
+    private int NestedLevelsV2(Page page, in PageHeader header, VortexBuffer body)
     {
         int entries = NestedEntries(header.ValueCount);
         Span<byte> levels = LevelBlock(page, entries);
         if (_leaf.MaxRepetitionLevel > 0)
         {
-            new RleHybridDecoder(_repetitionWidth).Read(Bytes(at, header.RepetitionLevelsLength).Span, levels[..entries]);
+            new RleHybridDecoder(_repetitionWidth).Read(body.Slice(0, header.RepetitionLevelsLength).Span, levels[..entries]);
         }
 
         if (_leaf.MaxDefinitionLevel > 0)
         {
-            ReadOnlySpan<byte> runs = Bytes(at + header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span;
+            ReadOnlySpan<byte> runs = body.Slice(header.RepetitionLevelsLength, header.DefinitionLevelsLength).Span;
             new RleHybridDecoder(_definitionWidth).Read(runs, levels.Slice(entries, entries));
         }
 

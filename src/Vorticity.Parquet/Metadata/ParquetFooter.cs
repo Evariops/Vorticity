@@ -48,6 +48,7 @@ internal sealed class ParquetFooter
     {
         _bytes = bytes;
         _chunkStarts = new int[]?[rowGroups];
+        _decrypted = new ReadOnlyMemory<byte>?[]?[rowGroups];
     }
 
     /// <summary>The footer's bytes, which every <see cref="ByteRange"/> of this footer points into.</summary>
@@ -70,7 +71,19 @@ internal sealed class ParquetFooter
     internal ColumnOrderKind[] ColumnOrders { get; private set; } = [];
 
     /// <summary>Whether the footer declares an encryption algorithm, a plaintext footer of an encrypted file.</summary>
-    internal bool IsEncrypted { get; private set; }
+    internal bool IsEncrypted => Algorithm is not null;
+
+    /// <summary>A plaintext footer's encryption algorithm, with the metadata of its signing key; null for a file in plaintext, or one whose footer is encrypted.</summary>
+    internal Encryption.FileCrypto? Algorithm { get; private set; }
+
+    /// <summary>The bytes the <c>FileMetaData</c> takes, past which a plaintext footer holds its signature.</summary>
+    internal int StructLength { get; private set; }
+
+    /// <summary>What decrypts the chunks' encrypted metadata, set once the open has the keys.</summary>
+    internal Encryption.FileDecryptor? Decryptor { get; set; }
+
+    /// <summary>Per row group, the chunks' encrypted metadata decrypted, each the first time it is asked for.</summary>
+    private readonly ReadOnlyMemory<byte>?[]?[] _decrypted;
 
     /// <summary>Reads a <c>FileMetaData</c>.</summary>
     internal static ParquetFooter Read(ReadOnlyMemory<byte> bytes)
@@ -85,7 +98,8 @@ internal sealed class ParquetFooter
         (ByteRange, ByteRange)[] keyValues = [];
         ColumnOrderKind[] orders = [];
         ByteRange createdBy = ByteRange.None;
-        bool encrypted = false;
+        Encryption.FileCrypto? algorithm = null;
+        byte[] signingKey = [];
         short saved = reader.EnterStruct();
         while (reader.ReadFieldHeader(out ThriftType type, out short id))
         {
@@ -121,9 +135,11 @@ internal sealed class ParquetFooter
                 case 7 when type == ThriftType.List:
                     orders = ReadColumnOrders(ref reader);
                     break;
-                case 8:
-                    encrypted = true;
-                    reader.Skip(type);
+                case 8 when type == ThriftType.Struct:
+                    algorithm = Encryption.FileCrypto.ReadAlgorithm(ref reader);
+                    break;
+                case 9 when type == ThriftType.Binary:
+                    signingKey = reader.ReadBinary().ToArray();
                     break;
                 default:
                     reader.Skip(type);
@@ -132,6 +148,12 @@ internal sealed class ParquetFooter
         }
 
         reader.ExitStruct(saved);
+        int structLength = reader.Position;
+        if (algorithm is not null)
+        {
+            algorithm.KeyMetadata = signingKey;
+        }
+
         if (found != 15)
         {
             ParquetThrow.Format("The footer lacks its version, schema, row count or row groups.");
@@ -168,7 +190,8 @@ internal sealed class ParquetFooter
             KeyValues = keyValues,
             CreatedBy = createdBy,
             ColumnOrders = orders,
-            IsEncrypted = encrypted,
+            Algorithm = algorithm,
+            StructLength = structLength,
         };
         return footer;
     }
@@ -212,8 +235,44 @@ internal sealed class ParquetFooter
     }
 
     /// <summary>The metadata of column <paramref name="column"/>'s chunk in row group <paramref name="rowGroup"/>.</summary>
-    internal ColumnChunkMetadata Chunk(int rowGroup, int column) =>
-        ColumnChunkMetadata.Read(Bytes, ChunkStarts(rowGroup)[column]);
+    /// <remarks>
+    /// A chunk whose metadata is encrypted with its column's key is read from the plaintext of it,
+    /// decrypted the first time and kept, where the caller gave the key; else it is
+    /// <see cref="ColumnChunkMetadata.Hidden"/>, its plaintext footer's copy stripped of its statistics
+    /// or absent.
+    /// </remarks>
+    internal ColumnChunkMetadata Chunk(int rowGroup, int column)
+    {
+        ColumnChunkMetadata chunk = ColumnChunkMetadata.Read(_bytes, ChunkStarts(rowGroup)[column]);
+        if (!chunk.EncryptedMetadata.IsPresent || Decryptor is not { } decryptor)
+        {
+            return chunk;
+        }
+
+        ReadOnlyMemory<byte>?[] decrypted = Volatile.Read(ref _decrypted[rowGroup])
+            ?? Interlocked.CompareExchange(ref _decrypted[rowGroup], new ReadOnlyMemory<byte>?[RowGroups[rowGroup].ColumnCount], null)
+            ?? _decrypted[rowGroup]!;
+        if (decrypted[column] is not { } plaintext)
+        {
+            byte[]? key = decryptor.ColumnKey(ColumnPaths[column], chunk.KeyMetadata.Of(Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
+            if (key is null)
+            {
+                return chunk;
+            }
+
+            plaintext = decryptor.Decrypt(key, chunk.EncryptedMetadata.Of(Bytes), Encryption.ModuleType.ColumnMetaData, Ordinal(rowGroup), column);
+            decrypted[column] = plaintext;
+        }
+
+        chunk.Decrypted(plaintext);
+        return chunk;
+    }
+
+    /// <summary>The ordinal of row group <paramref name="rowGroup"/> in its modules' AAD: its own where the footer gives it.</summary>
+    internal int Ordinal(int rowGroup) => RowGroups[rowGroup].Ordinal >= 0 ? RowGroups[rowGroup].Ordinal : rowGroup;
+
+    /// <summary>The leaves' paths, their names joined by dots, in their order: what a column's key is asked for by; set at the open.</summary>
+    internal string[] ColumnPaths { get; set; } = [];
 
     private static SchemaElement[] ReadSchema(ref ThriftCompactReader reader)
     {
