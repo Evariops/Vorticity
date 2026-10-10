@@ -48,8 +48,8 @@ public sealed class AllocationContractTests
     /// <summary>
     /// A sealed file's batches cost what a plain file's do: the frames decrypted into pooled blocks,
     /// cipher instances kept per lane, the ciphertext read through a request set the reader keeps.
-    /// The sealed bytes are held in memory and published as shared views, so that what is counted is
-    /// the sealing and not the source under it.
+    /// The sealed bytes are held in memory by a <c>MemorySegmentSource</c>, whose batch reads are views
+    /// of them that allocate nothing, so that what is counted is the sealing.
     /// </summary>
     [Fact]
     public async Task AScanOfASealedFileAllocatesNothingPerBatchAfterTheFirst()
@@ -65,7 +65,7 @@ public sealed class AllocationContractTests
         }
 
         Vorticity.Sealing.SealedSegmentReader reader = await Vorticity.Sealing.SealedSegmentReader.OpenAsync(
-            new SharedViews(sealedBytes),
+            new Vorticity.IO.MemorySegmentSource(sealedBytes),
             ownsInner: true,
             (descriptor, token) => keyring.UnwrapAsync(descriptor.KeyId, descriptor.WrappedKey, descriptor.KeyContext, token),
             ct);
@@ -424,43 +424,4 @@ public sealed class AllocationContractTests
         return sum;
     }
 
-    /// <summary>Bytes in memory whose batch reads hand out views of one pinned block, allocating nothing per read.</summary>
-    private sealed class SharedViews(byte[] bytes) : Vorticity.IO.ISegmentReader
-    {
-        private readonly Vorticity.Buffers.PinnedArraySegmentOwner _block = Vorticity.Buffers.PinnedArraySegmentOwner.CopyOf(bytes, 64);
-
-        public System.Threading.Tasks.ValueTask<long> GetLengthAsync(System.Threading.CancellationToken cancellationToken) =>
-            new System.Threading.Tasks.ValueTask<long>(bytes.Length);
-
-        public System.Threading.Tasks.ValueTask<Vorticity.Buffers.SegmentOwner> ReadAsync(Vorticity.Serialization.Schemas.SegmentSpec spec, System.Threading.CancellationToken cancellationToken) =>
-            ReadRangeAsync((long)spec.Offset, (int)spec.Length, 1, cancellationToken);
-
-        public System.Threading.Tasks.ValueTask ReadManyAsync(Vorticity.IO.SegmentRequestSet requests, System.Threading.CancellationToken cancellationToken)
-        {
-            for (int slot = 0; slot < requests.Count; slot++)
-            {
-                if (!requests.IsFilled(slot))
-                {
-                    Vorticity.Serialization.Schemas.SegmentSpec spec = requests.GetSpec(slot);
-                    requests.SetSharedResult(slot, _block, Vorticity.Buffers.VortexBuffer.FromPinned(_block.Buffer.Span.Slice((int)spec.Offset, (int)spec.Length), 0));
-                }
-            }
-
-            requests.Complete();
-            return System.Threading.Tasks.ValueTask.CompletedTask;
-        }
-
-        public System.Threading.Tasks.ValueTask<Vorticity.Buffers.SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, System.Threading.CancellationToken cancellationToken)
-        {
-            int available = (int)Math.Min(length, bytes.Length - offset);
-            return new System.Threading.Tasks.ValueTask<Vorticity.Buffers.SegmentOwner>(
-                new Vorticity.IO.SliceSegmentOwner(_block, Vorticity.Buffers.VortexBuffer.FromPinned(_block.Buffer.Span.Slice((int)offset, available), 0)));
-        }
-
-        public System.Threading.Tasks.ValueTask DisposeAsync()
-        {
-            _block.Release();
-            return System.Threading.Tasks.ValueTask.CompletedTask;
-        }
-    }
 }
