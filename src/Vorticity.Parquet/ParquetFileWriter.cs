@@ -109,7 +109,10 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             string path = string.Join('.', map.Columns[i].Path);
             double rate = options.BloomFilters is { } rates && rates.TryGetValue(path, out double asked) ? asked : 0;
             blooms.Remove(path);
-            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows);
+            _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
+            {
+                WriteChecksums = options.WriteChecksums,
+            };
         }
 
         if (blooms.Count > 0)

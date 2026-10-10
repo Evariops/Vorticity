@@ -27,7 +27,7 @@ public class ParquetWriteBenchmarks
     private readonly ParquetTable _table = new();
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-bloom")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-bloom", "parquet-crc")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -86,7 +86,7 @@ public class ParquetScanBenchmarks
     private string _path = string.Empty;
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-crc")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -120,6 +120,10 @@ public class ParquetScanBenchmarks
     [GlobalCleanup]
     public void Cleanup() => System.IO.File.Delete(_path);
 
+    /// <summary>The Parquet file, its pages held to their checksums under <c>parquet-crc</c>.</summary>
+    private ValueTask<ParquetFile> OpenAsync() =>
+        VortexSession.Default.OpenParquetAsync(_path, new ParquetOpenOptions { VerifyChecksums = Format == "parquet-crc" }, CancellationToken.None);
+
     [Benchmark(Description = "scan every column")]
     public async Task<long> Scan()
     {
@@ -134,7 +138,7 @@ public class ParquetScanBenchmarks
         }
         else
         {
-            await using ParquetFile file = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+            await using ParquetFile file = await OpenAsync().ConfigureAwait(false);
             await foreach (BatchView batch in file.Scan())
             {
                 rows += batch.RowCount;
@@ -153,7 +157,7 @@ public class ParquetScanBenchmarks
             return await file.Scan("id").Where($"value > {900.0}").CountAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
-        await using ParquetFile parquet = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+        await using ParquetFile parquet = await OpenAsync().ConfigureAwait(false);
         return await parquet.Scan("id").Where($"value > {900.0}").CountAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -170,7 +174,7 @@ public class ParquetScanBenchmarks
             return await file.Scan("id").Where($"label = {"label-0500"}").CountAsync(CancellationToken.None).ConfigureAwait(false);
         }
 
-        await using ParquetFile parquet = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
+        await using ParquetFile parquet = await OpenAsync().ConfigureAwait(false);
         return await parquet.Scan("id").Where($"label = {"label-0500"}").CountAsync(CancellationToken.None).ConfigureAwait(false);
     }
 }
@@ -231,7 +235,7 @@ internal sealed class ParquetTable
 
         ParquetCompression compression = format switch
         {
-            "parquet-none" or "parquet-bloom" => ParquetCompression.Uncompressed,
+            "parquet-none" or "parquet-bloom" or "parquet-crc" => ParquetCompression.Uncompressed,
             "parquet-snappy" => ParquetCompression.Snappy,
             _ => ParquetCompression.Zstd,
         };
@@ -239,6 +243,7 @@ internal sealed class ParquetTable
         {
             Compression = compression,
             BloomFilters = format == "parquet-bloom" ? new Dictionary<string, double> { ["id"] = 0.01, ["label"] = 0.01 } : null,
+            WriteChecksums = format == "parquet-crc",
         });
         Fill(parquet.Builder());
         await parquet.WriteAsync(parquet.Builder(), CancellationToken.None).ConfigureAwait(false);

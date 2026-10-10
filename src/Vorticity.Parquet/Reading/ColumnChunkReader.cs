@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -144,6 +145,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     private string Name => string.Join('.', _leaf.Path);
+
+    /// <summary>
+    /// Whether each page this reader decodes is held to its <c>crc</c>, where it has one: the CRC-32
+    /// of its bytes as stored past its header. A page skipped by its header is never read, nor checked.
+    /// </summary>
+    internal bool VerifyChecksums { get; set; }
 
     /// <summary>Starts the chunk of a row group: its bytes, its codec and its rows.</summary>
     internal void Start(VortexBuffer chunk, CompressionCodec codec, long rows)
@@ -526,6 +533,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     private Page DecodeV2(ScanContext context, in PageHeader header, int at)
     {
+        Check(header, at);
         // A flat column's repetition levels say nothing, and a required one's definition levels
         // neither: some writers write them anyway, and they are stepped over.
         int levels = header.RepetitionLevelsLength + header.DefinitionLevelsLength;
@@ -602,6 +610,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     private Page DecodeV1(ScanContext context, in PageHeader header, int at)
     {
+        Check(header, at);
         Page page = Rent(0);
         NativeSegmentOwner? owner = null;
         try
@@ -1349,8 +1358,18 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
+    /// <summary>Holds the page at <paramref name="at"/> to its checksum, when the reader verifies them and the page has one.</summary>
+    private void Check(in PageHeader header, int at)
+    {
+        if (VerifyChecksums && header.HasCrc && Crc32.HashToUInt32(_chunk.Span.Slice(at, header.CompressedPageSize)) != unchecked((uint)header.Crc))
+        {
+            ParquetThrow.Format($"A page of '{Name}' does not match its checksum: its bytes are not the ones written.");
+        }
+    }
+
     private Page DecodeDictionary(ScanContext context, in PageHeader header, int at)
     {
+        Check(header, at);
         if (_dictionary is not null)
         {
             ParquetThrow.Format($"The column chunk of '{Name}' holds a second dictionary page.");

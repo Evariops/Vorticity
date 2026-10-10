@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -125,6 +126,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkUncompressed;
     private readonly ChunkStatistics _statistics;
 
+    /// <summary>The CRC-32 a page's checksum is computed by, made at the first.</summary>
+    private Crc32? _crc;
+
     /// <summary>The chunk's Bloom filter, when the column asked for one.</summary>
     private readonly BloomCollector? _bloom;
 
@@ -141,6 +145,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>A nested column's page's rows and entries; its values are what <see cref="_pageRows"/> counts.</summary>
     private int _pageNestedRows;
     private int _pageEntries;
+
+    /// <summary>Whether each page gets a <c>crc</c>: the CRC-32 of its bytes as stored past its header.</summary>
+    internal bool WriteChecksums { get; init; }
 
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
@@ -325,6 +332,11 @@ internal sealed class ColumnChunkWriter : IDisposable
             RepetitionLevelsLength = repetitionLength,
             IsCompressed = compressed || _codec == CompressionCodec.Uncompressed,
         };
+        if (WriteChecksums)
+        {
+            header.HasCrc = true;
+            header.Crc = Checksum(_levels.WrittenSpan, stored);
+        }
 
         long pageStart = _chunk.Length;
         ThriftCompactWriter writer = new(_chunk);
@@ -848,6 +860,17 @@ internal sealed class ColumnChunkWriter : IDisposable
     }
 
     /// <summary>The dictionary page, when a data page used the dictionary: the values coded until the last such page.</summary>
+    /// <summary>The checksum of a page whose bytes past its header are <paramref name="levels"/> then <paramref name="stored"/>.</summary>
+    private int Checksum(ReadOnlySpan<byte> levels, ReadOnlySpan<byte> stored)
+    {
+        Crc32 crc = _crc ??= new Crc32();
+        crc.Append(levels);
+        crc.Append(stored);
+        uint hash = crc.GetCurrentHashAsUInt32();
+        crc.Reset();
+        return unchecked((int)hash);
+    }
+
     private void WriteDictionaryPage()
     {
         _dictionaryPage.Clear();
@@ -869,6 +892,11 @@ internal sealed class ColumnChunkWriter : IDisposable
             ValueCount = _frozenEntries,
             Encoding = ParquetEncoding.Plain,
         };
+        if (WriteChecksums)
+        {
+            header.HasCrc = true;
+            header.Crc = Checksum(default, stored);
+        }
 
         ThriftCompactWriter writer = new(_dictionaryPage);
         header.Write(ref writer, default);

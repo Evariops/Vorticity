@@ -119,6 +119,11 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _readers = readers.ToArray();
+        foreach (ColumnChunkReader reader in _readers)
+        {
+            reader.VerifyChecksums = file.Options.VerifyChecksums;
+        }
+
         _leaves = new int[_readers.Length];
         for (int i = 0; i < _readers.Length; i++)
         {

@@ -80,6 +80,12 @@ public sealed record ParquetWriteOptions
     /// </summary>
     public IReadOnlyDictionary<string, double>? BloomFilters { get; init; }
 
+    /// <summary>
+    /// Whether each page carries a checksum, the CRC-32 of its bytes as stored past its header, which
+    /// a reader may hold it to. Off by default: a reader that does not check one pays for its bytes.
+    /// </summary>
+    public bool WriteChecksums { get; init; }
+
     internal void Validate()
     {
         if (BloomFilters is { } blooms)

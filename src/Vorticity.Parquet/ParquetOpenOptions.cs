@@ -41,4 +41,11 @@ public sealed record ParquetOpenOptions
             _maxDecompressedSize = value;
         }
     }
+
+    /// <summary>
+    /// Whether each page a scan decodes is held to its checksum, where its writer gave it one: a page
+    /// whose bytes do not match fails the scan with a <see cref="ParquetFormatException"/>. Off by
+    /// default, since a check reads every byte of a page where a view of it would not.
+    /// </summary>
+    public bool VerifyChecksums { get; init; }
 }
