@@ -87,6 +87,11 @@ internal sealed class SealedLayout
     {
         long trailerStart = objectLength - trailer.Length;
         SealDescriptor descriptor = SealDescriptor.Read(trailer, out int at);
+        if (at > trailer.Length - SealedFormat.TrailerSuffixBytes)
+        {
+            throw Malformed("its trailer's descriptor runs into the trailer's length");
+        }
+
         ReadOnlySpan<byte> rest = trailer[at..^SealedFormat.TrailerSuffixBytes];
         if (rest.Length < 4)
         {

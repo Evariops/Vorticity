@@ -485,6 +485,10 @@ And the classic mistakes with GCM:
   offset, frames reordered or taken from another object, objects swapped in a dataset, the descriptor
   or the epochs altered, a plain object put in place of a sealed one. Each case must fail at the first
   read that uses the altered bytes, before any plaintext is used, and verification must find every one.
+- Fuzzing: an envelope mutated at random, and in the fields its structure hangs on, fails with the
+  format's own exceptions or reads back what was sealed, bit for bit, quickly. The walk that repairs
+  a file without the key is fuzzed with it. A few thousand mutations run with every test run, and a
+  longer campaign on demand.
 - Transparency: every kind of query, from the rows and a filter to a group by, an ordered top-k and a
   walk of a key index, runs over a sealed file and over the plain file its plaintext is, at one and at
   many lanes, and over an encrypted dataset and a plain one of the same objects, and every answer is
