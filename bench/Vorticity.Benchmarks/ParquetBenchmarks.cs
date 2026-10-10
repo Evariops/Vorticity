@@ -27,7 +27,7 @@ public class ParquetWriteBenchmarks
     private readonly ParquetTable _table = new();
 
     /// <summary>The format and its codec: <c>vortex</c>, or <c>parquet-</c> and a codec.</summary>
-    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-zstd-8", "parquet-bloom", "parquet-crc")]
+    [Params("vortex", "parquet-none", "parquet-snappy", "parquet-zstd", "parquet-zstd-8", "parquet-bloom", "parquet-crc", "parquet-smallest")]
     public string Format { get; set; } = "vortex";
 
     [GlobalSetup]
@@ -242,6 +242,7 @@ internal sealed class ParquetTable
         await using ParquetFileWriter parquet = VortexSession.Default.CreateParquetWriter(pipe, Schema, new ParquetWriteOptions
         {
             Compression = compression,
+            Profile = format == "parquet-smallest" ? CompressionProfile.Smallest : CompressionProfile.Auto,
             BloomFilters = format == "parquet-bloom" ? new Dictionary<string, double> { ["id"] = 0.01, ["label"] = 0.01 } : null,
             WriteChecksums = format == "parquet-crc",
             DegreeOfParallelism = format == "parquet-zstd-8" ? 8 : 0,

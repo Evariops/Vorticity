@@ -482,10 +482,12 @@ core's plan memory does.
 
 ALP stays behind an option while the standard marks it Preview, as the standard recommends of a
 writer. `CompressionProfile` changes the arithmetic, not the pass: `Auto` weighs bytes against decode
-speed, `Smallest` prices by bytes after compression and runs every trial, `Fastest` writes PLAIN and
-dictionaries, `None` writes PLAIN. `Hints` pins a column to an encoding by path, as the core's hints pin a
-scheme: on every page, under every profile, unpriced, a dictionary while it stays within its bound;
-an encoding the column's type does not take is refused when the writer is created.
+speed, an encoding taken when it saves an eighth; `Smallest` weighs every candidate by the bytes it
+stores once compressed, in a trial of each chunk's first PLAIN page at the chunk's codec and level,
+whose winner the chunk's later PLAIN pages take, a few compressions a chunk; `Fastest` writes PLAIN
+and dictionaries, `None` writes PLAIN. `Hints` pins a column to an encoding by path, as the core's
+hints pin a scheme: on every page, under every profile, unpriced, a dictionary while it stays within
+its bound; an encoding the column's type does not take is refused when the writer is created.
 
 ### 6.4 Compression
 

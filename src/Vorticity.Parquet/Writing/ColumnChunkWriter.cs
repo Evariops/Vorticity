@@ -104,6 +104,12 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>Whether a PLAIN page may take another encoding where it pays: under Auto and Smallest.</summary>
     private readonly bool _encodings;
 
+    /// <summary>Whether a PLAIN page takes the encoding a trial of every candidate found smallest after compression: under Smallest.</summary>
+    private readonly bool _trials;
+
+    /// <summary>Under Smallest, what the trial on the chunk's first PLAIN page chose, or null before it.</summary>
+    private ParquetEncoding? _smallest;
+
     /// <summary>A page encoded otherwise than PLAIN, and a byte array page's values without their lengths.</summary>
     private readonly PooledBytes _encoded;
     private readonly PooledBytes _data;
@@ -224,6 +230,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
         _eligible = profile != CompressionProfile.None && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
         _encodings = profile is CompressionProfile.Auto or CompressionProfile.Smallest;
+        _trials = profile == CompressionProfile.Smallest;
         _encoded = new PooledBytes(pool);
         _data = new PooledBytes(pool);
         _lengths = new int[blockRows];
@@ -458,7 +465,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         {
             if (_hint is ParquetEncodingHint.Auto)
             {
-                encoding = _encodings ? Choose(ref body, values) : encoding;
+                encoding = _trials ? Smallest(ref body, values) : _encodings ? Choose(ref body, values) : encoding;
             }
             else if (_hint is not (ParquetEncodingHint.Plain or ParquetEncodingHint.Dictionary))
             {
@@ -808,6 +815,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _frozenBytes = 0;
         Array.Clear(_pagesBy);
         _split = null;
+        _smallest = null;
         _codeBytes = 0;
         _plainBytes = 0;
         _dictionary = _eligible;
@@ -1068,39 +1076,103 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private ParquetEncoding Pin(ref ReadOnlySpan<byte> body, int count)
     {
-        switch (_hint)
+        ParquetEncoding encoding = EncodingOf(_hint);
+        body = Encode(encoding, body, count);
+        return encoding;
+    }
+
+    /// <summary>
+    /// Under <see cref="CompressionProfile.Smallest"/>: the encoding that stores the chunk's first
+    /// PLAIN page in the fewest bytes, each candidate encoded and compressed by the chunk's codec at
+    /// its level, PLAIN among them; every later PLAIN page of the chunk then takes it.
+    /// </summary>
+    private ParquetEncoding Smallest(ref ReadOnlySpan<byte> body, int count)
+    {
+        if (_smallest is null)
         {
-            case ParquetEncodingHint.DeltaBinaryPacked when _column.Physical == PhysicalType.Int32:
+            ParquetEncoding best = ParquetEncoding.Plain;
+            long least = Stored(body);
+            foreach (ParquetEncoding candidate in Candidates())
+            {
+                long stored = Stored(Encode(candidate, body, count));
+                if (stored < least)
+                {
+                    least = stored;
+                    best = candidate;
+                }
+            }
+
+            _smallest = best;
+        }
+
+        if (_smallest is ParquetEncoding.Plain)
+        {
+            return ParquetEncoding.Plain;
+        }
+
+        body = Encode(_smallest.Value, body, count);
+        return _smallest.Value;
+    }
+
+    /// <summary>The encodings other than PLAIN the standard gives the column's physical type, as a dictionary's fallback.</summary>
+    private ReadOnlySpan<ParquetEncoding> Candidates() => _column.Physical switch
+    {
+        PhysicalType.Int32 or PhysicalType.Int64 => [ParquetEncoding.DeltaBinaryPacked, ParquetEncoding.ByteStreamSplit],
+        PhysicalType.Float or PhysicalType.Double => [ParquetEncoding.ByteStreamSplit],
+        PhysicalType.ByteArray => [ParquetEncoding.DeltaLengthByteArray, ParquetEncoding.DeltaByteArray],
+        PhysicalType.FixedLenByteArray => [ParquetEncoding.DeltaByteArray, ParquetEncoding.ByteStreamSplit],
+        PhysicalType.Boolean => [ParquetEncoding.Rle],
+        _ => [],
+    };
+
+    /// <summary>The bytes a page of <paramref name="bytes"/> takes in the file: compressed when that saves an eighth, as is.</summary>
+    private long Stored(ReadOnlySpan<byte> bytes)
+    {
+        if (_codec == CompressionCodec.Uncompressed)
+        {
+            return bytes.Length;
+        }
+
+        int compressed = Compress(bytes).Length;
+        return compressed <= bytes.Length - (bytes.Length / 8) ? compressed : bytes.Length;
+    }
+
+    /// <summary>
+    /// The PLAIN page <paramref name="body"/> of <paramref name="count"/> values in
+    /// <paramref name="encoding"/>, one the standard gives the column's physical type; its bytes.
+    /// </summary>
+    private ReadOnlySpan<byte> Encode(ParquetEncoding encoding, ReadOnlySpan<byte> body, int count)
+    {
+        _encoded.Clear();
+        switch (encoding)
+        {
+            case ParquetEncoding.DeltaBinaryPacked when _column.Physical == PhysicalType.Int32:
             {
                 ReadOnlySpan<int> values = MemoryMarshal.Cast<byte, int>(body);
-                _encoded.Clear();
                 DeltaBinaryPacked.Encode32(values, _encoded.Reserve(DeltaBinaryPacked.Size32(values)));
                 break;
             }
 
-            case ParquetEncodingHint.DeltaBinaryPacked:
+            case ParquetEncoding.DeltaBinaryPacked:
             {
                 ReadOnlySpan<long> values = MemoryMarshal.Cast<byte, long>(body);
-                _encoded.Clear();
                 DeltaBinaryPacked.Encode64(values, _encoded.Reserve(DeltaBinaryPacked.Size64(values)));
                 break;
             }
 
-            case ParquetEncodingHint.ByteStreamSplit:
-                _encoded.Clear();
+            case ParquetEncoding.ByteStreamSplit:
                 ByteStreamSplit.Encode(body, _column.ValueWidth, _encoded.Reserve(body.Length));
                 break;
 
-            case ParquetEncodingHint.DeltaLengthByteArray:
+            case ParquetEncoding.DeltaLengthByteArray:
             {
                 ReadOnlySpan<byte> data = Unprefix(body, count);
                 ReadOnlySpan<int> lengths = _lengths.AsSpan(0, count);
-                _encoded.Clear();
                 DeltaByteArrays.EncodeLengths(lengths, data, _encoded.Reserve(DeltaByteArrays.SizeLengths(lengths, data.Length)));
                 break;
             }
 
-            case ParquetEncodingHint.DeltaByteArray:
+            case ParquetEncoding.DeltaByteArray:
             {
                 // A fixed-length array's values lie back to back, each the type's length.
                 ReadOnlySpan<byte> data = body;
@@ -1117,18 +1189,18 @@ internal sealed class ColumnChunkWriter : IDisposable
                 Span<int> prefixes = _prefixes.AsSpan(0, count);
                 Span<int> suffixes = _suffixes.AsSpan(0, count);
                 int rest = DeltaByteArrays.Prefixes(data, lengths, prefixes, suffixes);
-                _encoded.Clear();
                 DeltaByteArrays.EncodePrefixes(data, lengths, prefixes, suffixes, _encoded.Reserve(DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest)));
                 break;
             }
 
+            case ParquetEncoding.Rle:
+                return Runs(count, RunsSize(body, count));
+
             default:
-                body = Runs(count, RunsSize(body, count));
-                return ParquetEncoding.Rle;
+                return body;
         }
 
-        body = _encoded.WrittenSpan;
-        return EncodingOf(_hint);
+        return _encoded.WrittenSpan;
     }
 
     /// <summary>The encoding a hint names.</summary>

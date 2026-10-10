@@ -175,6 +175,86 @@ public sealed class ColumnOptionsTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Under Smallest a chunk's PLAIN pages take the candidate that stores its first page in the
+    /// fewest bytes once compressed: a chunk of one page of unique values, which no dictionary takes,
+    /// is exactly as small as the smallest of the same page pinned to each candidate.
+    /// </summary>
+    [Theory]
+    [InlineData("walk")]
+    [InlineData("far")]
+    [InlineData("smooth")]
+    [InlineData("urls")]
+    public async Task TheSmallestProfileWeighsEveryEncodingAfterCompression(string shape)
+    {
+        VortexSchema schema = shape switch
+        {
+            "smooth" => [("v", VortexType.Float64)],
+            "urls" => [("v", VortexType.Utf8)],
+            _ => [("v", VortexType.Int64)],
+        };
+        ParquetEncodingHint[] candidates = shape switch
+        {
+            "smooth" => [ParquetEncodingHint.Plain, ParquetEncodingHint.ByteStreamSplit],
+            "urls" => [ParquetEncodingHint.Plain, ParquetEncodingHint.DeltaLengthByteArray, ParquetEncodingHint.DeltaByteArray],
+            _ => [ParquetEncodingHint.Plain, ParquetEncodingHint.DeltaBinaryPacked, ParquetEncodingHint.ByteStreamSplit],
+        };
+
+        ParquetWriteOptions smallest = new() { Profile = CompressionProfile.Smallest };
+        (long bytes, IReadOnlyList<string> encodings) = await ChunkAsync(smallest);
+        long least = long.MaxValue;
+        string? best = null;
+        foreach (ParquetEncodingHint candidate in candidates)
+        {
+            (long pinned, IReadOnlyList<string> named) = await ChunkAsync(smallest with { Hints = new Dictionary<string, ParquetEncodingHint> { ["v"] = candidate } });
+            if (pinned < least)
+            {
+                least = pinned;
+                best = named[0];
+            }
+        }
+
+        Assert.Equal(least, bytes);
+        Assert.Equal(best, encodings[0]);
+
+        async Task<(long Bytes, IReadOnlyList<string> Encodings)> ChunkAsync(ParquetWriteOptions options)
+        {
+            string path = NewPath();
+            await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path, schema, options))
+            {
+                ColumnsBuilder builder = writer.Builder();
+                Random random = new(23);
+                long walk = 0;
+                for (int i = 0; i < 8_192; i++)
+                {
+                    walk += random.Next(1, 1_000);
+                    switch (shape)
+                    {
+                        case "walk":
+                            builder.Column<long>(0).Append(walk);
+                            break;
+                        case "far":
+                            builder.Column<long>(0).Append(((long)random.Next(2) << 62) | ((long)i << 16) | (long)random.Next(1 << 16));
+                            break;
+                        case "smooth":
+                            builder.Column<double>(0).Append(20.0 + (5.0 * Math.Sin(i / 300.0)) + (i * 1e-9));
+                            break;
+                        default:
+                            builder.Column<string>(0).Append($"https://example.org/catalogue/section-{i / 100:D3}/item-{walk:D9}");
+                            break;
+                    }
+                }
+
+                await writer.WriteAsync(builder, Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
+            ParquetChunkInfo chunk = file.Metadata.RowGroups[0].Chunks[0];
+            return (chunk.CompressedBytes, chunk.Encodings);
+        }
+    }
+
     /// <summary>A chunk's data page encodings: its listed ones but its levels' RLE and its dictionary page's PLAIN.</summary>
     private static string[] DataEncodings(ParquetRowGroupInfo group, string column)
     {
