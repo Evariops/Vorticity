@@ -526,7 +526,9 @@ their nodes, whose bytes stay where they were decoded until the batch is dead. T
 are eight or more, or when the batches before took 50 µs to decode on average: below, waking the
 threads costs more than the decode they would share, and the report's table of four fields decodes
 one field after the other. Side by side, a batch waits for its slowest field, the one that begins a
-page, while the others idle.
+page, while the others idle, and so they take six lanes at most: past six, each batch's wake-ups cost
+more than the lanes share, a file of 22 fields and six lists scanning in 31 ms on 32 lanes against
+24 on six.
 
 So a row group whose fields are all flat and whose rows are read in place decodes ahead of the read
 a field at a time: each field's batches one after the other, those the page index leaves, each
