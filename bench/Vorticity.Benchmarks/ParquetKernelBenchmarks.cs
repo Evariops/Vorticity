@@ -1,5 +1,5 @@
 // The Parquet decoders' kernels, each against a copy of its output: what decoding a page costs
-// beyond moving its values. A million values of each shape a column takes: a key that climbs by one
+// beyond moving its values, and what splitting one into its byte streams costs the writer. A million values of each shape a column takes: a key that climbs by one
 // (every miniblock 0 bits wide), small and medium deltas, and noise (the full width).
 using System;
 
@@ -24,6 +24,8 @@ public class ParquetKernelBenchmarks
     private byte[] _deltas32 = [];
     private readonly byte[] _split = new byte[Count * sizeof(double)];
     private readonly byte[] _gathered = new byte[Count * sizeof(double)];
+    private readonly byte[] _splitLongs = new byte[Count * sizeof(long)];
+    private readonly byte[] _splitInts = new byte[Count * sizeof(int)];
 
     /// <summary>The values' shape: climbing by one, small or medium deltas, or noise.</summary>
     [Params("climbing", "small", "medium", "noise")]
@@ -80,5 +82,19 @@ public class ParquetKernelBenchmarks
     {
         ByteStreamSplit.Decode(_split, sizeof(double), _gathered);
         return _gathered[^1];
+    }
+
+    [Benchmark(Description = "BYTE_STREAM_SPLIT written, 8 bytes")]
+    public byte SplitLongs()
+    {
+        ByteStreamSplit.Encode(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_longs.AsSpan()), sizeof(long), _splitLongs);
+        return _splitLongs[^1];
+    }
+
+    [Benchmark(Description = "BYTE_STREAM_SPLIT written, 4 bytes")]
+    public byte SplitInts()
+    {
+        ByteStreamSplit.Encode(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_ints.AsSpan()), sizeof(int), _splitInts);
+        return _splitInts[^1];
     }
 }

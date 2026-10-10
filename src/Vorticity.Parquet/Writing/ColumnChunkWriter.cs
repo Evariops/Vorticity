@@ -111,7 +111,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>Per encoding, the chunk's data pages that took it.</summary>
     private readonly int[] _pagesBy = new int[16];
 
-    /// <summary>Whether a float column's pages split their bytes into streams: decided by a trial on the chunk's first PLAIN page.</summary>
+    /// <summary>Whether the chunk's pages split their bytes into streams: decided by a trial on the first page to weigh it.</summary>
     private bool? _split;
 
     /// <summary>The codes the chunk's dictionary pages took, and the PLAIN bytes they stand for.</summary>
@@ -961,10 +961,11 @@ internal sealed class ColumnChunkWriter : IDisposable
 
     /// <summary>
     /// The encoding a PLAIN page takes where another pays, <paramref name="body"/> then its bytes:
-    /// DELTA_BINARY_PACKED for integers, priced exactly; BYTE_STREAM_SPLIT for floats under a codec,
-    /// by a trial on the chunk's first page; the delta encodings of byte arrays, priced exactly; RLE
-    /// for booleans. An encoding is taken when it saves an eighth of the bytes, which pays for its
-    /// slower decode, but for a byte array's lengths, which always do.
+    /// DELTA_BINARY_PACKED for integers and DELTA_BYTE_ARRAY for fixed-length byte arrays, priced
+    /// exactly, and where neither pays BYTE_STREAM_SPLIT under a codec, by a trial, as for floats; the
+    /// delta encodings of byte arrays, priced exactly; RLE for booleans. An encoding is taken when it
+    /// saves an eighth of the bytes, which pays for its slower decode, but for a byte array's lengths,
+    /// which always do.
     /// </summary>
     private ParquetEncoding Choose(ref ReadOnlySpan<byte> body, int count)
     {
@@ -976,7 +977,7 @@ internal sealed class ColumnChunkWriter : IDisposable
                 int size = DeltaBinaryPacked.Size32(values);
                 if (size > body.Length - (body.Length / 8))
                 {
-                    return ParquetEncoding.Plain;
+                    return Split(ref body, sizeof(int));
                 }
 
                 _encoded.Clear();
@@ -991,7 +992,7 @@ internal sealed class ColumnChunkWriter : IDisposable
                 int size = DeltaBinaryPacked.Size64(values);
                 if (size > body.Length - (body.Length / 8))
                 {
-                    return ParquetEncoding.Plain;
+                    return Split(ref body, sizeof(long));
                 }
 
                 _encoded.Clear();
@@ -1001,31 +1002,13 @@ internal sealed class ColumnChunkWriter : IDisposable
             }
 
             case PhysicalType.Float:
+                return Split(ref body, sizeof(float));
+
             case PhysicalType.Double:
-            {
-                if (_codec == CompressionCodec.Uncompressed || _split == false)
-                {
-                    return ParquetEncoding.Plain;
-                }
+                return Split(ref body, sizeof(double));
 
-                int width = _column.Physical == PhysicalType.Float ? sizeof(float) : sizeof(double);
-                _encoded.Clear();
-                ByteStreamSplit.Encode(body, width, _encoded.Reserve(body.Length));
-                if (_split is null)
-                {
-                    // The trial: what the codec makes of either form of the chunk's first page.
-                    int plain = Compress(body).Length;
-                    int split = Compress(_encoded.WrittenSpan).Length;
-                    _split = split <= plain - (plain / 8);
-                    if (_split == false)
-                    {
-                        return ParquetEncoding.Plain;
-                    }
-                }
-
-                body = _encoded.WrittenSpan;
-                return ParquetEncoding.ByteStreamSplit;
-            }
+            case PhysicalType.FixedLenByteArray:
+                return ChooseFixed(ref body, count);
 
             case PhysicalType.ByteArray when _column.Conversion == ValueConversion.ByteArray:
                 return ChooseBytes(ref body, count);
@@ -1051,6 +1034,61 @@ internal sealed class ColumnChunkWriter : IDisposable
             default:
                 return ParquetEncoding.Plain;
         }
+    }
+
+    /// <summary>
+    /// BYTE_STREAM_SPLIT for values of <paramref name="width"/> bytes under a codec, when the trial on
+    /// the chunk's first page to get here found the codec makes the split values an eighth smaller
+    /// than the PLAIN ones; PLAIN otherwise.
+    /// </summary>
+    private ParquetEncoding Split(ref ReadOnlySpan<byte> body, int width)
+    {
+        if (_codec == CompressionCodec.Uncompressed || _split == false)
+        {
+            return ParquetEncoding.Plain;
+        }
+
+        _encoded.Clear();
+        ByteStreamSplit.Encode(body, width, _encoded.Reserve(body.Length));
+        if (_split is null)
+        {
+            // The trial: what the codec makes of either form of the page.
+            int plain = Compress(body).Length;
+            int split = Compress(_encoded.WrittenSpan).Length;
+            _split = split <= plain - (plain / 8);
+            if (_split == false)
+            {
+                return ParquetEncoding.Plain;
+            }
+        }
+
+        body = _encoded.WrittenSpan;
+        return ParquetEncoding.ByteStreamSplit;
+    }
+
+    /// <summary>
+    /// A fixed-length byte array page's encoding: DELTA_BYTE_ARRAY when the prefixes neighbours share
+    /// save an eighth, as the sign bytes of a wide decimal's small values do, priced exactly; else
+    /// BYTE_STREAM_SPLIT by trial.
+    /// </summary>
+    private ParquetEncoding ChooseFixed(ref ReadOnlySpan<byte> body, int count)
+    {
+        int width = _column.ValueWidth;
+        Span<int> lengths = _lengths.AsSpan(0, count);
+        lengths.Fill(width);
+        Span<int> prefixes = _prefixes.AsSpan(0, count);
+        Span<int> suffixes = _suffixes.AsSpan(0, count);
+        int rest = DeltaByteArrays.Prefixes(body, lengths, prefixes, suffixes);
+        int size = DeltaByteArrays.SizePrefixes(prefixes, suffixes, rest);
+        if (size > body.Length - (body.Length / 8))
+        {
+            return Split(ref body, width);
+        }
+
+        _encoded.Clear();
+        DeltaByteArrays.EncodePrefixes(body, lengths, prefixes, suffixes, _encoded.Reserve(size));
+        body = _encoded.WrittenSpan;
+        return ParquetEncoding.DeltaByteArray;
     }
 
     /// <summary>

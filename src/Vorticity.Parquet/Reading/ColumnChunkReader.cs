@@ -1026,20 +1026,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     position += sizeof(int);
                 }
 
-                if (length < 0 || length > source.Length - position || length > _slot)
+                if (length < 0 || length > source.Length - position)
                 {
-                    ParquetThrow.Format($"A decimal of '{Name}' runs past its page, or is wider than its precision allows.");
+                    ParquetThrow.Format($"A decimal of '{Name}' runs past its page.");
                 }
 
-                ReadOnlySpan<byte> bigEndian = source.Slice(position, length);
-                Span<byte> into = wide.Slice(i * _slot, _slot);
-                byte sign = length > 0 && (bigEndian[0] & 0x80) != 0 ? (byte)0xFF : (byte)0;
-                into.Fill(sign);
-                for (int b = 0; b < length; b++)
-                {
-                    into[b] = bigEndian[length - 1 - b];
-                }
-
+                WidenOne(source.Slice(position, length), wide.Slice(i * _slot, _slot));
                 position += length;
             }
 
@@ -1053,6 +1045,54 @@ internal sealed partial class ColumnChunkReader : IDisposable
         finally
         {
             dense.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Decimals a delta encoding rebuilt back to back in <paramref name="heap"/>, each of its
+    /// <paramref name="lengths"/>, sign-extended into the column's storage: a FIXED_LEN_BYTE_ARRAY's
+    /// every one the type's length.
+    /// </summary>
+    private void Widen(Page page, ReadOnlySpan<byte> heap, ReadOnlySpan<int> lengths, int valid)
+    {
+        NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * _slot, 64);
+        try
+        {
+            Span<byte> wide = dense.WritableSpan;
+            int position = 0;
+            for (int i = 0; i < valid; i++)
+            {
+                int length = lengths[i];
+                if (_width > 0 && length != _width)
+                {
+                    ParquetThrow.Format($"A decimal of '{Name}' takes {length} bytes where its type's length is {_width}.");
+                }
+
+                WidenOne(heap.Slice(position, length), wide.Slice(i * _slot, _slot));
+                position += length;
+            }
+
+            Place(page, wide[..(valid * _slot)], valid);
+        }
+        finally
+        {
+            dense.Dispose();
+        }
+    }
+
+    /// <summary>One big-endian two's-complement decimal sign-extended into its little-endian slot.</summary>
+    private void WidenOne(ReadOnlySpan<byte> bigEndian, Span<byte> into)
+    {
+        if (bigEndian.Length > into.Length)
+        {
+            ParquetThrow.Format($"A decimal of '{Name}' is wider than its precision allows.");
+        }
+
+        byte sign = bigEndian.Length > 0 && (bigEndian[0] & 0x80) != 0 ? (byte)0xFF : (byte)0;
+        into.Fill(sign);
+        for (int b = 0; b < bigEndian.Length; b++)
+        {
+            into[b] = bigEndian[bigEndian.Length - 1 - b];
         }
     }
 
@@ -1148,8 +1188,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
         {
             ParquetEncoding.Plain or ParquetEncoding.RleDictionary or ParquetEncoding.PlainDictionary => true,
             ParquetEncoding.DeltaBinaryPacked => _form is LeafForm.Fixed or LeafForm.Narrowed && _leaf.Physical is PhysicalType.Int32 or PhysicalType.Int64,
-            ParquetEncoding.DeltaLengthByteArray => _views,
-            ParquetEncoding.DeltaByteArray => _views || _form == LeafForm.FixedBytes,
+            ParquetEncoding.DeltaLengthByteArray => _views || (_form == LeafForm.BigEndianDecimal && _width == 0),
+            ParquetEncoding.DeltaByteArray => _views || _form is LeafForm.FixedBytes or LeafForm.Float16 or LeafForm.BigEndianDecimal,
             ParquetEncoding.ByteStreamSplit => _form is LeafForm.Fixed or LeafForm.Float16 or LeafForm.FixedBytes or LeafForm.Narrowed
                 || (_form == LeafForm.BigEndianDecimal && _width > 0),
             ParquetEncoding.Rle => _form == LeafForm.Bool,
@@ -1254,7 +1294,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    /// <summary>A DELTA_LENGTH_BYTE_ARRAY page cut into views over its own bytes, which the page keeps.</summary>
+    /// <summary>
+    /// A DELTA_LENGTH_BYTE_ARRAY page cut into views over its own bytes, which the page keeps, or a
+    /// BYTE_ARRAY decimal's widened out of them.
+    /// </summary>
     private void Lengths(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
     {
         NativeSegmentOwner lengths = _pool.Rent(Math.Max(valid, 1) * sizeof(int), 64);
@@ -1263,6 +1306,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Span<int> span = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan)[..valid];
             int start = DeltaByteArrays.DecodeLengths(values.Span, span);
             VortexBuffer heap = values.Slice(start, values.Length - start);
+            if (_form == LeafForm.BigEndianDecimal)
+            {
+                Widen(page, heap.Span, span, valid);
+                return;
+            }
+
             CutViews(page, span, heap, valid);
             page.Data = heap;
             page.DataOwner = owner;
@@ -1296,6 +1345,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 page.Data = heap.Buffer.Slice(0, (int)total);
                 page.DataOwner = heap;
                 heap = null;
+                return;
+            }
+
+            if (_form == LeafForm.BigEndianDecimal)
+            {
+                Widen(page, heap.WritableSpan[..(int)total], rebuilt, valid);
                 return;
             }
 
@@ -1425,7 +1480,6 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
-    /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
     /// <summary>Holds the page at <paramref name="at"/> to its checksum, when the reader verifies them and the page has one.</summary>
     private void Check(in PageHeader header, int at)
     {
@@ -1435,6 +1489,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
     }
 
+    /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
     private Page DecodeDictionary(ScanContext context, in PageHeader header, int at)
     {
         Check(header, at);

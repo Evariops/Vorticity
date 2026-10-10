@@ -11,8 +11,8 @@ using Vorticity.Parquet.Thrift;
 namespace Vorticity.Parquet.Tests;
 
 /// <summary>
-/// A Parquet file put together by hand: schema elements, and per column pages of levels and PLAIN
-/// values, uncompressed, in one row group. What this package's writer never lays out — v1 pages, a
+/// A Parquet file put together by hand: schema elements, and per column pages of levels and values,
+/// uncompressed, in one row group. What this package's writer never lays out — v1 pages, a
 /// row cut across two pages, the deprecated BIT_PACKED levels — and what no writer should.
 /// </summary>
 internal sealed class HandBuiltFile
@@ -23,7 +23,7 @@ internal sealed class HandBuiltFile
     /// <summary>A file whose root holds <paramref name="fields"/> fields: the elements added next, depth first.</summary>
     internal HandBuiltFile(int fields)
     {
-        _schema = [new Element("schema", null, null, fields, null)];
+        _schema = [new Element("schema", null, null, fields, null, -1, -1, -1, null)];
     }
 
     /// <summary>The rows the footer and its row group declare.</summary>
@@ -32,14 +32,26 @@ internal sealed class HandBuiltFile
     /// <summary>Adds a group of <paramref name="children"/> elements, which the next elements are.</summary>
     internal HandBuiltFile Group(string name, FieldRepetition repetition, int children, ConvertedType? converted = null)
     {
-        _schema.Add(new Element(name, null, repetition, children, converted));
+        _schema.Add(new Element(name, null, repetition, children, converted, -1, -1, -1, null));
         return this;
     }
 
-    /// <summary>Adds a leaf.</summary>
-    internal HandBuiltFile Leaf(string name, FieldRepetition repetition, PhysicalType type, ConvertedType? converted = null)
+    /// <summary>
+    /// Adds a leaf: a FIXED_LEN_BYTE_ARRAY's with its <paramref name="length"/>, a decimal's with its
+    /// <paramref name="scale"/> and <paramref name="precision"/>, and a logical type whose member is
+    /// an empty struct, as FLOAT16's is, by its <paramref name="logical"/> kind.
+    /// </summary>
+    internal HandBuiltFile Leaf(
+        string name,
+        FieldRepetition repetition,
+        PhysicalType type,
+        ConvertedType? converted = null,
+        int length = -1,
+        int scale = -1,
+        int precision = -1,
+        LogicalTypeKind? logical = null)
     {
-        _schema.Add(new Element(name, type, repetition, -1, converted));
+        _schema.Add(new Element(name, type, repetition, -1, converted, length, scale, precision, logical));
         return this;
     }
 
@@ -79,6 +91,11 @@ internal sealed class HandBuiltFile
                 writer.WriteI32Field(1, (int)type);
             }
 
+            if (element.Length >= 0)
+            {
+                writer.WriteI32Field(2, element.Length);
+            }
+
             if (element.Repetition is { } repetition)
             {
                 writer.WriteI32Field(3, (int)repetition);
@@ -93,6 +110,20 @@ internal sealed class HandBuiltFile
             if (element.Converted is { } converted)
             {
                 writer.WriteI32Field(6, (int)converted);
+            }
+
+            if (element.Scale >= 0)
+            {
+                writer.WriteI32Field(7, element.Scale);
+                writer.WriteI32Field(8, element.Precision);
+            }
+
+            if (element.Logical is { } logical)
+            {
+                short union = writer.BeginStructField(10);
+                short member = writer.BeginStructField((short)logical);
+                writer.EndStruct(member);
+                writer.EndStruct(union);
             }
 
             writer.EndStruct(saved);
@@ -110,9 +141,12 @@ internal sealed class HandBuiltFile
             writer.WriteI64Field(2, offsets[i]);
             short meta = writer.BeginStructField(3);
             writer.WriteI32Field(1, (int)column.Type);
-            writer.WriteListField(2, ThriftType.I32, 2);
-            writer.WriteI32Element((int)ParquetEncoding.Plain);
-            writer.WriteI32Element((int)ParquetEncoding.Rle);
+            writer.WriteListField(2, ThriftType.I32, column.Encodings.Count);
+            foreach (ParquetEncoding encoding in column.Encodings)
+            {
+                writer.WriteI32Element((int)encoding);
+            }
+
             writer.WriteListField(3, ThriftType.Binary, column.Path.Length);
             foreach (string name in column.Path)
             {
@@ -179,7 +213,16 @@ internal sealed class HandBuiltFile
         return bytes.ToArray();
     }
 
-    private sealed record Element(string Name, PhysicalType? Type, FieldRepetition? Repetition, int Children, ConvertedType? Converted);
+    private sealed record Element(
+        string Name,
+        PhysicalType? Type,
+        FieldRepetition? Repetition,
+        int Children,
+        ConvertedType? Converted,
+        int Length,
+        int Scale,
+        int Precision,
+        LogicalTypeKind? Logical);
 
     /// <summary>A column's chunk, its pages in order.</summary>
     internal sealed class Column(PhysicalType type, string[] path)
@@ -189,6 +232,9 @@ internal sealed class HandBuiltFile
         internal string[] Path { get; } = path;
 
         internal List<byte[]> Pages { get; } = [];
+
+        /// <summary>The encodings the chunk's pages use, its levels' RLE among them, as its metadata lists them.</summary>
+        internal SortedSet<ParquetEncoding> Encodings { get; } = [ParquetEncoding.Plain, ParquetEncoding.Rle];
 
         internal long Values { get; private set; }
 
@@ -237,9 +283,13 @@ internal sealed class HandBuiltFile
             return Add(page.WrittenSpan.ToArray(), definition.Length);
         }
 
-        /// <summary>Adds a v2 page: its levels ahead of its values, RLE without lengths, which its header holds.</summary>
-        internal Column V2(byte[]? repetition, int maxRepetition, byte[] definition, int maxDefinition, int rows, byte[] values)
+        /// <summary>
+        /// Adds a v2 page: its levels ahead of its values, RLE without lengths, which its header holds;
+        /// its values PLAIN unless <paramref name="encoding"/> says otherwise.
+        /// </summary>
+        internal Column V2(byte[]? repetition, int maxRepetition, byte[] definition, int maxDefinition, int rows, byte[] values, ParquetEncoding encoding = ParquetEncoding.Plain)
         {
+            Encodings.Add(encoding);
             byte[] repetitionBytes = maxRepetition > 0 ? Rle(repetition!, maxRepetition) : [];
             byte[] definitionBytes = maxDefinition > 0 ? Rle(definition, maxDefinition) : [];
             int nulls = 0;
@@ -259,7 +309,7 @@ internal sealed class HandBuiltFile
             writer.WriteI32Field(1, definition.Length);
             writer.WriteI32Field(2, nulls);
             writer.WriteI32Field(3, rows);
-            writer.WriteI32Field(4, (int)ParquetEncoding.Plain);
+            writer.WriteI32Field(4, (int)encoding);
             writer.WriteI32Field(5, definitionBytes.Length);
             writer.WriteI32Field(6, repetitionBytes.Length);
             writer.WriteBooleanField(7, false);

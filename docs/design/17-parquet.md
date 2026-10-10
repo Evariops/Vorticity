@@ -542,7 +542,7 @@ again with hardware intrinsics disabled and compares bit for bit
 | expand | dense values to the rows' slots | a mask-driven expand, `VPEXPAND` where the runtime exposes it, shuffle tables otherwise |
 | delta decode | DELTA_BINARY_PACKED, the lengths of the delta byte arrays | unpack, add the minimum delta, an in-register prefix sum with a carried lane, wrapping |
 | delta encode | the same | deltas by a shifted subtraction, minimum and width by reductions and a leading-zero count |
-| stream split | BYTE_STREAM_SPLIT | byte interleaves (`PUNPCK`, `ZIP`) for 2, 4 and 8 streams, a VBMI permute; the inverse to encode |
+| stream split | BYTE_STREAM_SPLIT | 16 values a step for 2, 4 and 8 streams: byte interleaves (`PUNPCK`, `ZIP`) to decode, even bytes pulled from odd ones (`PACKUSWB` over a mask or a shift, `UZP`) to encode, at 25 GB/s and more either way |
 | ALP | FLOAT, DOUBLE | unpack, add the frame, convert (`VCVTQQ2PD` under AVX-512DQ), two multiplications never fused, exceptions patched |
 | plain byte arrays | PLAIN BYTE_ARRAY | serial, since each length gives the next value's place; unrolled, values inlined into views by 16-byte loads within the slack |
 | big-endian decimals | DECIMAL on fixed and variable byte arrays | a byte-reversing shuffle and a sign extension |

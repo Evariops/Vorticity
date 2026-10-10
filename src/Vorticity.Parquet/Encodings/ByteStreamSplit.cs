@@ -14,9 +14,9 @@ namespace Vorticity.Parquet.Encodings;
 /// </summary>
 /// <remarks>
 /// It changes no size: what it buys is a codec's ratio on floating point, whose exponent bytes
-/// repeat where its mantissa's do not. Values of four and eight bytes go sixteen at a time through
-/// byte interleaves where SSE2 or AdvSimd have them, a transpose of 16-byte blocks; any other width,
-/// and what is left, a byte at a time.
+/// repeat where its mantissa's do not. Values of two, four and eight bytes go sixteen at a time where
+/// SSE2 or AdvSimd have the shuffles, a transpose of 16-byte blocks: gathered by byte interleaves,
+/// split by pulling even bytes from odd ones; any other width, and what is left, a byte at a time.
 /// </remarks>
 internal static class ByteStreamSplit
 {
@@ -32,6 +32,7 @@ internal static class ByteStreamSplit
         int count = source.Length / width;
         int done = width switch
         {
+            2 => Interleave2(source, destination, count),
             4 => Interleave4(source, destination, count),
             8 => Interleave8(source, destination, count),
             _ => 0,
@@ -50,13 +51,162 @@ internal static class ByteStreamSplit
     internal static void Encode(ReadOnlySpan<byte> values, int width, Span<byte> destination)
     {
         int count = values.Length / width;
-        for (int i = 0; i < count; i++)
+        int done = width switch
+        {
+            2 => Split2(values, destination, count),
+            4 => Split4(values, destination, count),
+            8 => Split8(values, destination, count),
+            _ => 0,
+        };
+
+        for (int i = done; i < count; i++)
         {
             for (int k = 0; k < width; k++)
             {
                 destination[(k * count) + i] = values[(i * width) + k];
             }
         }
+    }
+
+    /// <summary>Values of two bytes into two streams, sixteen values a step; the values done.</summary>
+    private static int Split2(ReadOnlySpan<byte> values, Span<byte> destination, int count)
+    {
+        if (!Sse2.IsSupported && !AdvSimd.Arm64.IsSupported)
+        {
+            return 0;
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        for (; i + 16 <= count; i += 16)
+        {
+            nuint at = (nuint)(i * 2);
+            Vector128<byte> v0 = Vector128.LoadUnsafe(ref from, at);
+            Vector128<byte> v1 = Vector128.LoadUnsafe(ref from, at + 16);
+            Even(v0, v1).StoreUnsafe(ref into, (nuint)i);
+            Odd(v0, v1).StoreUnsafe(ref into, (nuint)(count + i));
+        }
+
+        return i;
+    }
+
+    /// <summary>
+    /// Values of four bytes into four streams, sixteen values a step: the even and odd bytes of each
+    /// pair of vectors pulled apart, twice; the values done.
+    /// </summary>
+    private static int Split4(ReadOnlySpan<byte> values, Span<byte> destination, int count)
+    {
+        if (!Sse2.IsSupported && !AdvSimd.Arm64.IsSupported)
+        {
+            return 0;
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        for (; i + 16 <= count; i += 16)
+        {
+            nuint at = (nuint)(i * 4);
+            Vector128<byte> v0 = Vector128.LoadUnsafe(ref from, at);
+            Vector128<byte> v1 = Vector128.LoadUnsafe(ref from, at + 16);
+            Vector128<byte> v2 = Vector128.LoadUnsafe(ref from, at + 32);
+            Vector128<byte> v3 = Vector128.LoadUnsafe(ref from, at + 48);
+
+            // Bytes 0 and 2, then 1 and 3, of values 0 to 7 and 8 to 15; then each pair apart.
+            Vector128<byte> even0 = Even(v0, v1);
+            Vector128<byte> odd0 = Odd(v0, v1);
+            Vector128<byte> even1 = Even(v2, v3);
+            Vector128<byte> odd1 = Odd(v2, v3);
+            Even(even0, even1).StoreUnsafe(ref into, (nuint)i);
+            Even(odd0, odd1).StoreUnsafe(ref into, (nuint)(count + i));
+            Odd(even0, even1).StoreUnsafe(ref into, (nuint)((2 * count) + i));
+            Odd(odd0, odd1).StoreUnsafe(ref into, (nuint)((3 * count) + i));
+        }
+
+        return i;
+    }
+
+    /// <summary>
+    /// Values of eight bytes into eight streams, sixteen values a step: the even and odd bytes pulled
+    /// apart three times; the values done.
+    /// </summary>
+    private static int Split8(ReadOnlySpan<byte> values, Span<byte> destination, int count)
+    {
+        if (!Sse2.IsSupported && !AdvSimd.Arm64.IsSupported)
+        {
+            return 0;
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        for (; i + 16 <= count; i += 16)
+        {
+            nuint at = (nuint)(i * 8);
+            Vector128<byte> v0 = Vector128.LoadUnsafe(ref from, at);
+            Vector128<byte> v1 = Vector128.LoadUnsafe(ref from, at + 16);
+            Vector128<byte> v2 = Vector128.LoadUnsafe(ref from, at + 32);
+            Vector128<byte> v3 = Vector128.LoadUnsafe(ref from, at + 48);
+            Vector128<byte> v4 = Vector128.LoadUnsafe(ref from, at + 64);
+            Vector128<byte> v5 = Vector128.LoadUnsafe(ref from, at + 80);
+            Vector128<byte> v6 = Vector128.LoadUnsafe(ref from, at + 96);
+            Vector128<byte> v7 = Vector128.LoadUnsafe(ref from, at + 112);
+
+            // Bytes 0, 2, 4 and 6, and 1, 3, 5 and 7, of four values each.
+            Vector128<byte> e0 = Even(v0, v1);
+            Vector128<byte> o0 = Odd(v0, v1);
+            Vector128<byte> e1 = Even(v2, v3);
+            Vector128<byte> o1 = Odd(v2, v3);
+            Vector128<byte> e2 = Even(v4, v5);
+            Vector128<byte> o2 = Odd(v4, v5);
+            Vector128<byte> e3 = Even(v6, v7);
+            Vector128<byte> o3 = Odd(v6, v7);
+
+            // Bytes 0 and 4, 2 and 6, 1 and 5, 3 and 7, of eight values each.
+            Vector128<byte> b04a = Even(e0, e1);
+            Vector128<byte> b26a = Odd(e0, e1);
+            Vector128<byte> b04b = Even(e2, e3);
+            Vector128<byte> b26b = Odd(e2, e3);
+            Vector128<byte> b15a = Even(o0, o1);
+            Vector128<byte> b37a = Odd(o0, o1);
+            Vector128<byte> b15b = Even(o2, o3);
+            Vector128<byte> b37b = Odd(o2, o3);
+
+            Even(b04a, b04b).StoreUnsafe(ref into, (nuint)i);
+            Even(b15a, b15b).StoreUnsafe(ref into, (nuint)(count + i));
+            Even(b26a, b26b).StoreUnsafe(ref into, (nuint)((2 * count) + i));
+            Even(b37a, b37b).StoreUnsafe(ref into, (nuint)((3 * count) + i));
+            Odd(b04a, b04b).StoreUnsafe(ref into, (nuint)((4 * count) + i));
+            Odd(b15a, b15b).StoreUnsafe(ref into, (nuint)((5 * count) + i));
+            Odd(b26a, b26b).StoreUnsafe(ref into, (nuint)((6 * count) + i));
+            Odd(b37a, b37b).StoreUnsafe(ref into, (nuint)((7 * count) + i));
+        }
+
+        return i;
+    }
+
+    /// <summary>Two streams into values of two bytes, sixteen values a step; the values done.</summary>
+    private static int Interleave2(ReadOnlySpan<byte> source, Span<byte> destination, int count)
+    {
+        if (!Sse2.IsSupported && !AdvSimd.Arm64.IsSupported)
+        {
+            return 0;
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(source);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        for (; i + 16 <= count; i += 16)
+        {
+            Vector128<byte> s0 = Vector128.LoadUnsafe(ref from, (nuint)i);
+            Vector128<byte> s1 = Vector128.LoadUnsafe(ref from, (nuint)(count + i));
+            nuint at = (nuint)(i * 2);
+            ZipLow(s0, s1).StoreUnsafe(ref into, at);
+            ZipHigh(s0, s1).StoreUnsafe(ref into, at + 16);
+        }
+
+        return i;
     }
 
     /// <summary>Four streams into values of four bytes, sixteen values a step; the values done.</summary>
@@ -143,6 +293,33 @@ internal static class ByteStreamSplit
         }
 
         return i;
+    }
+
+    /// <summary>The even bytes of <paramref name="left"/>, then those of <paramref name="right"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> Even(Vector128<byte> left, Vector128<byte> right)
+    {
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            return AdvSimd.Arm64.UnzipEven(left, right);
+        }
+
+        Vector128<ushort> low = Vector128.Create((ushort)0x00FF);
+        return Sse2.PackUnsignedSaturate((left.AsUInt16() & low).AsInt16(), (right.AsUInt16() & low).AsInt16());
+    }
+
+    /// <summary>The odd bytes of <paramref name="left"/>, then those of <paramref name="right"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> Odd(Vector128<byte> left, Vector128<byte> right)
+    {
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            return AdvSimd.Arm64.UnzipOdd(left, right);
+        }
+
+        return Sse2.PackUnsignedSaturate(
+            Sse2.ShiftRightLogical(left.AsUInt16(), 8).AsInt16(),
+            Sse2.ShiftRightLogical(right.AsUInt16(), 8).AsInt16());
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
