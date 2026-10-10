@@ -326,10 +326,14 @@ internal sealed class ScratchFrames : IDisposable
     private const int SealedFrameBytes = FrameBytes + Sealing.SealedFormat.TagBytes;
 
     private readonly Sealing.EpochCipher _cipher;
-    private readonly byte[] _pending = GC.AllocateUninitializedArray<byte>(FrameBytes, pinned: true);
-    private readonly byte[] _sealed = GC.AllocateUninitializedArray<byte>(SealedFrameBytes, pinned: true);
+
+    // From the shared pool, as a plain scratch's pages are: a spill pays no buffer of its own. The
+    // frame being filled holds plaintext, and is wiped before it goes back.
+    private readonly byte[] _pending = ArrayPool<byte>.Shared.Rent(FrameBytes);
+    private readonly byte[] _sealed = ArrayPool<byte>.Shared.Rent(SealedFrameBytes);
     private int _filled;
     private long _written;
+    private int _disposed;
 
     internal ScratchFrames()
     {
@@ -340,6 +344,7 @@ internal sealed class ScratchFrames : IDisposable
     }
 
     /// <summary>Appends plaintext: each frame it fills is sealed and written, the rest kept for the next append.</summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask AppendAsync(SafeFileHandle file, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken)
     {
         while (!bytes.IsEmpty)
@@ -351,7 +356,7 @@ internal sealed class ScratchFrames : IDisposable
             if (_filled == FrameBytes)
             {
                 Seal();
-                await RandomAccess.WriteAsync(file, _sealed, _written * SealedFrameBytes, cancellationToken).ConfigureAwait(false);
+                await RandomAccess.WriteAsync(file, _sealed.AsMemory(0, SealedFrameBytes), _written * SealedFrameBytes, cancellationToken).ConfigureAwait(false);
                 _written++;
                 _filled = 0;
             }
@@ -359,6 +364,7 @@ internal sealed class ScratchFrames : IDisposable
     }
 
     /// <summary>Reads plaintext from <paramref name="offset"/>: the frames written, read in one call and opened, and the frame being filled.</summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask ReadAsync(SafeFileHandle file, long offset, Memory<byte> destination, CancellationToken cancellationToken)
     {
         long writtenBytes = _written * FrameBytes;
@@ -369,7 +375,7 @@ internal sealed class ScratchFrames : IDisposable
             long last = (offset + count - 1) / FrameBytes;
             int frames = (int)(last - first + 1);
             byte[] sealedRun = ArrayPool<byte>.Shared.Rent(frames * SealedFrameBytes);
-            byte[] plain = ArrayPool<byte>.Shared.Rent(FrameBytes);
+            byte[]? plain = null;
             try
             {
                 Memory<byte> run = sealedRun.AsMemory(0, frames * SealedFrameBytes);
@@ -386,12 +392,16 @@ internal sealed class ScratchFrames : IDisposable
                     at += read;
                 }
 
-                Open(sealedRun, first, frames, plain, offset, destination.Span[..count]);
+                Open(sealedRun, first, frames, ref plain, offset, destination.Span[..count]);
             }
             finally
             {
-                System.Security.Cryptography.CryptographicOperations.ZeroMemory(plain);
-                ArrayPool<byte>.Shared.Return(plain);
+                if (plain is not null)
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(plain);
+                    ArrayPool<byte>.Shared.Return(plain);
+                }
+
                 ArrayPool<byte>.Shared.Return(sealedRun);
             }
 
@@ -408,8 +418,16 @@ internal sealed class ScratchFrames : IDisposable
 
     public void Dispose()
     {
+        // Once: a buffer given back twice would be lent to two owners.
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         _cipher.Dispose();
         System.Security.Cryptography.CryptographicOperations.ZeroMemory(_pending);
+        ArrayPool<byte>.Shared.Return(_pending);
+        ArrayPool<byte>.Shared.Return(_sealed);
     }
 
     private void Seal()
@@ -417,7 +435,7 @@ internal sealed class ScratchFrames : IDisposable
         System.Security.Cryptography.AesGcm aes = _cipher.Rent();
         try
         {
-            Sealing.EpochCipher.Seal(aes, _written, final: false, _pending, _sealed.AsSpan(0, FrameBytes), _sealed.AsSpan(FrameBytes));
+            Sealing.EpochCipher.Seal(aes, _written, final: false, _pending.AsSpan(0, FrameBytes), _sealed.AsSpan(0, FrameBytes), _sealed.AsSpan(FrameBytes, Sealing.SealedFormat.TagBytes));
         }
         finally
         {
@@ -425,8 +443,12 @@ internal sealed class ScratchFrames : IDisposable
         }
     }
 
-    /// <summary>Opens <paramref name="frames"/> frames from <paramref name="first"/> and copies out the plaintext from <paramref name="offset"/>.</summary>
-    private void Open(byte[] sealedRun, long first, int frames, byte[] plain, long offset, Span<byte> destination)
+    /// <summary>
+    /// Opens <paramref name="frames"/> frames from <paramref name="first"/> into the plaintext from
+    /// <paramref name="offset"/>: a frame the destination holds whole straight into it, one it holds in
+    /// part into <paramref name="plain"/>, rented the first time, and copied out.
+    /// </summary>
+    private void Open(byte[] sealedRun, long first, int frames, ref byte[]? plain, long offset, Span<byte> destination)
     {
         System.Security.Cryptography.AesGcm aes = _cipher.Rent();
         try
@@ -434,12 +456,19 @@ internal sealed class ScratchFrames : IDisposable
             for (int f = 0; f < frames; f++)
             {
                 long index = first + f;
-                Sealing.EpochCipher.Open(
-                    aes, index, final: false, sealedRun.AsSpan(f * SealedFrameBytes, FrameBytes),
-                    sealedRun.AsSpan((f * SealedFrameBytes) + FrameBytes, Sealing.SealedFormat.TagBytes), plain.AsSpan(0, FrameBytes), index * SealedFrameBytes);
                 long frameStart = index * FrameBytes;
                 long from = Math.Max(offset, frameStart);
                 long to = Math.Min(offset + destination.Length, frameStart + FrameBytes);
+                ReadOnlySpan<byte> ciphertext = sealedRun.AsSpan(f * SealedFrameBytes, FrameBytes);
+                ReadOnlySpan<byte> tag = sealedRun.AsSpan((f * SealedFrameBytes) + FrameBytes, Sealing.SealedFormat.TagBytes);
+                if (to - from == FrameBytes)
+                {
+                    Sealing.EpochCipher.Open(aes, index, final: false, ciphertext, tag, destination.Slice((int)(from - offset), FrameBytes), index * SealedFrameBytes);
+                    continue;
+                }
+
+                plain ??= ArrayPool<byte>.Shared.Rent(FrameBytes);
+                Sealing.EpochCipher.Open(aes, index, final: false, ciphertext, tag, plain.AsSpan(0, FrameBytes), index * SealedFrameBytes);
                 plain.AsSpan((int)(from - frameStart), (int)(to - from)).CopyTo(destination[(int)(from - offset)..]);
             }
         }
