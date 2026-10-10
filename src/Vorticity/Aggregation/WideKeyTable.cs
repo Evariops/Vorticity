@@ -161,13 +161,23 @@ internal struct WideKeyTable<TValue>
     /// <paramref name="next"/>, which it then holds, and which the caller's keys hold from then on.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal int GetOrAdd(TValue key, int next, ReadOnlySpan<TValue> keys)
+    internal int GetOrAdd(TValue key, int next, ReadOnlySpan<TValue> keys) => GetOrAdd(key, HashOf(key, _seed), next, keys);
+
+    /// <summary>The seed the keys are hashed under: a hash taken under another is no longer theirs.</summary>
+    internal readonly ulong Seed => _seed;
+
+    /// <summary>
+    /// <see cref="GetOrAdd(TValue, int, ReadOnlySpan{TValue})"/> of a key whose <paramref name="hash"/>
+    /// the home pass took under the table's <see cref="Seed"/>: a wide key hashed once where a new one was
+    /// hashed three times, its home looked at, then its slot, then its line (q10's tuples).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int GetOrAdd(TValue key, uint hash, int next, ReadOnlySpan<TValue> keys)
     {
         Span<Slot> slots = Slots;
         if (slots.Length != 0)
         {
-            uint hash = HashOf(key, _seed);
-            ref Slot slot = ref slots[(int)KeyTable<TValue>.FastMod(hash, (uint)slots.Length, _multiplier)];
+            ref Slot slot = ref slots[(int)KeyTable<TValue>.SlotOf(hash, (uint)slots.Length, _multiplier)];
             if (slot.Group != 0)
             {
                 if (slot.Hash == hash && keys[slot.Group - 1].Equals(key))
@@ -184,7 +194,7 @@ internal struct WideKeyTable<TValue>
             }
         }
 
-        return Search(key, next, keys);
+        return Search(key, hash, next, keys);
     }
 
     /// <summary>
@@ -194,22 +204,39 @@ internal struct WideKeyTable<TValue>
     /// </summary>
     /// <param name="keys">The keys of the batch.</param>
     /// <param name="groups">Each key's group, or -1.</param>
-    /// <param name="hashes">Room for each key's hash, as many as the keys, when <paramref name="ahead"/> reads ahead.</param>
+    /// <param name="hashes">Room for each key's hash, as many as the keys: filled, for the keys missed to be added under it while <see cref="Seed"/> holds.</param>
     /// <param name="ahead">How many rows on a slot is read before its row compares; 0 for none.</param>
     /// <param name="held">The keys of the groups.</param>
     /// <param name="missed">Whether a key found no group: the rows left to the lookup, none when false.</param>
-    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> hashes, int ahead, ReadOnlySpan<TValue> held, out bool missed)
+    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> hashes, int ahead, ReadOnlySpan<TValue> held, out bool missed) =>
+        FindAtHome(keys, groups, hashes, ahead, given: false, held, out missed);
+
+    /// <summary>
+    /// <see cref="FindAtHome(ReadOnlySpan{TValue}, Span{int}, Span{uint}, int, ReadOnlySpan{TValue}, out bool)"/>,
+    /// the keys' hashes under the table's seed already in <paramref name="hashes"/> when
+    /// <paramref name="given"/>: the hashes a core's entries carry, read where the words were folded again.
+    /// </summary>
+    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> hashes, int ahead, bool given, ReadOnlySpan<TValue> held, out bool missed)
     {
         Span<Slot> slots = Slots;
         if (slots.Length == 0 || held.IsEmpty)
         {
             groups[..keys.Length].Fill(-1);
             missed = keys.Length > 0;
+            if (!given && hashes.Length >= keys.Length)
+            {
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    hashes[i] = HashOf(keys[i], _seed);
+                }
+            }
+
             return 0;
         }
 
         groups = groups[..keys.Length];
         ulong seed = _seed;
+        ulong prepared = Prepared(seed);
         ulong multiplier = _multiplier;
         uint length = (uint)slots.Length;
         ref Slot first = ref MemoryMarshal.GetReference(slots);
@@ -220,11 +247,26 @@ internal struct WideKeyTable<TValue>
             // Every row's slot first, its group where the hash agrees, then every candidate's key: two
             // loops, no read of a key waiting on its row's read of a slot. In one loop, a count by a
             // million UUIDs at one lane took 1.06 times as long as slots that hold their keys; in two,
-            // 0.86 of one loop's time, measured on 2026-10-08.
+            // 0.86 of one loop's time, measured on 2026-10-08. Each hash kept for the keys missed, where
+            // the caller has room for them.
+            bool keep = hashes.Length >= keys.Length;
             for (int i = 0; i < keys.Length; i++)
             {
-                uint hash = HashOf(keys[i], seed);
-                ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hash, length, multiplier));
+                uint hash;
+                if (given)
+                {
+                    hash = hashes[i];
+                }
+                else
+                {
+                    hash = HashOf(keys[i], seed, prepared);
+                    if (keep)
+                    {
+                        hashes[i] = hash;
+                    }
+                }
+
+                ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hash, length, multiplier));
                 groups[i] = (home.Group & -Unsafe.BitCast<bool, byte>(home.Hash == hash)) - 1;
             }
 
@@ -242,16 +284,19 @@ internal struct WideKeyTable<TValue>
         }
 
         hashes = hashes[..keys.Length];
-        for (int i = 0; i < keys.Length; i++)
+        if (!given)
         {
-            hashes[i] = HashOf(keys[i], seed);
+            for (int i = 0; i < keys.Length; i++)
+            {
+                hashes[i] = HashOf(keys[i], seed, prepared);
+            }
         }
 
         int sink = 0;
         int row = 0;
         for (int touched = keys.Length - ahead; row < touched; row++)
         {
-            sink ^= Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hashes[row + ahead], length, multiplier)).Group;
+            sink ^= Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hashes[row + ahead], length, multiplier)).Group;
             int group = Found(ref first, ref firstKey, hashes[row], keys[row], length, multiplier);
             groups[row] = group;
             any |= group;
@@ -275,7 +320,7 @@ internal struct WideKeyTable<TValue>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int Found(ref Slot first, ref TValue firstKey, uint hash, TValue key, uint length, ulong multiplier)
     {
-        ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.FastMod(hash, length, multiplier));
+        ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hash, length, multiplier));
         int candidate = (home.Group & -Unsafe.BitCast<bool, byte>(home.Hash == hash)) - 1;
         int same = Unsafe.BitCast<bool, byte>(Unsafe.Add(ref firstKey, (nint)(uint)(candidate & ~(candidate >> 31))).Equals(key));
         return ((candidate + 1) & -same) - 1;
@@ -340,7 +385,14 @@ internal struct WideKeyTable<TValue>
 
     /// <summary>A key whose home is taken: the rest of the home's line, then the line's chain.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private int Search(TValue key, int next, ReadOnlySpan<TValue> keys)
+    private int Search(TValue key, int next, ReadOnlySpan<TValue> keys) => Search(key, HashOf(key, _seed), next, keys);
+
+    /// <summary>
+    /// <see cref="Search(TValue, int, ReadOnlySpan{TValue})"/> of a key whose <paramref name="hash"/> was
+    /// taken under the table's seed, which a resize keeps and a new seed does not.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int Search(TValue key, uint hash, int next, ReadOnlySpan<TValue> keys)
     {
         if (_length == 0)
         {
@@ -348,8 +400,7 @@ internal struct WideKeyTable<TValue>
         }
 
         Span<Slot> slots = Slots;
-        uint hash = HashOf(key, _seed);
-        uint at = KeyTable<TValue>.FastMod(hash, (uint)slots.Length, _multiplier);
+        uint at = KeyTable<TValue>.SlotOf(hash, (uint)slots.Length, _multiplier);
         uint first = at & ~(uint)(Width - 1);
         uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
         uint probe = at;
@@ -361,7 +412,7 @@ internal struct WideKeyTable<TValue>
                 if (_count >= _growAt)
                 {
                     Resize(KeyTable<TValue>.PrimeAtLeast(GroupKeys.Doubled(slots.Length)));
-                    return Search(key, next, keys);
+                    return Search(key, hash, next, keys);
                 }
 
                 slot.Hash = hash;
@@ -396,9 +447,10 @@ internal struct WideKeyTable<TValue>
         if (_count >= _growAt || (!_squeezed && 8L * _overflowed > _count && 10L * _count > 3L * slots.Length))
         {
             Resize(KeyTable<TValue>.PrimeAtLeast(GroupKeys.Doubled(slots.Length)));
-            return Search(key, next, keys);
+            return Search(key, hash, next, keys);
         }
 
+        // A new seed: the key hashed again under it.
         if (links >= MaxChain && _seed == 0)
         {
             Reseed((ulong)Random.Shared.NextInt64(1, long.MaxValue) | 1, keys);
@@ -442,12 +494,20 @@ internal struct WideKeyTable<TValue>
     /// rapidhash (<see cref="TextWord.Home"/>).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint HashOf(TValue key, ulong seed)
+    private static uint HashOf(TValue key, ulong seed) => HashOf(key, seed, Prepared(seed));
+
+    /// <summary>The seed a short text's word is homed by, prepared once a batch (<see cref="TextWord.Prepared"/>); the seed itself for any other key.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Prepared(ulong seed) => typeof(TValue) == typeof(TextWord) ? TextWord.Prepared(seed) : seed;
+
+    /// <summary>As <see cref="HashOf(TValue, ulong)"/>, the seed already prepared.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint HashOf(TValue key, ulong seed, ulong prepared)
     {
         (ulong low, ulong high) = KeyWords.Of(key);
         if (typeof(TValue) == typeof(TextWord))
         {
-            return TextWord.Home(low, high, seed);
+            return TextWord.HomePrepared(low, high, prepared);
         }
 
         if (seed != 0)
@@ -507,7 +567,7 @@ internal struct WideKeyTable<TValue>
     private void Place(uint hash, int group)
     {
         Span<Slot> slots = Slots;
-        uint at = KeyTable<TValue>.FastMod(hash, (uint)slots.Length, _multiplier);
+        uint at = KeyTable<TValue>.SlotOf(hash, (uint)slots.Length, _multiplier);
         uint first = at & ~(uint)(Width - 1);
         uint end = Math.Min(first + (uint)Width, (uint)slots.Length);
         uint probe = at;

@@ -27,6 +27,14 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
     private MaskCache _rows;
     private int[] _counts = [];
 
+    // The windows an exact float sum folds a row at a time from now on, the last window's groups mostly at
+    // tops of their own: the window's top then missed them, and the branch between the two paths, taken at
+    // random, cost more than it saved (a hundred groups of ranges of their own ×1.13).
+    private int _ownTops;
+
+    /// <summary>The windows an exact float sum whose groups sat at tops of their own folds a row at a time before it tries the window's top again.</summary>
+    private const int OwnTopWindows = 8;
+
     internal FixedSlot(StorageKind kind, Func<TState, TResult> finish)
         : this(kind, finish, default(TOp))
     {
@@ -205,6 +213,20 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 ReadOnlySpan<ulong> mask = _rows.And(input, input.Selection, valid);
                 if (mask.IsEmpty)
                 {
+                    // An exact float sum: the extractors of the window's top held in registers, unless the
+                    // last window's groups sat at tops of their own (IndexedSum.Fold).
+                    if (typeof(TState) == typeof(IndexedSum) && typeof(TValue) == typeof(double))
+                    {
+                        if (_ownTops == 0)
+                        {
+                            int added = IndexedSum.Fold(Unsafe.As<StateView<TState>, StateView<IndexedSum>>(ref states), groups, MemoryMarshal.Cast<TValue, double>(values), input.Start, input.End);
+                            _ownTops = added > (input.End - input.Start) / 4 ? OwnTopWindows : 0;
+                            return;
+                        }
+
+                        _ownTops--;
+                    }
+
                     // Every row and no null: a loop with nothing but the fold, the cursor's test of its mask
                     // out of it; with no branch on the values while the groups have seen few rows.
                     if (input.Settled)
@@ -236,7 +258,9 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
         }
     }
 
-    internal override bool CarriesCount => true;
+    // An exact float sum folds its own pass, its split held to one top (IndexedSum.Fold), rather than carry
+    // a count through IndexedSum.Add, a value at a time.
+    internal override bool CarriesCount => typeof(TState) != typeof(IndexedSum);
 
     internal override bool StepRowsCounted(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot count) => count switch
     {
@@ -287,6 +311,55 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : RecordSlot<TStat
                 ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
                 op.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
                 Unsafe.As<byte, TCount>(ref Unsafe.AddByteOffset(ref record, count))++;
+            }
+        }
+
+        return true;
+    }
+
+    internal override bool StepRowsPaired(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot twin, in BatchInput twinInput)
+    {
+        if (twin is not FixedSlot<TValue, TState, TOp, TResult> other || RuntimeHelpers.IsReferenceOrContainsReferences<TState>()
+            || Bound is not { } records || !ReferenceEquals(records, other.Bound) || !input.Selection.IsEmpty || !twinInput.Selection.IsEmpty
+            || FixedReader.EncodingOf(input.Arena, input.Node, _kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary
+            || FixedReader.EncodingOf(twinInput.Arena, twinInput.Node, other._kind) is ColumnEncoding.Constant or ColumnEncoding.Dictionary)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<TValue> values = _values.Of(input.Arena, input.Batch, input.Node, _kind, out ReadOnlySpan<ulong> valid);
+        ReadOnlySpan<TValue> twinValues = other._values.Of(twinInput.Arena, twinInput.Batch, twinInput.Node, other._kind, out ReadOnlySpan<ulong> twinValid);
+        if (!_rows.And(input, input.Selection, valid).IsEmpty || !other._rows.And(twinInput, twinInput.Selection, twinValid).IsEmpty)
+        {
+            return false;
+        }
+
+        // Both states in one record: a row's group read once, its record reached once, each value read
+        // from its own column.
+        TOp op = _op;
+        TOp twinOp = other._op;
+        StateView<TState> states = States;
+        nint state = states.Offset;
+        nint twinState = other.States.Offset;
+        ref int groupOf = ref MemoryMarshal.GetReference(groups);
+        ref TValue valueOf = ref MemoryMarshal.GetReference(values);
+        ref TValue twinOf = ref MemoryMarshal.GetReference(twinValues);
+        if (input.Settled)
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                twinOp.Add(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, twinState)), Unsafe.Add(ref twinOf, row));
+            }
+        }
+        else
+        {
+            for (int row = input.Start; row < input.End; row++)
+            {
+                ref byte record = ref states.Record(Unsafe.Add(ref groupOf, row));
+                op.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, state)), Unsafe.Add(ref valueOf, row));
+                twinOp.AddSelected(ref Unsafe.As<byte, TState>(ref Unsafe.AddByteOffset(ref record, twinState)), Unsafe.Add(ref twinOf, row));
             }
         }
 
@@ -1349,6 +1422,11 @@ internal static class KeyWords
         {
             Half h = Unsafe.BitCast<TValue, Half>(value);
             return (Half.IsNaN(h) ? (ushort)0x7E00 : h == Half.Zero ? (ushort)0 : BitConverter.HalfToUInt16Bits(h), 0);
+        }
+
+        if (typeof(TValue) == typeof(KeyTuple))
+        {
+            return Unsafe.BitCast<TValue, KeyTuple>(value).Words();
         }
 
         if (Unsafe.SizeOf<TValue>() == 32)

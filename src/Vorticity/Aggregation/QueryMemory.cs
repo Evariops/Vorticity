@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -9,9 +8,9 @@ namespace Vorticity.Aggregating;
 
 /// <summary>
 /// The scratch arrays of the steps that grow with the groups — the order of a result, its top, the
-/// sort of the rows a fetch reads, a lane's top — rented from the shared pool under the query's
+/// sort of the rows a fetch reads, a lane's top — rented from the process's shelf under the query's
 /// memory: reserved before they are rented, at the length
-/// the pool hands out, and given back with them. What the pool keeps of them afterwards is the rest
+/// the shelf hands out, and given back with them. What the shelf keeps of them afterwards is the rest
 /// of the process's memory, which the process's budget reads at its next full collection. An array
 /// under a page goes uncounted both ways, as a shelf's.
 /// </summary>
@@ -20,7 +19,7 @@ internal static class QueryArrays
     /// <summary>The least array counted: a page.</summary>
     private const long LeastCounted = 4096;
 
-    /// <summary>An array of <paramref name="length"/> elements at least, from the shared pool, reserved first under <paramref name="memory"/> for <paramref name="what"/>.</summary>
+    /// <summary>An array of <paramref name="length"/> elements at least, from the process's shelf (<see cref="ArrayShelf.Rent{T}"/>), reserved first under <paramref name="memory"/> for <paramref name="what"/>.</summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
     internal static T[] Rent<T>(QueryMemory? memory, int length, string what)
     {
@@ -34,10 +33,10 @@ internal static class QueryArrays
             memory.Measure(bytes);
         }
 
-        return ArrayPool<T>.Shared.Rent(length);
+        return ArrayShelf.Rent<T>(length);
     }
 
-    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the shared pool, its bytes given back to <paramref name="memory"/>.</summary>
+    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the process's shelf, its bytes given back to <paramref name="memory"/>.</summary>
     internal static void Return<T>(QueryMemory? memory, T[] array)
     {
         if (memory is not null && Bytes<T>(array.Length) is long bytes and >= LeastCounted)
@@ -46,10 +45,10 @@ internal static class QueryArrays
             memory.Measure(-bytes);
         }
 
-        ArrayPool<T>.Shared.Return(array);
+        ArrayShelf.Return(array);
     }
 
-    /// <summary>The length the shared pool hands out for <paramref name="length"/>: its power of two from sixteen, past a gigabyte of elements the length itself.</summary>
+    /// <summary>The length the shelf hands out for <paramref name="length"/>: its power of two from sixteen, past a gigabyte of elements the length itself.</summary>
     private static int Pooled(int length) => length <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 16)) : length;
 
     private static long Bytes<T>(int length) => (long)length * Unsafe.SizeOf<T>();
@@ -79,6 +78,7 @@ internal sealed class QueryMemory : IDisposable
     private long _held;
     private long _peak;
     private long _measured;
+    private long _beside;
     private int _left;
 
     /// <summary>A query's memory under <paramref name="budget"/>, one more query to share its ceiling with until it is given back.</summary>
@@ -87,6 +87,9 @@ internal sealed class QueryMemory : IDisposable
         _budget = budget;
         budget.Enter();
     }
+
+    /// <summary>When the query began, in <see cref="System.Diagnostics.Stopwatch"/> ticks: what the process's shelf held from before it is another query's.</summary>
+    internal long Started { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
 
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);
@@ -200,16 +203,39 @@ internal sealed class QueryMemory : IDisposable
         }
     }
 
-    /// <summary>Keeps <paramref name="bytes"/> of what the query holds and measures, the result it delivers, and gives back the rest.</summary>
-    internal void Keep(long bytes)
+    /// <summary>
+    /// Reserves and measures <paramref name="bytes"/> the query holds beside its groups for its whole run,
+    /// which its lanes share: the long texts of a key's tuples (<see cref="TupleLayout"/>). Past the
+    /// ceiling when the budget refuses them, as a table that grows within a batch: the lanes' next readings
+    /// spill or turn to the core. Kept with the result until it is delivered.
+    /// </summary>
+    internal void HoldBeside(long bytes)
     {
-        long held = Held;
-        if (held > bytes)
+        if (!TryGrow(bytes))
         {
-            Shrink(held - bytes);
+            Force(bytes);
         }
 
-        Measure(bytes - Measured);
+        Measure(bytes);
+        Interlocked.Add(ref _beside, bytes);
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="bytes"/> of what the query holds and measures, the result it delivers, and
+    /// what it holds beside its groups (<see cref="HoldBeside"/>), and gives back the rest.
+    /// </summary>
+    internal void Keep(long bytes)
+    {
+        // What it holds beside its groups stays, whether the bytes count it (what it holds) or not (a
+        // result's own).
+        long held = Held;
+        long kept = Math.Max(bytes, Math.Min(held, bytes + Volatile.Read(ref _beside)));
+        if (held > kept)
+        {
+            Shrink(held - kept);
+        }
+
+        Measure(kept - Measured);
     }
 
     /// <summary>Gives back everything the query holds.</summary>
@@ -238,6 +264,9 @@ internal sealed class QueryMemory : IDisposable
         if (Interlocked.Exchange(ref _left, 1) == 0)
         {
             _budget.Leave();
+
+            // The next query of its kind will hold as much: the process's shelf keeps up to that, for it.
+            ArrayShelf.Retained.Expect(Peak);
         }
     }
 

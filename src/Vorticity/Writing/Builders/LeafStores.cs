@@ -420,6 +420,33 @@ internal sealed unsafe class VarBinStore : ColumnStore
     /// which its decoder validated as it read it, kept as a group's key or extreme. Checking them again
     /// took a tenth of a group by of a million texts.
     /// </summary>
+    /// <summary>
+    /// Room for <paramref name="count"/> views past the last, each to be written in place as
+    /// <see cref="AppendInline"/> writes one, then held by <see cref="AdvanceViews"/>: a part's key texts
+    /// written at once, where a call a value took nine cycles of a group by's output (q10).
+    /// </summary>
+    internal Span<byte> InlineViews(int count)
+    {
+        if (_capacity - Count < count)
+        {
+            Grow(Pool, ref _viewsOwner, ref _views, ref _viewBytes, (long)Count * ViewSize, ((long)Count + count) * ViewSize);
+            _capacity = _viewBytes / ViewSize;
+        }
+
+        return new Span<byte>(_views + ((long)Count * ViewSize), count * ViewSize);
+    }
+
+    /// <summary>The first <paramref name="count"/> views of the last <see cref="InlineViews"/> written, now the store's.</summary>
+    internal void AdvanceViews(int count)
+    {
+        if ((uint)count > (uint)(_capacity - Count))
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), count, $"The last views hold {_capacity - Count} values.");
+        }
+
+        Count += count;
+    }
+
     internal void AppendValidated(ReadOnlySpan<byte> value)
     {
         EnsureViews();
@@ -438,6 +465,23 @@ internal sealed unsafe class VarBinStore : ColumnStore
             _dataLength += size;
         }
 
+        Count++;
+    }
+
+    /// <summary>
+    /// A value of twelve bytes or fewer, read already, as its view: its length in the low 32 bits of
+    /// <paramref name="low"/>, its bytes after, zero past them, the two words a group's key holds it as.
+    /// Copying its bytes out of the word to write them back into a view took a third of the output of
+    /// db-benchmark's q10, three texts in ten million groups.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void AppendInline(ulong low, ulong high)
+    {
+        System.Diagnostics.Debug.Assert((uint)low <= MaxInline, "A view of a longer value points into a data buffer.");
+        EnsureViews();
+        ref byte view = ref _views[(long)Count * ViewSize];
+        Unsafe.WriteUnaligned(ref view, low);
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), high);
         Count++;
     }
 

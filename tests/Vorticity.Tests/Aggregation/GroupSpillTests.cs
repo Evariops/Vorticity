@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -12,8 +13,9 @@ namespace Vorticity.Tests.Aggregation;
 /// The spill of the lanes' tables: a group by whose budget cannot hold its lanes' tables, on keys or
 /// states the core cannot take (a text, a composite holding one, a text's extremes, distinct counts),
 /// writes each table to the scratch when the budget holds it no more, then reads the runs back part by
-/// part, exact, every reservation and every file given back. Budgets are set against the result: what one
-/// lane holds once it has met every row.
+/// part, exact, every reservation and every file given back; and a key of six columns as its tuple, which
+/// the core takes and spills by its parts. Budgets are set against the result: what one lane holds once it
+/// has met every row.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
 public sealed partial class GroupSpillTests
@@ -64,15 +66,43 @@ public sealed partial class GroupSpillTests
         // Two texts and four integers, their numbers in a word of 256 bits: each part's values written
         // by its index, the words packed again as the runs are read back.
         (_, Row[] rows) = await Fixture.Async;
-        Dictionary<(string, int, int, string, int, long), SixCount> expected = rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value))
-            .ToDictionary(g => g.Key, g => new SixCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
         await ExactAsync(
             degree,
             percent,
-            file => file.Scan<Row>().GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value)).Select(g => (g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count())),
+            file =>
+            {
+                Vorticity.Aggregation grouped = SixColumns(file);
+                grouped.Plan.Tuples = false;
+                return grouped;
+            },
             (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value),
-            expected);
+            SixCounts(rows));
     }
+
+    [Theory]
+    [InlineData(1, 200)]
+    [InlineData(1, 10)]
+    [InlineData(4, 50)]
+    [InlineData(14, 10)]
+    public async Task AKeyOfSixValuesSpillsAsItsTuplesAndEndsExact(int degree, int percent)
+    {
+        // The same six columns as the tuple of their values, a key of 64 bytes the core takes: the governor
+        // turns to the core, whose parts go to the scratch and come back.
+        (_, Row[] rows) = await Fixture.Async;
+        AggregationRun run = await ExactAsync(degree, percent, SixColumns, (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value), SixCounts(rows));
+        if (percent <= 50)
+        {
+            Assert.NotNull(run.Core);
+        }
+    }
+
+    /// <summary>A count by six columns: two texts and four integers.</summary>
+    private static Vorticity.Aggregation SixColumns(VortexFile file) =>
+        file.Scan<Row>().GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value)).Select(g => (g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
+
+    private static Dictionary<(string, int, int, string, int, long), SixCount> SixCounts(Row[] rows) =>
+        rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value))
+            .ToDictionary(g => g.Key, g => new SixCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
 
     [Theory]
     [MemberData(nameof(Budgets))]
@@ -611,9 +641,10 @@ public sealed partial class GroupSpillTests
     /// <summary>
     /// The query under a budget of <paramref name="percent"/> of its result, at <paramref name="degree"/>:
     /// every group's answer, written to the scratch under half and a tenth of it, nothing at one lane under
-    /// twice it; the peak within 6 % of the ceiling, nothing reserved and no file left after.
+    /// twice it; the peak of the lanes' tables within 6 % of the ceiling, nothing reserved and no file left
+    /// after. The run, for what the test checks more.
     /// </summary>
-    private static async Task ExactAsync<TResult, TKey>(
+    private static async Task<AggregationRun> ExactAsync<TResult, TKey>(
         int degree, int percent, Func<VortexFile, Vorticity.Aggregation> query, Func<TResult, TKey> keyOf, Dictionary<TKey, TResult> expected)
         where TResult : IVortexRecord<TResult>
         where TKey : notnull
@@ -639,7 +670,9 @@ public sealed partial class GroupSpillTests
                 Assert.Equal(answer, read[key]);
             }
 
-            int runs = grouped.Plan.LastRun!.SpilledRuns;
+            // The lanes' runs, or the core's parts when the governor turned to it.
+            AggregationRun run = grouped.Plan.LastRun!;
+            int runs = run.SpilledRuns + (run.Core?.SpilledParts ?? 0);
             if (percent <= 50)
             {
                 Assert.True(runs > 0, $"no run written under {budget.CeilingBytes:N0} bytes of {result:N0}");
@@ -649,9 +682,16 @@ public sealed partial class GroupSpillTests
                 Assert.Equal(0, runs);
             }
 
-            Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+            // The lanes' tables keep within their budget; the core, under pressure, takes past it what a
+            // stack asks more, and gives everything back (CorePressureTests).
+            if (run.Core is null)
+            {
+                Assert.True(budget.PeakBytes <= budget.CeilingBytes * 106 / 100, $"peak {budget.PeakBytes:N0} of {budget.CeilingBytes:N0}");
+            }
+
             Assert.Equal(0, budget.ReservedBytes);
             Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+            return run;
         }
         finally
         {

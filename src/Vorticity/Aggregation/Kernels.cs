@@ -705,7 +705,11 @@ internal static class RowMasks
     }
 }
 
-/// <summary>Buffers a slot keeps from one batch to the next, grown and never shrunk, so a batch allocates nothing once warm.</summary>
+/// <summary>
+/// Buffers a slot keeps from one batch to the next, grown and never shrunk, so a batch allocates nothing
+/// once warm; taken from the process's shelf, a power of two long, and the one they replace given back
+/// to it, so that the next query's grow into the arrays this one's left.
+/// </summary>
 internal static class Scratch
 {
     /// <summary>Makes <paramref name="array"/> hold at least <paramref name="length"/> elements; a grown array starts empty, its old content is not copied.</summary>
@@ -713,8 +717,17 @@ internal static class Scratch
     {
         if (array.Length < length)
         {
-            array = new T[Capacity(length, array.Length)];
+            T[] old = array;
+            array = ArrayShelf.Retained.Take<T>(Capacity(length, array.Length), zeroed: true);
+            ArrayShelf.Retained.Give(old);
         }
+    }
+
+    /// <summary>Gives <paramref name="array"/> back to the process's shelf, its owner done with it, and leaves it empty.</summary>
+    internal static void Return<T>(ref T[] array)
+    {
+        ArrayShelf.Retained.Give(array);
+        array = [];
     }
 
     /// <summary>

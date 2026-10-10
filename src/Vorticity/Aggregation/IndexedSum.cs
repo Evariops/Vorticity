@@ -262,6 +262,15 @@ internal struct IndexedSum
     /// <summary>Folds another sum: the higher top for both, the bins added.</summary>
     internal void Merge(in IndexedSum other)
     {
+        // An empty sum takes the other whole: its count, its top, its infinities and its bins are what the
+        // fold would give, with no shift. Nearly every group of db-benchmark's q10 merges into an empty
+        // one, 9 % of its cycles at fourteen lanes.
+        if (Meta == 0)
+        {
+            this = other;
+            return;
+        }
+
         IndexedSum theirs = other;
         Counted(theirs.Count);
         int mine = Top;
@@ -347,16 +356,20 @@ internal struct IndexedSum
 
     /// <summary>
     /// The top a magnitude calls for: the lowest whose limit, <c>2^(27 · top − 1048)</c>, the whole
-    /// binade of the magnitude stays below.
+    /// binade of the magnitude stays below. The binade read off the exponent's bits, or for a subnormal
+    /// off its highest bit, as <see cref="Math.ILogB"/> gives it, which is a call.
     /// </summary>
-    private static int Needed(double magnitude)
+    internal static int Needed(double magnitude)
     {
         if (magnitude == 0)
         {
             return MinTop;
         }
 
-        int bound = Math.ILogB(magnitude) + 1 - (Lowest + Width - 1);
+        ulong bits = (ulong)BitConverter.DoubleToInt64Bits(magnitude);
+        int biased = (int)(bits >> 52);
+        int binade = biased != 0 ? biased - 1023 : 63 - BitOperations.LeadingZeroCount(bits) + Lowest;
+        int bound = binade + 1 - (Lowest + Width - 1);
         return Math.Max(MinTop, (bound + Width - 1) / Width);
     }
 
@@ -535,6 +548,99 @@ internal struct IndexedSum
         {
             Deposit(values[i], top);
         }
+    }
+
+    /// <summary>
+    /// Folds the rows [<paramref name="start"/>, <paramref name="end"/>) of <paramref name="values"/> into the
+    /// sums of their groups, <paramref name="states"/>: the window's largest magnitude calls for a top, whose
+    /// extractors stay in registers. A row whose group sits at that top is split with them, its group read
+    /// for its bins alone; a group that holds no value yet takes its first at the top the value calls for;
+    /// any other row is folded as <see cref="Add(double)"/> folds it. A window with a NaN or an infinity, or that
+    /// calls for a top split scaled, is folded a row at a time. The parts are those Add gives.
+    /// </summary>
+    /// <remarks>
+    /// Add reads the group's top, then its extractors by it, then splits the value: a chain from the group's
+    /// state through seven additions to its bins, which a row whose group a row still in flight holds
+    /// waits for whole. A hundred groups took ≈ 12 cycles a value (vortex-queries --micro floatsum). Here
+    /// the split does not wait on the group: only the three bins and the count do.
+    /// </remarks>
+    /// <returns>The rows folded as Add folds them: groups at another top than the window's.</returns>
+    internal static int Fold(StateView<IndexedSum> states, ReadOnlySpan<int> groups, ReadOnlySpan<double> values, int start, int end)
+    {
+        int top = TopOf(states, groups, values, start, end);
+        if (top is < MinTop or >= HugeTop)
+        {
+            for (int row = start; row < end; row++)
+            {
+                states[groups[row]].Add(values[row]);
+            }
+
+            return end - start;
+        }
+
+        // The group's top and count read at once: their difference from the top's, unsigned, is the count
+        // when the group sits at the top, past the endurance otherwise. A value at or past the top's limit,
+        // a NaN or an infinity among them, is folded as Add folds it.
+        long topBits = (long)top << TopShift;
+        double limit = Limit[top];
+        double s0 = Sigma[top];
+        double s1 = Sigma[top - 1];
+        double s2 = Sigma[top - 2];
+        long b0 = SigmaBits[top];
+        long b1 = SigmaBits[top - 1];
+        long b2 = SigmaBits[top - 2];
+        nint offset = states.Offset;
+        ref int groupOf = ref MemoryMarshal.GetReference(groups);
+        ref double valueOf = ref MemoryMarshal.GetReference(values);
+        int added = 0;
+        for (int row = start; row < end; row++)
+        {
+            double value = Unsafe.Add(ref valueOf, row);
+            double magnitude = Math.Abs(value);
+            ref IndexedSum sum = ref Unsafe.As<byte, IndexedSum>(ref Unsafe.AddByteOffset(ref states.Record(Unsafe.Add(ref groupOf, row)), offset));
+            long meta = sum.Meta;
+            if (((ulong)((meta & (TopMask | CountMask)) - topBits) < Endurance) & (magnitude < limit))
+            {
+                sum.Meta = meta + 1;
+                double y = s0 + value;
+                sum.M0 += BitConverter.DoubleToInt64Bits(y) - b0;
+                double r = value - (y - s0);
+                y = s1 + r;
+                sum.M1 += BitConverter.DoubleToInt64Bits(y) - b1;
+                r -= y - s1;
+                sum.M2 += BitConverter.DoubleToInt64Bits(s2 + r) - b2;
+            }
+            else if (meta == 0 && magnitude < double.PositiveInfinity && Needed(magnitude) is int own && own < HugeTop)
+            {
+                // A group's first value, which no NaN came before: counted, its top the value's, as AddSlow
+                // does with no bin to move.
+                sum.Meta = ((long)own << TopShift) + 1;
+                sum.Deposit(value, own);
+            }
+            else
+            {
+                sum.Add(value);
+                added++;
+            }
+        }
+
+        return added;
+    }
+
+    /// <summary>
+    /// The top a window is split at: that of its first row's group, or of the first row's value when its
+    /// group holds none yet; 0 when that value is a NaN or an infinity.
+    /// </summary>
+    private static int TopOf(StateView<IndexedSum> states, ReadOnlySpan<int> groups, ReadOnlySpan<double> values, int start, int end)
+    {
+        if (start >= end)
+        {
+            return 0;
+        }
+
+        int top = states[groups[start]].Top;
+        double magnitude = Math.Abs(values[start]);
+        return top != 0 ? top : magnitude < double.PositiveInfinity ? Needed(magnitude) : 0;
     }
 }
 

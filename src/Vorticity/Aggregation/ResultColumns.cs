@@ -35,6 +35,11 @@ internal abstract class ResultColumn
 
     /// <summary>Whether <see cref="OrderOf"/> reads the values into an array: the column is built for an order otherwise.</summary>
     internal virtual bool ReadsOrder => false;
+
+    /// <summary>The column's scratch back to the process's shelf: the result is done with it.</summary>
+    internal virtual void Release()
+    {
+    }
 }
 
 /// <summary>A component of the key, in a column of the key column's own type: its values written as the index holds them.</summary>
@@ -84,14 +89,12 @@ internal sealed class ValueResultColumn<T> : ResultColumn
             return;
         }
 
-        if (_values.Length < groups.Length)
-        {
-            _values = new T[Scratch.Capacity(groups.Length, _values.Length)];
-        }
-
+        Scratch.Grow(ref _values, groups.Length);
         Read(outcome, groups, _values.AsSpan(0, groups.Length));
         ResultValues.Append(store, _values, groups.Length, _record);
     }
+
+    internal override void Release() => Scratch.Return(ref _values);
 
     internal override bool ReadsOrder => _record is null && ValuesOrder.Orders<T>();
 

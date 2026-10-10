@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -90,6 +89,14 @@ internal abstract class AggregateSlot
 
     /// <summary>Whether the slot can count rows in its own pass (<see cref="StepRowsCounted"/>).</summary>
     internal virtual bool CarriesCount => false;
+
+    /// <summary>
+    /// As <see cref="StepRows"/>, <paramref name="twin"/>'s rows folded in the same pass, a slot of the
+    /// same aggregate over another column, its states in the same records: a row's group read and its
+    /// record reached once for both, when every row of the window is selected and none is null on either
+    /// side. False when it cannot, nothing folded.
+    /// </summary>
+    internal virtual bool StepRowsPaired(in BatchInput input, ReadOnlySpan<int> groups, AggregateSlot twin, in BatchInput twinInput) => false;
 
     /// <summary>
     /// Whether <see cref="StepRanges"/> folds ranges of a few rows of <paramref name="input"/> for
@@ -391,7 +398,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// <summary>The bytes of the groups' answers, a run at a time of one part, as <see cref="Results"/> reads them.</summary>
     public void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups)
     {
-        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -413,7 +420,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(local);
+            ArrayShelf.Return(local);
         }
     }
     internal override TResult Result(int group)
@@ -428,7 +435,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// </summary>
     internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
     {
-        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -450,7 +457,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(local);
+            ArrayShelf.Return(local);
         }
     }
 
@@ -463,7 +470,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// <summary>The means a run at a time of one part, as <see cref="Results"/> reads the answers.</summary>
     public void Means(ReadOnlySpan<int> groups, Span<double?> into)
     {
-        int[] local = ArrayPool<int>.Shared.Rent(groups.Length);
+        int[] local = ArrayShelf.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -485,7 +492,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(local);
+            ArrayShelf.Return(local);
         }
     }
 

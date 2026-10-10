@@ -26,7 +26,13 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
         High = high;
     }
 
-    public bool Equals(TextWord other) => Low == other.Low && High == other.High;
+    /// <remarks>
+    /// Both words at once, with no branch: the first passes of the key tables compare a row's word with a
+    /// slot's and take the group or none by a mask, and a <c>&amp;&amp;</c> compiled to a branch on the low
+    /// word, mispredicted at every key that is not in its home slot (2026-10-09, the disassembly of
+    /// <see cref="KeyTable{TValue}.FindAtHome"/>).
+    /// </remarks>
+    public bool Equals(TextWord other) => ((Low ^ other.Low) | (High ^ other.High)) == 0;
 
     public override bool Equals(object? obj) => obj is TextWord other && Equals(other);
 
@@ -57,12 +63,23 @@ internal readonly struct TextWord : IEquatable<TextWord>, IComparable<TextWord>
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static uint Home(ulong low, ulong high, ulong seed)
+    internal static uint Home(ulong low, ulong high, ulong seed) => HomePrepared(low, high, Prepared(seed));
+
+    /// <summary>
+    /// <see cref="Home"/> of a seed already prepared by <see cref="Prepared"/>: a table's first pass prepares
+    /// it once a batch, where preparing it at every row cost a test and four instructions of the constant a
+    /// row, in the loop the native compiler left it in (2026-10-09).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint HomePrepared(ulong low, ulong high, ulong prepared)
     {
-        ulong prepared = seed == 0 ? Unseeded : seed ^ Mix(seed ^ Secret2, Secret1) ^ 16;
         ulong upper = Math.BigMul(low ^ Secret1, high ^ prepared, out ulong lower);
         return (uint)(Mix(lower ^ Secret7, upper ^ Secret1 ^ 16) >> 32);
     }
+
+    /// <summary>The seed as rapidhash prepares it, the length of 16 folded in: <c>seed ^ mix(seed ^ secret[2], secret[1]) ^ 16</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Prepared(ulong seed) => seed == 0 ? Unseeded : seed ^ Mix(seed ^ Secret2, Secret1) ^ 16;
 
     // rapidhash's secrets (V3) its path for 16 bytes reads.
     private const ulong Secret1 = 0x8bb84b93962eacc9UL;
@@ -128,6 +145,7 @@ internal sealed class ShortTextKeys : GroupKeys
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
     private readonly int _probeAhead;
+    private readonly long _aheadBytes;
     private readonly ArrayShelf? _shelf;
 
     // The words while every value met is short, then the bytes for good: one of them, never both.
@@ -135,13 +153,14 @@ internal sealed class ShortTextKeys : GroupKeys
     private BytesKeys? _bytes;
     private TextWord[] _block = [];
 
-    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null)
+    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
     {
         _shape = shape;
         _sorted = sorted;
         _probeAhead = probeAhead;
+        _aheadBytes = aheadBytes;
         _shelf = shelf;
-        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, shelf: shelf);
+        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes);
     }
 
     /// <summary>Whether the keys are still words: every value met so far 12 bytes or less.</summary>
@@ -203,6 +222,14 @@ internal sealed class ShortTextKeys : GroupKeys
             for (int start = 0; start < rows; start += Chunk)
             {
                 int end = Math.Min(rows, start + Chunk);
+
+                // Views this library cut are the words already: read where they lie.
+                if (validity.IsEmpty && canonical.TryWordsInPlace(start, end - start, out ReadOnlySpan<TextWord> inPlace))
+                {
+                    words.TwoPasses(inPlace, validity, start, rowGroups);
+                    continue;
+                }
+
                 if (!FillWords(canonical, validity, start, end))
                 {
                     Demote();
@@ -233,6 +260,11 @@ internal sealed class ShortTextKeys : GroupKeys
     /// <summary>The words of rows <paramref name="start"/> to <paramref name="end"/> into the block's scratch from its start; false at the first value too long for one.</summary>
     private bool FillWords(BytesBlock canonical, ReadOnlySpan<ulong> validity, int start, int end)
     {
+        if (validity.IsEmpty)
+        {
+            return canonical.TryWords(start, _block.AsSpan(0, end - start));
+        }
+
         TextWord[] block = _block;
         for (int row = start; row < end; row++)
         {
@@ -432,7 +464,7 @@ internal sealed class ShortTextKeys : GroupKeys
     private ReadOnlySpan<byte> KeyOf(int group, Span<byte> buffer) =>
         _words is { } words ? BytesOf(words.KeyAt(group), buffer) : _bytes!.KeyOf(group);
 
-    internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead);
+    internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead, aheadBytes: _aheadBytes);
 
     internal override GroupKeys ForTable(ArrayShelf shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
 
@@ -450,6 +482,7 @@ internal sealed class ShortTextKeys : GroupKeys
     {
         _words?.Release();
         _bytes?.Release();
+        Scratch.Return(ref _block);
     }
 
     /// <summary>Room for <paramref name="groups"/> groups, foretold by a lane's first rows, in the table the keys are in.</summary>
@@ -666,10 +699,47 @@ internal sealed class ShortTextKeys : GroupKeys
 
     internal override void Append(int component, ColumnStore store, ReadOnlySpan<int> groups)
     {
-        // The keys came from the column the reader checked as it decoded it, as a table of bytes appends them.
+        // The keys came from the column the reader checked as it decoded it, as a table of bytes appends them;
+        // a word is its value's view.
         VarBinStore leaf = (VarBinStore)store.Leaf;
-        Span<byte> buffer = stackalloc byte[16];
         int nullGroup = NullNumber;
+        if (_words is { } words)
+        {
+            // The views written in place up to the null group, then one at a time from it.
+            Span<byte> views = leaf.InlineViews(groups.Length);
+            ref byte view = ref MemoryMarshal.GetReference(views);
+            int done = 0;
+            for (; done < groups.Length; done++)
+            {
+                int group = groups[done];
+                if (group == nullGroup)
+                {
+                    break;
+                }
+
+                ref readonly TextWord word = ref words.KeyRef(group);
+                ref byte at = ref Unsafe.Add(ref view, (nint)done * (2 * sizeof(ulong)));
+                Unsafe.WriteUnaligned(ref at, word.Low);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref at, sizeof(ulong)), word.High);
+            }
+
+            leaf.AdvanceViews(done);
+            foreach (int group in groups[done..])
+            {
+                if (group == nullGroup)
+                {
+                    KeyStores.AppendNull(store);
+                }
+                else
+                {
+                    ref readonly TextWord word = ref words.KeyRef(group);
+                    leaf.AppendInline(word.Low, word.High);
+                }
+            }
+
+            return;
+        }
+
         foreach (int group in groups)
         {
             if (group == nullGroup)
@@ -678,7 +748,7 @@ internal sealed class ShortTextKeys : GroupKeys
             }
             else
             {
-                leaf.AppendValidated(KeyOf(group, buffer));
+                leaf.AppendValidated(_bytes!.KeyOf(group));
             }
         }
     }

@@ -120,13 +120,23 @@ public sealed class QueryMemoryBudget
         _process?.Leave();
     }
 
-    /// <summary>Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved, when either would pass its ceiling.</summary>
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> under this budget and the process's; false, and nothing reserved,
+    /// when either would pass its ceiling. Short of room, the process's shelf lets its large arrays go
+    /// first, for the collection that follows to take them.
+    /// </summary>
     internal bool TryReserve(long bytes)
     {
         if (_process is null)
         {
             Observe();
-            return TryAdd(ref _reserved, bytes, Available()) || (Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after));
+            if (TryAdd(ref _reserved, bytes, Available()))
+            {
+                return true;
+            }
+
+            Aggregating.ArrayShelf.Retained.Relieve();
+            return Collect(bytes) is long after && TryAdd(ref _reserved, bytes, after);
         }
 
         if (!TryAdd(ref _reserved, bytes, _ceiling))
@@ -226,6 +236,41 @@ public sealed class QueryMemoryBudget
 
     /// <summary>Arrays of <paramref name="bytes"/> the queries' tables replaced with larger ones: in the heap until a collection takes them.</summary>
     internal void Discard(long bytes) => Interlocked.Add(ref (_process ?? this)._pending, bytes);
+
+    /// <summary>
+    /// The process's shelf keeps an array of <paramref name="bytes"/> for the next query: reserved and
+    /// measured as the queries' tables are, within the ceiling and with no collection asked for; false,
+    /// and nothing counted, past it. Every array given to it was let go to the rest first: a query's,
+    /// when it gave it back; another's, when the shelf handed it out (<see cref="Unkeep"/>) or made it
+    /// new for code that counts nothing. The process's own budget.
+    /// </summary>
+    internal bool TryKeep(long bytes)
+    {
+        Observe();
+        if (!TryAdd(ref _reserved, bytes, Available()))
+        {
+            return false;
+        }
+
+        Interlocked.Add(ref _measured, bytes);
+        Interlocked.Add(ref _pending, -bytes);
+        return true;
+    }
+
+    /// <summary>
+    /// The process's shelf lets an array of <paramref name="bytes"/> go: to a query that counts it, its
+    /// count handed over (<paramref name="counted"/>); else to the collector or to code that counts
+    /// nothing, the rest of the process until the next full collection reads it again.
+    /// </summary>
+    internal void Unkeep(long bytes, bool counted)
+    {
+        Interlocked.Add(ref _reserved, -bytes);
+        Interlocked.Add(ref _measured, -bytes);
+        if (!counted)
+        {
+            Interlocked.Add(ref _pending, bytes);
+        }
+    }
 
     /// <summary>
     /// What the process's limits leave the queries past the rest of its memory: the collector's, past

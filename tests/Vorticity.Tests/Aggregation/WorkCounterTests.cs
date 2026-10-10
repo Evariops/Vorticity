@@ -29,19 +29,19 @@ public sealed partial class WorkCounterTests
     /// <summary>The counts at one lane, a line a query, as <see cref="Line"/> writes them.</summary>
     private static readonly string[] Expected =
     [
-        "count and sum by 10^3 values: result 1501672601, rows 300000, lanes 1, lane groups 1000, arrays 8 of 40888 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 1310720 B",
-        "count and sum by 10^5 values: result 1501672601, rows 300000, lanes 1, lane groups 95013, arrays 19 of 3653560 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 4177976 B",
-        "count and sum by 10^6 values: result 1501672601, rows 300000, lanes 1, lane groups 259343, arrays 35 of 12566512 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 12566640 B",
-        "count and sum by an ordered key: result 1501672601, rows 300000, lanes 1, lane groups 1, arrays 51 of 3720508 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 3606448 B",
-        "count and sum by a strided long: result 1501672601, rows 300000, lanes 1, lane groups 259147, arrays 78 of 27797100 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 17680988 B",
-        "count and sum by 10^6 values, the core: result 1501672601, rows 300000, lanes 1, lane groups 37176, arrays 72 of 18380500 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, core: flushes 2 of 267855, bypassed 0, applied 267855 made 259343",
-        "distinct count by 10^5 values: result 299955, rows 300000, lanes 1, lane groups 95013, arrays 65 of 30391360 B, copied 8388352 B, blocks 0/0/4, merge 0 parts 0 entries, peak 19906560 B",
+        "count and sum by 10^3 values: result 1501672601, rows 300000, lanes 1, lane groups 1000, arrays 3 of 36824 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 1310720 B",
+        "count and sum by 10^5 values: result 1501672601, rows 300000, lanes 1, lane groups 95013, arrays 20 of 3653624 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 4177976 B",
+        "count and sum by 10^6 values: result 1501672601, rows 300000, lanes 1, lane groups 259343, arrays 36 of 12566576 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 12566640 B",
+        "count and sum by an ordered key: result 1501672601, rows 300000, lanes 1, lane groups 1, arrays 52 of 3720572 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 3606448 B",
+        "count and sum by a strided long: result 1501672601, rows 300000, lanes 1, lane groups 259147, arrays 79 of 27797228 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 17680988 B",
+        "count and sum by 10^6 values, the core: result 1501672601, rows 300000, lanes 1, lane groups 37176, arrays 73 of 18380564 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, core: flushes 2 of 267855, bypassed 0, applied 267855 made 259343",
+        "distinct count by 10^5 values: result 299955, rows 300000, lanes 1, lane groups 95013, arrays 66 of 30391424 B, copied 8388352 B, blocks 0/0/4, merge 0 parts 0 entries, peak 19906560 B",
         "distinct values of 10^6: result 129508936719, rows 0, lanes 0, lane groups 0, arrays 0 of 0 B, copied 0 B, blocks 0/0/0, merge  parts 0 entries, peak 0 B",
         "count by a text: result 200000, rows 200000, lanes 1, lane groups 49081, arrays 50 of 7730472 B, copied 1833792 B, blocks 0/12/1, merge 0 parts 0 entries, peak 6029368 B",
-        "count by a text and an int: result 200000, rows 200000, lanes 1, lane groups 196058, arrays 94 of 14492304 B, copied 2357952 B, blocks 0/0/0, merge 0 parts 0 entries, peak 12126112 B",
-        "count by a name, each once then all again: result 200000, rows 200000, lanes 1, lane groups 100000, arrays 72 of 11905852 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 7947288 B",
-        "least and greatest text by 10^3 values: result 56000, rows 200000, lanes 1, lane groups 1000, arrays 21 of 171968 B, copied 0 B, blocks 0/0/13, merge 0 parts 0 entries, peak 1310720 B",
-        "distinct users by day: result 299552, rows 300000, lanes 1, lane groups 1, arrays 370 of 2940924 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 2621440 B",
+        "count by a text and an int: result 200000, rows 200000, lanes 1, lane groups 196058, arrays 95 of 14492368 B, copied 2357952 B, blocks 0/0/0, merge 0 parts 0 entries, peak 12126112 B",
+        "count by a name, each once then all again: result 200000, rows 200000, lanes 1, lane groups 100000, arrays 71 of 11901980 B, copied 0 B, blocks 0/0/4, merge 0 parts 0 entries, peak 7947288 B",
+        "least and greatest text by 10^3 values: result 56000, rows 200000, lanes 1, lane groups 1000, arrays 22 of 172032 B, copied 0 B, blocks 0/0/13, merge 0 parts 0 entries, peak 1310720 B",
+        "distinct users by day: result 299552, rows 300000, lanes 1, lane groups 1, arrays 371 of 2940988 B, copied 0 B, blocks 4/0/0, merge 0 parts 0 entries, peak 2621440 B",
     ];
 
     [Fact]

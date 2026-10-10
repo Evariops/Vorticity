@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Vorticity.Buffers;
 
@@ -36,22 +39,53 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     private const long Ahead = 256 * 1024;
 
+    /// <summary>The bytes from which an array lies on the large object heap.</summary>
+    private const long LargeBytes = 85_000;
+
+    /// <summary>The piles a shelf keeps once emptied: past them, a pile its budget empties goes.</summary>
+    private const int MostPiles = 4096;
+
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<(Type Type, int Length), Pile> _piles = [];
     private readonly ArrayShelf? _parent;
+
+    // What the shelf keeps of large arrays, and apart of small ones: a small array missed is allocated on
+    // the small object heap, whose collections stop every lane and copy what lives there; a large one,
+    // a page fault. The bytes it holds, and of them the small arrays'.
     private readonly long _budget;
+    private readonly long _smallBudget;
     private long _held;
+    private long _heldSmall;
     private bool _used;
+
+    // The process's shelf counts its large arrays in the process's budget (Governed). Past its budget, it
+    // keeps what the queries running lately need (Expected), up to a quarter of the memory the process
+    // may use (Cap), back to its budget once idle: the bytes of large arrays it refused or let go for
+    // want of room since a query last ended (Short), whether it was used since the last tick of its
+    // timer, and the ticks it has been idle.
+    private readonly bool _governed;
+    private readonly long _cap;
+    private long _expected;
+    private long _short;
+    private bool _active;
+    private int _idle;
+    private Timer? _timer;
+
+    // The piles of each kind from the one taken from or given to most recently to the one least
+    // recently, linked: past its budget, the shelf lets go of the oldest first.
+    private PileOrder _large;
+    private PileOrder _small;
 
     // A shelf under a query's memory; for a lane's, the bytes of the arrays it handed out that its
     // tables hold, and what it reserved ahead of the next ones.
     private readonly QueryMemory? _memory;
     private long _out;
     private long _credit;
+    private bool _forgotten;
 
     /// <summary>A query's shelf, which takes from the process's when it holds nothing of a length, and hands it what it holds at the end.</summary>
     internal ArrayShelf()
-        : this(Retained, long.MaxValue)
+        : this(Retained, long.MaxValue, long.MaxValue)
     {
     }
 
@@ -62,42 +96,190 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// exact, each taken under no lock of its own: the lanes that apply bursts meet on it.
     /// </summary>
     internal ArrayShelf(QueryMemory memory, bool pooled)
-        : this(Retained, pooled ? long.MaxValue : 0) => _memory = memory;
+        : this(Retained, pooled ? long.MaxValue : 0, pooled ? long.MaxValue : 0) => _memory = memory;
 
     /// <summary>
     /// A lane's shelf under its query's memory: an array it
-    /// hands out is reserved before it is allocated, and given back when its table lets it go, which
-    /// leaves it to the next collection; it keeps none. A table that doubles reserves its new arrays
+    /// hands out is reserved before it is taken, from the process's shelf or new, and given back when
+    /// its table lets it go, to the process's shelf, which keeps it for the next table of its length,
+    /// this query's or the next one's; it keeps none itself. A table that doubles reserves its new arrays
     /// while it still holds the old ones: what the copy holds, no more. It reserves <see cref="Ahead"/>
     /// at a time, and keeps up to twice that of what its tables give back; one lane uses it at a time,
-    /// and it takes no lock.
+    /// and it takes no lock but the process's shelf's.
     /// </summary>
     internal ArrayShelf(QueryMemory memory)
-        : this(parent: null, budget: 0) => _memory = memory;
+        : this(parent: null, budget: 0, smallBudget: 0) => _memory = memory;
 
     /// <summary>Whether the shelf is a lane's: under a query's memory, with no pile and no process's shelf behind it.</summary>
     private bool Lane => _memory is not null && _parent is null;
 
-    private ArrayShelf(ArrayShelf? parent, long budget)
+    /// <summary>The query's memory the shelf counts its arrays under: its run's; null for a shelf that counts nothing.</summary>
+    internal QueryMemory? Memory => _memory;
+
+    private ArrayShelf(ArrayShelf? parent, long budget, long smallBudget, bool governed = false)
     {
         _parent = parent;
         _budget = budget;
+        _smallBudget = smallBudget;
+        _governed = governed;
+        _cap = governed ? Math.Max(budget, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 4) : budget;
     }
 
     /// <summary>
-    /// The process's shelf: what queries left, up to a quarter of a gigabyte or a sixteenth of the
-    /// memory the process may use, whichever is less, for the next query not to touch fresh memory
-    /// again. Swept after collections: emptied when no query took from it since the last, or when the
-    /// machine's memory load is high.
+    /// The process's shelf: what queries left, for the next query not to touch fresh memory again: of
+    /// large arrays, up to a quarter of a gigabyte or a sixteenth of the memory the process may use,
+    /// whichever is less, and while queries run, up to the most one of them held lately
+    /// (<see cref="Expect"/>); of small ones, a quarter of the first again, apart, so that a query whose
+    /// large arrays its budget does not hold still finds its small ones. Its large arrays count in the
+    /// process's budget as the queries' tables do, and go when a query needs their room
+    /// (<see cref="Relieve"/>). Back to its budget after two seconds with no query, and swept after
+    /// collections: emptied when no query took from it since the last, or when the machine's memory load
+    /// is high.
     /// </summary>
+    /// <remarks>
+    /// A query's working memory is zero allocation only if kept from one query to the next: q10 on 10⁷
+    /// rows at fourteen lanes holds more than a gigabyte and a half, which a shelf of a quarter of a
+    /// gigabyte made new at every query, in page faults and zeroed pages (×0.88 kept, ×0.90 for the keys
+    /// of 10⁷ values on 4·10⁷ rows). Kept only while queries come, counted, and given up for them.
+    /// </remarks>
     internal static ArrayShelf Retained { get; } = NewRetained();
 
     private static ArrayShelf NewRetained()
     {
-        ArrayShelf shelf = new ArrayShelf(parent: null, Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16));
+        long budget = Math.Min(256L << 20, GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 16);
+        ArrayShelf shelf = new ArrayShelf(parent: null, budget, budget / 4, governed: true);
         CollectionSweeper<ArrayShelf>.Register(shelf);
         return shelf;
     }
+
+    /// <summary>How often the process's shelf, past its budget, looks whether queries still come.</summary>
+    private static readonly TimeSpan IdleTick = TimeSpan.FromSeconds(1);
+
+    /// <summary>The ticks with no query after which the process's shelf goes back to its budget.</summary>
+    private const int IdleTicks = 2;
+
+    /// <summary>
+    /// A query that held <paramref name="peak"/> bytes of its budget at once ended: the process's shelf
+    /// keeps up to as many large arrays for the next, and more by what it refused or let go for want of
+    /// room since a query last ended, which the next of the kind would make again; up to
+    /// <see cref="_cap"/>, until two seconds pass with no query. A query's peak alone fell short: what
+    /// its lanes gave back early and its core took late is never held at once (s7 on 4·10⁶ rows at
+    /// fourteen lanes, 134 MB a query made anew with the shelf at its peak).
+    /// </summary>
+    internal void Expect(long peak)
+    {
+        if (!_governed)
+        {
+            return;
+        }
+
+        long shortBy = Interlocked.Exchange(ref _short, 0);
+        long want = Math.Min(_cap, Math.Max(peak, shortBy > 0 ? LargeBudget + shortBy : 0));
+        if (want <= _budget)
+        {
+            return;
+        }
+
+        long expected = Volatile.Read(ref _expected);
+        while (want > expected)
+        {
+            long seen = Interlocked.CompareExchange(ref _expected, want, expected);
+            if (seen == expected)
+            {
+                break;
+            }
+
+            expected = seen;
+        }
+
+        Watch();
+    }
+
+    /// <summary>
+    /// A query needs room the process's budget refused: the shelf's large arrays all go to the collector,
+    /// which the budget then asks for. A cache, not a holder: never in a query's way.
+    /// </summary>
+    internal void Relieve()
+    {
+        if (!_governed || Volatile.Read(ref _held) == Volatile.Read(ref _heldSmall))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            Volatile.Write(ref _expected, 0);
+            Evict(long.MaxValue, ref _large, kept: null, before: long.MaxValue);
+        }
+    }
+
+    /// <summary>The timer that brings the process's shelf back to its budget once idle, started when it keeps past it.</summary>
+    private void Watch()
+    {
+        if (Volatile.Read(ref _timer) is null)
+        {
+            Timer timer = new Timer(static state => ((ArrayShelf)state!).Tick(), this, IdleTick, IdleTick);
+            if (Interlocked.CompareExchange(ref _timer, timer, null) is not null)
+            {
+                timer.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// A tick of the timer: a shelf used since the last, or while a query runs, waits on; idle for
+    /// <see cref="IdleTicks"/>, it lets go of what it keeps past its budget, to the collector, which it
+    /// asks to run when that is much. A query between two uses of the shelf is not idle: under a
+    /// debugger, q10's scan went seconds without one, and its shelf, let go mid-query, made 850 MB again.
+    /// </summary>
+    private void Tick()
+    {
+        long trimmed = 0;
+        lock (_gate)
+        {
+            if (_active || QueryMemoryBudget.Process.ActiveQueries > 0)
+            {
+                _active = false;
+                _idle = 0;
+                return;
+            }
+
+            if (++_idle < IdleTicks)
+            {
+                return;
+            }
+
+            _idle = 0;
+            Volatile.Write(ref _expected, 0);
+            long over = _held - _heldSmall - _budget;
+            if (over > 0)
+            {
+                long before = _held;
+                Evict(over, ref _large, kept: null, before: long.MaxValue);
+                trimmed = before - _held;
+            }
+
+            _timer?.Dispose();
+            _timer = null;
+        }
+
+        if (trimmed >= _budget)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false);
+        }
+    }
+
+    /// <summary>
+    /// An array of <paramref name="length"/> elements at least, its power of two from sixteen, from the
+    /// process's shelf, holding whatever it held: the shared array pool's rent, but found again on any
+    /// thread, where the pool kept an array for each thread that gave one back and the next query's,
+    /// on another thread, made a new one.
+    /// </summary>
+    internal static T[] Rent<T>(int length) =>
+        Retained.Take<T>(length <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 16)) : length, zeroed: false);
+
+    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the process's shelf.</summary>
+    internal static void Return<T>(T[] array) => Retained.Give(array);
 
     /// <summary>The bytes the shelf holds.</summary>
     internal long Held
@@ -126,8 +308,11 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>The bytes a lane's tables copied from an array into the one that replaced it (<see cref="Resize{T}"/>).</summary>
     internal long CopiedBytes { get; private set; }
 
-    /// <summary>The most bytes the shelf keeps on its piles; past it, what it is given goes.</summary>
-    internal long Budget => _budget;
+    /// <summary>The most bytes the shelf keeps on its piles, its large arrays' and its small ones'; past it, what it is given goes.</summary>
+    internal long Budget => LargeBudget > long.MaxValue - _smallBudget ? long.MaxValue : LargeBudget + _smallBudget;
+
+    /// <summary>The most bytes of large arrays the shelf keeps: its budget, or for the process's, what a query held lately past it.</summary>
+    private long LargeBudget => _governed ? Math.Max(_budget, Volatile.Read(ref _expected)) : _budget;
 
     /// <summary>
     /// Whether a lane's shelf takes an array its budget refuses all the same, counted past the ceiling:
@@ -198,10 +383,11 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// An array of <paramref name="length"/> elements, from the shelf, the process's, or new; zeroed
     /// when <paramref name="zeroed"/>. Under a query's memory, reserved first, then new; past the budget
     /// when <paramref name="overdraw"/>, for a lane emptying its table into the core, whose table is
-    /// given back right after.
+    /// given back right after. <paramref name="counted"/>: whether the taker counts it in its query's
+    /// memory, so that the process's shelf hands its count over rather than leave it to the rest.
     /// </summary>
     /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
-    internal T[] Take<T>(int length, bool zeroed, bool overdraw = false)
+    internal T[] Take<T>(int length, bool zeroed, bool overdraw = false, bool counted = false)
     {
         if (Lane)
         {
@@ -213,17 +399,26 @@ internal sealed class ArrayShelf : ISweptAfterCollections
 
             Handed++;
             HandedBytes += bytes;
-            return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
+            return Retained.Take<T>(length, zeroed, counted: bytes >= LeastCounted);
         }
 
         Array? found = null;
         lock (_gate)
         {
             _used = true;
-            if (_piles.TryGetValue((typeof(T), length), out Pile? pile) && pile.Arrays.Count > 0)
+            _active = true;
+            if (_piles.TryGetValue((typeof(T), length), out Pile? pile))
             {
-                found = pile.Arrays.Pop();
-                _held -= (long)length * pile.ElementBytes;
+                Touch(pile);
+                if (pile.Arrays.Count > 0)
+                {
+                    found = pile.Arrays.Pop();
+                    Hold(pile, -pile.Bytes);
+                    if (_governed && !pile.Small)
+                    {
+                        QueryMemoryBudget.Process.Unkeep(pile.Bytes, counted);
+                    }
+                }
             }
         }
 
@@ -238,47 +433,115 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
 
         // An array the query did not hold enters its count, exactly, before it comes.
-        if (_memory is { } memory && (long)length * Unsafe.SizeOf<T>() is long counted and >= LeastCounted)
+        bool counts = false;
+        if (_memory is { } memory && (long)length * Unsafe.SizeOf<T>() is long asked and >= LeastCounted)
         {
-            if (!memory.TryGrow(counted))
+            if (!memory.TryGrow(asked))
             {
                 if (!overdraw && !Overdraws && Pressure is not { Owed: true })
                 {
-                    throw memory.Exceeded("group by", -1, counted);
+                    throw memory.Exceeded("group by", -1, asked);
                 }
 
-                memory.Force(counted);
+                memory.Force(asked);
             }
 
-            memory.Measure(counted);
+            memory.Measure(asked);
+            counts = true;
         }
 
-        return _parent is not null ? _parent.Take<T>(length, zeroed)
-            : zeroed ? new T[length]
-            : GC.AllocateUninitializedArray<T>(length);
+        if (_parent is not null)
+        {
+            return _parent.Take<T>(length, zeroed, counted: counts);
+        }
+
+        // Made new for code that counts nothing: the rest of the process, which the shelf takes it out of
+        // when it is given back.
+        if (_governed && !counted && (long)length * Unsafe.SizeOf<T>() is long made and >= LargeBytes)
+        {
+            QueryMemoryBudget.Process.Discard(made);
+        }
+
+        return zeroed ? new T[length] : GC.AllocateUninitializedArray<T>(length);
     }
 
     /// <summary>
     /// Puts an array nothing holds any more back on the shelf; past the shelf's budget, lets it go.
-    /// Under a query's memory, its bytes given back, and left to the next collection.
+    /// A lane's shelf gives its bytes back to the query's memory and the array to the process's shelf.
     /// </summary>
     internal void Give<T>(T[] array)
     {
         if (Lane)
         {
+            // A result delivered offers its arrays: kept in place of what queries before its own left, never
+            // of what its own used. A table larger than the process's budget, given back whole at the end,
+            // let go the arrays the next query's table takes first as it grows, and that query then let go
+            // of these (q10 at one lane, 722 MB a query against 517 when the table went to the collector);
+            // kept only where there was room, it found the shelf full of the queries' before it.
+            if (_forgotten)
+            {
+                Retained.Offer(array, _memory!.Started);
+                return;
+            }
+
             if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
                 Unreserve(_memory!, bytes);
             }
 
+            Retained.Give(array);
             return;
         }
+
+        Clean(array);
 
         // Let go past the shelf's budget, or while the shelf lets go of what it is given: it leaves the query's count.
         if (Drops || !Give(typeof(T), array, Unsafe.SizeOf<T>()))
         {
             Leave(array.Length * (long)Unsafe.SizeOf<T>());
         }
+    }
+
+    /// <summary>
+    /// An array put on the process's shelf where its budget has room, or in place of arrays of lengths
+    /// no one took or gave since <paramref name="since"/>, in <see cref="Stopwatch"/> ticks.
+    /// </summary>
+    private void Offer<T>(T[] array, long since)
+    {
+        Clean(array);
+        Give(typeof(T), array, Unsafe.SizeOf<T>(), since);
+    }
+
+    /// <summary>An array given back made safe to keep: poisoned under the tests, its references cleared.</summary>
+    private static void Clean<T>(T[] array)
+    {
+        // An array of references kept would keep what it points to: the objects of the query that gave it.
+        if (PoisonsGiven)
+        {
+            Poison(array);
+        }
+        else if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+        {
+            Array.Clear(array);
+        }
+    }
+
+    /// <summary>
+    /// Whether an array given back is filled with a pattern no table writes before it is kept: a table
+    /// that reads an array after giving it reads garbage at once, rather than another table's groups
+    /// once a shelf lends it again. The tests' switch.
+    /// </summary>
+    internal static bool PoisonsGiven { get; set; }
+
+    private static void Poison<T>(T[] array)
+    {
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+        {
+            Array.Clear(array);
+            return;
+        }
+
+        MemoryMarshal.CreateSpan(ref Unsafe.As<T, byte>(ref MemoryMarshal.GetArrayDataReference(array)), array.Length * Unsafe.SizeOf<T>()).Fill(0xDB);
     }
 
     /// <summary>
@@ -363,6 +626,17 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         }
     }
 
+    /// <summary>
+    /// A lane's shelf whose tables are a result delivered, its query's memory given back whole: what
+    /// they give back goes to the process's shelf, counted nowhere.
+    /// </summary>
+    internal void Forget()
+    {
+        _out = 0;
+        _credit = 0;
+        _forgotten = true;
+    }
+
     /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else <see cref="Ahead"/> more.</summary>
     private void Reserve(QueryMemory memory, long bytes)
     {
@@ -414,36 +688,38 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// </summary>
     internal void Clear()
     {
-        List<(Type Type, Pile Pile)> piles = [];
+        // Each leaves the query's count, kept by the process's shelf or let go: handed under this shelf's
+        // lock, then the process's, in that order only, with no list of them made first.
         lock (_gate)
         {
-            foreach (((Type type, int _), Pile pile) in _piles)
+            if (_parent is not null)
             {
-                piles.Add((type, pile));
+                foreach (KeyValuePair<(Type Type, int Length), Pile> entry in _piles)
+                {
+                    Pile pile = entry.Value;
+                    while (pile.Arrays.Count > 0)
+                    {
+                        Array array = pile.Arrays.Pop();
+                        long bytes = (long)array.Length * pile.ElementBytes;
+                        Leave(bytes);
+                        _parent.Give(entry.Key.Type, array, pile.ElementBytes);
+                    }
+                }
             }
 
-            _piles.Clear();
-            _held = 0;
-        }
-
-        if (_parent is null)
-        {
-            return;
-        }
-
-        // Each leaves the query's count, kept by the process's shelf or let go.
-        foreach ((Type type, Pile pile) in piles)
-        {
-            foreach (Array array in pile.Arrays)
-            {
-                _parent.Give(type, array, pile.ElementBytes);
-                Leave((long)array.Length * pile.ElementBytes);
-            }
+            Empty();
         }
     }
 
-    /// <summary>An array of elements of <paramref name="type"/>, <paramref name="elementBytes"/> each, on the shelf, within its budget: whether it kept it.</summary>
-    private bool Give(Type type, Array array, int elementBytes)
+    /// <summary>
+    /// An array of elements of <paramref name="type"/>, <paramref name="elementBytes"/> each, on the shelf,
+    /// within its budget: whether it kept it. Past the budget, the arrays of the lengths taken or given
+    /// least recently go first, those last used before <paramref name="before"/> only: a shelf full of
+    /// another query's lengths kept them while every query went on taking from it, and the arrays of the
+    /// queries running now could not come in. The process's shelf counts a large one in the process's
+    /// budget, and lets it go when the budget has no room for it.
+    /// </summary>
+    private bool Give(Type type, Array array, int elementBytes, long before = long.MaxValue)
     {
         int length = array.Length;
         if (length == 0)
@@ -451,24 +727,174 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             return true;
         }
 
-        long bytes = (long)length * elementBytes;
+        bool watch = false;
         lock (_gate)
         {
-            if (_held + bytes > _budget)
-            {
-                return false;
-            }
-
             if (!_piles.TryGetValue((type, length), out Pile? pile))
             {
-                pile = new Pile(elementBytes);
-                _piles.Add((type, length), pile);
+                pile = new Pile((type, length), elementBytes);
+                _piles.Add(pile.Key, pile);
+            }
+
+            Touch(pile);
+            _active = true;
+            long budget = pile.Small ? _smallBudget : LargeBudget;
+            long held = pile.Small ? _heldSmall : _held - _heldSmall;
+            if (held + pile.Bytes > budget)
+            {
+                // Short of room: what goes for it, or it, the next query of its kind makes again.
+                long heldBefore = _held;
+                bool room = pile.Bytes <= budget && Evict(held + pile.Bytes - budget, ref OrderOf(pile), pile, before);
+                if (_governed && !pile.Small)
+                {
+                    Interlocked.Add(ref _short, heldBefore - _held + (room ? 0 : pile.Bytes));
+                }
+
+                if (!room)
+                {
+                    return false;
+                }
+
+                held = pile.Small ? _heldSmall : _held - _heldSmall;
+            }
+
+            if (_governed && !pile.Small)
+            {
+                if (!QueryMemoryBudget.Process.TryKeep(pile.Bytes))
+                {
+                    return false;
+                }
+
+                watch = held + pile.Bytes > _budget;
             }
 
             pile.Arrays.Push(array);
-            _held += bytes;
-            return true;
+            Hold(pile, pile.Bytes);
         }
+
+        if (watch)
+        {
+            Watch();
+        }
+
+        return true;
+    }
+
+    /// <summary>The bytes the shelf holds moved by <paramref name="bytes"/>, an array of <paramref name="pile"/>'s taken or given.</summary>
+    private void Hold(Pile pile, long bytes)
+    {
+        _held += bytes;
+        if (pile.Small)
+        {
+            _heldSmall += bytes;
+        }
+    }
+
+    /// <summary>
+    /// Lets go of <paramref name="bytes"/> at least of the arrays on the piles of <paramref name="order"/>
+    /// taken from or given to least recently, never <paramref name="kept"/>'s nor one used since
+    /// <paramref name="before"/>, under the lock: whether it could. Past <see cref="MostPiles"/>, a pile
+    /// emptied goes, so that the lengths a process once met do not pile up; short of them it stays, its
+    /// next array a push. The process's shelf takes a large array it lets go out of the process's budget,
+    /// to the collector.
+    /// </summary>
+    private bool Evict(long bytes, ref PileOrder order, Pile? kept, long before)
+    {
+        // The piles lie in the order of their last use: the first one used since the bound ends the walk.
+        Pile? pile = order.Oldest;
+        while (bytes > 0 && pile is not null && pile.Touched < before)
+        {
+            Pile? newer = pile.Newer;
+            if (pile != kept)
+            {
+                while (bytes > 0 && pile.Arrays.Count > 0)
+                {
+                    pile.Arrays.Pop();
+                    Hold(pile, -pile.Bytes);
+                    if (_governed && !pile.Small)
+                    {
+                        QueryMemoryBudget.Process.Unkeep(pile.Bytes, counted: false);
+                    }
+
+                    bytes -= pile.Bytes;
+                }
+
+                if (pile.Arrays.Count == 0 && _piles.Count > MostPiles)
+                {
+                    Unlink(ref order, pile);
+                    _piles.Remove(pile.Key);
+                }
+            }
+
+            pile = newer;
+        }
+
+        return bytes <= 0;
+    }
+
+    /// <summary>The order of the piles of <paramref name="pile"/>'s kind.</summary>
+    private ref PileOrder OrderOf(Pile pile) => ref pile.Small ? ref _small : ref _large;
+
+    /// <summary>Makes <paramref name="pile"/> the one of its kind used most recently, under the lock.</summary>
+    private void Touch(Pile pile)
+    {
+        pile.Touched = Stopwatch.GetTimestamp();
+        ref PileOrder order = ref OrderOf(pile);
+        if (order.Newest == pile)
+        {
+            return;
+        }
+
+        Unlink(ref order, pile);
+        pile.Older = order.Newest;
+        if (order.Newest is not null)
+        {
+            order.Newest.Newer = pile;
+        }
+
+        order.Newest = pile;
+        order.Oldest ??= pile;
+    }
+
+    /// <summary>Takes <paramref name="pile"/> out of <paramref name="order"/>, under the lock; nothing for one not in it.</summary>
+    private static void Unlink(ref PileOrder order, Pile pile)
+    {
+        if (pile.Newer is { } newer)
+        {
+            newer.Older = pile.Older;
+        }
+        else if (order.Newest == pile)
+        {
+            order.Newest = pile.Older;
+        }
+
+        if (pile.Older is { } older)
+        {
+            older.Newer = pile.Newer;
+        }
+        else if (order.Oldest == pile)
+        {
+            order.Oldest = pile.Newer;
+        }
+
+        pile.Newer = null;
+        pile.Older = null;
+    }
+
+    /// <summary>Every pile gone, under the lock.</summary>
+    private void Empty()
+    {
+        if (_governed && _held > _heldSmall)
+        {
+            QueryMemoryBudget.Process.Unkeep(_held - _heldSmall, counted: false);
+            Volatile.Write(ref _expected, 0);
+        }
+
+        _piles.Clear();
+        _large = default;
+        _small = default;
+        _held = 0;
+        _heldSmall = 0;
     }
 
     /// <summary>After a collection: the process's shelf emptied when no query took from it since the last sweep, or under a high memory load.</summary>
@@ -480,19 +906,42 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         {
             if (!_used || pressed)
             {
-                _piles.Clear();
-                _held = 0;
+                Empty();
             }
 
             _used = false;
         }
     }
 
-    /// <summary>The arrays of one type and length, and the bytes of an element.</summary>
-    private sealed class Pile(int elementBytes)
+    /// <summary>The newest and the oldest pile of a kind, linked through them.</summary>
+    private struct PileOrder
     {
+        internal Pile? Newest;
+        internal Pile? Oldest;
+    }
+
+    /// <summary>The arrays of one type and length, and the bytes of an element.</summary>
+    private sealed class Pile((Type Type, int Length) key, int elementBytes)
+    {
+        internal (Type Type, int Length) Key { get; } = key;
+
         internal Stack<Array> Arrays { get; } = new Stack<Array>();
 
         internal int ElementBytes { get; } = elementBytes;
+
+        /// <summary>The bytes of each of its arrays.</summary>
+        internal long Bytes { get; } = (long)key.Length * elementBytes;
+
+        /// <summary>Whether its arrays lie on the small object heap.</summary>
+        internal bool Small => Bytes < LargeBytes;
+
+        /// <summary>When it was last taken from or given to, in <see cref="Stopwatch"/> ticks.</summary>
+        internal long Touched { get; set; }
+
+        /// <summary>The pile used next more recently, null for the newest.</summary>
+        internal Pile? Newer { get; set; }
+
+        /// <summary>The pile used next less recently, null for the oldest.</summary>
+        internal Pile? Older { get; set; }
     }
 }

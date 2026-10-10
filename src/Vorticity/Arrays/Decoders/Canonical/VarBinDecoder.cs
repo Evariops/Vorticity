@@ -150,16 +150,19 @@ internal sealed class VarBinDecoder : ArrayDecoder
             context.MarkNodeChecked(in node);
         }
 
+        // The cut of every row writes each inline value zero past its bytes (ViewKernels.Place, the
+        // vector cuts by their masks), as the emptied views of the null rows are.
+        bool padded = !selective;
         if (bytes.Length == 0)
         {
             // Every value is empty, so no view can reference a buffer; matching upstream, which
             // returns `Vec::new()` for an empty heap.
-            return context.Canonical.AddVarBinView(dtype, produced, validity, views, default);
+            return context.Canonical.AddVarBinView(dtype, produced, validity, views, default, padded);
         }
 
         Span<VortexBuffer> single = stackalloc VortexBuffer[1];
         single[0] = bytes;
-        return context.Canonical.AddVarBinView(dtype, produced, validity, views, single);
+        return context.Canonical.AddVarBinView(dtype, produced, validity, views, single, padded);
     }
 
     /// <summary>

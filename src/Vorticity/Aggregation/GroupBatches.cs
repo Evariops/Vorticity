@@ -660,9 +660,13 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         _cut?.Reset();
 
         // The outcome held in memory holds the query's memory and its spilled parts: given back last,
-        // then the parts' stores.
+        // then the parts' stores, and the scratch of the result's columns.
         _outcome?.Delivered();
         _builder?.Release();
+        foreach (ResultColumn column in _query.Columns)
+        {
+            column.Release();
+        }
     }
 }
 
@@ -808,7 +812,7 @@ internal static class GroupSelection
         bool chosen = query.Plan.Chosen.Length > 0;
         int reader = chosen ? Math.Min(query.ChosenReader, operators) : operators;
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : query.Session.Options.MaxDegreeOfParallelism;
-        (int[] groups, int count) = await OperatorsAsync(query, outcome, 0, reader, outcome.Order, outcome.Order.Length, degree, cancellationToken).ConfigureAwait(false);
+        (int[] groups, int count) = await OperatorsAsync(query, outcome, 0, reader, outcome.Order, outcome.Count, degree, cancellationToken).ConfigureAwait(false);
         if (!chosen)
         {
             return (groups, count);

@@ -71,11 +71,14 @@ internal static class Program
         // A round maps its file anew, as the reference maps it at each call: the default session
         // would hand round two the mapping round one left, pages already mapped. The bench host
         // sets the same session in `Scenarios.OpenFilesCold`. A group by takes its lanes from the
-        // session, as the queries bench gives them.
+        // session, as the queries bench gives them. VORTICITY_RUNNER_WARM=1 keeps the session's
+        // default instead, 64 files mapped once and taken over by the next open: the file already in
+        // memory, the base a comparison against a table loaded beforehand takes (bench/duckdb.sh).
         QueryMemoryBudget? budget = grouped && GroupScenarios.BudgetBytes is long bytes ? new QueryMemoryBudget(bytes) : null;
+        bool warm = Environment.GetEnvironmentVariable("VORTICITY_RUNNER_WARM") == "1";
         ScenarioSet.Session = VortexSession.Create(options =>
         {
-            options.MappedFileCacheCount = 0;
+            options.MappedFileCacheCount = warm ? 64 : 0;
             if (grouped)
             {
                 options.MaxDegreeOfParallelism = threads;
@@ -88,15 +91,32 @@ internal static class Program
         long[] delivered = new long[repeat];
         long[] workMicros = new long[repeat];
         long[] allocated = new long[repeat];
+        ProcessCounters[] spent = new ProcessCounters[repeat];
+
+        // The collections of each generation a round called, and the time they held every thread: the
+        // stops a lane cannot work through.
+        int[] collections = new int[repeat * 3];
+        long[] pausedMicros = new long[repeat];
         long before = AllocatedSoFar();
         for (int round = 0; round < repeat; round++)
         {
             // The action is timed from inside the process, once it is up: what the report compares
             // is the work, and the process start is a property of the build that the parent times
-            // apart.
+            // apart. The processor's counters are read outside the timed span, on every thread of the
+            // process: what the round cost the machine beside how long it took.
+            int gen0 = GC.CollectionCount(0);
+            int gen1 = GC.CollectionCount(1);
+            int gen2 = GC.CollectionCount(2);
+            TimeSpan paused = GC.GetTotalPauseDuration();
+            ProcessCounters counted = ProcessCost.ReadCounters();
             long started = Stopwatch.GetTimestamp();
             delivered[round] = await scenario(args[2]).ConfigureAwait(false);
             workMicros[round] = (long)(Stopwatch.GetElapsedTime(started).TotalMilliseconds * 1000);
+            spent[round] = ProcessCost.ReadCounters().Since(counted);
+            pausedMicros[round] = (long)(GC.GetTotalPauseDuration() - paused).TotalMicroseconds;
+            collections[(3 * round) + 0] = GC.CollectionCount(0) - gen0;
+            collections[(3 * round) + 1] = GC.CollectionCount(1) - gen1;
+            collections[(3 * round) + 2] = GC.CollectionCount(2) - gen2;
             long after = AllocatedSoFar();
             allocated[round] = after - before;
             before = after;
@@ -108,7 +128,7 @@ internal static class Program
             {
                 Console.WriteLine(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"round={round} rows={delivered[round]} work_us={workMicros[round]} allocated_bytes={allocated[round]}"));
+                    $"round={round} rows={delivered[round]} work_us={workMicros[round]} allocated_bytes={allocated[round]} cpu_us={spent[round].CpuNanoseconds / 1000} instructions={spent[round].Instructions} cycles={spent[round].Cycles} gc={collections[3 * round]}/{collections[(3 * round) + 1]}/{collections[(3 * round) + 2]} gc_paused_us={pausedMicros[round]}"));
             }
         }
 

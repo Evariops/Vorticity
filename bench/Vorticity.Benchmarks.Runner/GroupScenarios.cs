@@ -38,7 +38,8 @@ namespace Vorticity.Bench.Runner;
 /// streams at every degree), <c>blocking</c> (no stream), <c>core</c> (the core at every degree),
 /// <c>whole</c> (the core's groups delivered whole), <c>tables</c> (the lanes' tables, the core taken
 /// neither from the first batch nor from the first rows), <c>nofan</c> (the lanes all start at the head
-/// of the queue), <c>noretire</c> (lanes under pressure write their tables rather than retire into
+/// of the queue), <c>numbers</c> (a key of five to eight columns as the numbers of its columns rather
+/// than its tuples), <c>noretire</c> (lanes under pressure write their tables rather than retire into
 /// one), <c>budget=N</c> (the session's memory budget, in MiB, under which the runner prints its peak),
 /// <c>capacity=N</c>, <c>alpha=N</c>, <c>floor=N</c>, <c>table=N</c>, <c>batch=N</c>, <c>window=N</c>, <c>probe=N</c>, <c>bypass=N</c>
 /// (the core's ε, in percent). The degree is the runner's <c>--threads</c>.
@@ -196,6 +197,7 @@ internal static class GroupScenarios
                 plan.CoreOnNew = false;
             },
             "nofan" => static plan => plan.Fan = false,
+            "numbers" => static plan => plan.Tuples = false,
             "capacity" => plan => plan.CoreCapacity = Valued(value, name),
             "alpha" => plan => plan.CoreAlpha = Valued(value, name),
             "floor" => plan => plan.CoreFloor = Valued(value, name),
@@ -206,7 +208,7 @@ internal static class GroupScenarios
             "bypass" => plan => plan.CoreBypass = Valued(value, name) / 100.0,
             "noretire" => static plan => plan.LanesRetire = false,
             "budget" => Budget(Valued(value, name)),
-            _ => throw new ArgumentException($"No switch named '{name}': zones, blocking, core, whole, tables, nofan, noretire, budget=N (MiB), capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
+            _ => throw new ArgumentException($"No switch named '{name}': zones, blocking, core, whole, tables, nofan, numbers, noretire, budget=N (MiB), capacity=N, alpha=N, floor=N, table=N, batch=N, window=N, probe=N, bypass=N (percent).", nameof(option)),
         };
     }
 

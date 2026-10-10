@@ -28,6 +28,10 @@
 # millisecond, and what the caller's thread and the pool's workers spent their cycles on.
 #
 # The reports land in the output directory, by default under $TMPDIR/vorticity-profile.
+#
+# VORTICITY_RUNNER_WARM=1 in the environment keeps the runner's file mapped from one round to the next,
+# as the warm base of the comparison with DuckDB does: Instruments launches the runner with it, which
+# it would not pass on by itself.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,6 +54,8 @@ while [ $# -gt 0 ]; do
 done
 lanes=()
 [ -z "$threads" ] || lanes=(--threads "$threads")
+envs=()
+[ -z "${VORTICITY_RUNNER_WARM:-}" ] || envs=(--env "VORTICITY_RUNNER_WARM=$VORTICITY_RUNNER_WARM")
 case "$mode" in cycles|allocations|trace) ;; *) usage ;; esac
 [ -f "$file" ] || { echo "no such file: $file" >&2; exit 2; }
 file="$(cd "$(dirname "$file")" && pwd)/$(basename "$file")"
@@ -90,7 +96,7 @@ case "$mode" in
         "$xctrace" record --template 'CPU Profiler' --show-recording-options 2> /dev/null |
             sed 's/"highFrequency" : false/"highFrequency" : true/' > "$out/options.json"
         "$xctrace" record --template 'CPU Profiler' --recording-options "$out/options.json" --no-prompt \
-            --output "$out/cycles.trace" --target-stdout "$out/runner.txt" \
+            --output "$out/cycles.trace" --target-stdout "$out/runner.txt" ${envs[@]+"${envs[@]}"} \
             --launch -- "$runner" --scenario "$scenario" "$file" "$rows" --repeat "$rounds" ${lanes[@]+"${lanes[@]}"} > /dev/null
         "$xctrace" export --input "$out/cycles.trace" \
             --xpath '/trace-toc/run[@number="1"]/data/table[@schema="cpu-profile"]' \
@@ -113,7 +119,7 @@ case "$mode" in
         ;;
     trace)
         "$xctrace" record --template 'Processor Trace' --no-prompt \
-            --output "$out/processor.trace" --target-stdout "$out/runner.txt" \
+            --output "$out/processor.trace" --target-stdout "$out/runner.txt" ${envs[@]+"${envs[@]}"} \
             --launch -- "$runner" --scenario "$scenario" "$file" "$rows" --repeat "$rounds" ${lanes[@]+"${lanes[@]}"}
         echo "open it with: open '$out/processor.trace'"
         ;;

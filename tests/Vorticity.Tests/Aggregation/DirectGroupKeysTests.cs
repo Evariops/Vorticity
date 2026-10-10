@@ -41,6 +41,76 @@ public sealed partial class DirectGroupKeysTests
         Assert.Equal(6, keys.Count);
     }
 
+    // A span numbered whole: each value's group is its number from the start, a value past the bounds a
+    // group past the span; the values no row met are dropped once the rows are folded, the others kept in
+    // their order, and the keys number values as they first come from then on.
+    [Fact]
+    public void ASpanNumberedWholeDropsTheValuesNoRowMet()
+    {
+        GroupKeys keys = new FixedKeys<int>(Shape(VortexType.Int32), sorted: false, new KeyBounds(-5, 5));
+        Assert.True(keys.NumberWhole(groupBytes: 16));
+        AssertGroupedAs(keys, [3, -5, 3, 0, 5, -5], [8, 0, 8, 5, 10, 0]);
+        AssertGroupedAs(keys, [9, 0], [11, 5]);
+        Assert.Equal(12, keys.Count);
+
+        int[] met = keys.Met()!;
+        Assert.Equal([0, 5, 8, 10, 11], met);
+        keys.Keep(met);
+        AssertGroupedAs(keys, [5, 1, -5, 9], [3, 5, 0, 4]);
+        Assert.Equal(6, keys.Count);
+        Assert.Null(keys.Met());
+    }
+
+    // Every value of a span numbered whole met, a row's group is its number with no page read, a value past
+    // the bounds left for the lookup, in vectors and then row by row; nothing is dropped. A span whose
+    // groups would not fit the private cache is numbered as values come.
+    [Fact]
+    public void ASpanMetWholeNumbersItsRowsByTheirValue()
+    {
+        GroupKeys keys = new FixedKeys<int>(Shape(VortexType.Int32), sorted: false, new KeyBounds(100, 163));
+        Assert.True(keys.NumberWhole(groupBytes: 16));
+        AssertGroupedAs(keys, [.. Enumerable.Range(100, 64)], [.. Enumerable.Range(0, 64)]);
+        int[] values = [.. Enumerable.Range(0, 37).Select(i => i == 20 ? 99 : i == 33 ? 500 : 100 + (i * 7 % 64))];
+        AssertGroupedAs(keys, values, [.. values.Select(value => value == 99 ? 64 : value == 500 ? 65 : value - 100)]);
+        Assert.Null(keys.Met());
+
+        GroupKeys wide = new FixedKeys<int>(Shape(VortexType.Int32), sorted: false, new KeyBounds(0, (1 << 16) - 1));
+        Assert.True(((FixedKeys<int>)wide).ByValue);
+        Assert.False(wide.NumberWhole(groupBytes: 16));
+    }
+
+    // A span numbered whole whose rows meet one value in three, a null in thirteen among them, under a filter
+    // and not: the groups .NET makes at every degree, as numbering values as they come makes them.
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(4, true)]
+    [InlineData(4, false)]
+    public async Task ASpanNumberedWholeGroupsAsTheRowsDo(int degree, bool whole)
+    {
+        Reading[] rows = Readings();
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            foreach (bool filtered in (bool[])[false, true])
+            {
+                Scan<Reading> scan = filtered ? file.Scan<Reading>().Where(r => r.Value > 3) : file.Scan<Reading>();
+                Vorticity.Aggregation grouped = scan.GroupBy(r => r.Sparse).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value)));
+                grouped.Plan.NumberWhole = whole;
+                List<SparseTotal> totals = await ListAsync(grouped.As<SparseTotal>());
+                Assert.Equal(
+                    rows.Where(r => !filtered || r.Value > 3).GroupBy(r => r.Sparse).Select(g => new SparseTotal(g.Key, g.Count(), g.Sum(r => r.Value)))
+                        .OrderBy(t => t.Sparse ?? int.MinValue),
+                    totals.OrderBy(t => t.Sparse ?? int.MinValue));
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
@@ -99,14 +169,19 @@ public sealed partial class DirectGroupKeysTests
     private static ColumnShape Shape(VortexType type) =>
         new ColumnShape(new ColumnSym(Expr.Field("k"), type, null, null, -1, []));
 
-    /// <summary>Keys scattered over a few hundred values: negative ones, nullable ones, unsigned ones.</summary>
+    /// <summary>Keys scattered over a few hundred values: negative ones, nullable ones, unsigned ones, one value in three of their span.</summary>
     private static Reading[] Readings()
     {
         Reading[] rows = new Reading[Rows];
         for (int row = 0; row < Rows; row++)
         {
             int scattered = (int)((uint)(row * 2_654_435_761u) >> 23);
-            rows[row] = new Reading(scattered - 256, scattered % 9 == 0 ? null : (short)(scattered % 40 - 20), (uint)(scattered % 300) + 4_000_000_000u, row % 7);
+            rows[row] = new Reading(
+                scattered - 256,
+                scattered % 9 == 0 ? null : (short)(scattered % 40 - 20),
+                (uint)(scattered % 300) + 4_000_000_000u,
+                row % 7,
+                row % 13 == 0 ? null : (scattered % 200 * 3) - 300);
         }
 
         return rows;
@@ -139,7 +214,10 @@ public sealed partial class DirectGroupKeysTests
     }
 
     [VortexRecord]
-    public partial record struct Reading(int Small, short? Maybe, uint Unsigned, long Value);
+    public partial record struct Reading(int Small, short? Maybe, uint Unsigned, long Value, int? Sparse);
+
+    [VortexRecord]
+    public partial record struct SparseTotal(int? Sparse, long Count, long Sum);
 
     [VortexRecord]
     public partial record struct Total(int Small, long Count, long Sum);

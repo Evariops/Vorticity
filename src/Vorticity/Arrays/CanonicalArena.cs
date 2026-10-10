@@ -1172,11 +1172,26 @@ internal partial class CanonicalArena
         int length,
         Validity validity,
         VortexBuffer views,
-        ReadOnlySpan<VortexBuffer> dataBuffers)
+        ReadOnlySpan<VortexBuffer> dataBuffers) =>
+        AddVarBinView(dtype, length, validity, views, dataBuffers, padded: false);
+
+    /// <summary>
+    /// <see cref="AddVarBinView(DType, int, Validity, VortexBuffer, ReadOnlySpan{VortexBuffer})"/>, saying
+    /// whether this library's kernels wrote the views, every inline value zero past its bytes
+    /// (<see cref="CanonicalRecord.PaddedViews"/>).
+    /// </summary>
+    internal int AddVarBinView(
+        DType dtype,
+        int length,
+        Validity validity,
+        VortexBuffer views,
+        ReadOnlySpan<VortexBuffer> dataBuffers,
+        bool padded)
     {
         RequireExactLength(views.Length, length, 16, "VarBinView");
         CanonicalRecord r = New(CanonicalKind.VarBinView, dtype, length, validity);
         r.BufferA = views;
+        r.PaddedViews = padded;
         r.DataBufferStart = _dataBufferCount;
         r.DataBufferCount = dataBuffers.Length;
         for (int i = 0; i < dataBuffers.Length; i++)
@@ -2146,6 +2161,13 @@ internal struct CanonicalRecord
     internal int DataBufferStart;
     internal int DataBufferCount;
     internal uint FixedSize;
+
+    /// <summary>
+    /// For a <see cref="CanonicalKind.VarBinView"/>: whether this library's kernels wrote its views, every
+    /// inline value zero past its bytes, so that a view of twelve bytes or fewer is a short text key's word
+    /// as it lies; false for views read as they came, whose padding nothing promises.
+    /// </summary>
+    internal bool PaddedViews;
 
     /// <summary>
     /// For a <see cref="CanonicalKind.Constant"/>, <see cref="CanonicalKind.Dictionary"/> or

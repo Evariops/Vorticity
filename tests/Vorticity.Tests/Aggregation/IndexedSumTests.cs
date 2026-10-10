@@ -13,6 +13,34 @@ namespace Vorticity.Tests.Aggregation;
 /// </summary>
 public sealed class IndexedSumTests
 {
+    // The top a magnitude calls for, its binade read off its bits, against Math.ILogB's: every binade of
+    // the normal doubles at both ends of its mantissas, every bit a subnormal may hold highest, and zero.
+    [Fact]
+    public void TheTopReadOffTheBitsIsTheOneILogBGives()
+    {
+        static int ByILogB(double magnitude) =>
+            magnitude == 0 ? 2 : Math.Max(2, (Math.ILogB(magnitude) + 1 - (-1074 + 27 - 1) + 27 - 1) / 27);
+
+        Assert.Equal(ByILogB(0), IndexedSum.Needed(0));
+        for (long biased = 1; biased < 2047; biased++)
+        {
+            foreach (long mantissa in (long[])[0, 1, 1L << 51, (1L << 52) - 1])
+            {
+                double magnitude = BitConverter.Int64BitsToDouble((biased << 52) | mantissa);
+                Assert.Equal(ByILogB(magnitude), IndexedSum.Needed(magnitude));
+            }
+        }
+
+        for (int bit = 0; bit < 52; bit++)
+        {
+            foreach (long below in (long[])[0, (1L << bit) - 1])
+            {
+                double subnormal = BitConverter.Int64BitsToDouble((1L << bit) | below);
+                Assert.Equal(ByILogB(subnormal), IndexedSum.Needed(subnormal));
+            }
+        }
+    }
+
     // The rounding in two words, which a sum's value takes, against the rounding of an Int128: the same
     // bits for totals of every length, both signs, ties to even, and exponents down past the subnormals.
     [Fact]

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -224,6 +223,25 @@ internal sealed class AggregationPlan
     /// </summary>
     internal const int DefaultProbeAhead = 0;
 
+    /// <summary>
+    /// The bytes of a lane's table of hashed keys past which, <see cref="ProbeAhead"/> left at its
+    /// default, its first pass reads each slot <see cref="ReadAhead"/> rows ahead: the share of a private
+    /// cache a lane's cache gets, past which every probe misses. Each run sets it from its lanes; none
+    /// reads ahead before it does.
+    /// </summary>
+    internal long ReadAheadBytes { get; set; } = long.MaxValue;
+
+    /// <summary>
+    /// The rows ahead a lane's table read its slots once it outgrew <see cref="ReadAheadBytes"/>. Measured
+    /// on 2026-10-10 on the Mac at fourteen lanes, every table read ahead: 16 rows took ×0.929 off q3
+    /// (10⁵ short texts, a lane's table of 2.4 MB) and nothing off q2 nor 10⁶ hashed keys, 32 rows
+    /// ×0.939; keys in a row, at a stride or hot gave back 2 to 8 % at one lane on 2026-10-06, their
+    /// tables in cache, which the size spares. Read ahead past the size alone: q3 ×0.963 and q7 ×0.947
+    /// at fourteen lanes, the rest flat; never the tuples of several columns, whose slot read ahead
+    /// still leaves their 64 bytes to compare: q10 ×1.015 at one lane.
+    /// </summary>
+    internal const int ReadAhead = 16;
+
     /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
     internal long PeakGroups { get; set; }
 
@@ -381,6 +399,20 @@ internal sealed class AggregationPlan
     /// </summary>
     internal bool MergeByValue { get; set; } = true;
 
+    /// <summary>
+    /// Whether a lane's key numbered by value over a span whose groups fit the private cache numbers it
+    /// whole (<see cref="GroupKeys.NumberWhole"/>): false to number values as they first come, the switch
+    /// the tests compare them with.
+    /// </summary>
+    internal bool NumberWhole { get; set; } = true;
+
+    /// <summary>
+    /// Whether the core pages a key numbered by value over a span no wider than the rows
+    /// (<see cref="GroupCore.Paged"/>): false for sub-tables of hashes, the switch the tests and the bench
+    /// compare them with.
+    /// </summary>
+    internal bool CorePages { get; set; } = true;
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
@@ -401,8 +433,23 @@ internal sealed class AggregationPlan
                 $"'{symbol}' is neither an aggregate nor a component of the key: a result is an aggregate of the group, or g.Key.");
     }
 
-    /// <summary>The slot of <paramref name="node"/>: the one aggregate of the plan it is the same as.</summary>
-    internal int IndexOf(IAggregateNode node) => Array.FindIndex(Aggregates, known => known.Identity.Equals(node.Identity));
+    /// <summary>
+    /// The slot of <paramref name="node"/>: the one aggregate of the plan it is the same as. A loop, where a
+    /// predicate capturing the node made a closure and a delegate at each call: two a result column a
+    /// part of the core's result, 1 024 a query of two aggregates.
+    /// </summary>
+    internal int IndexOf(IAggregateNode node)
+    {
+        for (int i = 0; i < Aggregates.Length; i++)
+        {
+            if (Aggregates[i].Identity.Equals(node.Identity))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
 
     private static void Add(List<IAggregateNode> aggregates, IAggregateNode aggregate)
     {
@@ -433,20 +480,55 @@ internal sealed class AggregationPlan
 
     /// <summary>
     /// The index of the groups of one partition: a key of one column by its own index, of two to
-    /// eight by their indexes' numbers packed into a word, of more by their values encoded into bytes.
+    /// eight by their indexes' numbers packed into a word, or of five to eight texts and integers by
+    /// the tuple of their values, of more by their values encoded into bytes.
     /// </summary>
     /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
     /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
     /// <param name="shelf">The lane's shelf under its query's memory, which the key's tables grow from; null for tables nothing counts.</param>
-    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null) => Keys.Length switch
+    /// <param name="memory">
+    /// The run's memory, the shelf's when not given: a key held as its tuples numbers its long texts once
+    /// for the run, under it. Null for keys that only tell what they are.
+    /// </param>
+    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null, ArrayShelf? shelf = null, QueryMemory? memory = null) => Keys.Length switch
     {
-        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf),
+        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0], ProbeAhead, facts?.Rows ?? -1, shelf, ReadAheadBytes),
         2 or 3 or 4 when Raw(facts) is { } layout => layout.Bits <= 64 ? new RawKeys<ulong>(layout, shelf: shelf) : new RawKeys<UInt128>(layout, shelf: shelf),
         2 => new PackedKeys<ulong>(Keys, facts, shelf: shelf),
         3 or 4 => new PackedKeys<UInt128>(Keys, facts, shelf: shelf),
+        <= 8 when Tuples && TupleLayout(memory ?? shelf?.Memory) is { } layout => new TupleKeys(layout, ProbeAhead, shelf),
         <= 8 => new PackedKeys<PackedTuple>(Keys, facts, shelf: shelf),
         _ => new CompositeKeys(Keys, shelf),
     };
+
+    /// <summary>
+    /// Whether a key of five to eight text and integer columns is held as the tuple of its values
+    /// (<see cref="TupleKeys"/>), which the core takes, rather than as the numbers its columns have in
+    /// indexes of their own: false for those numbers, the switch the tests and the bench compare them with.
+    /// </summary>
+    internal bool Tuples { get; set; } = true;
+
+    // Whether a tuple holds the key (null before it is asked), and the layout of each run's tuples, keyed
+    // by the run's memory: its long texts numbered once for the run, the same in every lane, and dropped
+    // with it.
+    private bool? _tuplesFit;
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<QueryMemory, TupleLayout> _tupleLayouts = new();
+
+    /// <summary>
+    /// The layout of the key's tuples for the run <paramref name="run"/> counts, the same for every lane of
+    /// it; one of its own without a run, which only tells what the keys are. Null when a tuple cannot hold
+    /// the key.
+    /// </summary>
+    private TupleLayout? TupleLayout(QueryMemory? run)
+    {
+        _tuplesFit ??= Aggregating.TupleLayout.Of(Keys, memory: null) is not null;
+        if (_tuplesFit != true)
+        {
+            return null;
+        }
+
+        return run is null ? Aggregating.TupleLayout.Of(Keys, memory: null) : _tupleLayouts.GetValue(run, memory => Aggregating.TupleLayout.Of(Keys, memory)!);
+    }
 
     /// <summary>
     /// The layout of the key as the tuple of its values in one word, unless the statistics say a
@@ -485,28 +567,29 @@ internal sealed class AggregationPlan
     }
 
     /// <summary>The index of a key of one column.</summary>
-    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1, ArrayShelf? shelf = null) =>
+    internal static GroupKeys Single(
+        ColumnShape key, bool sorted, KeyBounds? bounds = null, int probeAhead = DefaultProbeAhead, long rows = -1, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue) =>
         key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
-                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows, shelf: shelf),
-                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.I16 => new FixedKeys<short>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.I32 => new FixedKeys<int>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.I64 => new FixedKeys<long>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U8 => new FixedKeys<byte>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U32 => new FixedKeys<uint>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds, probeAhead, rows, shelf: shelf, aheadBytes: aheadBytes),
+                PType.F16 => new FixedKeys<Half>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+                PType.F32 => new FixedKeys<float>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+                _ => new FixedKeys<double>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
             },
-            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf),
-            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf),
+            StorageKind.Decimal => new FixedKeys<Int128>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
+            StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes),
             StorageKind.Bool => new BoolKeys(key),
-            StorageKind.Bytes => new ShortTextKeys(key, sorted, probeAhead, shelf),
+            StorageKind.Bytes => new ShortTextKeys(key, sorted, probeAhead, shelf, aheadBytes),
             _ => throw key.Unsupported("a group key"),
         };
 }
@@ -572,13 +655,15 @@ internal sealed class AggregationOutcome
     // The means read from the slots of sums, by the sum's slot, made on the first read.
     private AggregateSlot?[]? _views;
 
-    internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order)
+    /// <summary>The groups of <paramref name="keys"/> in their states, delivered in the first <paramref name="count"/> of <paramref name="order"/>, every one by default.</summary>
+    internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order, int count = -1)
     {
         _plan = plan;
         _slots = slots;
         Keys = keys;
         Order = order;
-        _chosen = new ChosenValues[plan.Chosen.Length];
+        Count = count < 0 ? order.Length : count;
+        _chosen = plan.Chosen.Length == 0 ? [] : new ChosenValues[plan.Chosen.Length];
         for (int c = 0; c < _chosen.Length; c++)
         {
             _chosen[c] = plan.Chosen[c].CreateValues();
@@ -590,7 +675,21 @@ internal sealed class AggregationOutcome
     /// <summary>What the result holds of its query's memory budget, until it is delivered; null for a result nobody counts.</summary>
     internal QueryMemory? Memory { get; set; }
 
-    /// <summary>Gives back what the result held of its query's budget: delivered, it is the caller's.</summary>
+    /// <summary>
+    /// The partition whose tables are the result, a lane's alone or the largest a merge in series kept
+    /// as it: its arrays go back to the process's shelf once the result is delivered, for the next query.
+    /// </summary>
+    internal AggregationPartition? Kept { get; init; }
+
+    /// <summary>Whether <see cref="Order"/> is lent by the process's shelf, which takes it back once the result is delivered.</summary>
+    internal bool OrderLent { get; init; }
+
+    private int _givenBack;
+
+    /// <summary>
+    /// Gives back what the result held of its query's budget: delivered, it is the caller's; and, once,
+    /// the tables and the order the shelves lent it, its batches dead with the reads that took them.
+    /// </summary>
     internal void Delivered()
     {
         Parts?.Close();
@@ -598,6 +697,15 @@ internal sealed class AggregationOutcome
         {
             _plan.LastPeakBytes = Math.Max(_plan.LastPeakBytes, memory.Peak);
             memory.Dispose();
+        }
+
+        if (Interlocked.Exchange(ref _givenBack, 1) == 0)
+        {
+            Kept?.Delivered();
+            if (OrderLent)
+            {
+                ArrayShelf.Retained.Give(Order);
+            }
         }
     }
 
@@ -609,8 +717,14 @@ internal sealed class AggregationOutcome
 
     internal GroupKeys? Keys { get; }
 
-    /// <summary>The groups in delivery order; the one group of a scalar aggregation.</summary>
+    /// <summary>
+    /// The groups in delivery order, its first <see cref="Count"/>; the one group of a scalar aggregation.
+    /// An order lent by a shelf is longer.
+    /// </summary>
     internal int[] Order { get; }
+
+    /// <summary>The groups delivered: the first ones of <see cref="Order"/>.</summary>
+    internal int Count { get; }
 
     internal AggregateSlot SlotOf(IAggregateNode node)
     {
@@ -673,6 +787,11 @@ internal sealed class AggregationPartition
     private readonly int[] _filterOf;
     private readonly FilterMasks? _masks;
     private readonly GroupRanges _ranges = new GroupRanges();
+
+    // The group of each row of a batch, rented from the shared pool and given back with the partition's
+    // groups (Release): a lane's of 512 KB, made anew by every lane of every query, were 89 % of what a
+    // count and a sum by 10³ keys allocated at fourteen lanes, 7.3 of 8.2 MB a query. The lane's admission
+    // counts it (a batch's scratch).
     private int[] _rowGroups = [];
     private long _batch;
 
@@ -735,12 +854,16 @@ internal sealed class AggregationPartition
     private int _settledEnd;
     private ZoneSettling.Scratch? _settledScratch;
 
+    /// <summary>
+    /// A partition of <paramref name="plan"/>'s groups: under <paramref name="memory"/>, its arrays from a
+    /// lane's shelf, or from <paramref name="arrays"/>, a shelf of its own counted by no query.
+    /// </summary>
     internal AggregationPartition(
         AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyFacts? facts = null,
-        GroupKeys? keys = null, QueryMemory? memory = null)
+        GroupKeys? keys = null, QueryMemory? memory = null, ArrayShelf? arrays = null)
     {
         Memory = memory;
-        _arrays = memory is null ? null : new ArrayShelf(memory);
+        _arrays = arrays ?? (memory is null ? null : new ArrayShelf(memory));
         _turnAt = plan.CoreTurnAt;
         _plan = plan;
         _settledSlots = settled;
@@ -799,7 +922,17 @@ internal sealed class AggregationPartition
     internal LaneCore? Core
     {
         get => _core;
-        init => _core = value;
+        init
+        {
+            // A lane on a core that spills takes past its budget in the middle of a batch, its cache
+            // growing: its next deposit finds no room, and the core spills its largest part before the
+            // lane's next batch. Refused, the lane failed the query when it met the budget first.
+            _core = value;
+            if (_arrays is not null && value is not null && value.Core.Spills)
+            {
+                _arrays.Overdraws = true;
+            }
+        }
     }
 
     /// <summary>
@@ -968,6 +1101,7 @@ internal sealed class AggregationPartition
     /// </summary>
     internal async ValueTask EvictAsync(CancellationToken cancellationToken)
     {
+        DropUnmet();
         if (Keys is not { Count: > 0 } keys)
         {
             return;
@@ -1239,9 +1373,6 @@ internal sealed class AggregationPartition
         }
     }
 
-    // The map of the first batch's values over the span, 4 096 bits.
-    private ulong[]? _spreadMap;
-
     /// <summary>
     /// Judges the key on the lane's first batch, before a row of it is folded: its selected values
     /// placed in 4 096 bins over the span, a bit each, and compared to the B (1 − e^(−n/B)) of B bins n
@@ -1253,6 +1384,11 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void Judge(RecordBatch batch)
     {
+        if (TurnOnNew && !_sampled && batch.SelectedRows > 0)
+        {
+            JudgeSample(batch);
+        }
+
         if (!TurnOnSpread || _spreadJudged || Keys is not { NumberedByValue: true } keys || batch.RowCount == 0 || batch.SelectedRows == 0)
         {
             return;
@@ -1266,8 +1402,9 @@ internal sealed class AggregationPartition
             node = arena.GetNode(node).StorageIndex;
         }
 
-        _spreadMap ??= new ulong[4096 / 64];
-        if (keys.Spread(arena, [node], batch.RowCount, batch.SelectionWords, AggregationPlan.ScatteredSpan, _spreadMap) is not { } spread || spread.Values == 0)
+        // The map of the first batch's values over the span, 4 096 bits, on the stack: it is read once.
+        Span<ulong> map = stackalloc ulong[4096 / 64];
+        if (keys.Spread(arena, [node], batch.RowCount, batch.SelectionWords, AggregationPlan.ScatteredSpan, map) is not { } spread || spread.Values == 0)
         {
             return;
         }
@@ -1276,6 +1413,80 @@ internal sealed class AggregationPartition
         if (spread.Set >= SpreadShare * drawn)
         {
             Pressure!.Outgrew(CoreReason.Spread, _rowsFolded);
+        }
+    }
+
+    /// <summary>The rows of a lane's first batch whose keys judge a hashed key before the batch is folded (<see cref="JudgeSample"/>).</summary>
+    internal const int SampledRows = 8_192;
+
+    // Whether the lane judged its key on a sample of its first batch (JudgeSample).
+    private bool _sampled;
+
+    /// <summary>
+    /// Judges a hashed key on the lane's first batch, before a row of it is folded: the groups its first
+    /// <see cref="SampledRows"/> rows make in the lane's own table, no value folded, and the values of a
+    /// uniform key that makes as many (<see cref="EstimatedValues"/>). Past <see cref="TurnValues"/>, every
+    /// lane turns to the core with its table nearly empty, those groups' states still empty. Folded first,
+    /// the batch grew each lane's table to its rows, nearly all new, its arrays doubled some fourteen times,
+    /// then emptied into the core and dropped: 400 of the 490 MB a hashed key of 3.3M values over 4M rows
+    /// allocated a query at fourteen lanes (2026-10-09). A key of fewer values keeps its table, the batch's
+    /// rows finding there the groups the sample made, and is judged on its first rows as before. 8 192 rows
+    /// tell 10⁵ values from 10⁶: about 335 repeats against 34.
+    /// </summary>
+    private void JudgeSample(RecordBatch batch)
+    {
+        _sampled = true;
+        int rows = batch.RowCount;
+        if (rows < SampledRows || Keys is not { NumberedByValue: false, Count: 0, EntryBytes: > 0 } keys || Pressure is not { Outgrown: false } pressure)
+        {
+            return;
+        }
+
+        // The rows a filter keeps among the first ones: a filter that keeps few leaves the key to its first rows.
+        ReadOnlySpan<ulong> selection = batch.SelectionWords;
+        int sampled = SampledRows;
+        if (!selection.IsEmpty)
+        {
+            selection = selection[..(SampledRows >> 6)];
+            sampled = 0;
+            foreach (ulong word in selection)
+            {
+                sampled += BitOperations.PopCount(word);
+            }
+
+            if (sampled < SampledRows / 2)
+            {
+                return;
+            }
+        }
+
+        CanonicalArena arena = batch.Arena;
+        for (int c = 0; c < _keyCount; c++)
+        {
+            int node = FilterEvaluator.Resolve(arena, batch.RootIndex, _columns[c].Field, rows);
+            while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+            {
+                node = arena.GetNode(node).StorageIndex;
+            }
+
+            _nodes[c] = node;
+        }
+
+        if (_rowGroups.Length < SampledRows)
+        {
+            RentRowGroups(SampledRows);
+        }
+
+        _ranges.Clear();
+        keys.Assign(arena, _nodes.AsSpan(0, _keyCount), SampledRows, selection, _rowGroups, _ranges);
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            Slots[i].EnsureGroups(keys.Count);
+        }
+
+        if (EstimatedValues(sampled, keys.Count) >= TurnValues)
+        {
+            pressure.Outgrew(CoreReason.FirstRows, _rowsFolded);
         }
     }
 
@@ -1506,6 +1717,29 @@ internal sealed class AggregationPartition
     internal long Footprint => (Keys?.Footprint ?? 0) + (_componentKeys?.Footprint ?? 0) + AggregateSlot.FootprintOf(Slots);
 
     /// <summary>
+    /// Room for the group of each of <paramref name="rows"/> rows, the one held before given back: taken
+    /// from the process's shelf a power of two long, cleared, as a new array starts, since a row a
+    /// selection leaves out keeps what the array held, and another query's groups would be past this
+    /// one's. The shared array pool kept an array for each thread that gave one back, which the lane of
+    /// the next query, on another thread, did not find: half a megabyte a query at fourteen lanes.
+    /// </summary>
+    private void RentRowGroups(int rows)
+    {
+        GiveBackRowGroups();
+        _rowGroups = ArrayShelf.Retained.Take<int>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(rows, 16)), zeroed: true);
+    }
+
+    /// <summary>The groups of the rows given back to the process's shelf, once nothing folds into the partition.</summary>
+    private void GiveBackRowGroups()
+    {
+        if (_rowGroups.Length > 0)
+        {
+            ArrayShelf.Retained.Give(_rowGroups);
+            _rowGroups = [];
+        }
+    }
+
+    /// <summary>
     /// Drops the partition's groups, its keys, states and scratch, once another holds them: a lane's
     /// tables die with the merge, whatever still holds the partition. Frames of the pass do: a
     /// blocking group by goes out in continuations of the lane or the merge worker that finished
@@ -1515,10 +1749,11 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void Release()
     {
+        ReturnArrays();
         Keys = null;
         Slots = [];
         Records = null;
-        _rowGroups = [];
+        GiveBackRowGroups();
         _narrowed = [];
         _componentOf = [];
         _componentRows = [];
@@ -1527,14 +1762,43 @@ internal sealed class AggregationPartition
     }
 
     /// <summary>
-    /// Lets the partition's tables go and gives back what it held of its query's memory, the arrays
-    /// left to the next collection: a range a stream followed into the
-    /// partition before it, whose groups now live there.
+    /// The partition's tables, a result, delivered: their arrays back to the process's shelf for the
+    /// next query, which grew its own again while a collection took these; its query gave its memory
+    /// back whole, so its shelf counts them nowhere.
+    /// </summary>
+    internal void Delivered()
+    {
+        _arrays?.Forget();
+        Release();
+    }
+
+    /// <summary>
+    /// Lets the partition's tables go and gives back what it held of its query's memory: a range a
+    /// stream followed into the partition before it, whose groups now live there.
     /// </summary>
     internal void LetGo()
     {
+        ReturnArrays();
         GiveBack();
         Release();
+    }
+
+    /// <summary>
+    /// The arrays of the partition's keys and records back to the shelf they came from, a lane's, which
+    /// hands them to the process's for the next table of their length, this query's or the next one's:
+    /// a lane's tables were left to the next collection, every query growing its own again. Before what
+    /// the partition held of its query's memory is given back, the shelf counting each out; its tables
+    /// are empty after.
+    /// </summary>
+    private void ReturnArrays()
+    {
+        Keys?.Release();
+        Records?.Release();
+
+        // The lane's side of the core, its applier and the partition it bypassed its cache with, and a
+        // shelf of the partition's own, which hands what it holds to the process's; a lane's holds nothing.
+        _core?.Release();
+        _arrays?.Clear();
     }
 
     /// <summary>What the partition's tables held of its query's memory given back, the tables themselves left to the next collection.</summary>
@@ -1591,7 +1855,8 @@ internal sealed class AggregationPartition
             arrays.Exact = true;
         }
         int[]? numbers = null;
-        cache.MergeFrom(this, ref numbers, apart: null);
+        cache.MergeFrom(this, ref numbers);
+        ReturnArrays();
         GiveBack();
         lane.Turning = false;
         Keys = cache.Keys;
@@ -1645,6 +1910,7 @@ internal sealed class AggregationPartition
         // A lane whose table holds less than the core would cost it keeps its table, but for one already
         // past its budget when the core spills, which a lane's table cannot; and but when a lane turned
         // on what its rows showed, where every lane turns while its table is small.
+        DropUnmet();
         CorePressure pressure = Pressure!;
 
         // The core cannot hold the query's groups: what the lane's rows show changes nothing, and its
@@ -1979,9 +2245,12 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// A slot for each aggregate of the plan, the settled one or a new one, the new ones whose states
-    /// hold no reference sharing <paramref name="records"/>, a record a group.
+    /// hold no reference sharing <paramref name="records"/>, a record a group, laid out as
+    /// <paramref name="layout"/> says when the caller knows it already: a core's, the same for each of
+    /// its sub-tables, whose four objects each made again.
     /// </summary>
-    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records, ArrayShelf? shelf = null)
+    internal static AggregateSlot[] NewSlots(
+        AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source, out GroupRecords? records, ArrayShelf? shelf = null, RecordLayout? layout = null)
     {
         AggregateSlot[] slots = new AggregateSlot[settled.Length];
         for (int i = 0; i < settled.Length; i++)
@@ -2000,14 +2269,14 @@ internal sealed class AggregationPartition
         }
 
         records = null;
-        if (RecordLayout.Of(slots) is { } layout)
+        if ((layout ?? RecordLayout.Of(slots)) is { } laid)
         {
-            records = new GroupRecords(layout, shelf);
+            records = new GroupRecords(laid, shelf);
             for (int i = 0; i < slots.Length; i++)
             {
-                if (layout.Offsets[i] >= 0)
+                if (laid.Offsets[i] >= 0)
                 {
-                    slots[i].Bind(records, layout.Offsets[i]);
+                    slots[i].Bind(records, laid.Offsets[i]);
                 }
             }
         }
@@ -2126,6 +2395,56 @@ internal sealed class AggregationPartition
 
     /// <summary>The first groups of an order on the key the query takes, which the partition keeps alone as it goes; null to keep every group.</summary>
     internal KeyTop? Top { get; init; }
+
+    /// <summary>
+    /// Whether a key numbered by value may number its span whole (<see cref="GroupKeys.NumberWhole"/>): a
+    /// lane of a group by's pass, whose groups no one reads before its rows are folded but through
+    /// <see cref="DropUnmet"/>; never with a top, the core or a key that streams.
+    /// </summary>
+    internal bool NumbersWhole { get; init; }
+
+    // Whether the partition judged at its first batch whether its key numbers its span whole.
+    private bool _wholeJudged;
+
+    /// <summary>
+    /// The bytes of a group's record, or -1 when a slot keeps its states apart. The groups no row met are
+    /// dropped by a keep, which moves the records within their array, but a set of values a group to
+    /// arrays beside the old: a distinct count by a thousand values numbered whole, three in ten never
+    /// met, held 47 MB at its peak at one lane rather than 29.
+    /// </summary>
+    private long RecordBytes()
+    {
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            if (_inputs[i] != Settled && Slots[i].StateBytes == 0)
+            {
+                return -1;
+            }
+        }
+
+        return (long)(Records?.Layout.Stride ?? 0) * sizeof(ulong);
+    }
+
+    /// <summary>
+    /// The groups of a span numbered whole that no row met, dropped, keys and states: before anyone else
+    /// reads the partition's groups, at the end of its lane, or when it turns to the core or writes its
+    /// table to the scratch. Its key numbers values as they first come from then on.
+    /// </summary>
+    internal void DropUnmet()
+    {
+        if (Keys?.Met() is { } met)
+        {
+            Keep(met);
+            GroupsAtEnd = met.Length;
+        }
+    }
+
+    /// <summary>
+    /// The lane folds no more rows: the group of each row back to the process's shelf now, where it went
+    /// back with the partition's release, which the partition a merge in series keeps as the result
+    /// never has: the next query's lane made another, half a megabyte.
+    /// </summary>
+    internal void FoldsNoMore() => GiveBackRowGroups();
 
     /// <summary>The groups the partition held at most since its top last counted them.</summary>
     internal int PeakGroups { get; set; }
@@ -2342,7 +2661,22 @@ internal sealed class AggregationPartition
             return;
         }
 
-        Scratch.Grow(ref _rowGroups, rows);
+        // A key numbered by value over a span whose records fit the private cache numbers it whole from
+        // the first row: a row's group is its value less the least once every value is met.
+        if (NumbersWhole && !_wholeJudged)
+        {
+            _wholeJudged = true;
+            if (Top is null && _core is null && _componentKeys is null && RecordBytes() is long bytes and >= 0)
+            {
+                Keys.NumberWhole(bytes);
+            }
+        }
+
+        if (_rowGroups.Length < rows)
+        {
+            RentRowGroups(rows);
+        }
+
         _ranges.Clear();
         int before = Keys.Count;
         bool ranged = Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges);
@@ -2401,12 +2735,25 @@ internal sealed class AggregationPartition
                     Slots[first].StepRows(Input(number, arena, first, rows, selection).Window(start, end), rowGroups);
                 }
 
+                // A slot and its twin, the same aggregate over another column, fold in one pass when they can.
+                ulong paired = 0;
                 for (int i = 0; i < Slots.Length; i++)
                 {
-                    if (i != first && Folds(i) && !(carried && (i == count || i == carrier)))
+                    if (i == first || !Folds(i) || (carried && (i == count || i == carrier)) || (i < 64 && ((paired >> i) & 1) != 0))
                     {
-                        Slots[i].StepRows(Input(number, arena, i, rows, selection).Window(start, end), rowGroups);
+                        continue;
                     }
+
+                    BatchInput input = Input(number, arena, i, rows, selection).Window(start, end);
+                    int twin = TwinOf(i);
+                    if (twin >= 0 && twin != first && Folds(twin) && !(carried && (twin == count || twin == carrier))
+                        && Slots[i].StepRowsPaired(input, rowGroups, Slots[twin], Input(number, arena, twin, rows, selection).Window(start, end)))
+                    {
+                        paired |= 1UL << twin;
+                        continue;
+                    }
+
+                    Slots[i].StepRows(input, rowGroups);
                 }
             }
 
@@ -2644,33 +2991,48 @@ internal sealed class AggregationPartition
     /// <param name="numbers">The numbers of the groups of a partition past those every thread shares (<see cref="Numbers"/>), the caller's.</param>
     /// <param name="apart">The slots left to merge apart, by parts of their pairs (<see cref="IPairedSlot"/>); null for none.</param>
     /// <returns>The map of the other's groups onto this one's.</returns>
-    internal int[] MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart = null)
+    internal int[] MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart) =>
+        MergeFrom(other, ref numbers, apart, kept: true)!;
+
+    /// <summary>
+    /// <see cref="MergeFrom(AggregationPartition, ref int[], bool[])"/> for a caller that keeps no map: the
+    /// map lent by the process's shelf and given back, where every lane merged in series made one.
+    /// </summary>
+    internal void MergeFrom(AggregationPartition other, ref int[]? numbers) => MergeFrom(other, ref numbers, apart: null, kept: false);
+
+    private int[]? MergeFrom(AggregationPartition other, ref int[]? numbers, bool[]? apart, bool kept)
     {
-        int[] map;
-        if (Keys is null)
+        int count = Keys is null ? 1 : other.Keys!.Count;
+        int[] map = Keys is null ? [0] : kept ? new int[count] : ArrayShelf.Rent<int>(count);
+        if (Keys is not null)
         {
-            map = [0];
-        }
-        else
-        {
-            map = new int[other.Keys!.Count];
-            other.Keys.MergeInto(Keys, Numbers.Upto(map.Length, ref numbers), map);
+            other.Keys!.MergeInto(Keys, Numbers.Upto(count, ref numbers), map.AsSpan(0, count));
             foreach (AggregateSlot slot in Slots)
             {
                 slot.EnsureGroups(Keys.Count);
             }
         }
 
-        ReadOnlySpan<int> all = Numbers.Upto(map.Length, ref numbers);
+        ReadOnlySpan<int> all = Numbers.Upto(count, ref numbers);
         for (int i = 0; i < Slots.Length; i++)
         {
             if (_inputs[i] != Settled && (apart is null || !apart[i]))
             {
-                Slots[i].MergeFrom(other.Slots[i], all, map);
+                Slots[i].MergeFrom(other.Slots[i], all, map.AsSpan(0, count));
             }
         }
 
-        return map;
+        if (kept)
+        {
+            return map;
+        }
+
+        if (Keys is not null)
+        {
+            ArrayShelf.Return(map);
+        }
+
+        return null;
     }
 
     /// <summary>The input of an aggregate settled before the scan, which is never stepped.</summary>
@@ -2693,6 +3055,46 @@ internal sealed class AggregationPartition
 
     /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>
     private bool Folds(int slot) => _filterOf[slot] < 0 || !_masks!.KeepsNone(_filterOf[slot]);
+
+    // Each slot's twin (TwinOf), made at the first batch.
+    private int[]? _twins;
+
+    /// <summary>
+    /// The slot that folds in <paramref name="slot"/>'s pass (<see cref="AggregateSlot.StepRowsPaired"/>), or
+    /// -1: the next one of the same type, the same aggregate over another column, both unfiltered, their
+    /// states in the same records, among the first 64 slots; each slot the twin of one at most.
+    /// </summary>
+    private int TwinOf(int slot)
+    {
+        if (_twins is null)
+        {
+            int[] twins = new int[Slots.Length];
+            twins.AsSpan().Fill(-1);
+            ulong taken = 0;
+            for (int i = 0; i < Math.Min(Slots.Length, 64); i++)
+            {
+                if (((taken >> i) & 1) != 0 || _inputs[i] == Settled || _filterOf[i] >= 0 || Slots[i].Bound is not { } records)
+                {
+                    continue;
+                }
+
+                for (int j = i + 1; j < Math.Min(Slots.Length, 64); j++)
+                {
+                    if (((taken >> j) & 1) == 0 && _inputs[j] != Settled && _filterOf[j] < 0 && Slots[j].GetType() == Slots[i].GetType()
+                        && ReferenceEquals(Slots[j].Bound, records))
+                    {
+                        twins[i] = j;
+                        taken |= (1UL << i) | (1UL << j);
+                        break;
+                    }
+                }
+            }
+
+            _twins = twins;
+        }
+
+        return _twins[slot];
+    }
 
     /// <summary>
     /// The slot of a count of rows in the records, unfiltered, and the fixed slot that can carry it in its
@@ -2946,6 +3348,10 @@ internal static class AggregationEngine
             long splitBytes = ranges is null ? 0 : source.ReadAheadBytes(pass);
             int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, out int ahead);
 
+            // A lane's table reads its slots ahead once past its share of a cache: one lane alone has its
+            // cluster's to itself.
+            plan.ReadAheadBytes = lanes > 1 ? GroupCore.LaneCacheBytes : GroupCore.AloneCacheBytes;
+
             // The core holds the groups once a lane's cache fills: each lane's
             // partition is then its cache, which no table of groups sized on the source's rows fills.
             core = GroupCore.Of(plan, settled, columns, inputs, source, facts, sorted, top, lanes, memory);
@@ -2968,6 +3374,7 @@ internal static class AggregationEngine
                 AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
                 {
                     Top = top,
+                    NumbersWhole = plan.NumberWhole,
                     Core = core?.Lane(),
                     Pressure = pressure,
                     Spill = spill,
@@ -2987,6 +3394,8 @@ internal static class AggregationEngine
                 partitions = [only];
                 plan.Watch?.Invoke(partitions);
                 await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
+                only.DropUnmet();
+                only.FoldsNoMore();
             }
             else
             {
@@ -2998,6 +3407,7 @@ internal static class AggregationEngine
                     partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts, memory: memory)
                     {
                         Top = top is { FirstMet: true } ? null : top,
+                        NumbersWhole = plan.NumberWhole,
                         Core = core?.Lane(),
                         Pressure = pressure,
                         TurnOnNew = pressure is not null && plan.CoreOnNew && lanes >= (plan.CoreLanes ?? GroupCore.DefaultLanes)
@@ -3103,7 +3513,8 @@ internal static class AggregationEngine
 
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
-                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, Shuffled(held.Order(sorted: false)));
+                (int[] heldOrder, bool heldLent) = LentWholeOrder(held.Count);
+                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent };
                 if (spilled.Length == 0)
                 {
                     foreach (AggregationPartition partition in partitions)
@@ -3143,13 +3554,16 @@ internal static class AggregationEngine
             plan.LastRun = (Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes) with { MergeEntries = entries }).Spilled(spill);
             spill?.Dispose();
 
-            // The lanes' tables die with the merge, but the one a merge in series kept as the result.
+            // The lanes' tables die with the merge, but the one a merge in series kept as the result,
+            // which goes back to the process's shelf once delivered.
             long result = mergedBytes;
+            AggregationPartition? whole = null;
             foreach (AggregationPartition partition in tables)
             {
                 if (ReferenceEquals(partition.Slots, slots))
                 {
                     result = partition.Footprint;
+                    whole = partition;
                 }
                 else
                 {
@@ -3158,8 +3572,14 @@ internal static class AggregationEngine
             }
 
             // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
-            int[] order = keys is null ? [0] : Shuffled(keys.Order(sorted: false));
-            return Counted(new AggregationOutcome(plan, slots, keys, order), memory, result);
+            // Lent by the process's shelf, and given back with the result.
+            if (keys is null)
+            {
+                return Counted(new AggregationOutcome(plan, slots, keys, [0]) { Kept = whole }, memory, result);
+            }
+
+            (int[] order, bool lent) = LentWholeOrder(keys.Count);
+            return Counted(new AggregationOutcome(plan, slots, keys, order, keys.Count) { Kept = whole, OrderLent = lent }, memory, result);
         }
         catch
         {
@@ -3261,16 +3681,60 @@ internal static class AggregationEngine
     /// copy shuffled by a draw the process's seed and the groups' count make: the same for two identical
     /// queries of a process, and unlike the merge's.
     /// </summary>
-    internal static int[] Shuffled(int[] order)
+    internal static int[] Shuffled(int[] order) => Shuffled(order, order.Length);
+
+    /// <summary><see cref="Shuffled(int[])"/> of the first <paramref name="count"/> groups of an order a shelf lent, longer than they are: a copy of them alone.</summary>
+    internal static int[] Shuffled(int[] order, int count)
     {
-        if (!AggregationPlan.ShuffledOrder || order.Length < 2)
+        if (!AggregationPlan.ShuffledOrder || count < 2)
         {
             return order;
         }
 
-        int[] shuffled = [.. order];
-        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)order.Length))).Shuffle(shuffled);
+        int[] shuffled = order.AsSpan(0, count).ToArray();
+        new Random(unchecked((int)(MergeHash.Seed ^ (ulong)count))).Shuffle(shuffled);
         return shuffled;
+    }
+
+    /// <summary>
+    /// The order of a whole result, the groups 0 to <paramref name="count"/> less one, lent by the
+    /// process's shelf a power of two long: the identity a result's keys made new at every query. Under
+    /// the tests' shuffle, the shuffled copy is the result's, and the lent one goes back at once.
+    /// </summary>
+    internal static (int[] Order, bool Lent) LentWholeOrder(int count)
+    {
+        int[] order = LentOrder(ArrayShelf.Retained, count);
+        int[] shuffled = Shuffled(order, count);
+        if (!ReferenceEquals(shuffled, order))
+        {
+            ArrayShelf.Retained.Give(order);
+            return (shuffled, false);
+        }
+
+        return (order, order.Length > 0);
+    }
+
+    /// <summary>
+    /// The groups 0 to <paramref name="count"/> less one in their order, in an array of
+    /// <paramref name="shelf"/>'s a power of two long, so that the parts of a query take the same
+    /// arrays again, and the next query those its shelf handed to the process's: given back once the
+    /// groups are built into their batches. Taken past the budget when it must: it is held only while
+    /// its part is built, and the part's keys and states hold several times its bytes.
+    /// </summary>
+    internal static int[] LentOrder(ArrayShelf shelf, int count)
+    {
+        if (count == 0)
+        {
+            return [];
+        }
+
+        int[] order = shelf.Take<int>(Scratch.Capacity(count, 0), zeroed: false, overdraw: true);
+        for (int g = 0; g < count; g++)
+        {
+            order[g] = g;
+        }
+
+        return order;
     }
 
     /// <summary>
@@ -3281,7 +3745,7 @@ internal static class AggregationEngine
     {
         memory.Keep(bytes + ((long)outcome.Order.Length * sizeof(int)));
         outcome.Memory = memory;
-        outcome.Plan.LastGroups = outcome.Order.Length;
+        outcome.Plan.LastGroups = outcome.Count;
         outcome.Plan.LastPeakBytes = memory.Peak;
         return outcome;
     }
@@ -3473,7 +3937,7 @@ internal static class AggregationEngine
         {
             if (partition.Core is null && partition.Keys is not null && (!ended || partition.HasEnded) && !ReferenceEquals(partition, largest))
             {
-                largest!.MergeFrom(partition, ref numbers, apart: null);
+                largest!.MergeFrom(partition, ref numbers);
                 largest.Recount();
                 partition.LetGo();
                 partition.Gave();
@@ -3556,19 +4020,30 @@ internal static class AggregationEngine
             // are many, apart, by parts of the pairs taken side by side.
             int[]? numbers = null;
             bool[]? apart = partitions.Length > 1 && degree > 1 ? Paired(partitions, inputs) : null;
-            int[][] maps = new int[partitions.Length][];
+            int[][]? maps = apart is null ? null : new int[partitions.Length][];
             for (int p = 0; p < partitions.Length; p++)
             {
-                if (p != largest)
+                if (p == largest)
+                {
+                    continue;
+                }
+
+                // The maps kept for the pairs merged apart; with none, each lent and given back.
+                if (maps is not null)
                 {
                     maps[p] = biggest.MergeFrom(partitions[p], ref numbers, apart);
-                    biggest.Recount();
                 }
+                else
+                {
+                    biggest.MergeFrom(partitions[p], ref numbers);
+                }
+
+                biggest.Recount();
             }
 
             if (apart is not null)
             {
-                await MergePairedAsync(partitions, largest, maps, apart, degree, memory, cancellationToken).ConfigureAwait(false);
+                await MergePairedAsync(partitions, largest, maps!, apart, degree, memory, cancellationToken).ConfigureAwait(false);
             }
 
             return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0, null, serial);
@@ -3769,7 +4244,7 @@ internal static class AggregationEngine
     private static (int[] Placed, int[] Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts, bool byValue)
     {
         int count = keys.Count;
-        byte[] partOf = ArrayPool<byte>.Shared.Rent(count);
+        byte[] partOf = ArrayShelf.Rent<byte>(count);
         try
         {
             if (byValue)
@@ -3802,7 +4277,7 @@ internal static class AggregationEngine
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(partOf);
+            ArrayShelf.Return(partOf);
         }
     }
 
@@ -4334,12 +4809,14 @@ internal static class AggregationEngine
                             await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
                         }
 
+                        partition.DropUnmet();
                         if (partition.Retiring)
                         {
                             await partition.RetireAsync(token).ConfigureAwait(false);
                         }
 
                         await partition.EndedAsync(token).ConfigureAwait(false);
+                        partition.FoldsNoMore();
                     }
                     catch
                     {
