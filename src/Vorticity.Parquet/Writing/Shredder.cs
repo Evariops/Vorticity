@@ -36,6 +36,10 @@ internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
     private Entries _next = new(pool);
     private NativeSegmentOwner? _valueBlock;
 
+    /// <summary>A list view's offsets and sizes widened, when they are of two types no shape reads as they lie.</summary>
+    private long[] _wideOffsets = [];
+    private long[] _wideSizes = [];
+
     /// <summary>The entries of the rows shredded last.</summary>
     internal int Count { get; private set; }
 
@@ -194,11 +198,67 @@ internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
                 Expand(new ViewShape<ulong>(offsets, sizes), count, step);
                 break;
             default:
-                Expand(new AnyShape(offsets, list.OffsetPType, sizes, list.SizePType), count, step);
+                // Offsets and sizes of two other types: both widened once, each by its own type,
+                // rather than either read by a type switch a row.
+                int rows = list.Length;
+                if (_wideOffsets.Length < rows)
+                {
+                    _wideOffsets = new long[Math.Max(rows, 2 * _wideOffsets.Length)];
+                    _wideSizes = new long[_wideOffsets.Length];
+                }
+
+                Widen(offsets, list.OffsetPType, _wideOffsets.AsSpan(0, rows));
+                Widen(sizes, list.SizePType, _wideSizes.AsSpan(0, rows));
+                Expand(new ViewShape<long>(MemoryMarshal.AsBytes(_wideOffsets.AsSpan(0, rows)), MemoryMarshal.AsBytes(_wideSizes.AsSpan(0, rows))), count, step);
                 break;
         }
 
         return elements;
+    }
+
+    /// <summary>The first integers of <paramref name="source"/>, of <paramref name="type"/>, widened into <paramref name="destination"/>.</summary>
+    private static void Widen(ReadOnlySpan<byte> source, PType type, Span<long> destination)
+    {
+        switch (type)
+        {
+            case PType.I8:
+                Widen<sbyte>(source, destination);
+                break;
+            case PType.U8:
+                Widen<byte>(source, destination);
+                break;
+            case PType.I16:
+                Widen<short>(source, destination);
+                break;
+            case PType.U16:
+                Widen<ushort>(source, destination);
+                break;
+            case PType.I32:
+                Widen<int>(source, destination);
+                break;
+            case PType.U32:
+                Widen<uint>(source, destination);
+                break;
+            case PType.I64:
+                Widen<long>(source, destination);
+                break;
+            case PType.U64:
+                Widen<ulong>(source, destination);
+                break;
+            default:
+                ArraysThrow.Format($"A list's offsets or sizes are {type}, not integers.");
+                break;
+        }
+
+        static void Widen<T>(ReadOnlySpan<byte> source, Span<long> destination)
+            where T : unmanaged, IBinaryInteger<T>
+        {
+            ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(source)[..destination.Length];
+            for (int i = 0; i < values.Length; i++)
+            {
+                destination[i] = long.CreateTruncating(values[i]);
+            }
+        }
     }
 
     private void Expand<TShape>(TShape shape, long elementCount, ShredStep step)
@@ -347,17 +407,6 @@ internal sealed class Shredder(AlignedBufferPool pool) : IDisposable
         public long Length(int row) => long.CreateTruncating(_sizes[row]);
 
         public long First(int row) => long.CreateTruncating(_offsets[row]);
-    }
-
-    /// <summary>A list view's offsets and sizes of any two integer types.</summary>
-    private readonly ref struct AnyShape(ReadOnlySpan<byte> offsets, PType offsetType, ReadOnlySpan<byte> sizes, PType sizeType) : IListShape
-    {
-        private readonly ReadOnlySpan<byte> _offsets = offsets;
-        private readonly ReadOnlySpan<byte> _sizes = sizes;
-
-        public long Length(int row) => CanonicalSupport.ReadInteger(_sizes, sizeType, row);
-
-        public long First(int row) => CanonicalSupport.ReadInteger(_offsets, offsetType, row);
     }
 
     /// <summary>A fixed-size list's: every row the same number of elements, back to back.</summary>

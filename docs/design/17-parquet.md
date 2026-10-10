@@ -630,8 +630,8 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 | what the footer answers reads nothing more | no request after the open for a count, and for a minimum or a maximum under exact statistics |
 | the open is the schema and the row groups, not their product | the open's allocations on a footer of 1 000 columns by 1 000 row groups under a ceiling that does not grow with their product |
 | the first batch waits for its pages, not its row group | the time to first batch flat over row groups sixteen times apart, locally and over the HTTP source with latency |
-| no dispatch per value | `PerRowDispatchTests` extended to the package |
-| every kernel has a scalar twin | the package's kernel tests in `tests/scalar-pass.txt` |
+| no dispatch per value | `PerRowDispatchTests` counts the package's calls to the per-value readers beside the core's, at the same ceilings |
+| every kernel has a scalar twin | the package's suite, run whole by `tests/scalar-pass.sh` with hardware intrinsics disabled |
 | Native AOT | `pqdump`, the inspection tool, built on the public surface alone and published ahead of time, opens, scans and verifies every file of the standard's test suite at a pinned commit; its surface is on record beside the core's, rendered the same way |
 | a file is the same bytes at every degree | written at degrees 1, 2, 4 and 8 and compared |
 | the writer allocates per file, not per row | a ceiling per written file and per column of a wide schema |

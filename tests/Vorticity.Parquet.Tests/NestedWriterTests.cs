@@ -67,6 +67,47 @@ public sealed class NestedWriterTests
         }
     }
 
+    /// <summary>
+    /// A list view whose offsets and sizes are of two types, neither the other's: shredded through
+    /// both widened once, each by its own type, to the same lists.
+    /// </summary>
+    [Fact]
+    public async Task WritesAListViewOfOffsetsAndSizesOfTwoTypes()
+    {
+        VortexSchema schema = [("tags", VortexType.List(VortexType.Int32))];
+        Arrays.CanonicalArena arena = new();
+        Types.DTypeArena types = new();
+        Types.DType row = VortexTypes.ToDType(schema, types);
+        Types.DType list = row.GetField(0);
+        int[] values = [1, 2, 3, 4, 5, 6];
+        byte[] valueBytes = new byte[values.Length * sizeof(int)];
+        Buffer.BlockCopy(values, 0, valueBytes, 0, valueBytes.Length);
+        int elements = arena.AddPrimitive(list.ElementType, values.Length, Arrays.Validity.NonNullable, Types.PType.I32, Copy(valueBytes));
+
+        // Rows [], [1], [2, 3], [4, 5, 6]; then [5, 6] again, out of order, as a view may be.
+        byte[] offsets = [0, 0, 0, 0, 1, 0, 3, 0, 4, 0];
+        byte[] sizes = [0, 1, 2, 3, 2];
+        int view = arena.AddListView(list, 5, Arrays.Validity.NonNullable, elements, Copy(offsets), Types.PType.U16, Copy(sizes), Types.PType.U8);
+        int root = arena.AddStruct(row, 5, Arrays.Validity.NonNullable, [view]);
+
+        using Temp target = new();
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(target.Path, schema))
+        {
+            using RecordBatch batch = new(arena, root, 0);
+            await writer.WriteAsync(batch, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        Assert.Equal(["[]", "[1]", "[2, 3]", "[4, 5, 6]", "[5, 6]"], await RowsAsync(target.Path));
+
+        Buffers.VortexBuffer Copy(byte[] bytes)
+        {
+            Buffers.VortexBuffer buffer = arena.Allocate(bytes.Length, 16, out Span<byte> destination);
+            bytes.CopyTo(destination);
+            return buffer;
+        }
+    }
+
     private static async Task RewriteAsync(string source, string target, ParquetWriteOptions options)
     {
         await using ParquetFile file = await ParquetFile.OpenAsync(source, Ct);

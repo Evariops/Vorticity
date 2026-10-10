@@ -11,9 +11,9 @@
 //
 // WHAT IT COUNTS, AND WHY THAT AND NOT THE RULE ITSELF. "Is this call inside a per-row loop" is not
 // decidable by reading a line; it needs the loop around it. So this counts something coarser and
-// mechanical -- every CALL to the three helpers in `src/Vorticity`, per file -- and holds each
-// file at a ceiling. The per-row subset is carried in the same table, beside what will remove it,
-// and comes down with the total when a site is wired onto a typed kernel.
+// mechanical -- every CALL to the three helpers in `src/Vorticity` and the Parquet package, per
+// file -- and holds each file at a ceiling. The per-row subset is carried in the same table, beside
+// what will remove it, and comes down with the total when a site is wired onto a typed kernel.
 //
 // The coarseness costs one thing and buys another. It costs a false red when a call is added in a
 // legitimate category: a bounds check, a single value, an error path. That red is a one-line table
@@ -95,6 +95,7 @@ public sealed partial class PerRowDispatchTests
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
         ("Writing/ArrayBlobWriter.cs", 0, 0, "W-13 done: a block with nulls takes the lanes and clears its nulls by their bits"),
         ("Writing/BitPackPlan.cs", 0, 0, "W-11 done: the minimum is read at the element's own width"),
+        ("Vorticity.Parquet/Metadata/SchemaElement.cs", 2, 0, "a local method of the same name, not these"),
     ];
 
     /// <summary>The table's two grand totals, starting with every call it allows.</summary>
@@ -102,7 +103,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 42;
+    private const int TotalCalls = 44;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -117,7 +118,7 @@ public sealed partial class PerRowDispatchTests
     {
         Dictionary<string, int> counted = Count();
         StringBuilder report = new StringBuilder(
-            "PER-ROW DISPATCH: calls to ReadInteger/ReadUnsigned/WriteInteger in src/Vorticity\n");
+            "PER-ROW DISPATCH: calls to ReadInteger/ReadUnsigned/WriteInteger in src/Vorticity and src/Vorticity.Parquet\n");
 
         List<string> bad = [];
         int calls = 0;
@@ -179,11 +180,21 @@ public sealed partial class PerRowDispatchTests
         Assert.True(bad.Count == 0, string.Join("\n", bad) + "\n" + report);
     }
 
-    /// <summary>Every call in <c>src/Vorticity</c>, by path relative to it.</summary>
+    /// <summary>
+    /// Every call in <c>src/Vorticity</c>, by path relative to it, and in the Parquet package, which
+    /// reads and writes through the same canonical forms, by path behind the package's name.
+    /// </summary>
     private static Dictionary<string, int> Count()
     {
-        string root = Sources();
+        string core = Sources();
         Dictionary<string, int> counted = [];
+        Count(core, string.Empty, counted);
+        Count(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(core)!, "Vorticity.Parquet"), "Vorticity.Parquet/", counted);
+        return counted;
+    }
+
+    private static void Count(string root, string prefix, Dictionary<string, int> counted)
+    {
         foreach (string path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
         {
             string relative = System.IO.Path.GetRelativePath(root, path).Replace('\\', '/');
@@ -210,11 +221,9 @@ public sealed partial class PerRowDispatchTests
 
             if (calls > 0)
             {
-                counted[relative] = calls;
+                counted[prefix + relative] = calls;
             }
         }
-
-        return counted;
     }
 
     // `src/Vorticity`, found the way `Corpus` finds the corpus: by walking up from this source
