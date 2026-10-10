@@ -1486,16 +1486,33 @@ internal enum CoreReason
 /// <param name="RecordWords">The words of a record, copied whole from a lane's cache.</param>
 /// <param name="Words">The words of an entry.</param>
 /// <param name="KeyOffset">The byte of an entry its key starts at: in the record's padding when it fits there, past the record otherwise.</param>
-internal readonly record struct EntryShape(int RecordWords, int Words, int KeyOffset)
+/// <param name="HashOffset">
+/// The byte of an entry its key's hash lies at, four bytes, as a sub-table under no seed hashes it; -1 when
+/// entries carry none.
+/// </param>
+internal readonly record struct EntryShape(int RecordWords, int Words, int KeyOffset, int HashOffset = -1)
 {
-    /// <summary>The entries of records laid out as <paramref name="layout"/>, or of none, and keys of <paramref name="keyBytes"/>, a power of two.</summary>
+    /// <summary>
+    /// The entries of records laid out as <paramref name="layout"/>, or of none, and keys of <paramref name="keyBytes"/>, a power of two.
+    /// A key wider than two words carries its hash, before the key, in the record's padding when there is
+    /// room: the lane that scatters it has its words folded already, where the core folded them again,
+    /// four products for a tuple (q10).
+    /// </summary>
     internal static EntryShape Of(RecordLayout? layout, int keyBytes)
     {
         int recordWords = layout?.Stride ?? 0;
         int alignment = Math.Min(sizeof(ulong), keyBytes);
-        int keyOffset = ((layout?.Width ?? 0) + alignment - 1) & -alignment;
+        int width = layout?.Width ?? 0;
+        int hashOffset = -1;
+        if (keyBytes > 2 * sizeof(ulong))
+        {
+            hashOffset = (width + sizeof(uint) - 1) & -sizeof(uint);
+            width = hashOffset + sizeof(uint);
+        }
+
+        int keyOffset = (width + alignment - 1) & -alignment;
         int bytes = Math.Max(recordWords * sizeof(ulong), keyOffset + keyBytes);
-        return new EntryShape(recordWords, (bytes + sizeof(ulong) - 1) / sizeof(ulong), keyOffset);
+        return new EntryShape(recordWords, (bytes + sizeof(ulong) - 1) / sizeof(ulong), keyOffset, hashOffset);
     }
 }
 
@@ -2713,6 +2730,36 @@ internal static class EntryKeys
         }
 
         ref ulong first = ref MemoryMarshal.GetReference(records);
+        if (shape.HashOffset >= 0)
+        {
+            // A wide key's words folded once: its part from them, and its hash in the sub-table, which the
+            // core then reads where it folded the words again.
+            nint hashOffset = shape.HashOffset;
+            for (int g = 0; g < keys.Length; g++)
+            {
+                if (g == skip)
+                {
+                    continue;
+                }
+
+                TKey key = keys[g];
+                (ulong low, ulong high) = KeyWords.Of(key);
+                ref ulong entry = ref lane.Entry((int)(MergeHash.Of(low, high, MergeHash.Seed) >> GroupCore.PartShift));
+                ref ulong record = ref Unsafe.Add(ref first, (nint)g * stride);
+                for (int w = 0; w < stride; w++)
+                {
+                    Unsafe.Add(ref entry, w) = Unsafe.Add(ref record, w);
+                }
+
+                // The hash and the key last: they may lie in the record's padding.
+                ref byte bytes = ref Unsafe.As<ulong, byte>(ref entry);
+                Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref bytes, hashOffset), TableHash(low, high));
+                Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref bytes, keyOffset), key);
+            }
+
+            return;
+        }
+
         for (int g = 0; g < keys.Length; g++)
         {
             if (g == skip)
@@ -2759,8 +2806,15 @@ internal static class EntryKeys
             entry.Clear();
             records.Slice(g * stride, stride).CopyTo(entry);
 
-            // The key last: it may lie in the record's padding.
-            Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref Unsafe.As<ulong, byte>(ref MemoryMarshal.GetReference(entry)), keyOffset), keys[g]);
+            // The hash and the key last: they may lie in the record's padding.
+            ref byte bytes = ref Unsafe.As<ulong, byte>(ref MemoryMarshal.GetReference(entry));
+            if (shape.HashOffset >= 0)
+            {
+                (ulong low, ulong high) = KeyWords.Of(keys[g]);
+                Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref bytes, shape.HashOffset), TableHash(low, high));
+            }
+
+            Unsafe.WriteUnaligned(ref Unsafe.AddByteOffset(ref bytes, keyOffset), keys[g]);
             n++;
         }
 
@@ -2819,5 +2873,29 @@ internal static class EntryKeys
 
         ref byte first = ref Unsafe.As<ulong, byte>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(batch.Words), (nint)batch.Start));
         return Unsafe.ReadUnaligned<TKey>(ref Unsafe.AddByteOffset(ref first, ((nint)entry * shape.Words * sizeof(ulong)) + shape.KeyOffset));
+    }
+
+    /// <summary>The hash entry <paramref name="entry"/> of a batch carries (<see cref="EntryShape.HashOffset"/>), as <see cref="TableHash"/> took it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint HashAt(PartBatch batch, EntryShape shape, int entry)
+    {
+        if ((uint)entry >= (uint)batch.Count || shape.HashOffset < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(entry));
+        }
+
+        ref byte first = ref Unsafe.As<ulong, byte>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(batch.Words), (nint)batch.Start));
+        return Unsafe.ReadUnaligned<uint>(ref Unsafe.AddByteOffset(ref first, ((nint)entry * shape.Words * sizeof(ulong)) + shape.HashOffset));
+    }
+
+    /// <summary>
+    /// A key's hash in a sub-table under no seed, its words folded (<see cref="KeyWords"/>) then their
+    /// halves: what <see cref="WideKeyTable{TValue}"/> takes for any key but a short text's.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static uint TableHash(ulong low, ulong high)
+    {
+        ulong folded = low ^ high;
+        return (uint)(folded ^ (folded >> 32));
     }
 }

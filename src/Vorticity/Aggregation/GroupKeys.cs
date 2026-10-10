@@ -811,8 +811,8 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     /// <summary>The first pass of the index the groups are in (<see cref="KeyTable{TValue}.FindAtHome"/>).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead, out bool missed) =>
-        Compact ? _wide.FindAtHome(keys, groups, homes, ahead, _keys.AsSpan(0, Count), out missed) : _index.FindAtHome(keys, groups, homes, ahead, out missed);
+    private int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> homes, int ahead, out bool missed, bool given = false) =>
+        Compact ? _wide.FindAtHome(keys, groups, homes, ahead, given, _keys.AsSpan(0, Count), out missed) : _index.FindAtHome(keys, groups, homes, ahead, out missed);
 
     /// <summary>The group of <paramref name="value"/> in the index the groups are in, <paramref name="next"/> when it is new.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2152,15 +2152,22 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         int keyWords = (Unsafe.SizeOf<TValue>() + sizeof(ulong) - 1) / sizeof(ulong);
         Span<TValue> keys = MemoryMarshal.Cast<ulong, TValue>(scratch[..(count * keyWords)])[..count];
         Span<uint> homes = MemoryMarshal.Cast<ulong, uint>(scratch.Slice(count * keyWords, count))[..count];
+        bool hashed = Compact;
+        ulong seed = hashed ? _wide.Seed : 0;
+
+        // The hashes the entries carry are a sub-table's under no seed (EntryKeys.TableHash).
+        bool given = hashed && seed == 0 && shape.HashOffset >= 0;
         for (int i = 0; i < count; i++)
         {
             keys[i] = EntryKeys.KeyAt<TValue>(batch, shape, entries[i]);
+            if (given)
+            {
+                homes[i] = EntryKeys.HashAt(batch, shape, entries[i]);
+            }
         }
 
         groups = groups[..count];
-        bool hashed = Compact;
-        ulong seed = hashed ? _wide.Seed : 0;
-        _sink ^= FindAtHome(keys, groups, homes, 0, out bool missed);
+        _sink ^= FindAtHome(keys, groups, homes, 0, out bool missed, given);
         if (!missed)
         {
             return;

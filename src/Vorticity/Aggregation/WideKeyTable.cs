@@ -168,8 +168,8 @@ internal struct WideKeyTable<TValue>
 
     /// <summary>
     /// <see cref="GetOrAdd(TValue, int, ReadOnlySpan{TValue})"/> of a key whose <paramref name="hash"/>
-    /// <see cref="FindAtHome"/> took under the table's <see cref="Seed"/>: a wide key hashed once where a
-    /// new one was hashed three times, its home looked at, then its slot, then its line (q10's tuples).
+    /// the home pass took under the table's <see cref="Seed"/>: a wide key hashed once where a new one was
+    /// hashed three times, its home looked at, then its slot, then its line (q10's tuples).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int GetOrAdd(TValue key, uint hash, int next, ReadOnlySpan<TValue> keys)
@@ -208,14 +208,22 @@ internal struct WideKeyTable<TValue>
     /// <param name="ahead">How many rows on a slot is read before its row compares; 0 for none.</param>
     /// <param name="held">The keys of the groups.</param>
     /// <param name="missed">Whether a key found no group: the rows left to the lookup, none when false.</param>
-    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> hashes, int ahead, ReadOnlySpan<TValue> held, out bool missed)
+    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> hashes, int ahead, ReadOnlySpan<TValue> held, out bool missed) =>
+        FindAtHome(keys, groups, hashes, ahead, given: false, held, out missed);
+
+    /// <summary>
+    /// <see cref="FindAtHome(ReadOnlySpan{TValue}, Span{int}, Span{uint}, int, ReadOnlySpan{TValue}, out bool)"/>,
+    /// the keys' hashes under the table's seed already in <paramref name="hashes"/> when
+    /// <paramref name="given"/>: the hashes a core's entries carry, read where the words were folded again.
+    /// </summary>
+    internal readonly int FindAtHome(ReadOnlySpan<TValue> keys, Span<int> groups, Span<uint> hashes, int ahead, bool given, ReadOnlySpan<TValue> held, out bool missed)
     {
         Span<Slot> slots = Slots;
         if (slots.Length == 0 || held.IsEmpty)
         {
             groups[..keys.Length].Fill(-1);
             missed = keys.Length > 0;
-            if (hashes.Length >= keys.Length)
+            if (!given && hashes.Length >= keys.Length)
             {
                 for (int i = 0; i < keys.Length; i++)
                 {
@@ -244,10 +252,18 @@ internal struct WideKeyTable<TValue>
             bool keep = hashes.Length >= keys.Length;
             for (int i = 0; i < keys.Length; i++)
             {
-                uint hash = HashOf(keys[i], seed, prepared);
-                if (keep)
+                uint hash;
+                if (given)
                 {
-                    hashes[i] = hash;
+                    hash = hashes[i];
+                }
+                else
+                {
+                    hash = HashOf(keys[i], seed, prepared);
+                    if (keep)
+                    {
+                        hashes[i] = hash;
+                    }
                 }
 
                 ref Slot home = ref Unsafe.Add(ref first, (nint)KeyTable<TValue>.SlotOf(hash, length, multiplier));
@@ -268,9 +284,12 @@ internal struct WideKeyTable<TValue>
         }
 
         hashes = hashes[..keys.Length];
-        for (int i = 0; i < keys.Length; i++)
+        if (!given)
         {
-            hashes[i] = HashOf(keys[i], seed, prepared);
+            for (int i = 0; i < keys.Length; i++)
+            {
+                hashes[i] = HashOf(keys[i], seed, prepared);
+            }
         }
 
         int sink = 0;
