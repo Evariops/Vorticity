@@ -1,6 +1,6 @@
 # Errors
 
-The exceptions this library throws, what each one means, and which are your fault.
+The exceptions this library throws, what each one means, and which ones are your fault.
 
 ```csharp
 await Show("512 zero bytes", async () =>
@@ -25,8 +25,8 @@ a record member the file has no column for -> VortexSchemaException: Member 'Per
 a key cursor over a column nothing orders -> VortexUnsupportedException (Index, vorticity.sorted.runs.v1): Unsupported Vortex component: index 'vorticity.sorted.runs.v1'. 'Celsius' has no key source (SortedColumn: the file statistics say the column is not sorted; SortedRuns: the file carries no index directory; …). A cursor over an unindexed column would have to hold the column to sort it, which this library refuses. Write the file with IndexPolicy.SortedRuns for that column, …
 ```
 
-`Show` runs the call and prints the exception's type and message; the sample runs sixteen cases
-this way.
+`Show` runs the call and prints the exception's type and message. The sample runs sixteen cases this
+way.
 
 ## The hierarchy
 
@@ -34,31 +34,45 @@ Every exception the library throws on purpose derives from `VortexException`:
 
 | | means | whose fault |
 |---|---|---|
-| `VortexFormatException` | the bytes are not what they claim to be, or a limit says no | the file's, or yours for pointing at the wrong bytes; never worth retrying |
-| `VortexUnsupportedException` | the input is well formed and asks for something this build does not do | nobody's: a newer library, another edition, or an index the file lacks |
+| `VortexFormatException` | the bytes are not what they claim to be, or a limit says no | the file's, or yours for pointing at the wrong bytes. Never worth retrying |
+| `VortexUnsupportedException` | the input is well formed but asks for something this build does not do | nobody's: it needs a newer library, another edition, or an index the file lacks |
 | `VortexSchemaException` | a record, a builder, a column request or a literal does not fit the schema | yours, and the message says what to change |
+| `VortexMemoryException` | a query needs more memory than its `QueryMemoryBudget` grants and nothing it holds can spill, or more scratch than its `ScratchBudget` or the disk allows | the workload's: raise the budget, lower the degree, or narrow the query |
 
-What stays outside it is plain .NET: an argument out of range is an `ArgumentException`, misuse is
-an `InvalidOperationException`, a missing file is a `FileNotFoundException`. The object store of
-[object-store.md](object-store.md) adds two of its own, `ObjectStoreException` and
-`ObjectNotFoundException`, both `VortexException`s too.
+A `VortexMemoryException` names the operator, its groups and the bytes it asked for, and the query
+has already given back everything it held, scratch files included ([threads.md](threads.md)
+covers the budgets). A writer whose policy requires an index that could not be built throws a plain
+`VortexException` naming the index and the reason, before the file is completed
+([indexes.md](indexes.md)).
+
+Everything else is plain .NET. An argument out of range is an `ArgumentException`, misuse is an
+`InvalidOperationException` and a missing file is a `FileNotFoundException`.
+
+`Vorticity.Dataset` adds four exceptions of its own, all derived from `VortexException`:
+
+| | means |
+|---|---|
+| `ObjectStoreException` | the object store refused or failed a request ([object-store.md](object-store.md)) |
+| `ObjectNotFoundException` | a key is not in the store, often because a handle outlived the retention window and should refresh |
+| `TornCommitException` | a writer died mid-commit on `FileObjectStore`, and `VortexDataset.RemoveTornCommitAsync` clears it ([dataset-maintenance.md](dataset-maintenance.md)) |
+| `DatasetIntegrityException` | a safety check found that a change would lose rows, double them or break their order, so nothing was committed. Running the same change again will hit it again |
 
 ## `VortexFormatException`
 
-A file that does not parse: bad offsets, a truncation, a field out of range, a nesting deeper than
-a cap allows, a block that would decode to more than `MaxDecompressedSize`. It is the half of the
-promise about hostile input that says a malformed file produces this exception, or
-`VortexUnsupportedException`, and never an out-of-bounds read, an unbounded allocation or a hang.
+This is a file that does not parse: bad offsets, a truncation, a field out of range, nesting deeper
+than a cap allows, or a block that would decode to more than `MaxDecompressedSize`. It is half of
+the library's promise about hostile input: a malformed file produces this exception or a
+`VortexUnsupportedException`, never an out-of-bounds read, an unbounded allocation or a hang.
 [limits.md](limits.md) lists the caps and shows a thousand damaged files producing nothing else.
 
-A torn append is one too, when you ask for it: by default an open falls back to the last whole
-version of the file, and `VortexTornTailPolicy.Refuse` makes it throw instead. See
+A torn append raises it too, if you ask. By default an open falls back to the last whole version of
+the file, and `VortexTornTailPolicy.Refuse` makes it throw instead. See
 [append-and-repair.md](append-and-repair.md).
 
 ## `VortexUnsupportedException`
 
-The file, or the request, needs a component this build does not implement. The exception names
-it, in two parts that together say which edition introduced it:
+The file, or the request, needs a component this build does not implement. The exception names it
+in two parts, which together tell you which edition introduced it:
 
 ```csharp
 catch (VortexUnsupportedException e)
@@ -72,14 +86,15 @@ a uuid column written to an edition older than uuid -> VortexUnsupportedExceptio
 ```
 
 `Kind` is a `ComponentKind`: `Array` or `Layout` for an encoding, `DType` for a column type,
-`Aggregate` for a zone-map statistic, `Compression` or `Encryption` for a segment scheme, `Index`
-for an index kind or an index a request needs, and `Feature` for something the library does not
-offer on this input, such as an append over a layout it cannot resume. `ComponentId` is the id as
-the file spells it. `VortexEditions.IntroducedIn(kind, id)` answers the edition question in code;
-[editions.md](editions.md) says how to write for older readers.
+`Aggregate` for a zone-map statistic, `Compression` or `Encryption` for a segment scheme, `Index` for
+an index kind or an index a request needs, and `Feature` for something the library does not offer on
+this input, such as an append over a layout it cannot resume. `ComponentId` is the id as the file
+spells it. `VortexEditions.IntroducedIn(kind, id)` answers the edition question in code, and
+[editions.md](editions.md) explains how to write for older readers.
 
-An unknown encoding does not stop a file from opening: the refusal comes from the first block that
-needs it, so a scan that does not read that column succeeds. [limits.md](limits.md) shows one.
+An unknown encoding does not stop a file from opening. The refusal comes from the first block that
+needs it, so a scan that does not read that column still succeeds. [limits.md](limits.md) shows an
+example.
 
 ## `VortexSchemaException`
 
@@ -93,11 +108,11 @@ a column the file does not have, by name -> VortexSchemaException: The file has 
 a nullable builder over a non-nullable column -> VortexSchemaException: Column 'Day' is i32, which is not nullable; ask for a builder of int instead of int?.
 ```
 
-On the typed path most of these cannot be written at all: a literal of the wrong type does not
+On the typed path most of these cannot even be written: a literal of the wrong type does not
 compile, and a record binds once, at the first sink of a scan. On the tool path, where names and
-literals are data, the check happens when `Where` is called or the column is asked for, before
-anything is read. [records.md](records.md#binding-a-record-to-a-file) says how members find their
-columns.
+literals are data, the check happens when `Where` is called or the column is requested, before
+anything is read. [records.md](records.md#binding-a-record-to-a-file) explains how members find
+their columns.
 
 ## The .NET ones
 
@@ -112,26 +127,27 @@ a session disposed while one of its files is open -> InvalidOperationException: 
 
 | | when |
 |---|---|
-| `FormatException` | a filter string for the tool path, `VortexExpr.Parse`, that does not parse |
-| `FileNotFoundException`, `IOException` | no file at the path, or one the operating system will not open |
-| `ArgumentOutOfRangeException` | a row index below zero or past the last row; a negative option |
+| `FormatException` | a filter string for the tool path (`VortexExpr.Parse`) does not parse |
+| `FileNotFoundException`, `IOException` | there is no file at the path, or the operating system will not open it |
+| `ArgumentOutOfRangeException` | a row index below zero or past the last row, or a negative option |
 | `InvalidOperationException` | a scan run twice, `Rows` by range and by indices on one scan, a key cursor on a filtered scan, a session disposed before its files, an option set after `VortexSession.Create` returned |
-| `ObjectDisposedException` | an owned batch used after `Dispose`, a disposed file asked for what it no longer holds |
-| `OperationCanceledException` | a token you passed was cancelled: see [cancel-work.md](cancel-work.md) |
+| `ObjectDisposedException` | an owned batch used after `Dispose`, or a disposed file asked for something it no longer holds |
+| `OperationCanceledException` | a token you passed was cancelled (see [cancel-work.md](cancel-work.md)) |
 
 ## Watch out
 
-* **A row range past the end is clamped, a row index past the end throws.**
+* A row range past the end is clamped, but a row index past the end throws.
   `Rows(new RowRange(0, rows + 10))` counts 1 000 000 rows on the demonstration file, without an
   exception.
-* **A disposed `VortexFile` answers what its open captured and refuses the rest.** `RowCount`,
-  `Schema` and `Statistics` go on answering; `Identity` and `SegmentMap` throw
-  `ObjectDisposedException`, because they read the tail buffer the file returned to the pool.
-  `Scan<T>()` still builds a scan, which throws `ObjectDisposedException` at its first read.
-  Treat a disposed file as gone.
-* **Each scan is single-use.** Build a new one per question; building one costs nothing that is
-  worth caching.
-* VX1003 and VX1004 catch some of these at compile time: see [diagnostics.md](diagnostics.md).
+* A disposed `VortexFile` still answers what its open captured and refuses the rest. `RowCount`,
+  `Schema` and `Statistics` keep answering, while `Identity` and `SegmentMap` throw
+  `ObjectDisposedException` because they read the tail buffer the file returned to the pool.
+  `Scan<T>()` still builds a scan, which throws `ObjectDisposedException` at its first read. Treat a
+  disposed file as gone.
+* Each scan is single-use. Build a new one per question, since building one costs nothing worth
+  caching.
+* The analyzers VX1003 and VX1004 catch some of these at compile time (see
+  [diagnostics.md](diagnostics.md)).
 
 ## Run it
 

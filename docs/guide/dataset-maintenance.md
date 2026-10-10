@@ -1,6 +1,6 @@
 # Dataset maintenance
 
-Compact, vacuum and verify a dataset, and what each costs in requests.
+Compact, vacuum and verify a dataset, and see what each operation costs in store requests.
 
 ```csharp
 await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
@@ -28,21 +28,22 @@ plan: work True, style Leveled, clustered True, lag 2, objects by level [10], by
   cost: 0 requests (0 get, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 
-Appending is cheap and leaves a dataset in poor shape: many small objects, and every old version
-still holding its own. The three operations here put it back in order. None of them runs by
-itself: they are the caller's background job, and the dataset only reports how far behind it is.
-Like everything in `Vorticity.Dataset`, they are experimental: see [datasets.md](datasets.md).
+Appending is cheap, but it leaves a dataset in poor shape: many small objects, and every old version
+still holding on to its own. The three operations on this page put it back in order. None of them
+runs by itself. They are the caller's background job, and the dataset only reports how far behind
+it is. Like everything in `Vorticity.Dataset`, they are experimental (see [datasets.md](datasets.md)).
 
 ## Compaction
 
-Level 0 is where appends land, and it holds eight objects before compaction has work to do. `Lag`
-is how far past that ceiling it is: here ten objects, a lag of 2, and every lookup by key touches
-the two extra objects until compaction catches up. Ask before doing: `PlanCompactionAsync` reads
-the top page of each level, which the version's header carries or the handle already holds, and
-descends from it only to the objects a job would take: no request at all here, and two over 125 000
-objects. `HasWork`
-is the question; `Job` is the one job it would run: the levels it moves between, what triggered
-it, the objects, rows and bytes it would read, and the size of the objects it would write.
+Appends land in level 0, which can hold eight objects before compaction has work to do. `Lag` is how
+far past that ceiling it is. Here ten objects give a lag of 2, and every lookup by key touches the
+two extra objects until compaction catches up.
+
+You can ask before doing anything. `PlanCompactionAsync` reads the top page of each level, which the
+version's header carries or the handle already holds, and only descends to the objects a job would
+take. Here that costs no request at all, and two requests over 125 000 objects. `HasWork` answers
+the question, and `Job` describes the one job it would run: the levels it moves between, what
+triggered it, the objects, rows and bytes it would read, and the size of the objects it would write.
 
 ```csharp
 CompactionResult? compacted = await dataset.CompactAsync();
@@ -54,42 +55,39 @@ compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 by
 now: 1 objects, lag 0; again: nothing to do
 ```
 
-**Ten objects became one, and 128 862 bytes became 79 036**: the same 50 000 rows in two thirds of
-the space, because a column encoder does more with 50 000 rows than with 5 000 at a time. Small
-appends cost size, and compaction is what gets it back.
+Ten objects became one, and 128 862 bytes became 79 036. The same 50 000 rows take a third less
+space, because the column encoders do more with 50 000 rows at once than with 5 000. Small appends
+cost size, and compaction wins it back.
 
-`CompactAsync` runs one job and returns `null` when none is due, so a caller that wants the
-dataset back within its bounds loops until it does, rather than having one call rewrite
-gigabytes. With a clustering key the style is `Leveled`: the levels above 0 hold key-disjoint
-objects, so a lookup by key touches at most one object per level. Without one it is `Tiered`,
-which rewrites each row less often and bounds lookups less. `CompactionOptions` moves the level 0
-ceiling, the fan-out between levels, the size of a level 1 object and the cap on an output object.
-`Outcome` says whether the commit applied, or found that a concurrent writer had already done it.
+`CompactAsync` runs one job and returns `null` when none is due. A caller that wants the dataset
+back within its bounds calls it in a loop, so no single call rewrites gigabytes. With a clustering
+key the style is `Leveled`: the levels above 0 hold objects with disjoint keys, so a lookup by key
+touches at most one object per level. Without a key it is `Tiered`, which rewrites each row less
+often but bounds lookups less. `CompactionOptions` sets the level 0 ceiling, the fan-out between
+levels, the size of a level 1 object and the cap on an output object. `Outcome` says whether the
+commit applied, or whether a concurrent writer had already done the work.
 
-Level 0 goes to the first level that holds it: the ten appends here, 126 KiB, fit level 1, which
-holds ten objects of 128 KiB; a load of gigabytes goes past the levels it would only overflow and
-is written once. A dataset that takes many small commits then pays for each a merge into a level a
-few times its size, never one into the levels that hold the bulk of its rows. An output object is
-at most `MaxObjectBytes`, 4 MiB by default.
+Level 0 goes to the first level large enough to hold it. The ten appends here, 126 KiB, fit in level
+1, which holds ten objects of 128 KiB, while a load of gigabytes skips the levels it would only
+overflow and is written once. A dataset that takes many small commits therefore pays for each one a
+merge into a level a few times its size, never a merge into the levels that hold most of its rows.
+An output object is at most `MaxObjectBytes`, 4 MiB by default.
 
-A level above 0 over its size gives up one object, merged into the level above with the objects
-there its keys meet: by default the largest, the one holding the level over its size the most.
-`CompactionOptions.Pick = CompactionPick.RoundRobin` takes instead the object past the one the
-level's last job took, and the first past the end, so that the rewrites go over every key in turn,
-as LevelDB does; each level of a header records where its last job stopped. On ten million rows
-and 30 000 small commits it wrote 6 % more than the largest first, which is why a leveled dataset
-does not default to it. A tiered dataset does: its job concatenates a run of one level's objects
-that nothing else sits between, and the run past the pointer is found by descending the trees, one
-page over 100 000 objects, where the longest run is found only by reading every leaf, 71 pages. A
-dataset ordered by arrival keeps each level's objects together, and the two take the same runs.
+When a level above 0 grows past its size, it gives up one object, which is merged into the next
+level with the objects there whose keys it overlaps. By default it picks the largest object, the one
+that pushes the level furthest over its size. `CompactionOptions.Pick = CompactionPick.RoundRobin`
+takes instead the object after the one the level's previous job took, wrapping around at the end,
+so that rewrites sweep every key in turn as LevelDB does. On ten million rows and 30 000 small
+commits it wrote 6 % more than the largest-first default, which is why leveled datasets do not use
+it. Tiered datasets do, because their job concatenates a run of one level's objects, and finding the
+run after the pointer costs a page where finding the longest run means reading every leaf.
 
-Compaction writes the live rows only: the rows a delete marked in an input object end with it, and
-its outputs carry no marks. An object whose marks reach half a delete's bounds, a sixteenth of its
-rows or half a kilobyte of positions, is rewritten alone in its level by a job whose `Trigger` is
-`Marks`: after the bounds of the levels and before the fragments, the most marked object first. A
-compaction that read an object before a delete marked rows in it
-finds the object's entry changed at its commit, and is `Abandoned` rather than bringing those rows
-back.
+Compaction writes only the live rows. Rows a delete marked in an input object disappear with it, and
+the outputs carry no marks. An object whose marks reach half a delete's limits (a sixteenth of its
+rows or half a kilobyte of positions) is rewritten alone in its level by a job whose `Trigger` is
+`Marks`. Those jobs come after the level limits and before the fragments, the most marked object
+first. A compaction that read an object before a delete marked rows in it finds the object's entry
+changed when it commits, and ends `Abandoned` rather than bringing those rows back.
 
 ## Verify
 
@@ -104,16 +102,16 @@ verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 hea
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
-references promise, and names every problem instead of throwing: `Problems` is a list of
-sentences, empty when `Holds` is true. An object is hashed against the hash its entry records;
-`Unhashed` counts the imported objects whose entry records none, whose length is checked instead.
-`since` skips what an earlier, trusted version shares with this one: after one more append, it
-read 28 830 bytes where a full verification read 146 049.
+references promise, and reports every problem instead of throwing. `Problems` is a list of
+sentences, empty when `Holds` is true. Each object is hashed and compared with the hash its entry
+records. `Unhashed` counts the imported objects whose entry records no hash, and for those only the
+length is checked. `since` skips what an earlier, trusted version shares with this one: after one
+more append it read 28 178 bytes, where a full verification read 145 609.
 
 ## Vacuum
 
-Old versions keep their objects readable. Vacuum deletes what no version inside the retention
-window references:
+Old versions keep their objects readable. Vacuum deletes what no version inside the retention window
+still references:
 
 ```csharp
 VacuumResult today = await dataset.VacuumAsync(new VacuumOptions { DryRun = true });
@@ -130,26 +128,28 @@ vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 3
 and the data: 55000 rows, 2 objects
 ```
 
-Today nothing goes: every version is younger than the window, seven days unless
-`DatasetOptions.RetentionWindow` said otherwise when the dataset was created, and
+Today nothing goes, because every version is younger than the window. The window is seven days
+unless `DatasetOptions.RetentionWindow` set another when the dataset was created, and
 `RetainedVersions` keeps a number of versions whatever their age. Eight days later only the latest
-version is kept, and 21 objects go: the ten data objects compaction replaced, and eleven of the
-twelve superseded commit objects, the twelfth still holding pages the latest version reads. `VacuumOptions.TimeProvider` is the clock vacuum measures ages against, which is
-how the sample crosses the window and how you test your own retention; it must agree with the
-store's clock, because the ages it compares are the store's timestamps. The deletes go out in
-batches, two requests for twenty-one keys here. The fourth listing is of the leases a compaction
-loop may have left (below); each lease's key says when it ended, so none costs a head request.
+version is kept and 21 objects go: the ten data objects compaction replaced, and eleven of the
+twelve superseded commit objects. The twelfth still holds pages the latest version reads.
 
-**Run a dry run first.** `Deleted` lists what would go, commit objects first, `Young` the
+`VacuumOptions.TimeProvider` is the clock vacuum measures ages against. That is how the sample
+jumps past the window, and how you can test your own retention. It must agree with the store's
+clock, since the ages it compares are the store's timestamps. Deletes go out in batches, two
+requests for twenty-one keys here. The fourth listing covers the leases a compaction loop may have
+left behind (see below), and since each lease's key says when it ended, none needs a head request.
+
+Run a dry run first. `Deleted` lists what would go, commit objects first. `Young` lists the
 unreferenced objects kept because they may belong to a writer still in flight, and `Retained` the
 versions kept. On a store under a retention lock, `Locked` lists what is past the window but still
-under the store's lock or a legal hold, and `NextUnlock` says when the first of it may go: the next
-vacuum after that date takes it.
+under the store's lock or a legal hold, and `NextUnlock` says when the first of it may go, so the
+next vacuum after that date takes it.
 
 ## In the background
 
-A loop that compacts until it is cancelled, which any host runs: a hosted service, a worker, a
-console. The library starts no thread of its own.
+The library starts no thread of its own. Compaction in the background is a loop that runs until it
+is cancelled, hosted wherever you like: a hosted service, a worker, a console.
 
 ```csharp
 using CancellationTokenSource stop = new CancellationTokenSource();
@@ -163,31 +163,31 @@ Task loop = dataset.RunCompactionAsync(
 stopped: 1 compactions, 2 objects, lag 0
 ```
 
-Each turn refreshes the handle, one head request, plans, and runs the job due for it; when nothing
-is due it sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces it: after a
-job it waits until what the job wrote fits the rate, so that compaction leaves the store's bandwidth
-to the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
-the exception a job raised, which a host catches before running the loop again.
+Each turn refreshes the handle (one head request), plans, and runs the job that is due. When nothing
+is due it sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
+after a job it waits until what the job wrote fits the rate, which leaves the store's bandwidth to
+the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
+the exception a job raised, which the host catches before starting the loop again.
 
-A job is the one `CompactAsync` runs, so a loop is safe against every writer and every other loop;
-what several loops on one dataset can waste is a job two of them run, which a commit then abandons.
-Loops that know one another say so with `Loops` and `Loop`: each takes the due job ranked at its
-index, and no two ranked jobs read or write one level. Loops that cannot count one another set
-`Leases`: before a job a loop creates `leases/<level>/<end>` for each of its levels by
-put-if-absent, holds them until the end of the current `LeaseSpan`, a minute by default, and moves
-to the next job when another loop holds one. The loop remembers the leases it created, so it runs
-the next job on its levels within the same span without asking the store again; a loop that leased
-some of a job's levels before finding another holding the rest keeps those for the span all the
-same. Nothing releases a lease, so a store that refuses deletes still works; vacuum deletes the
+A loop runs the same jobs as `CompactAsync`, so it is safe against every writer and every other
+loop. What several loops on one dataset can waste is a job that two of them run at once, which one
+commit then abandons. Loops that know about one another say so with `Loops` and `Loop`: each takes
+the due job ranked at its index, and no two ranked jobs read or write the same level. Loops that
+cannot coordinate set `Leases` instead. Before a job, a loop creates `leases/<level>/<end>` for each
+of its levels with put-if-absent, holds them until the end of the current `LeaseSpan` (a minute by
+default), and moves to the next job when another loop holds one. A loop remembers the leases it
+created, so it can run the next job on the same levels within the span without asking the store
+again. Nothing releases a lease, so a store that refuses deletes still works, and vacuum deletes the
 leases that ended a window ago.
 
 ## In the writer's commit
 
-A dataset with one writer and no process to spare can have the writer hold level 0 itself:
-`DatasetOptions.InlineCompactionBytes` makes a commit that takes level 0 past its ceiling merge it
-into the level above before it returns, when the job reads no more than that many bytes. The merge's
-latency lands in that one commit, and a larger job is left to another driver. The commit stands
-whatever befalls the merge, which, failed or cancelled, leaves level 0 for the next commit.
+A dataset with a single writer and no spare process can let the writer keep level 0 in check.
+`DatasetOptions.InlineCompactionBytes` makes a commit that pushes level 0 past its ceiling merge it
+into the next level before returning, as long as the job reads no more than that many bytes. The
+merge's latency lands on that one commit, and larger jobs are left to another driver. The commit
+stands whatever happens to the merge, and a failed or cancelled merge leaves level 0 to the next
+commit.
 
 ## What each costs
 
@@ -201,25 +201,25 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | `VerifyAsync(since)` | 12 | what the earlier version does not share |
 | `VacuumAsync` | 29 to 31 | a listing, a head per commit object, the retained trees, the leases' listing, the deletes in batches |
 
-`DependentSteps` is the number that decides latency: the round trips that waited for the one
-before. On a store where a request costs 30 ms, it is what a job takes. See
+`DependentSteps` is the number that sets latency: the round trips that had to wait for the previous
+one. On a store where a request costs 30 ms, it is what a job takes. See
 [object-store.md](object-store.md).
 
 ## Watch out
 
-* **Compaction and vacuum are separate.** Compaction leaves the replaced objects in place for the
-  versions that still name them; vacuum removes them once those versions are past the window.
-* **A reader that outlives the window loses its objects.** Vacuum marks from the store's latest
-  version, not from yours: a handle still on an old version then finds an object missing, and
-  `ObjectNotFoundException` says to refresh.
-* Compaction commits like any writer, so a concurrent writer can win the race; look at `Outcome`.
-  Vacuum deletes only what no retained version references, and deletes nothing until every
-  retained version is marked.
-* **A writer that dies mid-commit on `FileObjectStore` leaves a commit that is not whole.** Every
-  open and every commit then throws `TornCommitException`, which names the version;
+* Compaction and vacuum are separate. Compaction leaves the replaced objects in place for the
+  versions that still name them, and vacuum removes them once those versions are past the window.
+* A reader that outlives the window loses its objects. Vacuum works from the store's latest version,
+  not from yours, so a handle still on an old version may find an object missing.
+  `ObjectNotFoundException` then tells it to refresh.
+* Compaction commits like any writer, so a concurrent writer can win the race. Check `Outcome`.
+  Vacuum deletes only what no retained version references, and deletes nothing until every retained
+  version has been walked.
+* A writer that dies mid-commit on `FileObjectStore` leaves an incomplete commit. Every open and
+  every commit then throws `TornCommitException`, which names the version.
   `VortexDataset.RemoveTornCommitAsync(store)` removes it once no writer holds it, and the dataset
   reads as the version before.
-* Nothing here changes the data: after all three, the same rows read back.
+* None of this changes the data. After all three operations, the same rows read back.
 
 ## Run it
 

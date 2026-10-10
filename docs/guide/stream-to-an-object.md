@@ -1,7 +1,7 @@
 # Stream to an object
 
-Write a file to anything that takes bytes (an upload, a socket, a stream) through a `PipeWriter`,
-and let a slow destination slow the producer down.
+Write a file to anything that accepts bytes, such as an upload, a socket or a stream, through a
+`PipeWriter`, and let a slow destination slow the producer down.
 
 ```csharp
 Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 256 << 10, resumeWriterThreshold: 128 << 10));
@@ -25,59 +25,62 @@ await using (VortexFileWriter writer = session.CreateWriter(pipe.Writer, Reading
 }
 ```
 
-`UploadAsync` stands in for a multipart upload: it reads the pipe, takes 64 KiB at a time as a part,
+`UploadAsync` stands in for a multipart upload. It reads the pipe, takes 64 KiB at a time as a part,
 and spends 2 ms on each. `Reading.Schema` is the record's schema, and `WriteAsync<Reading>` binds the
 record to it as it would to a file.
 
 ```
-through a Pipe: 1603156 bytes in 25 parts of up to 65536 bytes; 61 flushes waited 47 ms for the upload in all
+through a Pipe: 1603260 bytes in 25 parts of up to 65536 bytes; 61 flushes waited 49 ms for the upload in all
 read back from the uploaded bytes: 1000000 rows, mean 30.0000
-through PipeWriter.Create(stream): 1508212 bytes, 1000000 rows
+through PipeWriter.Create(stream): 1508316 bytes, 1000000 rows
 ```
 
 ## What happens
 
-* **The writer writes into the pipe's buffers and flushes only when asked.** `WriteAsync` encodes
-  chunks into the `PipeWriter` without flushing it; `FlushAsync` calls the pipe's own `FlushAsync`,
-  which returns once the reader has taken enough bytes to bring the pipe under its pause threshold.
-  A slow destination therefore slows the producer instead of growing a buffer: here 61 flushes
-  waited 47 ms in all, about what the 25 parts took to upload.
-* **`CompleteAsync` completes the pipe** once the footer is in it, which is how the reader knows the
-  file is whole. Do not complete it yourself.
-* **Any `PipeWriter` will do.** `PipeWriter.Create(stream)` covers a `Stream`, a `FileStream` or a
-  `MemoryStream`, and the bytes are the same file as one written to a path. An object store's own
-  pipe gets the same backpressure, and a multipart upload is a pipe that sends a part per threshold;
-  nothing in the writer knows.
+The writer writes into the pipe's buffers and only flushes when asked. `WriteAsync` encodes chunks
+into the `PipeWriter` without flushing it, and `FlushAsync` calls the pipe's own `FlushAsync`, which
+returns once the reader has taken enough bytes to bring the pipe back under its pause threshold. A
+slow destination therefore slows the producer instead of growing a buffer: here the 61 flushes
+waited 49 ms in total, about what the 25 parts took to upload.
+
+`CompleteAsync` completes the pipe once the footer is in it, which is how the reader knows the file
+is whole. Do not complete the pipe yourself.
+
+Any `PipeWriter` will do. `PipeWriter.Create(stream)` covers a `Stream`, a `FileStream` or a
+`MemoryStream`, and the bytes form the same file as one written to a path. An object store's own pipe
+gets the same backpressure, and a multipart upload is just a pipe that sends a part each time it
+fills. Nothing in the writer needs to know.
 
 ## Giving up
 
-A writer abandoned, or disposed without `CompleteAsync`, has no file to delete. It completes the
-pipe with an error instead, so that whatever it feeds knows the bytes are not a file:
+A writer that is abandoned, or disposed without `CompleteAsync`, has no file to delete. It completes
+the pipe with an error instead, so that whatever the pipe feeds knows the bytes are not a file:
 
 ```
 a writer disposed without CompleteAsync: the upload sees OperationCanceledException: The Vortex file was abandoned; the bytes written so far are not a file.
 ```
 
-The consumer's `ReadAsync` throws that exception. An upload should abort there, and never publish
-what it received.
+The consumer's `ReadAsync` throws that exception. An upload should abort at that point and never
+publish what it received.
 
 ## What it costs
 
-The file through the pipe is 5 % larger than through `PipeWriter.Create(stream)` with one write:
-flushing every 256 KiB seals smaller chunks, and each chunk carries its own framing and encoding
-choices ([blocks-and-chunks.md](blocks-and-chunks.md)). Flush at the size your destination wants,
-not more often.
+The file written through the pipe is about 6 % larger than the one written through
+`PipeWriter.Create(stream)` in a single write. Flushing every 256 KiB seals smaller chunks, and each
+chunk carries its own framing and encoding choices ([blocks-and-chunks.md](blocks-and-chunks.md)).
+Flush at the size your destination wants, and no more often.
 
 ## Watch out
 
-* **Bytes pile up in the pipe until you flush.** A pause threshold applies at a flush and nowhere
-  else, so a producer that feeds the builder and never calls `FlushAsync` buffers the whole file in
-  the pipe. `UnflushedBytes` says how much is waiting. `WriteAsync` over an `IAsyncEnumerable`
-  flushes by itself once 8 MiB are waiting ([write-rows.md](write-rows.md)).
-* **The sink is written once, front to back.** Nothing is sought or rewritten, which is what lets a
-  socket or an upload be the destination. Appending needs a path ([append-and-repair.md](append-and-repair.md)).
-* Reading the uploaded file back from memory is `session.OpenAsync(new MemorySegmentSource(bytes))`;
-  from an object store, through your own `ISegmentSource` ([object-store.md](object-store.md)).
+* Bytes pile up in the pipe until you flush. A pause threshold only applies at a flush, so a producer
+  that feeds the builder and never calls `FlushAsync` buffers the whole file in the pipe.
+  `UnflushedBytes` says how much is waiting. `WriteAsync` over an `IAsyncEnumerable` flushes on its
+  own once 8 MiB are waiting ([write-rows.md](write-rows.md)).
+* The sink is written once, front to back. Nothing is sought or rewritten, which is what lets a socket
+  or an upload be the destination. Appending, on the other hand, needs a path
+  ([append-and-repair.md](append-and-repair.md)).
+* To read the uploaded file back from memory, use `session.OpenAsync(new MemorySegmentSource(bytes))`.
+  From an object store, use your own `ISegmentSource` ([object-store.md](object-store.md)).
 
 ## Run it
 

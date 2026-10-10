@@ -32,86 +32,85 @@ await using (VortexFileWriter writer = session.CreateWriter<Reading>(path))
 
 `Reading` is `[VortexRecord] public partial record struct Reading(int Day, double? Celsius, string City)`.
 The record's schema becomes the file's, and the generator gives the builder one property per member:
-`b.Day` is a `ColumnBuilder<int>`, `b.Celsius` a `ColumnBuilder<double?>`, `b.City` a
-`ColumnBuilder<string>`. `cities` holds the city names as UTF-8 byte arrays, and `Temperatures` fills
-a block of values and clears one bit in fifty in `validity`. [records.md](records.md) says what a
-record may hold.
+`b.Day` is a `ColumnBuilder<int>`, `b.Celsius` a `ColumnBuilder<double?>`, and `b.City` a
+`ColumnBuilder<string>`. `cities` holds the city names as UTF-8 byte arrays, and `Temperatures` fills a
+block of values and clears one bit in fifty in `validity`. [records.md](records.md) lists what a
+record can hold.
 
 ## What happens
 
-* `CreateWriter<Reading>` creates the file, replacing whatever was at the path, and binds the record.
-  `Builder<Reading>()` returns the writer's one builder, whose buffers come from the session's pool.
-  Every call returns the same builder.
-* `GetSpan(count)` is the `IBufferWriter` pattern. It hands you exactly `count` slots of the buffer
-  the encoder will read; you fill them and `Advance` commits them. A primitive column is encoded
-  from those bytes where they lie, without a copy.
-* `Append(values, validity)` takes a block of values and its bitmap in one call: bit `i % 64` of
-  word `i / 64` belongs to value `i`, and a set bit means the value is present. A bitmap with every
-  bit set allocates nothing. [write-nulls.md](write-nulls.md) covers the other null appends.
+* `CreateWriter<Reading>` starts the file and binds the record. The file replaces whatever is at the
+  path once it is complete. `Builder<Reading>()` returns the writer's single builder, whose buffers
+  come from the session's pool, and every call returns the same builder.
+* `GetSpan(count)` follows the `IBufferWriter` pattern. It hands you exactly `count` slots of the
+  buffer the encoder will read, you fill them, and `Advance` commits them. A primitive column is
+  encoded from those bytes where they lie, without a copy.
+* `Append(values, validity)` takes a block of values and its bitmap in one call. Bit `i % 64` of word
+  `i / 64` belongs to value `i`, and a set bit means the value is present. A bitmap with every bit set
+  allocates nothing. [write-nulls.md](write-nulls.md) covers the other ways to append nulls.
 * `Append` on a text column takes UTF-8 bytes and does not transcode them.
   [write-text.md](write-text.md) covers strings, formatted values and long values.
-* `WriteAsync(b)` takes the builder's rows and clears it for the next block, keeping its buffers.
-  Once the rows it holds reach a chunk's worth of bytes, it encodes the whole blocks among them.
+* `WriteAsync(b)` takes the builder's rows and clears it for the next block, keeping its buffers. Once
+  the rows it holds reach a chunk's worth of bytes, it encodes the whole blocks among them.
 * `FlushAsync` hands the encoded chunks to the file. It is the only I/O before completion, and
   `UnflushedBytes` says how much is waiting for it.
-* `CompleteAsync` writes the pending rows as the last block, then the statistics, the zone maps
-  and the footer, and returns the `WriteReport`.
+* `CompleteAsync` writes the pending rows as the last block, then the statistics, the zone maps and
+  the footer, and returns the `WriteReport`.
 
 ## What the writer decided
 
-The report is the only place that says what was chosen. The sample prints it, grouping the
-per-chunk encodings:
+The report is the only place that says what was chosen. The sample prints it, grouping the encodings
+of each chunk:
 
 ```
-1000000 rows in blocks of 8192, 17 chunks, 1508212 bytes, in 117 ms
-  data 1495924, statistics 200, zone maps 8264, indexes 0, footer 3824
+1000000 rows in blocks of 8192, 17 chunks, 1508316 bytes, in 86 ms
+  data 1495988, statistics 200, zone maps 8264, indexes 0, footer 3864
   chunk rows: 65536 x15, 16384, 576
-  Day: RunEnd x16, Sequence
+  Day: RunEnd x16, Constant
   Celsius: Dictionary x16, Alp
   City: RunEnd x17
-read back: 1000000 rows, 1508212 bytes on disk, mean 30.0000 °C
+read back: 1000000 rows, 1508316 bytes on disk, mean 30.0000 °C
 ```
 
 `report.Columns` gives one encoding per chunk and per column. A day lasts a thousand rows, so `Day`
-is written as runs; the last 576 rows all fall on day 999, a progression of step zero. Four hundred
-distinct temperatures make a dictionary, except in the small tail chunk, which took ALP. The city
-changes every seven rows, which is still a run. Nothing was sampled or guessed: the writer priced the
-candidates on each chunk it held. [11-write-strategy.md](../design/11-write-strategy.md) describes
-how.
+is written as runs, and the last 576 rows all fall on day 999, which makes that small chunk a single
+constant. Four hundred distinct temperatures make a dictionary, except in the small tail chunk, which
+took ALP. The city changes every seven rows, which is still worth storing as runs. Nothing was
+sampled or guessed: the writer priced the candidates on each chunk it held.
+[11-write-strategy.md](../design/11-write-strategy.md) explains how.
 
-`report.Bytes` sums to the file's length. `report.ChunkRows` says how the rows were cut into chunks,
-and [blocks-and-chunks.md](blocks-and-chunks.md) explains why a write of one block at a time comes
-out as chunks of 65 536 rows: the writer sizes a chunk by its widest column, here the city's
-sixteen-byte views, a megabyte of them. `report.Indexes` lists every index the policy asked for:
-none here, since the default is `IndexPolicy.None` ([indexes.md](indexes.md)).
+`report.Bytes` adds up to the file's length. `report.ChunkRows` says how the rows were cut into
+chunks, and [blocks-and-chunks.md](blocks-and-chunks.md) explains why writing one block at a time
+still produces chunks of 65 536 rows: the writer sizes a chunk by its widest column, here the city's
+sixteen-byte views, and puts a megabyte of them in a chunk. `report.Indexes` lists every index the
+policy asked for, none here, since the default is `IndexPolicy.None` ([indexes.md](indexes.md)).
 
 ## What it costs
 
-The million rows took 117 ms in this run and 1.51 MB on disk; run alone, compiling the writer as it
-goes, the sample takes about 200 ms. The
-same rows stored without encoding take 20.8 MB ([writer-options.md](writer-options.md)). The
-columns are encoded on the thread that calls `WriteAsync`. The builder holds up to a chunk's worth
-of rows, a megabyte of the widest column by default, before whole blocks are encoded and released.
+The million rows took 86 ms in this run and 1.51 MB on disk. Run on its own, compiling the writer as
+it goes, the sample takes about 200 ms. The same rows stored without any encoding take 20.9 MB
+([writer-options.md](writer-options.md)). The columns are encoded on the thread that calls
+`WriteAsync`. The builder holds up to a chunk's worth of rows, a megabyte of the widest column by
+default, before whole blocks are encoded and released.
 
 ## Watch out
 
-* **A span does not cross an `await`.** Fill it and call `Advance` before the next `await`: the
+* A span does not cross an `await`. Fill it and call `Advance` before the next `await`, since the
   compiler refuses a `Span<T>` that lives across one.
-* **Every column must hold the same number of rows** when `WriteAsync` is called, and no list may be
-  left open. Otherwise it throws `VortexSchemaException`, for example: *The builder cannot be
-  written: field 1 of struct{…} holds 7 rows and field 0 holds 8. Complete every row before writing
-  it.*
-* **A builder belongs to its writer.** `WriteAsync` refuses another writer's builder with
+* Every column must hold the same number of rows when `WriteAsync` is called, and no list may be left
+  open. Otherwise it throws `VortexSchemaException`, for example *The builder cannot be written:
+  field 1 of struct{…} holds 7 rows and field 0 holds 8. Complete every row before writing it.*
+* A builder belongs to its writer. `WriteAsync` refuses another writer's builder with
   `ArgumentException`. A builder is not thread-safe: one thread fills it and writes it.
-* **`CompleteAsync` is what makes the file.** A writer disposed without it gives the file up, and a
-  created file is deleted. [append-and-repair.md](append-and-repair.md) says what that means for an
-  append.
+* `CompleteAsync` is what makes the file. A writer disposed without it gives the file up, and a
+  created file is deleted. [append-and-repair.md](append-and-repair.md) explains what that means
+  for an append.
 * The options that change the file (compression, hints, block size, statistics, edition, metadata,
-  identity) are in [writer-options.md](writer-options.md).
+  identity) are covered in [writer-options.md](writer-options.md).
 
-The other ways in: rows instead of columns ([write-rows.md](write-rows.md)), lists and nested
-records ([write-lists-and-records.md](write-lists-and-records.md)), a schema known only at run
-time ([write-without-a-record.md](write-without-a-record.md)), and a stream or an upload as the
+The other ways in are rows instead of columns ([write-rows.md](write-rows.md)), lists and nested
+records ([write-lists-and-records.md](write-lists-and-records.md)), a schema known only at run time
+([write-without-a-record.md](write-without-a-record.md)), and a stream or an upload as the
 destination ([stream-to-an-object.md](stream-to-an-object.md)).
 
 ## Run it
