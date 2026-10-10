@@ -794,8 +794,10 @@ where an encoding's header lies, a page's decompressed size at its most, truncat
 data, and the bit flip as the control. Each mutation is read whole mapped, then by positional reads,
 which cut groups into windows and read ahead, and verified against itself; only
 `ParquetFormatException` and `ParquetUnsupportedException` may escape, within five seconds. Its
-seeds are the standard's suite and this writer's files under every page version, codec and forced
-encoding (`FuzzSeeds`, where `VX_FUZZ_SEEDS` names the directory).
+seeds are the standard's suite, its encrypted files read with the keys its README publishes, and
+this writer's files under every page version, codec and forced encoding (`FuzzSeeds`, where
+`VX_FUZZ_SEEDS` names the directory). 300 000 mutations of the suite and 100 000 of this writer's
+files read or fail cleanly; a third of the suite's read to the end.
 
 ## 9. Correctness without an external reference
 
