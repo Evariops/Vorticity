@@ -19,6 +19,7 @@ public sealed partial class ParallelScanTests : IDisposable
 {
     private const int GroupRows = 16_384;
     private const int Groups = 8;
+    private const int BatchRows = 8_192;
 
     private static readonly string[] Desks = ["fx", "rates", "credit", "equity", "commodities"];
 
@@ -35,7 +36,7 @@ public sealed partial class ParallelScanTests : IDisposable
     public void Dispose() => System.IO.File.Delete(_path);
 
     [Fact]
-    public async Task CutsTheRowsAtTheRowGroups()
+    public async Task CutsTheRowsAtTheRowGroupsAndThePagesEveryColumnStarts()
     {
         await WriteAsync();
         await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
@@ -43,12 +44,13 @@ public sealed partial class ParallelScanTests : IDisposable
         Assert.True(pieces.Length > 1);
         Assert.Equal(0, pieces[0].Start);
         Assert.Equal((long)GroupRows * Groups, pieces[^1].End);
-        Assert.All(pieces, piece => Assert.Equal(0, piece.Start % GroupRows));
+        Assert.All(pieces, piece => Assert.Equal(0, piece.Start % BatchRows));
         Assert.All(pieces.Zip(pieces.Skip(1)), pair => Assert.Equal(pair.First.End, pair.Second.Start));
 
-        // One lane, or the rows of a single group, are one range.
+        // One lane is one range; a single group is cut where its pages start.
         Assert.Null(await file.Source.PiecesAsync(new ScanSpec(), 1, Ct));
-        Assert.Null(await file.Source.PiecesAsync(new ScanSpec { Rows = new RowRange(GroupRows, 2 * GroupRows) }, 4, Ct));
+        RowRange[] one = Assert.IsType<RowRange[]>(await file.Source.PiecesAsync(new ScanSpec { Rows = new RowRange(GroupRows, 2 * GroupRows) }, 4, Ct));
+        Assert.Equal([new RowRange(GroupRows, GroupRows + BatchRows), new RowRange(GroupRows + BatchRows, 2 * GroupRows)], one);
 
         // The row groups a filter's statistics rule out are dead rows: the live ones are shared.
         ScanSpec filtered = new() { Filter = Expressions.Expr.Ge(Expressions.Expr.Field("Id"), Expressions.Expr.Literal(Expressions.FilterLiteral.From(6L * GroupRows))) };
@@ -105,7 +107,47 @@ public sealed partial class ParallelScanTests : IDisposable
         Assert.All(answers[0].Zip(answers[1]), pair => Assert.Equal(pair.First.Sum, pair.Second.Sum, 6));
     }
 
-    private async Task<Trade[]> WriteAsync()
+    [Fact]
+    public async Task CutsARowGroupOnlyWhereEveryColumnStartsAPage()
+    {
+        // One row group, its pages on the batches: it spreads over the lanes.
+        Trade[] rows = await WriteAsync(new ParquetWriteOptions { RowGroupRows = GroupRows * Groups });
+        await using (ParquetFile file = await ParquetFile.OpenAsync(_path, Ct))
+        {
+            RowRange[] pieces = Assert.IsType<RowRange[]>(await file.Source.PiecesAsync(new ScanSpec(), 4, Ct));
+            Assert.True(pieces.Length >= 4, string.Join(", ", pieces));
+            Assert.All(pieces, piece => Assert.Equal(0, piece.Start % BatchRows));
+            Assert.Equal(rows.Length, await CountAsync(file, 4));
+        }
+
+        // Pages of a thousand rows start on no batch but every 1 024 000th row: the group is one range.
+        await WriteAsync(new ParquetWriteOptions { RowGroupRows = 64_000, BlockRows = 1_000 });
+        await using (ParquetFile file = await ParquetFile.OpenAsync(_path, Ct))
+        {
+            RowRange[]? pieces = await file.Source.PiecesAsync(new ScanSpec(), 4, Ct);
+            Assert.NotNull(pieces);
+            Assert.All(pieces, piece => Assert.Equal(0, piece.Start % 64_000));
+            Assert.Equal(rows.Length, await CountAsync(file, 4));
+        }
+    }
+
+    /// <summary>The rows a grouped count over <paramref name="degree"/> lanes adds up to.</summary>
+    private static async Task<long> CountAsync(ParquetFile file, int degree)
+    {
+        Vorticity.Aggregation desks = file.Scan<Trade>().With(new ScanOptions { DegreeOfParallelism = degree })
+            .GroupBy(r => r.Desk).Select(g => (g.Key, g.Count(), g.Sum(x => x.Price)));
+        long count = 0;
+        await foreach (DeskSum sum in desks.As<DeskSum>().ToRecordsAsync(Ct))
+        {
+            count += sum.Count;
+        }
+
+        return count;
+    }
+
+    private Task<Trade[]> WriteAsync() => WriteAsync(new ParquetWriteOptions { RowGroupRows = GroupRows });
+
+    private async Task<Trade[]> WriteAsync(ParquetWriteOptions options)
     {
         Random random = new(17);
         Trade[] rows = new Trade[GroupRows * Groups];
@@ -114,7 +156,7 @@ public sealed partial class ParallelScanTests : IDisposable
             rows[i] = new Trade(i, Desks[random.Next(Desks.Length)], Math.Round(random.NextDouble() * 100, 2));
         }
 
-        await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Trade>(_path, new ParquetWriteOptions { RowGroupRows = GroupRows });
+        await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Trade>(_path, options);
         await writer.WriteAsync<Trade>(rows, Ct);
         await writer.CompleteAsync(Ct);
         return rows;

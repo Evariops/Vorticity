@@ -9,6 +9,7 @@ using Vorticity.IO;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
 using Vorticity.Scanning;
+using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.Parquet.Reading;
 
@@ -113,15 +114,20 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
     }
 
     /// <remarks>
-    /// Cut at the row groups, as a Vortex file's rows are at its chunks: a lane reads whole row groups,
-    /// none of another lane's, and a group the statistics rule out is dead rows that join the range
-    /// before them. A file of one row group is one range.
+    /// Cut at the row groups, as a Vortex file's rows are at its chunks: a group the statistics rule
+    /// out is dead rows that join the range before them. A file read in place is cut inside a row group
+    /// too, where every column the scan reads starts a page on one of the scan's batches, as every
+    /// column of a file of this writer does: a lane then reaches its first row by the headers of the
+    /// pages before it, and decodes none of another lane's. Another writer's pages, cut by their bytes,
+    /// rarely start together, and a lane that started inside one would decode it again; its row groups
+    /// are cut whole. A row group is cut inside only where the groups are fewer than two a lane, since a
+    /// range cut inside one decodes its dictionaries again.
     /// </remarks>
-    internal override ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
+    internal override async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
     {
         if (degree <= 1 || spec.Take is not null || spec.MatchesNothing)
         {
-            return default;
+            return null;
         }
 
         ParquetFooter footer = file.Footer;
@@ -129,27 +135,47 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         RowRange rows = spec.Rows is { } asked ? asked.Intersect(whole) : whole;
         if (rows.IsEmpty)
         {
-            return default;
+            return null;
         }
 
         RowGroupPlan plan = RowGroupPlan.For(file, spec);
         long alive = 0;
+        int live = 0;
         for (int group = 0; group < footer.RowGroups.Length; group++)
         {
-            alive += plan.Read[group] ? Rows(footer.RowGroups[group]).Intersect(rows).Length : 0;
+            long groupAlive = plan.Read[group] ? Rows(footer.RowGroups[group]).Intersect(rows).Length : 0;
+            alive += groupAlive;
+            live += groupAlive > 0 ? 1 : 0;
         }
 
         int batchRows = ParquetBatches.RowsOf(spec);
         if (alive < 2L * batchRows)
         {
-            return default;
+            return null;
         }
 
+        // Inside a row group only where the groups are too few to keep every lane busy: a range cut
+        // inside one decodes its dictionaries again.
+        long[]?[]? inner = file.Reader.ReadsInPlace && live < 2 * degree
+            ? await PageCutsAsync(plan, rows, batchRows, Leaves(spec), cancellationToken).ConfigureAwait(false)
+            : null;
         Aggregating.LaneCuts cuts = new Aggregating.LaneCuts(rows, alive, degree, batchRows);
         long previous = rows.Start;
         for (int group = 0; group < footer.RowGroups.Length; group++)
         {
             RowRange groupRows = Rows(footer.RowGroups[group]);
+            if (inner?[group] is { } starts)
+            {
+                foreach (long at in starts)
+                {
+                    if (at > previous && at < rows.End)
+                    {
+                        cuts.Boundary(at, at - previous);
+                        previous = at;
+                    }
+                }
+            }
+
             if (groupRows.End <= previous || groupRows.End >= rows.End)
             {
                 continue;
@@ -159,9 +185,82 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             previous = groupRows.End;
         }
 
-        return new ValueTask<RowRange[]?>(cuts.Finish());
+        return cuts.Finish();
 
         static RowRange Rows(RowGroupEntry group) => new RowRange(group.FirstRow, group.FirstRow + group.RowCount);
+    }
+
+    /// <summary>
+    /// Per row group the plan reads of two batches or more, the rows inside it where every one of
+    /// <paramref name="leaves"/> starts a page on a batch of <paramref name="batchRows"/>, from their
+    /// offset indexes; null for a group a column of which has none, or no such row.
+    /// </summary>
+    private async ValueTask<long[]?[]> PageCutsAsync(RowGroupPlan plan, RowRange rows, int batchRows, int[] leaves, CancellationToken cancellationToken)
+    {
+        ParquetFooter footer = file.Footer;
+        long[]?[] cuts = new long[]?[footer.RowGroups.Length];
+        using SegmentRequestSet requests = new();
+        int[] slots = new int[leaves.Length];
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            RowGroupEntry entry = footer.RowGroups[group];
+            if (!plan.Read[group] || entry.RowCount < 2L * batchRows || new RowRange(entry.FirstRow, entry.FirstRow + entry.RowCount).Intersect(rows).IsEmpty)
+            {
+                continue;
+            }
+
+            requests.Release();
+            bool indexed = true;
+            for (int i = 0; i < leaves.Length && indexed; i++)
+            {
+                ColumnChunkMetadata chunk = footer.Chunk(group, leaves[i]);
+                indexed = file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength);
+                slots[i] = indexed ? requests.Add(new SegmentSpec((ulong)chunk.OffsetIndexOffset, (uint)chunk.OffsetIndexLength, 0, 0, 0)) : -1;
+            }
+
+            if (!indexed || leaves.Length == 0)
+            {
+                continue;
+            }
+
+            await file.Reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            HashSet<long>? common = null;
+            for (int i = 0; i < leaves.Length; i++)
+            {
+                HashSet<long> starts = [];
+                foreach (PageLocation page in OffsetIndex.Read(requests.GetBuffer(slots[i]).Span, entry.RowCount))
+                {
+                    if (page.FirstRow > 0 && page.FirstRow % batchRows == 0)
+                    {
+                        starts.Add(page.FirstRow);
+                    }
+                }
+
+                if (common is null)
+                {
+                    common = starts;
+                }
+                else
+                {
+                    common.IntersectWith(starts);
+                }
+            }
+
+            if (common is { Count: > 0 })
+            {
+                long[] sorted = [.. common];
+                Array.Sort(sorted);
+                for (int i = 0; i < sorted.Length; i++)
+                {
+                    sorted[i] += entry.FirstRow;
+                }
+
+                cuts[group] = sorted;
+            }
+        }
+
+        requests.Release();
+        return cuts;
     }
 
     internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
