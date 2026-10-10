@@ -104,7 +104,7 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
                 SegmentSpec spec = requests.GetSpec(slot);
                 SegmentIo.ValidateSpec(in spec, out long offset, out int length);
                 SegmentIo.CheckInFile(offset, length, _length);
-                requests.SetResult(slot, View(offset, length, 1 << spec.AlignmentExponent));
+                SetView(requests, slot, offset, length, 1 << spec.AlignmentExponent);
             }
 
             requests.Complete();
@@ -140,6 +140,24 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Fills a slot of a batch with a view of the segment where it lies, sharing the source's owner,
+    /// which allocates nothing for the slot; or, as <see cref="View"/> does, with a copy when the file
+    /// lays the segment off the boundary it declares.
+    /// </summary>
+    private unsafe void SetView(SegmentRequestSet requests, int slot, long offset, int length, int alignment)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        byte* at = _base + offset;
+        if (length == 0 || ((nuint)at & (nuint)(alignment - 1)) != 0)
+        {
+            requests.SetResult(slot, View(offset, length, alignment));
+            return;
+        }
+
+        requests.SetSharedResult(slot, _owner, VortexBuffer.FromPointer(at, length, BitOperations.TrailingZeroCount(alignment)));
     }
 
     /// <summary>
