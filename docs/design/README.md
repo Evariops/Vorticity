@@ -25,6 +25,7 @@ build on those two.
 | [14-public-api.md](14-public-api.md) | the rules the public API follows, and where each part lives |
 | [15-compaction.md](15-compaction.md) | compaction inline, on demand or in the background, planned from the top of the tree, and on a store that cannot delete |
 | [16-queries.md](16-queries.md) | projections, group by and aggregates in the shape of LINQ, run as a flow of batches: the first answer as soon as it is final, memory only for what is open, sums identical whatever the split, results that are scans themselves |
+| [17-object-storage.md](17-object-storage.md) | a design to build: files and datasets read and written straight on Amazon S3, Cloudflare R2, OVHcloud, Scaleway, Azure Blob Storage and Google Cloud Storage, with clients written here over the platform's HTTP client, the same API, and every operation's requests counted |
 | [90-registry.md](90-registry.md) | every encoding, layout and dtype: its edition, whether it is read and written, how a take is served |
 | [99-sources.md](99-sources.md) | the primary sources, and how to verify them again |
 
