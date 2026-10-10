@@ -526,13 +526,14 @@ threads costs more than the decode they would share, and the report's table of f
 one field after the other. Side by side, a batch waits for its slowest field, the one that begins a
 page, while the others idle.
 
-So a row group whose fields are all flat, read whole and in place with no batch pruned, decodes
-ahead of the read a field at a time: each field's batches one after the other, up to two past the
-last the read released, each into a context of its own, on as many lanes as the degree, a lane
-taking the field of the earliest batch that may run. The read waits for every field of the batch it
-asks for and releases each batch as it asks for the next, which frees its slot for the batch two on;
-a reader holds the pages a batch retires until the read releases it, and a row group ends with
-every batch released. The January 2023 yellow taxi trips, every page GZIP's, scan in 29 to 31 ms on
+So a row group whose fields are all flat and whose rows are read in place decodes ahead of the read
+a field at a time: each field's batches one after the other, those the page index leaves, each
+after the rows it rules out before it, which the field steps over, up to two past the last the read
+released, each into a context of its own, on as many lanes as the degree, a lane taking the field
+of the earliest batch that may run. The read waits for every field of the batch it asks for and
+releases each batch as it asks for the next, which frees its slot for the batch two on; a reader
+holds the pages a batch retires until the read releases it, and a row group ends with every batch
+released. A row group read in windows (§5.3), a take's among them, decodes a batch at a time. The January 2023 yellow taxi trips, every page GZIP's, scan in 29 to 31 ms on
 32 lanes against 33 to 36 side by side, 51 to 53 when only their pages decompressed on the lanes,
 and 190 on one; ClickBench's first file, 105 columns under SNAPPY, in 45 to 46 against 45 to 53 and
 105, and 173 on one, its `Title` column, a third of its bytes, the field each batch waits for.
