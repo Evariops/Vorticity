@@ -111,4 +111,5 @@ the row encoding, which a project acknowledges once before it builds.
 | [how-it-works.md](how-it-works.md) | the shape of the library in two pages, and where to read further |
 | [benchmarks.md](benchmarks.md) | every figure the bench publishes: Vorticity against the Rust implementation, and each kernel against its baseline |
 | [benchmarks-x64.md](benchmarks-x64.md) | the same measurements on an x64 machine, a Zen 4 processor under Windows, against a Rust built there |
+| [benchmarks-parquet-x64.md](benchmarks-parquet-x64.md) | how fast Parquet files read and write, against the same rows as Vortex, on one thread and on 32, on the same machine |
 | [benchmarks-duckdb.md](benchmarks-duckdb.md) | our group bys against DuckDB's on the same files, through its Vortex reader and from its own table |
