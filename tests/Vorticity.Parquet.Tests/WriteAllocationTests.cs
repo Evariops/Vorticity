@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Xunit;
 
 namespace Vorticity.Parquet.Tests;
@@ -19,6 +20,10 @@ namespace Vorticity.Parquet.Tests;
 /// once its row groups are done: their few hundred bytes a page are the file's, as the footer is. A
 /// column's dictionary table rents its buffers from the shared array pool, whose capacity follows
 /// the machine's cores: the columns are measured PLAIN, the table's cost left out of the ceiling.
+/// The writer rents its blocks from a pool of the test's own, graded as the shared one is: the
+/// blocks a read of large files leaves parked in the shared pool, until a sweep frees them, keep
+/// its classes from widening to a wide schema's demand, and the writer's blocks would be counted
+/// allocated again for what the process did before.
 /// </remarks>
 [Collection(nameof(ParquetAllocationCollection))]
 public sealed class WriteAllocationTests : IDisposable
@@ -41,7 +46,8 @@ public sealed class WriteAllocationTests : IDisposable
     public async Task FourTimesTheRowsCostOnlyTheirPages()
     {
         Assert.SkipWhen(Debug, "Allocation figures are Release figures: run `dotnet test -c Release`.");
-        (long few, long many) = await FloorsAsync(() => MeasureAsync(Mixed, 16), () => MeasureAsync(Mixed, 64));
+        await using VortexSession session = Isolated();
+        (long few, long many) = await FloorsAsync(() => MeasureAsync(session, Mixed, 16), () => MeasureAsync(session, Mixed, 64));
         long pages = 48L * Mixed.Count;
         Assert.True(
             many - few <= pages * PageCeiling,
@@ -52,13 +58,18 @@ public sealed class WriteAllocationTests : IDisposable
     public async Task FourTimesTheColumnsCostACeilingPerColumn()
     {
         Assert.SkipWhen(Debug, "Allocation figures are Release figures: run `dotnet test -c Release`.");
-        (long narrow, long wide) = await FloorsAsync(() => MeasureAsync(Longs(50), 2), () => MeasureAsync(Longs(200), 2));
+        await using VortexSession session = Isolated();
+        (long narrow, long wide) = await FloorsAsync(() => MeasureAsync(session, Longs(50), 2), () => MeasureAsync(session, Longs(200), 2));
         Assert.True(
             wide - narrow <= 150 * ColumnCeiling,
             string.Create(CultureInfo.InvariantCulture, $"150 columns more cost {wide - narrow} bytes, {(wide - narrow) / 150} a column, past {ColumnCeiling} ({wide} against {narrow})"));
     }
 
     private static bool Debug => typeof(ParquetFile).Assembly.GetCustomAttribute<DebuggableAttribute>() is { IsJITOptimizerDisabled: true };
+
+    /// <summary>A session over a pool of its own, graded as the shared pool is.</summary>
+    private static VortexSession Isolated() =>
+        VortexSession.Create(options => options.MemoryPool = new AlignedMemoryPool(AlignedBufferPool.Graded(32 * 1024 * 1024, 8, demandBudget: 256L * 1024 * 1024)));
 
     /// <summary>A schema of every kind of column the writer stages: integers, floats, text, bytes, booleans, nulls and lists.</summary>
     private static VortexSchema Mixed =>
@@ -95,11 +106,11 @@ public sealed class WriteAllocationTests : IDisposable
     }
 
     /// <summary>What writing <paramref name="batches"/> batches of <paramref name="schema"/> to a file allocates, on every thread, each column PLAIN.</summary>
-    private async Task<long> MeasureAsync(VortexSchema schema, int batches)
+    private async Task<long> MeasureAsync(VortexSession session, VortexSchema schema, int batches)
     {
         Dictionary<string, ParquetEncodingHint> hints = schema.Where(f => f.Type.Kind != VortexTypeKind.List).ToDictionary(f => f.Name, _ => ParquetEncodingHint.Plain);
         long before = GC.GetTotalAllocatedBytes(precise: true);
-        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(_path, schema, new ParquetWriteOptions { RowGroupRows = 64 * BatchRows, Hints = hints }))
+        await using (ParquetFileWriter writer = session.CreateParquetWriter(_path, schema, new ParquetWriteOptions { RowGroupRows = 64 * BatchRows, Hints = hints }))
         {
             ColumnsBuilder builder = writer.Builder();
             for (int batch = 0; batch < batches; batch++)

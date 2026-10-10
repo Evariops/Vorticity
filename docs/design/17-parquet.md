@@ -835,7 +835,7 @@ files read or fail cleanly; a third of the suite's read to the end.
 | every kernel has a scalar twin | the package's suite, run whole by `tests/scalar-pass.sh` with hardware intrinsics disabled |
 | Native AOT | `pqdump`, the inspection tool, built on the public surface alone and published ahead of time, opens, scans and verifies every file of the standard's test suite at a pinned commit; its surface is on record beside the core's, rendered the same way |
 | a file is the same bytes at every degree | written at degrees 1, 2, 4 and 8 and compared |
-| the writer allocates per file, not per row | warm, a file of four times the batches costs at most 288 bytes a page more, its bounds and its place kept for the indexes (251 measured), and a schema four times as wide at most 7 KiB a column more (6.6 measured), the columns PLAIN: a dictionary's table rents from the shared array pool, whose capacity follows the machine's cores |
+| the writer allocates per file, not per row | warm, a file of four times the batches costs at most 288 bytes a page more, its bounds and its place kept for the indexes (251 measured), and a schema four times as wide at most 7 KiB a column more (6.6 measured), the columns PLAIN: a dictionary's table rents from the shared array pool, whose capacity follows the machine's cores. The blocks come from a pool of the gate's own, graded as the shared one: after a read of large files the shared pool keeps their classes parked until a sweep, its budget spent, and a wide schema's blocks are allocated again, 7.3 KiB a column |
 
 The ratchets are counted as the core's are ([05-benchmarks.md](05-benchmarks.md) §5): a ceiling only
 comes down. Speed is measured against baselines this repository owns:
