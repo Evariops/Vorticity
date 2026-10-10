@@ -300,7 +300,9 @@ the core's order — cheapest first, stopping when nothing is left:
    true only where both sides can be, an OR false only where both can be, a NOT swapping the two,
    and a null check stays open over a chunk that may hold a null. A row group the predicate cannot
    select is dropped. The dictionary page is read on its own, up to 8 MiB, and again with its chunk
-   when the group is read after all.
+   when the group is read after all, but decoded once: the dictionary the pruning decoded passes to
+   the scan's reader of the column, with a reference to the bytes it was decoded from, and the
+   reader steps over the chunk's dictionary page by its header.
 
 A statistic prunes only where the standard makes it a bound:
 
@@ -778,9 +780,9 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 | promise | gate |
 |---|---|
 | nothing allocated per batch | allocations counted, warm, across full scans of a row group of 64 batches and of one of 16, which cost the same within 256 bytes, for every encoding the writer makes, pages v1 and v2, and every codec but GZIP |
-| a plain page without nulls is its column | on a mapped file of this writer, every `Values` of an uncompressed plain page lies inside the mapping; a v2 compressed plain page decompresses into the column's buffer, and a counter of copies stays at 0 |
-| a page is decompressed once per scan | decompressions equal the pages read |
-| a pruned page is neither read nor decoded | `Requests` and `BytesRequested` equal the plan's; pages decoded equal live pages |
+| a plain page without nulls is its column | on a mapped file of this writer, every `Values` of an uncompressed plain page lies inside the mapping; a v2 compressed plain page decompresses into the column's buffer, and the count of batches copied out of the pages they span stays at 0, where pages of three rows read in batches of four count theirs |
+| a page is decompressed once per scan | the file's pages walked by their headers: data and dictionary pages decoded equal theirs, decompressions equal those that go through the codec, under ZSTD, Snappy and none, pages v1 and v2, mapped and read; a dictionary decoded to prune is not decoded again |
+| a pruned page is neither read nor decoded | `Requests` and `BytesRequested` equal the plan's; pages decoded equal the pages of the batches the page index leaves, of every column, nested ones among them |
 | a range is requested at most once per scan | `Requests` equals the plan's distinct ranges |
 | what the footer answers reads nothing more | no request after the open for a count, and for a minimum or a maximum under exact statistics |
 | the open is the schema and the row groups, not their product | the opens of footers of 50 and 200 columns by 50 and 200 row groups: the widest costs what the two mixed ones do less the smallest, within 2 KiB, where a cost per chunk would leave 22 500 chunks over |

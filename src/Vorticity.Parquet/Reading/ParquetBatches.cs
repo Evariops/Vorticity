@@ -141,6 +141,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.VerifyChecksums = file.Options.VerifyChecksums;
+            reader.Counters = file.Counters;
         }
 
         // A scan that keeps encodings reads a flat column's dictionary pages as dictionary nodes.
@@ -344,6 +345,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             if (_maps[i] is not { } map)
             {
                 _readers[i].Start(_chunks.GetBuffer(_runSlots[next++].Slot), chunk.Codec, group.RowCount);
+                _dictionaries?.Hand(_leaves[i], _readers[i]);
                 continue;
             }
 
@@ -354,6 +356,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
 
             _readers[i].Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_runs), _file.ChunkRange(chunk).Length, map, chunk.Codec, group.RowCount);
+            _dictionaries?.Hand(_leaves[i], _readers[i]);
         }
 
         _groupStart = group.FirstRow;

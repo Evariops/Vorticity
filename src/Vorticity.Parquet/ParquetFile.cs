@@ -110,6 +110,9 @@ public sealed class ParquetFile : IAsyncDisposable
     /// <summary>The schema compiled to its leaves and levels.</summary>
     internal ParquetSchema Compiled { get; }
 
+    /// <summary>What the file's scans did to its pages, for the gates of the performance contract.</summary>
+    internal Reading.PageCounters Counters { get; } = new();
+
     internal ParquetScanSource Source => _source ??= new ParquetScanSource(this);
 
     /// <summary>Opens the file at <paramref name="path"/> in the default session.</summary>

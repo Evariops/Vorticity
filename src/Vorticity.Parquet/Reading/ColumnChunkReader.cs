@@ -115,6 +115,15 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The chunk's dictionary, decoded once as a page of one slot per entry.</summary>
     private Page? _dictionary;
 
+    /// <summary>
+    /// The dictionary a pruning decoded of the chunk started last and handed over, which the chunk's
+    /// dictionary page then is, rather than decoded again; null for none.
+    /// </summary>
+    private Page? _handed;
+
+    /// <summary>A reference to what holds the bytes the handed dictionary was decoded from, which its values may lie in.</summary>
+    private SegmentOwner? _handedBytes;
+
     private VortexBuffer[] _gathered = new VortexBuffer[4];
 
     /// <summary>A reader of <paramref name="leaf"/>'s chunks.</summary>
@@ -181,6 +190,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// of its bytes as stored past its header. A page skipped by its header is never read, nor checked.
     /// </summary>
     internal bool VerifyChecksums { get; set; }
+
+    /// <summary>What counts the pages this reader decodes and decompresses, and the batches it gathers; null for none.</summary>
+    internal PageCounters? Counters { get; set; }
 
     /// <summary>
     /// Whether a dictionary-encoded page of a flat column is kept as its codes over the dictionary's
@@ -355,6 +367,37 @@ internal sealed partial class ColumnChunkReader : IDisposable
         return Whole(context.Canonical, _dictionary);
     }
 
+    /// <summary>
+    /// Hands the dictionary this reader decoded last to <paramref name="reader"/>, a reader of the same
+    /// column started on the same chunk, with <paramref name="bytes"/>, a reference to what holds the
+    /// page bytes it was decoded from, which passes with it: false, and nothing passed, where this
+    /// reader holds none, or reads the column into other slots than the other does.
+    /// </summary>
+    internal bool HandDictionary(ColumnChunkReader reader, SegmentOwner bytes)
+    {
+        if (_dictionary is not { } dictionary || reader._handed is not null || reader._nested != _nested || reader._form != _form || reader._slot != _slot)
+        {
+            return false;
+        }
+
+        _dictionary = null;
+        reader._handed = dictionary;
+        reader._handedBytes = bytes;
+        return true;
+    }
+
+    /// <summary>The chunk's dictionary: the one a pruning handed over, or its page decoded.</summary>
+    private Page Dictionary(ScanContext context, in PageHeader header, int at, int stored)
+    {
+        if (_handed is { } handed)
+        {
+            _handed = null;
+            return handed;
+        }
+
+        return DecodeDictionary(context, header, Body(header, at, stored, out NativeSegmentOwner? owner), owner);
+    }
+
     /// <summary>The next <paramref name="rows"/> rows, as a node of <paramref name="context"/>'s arena.</summary>
     internal int Read(ScanContext context, int rows)
     {
@@ -475,7 +518,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             {
                 case PageType.DictionaryPage:
                     _position = at + stored;
-                    _dictionary = DecodeDictionary(context, header, Body(header, at, stored, out NativeSegmentOwner? owner), owner);
+                    _dictionary = Dictionary(context, header, at, stored);
                     continue;
                 case PageType.DataPageV2 when _nested || header.ValueCount == header.RowCount:
                     pageRows = header.RowCount;
@@ -523,6 +566,15 @@ internal sealed partial class ColumnChunkReader : IDisposable
             _dictionary = null;
         }
 
+        if (_handed is { } handed)
+        {
+            handed.Release();
+            _free.Push(handed);
+            _handed = null;
+        }
+
+        _handedBytes?.Release();
+        _handedBytes = null;
         _plan.Clear();
         _dense = default;
         _zeros = default;
@@ -618,6 +670,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A node of <paramref name="rows"/> rows copied out of the pages they span into the arena.</summary>
     private int Gather(ScanContext context, int rows)
     {
+        Counters?.AddGather();
         ArrayDecodeContext decode = context.Decode;
         bool nullable = _type.IsNullable;
         Span<byte> bits = default;
@@ -762,11 +815,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
             switch (header.Type)
             {
                 case PageType.DataPageV2:
+                    Counters?.AddPage();
                     return DecodeV2(context, header, Body(header, at, stored, out owner), owner);
                 case PageType.DataPage:
+                    Counters?.AddPage();
                     return DecodeV1(context, header, Body(header, at, stored, out owner), owner);
                 case PageType.DictionaryPage:
-                    _dictionary = DecodeDictionary(context, header, Body(header, at, stored, out owner), owner);
+                    _dictionary = Dictionary(context, header, at, stored);
                     continue;
                 default:
                     // An index page, or a kind a later version of the standard adds: not data.
@@ -806,6 +861,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             int valid;
             if (_nested)
             {
+                page.EndsRows = true;
                 valid = NestedLevelsV2(page, header, body);
                 if (_form == LeafForm.Null)
                 {
@@ -848,6 +904,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 NativeSegmentOwner values = _pool.Rent(size, 64);
                 try
                 {
+                    Counters?.AddDecompression();
                     PageCodecs.Decompress(_codec, stored.Span, values.WritableSpan, context.Zstd);
                 }
                 catch
@@ -907,6 +964,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 NativeSegmentOwner decompressed = _pool.Rent(size, 64);
                 try
                 {
+                    Counters?.AddDecompression();
                     PageCodecs.Decompress(_codec, body.Span, decompressed.WritableSpan, context.Zstd);
                 }
                 catch
@@ -1755,6 +1813,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The chunk's dictionary page, decoded as a page of one slot per entry and no null.</summary>
     private Page DecodeDictionary(ScanContext context, in PageHeader header, VortexBuffer body, NativeSegmentOwner? stored)
     {
+        Counters?.AddDictionary();
         NativeSegmentOwner? owner = stored;
         try
         {
@@ -1787,6 +1846,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 NativeSegmentOwner values = _pool.Rent(size, 64);
                 try
                 {
+                    Counters?.AddDecompression();
                     PageCodecs.Decompress(_codec, body.Span, values.WritableSpan, context.Zstd);
                 }
                 catch
@@ -2011,6 +2071,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
         /// <summary>A nested column's rows that start in the page past what batches have read.</summary>
         internal int RowsUnread;
 
+        /// <summary>
+        /// Whether the page's last row ends in it, as a v2 page's does: the standard splits no row
+        /// across pages of the second version, so the page after it need not be read to say so.
+        /// </summary>
+        internal bool EndsRows;
+
         /// <summary>A nested column's levels, a byte per entry: the repetition levels, then the definition levels.</summary>
         internal NativeSegmentOwner? Levels;
 
@@ -2058,6 +2124,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Entries = 0;
             EntriesRead = 0;
             RowsUnread = 0;
+            EndsRows = false;
         }
     }
 }

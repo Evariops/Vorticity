@@ -35,8 +35,9 @@ namespace Vorticity.Parquet.Reading;
 /// A chunk's pages are all codes by its <c>encoding_stats</c>, or, without them, by its encodings,
 /// when they are the first version's dictionary encoding and the levels' alone, as the standard's
 /// reference reader decides. The dictionary page is read on its own, from its offset to the first
-/// data page's, and again with its chunk when the group is read after all; one past 8 MiB is not
-/// read to prune.
+/// data page's, and again with its chunk when the group is read after all, which then steps over it:
+/// the dictionary decoded to prune is handed to the scan's reader of the column with the bytes it
+/// was decoded from. One past 8 MiB is not read to prune.
 /// </para>
 /// </remarks>
 internal sealed class DictionaryPruning : IDisposable
@@ -67,6 +68,12 @@ internal sealed class DictionaryPruning : IDisposable
     private readonly bool[] _nulls;
 
     /// <summary>
+    /// Per filter column, a reference to the bytes of the dictionary the group just kept was pruned
+    /// by, until the scan's reader of the column takes them with it, or the next group comes.
+    /// </summary>
+    private readonly SegmentOwner?[] _bytes;
+
+    /// <summary>
     /// The scan's context, whose arena the dictionaries are decoded into between two batches, or null
     /// for one of this pruning's own, made at the first dictionary.
     /// </summary>
@@ -86,6 +93,7 @@ internal sealed class DictionaryPruning : IDisposable
         _slots = new int[alone.Length];
         _nodes = new int[alone.Length];
         _nulls = new bool[alone.Length];
+        _bytes = new SegmentOwner?[alone.Length];
     }
 
     /// <summary>
@@ -115,6 +123,7 @@ internal sealed class DictionaryPruning : IDisposable
         ParquetFooter footer = file.Footer;
         int asked = 0;
         long bytes = 0;
+        Drop();
         _requests.Release();
         for (int i = 0; i < _readers.Length; i++)
         {
@@ -149,6 +158,7 @@ internal sealed class DictionaryPruning : IDisposable
         ScanContext context = _shared ?? (_owned ??= new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = file.Options.MaxDecompressedSize }));
         context.ResetBatch();
         _arena = context.Canonical;
+        bool kept = false;
         try
         {
             for (int i = 0; i < _readers.Length; i++)
@@ -159,13 +169,23 @@ internal sealed class DictionaryPruning : IDisposable
                 }
             }
 
-            return !Truth(_plan).True;
+            kept = Truth(_plan).True;
+            return !kept;
         }
         finally
         {
-            foreach (ColumnChunkReader? reader in _readers)
+            // A group kept is read next: its dictionaries wait for the scan's readers, their bytes
+            // held past the request's release.
+            for (int i = 0; i < _readers.Length; i++)
             {
-                reader?.Release();
+                if (kept && _slots[i] >= 0)
+                {
+                    _bytes[i] = _requests.GetOwner(_slots[i]).Retain();
+                }
+                else
+                {
+                    _readers[i]?.Release();
+                }
             }
 
             context.ResetBatch();
@@ -173,8 +193,36 @@ internal sealed class DictionaryPruning : IDisposable
         }
     }
 
+    /// <summary>
+    /// Hands the dictionary of leaf <paramref name="leaf"/> by which the group just kept was pruned to
+    /// <paramref name="reader"/>, started on the group's chunk of it: false where the pruning holds none.
+    /// </summary>
+    internal bool Hand(int leaf, ColumnChunkReader reader)
+    {
+        int i = Array.IndexOf(_filter.Columns, leaf);
+        if (i < 0 || _bytes[i] is not { } bytes || _readers[i] is not { } pruning || !pruning.HandDictionary(reader, bytes))
+        {
+            return false;
+        }
+
+        _bytes[i] = null;
+        return true;
+    }
+
+    /// <summary>Gives back the dictionaries no reader took, and the bytes they were decoded from.</summary>
+    private void Drop()
+    {
+        for (int i = 0; i < _readers.Length; i++)
+        {
+            _readers[i]?.Release();
+            _bytes[i]?.Release();
+            _bytes[i] = null;
+        }
+    }
+
     public void Dispose()
     {
+        Drop();
         foreach (ColumnChunkReader? reader in _readers)
         {
             reader?.Dispose();
@@ -200,6 +248,7 @@ internal sealed class DictionaryPruning : IDisposable
             column, VortexTypes.ToDType(column.Type, types), types.Bool(Nullability.NonNullable), file.Session.Options.EnginePool, file.Options.MaxDecompressedSize)
         {
             VerifyChecksums = file.Options.VerifyChecksums,
+            Counters = file.Counters,
         };
     }
 

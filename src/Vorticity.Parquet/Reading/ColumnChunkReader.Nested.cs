@@ -190,10 +190,12 @@ internal sealed partial class ColumnChunkReader
 
             // The page is taken whole: its buffers stay until the next batch, and the page after it
             // says whether its last row goes on, but where the offset index places the pages, each
-            // of which then starts a row, as the standard requires of an indexed chunk.
+            // of which then starts a row, as the standard requires of an indexed chunk, and after a
+            // v2 page, which splits no row. A page read past the batch to say so would be decoded
+            // even where the next batches are stepped over.
             _retired.Add(page);
             _page = null;
-            if ((!repeats || _map is not null) && started == rows)
+            if ((!repeats || _map is not null || page.EndsRows) && started == rows)
             {
                 break;
             }
