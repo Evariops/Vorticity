@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
 using Vorticity.Parquet.Thrift;
@@ -126,6 +127,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session.Options.MaxDegreeOfParallelism;
 
         _columns = new ColumnChunkWriter[map.Columns.Length];
+
+        // The lanes every column's pages compress on, while the columns encode the pages after them.
+        PageLanes? lanes = _lanes > 1 ? new PageLanes(_lanes) : null;
         HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
         HashSet<string> codecs = options.ColumnCompression is { } own ? new(own.Keys, StringComparer.Ordinal) : [];
         HashSet<string> hints = options.Hints is { } pinned ? new(pinned.Keys, StringComparer.Ordinal) : [];
@@ -157,6 +161,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                     AllowAlp = options.Alp,
                     Hint = hint,
                     Encryptor = _encryptor?.Column(path, column.Path, i),
+                    Lanes = lanes,
                 };
             }
 
@@ -738,7 +743,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             }
 
             // The block is whole in every column, its pages closed.
-            if (_groupRows >= _options.RowGroupRows || BufferedBytes() >= _options.RowGroupBytes)
+            if (_groupRows >= _options.RowGroupRows || Filled())
             {
                 await CloseRowGroupAsync(partial: false, cancellationToken).ConfigureAwait(false);
             }
@@ -914,15 +919,32 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         (_encryptor is { PlaintextFooter: false } ? EncryptedMagic : Magic).CopyTo(end[4..]);
     }
 
-    private long BufferedBytes()
+    /// <summary>
+    /// Whether the row group's pages reach <see cref="ParquetWriteOptions.RowGroupBytes"/>: never while
+    /// the most their pages compressing ahead can store keeps them under it, and otherwise as they
+    /// are once stored, so that a row group closes on the same block at every degree.
+    /// </summary>
+    private bool Filled()
     {
+        long bound = 0;
+        foreach (ColumnChunkWriter column in _columns)
+        {
+            bound += column.BufferedBound;
+        }
+
+        if (bound < _options.RowGroupBytes)
+        {
+            return false;
+        }
+
         long bytes = 0;
         foreach (ColumnChunkWriter column in _columns)
         {
+            column.Settle();
             bytes += column.BufferedBytes;
         }
 
-        return bytes;
+        return bytes >= _options.RowGroupBytes;
     }
 
     /// <summary>Per column of the file, the member of <typeparamref name="TRecord"/> that holds it.</summary>

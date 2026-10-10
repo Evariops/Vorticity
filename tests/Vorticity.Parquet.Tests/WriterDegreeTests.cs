@@ -22,9 +22,10 @@ public sealed partial class WriterDegreeTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Theory]
-    [InlineData(ParquetCompression.Zstd)]
-    [InlineData(ParquetCompression.Snappy)]
-    public async Task WritesTheSameBytesAtEveryDegree(ParquetCompression compression)
+    [InlineData(ParquetCompression.Zstd, 0L)]
+    [InlineData(ParquetCompression.Snappy, 0L)]
+    [InlineData(ParquetCompression.Zstd, 600_000L)]
+    public async Task WritesTheSameBytesAtEveryDegree(ParquetCompression compression, long rowGroupBytes)
     {
         Event[] rows = Events();
         byte[]? first = null;
@@ -38,6 +39,9 @@ public sealed partial class WriterDegreeTests
                     DegreeOfParallelism = degree,
                     Compression = compression,
                     RowGroupRows = 32_768,
+
+                    // Row groups closed by their bytes, which pages still compressing could only bound.
+                    RowGroupBytes = rowGroupBytes > 0 ? rowGroupBytes : 256L << 20,
                     BloomFilters = new Dictionary<string, double> { ["Unique"] = 0.01 },
                     WriteChecksums = true,
                 };
@@ -57,6 +61,7 @@ public sealed partial class WriterDegreeTests
                 {
                     first = bytes;
                     await using ParquetFile file = await ParquetFile.OpenAsync(path, Ct);
+                    Assert.True(rowGroupBytes > 0 ? file.Metadata.RowGroups.Count > 3 : file.Metadata.RowGroups.Count == 3, $"{file.Metadata.RowGroups.Count} row groups");
                     List<string> read = [];
                     await foreach (Event row in file.Scan<Event>().ToRecordsAsync(Ct))
                     {

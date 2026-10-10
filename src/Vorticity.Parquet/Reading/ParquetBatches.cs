@@ -7,6 +7,7 @@ using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.File;
 using Vorticity.IO;
+using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
 using Vorticity.Scanning;

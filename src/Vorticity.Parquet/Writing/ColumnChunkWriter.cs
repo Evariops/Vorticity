@@ -262,6 +262,12 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>Where the rows a value first occurs at are gathered for the dictionary, made at the first.</summary>
     private CanonicalArena? _gathered;
 
+    /// <summary>The pages compressing on the lanes, or compressed, in the chunk's order, not yet stored into it.</summary>
+    private readonly Queue<PendingPage> _pending = new();
+
+    /// <summary>The most bytes the pages in <see cref="_pending"/> add to the chunk.</summary>
+    private long _pendingBound;
+
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
@@ -307,8 +313,23 @@ internal sealed class ColumnChunkWriter : IDisposable
 
     internal WriteColumn Column => _column;
 
-    /// <summary>The bytes of the pages closed so far, waiting for the row group to close.</summary>
+    /// <summary>
+    /// The bytes of the pages closed so far, waiting for the row group to close, once those
+    /// compressing ahead are stored: see <see cref="Settle()"/>.
+    /// </summary>
     internal long BufferedBytes => _chunk.Length + _values.Length + _entries.Length;
+
+    /// <summary>The bytes of the pages closed so far, those compressing ahead at the most they can store.</summary>
+    internal long BufferedBound => BufferedBytes + _pendingBound;
+
+    /// <summary>
+    /// The lanes the column's pages compress on, shared with the file's other columns, while it
+    /// encodes the pages after them; null to compress each page as it closes.
+    /// </summary>
+    internal PageLanes? Lanes { get; init; }
+
+    /// <summary>Stores every page compressing ahead into the chunk, compressing here those no lane has begun.</summary>
+    internal void Settle() => Settle(wait: true);
 
     /// <summary>
     /// Lends the closed chunk's bytes to <paramref name="sink"/>, its dictionary page first, between
@@ -545,20 +566,17 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         _pagesBy[(int)encoding]++;
 
-        bool compressed = _codec != CompressionCodec.Uncompressed;
         ReadOnlySpan<byte> levels = _levels.WrittenSpan;
-        ReadOnlySpan<byte> stored = body;
+        ReadOnlySpan<byte> input;
         PageHeader header;
         if (DataPages == DataPageVersion.V1)
         {
             // The levels inside the page's bytes, and the whole compressed, whatever it saves.
-            ReadOnlySpan<byte> page = V1(levels, repetitionLength, body);
-            stored = compressed ? Compress(page) : page;
+            input = V1(levels, repetitionLength, body);
             header = new PageHeader
             {
                 Type = PageType.DataPage,
-                UncompressedPageSize = page.Length,
-                CompressedPageSize = stored.Length,
+                UncompressedPageSize = input.Length,
                 ValueCount = entries,
                 Encoding = encoding,
                 DefinitionLevelEncoding = ParquetEncoding.Rle,
@@ -568,44 +586,88 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
         else
         {
-            if (compressed)
-            {
-                ReadOnlySpan<byte> squeezed = Compress(body);
-                if (squeezed.Length <= body.Length - body.Length / 8)
-                {
-                    stored = squeezed;
-                }
-                else
-                {
-                    compressed = false;
-                }
-            }
-
+            input = body;
             header = new PageHeader
             {
                 Type = PageType.DataPageV2,
                 UncompressedPageSize = levels.Length + body.Length,
-                CompressedPageSize = levels.Length + stored.Length,
                 ValueCount = entries,
                 NullCount = nulls,
                 RowCount = rows,
                 Encoding = encoding,
                 DefinitionLevelsLength = levels.Length - repetitionLength,
                 RepetitionLevelsLength = repetitionLength,
-                IsCompressed = compressed || _codec == CompressionCodec.Uncompressed,
             };
+        }
+
+        PageTally tally = new(rows, entries, nulls, body.Length);
+        if (_codec == CompressionCodec.Uncompressed)
+        {
+            Store(header, levels, input, compressed: false, WriteChecksums ? Checksum(levels, input) : 0, tally);
+            return;
+        }
+
+        if (Lanes is { } lanes && Encryptor is null)
+        {
+            // On a lane when one is free, else here, but behind the pages before it either way.
+            bool queued = lanes.TryTake();
+            if (queued || _pending.Count > 0)
+            {
+                PendingPage page = new(this, lanes, header, levels, input, tally);
+                _pending.Enqueue(page);
+                _pendingBound += page.Bound;
+                if (queued)
+                {
+                    page.Queue();
+                }
+                else
+                {
+                    page.Complete();
+                }
+
+                Settle(wait: false);
+                return;
+            }
+        }
+
+        ReadOnlySpan<byte> squeezed = Compress(input);
+        bool compressed = header.Type == PageType.DataPage || Pays(squeezed.Length, input.Length);
+        ReadOnlySpan<byte> stored = compressed ? squeezed : input;
+        Store(header, levels, stored, compressed, WriteChecksums ? Checksum(levels, stored) : 0, tally);
+    }
+
+    /// <summary>Whether a v2 page's values are stored compressed: when the codec saves an eighth of their bytes, which pays for its decode.</summary>
+    private static bool Pays(int compressed, int plain) => compressed <= plain - plain / 8;
+
+    /// <summary>A page's rows, entries, nulls, and the bytes of its values before compression.</summary>
+    private readonly record struct PageTally(int Rows, int Entries, int Nulls, int Body);
+
+    /// <summary>
+    /// Appends a page to the chunk: <paramref name="header"/> given the sizes of its
+    /// <paramref name="stored"/> bytes and its checksum, then its <paramref name="levels"/>, a v2
+    /// page's, and those bytes, encrypted as modules of the column's key when it has one.
+    /// </summary>
+    private void Store(PageHeader header, ReadOnlySpan<byte> levels, ReadOnlySpan<byte> stored, bool compressed, int crc, in PageTally tally)
+    {
+        int rows = tally.Rows;
+        int entries = tally.Entries;
+        int nulls = tally.Nulls;
+        header.CompressedPageSize = levels.Length + stored.Length;
+        if (header.Type == PageType.DataPageV2)
+        {
+            header.IsCompressed = compressed || _codec == CompressionCodec.Uncompressed;
         }
 
         if (WriteChecksums)
         {
             header.HasCrc = true;
-            header.Crc = Checksum(levels, stored);
+            header.Crc = crc;
         }
 
         // Values stored as they are start on a 64-byte boundary of the file, behind the header's
         // extension; what lies between the header and them is the levels, inside a v1 page's bytes.
-        bool aligned = AlignUncompressedPages && Encryptor is null && !compressed && body.Length > 0;
-        int lead = levels.Length + (stored.Length - body.Length);
+        bool aligned = AlignUncompressedPages && Encryptor is null && !compressed && tally.Body > 0;
+        int lead = levels.Length + (stored.Length - tally.Body);
         long pageStart = _chunk.Length;
         int headerLength = 0;
         if (Encryptor is { } encryptor)
@@ -969,6 +1031,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             ClosePage();
         }
 
+        Settle(wait: true);
         WriteDictionaryPage(offset);
         long dictionary = _dictionaryPage.Length;
         WriteFirstHeader(offset + dictionary);
@@ -1047,6 +1110,13 @@ internal sealed class ColumnChunkWriter : IDisposable
 
     public void Dispose()
     {
+        // A page a lane compresses is waited for: its blocks go back to the pool once it is done.
+        while (_pending.Count > 0)
+        {
+            _pending.Dequeue().Dispose();
+        }
+
+        _pendingBound = 0;
         _values.Dispose();
         _levels.Dispose();
         _compressed.Dispose();
@@ -1704,17 +1774,144 @@ internal sealed class ColumnChunkWriter : IDisposable
     {
         _compressed.Clear();
         Span<byte> destination = _compressed.GetSpan(PageCodecs.MaxCompressedLength(_codec, body.Length));
+        return destination[..CompressInto(body, destination)];
+    }
+
+    /// <summary>Compresses <paramref name="body"/> into <paramref name="destination"/> by the column's codec, on any thread; the bytes it wrote.</summary>
+    private int CompressInto(ReadOnlySpan<byte> body, Span<byte> destination)
+    {
         ZstdCompressor? zstd = _codec == CompressionCodec.Zstd ? _compressors!.Rent() : null;
         try
         {
-            int size = PageCodecs.Compress(_codec, _level, body, destination, zstd);
-            return destination[..size];
+            return PageCodecs.Compress(_codec, _level, body, destination, zstd);
         }
         finally
         {
             if (zstd is not null)
             {
                 _compressors!.Return(zstd);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stores the pages compressing ahead into the chunk, in their order: those done, up to the first
+    /// that is not, or every one, compressed here when no lane has begun it, else waited for.
+    /// </summary>
+    private void Settle(bool wait)
+    {
+        while (_pending.Count > 0)
+        {
+            PendingPage page = _pending.Peek();
+            if (!wait && !page.Done)
+            {
+                return;
+            }
+
+            page.Complete();
+            _pending.Dequeue();
+            _pendingBound -= page.Bound;
+            try
+            {
+                page.Error?.Throw();
+                Store(page.Header, page.Levels, page.Stored, page.Compressed, page.Crc, page.Tally);
+            }
+            finally
+            {
+                page.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// A data page whose bytes compress on a lane while its column encodes the pages after it, then go
+    /// into the chunk in their turn: its levels and its bytes copied out of the column's buffers,
+    /// which the next page takes, into a block of its own, and its levels and compressed bytes side
+    /// by side in another, which its checksum covers in one pass.
+    /// </summary>
+    private sealed class PendingPage : LaneWork, IDisposable
+    {
+        /// <summary>The most bytes a page's header takes, its alignment's extension included.</summary>
+        private const int HeaderBound = 256;
+
+        private readonly ColumnChunkWriter _writer;
+        private readonly NativeSegmentOwner _source;
+        private readonly NativeSegmentOwner _target;
+        private readonly int _levels;
+        private readonly int _input;
+        private int _stored;
+
+        internal PendingPage(ColumnChunkWriter writer, PageLanes lanes, PageHeader header, ReadOnlySpan<byte> levels, ReadOnlySpan<byte> input, PageTally tally)
+            : base(lanes)
+        {
+            _writer = writer;
+            Header = header;
+            Tally = tally;
+            _levels = levels.Length;
+            _input = input.Length;
+            int bound = PageCodecs.MaxCompressedLength(writer._codec, input.Length);
+            _source = writer._pool.Rent(Math.Max(1, _levels + _input), 64);
+            try
+            {
+                _target = writer._pool.Rent(_levels + bound, 64);
+            }
+            catch
+            {
+                _source.Dispose();
+                throw;
+            }
+
+            levels.CopyTo(_source.WritableSpan);
+            input.CopyTo(_source.WritableSpan[_levels..]);
+
+            // A v2 page's values are stored as they are when the codec saves too little, a v1 page's
+            // compressed whatever it saves.
+            Bound = HeaderBound + _levels + (header.Type == PageType.DataPage ? bound : _input);
+        }
+
+        internal PageHeader Header { get; }
+
+        internal PageTally Tally { get; }
+
+        /// <summary>The most bytes the page adds to its chunk.</summary>
+        internal long Bound { get; }
+
+        /// <summary>Whether the page's values are stored compressed.</summary>
+        internal bool Compressed { get; private set; }
+
+        /// <summary>The CRC-32 of the levels and bytes stored, when the column writes checksums.</summary>
+        internal int Crc { get; private set; }
+
+        internal ReadOnlySpan<byte> Levels => _source.WritableSpan[.._levels];
+
+        internal ReadOnlySpan<byte> Stored => Compressed ? _target.WritableSpan.Slice(_levels, _stored) : _source.WritableSpan.Slice(_levels, _input);
+
+        public void Dispose()
+        {
+            if (!Claim())
+            {
+                Join();
+            }
+
+            _source.Dispose();
+            _target.Dispose();
+        }
+
+        protected override void Run()
+        {
+            Span<byte> source = _source.WritableSpan;
+            Span<byte> target = _target.WritableSpan;
+            int size = _writer.CompressInto(source.Slice(_levels, _input), target[_levels..]);
+            Compressed = Header.Type == PageType.DataPage || Pays(size, _input);
+            _stored = Compressed ? size : _input;
+            if (_writer.WriteChecksums)
+            {
+                if (Compressed)
+                {
+                    source[.._levels].CopyTo(target);
+                }
+
+                Crc = unchecked((int)Crc32.HashToUInt32((Compressed ? target : source)[..(_levels + _stored)]));
             }
         }
     }

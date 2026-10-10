@@ -684,8 +684,14 @@ deterministic algorithm, with no claim to match another compressor's bytes. GZIP
 through `System.IO.Compression`; its GZIP stream allocates per page, which the allocation gates name
 as the one exception.
 
-Pages are compressed on the writer's threads at a degree above one, each into a buffer of its own,
-and assembled in order: the bytes do not depend on the degree.
+At a degree above one, the columns of a block stage their rows side by side on the writer's
+threads, each closing its own page; rows too few to pay for the threads stage on the writing one.
+A page then compresses on a lane of the writer's while its column encodes the next, its levels and
+values copied out of the column's buffers into a block of its own, and goes into its chunk in page
+order. A row group closes on its bytes as they are once stored, which are waited for only when the
+most the pages still compressing could store reaches the bound: the bytes do not depend on the
+degree. On 32 lanes, the report's file of a million rows (§10) is written back in 14.4 to 14.7 ms
+a call, against 20 when only the pages' closes ran side by side; on one lane, 22.4 to 22.9.
 
 ### 6.5 Pages out without copies
 

@@ -1280,7 +1280,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
 
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes);
-                ThreadPool.UnsafeQueueUserWorkItem(page, preferLocal: false);
+                page.Queue();
                 _ahead.Enqueue(page);
                 _aheadBytes += size;
             }
@@ -1328,15 +1328,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The block a page was decompressed into ahead: here, when its lane has not begun it, else once its lane has.</summary>
     private static NativeSegmentOwner Wait(AheadPage page)
     {
-        if (page.Claim())
-        {
-            page.Run();
-        }
-        else
-        {
-            page.Join();
-        }
-
+        page.Complete();
         if (page.Error is { } error)
         {
             page.Block.Dispose();
@@ -1363,12 +1355,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// decompresses it itself rather than waiting for a lane the pool has not yet run.
     /// </summary>
     private sealed class AheadPage(ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block, PageLanes lanes)
-        : IThreadPoolWorkItem
+        : LaneWork(lanes)
     {
-        private readonly object _gate = new();
-        private int _claimed;
-        private bool _done;
-
         internal int Position { get; } = position;
 
         internal PageHeader Header { get; } = header;
@@ -1379,56 +1367,16 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         internal NativeSegmentOwner Block { get; } = block;
 
-        internal ExceptionDispatchInfo? Error { get; private set; }
-
-        /// <summary>Claims the decompression; false when a lane or the read has already.</summary>
-        internal bool Claim() => Interlocked.Exchange(ref _claimed, 1) == 0;
-
-        /// <summary>The lane's work: the decompression, unless the read claimed it first, and the lane given back.</summary>
-        public void Execute()
-        {
-            try
-            {
-                if (Claim())
-                {
-                    Run();
-                    reader.Counters?.AddAhead();
-                    lock (_gate)
-                    {
-                        _done = true;
-                        Monitor.PulseAll(_gate);
-                    }
-                }
-            }
-            finally
-            {
-                lanes.Give();
-            }
-        }
-
-        /// <summary>Waits for the lane that claimed the decompression to finish it: a page's decompression, begun.</summary>
-        internal void Join()
-        {
-            lock (_gate)
-            {
-                while (!_done)
-                {
-                    Monitor.Wait(_gate);
-                }
-            }
-        }
+        /// <summary>Counts the page a lane decompressed.</summary>
+        protected override void Ran() => reader.Counters?.AddAhead();
 
         /// <summary>Decompresses the page's bytes into its block, with a decompressor of the pool's for ZSTD.</summary>
-        internal void Run()
+        protected override void Run()
         {
             Zstd.ZstdDecompressor? zstd = codec == CompressionCodec.Zstd ? reader.TakeZstd() : null;
             try
             {
                 PageCodecs.Decompress(codec, source.Span, Block.WritableSpan, zstd);
-            }
-            catch (Exception exception)
-            {
-                Error = ExceptionDispatchInfo.Capture(exception);
             }
             finally
             {
