@@ -314,7 +314,10 @@ internal sealed partial class GroupCore
     /// <summary>
     /// A part's first sub-table: its pages side by side, numbered whole, in a paged core; else one of
     /// hashes made at once for the groups <paramref name="entries"/> entries may hold, which would
-    /// otherwise double some ten times, rehashing, through the part's first bursts.
+    /// otherwise double some ten times, rehashing, through the part's first bursts. Its room is rounded
+    /// up to a quarter of a power of two: a part's exact count made arrays of lengths no other part nor
+    /// query asked again, which the process's shelf piled one by one and found never (830 piles a query
+    /// on q10).
     /// </summary>
     internal SubTable FirstTable(CorePart part, int entries)
     {
@@ -324,8 +327,20 @@ internal sealed partial class GroupCore
         }
 
         SubTable first = NewTable(0);
-        first.Reserve((int)Math.Min(entries, _tableGroups));
+        first.Reserve((int)Math.Min(QuarterStep(entries), _tableGroups));
         return first;
+    }
+
+    /// <summary><paramref name="count"/> rounded up to a multiple of a quarter of the power of two at or below it: four lengths an octave, a quarter wasted at most.</summary>
+    internal static int QuarterStep(int count)
+    {
+        if (count <= 4)
+        {
+            return Math.Max(count, 1);
+        }
+
+        int step = 1 << (BitOperations.Log2((uint)count) - 2);
+        return (int)Math.Min(int.MaxValue, ((long)count + step - 1) & -(long)step);
     }
 
     /// <summary>The sub-table of a part of a paged core: the part's pages side by side, numbered whole.</summary>

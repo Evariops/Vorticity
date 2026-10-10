@@ -227,15 +227,17 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     }
 
     /// <summary>
-    /// A tick of the timer: a shelf used since the last waits on; idle for <see cref="IdleTicks"/>, it lets
-    /// go of what it keeps past its budget, to the collector, which it asks to run when that is much.
+    /// A tick of the timer: a shelf used since the last, or while a query runs, waits on; idle for
+    /// <see cref="IdleTicks"/>, it lets go of what it keeps past its budget, to the collector, which it
+    /// asks to run when that is much. A query between two uses of the shelf is not idle: under a
+    /// debugger, q10's scan went seconds without one, and its shelf, let go mid-query, made 850 MB again.
     /// </summary>
     private void Tick()
     {
         long trimmed = 0;
         lock (_gate)
         {
-            if (_active)
+            if (_active || QueryMemoryBudget.Process.ActiveQueries > 0)
             {
                 _active = false;
                 _idle = 0;
