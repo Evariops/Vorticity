@@ -388,10 +388,14 @@ A batch of a nested column ends on a row: where the repetition level is 0.
 A batch holds the same rows in every column, as the core requires, 8 192 by default. On a file this
 writer made, every column's pages lie on that grid (§6.1), so a batch is one page of each column and
 each of its buffers is the page's own: the mapping for a plain page stored uncompressed, the
-decompression's destination otherwise. On any other file, a batch's rows are cut on the same grid and
-a page decodes or decompresses straight into the batch's buffers at their offsets; a column whose
-values for one batch come from two pages copies them once into one buffer, since a column's values
-are one span.
+decompression's destination otherwise. On any other file, a batch's rows are cut on the same grid; a
+page is decoded whole, and a batch it holds whole reads its slots, views and validity in place, sliced
+at the batch's rows, so that a page of a million rows, as other writers cut them by bytes, is decoded
+once and copied never. Decoding a dictionary page's rows batch by batch instead, straight into each
+batch's buffers, was measured slower: on the January 2023 yellow taxi trips, read a column at a time,
+333 ms against 248, a narrow column's whole-page gather being one vectorized pass where a batch's pays
+its allocation and its spread each time. A column whose values for one batch come from two pages
+copies them once into one buffer, since a column's values are one span.
 
 A batch is borrowed, valid until the next `MoveNextAsync`; its buffers belong to the batch's arena or
 to the split's context, which holds the dictionaries and the page buffers views point into. An owned
