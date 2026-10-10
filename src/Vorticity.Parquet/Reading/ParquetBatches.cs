@@ -161,20 +161,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 break;
             }
 
-            // A batch the page index rules out: every column steps over its rows, a page it covers
-            // whole by its header alone.
-            for (int i = 0; i < _nodes.Length; i++)
-            {
-                if (_nested[i] is { } nested)
-                {
-                    nested.Skip(_context, rows);
-                }
-                else
-                {
-                    _readers[_flat[i]].Skip(_context, rows);
-                }
-            }
-
+            // A batch the page index rules out: every column steps over its rows.
+            SkipRows(rows);
             _groupRead += rows;
             _metrics.AddBlocksPruned(1);
         }
@@ -288,7 +276,42 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _groupStart = group.FirstRow;
         _groupRows = group.RowCount;
         _groupRead = 0;
+
+        // A range of rows that starts or ends inside the group: the batches before it stepped over,
+        // and none read past it. Its first and last batches hold rows outside it, which the scan trims.
+        if (_rows is { } asked)
+        {
+            if (asked.End < group.FirstRow + group.RowCount)
+            {
+                long end = asked.End - group.FirstRow;
+                _groupRows = Math.Min(group.RowCount, (end + _batchRows - 1) / _batchRows * _batchRows);
+            }
+
+            long before = (asked.Start - group.FirstRow) / _batchRows * _batchRows;
+            if (before > 0)
+            {
+                SkipRows((int)before);
+                _groupRead = before;
+            }
+        }
+
         return true;
+    }
+
+    /// <summary>Steps every column over its next <paramref name="rows"/> rows: a page they cover whole by its header alone.</summary>
+    private void SkipRows(int rows)
+    {
+        for (int i = 0; i < _nodes.Length; i++)
+        {
+            if (_nested[i] is { } nested)
+            {
+                nested.Skip(_context, rows);
+            }
+            else
+            {
+                _readers[_flat[i]].Skip(_context, rows);
+            }
+        }
     }
 
     /// <summary>The rows of a batch of <paramref name="spec"/>: <see cref="BatchRows"/>, or fewer when the scan asks for fewer.</summary>

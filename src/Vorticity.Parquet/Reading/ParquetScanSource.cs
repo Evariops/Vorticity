@@ -112,6 +112,58 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
         return await base.ExtremeAsync(spec, column, min, metrics, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <remarks>
+    /// Cut at the row groups, as a Vortex file's rows are at its chunks: a lane reads whole row groups,
+    /// none of another lane's, and a group the statistics rule out is dead rows that join the range
+    /// before them. A file of one row group is one range.
+    /// </remarks>
+    internal override ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
+    {
+        if (degree <= 1 || spec.Take is not null || spec.MatchesNothing)
+        {
+            return default;
+        }
+
+        ParquetFooter footer = file.Footer;
+        RowRange whole = new RowRange(0, file.RowCount);
+        RowRange rows = spec.Rows is { } asked ? asked.Intersect(whole) : whole;
+        if (rows.IsEmpty)
+        {
+            return default;
+        }
+
+        RowGroupPlan plan = RowGroupPlan.For(file, spec);
+        long alive = 0;
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            alive += plan.Read[group] ? Rows(footer.RowGroups[group]).Intersect(rows).Length : 0;
+        }
+
+        int batchRows = ParquetBatches.RowsOf(spec);
+        if (alive < 2L * batchRows)
+        {
+            return default;
+        }
+
+        Aggregating.LaneCuts cuts = new Aggregating.LaneCuts(rows, alive, degree, batchRows);
+        long previous = rows.Start;
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            RowRange groupRows = Rows(footer.RowGroups[group]);
+            if (groupRows.End <= previous || groupRows.End >= rows.End)
+            {
+                continue;
+            }
+
+            cuts.Boundary(groupRows.End, plan.Read[group] ? groupRows.Intersect(new RowRange(previous, groupRows.End)).Length : 0);
+            previous = groupRows.End;
+        }
+
+        return new ValueTask<RowRange[]?>(cuts.Finish());
+
+        static RowRange Rows(RowGroupEntry group) => new RowRange(group.FirstRow, group.FirstRow + group.RowCount);
+    }
+
     internal override bool TryBounds(int[] path, out FilterLiteral min, out FilterLiteral max)
     {
         min = FilterLiteral.Null;
