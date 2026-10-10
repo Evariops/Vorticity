@@ -213,6 +213,16 @@ internal sealed partial class ColumnChunkReader : IDisposable
             node = Whole(context.Canonical, _page);
             Retire();
         }
+        else if (_slot != 0 && _page.Rows - _page.Read >= rows)
+        {
+            // A batch inside a page larger than it, as other writers' pages often are: in place.
+            node = Slice(context.Canonical, _page, rows);
+            _page.Read += rows;
+            if (_page.Read == _page.Rows)
+            {
+                Retire();
+            }
+        }
         else
         {
             node = Gather(context, rows);
@@ -391,6 +401,38 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         _data[0] = page.Data;
         return Node(arena, page.Rows, validity, page.Values, _data);
+    }
+
+    /// <summary>
+    /// The next <paramref name="rows"/> rows of a page that holds them all, in place: its slots, its
+    /// validity and its codes sliced, nothing copied. The page stays until a later batch retires it.
+    /// </summary>
+    private int Slice(CanonicalArena arena, Page page, int rows)
+    {
+        int from = page.Read;
+        Validity validity = Validity.NonNullable;
+        if (_type.IsNullable)
+        {
+            validity = Validity.AllValid;
+            if (page.Validity is { } bits)
+            {
+                int nulls = rows - BitmapKernels.CountSet(bits.Buffer.Span, from, rows);
+                validity = nulls == 0 ? Validity.AllValid
+                    : nulls == rows ? Validity.AllInvalid
+                    : Validity.Bitmap(arena.AddBool(_validityType, rows, Validity.NonNullable, bits.Buffer.Slice(from >> 3), from & 7));
+            }
+        }
+
+        if (page.Codes is { } codes)
+        {
+            Page dictionary = _dictionary!;
+            _data[0] = dictionary.Data;
+            int entries = Storage(arena, dictionary.Rows, _values.IsNullable ? Validity.AllValid : Validity.NonNullable, dictionary.Values, _data);
+            return Wrap(arena, rows, arena.AddDictionary(_values, rows, validity, codes.Buffer.Slice(from * sizeof(uint), rows * sizeof(uint)), entries));
+        }
+
+        _data[0] = page.Data;
+        return Node(arena, rows, validity, page.Values.Slice(from * _slot, rows * _slot), _data);
     }
 
     /// <summary>A node of <paramref name="rows"/> rows copied out of the pages they span into the arena.</summary>
