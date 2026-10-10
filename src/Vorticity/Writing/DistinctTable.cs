@@ -29,6 +29,9 @@ internal sealed class DistinctTable
     /// <summary>The most slots a table of few values is spread over; past it, the load alone sizes the table.</summary>
     private const int SparseCapacity = 4096;
 
+    /// <summary>The most values a table of four- or eight-byte values holds for its rows to be compared with each of them at once.</summary>
+    private const int FewValues = 32;
+
     /// <summary>
     /// Entries beyond which the chunk refuses its dictionary candidate rather than keep growing.
     /// This is a bound on memory, not a pricing rule; pricing is the chooser's.
@@ -522,14 +525,32 @@ internal sealed class DistinctTable
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(node.Values.Span).Slice(start, count);
         if (mask.AllValid)
         {
+            int i = 0;
+            if (Vector256.IsHardwareAccelerated && (typeof(T) == typeof(ulong) || typeof(T) == typeof(uint)))
+            {
+                // While the table holds few values, every row is compared with each of them at once,
+                // a vector of rows at a time; the rows of a vector one of which the table does not
+                // hold go through it, which takes the new value.
+                int lanes = Vector256<uint>.Count;
+                while (i < values.Length && _distinct <= FewValues && !_abandoned)
+                {
+                    i = typeof(T) == typeof(ulong)
+                        ? ProbeFew(MemoryMarshal.Cast<T, ulong>(values), i)
+                        : ProbeFew(MemoryMarshal.Cast<T, uint>(values), i);
+                    for (int stop = Math.Min(values.Length, i + lanes); i < stop && !_abandoned; i++)
+                    {
+                        InsertFixed(ulong.CreateTruncating(values[i]));
+                    }
+                }
+            }
+
             // A row equal to the one before takes its code without the hash or the probe, and so
             // does the run it starts, measured a vector at a time: a sorted column or one of runs
             // is mostly such rows. The one compare that decides it is all a column without runs
             // pays. The run is measured before the row that starts it is inserted, so that the hash
             // of the row after the run is taken first: a probe whose branch was guessed wrong throws
             // away what came after it, never the hash waiting for it.
-            int i = 0;
-            ulong hash = values.IsEmpty ? 0 : KeyHash.Mix(ulong.CreateTruncating(values[0]));
+            ulong hash = i >= values.Length ? 0 : KeyHash.Mix(ulong.CreateTruncating(values[i]));
             while (i < values.Length && !_abandoned)
             {
                 T value = values[i];
@@ -560,6 +581,98 @@ internal sealed class DistinctTable
 
             InsertFixed(ulong.CreateTruncating(values[i]));
         }
+    }
+
+    /// <summary>
+    /// Codes the rows of <paramref name="values"/> from <paramref name="i"/> by comparing each with every
+    /// value the table holds, at most <see cref="FewValues"/>, eight rows at a time; where it stops: at
+    /// the first eight of which the table does not hold one, or before the last rows, fewer than eight.
+    /// </summary>
+    /// <remarks>
+    /// A row starts at all bits set, which no code is, and takes the code of the value it equals:
+    /// eight rows cost two compares and two blends a value, where the table's probe is a hash, a
+    /// load and a compare a row, and a branch the processor cannot guess when the rows draw few
+    /// values in no order.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int ProbeFew(ReadOnlySpan<ulong> values, int i)
+    {
+        Span<Vector256<ulong>> keys = stackalloc Vector256<ulong>[FewValues];
+        Span<Vector256<ulong>> codes = stackalloc Vector256<ulong>[FewValues];
+        int held = 0;
+        for (int code = 0; code < _distinct; code++)
+        {
+            if (code != _nullCode)
+            {
+                keys[held] = Vector256.Create(_codeKey[code]);
+                codes[held++] = Vector256.Create((ulong)code);
+            }
+        }
+
+        ref ulong first = ref MemoryMarshal.GetReference(values);
+        ref int into = ref MemoryMarshal.GetArrayDataReference(_codes);
+        for (; i <= values.Length - 8; i += 8)
+        {
+            Vector256<ulong> low = Vector256.LoadUnsafe(ref first, (nuint)i);
+            Vector256<ulong> high = Vector256.LoadUnsafe(ref first, (nuint)(i + 4));
+            Vector256<ulong> lowCodes = Vector256<ulong>.AllBitsSet;
+            Vector256<ulong> highCodes = Vector256<ulong>.AllBitsSet;
+            for (int k = 0; k < held; k++)
+            {
+                lowCodes = Vector256.ConditionalSelect(Vector256.Equals(low, keys[k]), codes[k], lowCodes);
+                highCodes = Vector256.ConditionalSelect(Vector256.Equals(high, keys[k]), codes[k], highCodes);
+            }
+
+            Vector256<int> found = Vector256.Narrow(lowCodes, highCodes).AsInt32();
+            if (Vector256.EqualsAny(found, Vector256<int>.AllBitsSet))
+            {
+                break;
+            }
+
+            found.StoreUnsafe(ref into, (nuint)_rows);
+            _rows += 8;
+        }
+
+        return i;
+    }
+
+    /// <summary><see cref="ProbeFew(ReadOnlySpan{ulong}, int)"/> over values of four bytes, a vector of eight a step.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int ProbeFew(ReadOnlySpan<uint> values, int i)
+    {
+        Span<Vector256<uint>> keys = stackalloc Vector256<uint>[FewValues];
+        Span<Vector256<uint>> codes = stackalloc Vector256<uint>[FewValues];
+        int held = 0;
+        for (int code = 0; code < _distinct; code++)
+        {
+            if (code != _nullCode)
+            {
+                keys[held] = Vector256.Create((uint)_codeKey[code]);
+                codes[held++] = Vector256.Create((uint)code);
+            }
+        }
+
+        ref uint first = ref MemoryMarshal.GetReference(values);
+        ref int into = ref MemoryMarshal.GetArrayDataReference(_codes);
+        for (; i <= values.Length - 8; i += 8)
+        {
+            Vector256<uint> rows = Vector256.LoadUnsafe(ref first, (nuint)i);
+            Vector256<uint> found = Vector256<uint>.AllBitsSet;
+            for (int k = 0; k < held; k++)
+            {
+                found = Vector256.ConditionalSelect(Vector256.Equals(rows, keys[k]), codes[k], found);
+            }
+
+            if (Vector256.EqualsAny(found, Vector256<uint>.AllBitsSet))
+            {
+                break;
+            }
+
+            found.AsInt32().StoreUnsafe(ref into, (nuint)_rows);
+            _rows += 8;
+        }
+
+        return i;
     }
 
     /// <summary>How many of <paramref name="values"/>, from the first, equal <paramref name="value"/>.</summary>
