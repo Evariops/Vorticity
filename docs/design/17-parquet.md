@@ -622,7 +622,7 @@ encoding's header, decompression bombs, and Class I fields set to plausible extr
 
 | promise | gate |
 |---|---|
-| nothing allocated per batch | allocations counted across a full scan after a warm-up batch, for every encoding and codec but GZIP |
+| nothing allocated per batch | allocations counted, warm, across full scans of a row group of 64 batches and of one of 16, which cost the same within 256 bytes, for every encoding the writer makes, pages v1 and v2, and every codec but GZIP |
 | a plain page without nulls is its column | on a mapped file of this writer, every `Values` of an uncompressed plain page lies inside the mapping; a v2 compressed plain page decompresses into the column's buffer, and a counter of copies stays at 0 |
 | a page is decompressed once per scan | decompressions equal the pages read |
 | a pruned page is neither read nor decoded | `Requests` and `BytesRequested` equal the plan's; pages decoded equal live pages |
