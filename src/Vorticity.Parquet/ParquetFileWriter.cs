@@ -53,10 +53,16 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// <summary>Per ZSTD level a column compresses at, the compressors its columns share.</summary>
     private readonly Dictionary<int, Compressors> _compressors = [];
 
-    /// <summary>The threads the columns close their pages on, the writing one included.</summary>
+    /// <summary>
+    /// The cells, rows times columns, from which a block's rows are staged side by side on the
+    /// writer's threads: below, waking the threads costs more than the staging they would share.
+    /// </summary>
+    private const int AcrossCells = 16_384;
+
+    /// <summary>The threads the columns stage their rows and close their pages on, the writing one included.</summary>
     private readonly int _lanes;
     private WorkFan? _fan;
-    private PageClosing? _closing;
+    private BlockWork? _blockWork;
     private readonly ColumnChunkWriter[] _columns;
 
     /// <summary>Per column, its node in the batch being taken.</summary>
@@ -529,19 +535,77 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _compressors.Clear();
     }
 
-    /// <summary>Closes the page every column staged for the block just filled, side by side on the writer's threads.</summary>
-    private void ClosePages()
+    /// <summary>
+    /// Stages rows <c>[start, start + count)</c> of the batch in every column and, when they end the
+    /// block, closes the columns' pages: on one lane, a column after the other, each closing its own;
+    /// on more, side by side on the writer's threads, each column staging its rows and closing its
+    /// page on the thread that claims it.
+    /// </summary>
+    /// <remarks>
+    /// Rows too few to pay for the threads are staged on this one, and only the pages they end are
+    /// closed side by side. A nested column always stages here, before the others: its shredding
+    /// may lay out nodes in the batch's arena, which the columns staging side by side only read.
+    /// </remarks>
+    private void Stage(CanonicalArena arena, int start, int count, bool closes)
     {
-        if (_lanes > 1 && _columns.Length > 1)
+        if (_lanes == 1 || _columns.Length == 1)
         {
-            (_fan ??= WorkFan.Rent(_lanes)).Run(_closing ??= new PageClosing(_columns), _columns.Length);
+            for (int c = 0; c < _columns.Length; c++)
+            {
+                _columns[c].Append(arena, _nodes[c], start, count);
+            }
+
+            return;
+        }
+
+        bool across = (long)count * _columns.Length >= AcrossCells;
+        for (int c = 0; c < _columns.Length; c++)
+        {
+            if (!across || _columns[c].Column.Nested)
+            {
+                _columns[c].Append(arena, _nodes[c], start, count);
+            }
+        }
+
+        if (across || closes)
+        {
+            BlockWork work = _blockWork ??= new BlockWork(this);
+            work.Start = start;
+            work.Stages = across;
+            work.Closes = closes;
+            (_fan ??= WorkFan.Rent(_lanes)).Run(work, _columns.Length, arena, count);
         }
     }
 
-    /// <summary>The columns' pages closed by the work fan, a column an item, on whichever of the writer's threads claims it.</summary>
-    private sealed class PageClosing(ColumnChunkWriter[] columns) : IFanWork
+    /// <summary>
+    /// A block's work for the work fan, a column an item, on whichever of the writer's threads claims
+    /// it: the column's rows staged, but a nested column's, and its page closed when the rows end the
+    /// block.
+    /// </summary>
+    private sealed class BlockWork(ParquetFileWriter writer) : IFanWork
     {
-        public void Run(WorkFan fan, int item) => columns[item].ClosePage();
+        /// <summary>The batch's first row the block takes.</summary>
+        internal int Start { get; set; }
+
+        /// <summary>Whether the columns stage the rows here, the fan's state the batch's arena and its value their count.</summary>
+        internal bool Stages { get; set; }
+
+        /// <summary>Whether the rows end the block, whose pages then close.</summary>
+        internal bool Closes { get; set; }
+
+        public void Run(WorkFan fan, int item)
+        {
+            ColumnChunkWriter column = writer._columns[item];
+            if (Stages && !column.Column.Nested)
+            {
+                column.Append((CanonicalArena)fan.State!, writer._nodes[item], Start, fan.Value);
+            }
+
+            if (Closes)
+            {
+                column.ClosePage();
+            }
+        }
     }
 
     /// <summary>
@@ -643,6 +707,13 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                 node = EncodedForms.Canonical(arena, arena.GetNode(node).StorageIndex);
             }
 
+            if (column.FixedElements && !column.Nested)
+            {
+                // Its elements laid out here, once, for the column to find them so when it stages
+                // beside the others, which only read the arena.
+                EncodedForms.Canonical(arena, arena.GetNode(node).ElementsIndex);
+            }
+
             _nodes[c] = node;
         }
 
@@ -656,22 +727,17 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         for (int start = 0; start < rows;)
         {
             int take = Math.Min(rows - start, blockRows - (int)(_groupRows % blockRows));
-            for (int c = 0; c < _columns.Length; c++)
-            {
-                _columns[c].Append(arena, _nodes[c], start, take);
-            }
-
+            bool closes = (_groupRows + take) % blockRows == 0;
+            Stage(arena, start, take, closes);
             start += take;
             _groupRows += take;
             _rowCount += take;
-            if (_groupRows % blockRows != 0)
+            if (!closes)
             {
                 continue;
             }
 
-            // The block is whole in every column: their pages close, on the writer's threads when it
-            // has more than one, each column's its own.
-            ClosePages();
+            // The block is whole in every column, its pages closed.
             if (_groupRows >= _options.RowGroupRows || BufferedBytes() >= _options.RowGroupBytes)
             {
                 await CloseRowGroupAsync(partial: false, cancellationToken).ConfigureAwait(false);

@@ -9,8 +9,8 @@ using Xunit;
 namespace Vorticity.Parquet.Tests;
 
 /// <summary>
-/// A file written on several threads: its columns close their pages side by side, and the file is
-/// the same bytes at every degree, and reads back the rows written.
+/// A file written on several threads: its columns stage their rows and close their pages side by
+/// side, and the file is the same bytes at every degree, and reads back the rows written.
 /// </summary>
 public sealed partial class WriterDegreeTests
 {

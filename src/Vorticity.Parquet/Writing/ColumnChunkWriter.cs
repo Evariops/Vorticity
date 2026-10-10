@@ -259,6 +259,9 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>What the column's ALP pages encode a vector through, made at the first.</summary>
     private Encodings.Alp.Scratch? _alp;
 
+    /// <summary>Where the rows a value first occurs at are gathered for the dictionary, made at the first.</summary>
+    private CanonicalArena? _gathered;
+
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, Compressors? compressors, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
         _rowValidity = column.Nullable && !column.Nested;
@@ -1068,6 +1071,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _lengths?.Dispose();
         _prefixes?.Dispose();
         _suffixes?.Dispose();
+        _gathered?.Reset();
     }
 
     private void Stage(CanonicalArena arena, int index, int start, int count)
@@ -1173,8 +1177,19 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         if (found > 0)
         {
-            int entries = CanonicalFilter.Apply(arena, index, firsts[..found]);
-            StageValues(arena, arena.GetNode(entries), 0, found, found, _entries);
+            // Gathered in the column's own arena, over the batch's buffers: the columns of a block
+            // stage side by side, and the batch's arena is read by all of them, written by none.
+            CanonicalArena gathered = _gathered ??= new CanonicalArena(4, _pool);
+            try
+            {
+                int entries = CanonicalFilter.Apply(gathered, gathered.ReferenceFrom(arena, index), firsts[..found]);
+                StageValues(gathered, gathered.GetNode(entries), 0, found, found, _entries);
+            }
+            finally
+            {
+                gathered.ResetKeepingBlocks();
+            }
+
             _entryCount += found;
         }
     }
