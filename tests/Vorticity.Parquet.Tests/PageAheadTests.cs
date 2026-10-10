@@ -13,8 +13,9 @@ namespace Vorticity.Parquet.Tests;
 /// <summary>
 /// A scan given lanes decompresses each column's next pages on them while it reads the pages before:
 /// the rows are the ones a scan on one lane reads, under every codec that compresses and both page
-/// versions, with nulls, dictionaries and text; a scan that stops early leaves no page decompressing
-/// behind it, and a skip over pages decompressed ahead drops them.
+/// versions, with nulls, dictionaries and text, the plain text cut into views by the lane that
+/// decompressed it; a scan that stops early leaves no page decompressing behind it, and a skip over
+/// pages decompressed ahead drops them.
 /// </summary>
 public sealed class PageAheadTests : IDisposable
 {
@@ -31,6 +32,8 @@ public sealed class PageAheadTests : IDisposable
         ("label", VortexType.Utf8.Nullable),
         ("flag", VortexType.Bool.Nullable),
         ("payload", VortexType.Utf8),
+        ("note", VortexType.Utf8.Nullable),
+        ("line", VortexType.Utf8),
     ];
 
     public void Dispose() => System.IO.File.Delete(_path);
@@ -45,14 +48,17 @@ public sealed class PageAheadTests : IDisposable
     public async Task ReadsOnLanesTheRowsOneLaneReads(ParquetCompression compression, DataPageVersion version)
     {
         await WriteAsync(compression, version);
-        (List<string> one, long aheadOnOne) = await CountedRowsAsync(1);
-        (List<string> four, long aheadOnFour) = await CountedRowsAsync(4);
+        (List<string> one, long aheadOnOne, long cutOnOne) = await CountedRowsAsync(1);
+        (List<string> four, long aheadOnFour, long cutOnFour) = await CountedRowsAsync(4);
         Assert.Equal(Rows, one.Count);
         Assert.Equal(one, four);
 
-        // On one lane no page is taken ahead; on four, pages are.
+        // On one lane no page is taken ahead; on four, pages are, and the plain text of the notes and
+        // the lines, nullable and required, is cut into views where it is decompressed.
         Assert.Equal(0, aheadOnOne);
+        Assert.Equal(0, cutOnOne);
         Assert.True(aheadOnFour > 0, "No page was taken ahead on four lanes.");
+        Assert.True(cutOnFour > 0, "No page's text was cut into views ahead on four lanes.");
 
         // A filter and a take step over pages a lane may have decompressed ahead.
         VortexExpr band = Expr.And(Expr.Ge(Expr.Field("id"), Expr.Literal(FilterLiteral.From(12_000L))), Expr.Lt(Expr.Field("id"), Expr.Literal(FilterLiteral.From(13_500L))));
@@ -88,13 +94,13 @@ public sealed class PageAheadTests : IDisposable
         Assert.Equal(await RowsAsync(1, scan => scan), await RowsAsync(4, scan => scan));
     }
 
-    /// <summary>Every row of the file on <paramref name="degree"/> lanes, and the pages its columns took ahead.</summary>
-    private async Task<(List<string> Rows, long Ahead)> CountedRowsAsync(int degree)
+    /// <summary>Every row of the file on <paramref name="degree"/> lanes, the pages its columns took ahead, and those whose views a lane cut.</summary>
+    private async Task<(List<string> Rows, long Ahead, long ViewsAhead)> CountedRowsAsync(int degree)
     {
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
         await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
         List<string> rows = await RowsAsync(file.Scan().ToBatchesAsync(Ct));
-        return (rows, file.Counters.Ahead);
+        return (rows, file.Counters.Ahead, file.Counters.ViewsAhead);
     }
 
     /// <summary>Every row the scan <paramref name="shape"/> makes of the file, on <paramref name="degree"/> lanes, each value rendered.</summary>
@@ -125,11 +131,19 @@ public sealed class PageAheadTests : IDisposable
 
     /// <summary>
     /// The rows, pages of 16 384 of them in a row group of them all: five pages a column, those of the
-    /// payloads, text that seldom repeats, large enough to be worth a lane under every codec.
+    /// payloads, the notes and the lines, text that seldom repeats, large enough to be worth a lane
+    /// under every codec, the notes and the lines PLAIN.
     /// </summary>
     private async Task WriteAsync(ParquetCompression compression, DataPageVersion version)
     {
-        ParquetWriteOptions options = new() { Compression = compression, DataPageVersion = version, BlockRows = 16_384, RowGroupRows = Rows };
+        ParquetWriteOptions options = new()
+        {
+            Compression = compression,
+            DataPageVersion = version,
+            BlockRows = 16_384,
+            RowGroupRows = Rows,
+            Hints = new Dictionary<string, ParquetEncodingHint> { ["note"] = ParquetEncodingHint.Plain, ["line"] = ParquetEncodingHint.Plain },
+        };
         await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(_path, Schema, options);
         ColumnsBuilder builder = writer.Builder();
         for (int row = 0; row < Rows; row++)
@@ -163,6 +177,16 @@ public sealed class PageAheadTests : IDisposable
             }
 
             builder.Column<string>(4).Append(string.Create(CultureInfo.InvariantCulture, $"payload {row * 2_654_435_761L % 1_000_003:D7} of the row, long enough to fill a page"));
+            if (row % 13 == 0)
+            {
+                builder.Column<string?>(5).AppendNull();
+            }
+            else
+            {
+                builder.Column<string?>(5).Append(string.Create(CultureInfo.InvariantCulture, $"note {row * 40_503L % 1_000_033:D7}, {(row % 3 == 0 ? "short" : "a little longer than twelve bytes")}"));
+            }
+
+            builder.Column<string>(6).Append(row % 4 == 0 ? "tiny" : string.Create(CultureInfo.InvariantCulture, $"line {row * 69_069L % 999_983:D6} of the file, on its own"));
         }
 
         await writer.WriteAsync(builder, Ct);

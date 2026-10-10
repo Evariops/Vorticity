@@ -146,8 +146,23 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The data pages after the one read, decompressed or being decompressed on the scan's lanes, in the chunk's order.</summary>
     private readonly Queue<AheadPage> _ahead = new();
 
+    /// <summary>What <see cref="ViewsAt"/> says of a page whose values a lane does not cut into views.</summary>
+    private const int NoViews = -2;
+
+    /// <summary>What <see cref="ViewsAt"/> says of a v1 page whose values lie past RLE levels behind their length.</summary>
+    private const int BehindLength = -1;
+
     /// <summary>The block a lane decompressed the page being decoded into, until its decode takes it.</summary>
     private NativeSegmentOwner? _decompressed;
+
+    /// <summary>
+    /// The views a lane cut the PLAIN byte arrays of the page being decoded into, while the page's bytes
+    /// lay in its cache, until the decode takes them: with the views cut and the bytes they were cut
+    /// from, which the decode holds to its own.
+    /// </summary>
+    private NativeSegmentOwner? _cutAhead;
+    private int _cutAheadViews;
+    private int _cutAheadBytes;
 
     /// <summary>The decompressed bytes of the pages in <see cref="_ahead"/>.</summary>
     private int _aheadBytes;
@@ -721,8 +736,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             Drop(Dequeue());
         }
 
-        _decompressed?.Dispose();
-        _decompressed = null;
+        LeaveAhead();
         for (int i = 0; i < _laneZstd.Length; i++)
         {
             if (Interlocked.Exchange(ref _laneZstd[i], null) is { } zstd)
@@ -1211,6 +1225,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 AheadPage ahead = Dequeue();
                 (header, at, stored) = (ahead.Header, ahead.At, ahead.Stored);
                 _decompressed = Wait(ahead);
+                (_cutAhead, _cutAheadViews, _cutAheadBytes) = (ahead.Views, ahead.ViewCount, ahead.ViewBytes);
             }
             else
             {
@@ -1231,8 +1246,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     }
                     finally
                     {
-                        _decompressed?.Dispose();
-                        _decompressed = null;
+                        LeaveAhead();
                     }
 
                     Prefetch();
@@ -1245,8 +1259,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     }
                     finally
                     {
-                        _decompressed?.Dispose();
-                        _decompressed = null;
+                        LeaveAhead();
                     }
 
                     Prefetch();
@@ -1374,7 +1387,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     return;
                 }
 
-                AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes, size);
+                int values = ViewsAt(header);
+                NativeSegmentOwner block = _pool.Rent(size, 64);
+                NativeSegmentOwner? views = values == NoViews ? null : _pool.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
+                AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, block, lanes, size, views, values);
                 page.Queue();
                 Counters?.AddAhead();
                 _ahead.Enqueue(page);
@@ -1385,6 +1401,60 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         _walked = position;
+    }
+
+    /// <summary>
+    /// Where a page decompressed ahead holds its values, for its lane to cut them into views: past the
+    /// levels of a v1 page, <see cref="BehindLength"/> where those are RLE behind their length;
+    /// <see cref="NoViews"/> for a page other than a flat column's PLAIN byte arrays, whose values the
+    /// read decodes itself. The read cuts the values again where the lane's views are not theirs whole.
+    /// </summary>
+    private int ViewsAt(in PageHeader header)
+    {
+        if (_nested || _form is not (LeafForm.Binary or LeafForm.Utf8) || header.Encoding != ParquetEncoding.Plain
+            || header.ValueCount <= 0 || (long)header.ValueCount * CanonicalSupport.ViewSize > _cap)
+        {
+            return NoViews;
+        }
+
+        if (header.Type == PageType.DataPageV2 || _leaf.MaxDefinitionLevel == 0)
+        {
+            return 0;
+        }
+
+        return header.DefinitionLevelEncoding switch
+        {
+            ParquetEncoding.Rle => BehindLength,
+            ParquetEncoding.BitPacked => LegacyBitPacked.Bytes(header.ValueCount, 1),
+            _ => NoViews,
+        };
+    }
+
+    /// <summary>Gives back what a lane made of the page being decoded that its decode did not take.</summary>
+    private void LeaveAhead()
+    {
+        _decompressed?.Dispose();
+        _decompressed = null;
+        _cutAhead?.Dispose();
+        _cutAhead = null;
+    }
+
+    /// <summary>
+    /// The views a lane cut the page's values into, where they are the <paramref name="valid"/> values of
+    /// <paramref name="bytes"/> bytes the decode would cut, with a view for each of its
+    /// <paramref name="rows"/>: else null, the lane's given back.
+    /// </summary>
+    private NativeSegmentOwner? TakeCutAhead(int bytes, int valid, int rows)
+    {
+        NativeSegmentOwner? views = _cutAhead;
+        _cutAhead = null;
+        if (views is not null && (_cutAheadViews != valid || _cutAheadBytes != bytes || views.Length < (long)rows * CanonicalSupport.ViewSize))
+        {
+            views.Dispose();
+            return null;
+        }
+
+        return views;
     }
 
     /// <summary>A ZSTD decompressor for a page decompressed ahead: one of the reader's, or the core pool's.</summary>
@@ -1431,6 +1501,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         if (page.Error is { } error)
         {
             page.Block.Dispose();
+            page.Views?.Dispose();
             error.Throw();
         }
 
@@ -1446,6 +1517,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         page.Block.Dispose();
+        page.Views?.Dispose();
     }
 
     /// <summary>
@@ -1453,7 +1525,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// by the lane when it begins, or by the read when it comes to the page first, which then
     /// decompresses it itself rather than waiting for a lane the pool has not yet run.
     /// </summary>
-    private sealed class AheadPage(ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block, PageLanes lanes, int size)
+    private sealed class AheadPage(
+        ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block,
+        PageLanes lanes, int size, NativeSegmentOwner? views, int values)
         : LaneWork(lanes)
     {
         /// <summary>The bytes the page decompresses to, which its block holds at least.</summary>
@@ -1469,7 +1543,20 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         internal NativeSegmentOwner Block { get; } = block;
 
-        /// <summary>Decompresses the page's bytes into its block, with a decompressor of the pool's for ZSTD.</summary>
+        /// <summary>The views the page's PLAIN byte arrays are cut into once it is decompressed, where the read takes them: see <see cref="ViewsAt"/>.</summary>
+        internal NativeSegmentOwner? Views { get; } = views;
+
+        /// <summary>The views cut, every value the page's bytes hold, or -1 before the lane cuts them.</summary>
+        internal int ViewCount { get; private set; } = -1;
+
+        /// <summary>The bytes the views were cut from: the page's past its levels.</summary>
+        internal int ViewBytes { get; private set; }
+
+        /// <summary>
+        /// Decompresses the page's bytes into its block, with a decompressor of the pool's for ZSTD, then
+        /// cuts its byte arrays into views while they lie in this lane's cache: read from another core's,
+        /// each length of the cut's chain would wait for its line.
+        /// </summary>
         protected override void Run()
         {
             Zstd.ZstdDecompressor? zstd = codec == CompressionCodec.Zstd ? reader.TakeZstd() : null;
@@ -1484,6 +1571,35 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     reader.GiveZstd(zstd);
                 }
             }
+
+            if (Views is { } cut)
+            {
+                Cut(Block.WritableSpan, cut.WritableSpan);
+            }
+        }
+
+        /// <summary>Cuts the values past the page's levels into views, as many as its bytes hold, up to its value count; nothing where the levels run past the page, which the read then says.</summary>
+        private void Cut(ReadOnlySpan<byte> body, Span<byte> views)
+        {
+            int start = values;
+            if (start == BehindLength)
+            {
+                int length = body.Length < sizeof(int) ? -1 : BinaryPrimitives.ReadInt32LittleEndian(body);
+                if (length < 0 || length > body.Length - sizeof(int))
+                {
+                    return;
+                }
+
+                start = sizeof(int) + length;
+            }
+
+            if (start > body.Length)
+            {
+                return;
+            }
+
+            ViewBytes = body.Length - start;
+            ViewCount = ViewKernels.BuildFromPrefixed(body[start..], views, Header.ValueCount);
         }
     }
 
@@ -1818,18 +1934,33 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private void Views(Page page, VortexBuffer values, NativeSegmentOwner? owner, int valid)
     {
         int rows = page.Rows;
-        NativeSegmentOwner views = Slots(page, rows * CanonicalSupport.ViewSize);
-        Span<byte> into = views.WritableSpan;
-        if (page.Validity is null)
+        NativeSegmentOwner? cut = TakeCutAhead(values.Length, valid, rows);
+        if (page.Validity is null && cut is not null)
         {
-            Cut(values.Span, into, valid);
+            // Cut where the page decompressed, while its bytes lay in that lane's cache.
+            Counters?.AddViewsAhead();
+            page.Slots = cut;
+            page.Values = cut.Buffer.Slice(0, rows * CanonicalSupport.ViewSize);
+        }
+        else if (page.Validity is null)
+        {
+            Cut(values.Span, Slots(page, rows * CanonicalSupport.ViewSize).WritableSpan, valid);
         }
         else
         {
-            NativeSegmentOwner dense = _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
+            Span<byte> into = Slots(page, rows * CanonicalSupport.ViewSize).WritableSpan;
+            NativeSegmentOwner dense = cut ?? _pool.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
             try
             {
-                Cut(values.Span, dense.WritableSpan, valid);
+                if (cut is null)
+                {
+                    Cut(values.Span, dense.WritableSpan, valid);
+                }
+                else
+                {
+                    Counters?.AddViewsAhead();
+                }
+
                 ValidRows.SpreadOver(dense.WritableSpan[..(valid * CanonicalSupport.ViewSize)], into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, CanonicalSupport.ViewSize, Encoding);
             }
             finally

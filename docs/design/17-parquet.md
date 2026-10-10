@@ -533,10 +533,17 @@ released, each into a context of its own, on as many lanes as the degree, a lane
 of the earliest batch that may run. The read waits for every field of the batch it asks for and
 releases each batch as it asks for the next, which frees its slot for the batch two on; a reader
 holds the pages a batch retires until the read releases it, and a row group ends with every batch
-released. A row group read in windows (§5.3), a take's among them, decodes a batch at a time. The January 2023 yellow taxi trips, every page GZIP's, scan in 29 to 31 ms on
-32 lanes against 33 to 36 side by side, 51 to 53 when only their pages decompressed on the lanes,
-and 190 on one; ClickBench's first file, 105 columns under SNAPPY, in 45 to 46 against 45 to 53 and
-105, and 173 on one, its `Title` column, a third of its bytes, the field each batch waits for.
+released. A row group read in windows (§5.3), a take's among them, decodes a batch at a time.
+
+A flat column's page of
+PLAIN byte arrays is cut into views by the lane that decompresses it, while its bytes lie in that
+lane's cache: cut on another core, each length of the cut's chain waits for its line, and
+ClickBench's `Title`, a third of its file's bytes, cut its views in 17 ms of each scan on 32 lanes
+against 0.5. The read takes the lane's views where they are its page's values whole, and cuts the
+values again where they are not, which says what is wrong with them. The January 2023 yellow taxi
+trips, every page GZIP's, scan in 24 to 25 ms on 32 lanes and 174 on one; ClickBench's first file,
+105 columns under SNAPPY, in 34 on 32 lanes and 35 to 37 on 8, against 38 to 39 and 41 with its
+views cut where they are read, and 125 on one, 65 of which inflate its pages.
 
 The answers are the same bits at every degree.
 

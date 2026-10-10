@@ -14,6 +14,7 @@ internal sealed class PageCounters
     private long _decompressions;
     private long _gathers;
     private long _ahead;
+    private long _viewsAhead;
     private long _piped;
 
     /// <summary>Data pages decoded: their levels and values made into the page's slots.</summary>
@@ -34,6 +35,9 @@ internal sealed class PageCounters
     /// </summary>
     internal long Ahead => Interlocked.Read(ref _ahead);
 
+    /// <summary>Data pages whose byte arrays the lane that decompressed them cut into views, which the read then took as they were.</summary>
+    internal long ViewsAhead => Interlocked.Read(ref _viewsAhead);
+
     /// <summary>Batches the scan read whose fields decoded ahead of it, a field at a time.</summary>
     internal long Piped => Interlocked.Read(ref _piped);
 
@@ -47,6 +51,8 @@ internal sealed class PageCounters
 
     internal void AddAhead() => Interlocked.Increment(ref _ahead);
 
+    internal void AddViewsAhead() => Interlocked.Increment(ref _viewsAhead);
+
     internal void AddPiped() => Interlocked.Increment(ref _piped);
 
     /// <summary>Starts every count again from zero.</summary>
@@ -57,6 +63,7 @@ internal sealed class PageCounters
         Interlocked.Exchange(ref _decompressions, 0);
         Interlocked.Exchange(ref _gathers, 0);
         Interlocked.Exchange(ref _ahead, 0);
+        Interlocked.Exchange(ref _viewsAhead, 0);
         Interlocked.Exchange(ref _piped, 0);
     }
 }
