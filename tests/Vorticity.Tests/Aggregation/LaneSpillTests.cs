@@ -59,6 +59,39 @@ public sealed partial class LaneSpillTests
     }
 
     [Fact]
+    public async Task ASessionThatSealsItsFilesSpillsSealedAndEndsExact()
+    {
+        // The spill of a session that seals its files: runs sealed on the disk, read back exact.
+        (string path, Row[] rows) = await WriteAsync();
+        string scratch = Directory.CreateTempSubdirectory("vorticity-lane-spill-").FullName;
+        try
+        {
+            long result = await PeakAsync(path, degree: 1);
+            QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
+            using VortexKeyring keyring = VortexKeyring.FromKeys(new VortexKey("spill", new byte[32]));
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 4;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+                options.Keyring = keyring;
+                options.EncryptFiles = true;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            long count = await file.Scan<Row>().CountDistinctAsync(r => r.User, Ct);
+            Assert.Equal(rows.Where(r => r.User is not null).Select(r => r.User).Distinct().LongCount(), count);
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task ADistinctCountOverTheScanWhoseScratchBudgetItsRunPassesFailsCleanly()
     {
         // A tenth of the result, and 64 KiB of scratch, which the first run passes: the typed refusal, no

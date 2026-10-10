@@ -346,6 +346,11 @@ public sealed class VortexDataset : IAsyncDisposable
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
         VortexWriteOptions write = _options.Write.WithIdentity(identity);
+        if (_store is SealedObjectStore { Seals: true })
+        {
+            // The runs an index of the object moves to disk hold its values: sealed as the object is.
+            write = write with { SealScratch = true };
+        }
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
         if (schema.Key is { } clustering && !bySortedColumn)
         {
