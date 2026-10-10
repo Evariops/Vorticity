@@ -10,19 +10,29 @@ using Xunit;
 namespace Vorticity.Tests.Arrays.Decoders.Compressed;
 
 /// <summary>
-/// A nullable zstd column's dense values spread over its valid rows, held to the rows filled one
-/// by one: every width, validity from sparse to nearly full so that each word is empty, whole or
-/// mixed, bitmaps starting mid-byte, row counts past the last whole word, and exactly as many
-/// values as valid rows, so a word near the end cannot read its values a vector at a time.
+/// A nullable column's dense values spread over its valid rows, held to the rows filled one by
+/// one: every width, a view's sixteen bytes and an odd fixed width among them, validity from sparse
+/// to nearly full so that each word is empty, whole or mixed, bitmaps starting mid-byte, row counts
+/// past the last whole word, and exactly as many values as valid rows, so a word near the end
+/// cannot read its values a vector at a time. Into rows zeroed before, and into rows of other
+/// bytes, which a spread over them writes zero where a row is null.
 /// </summary>
 public sealed class ZstdExpandTests
 {
     [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(4)]
-    [InlineData(8)]
-    public void EachValidRowTakesTheNextValueAndEachNullRowZero(int width)
+    [InlineData(1, false)]
+    [InlineData(2, false)]
+    [InlineData(4, false)]
+    [InlineData(8, false)]
+    [InlineData(12, false)]
+    [InlineData(16, false)]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(4, true)]
+    [InlineData(8, true)]
+    [InlineData(12, true)]
+    [InlineData(16, true)]
+    public void EachValidRowTakesTheNextValueAndEachNullRowZero(int width, bool over)
     {
         Random random = new Random(width * 7919);
         foreach (int rows in new[] { 1, 63, 64, 65, 200, 1_000 })
@@ -44,20 +54,15 @@ public sealed class ZstdExpandTests
                     byte[] destination = new byte[rows * width];
                     CanonicalArena arena = new CanonicalArena();
                     ValidityMask mask = ValidityMask.From(arena, Bitmap(arena, valid, bitOffset));
-                    switch (width)
+                    if (over)
                     {
-                        case 1:
-                            ValidRows.Expand<byte>(values, destination, in mask, rows, ZstdDecoder.Id);
-                            break;
-                        case 2:
-                            ValidRows.Expand<ushort>(values, destination, in mask, rows, ZstdDecoder.Id);
-                            break;
-                        case 4:
-                            ValidRows.Expand<uint>(values, destination, in mask, rows, ZstdDecoder.Id);
-                            break;
-                        default:
-                            ValidRows.Expand<ulong>(values, destination, in mask, rows, ZstdDecoder.Id);
-                            break;
+                        // Rows of other bytes, as a block of the pool holds: each null one must be written.
+                        destination.AsSpan().Fill(0xCD);
+                        ValidRows.SpreadOver(values, destination, in mask, rows, width, ZstdDecoder.Id);
+                    }
+                    else
+                    {
+                        ValidRows.Spread(values, destination, in mask, rows, width, ZstdDecoder.Id);
                     }
 
                     int next = 0;
