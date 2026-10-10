@@ -90,9 +90,36 @@ internal sealed class SessionKeys : IDisposable
     }
 
     /// <summary>The data key <paramref name="descriptor"/> names, lent to the caller: from the cache, or unwrapped once by the keyring.</summary>
-    internal async ValueTask<DataKey> UnwrapAsync(SealDescriptor descriptor, CancellationToken cancellationToken)
+    internal ValueTask<DataKey> UnwrapAsync(SealDescriptor descriptor, CancellationToken cancellationToken) =>
+        UnwrapAsync(descriptor.KeyId, descriptor.WrappedKey, descriptor.KeyContext, cancellationToken);
+
+    /// <summary>
+    /// A data key the session just drew from its keyring, kept as if it had been unwrapped: the
+    /// objects sealed under it are then read without asking the keyring. The cache takes the
+    /// caller's hold on <paramref name="key"/>.
+    /// </summary>
+    internal void Adopt(DataKey key, ReadOnlyMemory<byte> context)
     {
-        string name = Name(descriptor);
+        string name = Name(key.KeyId, key.WrappedKey.Span, context.Span);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_unwrapped.Remove(name, out Entry? replaced) && replaced.Key is { } old)
+            {
+                old.Dispose();
+            }
+
+            _unwrapped[name] = new Entry(Task.FromResult(key), _clock.GetUtcNow()) { Key = key };
+            _order.Enqueue(name);
+            Trim();
+        }
+    }
+
+    /// <summary>The data key wrapped as <paramref name="wrappedKey"/> under <paramref name="keyId"/>, lent to the caller: from the cache, or unwrapped once by the keyring.</summary>
+    internal async ValueTask<DataKey> UnwrapAsync(
+        string keyId, ReadOnlyMemory<byte> wrappedKey, ReadOnlyMemory<byte> context, CancellationToken cancellationToken)
+    {
+        string name = Name(keyId, wrappedKey.Span, context.Span);
         Entry entry;
         lock (_gate)
         {
@@ -115,7 +142,7 @@ internal sealed class SessionKeys : IDisposable
                 }
 
                 entry = new Entry(
-                    _keyring.UnwrapAsync(descriptor.KeyId, descriptor.WrappedKey, descriptor.KeyContext, CancellationToken.None).AsTask(),
+                    _keyring.UnwrapAsync(keyId, wrappedKey, context, CancellationToken.None).AsTask(),
                     _clock.GetUtcNow());
                 Unwraps++;
                 _unwrapped[name] = entry;
@@ -231,8 +258,17 @@ internal sealed class SessionKeys : IDisposable
     }
 
     /// <summary>What names a wrapped key: the key that wrapped it, the wrapped bytes and the context.</summary>
-    private static string Name(SealDescriptor descriptor) =>
-        string.Concat(descriptor.KeyId, "\n", Convert.ToBase64String(descriptor.WrappedKey.Span), "\n", Convert.ToBase64String(descriptor.KeyContext.Span));
+    private static string Name(string keyId, ReadOnlySpan<byte> wrappedKey, ReadOnlySpan<byte> context) =>
+        string.Concat(keyId, "\n", Convert.ToBase64String(wrappedKey), "\n", Convert.ToBase64String(context));
+
+    /// <summary>Generates a data key bound to <paramref name="context"/>, kept by the session and lent to the caller.</summary>
+    internal async ValueTask<DataKey> GenerateAsync(ReadOnlyMemory<byte> context, CancellationToken cancellationToken)
+    {
+        DataKey key = await _keyring.GenerateAsync(context, cancellationToken).ConfigureAwait(false);
+        DataKey lent = key.Retain();
+        Adopt(key, context);
+        return lent;
+    }
 
     /// <summary>A key being unwrapped, and once it is, the key, which the cache holds once.</summary>
     private sealed class Entry(Task<DataKey> pending, DateTimeOffset added)

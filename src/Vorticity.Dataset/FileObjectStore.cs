@@ -104,7 +104,7 @@ public sealed class FileObjectStore : IObjectStore
                     read += got;
                 }
 
-                return new ObjectRange(new SegmentLease(bytes.AsMemory(0, available), owner), Token(new FileInfo(path)));
+                return new ObjectRange(new SegmentLease(bytes.AsMemory(0, available), owner), Token(new FileInfo(path)), size);
             }
             catch
             {

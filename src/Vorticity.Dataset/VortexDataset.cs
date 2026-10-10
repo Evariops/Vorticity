@@ -166,15 +166,73 @@ public sealed class VortexDataset : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(store);
         options ??= new DatasetOptions();
         DateTimeOffset asked = options.TimeProvider.GetUtcNow();
-        (ulong version, CommitObject? commit) = await DatasetCommitter
-            .LatestAsync(store, cancellationToken).ConfigureAwait(false);
-        if (commit is null)
+        store = SealedObjectStore.Over(store, options.Session);
+        try
         {
-            throw ObjectNotFoundException.For(CommitKey.Prefix);
+            (ulong version, CommitObject? commit) = await DatasetCommitter
+                .LatestAsync(store, cancellationToken).ConfigureAwait(false);
+            if (commit is null)
+            {
+                throw ObjectNotFoundException.For(CommitKey.Prefix);
+            }
+
+            RequireEncryption(store, options);
+            return new VortexDataset(store, options.For(commit.Header), version, commit, asked);
+        }
+        catch
+        {
+            if (store is SealedObjectStore sealedStore)
+            {
+                await sealedStore.DisposeAsync().ConfigureAwait(false);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a plain dataset to a handle that asks for an encrypted one, or whose session refuses
+    /// plaintext: a reader that expects sealed data is not handed plain data in its place.
+    /// </summary>
+    private static void RequireEncryption(IObjectStore store, DatasetOptions options)
+    {
+        bool sealedData = store is SealedObjectStore { Seals: true };
+        if (!sealedData && (options.Encrypted || options.Session.Options.RefusePlaintext))
+        {
+            throw Sealing.SealedFiles.RefusedPlain(options.Encrypted ? "The dataset, opened as encrypted," : "The dataset");
+        }
+    }
+
+    /// <summary>
+    /// Changes the data key the dataset is sealed under: one commit that draws a new data key and is
+    /// sealed under it, after which every writer seals under the new key. The objects sealed before
+    /// keep the key they were sealed with until a compaction rewrites them, so a full rekey is this,
+    /// a compaction of every object, and a vacuum.
+    /// </summary>
+    /// <param name="cancellationToken">Cancels the key's generation and the commit.</param>
+    /// <returns>The version the rekeying commit created.</returns>
+    /// <exception cref="InvalidOperationException">The dataset is not encrypted.</exception>
+    public async ValueTask<ulong> RekeyAsync(CancellationToken cancellationToken = default)
+    {
+        if (_store is not SealedObjectStore { Seals: true } sealedStore)
+        {
+            throw new InvalidOperationException("The dataset is not encrypted, so it has no data key to change.");
         }
 
-        return new VortexDataset(store, options.For(commit.Header), version, commit, asked);
+        await sealedStore.RekeyAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            CommitResult result = await CommitAsync([new DatasetOperation.Rekey()], cancellationToken).ConfigureAwait(false);
+            return result.Version;
+        }
+        finally
+        {
+            sealedStore.AbandonRekey();
+        }
     }
+
+    /// <summary>Whether the dataset is encrypted: its commit objects, and so every object of it, sealed.</summary>
+    public bool IsEncrypted => _store is SealedObjectStore { Seals: true };
 
     /// <summary>Moves this handle to the latest version.</summary>
     /// <param name="cancellationToken">Cancels the requests.</param>
@@ -383,7 +441,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ?? throw ObjectNotFoundException.For(objectKey);
 
         long end = await EndAsync(cancellationToken).ConfigureAwait(false);
-        ObjectSegmentSource source = new ObjectSegmentSource(_store, objectKey);
+        ISegmentReader source = await ImportReaderAsync(objectKey, cancellationToken).ConfigureAwait(false);
         ObjectEntry entry;
         ReadOnlyMemory<byte> treeKey;
         await using (source.ConfigureAwait(false))
@@ -392,6 +450,15 @@ public sealed class VortexDataset : IAsyncDisposable
                 .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
+                // A sealed file keeps the binding it was written with: its object id is its identity,
+                // which its entry records and every later open checks again.
+                if (source is Sealing.SealedSegmentReader sealedFile
+                    && !sealedFile.Layout.Descriptor.ObjectId.SequenceEqual(SealedObjectStore.UidBytes(Identity(file))))
+                {
+                    throw VortexEncryptionException.Unauthenticated(
+                        $"'{objectKey}' is not the file its envelope binds: its identity and its object id differ.");
+                }
+
                 // An object reads as the dataset's schema, or is refused here rather than failing
                 // the first scan: the same columns, or those of an earlier schema, each under a
                 // name the column has or had and of a type its values survive the dataset's in.
@@ -419,6 +486,29 @@ public sealed class VortexDataset : IAsyncDisposable
 
         return await ApplyAsync(
             [new DatasetOperation.AddObject(treeKey, entry)], cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The reader an import opens a file through: sealed into an encrypted dataset, which refuses a
+    /// plain one, and plain into a plain one, which refuses a sealed one, as a dataset is sealed
+    /// whole or not at all.
+    /// </summary>
+    private async ValueTask<ISegmentReader> ImportReaderAsync(string objectKey, CancellationToken cancellationToken)
+    {
+        if (_store is SealedObjectStore { Seals: true } sealedStore)
+        {
+            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, cancellationToken).ConfigureAwait(false);
+        }
+
+        ObjectSegmentSource plain = new ObjectSegmentSource(_store, objectKey);
+        if (_store is SealedObjectStore && await Sealing.SealedFiles.EndsSealedAsync(plain, cancellationToken).ConfigureAwait(false))
+        {
+            await plain.DisposeAsync().ConfigureAwait(false);
+            throw VortexEncryptionException.Refused(
+                $"'{objectKey}' is sealed and the dataset is not encrypted: a dataset is sealed whole or not at all.");
+        }
+
+        return plain;
     }
 
     /// <summary>Removes data objects of the version this handle holds, in one commit.</summary>
@@ -741,9 +831,16 @@ public sealed class VortexDataset : IAsyncDisposable
     public ValueTask<DatasetVerification> VerifyAsync(ulong? since = null, CancellationToken cancellationToken = default) =>
         DatasetVerifier.VerifyAsync(_store, new VerifyOptions { Version = Version, Since = since }, cancellationToken);
 
-    /// <summary>Closes the data objects the handle keeps open.</summary>
+    /// <summary>Closes the data objects the handle keeps open, and wipes the keys of the commit objects it opened.</summary>
     /// <returns>A task that completes when every object is closed.</returns>
-    public ValueTask DisposeAsync() => _objects.DisposeAsync();
+    public async ValueTask DisposeAsync()
+    {
+        await _objects.DisposeAsync().ConfigureAwait(false);
+        if (_store is SealedObjectStore sealedStore)
+        {
+            await sealedStore.DisposeAsync().ConfigureAwait(false);
+        }
+    }
 
     /// <summary>
     /// Creates a dataset under a store prefix — everything under its keys — and returns a handle on
@@ -757,11 +854,27 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(store);
         options ??= new DatasetOptions();
+
+        // Encrypted when asked, and when the session seals what it writes or refuses plaintext, whose
+        // own open would refuse a plain dataset.
+        bool encrypted = options.Encrypted || options.Session.Seals || options.Session.Options.RefusePlaintext;
+        if (encrypted && options.Session.Keys is null)
+        {
+            throw new InvalidOperationException(
+                "An encrypted dataset is created in a session whose keyring seals it: set VortexSessionOptions.Keyring on DatasetOptions.Session.");
+        }
+
+        store = SealedObjectStore.Over(store, options.Session);
         (ulong existing, _) = await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false);
         if (existing != 0)
         {
             throw new ObjectStoreException(
                 $"This store already holds a dataset at version {existing}; open it rather than creating it.");
+        }
+
+        if (encrypted)
+        {
+            await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
         _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema);
@@ -950,7 +1063,6 @@ public sealed class VortexDataset : IAsyncDisposable
             return null;
         }
 
-        long bytes = draft.Sink.Position;
         UInt128 hash = draft.Sink.ContentHash;
 
         // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
@@ -962,6 +1074,8 @@ public sealed class VortexDataset : IAsyncDisposable
             throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
         }
 
+        // What the store holds, sealed bytes included: what a head reports, and verification checks.
+        long bytes = draft.Sink.StoredLength;
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries);
         return new WrittenObject(entry, KeyOf(prefix, entry));
     }

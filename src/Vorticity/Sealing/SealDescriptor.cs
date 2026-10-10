@@ -89,6 +89,10 @@ internal sealed class SealDescriptor
     /// <summary>The descriptor's length in bytes.</summary>
     internal int Length => Bytes.Length;
 
+    /// <summary>The length of a descriptor naming <paramref name="keyId"/>, a context of <paramref name="contextLength"/> bytes and a wrapped key of <paramref name="wrappedLength"/>.</summary>
+    internal static int LengthOf(string keyId, int contextLength, int wrappedLength) =>
+        FixedBytes + StrictUtf8.GetByteCount(keyId) + contextLength + wrappedLength;
+
     /// <summary>A descriptor whose commitment is still zeros; <see cref="SetCommitment"/> fills it once the hash has derived the first key.</summary>
     /// <exception cref="ArgumentException">A field is longer than the format allows.</exception>
     internal static SealDescriptor Create(

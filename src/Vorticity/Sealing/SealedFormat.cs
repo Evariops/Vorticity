@@ -97,6 +97,17 @@ internal static class SealedFormat
         return plain >= 0 && CipherLength(plain, frameSize) == cipherLength ? plain : -1;
     }
 
+    /// <summary>
+    /// The length of an object of one epoch holding <paramref name="plainLength"/> bytes, whose
+    /// descriptor is <paramref name="descriptorLength"/> bytes: the header, the frames, and a trailer
+    /// with the descriptor again and one epoch.
+    /// </summary>
+    internal static long SealedLength(int descriptorLength, long plainLength, int frameSize) =>
+        HeaderPrefixBytes + descriptorLength + CipherLength(plainLength, frameSize) + OneEpochTrailerBytes(descriptorLength);
+
+    /// <summary>The trailer of an object of one epoch: the descriptor, the count, the entry, the length and the magic.</summary>
+    internal static int OneEpochTrailerBytes(int descriptorLength) => descriptorLength + 4 + EpochEntryBytes + TrailerSuffixBytes;
+
     /// <summary>Writes the nonce of frame <paramref name="index"/>: the index as a little-endian 64-bit integer, then the flags, bit 0 marking the epoch's last frame.</summary>
     internal static void Nonce(long index, bool final, Span<byte> nonce)
     {
