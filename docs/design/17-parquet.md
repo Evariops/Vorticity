@@ -552,7 +552,7 @@ lane's cache: cut on another core, each length of the cut's chain waits for its 
 ClickBench's `Title`, a third of its file's bytes, cut its views in 17 ms of each scan on 32 lanes
 against 0.5. The read takes the lane's views where they are its page's values whole, and cuts the
 values again where they are not, which says what is wrong with them. The January 2023 yellow taxi
-trips, every page GZIP's, scan in 20 ms on 32 lanes, 30 on 8 and 174 on one; ClickBench's first
+trips, every page GZIP's, scan in 18.6 ms on 32 lanes, 27.5 on 8 and 155 on one; ClickBench's first
 file, 105 columns under SNAPPY, in 27 to 29 on 8 to 32 lanes, against 38 to 41 with its views cut
 where they are read, and 125 on one, 65 of which inflate its pages.
 
