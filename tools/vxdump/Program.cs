@@ -38,6 +38,9 @@ internal static class Program
                   --verify      check every index region against its checksum, and a fragment's
                                 record of the file's hash against the file
                   --repair      truncate a torn append back to the last valid file
+                  --key ID=HEX  a 32-byte key a sealed file's data key may be wrapped with, named
+                                ID, in hexadecimal (repeatable): every option reads the file sealed
+                  --decrypt P   write the sealed file's plaintext, a plain Vortex file, to P
                 """);
             return args.Length == 0 ? 2 : 0;
         }
@@ -53,8 +56,41 @@ internal static class Program
             return 2;
         }
 
+        VortexKeyring? keyring = null;
+        VortexSession session = VortexSession.Default;
         try
         {
+            if (sections.Keys.Count > 0)
+            {
+                VortexKey[] keys = new VortexKey[sections.Keys.Count];
+                for (int i = 0; i < keys.Length; i++)
+                {
+                    string named = sections.Keys[i];
+                    int equals = named.IndexOf('=', StringComparison.Ordinal);
+                    if (equals <= 0)
+                    {
+                        throw new FormatException($"--key takes ID=HEX; '{named}' names no id.");
+                    }
+
+                    keys[i] = new VortexKey(named[..equals], Convert.FromHexString(named[(equals + 1)..]));
+                }
+
+                keyring = VortexKeyring.FromKeys(keys);
+                session = VortexSession.Create(o => o.Keyring = keyring);
+            }
+
+            if (sections.Decrypt is { } destination)
+            {
+                System.IO.FileStream plain = System.IO.File.Create(destination);
+                await using (plain.ConfigureAwait(false))
+                {
+                    await session.DecryptAsync(path, plain).ConfigureAwait(false);
+                }
+
+                Console.Out.WriteLine($"decrypted {path} -> {destination}: {Text(new System.IO.FileInfo(destination).Length)} bytes");
+                return 0;
+            }
+
             ImmutableArray<IndexFragment>.Builder fragments = ImmutableArray.CreateBuilder<IndexFragment>();
             foreach (string fragment in sections.Fragments)
             {
@@ -62,7 +98,7 @@ internal static class Program
             }
 
             VortexOpenOptions open = new VortexOpenOptions { IndexFragments = fragments.ToImmutable() };
-            VortexFile file = await VortexSession.Default.OpenAsync(path, open).ConfigureAwait(false);
+            VortexFile file = await session.OpenAsync(path, open).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
                 StringBuilder output = new StringBuilder();
@@ -134,10 +170,24 @@ internal static class Program
             Console.Error.WriteLine($"io: {error.Message}");
             return 5;
         }
-        catch (Exception error) when (error is FormatException or ArgumentException or VortexSchemaException)
+        catch (VortexEncryptionException error)
+        {
+            Console.Error.WriteLine($"sealed: {error.Message}");
+            return 7;
+        }
+        catch (Exception error) when (error is FormatException or ArgumentException or VortexSchemaException or InvalidOperationException)
         {
             Console.Error.WriteLine($"vxdump: {error.Message}");
             return 2;
+        }
+        finally
+        {
+            if (!ReferenceEquals(session, VortexSession.Default))
+            {
+                await session.DisposeAsync().ConfigureAwait(false);
+            }
+
+            keyring?.Dispose();
         }
     }
 
@@ -413,7 +463,8 @@ internal static class Program
 
     private readonly record struct Sections(
         bool Schema, bool Encodings, bool Layout, bool Segments, bool Stats, bool Scan,
-        bool Indexes, string? Explain, IReadOnlyList<string> Fragments, bool Verify)
+        bool Indexes, string? Explain, IReadOnlyList<string> Fragments, bool Verify,
+        IReadOnlyList<string> Keys, string? Decrypt)
     {
         /// <summary>The sections asked for, or null, the option named on stderr, for an option vxdump does not know.</summary>
         internal static Sections? Parse(ReadOnlySpan<string> args)
@@ -421,11 +472,15 @@ internal static class Program
             bool schema = false, encodings = false, layout = false, segments = false, stats = false;
             bool scan = false, indexes = false, verify = false, any = false;
             string? explain = null;
+            string? decrypt = null;
             List<string> fragments = [];
+            List<string> keys = [];
             for (int i = 0; i < args.Length; i++)
             {
                 switch (args[i])
                 {
+                    case "--key" when i + 1 < args.Length: keys.Add(args[++i]); break;
+                    case "--decrypt" when i + 1 < args.Length: decrypt = args[++i]; break;
                     case "--indexes": indexes = any = true; break;
                     case "--fragment" when i + 1 < args.Length: fragments.Add(args[++i]); break;
                     case "--verify": verify = any = true; break;
@@ -444,8 +499,8 @@ internal static class Program
             }
 
             return any
-                ? new Sections(schema, encodings, layout, segments, stats, scan, indexes, explain, fragments, verify)
-                : new Sections(false, false, true, false, false, false, false, null, fragments, false);
+                ? new Sections(schema, encodings, layout, segments, stats, scan, indexes, explain, fragments, verify, keys, decrypt)
+                : new Sections(false, false, true, false, false, false, false, null, fragments, false, keys, decrypt);
         }
     }
 }

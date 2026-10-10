@@ -682,7 +682,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool, options.Durable);
         try
         {
-            VortexFileWriter writer = Create(new PipeSegmentSink(pipe), schema, options, session);
+            VortexFileWriter writer = Create(SinkOver(pipe, session), schema, options, session);
             writer._filePipe = pipe;
             writer.Session = session;
             return writer;
@@ -697,11 +697,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>; the writer completes the pipe.</summary>
     internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
     {
-        VortexFileWriter writer = Create(new PipeSegmentSink(sink), schema, options, session);
+        VortexFileWriter writer = Create(SinkOver(sink, session), schema, options, session);
         writer._callerPipe = sink;
         writer.Session = session;
         return writer;
     }
+
+    /// <summary>The sink over <paramref name="pipe"/>: a sealing stage when the session seals its files, a plain one otherwise.</summary>
+    private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session) =>
+        session.Seals
+            ? new Sealing.SealingSegmentSink(pipe, Sealing.SealParameters.ForFile(), session.Keys!.FileKeyAsync)
+            : new PipeSegmentSink(pipe);
 
     /// <summary>The session the writer belongs to.</summary>
     internal VortexSession Session { get; private set; } = VortexSession.Default;
@@ -713,6 +719,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal static async ValueTask<VortexFileWriter> AppendInSessionAsync(
         string path, VortexWriteOptions? options, VortexSession session, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(path);
+        if (session.Seals)
+        {
+            throw new NotSupportedException(
+                "A session that seals its files appends to none yet: appends to sealed files come with epochs. Write the file again instead.");
+        }
+
+        if (await Sealing.SealedFiles.IsSealedAsync(path, cancellationToken).ConfigureAwait(false))
+        {
+            throw new NotSupportedException(
+                $"'{path}' is sealed, and appends to sealed files come with epochs. Write the file again instead.");
+        }
+
         VortexFileWriter writer = await AppendAsync(path, options, null, session, cancellationToken).ConfigureAwait(false);
         writer.Session = session;
         return writer;

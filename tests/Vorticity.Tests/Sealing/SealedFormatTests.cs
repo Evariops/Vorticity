@@ -223,7 +223,7 @@ public sealed class SealedFormatTests
             new Vorticity.IO.MemorySegmentSource(sealedBytes),
             ownsInner: true,
             (descriptor, _) => descriptor.KeyId == key.KeyId && descriptor.WrappedKey.Span.SequenceEqual(key.WrappedKey.Span)
-                ? new ValueTask<DataKey>(key)
+                ? new ValueTask<DataKey>(key.Retain())
                 : throw VortexEncryptionException.NoKey(descriptor.KeyId, "another key"),
             ct);
         long length = await reader.GetLengthAsync(ct);

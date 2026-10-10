@@ -15,12 +15,16 @@ namespace Vorticity;
 /// <remarks>
 /// The key lives in native memory, which the garbage collector never moves or copies, and
 /// <see cref="Dispose"/> wipes it. The library never hands it out: a sealed object derives keys of
-/// its own from it, a fresh one per object and per append.
+/// its own from it, a fresh one per object and per append. A key a keyring returns belongs to the
+/// library from then on, which disposes it.
 /// </remarks>
 public sealed class DataKey : IDisposable
 {
     private readonly SecretBytes _key;
     private readonly byte[] _wrapped;
+
+    /// <summary>The holders of the key: the one that created it, and those the library lent it to.</summary>
+    private int _holders = 1;
 
     /// <summary>A data key a keyring generated or unwrapped.</summary>
     /// <param name="keyId">The id of the key that wrapped it, which a sealed object records and hands back to unwrap it.</param>
@@ -54,8 +58,32 @@ public sealed class DataKey : IDisposable
     /// <summary>The key itself, until the data key is disposed.</summary>
     internal ReadOnlySpan<byte> Key => _key.Span;
 
-    /// <summary>Wipes the key. Idempotent.</summary>
-    public void Dispose() => _key.Dispose();
+    /// <summary>Lends the key to one more holder, which disposes it once done; the key is wiped when the last one does.</summary>
+    /// <exception cref="ObjectDisposedException">The key is already wiped.</exception>
+    internal DataKey Retain()
+    {
+        int holders = Volatile.Read(ref _holders);
+        while (true)
+        {
+            ObjectDisposedException.ThrowIf(holders <= 0, this);
+            int seen = Interlocked.CompareExchange(ref _holders, holders + 1, holders);
+            if (seen == holders)
+            {
+                return this;
+            }
+
+            holders = seen;
+        }
+    }
+
+    /// <summary>Wipes the key, once every holder the library lent it to has let it go.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Decrement(ref _holders) == 0)
+        {
+            _key.Dispose();
+        }
+    }
 }
 
 /// <summary>A key the application holds, which a keyring of <see cref="VortexKeyring.FromKeys"/> wraps data keys with.</summary>

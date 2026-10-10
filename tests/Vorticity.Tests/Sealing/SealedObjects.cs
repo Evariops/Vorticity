@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipelines;
@@ -27,12 +26,12 @@ internal static class SealedObjects
         return key;
     }
 
-    /// <summary>Seals <paramref name="plaintext"/>, written in pieces of <paramref name="chunk"/> bytes.</summary>
+    /// <summary>Seals <paramref name="plaintext"/>, written in pieces of <paramref name="chunk"/> bytes; <paramref name="key"/> stays the caller's.</summary>
     internal static async Task<byte[]> SealAsync(
         ReadOnlyMemory<byte> plaintext, DataKey key, SealParameters parameters, int chunk, CancellationToken cancellationToken)
     {
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key.Retain()));
         try
         {
             for (int at = 0; at < plaintext.Length; at += chunk)
@@ -51,12 +50,12 @@ internal static class SealedObjects
         }
     }
 
-    /// <summary>Writes <paramref name="rows"/> as a Vortex file through a sealing stage.</summary>
+    /// <summary>Writes <paramref name="rows"/> as a Vortex file through a sealing stage; <paramref name="key"/> stays the caller's.</summary>
     internal static async Task<byte[]> WriteAsync(
         IReadOnlyList<Reading> rows, DataKey key, SealParameters parameters, CancellationToken cancellationToken)
     {
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
-        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key));
+        SealingSegmentSink sink = new SealingSegmentSink(pipe.Writer, parameters, _ => new ValueTask<DataKey>(key.Retain()));
         await using (VortexFileWriter writer = VortexFileWriter.Create(sink, VortexTypes.ToDType(Reading.Schema, new DTypeArena()), VortexWriteOptions.Default))
         {
             writer.Declare(Reading.Schema);
@@ -69,71 +68,46 @@ internal static class SealedObjects
         return await DrainAsync(pipe.Reader, cancellationToken);
     }
 
-    /// <summary>Opens <paramref name="sealedBytes"/> with <paramref name="keyring"/>, the keys it unwraps kept in <paramref name="keys"/>.</summary>
-    internal static ValueTask<SealedSegmentReader> OpenAsync(byte[] sealedBytes, VortexKeyring keyring, List<DataKey> keys, CancellationToken cancellationToken) =>
+    /// <summary>Opens <paramref name="sealedBytes"/> with the keys <paramref name="keyring"/> unwraps.</summary>
+    internal static ValueTask<SealedSegmentReader> OpenAsync(byte[] sealedBytes, VortexKeyring keyring, CancellationToken cancellationToken) =>
         SealedSegmentReader.OpenAsync(
             new MemorySegmentSource(sealedBytes),
             ownsInner: true,
-            async (descriptor, ct) =>
-            {
-                DataKey key = await keyring.UnwrapAsync(descriptor.KeyId, descriptor.WrappedKey, descriptor.KeyContext, ct);
-                lock (keys)
-                {
-                    keys.Add(key);
-                }
-
-                return key;
-            },
+            (descriptor, ct) => keyring.UnwrapAsync(descriptor.KeyId, descriptor.WrappedKey, descriptor.KeyContext, ct),
             cancellationToken);
 
     /// <summary>The whole plaintext of <paramref name="sealedBytes"/>, read as one range.</summary>
     internal static async Task<byte[]> OpenAllAsync(byte[] sealedBytes, VortexKeyring keyring, CancellationToken cancellationToken)
     {
-        List<DataKey> keys = [];
-        try
+        await using SealedSegmentReader reader = await OpenAsync(sealedBytes, keyring, cancellationToken);
+        long length = await reader.GetLengthAsync(cancellationToken);
+        if (length == 0)
         {
-            await using SealedSegmentReader reader = await OpenAsync(sealedBytes, keyring, keys, cancellationToken);
-            long length = await reader.GetLengthAsync(cancellationToken);
-            if (length == 0)
-            {
-                return [];
-            }
+            return [];
+        }
 
-            using Vorticity.Buffers.SegmentOwner all = await reader.ReadRangeAsync(0, checked((int)length), 1, cancellationToken);
-            return all.Buffer.Span.ToArray();
-        }
-        finally
-        {
-            foreach (DataKey key in keys)
-            {
-                key.Dispose();
-            }
-        }
+        using Vorticity.Buffers.SegmentOwner all = await reader.ReadRangeAsync(0, checked((int)length), 1, cancellationToken);
+        return all.Buffer.Span.ToArray();
     }
 
     /// <summary>The rows of the sealed Vortex file <paramref name="sealedBytes"/>.</summary>
     internal static async Task<List<Reading>> ReadRowsAsync(byte[] sealedBytes, VortexKeyring keyring, CancellationToken cancellationToken)
     {
-        List<DataKey> keys = [];
-        try
-        {
-            SealedSegmentReader reader = await OpenAsync(sealedBytes, keyring, keys, cancellationToken);
-            await using VortexFile file = await VortexFile.OpenAsync(reader, VortexOpenOptions.Default, cancellationToken);
-            List<Reading> rows = [];
-            await foreach (Reading row in file.Scan<Reading>().ToRecordsAsync(cancellationToken))
-            {
-                rows.Add(row);
-            }
+        SealedSegmentReader reader = await OpenAsync(sealedBytes, keyring, cancellationToken);
+        await using VortexFile file = await VortexFile.OpenAsync(reader, VortexOpenOptions.Default, cancellationToken);
+        return await RowsOfAsync(file, cancellationToken);
+    }
 
-            return rows;
-        }
-        finally
+    /// <summary>Every row of <paramref name="file"/>.</summary>
+    internal static async Task<List<Reading>> RowsOfAsync(VortexFile file, CancellationToken cancellationToken)
+    {
+        List<Reading> rows = [];
+        await foreach (Reading row in file.Scan<Reading>().ToRecordsAsync(cancellationToken))
         {
-            foreach (DataKey key in keys)
-            {
-                key.Dispose();
-            }
+            rows.Add(row);
         }
+
+        return rows;
     }
 
     /// <summary>Rows whose bytes do not repeat much, so that the file is not tiny.</summary>
@@ -161,7 +135,8 @@ internal static class SealedObjects
         return bytes;
     }
 
-    private static async Task<byte[]> DrainAsync(PipeReader reader, CancellationToken cancellationToken)
+    /// <summary>Everything a pipe's reader receives until the writer completes it.</summary>
+    internal static async Task<byte[]> DrainAsync(PipeReader reader, CancellationToken cancellationToken)
     {
         using MemoryStream all = new MemoryStream();
         while (true)

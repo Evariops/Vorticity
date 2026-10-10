@@ -82,7 +82,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// </summary>
     /// <param name="inner">The sealed bytes.</param>
     /// <param name="ownsInner">Whether disposing the reader disposes <paramref name="inner"/>.</param>
-    /// <param name="unwrap">The data key the descriptor names, borrowed: the reader derives its keys from it and keeps none of it.</param>
+    /// <param name="unwrap">The data key the descriptor names, handed over: the reader derives its keys from it and disposes it.</param>
     /// <param name="cancellationToken">Cancels the reads and the unwrap.</param>
     /// <param name="options">The coalescing budgets, the defaults when null.</param>
     /// <returns>The reader; on failure nothing is left open but <paramref name="inner"/>, which the caller still owns.</returns>
@@ -139,7 +139,15 @@ internal sealed class SealedSegmentReader : ISegmentReader
             }
 
             DataKey dataKey = await unwrap(layout.Descriptor, cancellationToken).ConfigureAwait(false);
-            ciphers = Ciphers(layout, dataKey);
+            try
+            {
+                ciphers = Ciphers(layout, dataKey);
+            }
+            finally
+            {
+                dataKey.Dispose();
+            }
+
             long tailStart = TailOf(layout, endStart);
             if (tailStart < layout.PlainLength)
             {

@@ -152,6 +152,47 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(options);
+        return session.Keys is null
+            ? OpenPlainAsync(path, options, session, cancellationToken)
+            : OpenWithKeysAsync(path, options, session, cancellationToken);
+    }
+
+    /// <summary>
+    /// Opens a file in a session that holds a keyring: a sealed file through a sealed reader over
+    /// positional reads, since its plaintext cannot be mapped; a plain one as any session opens it,
+    /// unless the session refuses plaintext. Telling them apart costs one read of the last four bytes.
+    /// </summary>
+    private static async ValueTask<VortexFile> OpenWithKeysAsync(
+        string path, VortexOpenOptions options, VortexSession session, CancellationToken cancellationToken)
+    {
+        FileSegmentSource file = new FileSegmentSource(path);
+        ISegmentReader reader;
+        try
+        {
+            reader = await Sealing.SealedFiles.ReaderAsync(file, ownsReader: true, session, path, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await file.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        if (ReferenceEquals(reader, file))
+        {
+            await file.DisposeAsync().ConfigureAwait(false);
+            return await OpenPlainAsync(path, options, session, cancellationToken).ConfigureAwait(false);
+        }
+
+        ValueTask<VortexFile> open = OpenCoreAsync(SessionReader.Wrap(reader, session), options, ownsSource: true, cancellationToken);
+        return options.PreloadIndexes
+            ? await FinishOpenAsync(open, null, preload: true, cancellationToken).ConfigureAwait(false)
+            : await open.ConfigureAwait(false);
+    }
+
+    /// <summary>Opens a plain file from a path: mapped by its first scan, or read positionally.</summary>
+    private static ValueTask<VortexFile> OpenPlainAsync(
+        string path, VortexOpenOptions options, VortexSession session, CancellationToken cancellationToken)
+    {
         ISegmentReader source = session.Options.MapFiles
             ? LocalFileSource.Open(path, session.Mappings)
             : SessionReader.Wrap(new FileSegmentSource(path), session);
