@@ -7,7 +7,7 @@ namespace Vorticity;
 /// highest. A range <c>[a, b)</c> is <see cref="AtOrAfter"/> on <c>a</c> and then <c>NextAsync</c>
 /// while the key stays below <c>b</c>.
 /// </remarks>
-public enum SeekOp : byte
+public enum SeekMode : byte
 {
     /// <summary>The first entry whose key equals the sought one; invalid when the key is absent.</summary>
     Exact,

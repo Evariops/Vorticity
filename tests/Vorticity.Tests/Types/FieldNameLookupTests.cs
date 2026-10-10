@@ -32,9 +32,8 @@ public sealed class FieldNameLookupTests
         Assert.Equal(-1, schema.IndexOf($"nested.leaf{width}"));
         Assert.Equal(-1, schema.IndexOf($"col{width + 5}"));
         Assert.Equal(-1, schema.IndexOf("col0.leaf1"));
-        Assert.True(schema.TryGetField("nested.leaf5"u8, out int leaf));
-        Assert.Equal(5, leaf);
-        Assert.False(schema.TryGetField([0xC3, 0x28], out _));
+        Assert.Equal(5, schema.IndexOf("nested.leaf5"u8));
+        Assert.Equal(-1, schema.IndexOf([0xC3, 0x28]));
 
         // The tool scan's column names resolve the same way, a path to its indices.
         Assert.Equal([width, 5], ToolPaths.Resolve(schema, "nested.leaf5"));

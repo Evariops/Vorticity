@@ -49,17 +49,17 @@ internal static class Observability
                     rows += batch.RowCount;
                 }
 
-                ScanStatistics stats = scan.Statistics;
+                ScanMetrics stats = scan.Metrics;
                 Console.WriteLine($"scan {run}: {stats.Rows} rows in {stats.Batches} batches, {stats.Requests} requests, " +
                     $"{stats.BytesRequested} bytes, {stats.BlocksDecoded} blocks decoded, {stats.BlocksPruned} pruned, {stats.CacheHits} cache hits");
             }
 
             Scan untyped = file.Scan("City").Where($"City = {"Paris"}");
             long paris = await untyped.CountAsync();
-            Console.WriteLine($"tool scan: {paris} rows, {untyped.Statistics.Requests} requests, {untyped.Statistics.BlocksDecoded} blocks decoded");
+            Console.WriteLine($"tool scan: {paris} rows, {untyped.Metrics.Requests} requests, {untyped.Metrics.BlocksDecoded} blocks decoded");
         }
 
-        Console.WriteLine($"cache: {session.Options.SegmentCache!.Hits} hits, {session.Options.SegmentCache.Misses} misses, {session.Options.SegmentCache.Size} bytes held");
+        Console.WriteLine($"cache: {session.Options.SegmentCache!.Hits} hits, {session.Options.SegmentCache.Misses} misses, {session.Options.SegmentCache.HeldBytes} bytes held");
 
         await using (VortexFileWriter writer = session.CreateWriter<Reading>(Demo.Path("observed.vortex")))
         {

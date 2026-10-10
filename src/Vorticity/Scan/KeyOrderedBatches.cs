@@ -389,7 +389,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 }
 
                 _positioned = descending
-                    ? await source.PrevAsync(_token).ConfigureAwait(false)
+                    ? await source.PreviousAsync(_token).ConfigureAwait(false)
                     : await source.NextAsync(_token).ConfigureAwait(false);
                 if (!_positioned)
                 {
@@ -581,7 +581,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     await waiter!.ReadByOthersAsync().ConfigureAwait(false);
                 }
 
-                if (ScanMetrics.Note(_scan.Metrics, context.Segments))
+                if (ScanCounters.Note(_scan.Metrics, context.Segments))
                 {
                     await _scan.File.Segments.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
                 }
@@ -598,7 +598,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 throw;
             }
 
-            ScanMetrics.Served(_scan.Metrics, context.Segments);
+            ScanCounters.Served(_scan.Metrics, context.Segments);
             _token.ThrowIfCancellationRequested();
             int[] parts = ArrayPool<int>.Shared.Rent(to - from);
             try

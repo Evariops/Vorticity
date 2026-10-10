@@ -21,7 +21,7 @@ public sealed class Scan
 {
     private readonly ScanSource _source;
     private readonly FieldMask? _projection;
-    private readonly ScanMetrics _metrics = new ScanMetrics();
+    private readonly ScanCounters _counters = new ScanCounters();
     private VortexExpr? _filter;
     private RowRange? _rows;
     private long[]? _take;
@@ -131,7 +131,7 @@ public sealed class Scan
     }
 
     /// <summary>What the sink did; valid once it has run.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_metrics);
+    public ScanMetrics Metrics => ScanMetrics.From(_counters);
 
     /// <summary>Enumerates the batches as borrowed views.</summary>
     /// <param name="cancellationToken">Cancels at a batch boundary.</param>
@@ -140,7 +140,7 @@ public sealed class Scan
     {
         Begin();
         CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
-        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _metrics).GetAsyncEnumerator(token), Schema, _source.Session);
+        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _counters).GetAsyncEnumerator(token), Schema, _source.Session);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -151,7 +151,7 @@ public sealed class Scan
         Begin();
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return RecordBatch.Own(batch.Arena, batch.RootIndex, batch.StartRow, Schema, _source.Session, batch.SelectionWords, batch.SelectedRows);
             }
@@ -170,7 +170,7 @@ public sealed class Scan
         Begin();
         try
         {
-            return await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -186,7 +186,7 @@ public sealed class Scan
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -222,7 +222,7 @@ public sealed class Scan
     {
         if (Interlocked.Exchange(ref _ended, 1) == 0)
         {
-            VortexTelemetry.ScanEnded(_metrics, _activity);
+            VortexTelemetry.ScanEnded(_counters, _activity);
             _activity = null;
         }
     }

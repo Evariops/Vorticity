@@ -15,9 +15,9 @@ What a record member and a `Column<T>` may be, and what the column exposes:
 | `Primitive` i8…i64, u8…u64 | `sbyte`…`long`, `byte`…`ulong` | `Values` as `ReadOnlySpan<T>`, an indexer | zero-copy |
 | `Primitive` u16 | `char` too | the same | the UTF-16 code unit, lone surrogates included |
 | `Primitive` i64, u64 | `nint`, `nuint` too, on a 64-bit host | the same | refused on a 32-bit host, whose native integer is narrower |
-| `Primitive` i64 | `TimeSpan` too | an indexer, `CopyTo`, `Storage()` | 100 ns ticks, exact over the whole range |
+| `Primitive` i64 | `TimeSpan` too | an indexer, `CopyTo`, `AsStorage()` | 100 ns ticks, exact over the whole range |
 | `Primitive` f16, f32, f64 | `Half`, `float`, `double` | the same | exact, since `Half` is IEEE binary16 |
-| `Decimal(p, s)` | `decimal` within [the bounds below](#2-decimal-why-systemdecimal-is-not-the-answer), `VortexDecimal` always | an indexer, `Storage<TStorage>()`, `Scale` | never lossy: a column too wide for `decimal` is refused when it binds |
+| `Decimal(p, s)` | `decimal` within [the bounds below](#2-decimal-why-systemdecimal-is-not-the-answer), `VortexDecimal` always | an indexer, `AsStorage<TStorage>()`, `Scale` | never lossy: a column too wide for `decimal` is refused when it binds |
 | `Decimal(p, 0)` | `Int128`, `UInt128` for `p ≤ 39`, `BigInteger` always | an indexer, `CopyTo`, and `Values` zero-copy over 128-bit storage | see [wider integers](#21-integers-wider-than-64-bits) |
 | `Utf8` | `string` | a UTF-8 span per value, `GetString(i)` on request | see [strings](#4-strings-spans-first-string-on-request) |
 | `Binary` | `ReadOnlyMemory<byte>`, `Memory<byte>`, `byte[]` | a span per value | |
@@ -25,11 +25,11 @@ What a record member and a `Column<T>` may be, and what the column exposes:
 | `List`, `FixedSizeList` | `ReadOnlyMemory<T>`, `Memory<T>`, `T[]`, `List<T>`, `ImmutableArray<T>`, an interface an array implements | a `Range` per row, `Elements` as `Column<T>` | reading rows allocates one array, or one `List<T>`, per list |
 | `List` of `Struct` | any of the above over a `[VortexRecord]` type | `ListOf<TNested>()`: a `Range` per row, `Elements` as `Columns<TNested>` | the elements are read in one pass, then cut per row |
 | `Map` | `Dictionary<TKey, TValue>`, `IDictionary`, `IReadOnlyDictionary` | `MapOf<TKey, TValue>()`: a `Range` per row, `Keys` and `Values` | scalar keys and values, and a key is never null |
-| `vortex.date` | `DateOnly` | an indexer, `Storage<int>()` or `Storage<long>()` | |
-| `vortex.time` | `TimeOnly` | an indexer, `Storage<TStorage>()`, `Unit` | |
-| `vortex.timestamp` | `DateTime` when naive or UTC, `DateTimeOffset` with a zone | an indexer, `Storage<long>()`, `Unit`, `TimeZone` | see [temporal extensions](#3-temporal-extensions-one-resolution-at-binding) |
+| `vortex.date` | `DateOnly` | an indexer, `AsStorage<int>()` or `AsStorage<long>()` | |
+| `vortex.time` | `TimeOnly` | an indexer, `AsStorage<TStorage>()`, `Unit` | |
+| `vortex.timestamp` | `DateTime` when naive or UTC, `DateTimeOffset` with a zone | an indexer, `AsStorage<long>()`, `Unit`, `TimeZone` | see [temporal extensions](#3-temporal-extensions-one-resolution-at-binding) |
 | `vortex.uuid` | `Guid` | an indexer | the byte order is converted explicitly, never implied |
-| an extension registered on the session | the registered type | an indexer, `Storage<TStorage>()` | see [the session](14-public-api.md#2-the-session) |
+| an extension registered on the session | the registered type | an indexer, `AsStorage<TStorage>()` | see [the session](14-public-api.md#2-the-session) |
 
 `Union` and `Variant` columns appear in a schema but no `T` maps to them. An `enum` member maps to
 its underlying integer.
@@ -72,7 +72,7 @@ The storage width is carried in `vortex.decimal`'s metadata as `values_type`: `i
 declare any wider one, and often does. Upstream allows precision-2 values in an `i256` buffer, and a
 decimal column from Arrow or Parquet arrives as `i128` or `i256` whatever its precision. The width is
 therefore read from `values_type`, and only a width narrower than the precision requires is refused.
-`Storage<TStorage>()` exposes what the file declared, for callers who do their own arithmetic without
+`AsStorage<TStorage>()` exposes what the file declared, for callers who do their own arithmetic without
 widening.
 
 .NET has `Int128` but no `Int256`, so this library carries an internal `Int256` with what the decimal
@@ -114,7 +114,7 @@ So the zone is resolved once, when a `DateTimeOffset` member or column binds to 
 `TimeZoneInfo.FindSystemTimeZoneById`, and never per value. A naive or UTC timestamp binds as
 `DateTime`, with `Kind` `Unspecified` or `Utc`, and needs no database. A zone the host cannot resolve
 makes the `DateTimeOffset` binding fail with `VortexSchemaException`. The column still binds as
-`long`, its storage, and `Storage()`, `Unit` and `TimeZone` let a caller convert with a zone of its
+`long`, its storage, and `AsStorage()`, `Unit` and `TimeZone` let a caller convert with a zone of its
 own choosing. The machine dependence is confined to one call, at one moment, with a refusal rather
 than a guess.
 

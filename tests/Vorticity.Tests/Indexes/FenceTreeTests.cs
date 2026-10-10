@@ -626,13 +626,13 @@ public sealed class FenceTreeTests
         for (int at = 0; at < rows; at += rows / 7)
         {
             long key = expected[at].Key;
-            Assert.True(await cursor.SeekAsync(FilterLiteral.From(key), SeekOp.AtOrAfter));
+            Assert.True(await cursor.SeekAsync(FilterLiteral.From(key), SeekMode.AtOrAfter));
             Assert.Equal(expected[at].Row, cursor.Row);
         }
 
         Assert.True(await cursor.SeekLastAsync());
         Assert.Equal(expected[^1].Row, cursor.Row);
-        Assert.True(await cursor.PrevAsync());
+        Assert.True(await cursor.PreviousAsync());
         Assert.Equal(expected[^2].Row, cursor.Row);
         Assert.Equal(rows, cursor.EntryCount);
 

@@ -43,7 +43,7 @@ that does not fit throws `ArgumentException` there, before a single byte is writ
 | `Hints` | empty | an encoding to try first, by column path |
 | `DegreeOfParallelism` | 0, the session's | the threads the writer summarizes its columns and compresses zstd frames on. The file is byte for byte the same whatever the degree ([threads.md](threads.md)) |
 | `TargetEdition` | `VortexEditions.Default` | the edition every component must belong to ([editions.md](editions.md)) |
-| `Statistics` | `true` | the per-column statistics the open reads back: null count, order, and the minimum and maximum of a numeric column |
+| `WriteStatistics` | `true` | the per-column statistics the open reads back: null count, order, and the minimum and maximum of a numeric column |
 | `StringBoundBytes` | 16 | the length of the bounds a text or binary column's zones carry, 0 for none |
 | `Indexes` | `IndexPolicy.None` | the indexes to build ([indexes.md](indexes.md)) |
 | `Identity` | drawn per write | the sixteen bytes that name this version of the file |
@@ -53,7 +53,7 @@ that does not fit throws `ArgumentException` there, before a single byte is writ
 ## Compression
 
 The same million rows under each profile. The write time is the best of three, and the decode forces
-every column of every batch to its plain form with `Canonical()`:
+every column of every batch to its plain form with `AsCanonical()`:
 
 | profile | bytes | written in | decoded in | encodings |
 |---|---|---|---|---|
@@ -142,7 +142,7 @@ block holds all of them and no bound can rule one out.
 
 ## Statistics, metadata and identity
 
-* `Statistics = false` saved 224 bytes out of 1 508 316, and `file.Statistics.Count` is then 0. A
+* `WriteStatistics = false` saved 224 bytes out of 1 508 316, and `file.Statistics.Count` is then 0. A
   question the statistics would have answered at open, such as a minimum or a count, then reads the
   zone maps or the data instead. The zone maps are kept, so `Day > 2000` still reads 0 of 123 blocks.
 * `Metadata` holds at most 14 entries, with keys of at most 64 UTF-8 bytes, besides the library's

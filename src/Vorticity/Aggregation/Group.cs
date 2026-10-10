@@ -255,7 +255,7 @@ public readonly struct Group<TRecord, TKey>
     /// <summary>A probe of the row a choice keeps, of the rows the group's filter keeps.</summary>
     private Probe<TRecord> Chosen(AggregateKind kind, ColumnShape? by) =>
         new Probe<TRecord>(
-            _binding ?? throw new InvalidOperationException("A chosen row is taken inside the lambda of Select or AggAsync, which hands it its columns."),
+            _binding ?? throw new InvalidOperationException("A chosen row is taken inside the lambda of Select or AggregateAsync, which hands it its columns."),
             null,
             Aggregators.Chosen(kind, by, _filter));
 

@@ -42,10 +42,10 @@ internal static class OpenAFile
         }
 
         CountingSource told = new CountingSource(new FileSegmentSource(path));
-        VortexOpenOptions wide = new VortexOpenOptions { Length = bytes.Length, InitialReadSize = 256 * 1024 };
+        VortexOpenOptions wide = new VortexOpenOptions { Length = bytes.Length, InitialReadBytes = 256 * 1024 };
         await using (VortexFile file = await session.OpenAsync(told, wide))
         {
-            Console.WriteLine($"InitialReadSize 256 KiB: {told.Requests} request, {told.Bytes} bytes");
+            Console.WriteLine($"InitialReadBytes 256 KiB: {told.Requests} request, {told.Bytes} bytes");
         }
 
         await using VortexSession cached = VortexSession.Create(options => options.SegmentCache = new SegmentCache(64L * 1024 * 1024));
@@ -84,7 +84,7 @@ internal static class OpenAFile
             _ = columns.RowCount;
         }
 
-        return ((source?.Requests ?? 0) - requests, (source?.Bytes ?? 0) - bytes, scan.Statistics.CacheHits);
+        return ((source?.Requests ?? 0) - requests, (source?.Bytes ?? 0) - bytes, scan.Metrics.CacheHits);
     }
 
     private sealed class CountingSource(ISegmentSource inner) : ISegmentSource

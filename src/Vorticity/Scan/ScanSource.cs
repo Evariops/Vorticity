@@ -85,14 +85,14 @@ internal abstract class ScanSource
     internal abstract VortexSession Session { get; }
 
     /// <summary>The batches, borrowed: each is valid until the next is asked for.</summary>
-    internal abstract IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanMetrics metrics);
+    internal abstract IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics);
 
-    internal abstract ValueTask<long> CountAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken);
+    internal abstract ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken);
 
-    internal abstract ValueTask<bool> AnyAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken);
+    internal abstract ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken);
 
     /// <summary>The smallest or largest non-null value of a column among the rows the scan keeps, or a null literal.</summary>
-    internal abstract ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanMetrics metrics, CancellationToken cancellationToken);
+    internal abstract ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken);
 
     internal abstract ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken);
 
@@ -173,12 +173,12 @@ internal sealed class FileScanSource : ScanSource
 
     internal override VortexSession Session => _file.Session;
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanMetrics metrics) =>
+    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
         : Refuted(spec) ? RefusedAsync(spec, metrics)
         : Builder(spec, metrics).ExecuteAsync();
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
         {
@@ -188,12 +188,12 @@ internal sealed class FileScanSource : ScanSource
         return await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken) =>
+    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing
         && !await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false)
         && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
 
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanMetrics metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
         {
@@ -208,7 +208,7 @@ internal sealed class FileScanSource : ScanSource
 
     /// <summary>The batches of a scan the file statistics refute: none, and its blocks counted pruned.</summary>
     private async IAsyncEnumerable<RecordBatch> RefusedAsync(
-        ScanSpec spec, ScanMetrics metrics, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        ScanSpec spec, ScanCounters metrics, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
         yield break;
@@ -218,7 +218,7 @@ internal sealed class FileScanSource : ScanSource
     /// Whether the file statistics refute the scan; when they do, its blocks are counted pruned, as
     /// its plan counts them, and nothing is read.
     /// </summary>
-    private async ValueTask<bool> RefuseAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken)
+    private async ValueTask<bool> RefuseAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (!Refuted(spec))
         {
@@ -234,7 +234,7 @@ internal sealed class FileScanSource : ScanSource
     /// gives. It consults no structure, and so reads nothing.
     /// </summary>
     private async ValueTask<ScanPlan> WholeAsync(ScanSpec spec, CancellationToken cancellationToken) =>
-        ScanPlan.From(await Builder(spec with { Filter = null, OrderPath = null }, new ScanMetrics())
+        ScanPlan.From(await Builder(spec with { Filter = null, OrderPath = null }, new ScanCounters())
             .ExplainAsync(cancellationToken).ConfigureAwait(false));
 
     internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
@@ -255,7 +255,7 @@ internal sealed class FileScanSource : ScanSource
             };
         }
 
-        ScanExplanation plan = await Builder(spec, new ScanMetrics()).ExplainAsync(cancellationToken).ConfigureAwait(false);
+        ScanExplanation plan = await Builder(spec, new ScanCounters()).ExplainAsync(cancellationToken).ConfigureAwait(false);
         ScanPlan result = ScanPlan.From(plan);
 
         // A filter known to match nothing runs no scan at all: it reads nothing and counts zero.
@@ -291,7 +291,7 @@ internal sealed class FileScanSource : ScanSource
 
     /// <summary>The segments the largest split of the scan asks for, over a source that copies them: the layout walked once, nothing read.</summary>
     internal override long ReadAheadBytes(ScanSpec spec) =>
-        _file.Source.ReadsInPlace || spec.MatchesNothing ? 0 : Builder(spec, new ScanMetrics()).LargestSplitBytes();
+        _file.Source.ReadsInPlace || spec.MatchesNothing ? 0 : Builder(spec, new ScanCounters()).LargestSplitBytes();
 
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -311,7 +311,7 @@ internal sealed class FileScanSource : ScanSource
     }
 
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
-    internal ScanBuilder Builder(ScanSpec spec, ScanMetrics metrics)
+    internal ScanBuilder Builder(ScanSpec spec, ScanCounters metrics)
     {
         ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics);
         if (spec.Projection is { } mask)
@@ -349,7 +349,7 @@ internal sealed class FileScanSource : ScanSource
             builder.WithMaxBatchRows(options.BatchRows);
         }
 
-        builder.WithPruning(options.Pruning).WithIndexes(options.UseIndexes);
+        builder.WithPruning(options.UseStatistics).WithIndexes(options.UseIndexes);
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
         builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings, spec.SinkDecodes);

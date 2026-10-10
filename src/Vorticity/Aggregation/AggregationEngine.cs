@@ -139,8 +139,8 @@ internal sealed class AggregationPlan
     /// <summary>The chunks the last run's top-k ranked on tasks of their own; one when it ranked its groups at once.</summary>
     internal int LastTopChunks { get; set; }
 
-    /// <summary>What the plan's last run did, as the query's statistics say it (docs/design/16-queries.md §10); null before one.</summary>
-    internal GroupStatistics? Statistics()
+    /// <summary>What the plan's last run did, as the query's metrics say it (docs/design/16-queries.md §10); null before one.</summary>
+    internal GroupMetrics? Metrics()
     {
         if (LastRun is not { } run)
         {
@@ -148,7 +148,7 @@ internal sealed class AggregationPlan
         }
 
         CoreRun? core = run.Core;
-        return new GroupStatistics(
+        return new GroupMetrics(
             LastGroups,
             PeakGroups,
             LastPeakBytes,
@@ -3128,9 +3128,9 @@ internal abstract class AggregationHost
 {
     internal abstract ScanSource Source { get; }
 
-    internal abstract ScanMetrics Metrics { get; }
+    internal abstract ScanCounters Counters { get; }
 
-    internal abstract ScanStatistics Statistics { get; }
+    internal abstract ScanMetrics Metrics { get; }
 
     internal abstract ScanSpec Spec();
 
@@ -3145,7 +3145,7 @@ internal abstract class AggregationHost
         try
         {
             ScanSpec spec = Spec(rows);
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, plan, cancellationToken).ConfigureAwait(false);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, plan, cancellationToken).ConfigureAwait(false);
             if (plan.Chosen.Length > 0)
             {
                 // The columns of the chosen rows, read once every group's row is known.
@@ -3157,7 +3157,7 @@ internal abstract class AggregationHost
 
                 try
                 {
-                    await ChosenFetch.FetchAsync(outcome, Source, spec, Metrics, groups, cancellationToken).ConfigureAwait(false);
+                    await ChosenFetch.FetchAsync(outcome, Source, spec, Counters, groups, cancellationToken).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -3196,7 +3196,7 @@ internal abstract class AggregationHost
 
             // With no order nor window over the groups, a core delivers them part by part.
             bool parted = query.Plan.CoreParted && top is null && !Array.Exists(query.Operators, op => op is GroupOrder or GroupWindow);
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Counters, query.Plan, cancellationToken, top, parted, builder).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             if (outcome.Parts is not null && Array.Exists(query.Operators, op => op is GroupOrder))
             {
@@ -3245,7 +3245,7 @@ internal abstract class AggregationHost
 internal static class AggregationEngine
 {
     internal static async ValueTask<AggregationOutcome> RunAsync(
-        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null, bool parted = false,
+        ScanSource source, ScanSpec spec, ScanCounters metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null, bool parted = false,
         PartBuilder? builder = null)
     {
         IAggregateNode[] aggregates = plan.Aggregates;
@@ -3306,7 +3306,7 @@ internal static class AggregationEngine
         // shares the live blocks, not the file's: a filter that keeps a few contiguous blocks keeps
         // every lane busy, rather than the one whose rows hold them. The settling read them already.
         int degree = Degree(source, pass);
-        if (settling is null && degree > 1 && pass.Take is null && pass.Filter is { } kept && pass.Options.Pruning && source is FileScanSource file)
+        if (settling is null && degree > 1 && pass.Take is null && pass.Filter is { } kept && pass.Options.UseStatistics && source is FileScanSource file)
         {
             BlockMask? live = await ZonePruningPlan
                 .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(kept), cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
@@ -4698,7 +4698,7 @@ internal static class AggregationEngine
         return parts.Count > 1 ? [.. parts] : null;
     }
 
-    internal static async Task RunPartitionAsync(ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition partition, CancellationToken cancellationToken)
+    internal static async Task RunPartitionAsync(ScanSource source, ScanSpec spec, ScanCounters metrics, AggregationPartition partition, CancellationToken cancellationToken)
     {
         long start = Stopwatch.GetTimestamp();
         await foreach (RecordBatch batch in source.BatchesAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -4756,7 +4756,7 @@ internal static class AggregationEngine
     /// all on its first rows, which a key whose cardinality changes as the rows go misleads together.
     /// </summary>
     private static async Task RunQueueAsync(
-        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition[] partitions, RowRange[] ranges, ZoneSettling? settling,
+        ScanSource source, ScanSpec spec, ScanCounters metrics, AggregationPartition[] partitions, RowRange[] ranges, ZoneSettling? settling,
         bool fan, int ahead, CancellationToken cancellationToken)
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

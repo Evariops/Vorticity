@@ -35,7 +35,7 @@ leaves in all: `Id`, `StartedAt`, `DurationMs`, `Referrer`, `Pages`, `Origin.Cou
 ## What it saves
 
 The sample scans the file with four records and measures each one twice: with `ExplainAsync` before
-the scan, from the layout alone, and with `Statistics` after it.
+the scan, from the layout alone, and with `Metrics` after it.
 
 | record | columns | segments | bytes to read | requests | bytes read |
 |---|---|---|---|---|---|

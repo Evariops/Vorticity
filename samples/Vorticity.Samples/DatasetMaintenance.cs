@@ -32,7 +32,7 @@ internal static class DatasetMaintenance
             $"objects by level [{string.Join(", ", plan.ObjectsByLevel)}], bytes by level [{string.Join(", ", plan.BytesByLevel)}]");
         if (plan.Job is { } job)
         {
-            Console.WriteLine($"  job: level {job.FromLevel} to {job.ToLevel}, {job.Trigger}, {job.Objects.Length} objects, {job.Rows} rows, " +
+            Console.WriteLine($"  job: level {job.FromLevel} to {job.ToLevel}, {job.Trigger}, {job.ObjectKeys.Length} objects, {job.Rows} rows, " +
                 $"{job.Bytes} bytes, target {job.TargetBytes}");
         }
 

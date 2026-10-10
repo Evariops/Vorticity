@@ -22,7 +22,7 @@ await foreach (var (day, _, _) in scan)
     earliest = Math.Min(earliest, day[0]);
 }
 
-ScanStatistics stats = scan.Statistics;
+ScanMetrics stats = scan.Metrics;
 ```
 
 ```
@@ -133,7 +133,7 @@ predicate. Write the rows in the order of the column you filter on, or at least 
 
 `ExplainAsync` reads the statistics and zone maps, plus at most the few segments of a sorted column it
 searches, and returns a `ScanPlan`: the live blocks, the segments and bytes they need, and one
-`PruningStep` per structure consulted, with what it pruned and what consulting it cost. `Statistics`,
+`PruningStep` per structure consulted, with what it pruned and what consulting it cost. `Metrics`,
 read after the sink, says what the scan actually did. Above, the plan counts 15 segments and
 217 052 bytes, including the 8 172 bytes of zone maps it consulted. The scan that followed read the
 other 12 segments, 208 880 bytes. The file keeps the zone maps a plan or a scan has read, and the

@@ -178,7 +178,7 @@ public sealed partial class FilteredGroupTests
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Totals totals = await file.Scan<Request>()
                 .Where(r => r.Day >= 2)
-                .AggAsync<Totals>(a => (a.Count(), a.Count(x => x.Status >= 500), a.Where(x => x.Region == "eu").Average(x => x.DurationMs), a.Any(x => x.Status == 503), a.All(x => x.Day < 10)), Ct);
+                .AggregateAsync<Totals>(a => (a.Count(), a.Count(x => x.Status >= 500), a.Where(x => x.Region == "eu").Average(x => x.DurationMs), a.Any(x => x.Status == 503), a.All(x => x.Day < 10)), Ct);
 
             Request[] kept = [.. rows.Where(r => r.Day >= 2)];
             Assert.Equal(kept.Length, totals.Rows);
@@ -190,10 +190,10 @@ public sealed partial class FilteredGroupTests
             // A count or an any of one filter alone is the scan's, its filter joined.
             Assert.Equal(
                 new Answers(kept.Count(r => r.Status >= 500 && r.Region == "us"), kept.Any(r => r.Status >= 500 && r.Region == "us")),
-                await file.Scan<Request>().Where(r => r.Day >= 2).AggAsync<Answers>(a => (a.Count(x => x.Status >= 500 & x.Region == "us"), a.Any(x => x.Status >= 500 & x.Region == "us")), Ct));
+                await file.Scan<Request>().Where(r => r.Day >= 2).AggregateAsync<Answers>(a => (a.Count(x => x.Status >= 500 & x.Region == "us"), a.Any(x => x.Status >= 500 & x.Region == "us")), Ct));
             Assert.Equal(
                 new Answers(0, false),
-                await file.Scan<Request>().AggAsync<Answers>(a => (a.Count(x => Predicate.None), a.Where(x => x.Day > 5).Any(x => x.Day < 5)), Ct));
+                await file.Scan<Request>().AggregateAsync<Answers>(a => (a.Count(x => Predicate.None), a.Where(x => x.Day > 5).Any(x => x.Day < 5)), Ct));
         }
         finally
         {

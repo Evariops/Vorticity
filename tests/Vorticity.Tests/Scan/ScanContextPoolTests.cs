@@ -42,7 +42,7 @@ public sealed class ScanContextPoolTests
         DTypeArena types = context.Types;
         types.Primitive(PType.I32, Nullability.NonNullable);
         context.LiveBlocks = new BlockMask(first.RowCount, 1024);
-        context.Metrics = new ScanMetrics();
+        context.Metrics = new ScanCounters();
         context.KeepEncodings = true;
         context.ExchangePushedFields(FieldMask.All);
         context.FieldsHonoured = true;

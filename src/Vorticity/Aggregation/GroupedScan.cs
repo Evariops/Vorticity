@@ -440,7 +440,7 @@ public sealed class Aggregation<TResult>
     internal Aggregation(ResultQuery query) => _query = query;
 
     /// <summary>What the scan did, and its group by; valid once the aggregation has been enumerated.</summary>
-    public ScanStatistics Statistics => _query.Statistics();
+    public ScanMetrics Metrics => _query.Metrics();
 
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
     internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;
@@ -528,7 +528,7 @@ public sealed class Aggregation
     internal ResultQuery Query => _query;
 
     /// <summary>What the scan did, and its group by; valid once the result has been read.</summary>
-    public ScanStatistics Statistics => _query.Statistics();
+    public ScanMetrics Metrics => _query.Metrics();
 
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
     internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;
@@ -567,7 +567,7 @@ public sealed class Aggregation
         where TRecord : IVortexRecord<TRecord>
     {
         ResultQuery typed = query.As(TRecord.Schema, typeof(TRecord));
-        return new Scan<TRecord>(new ResultScanSource(typed), typed.Metrics);
+        return new Scan<TRecord>(new ResultScanSource(typed), typed.Counters);
     }
 }
 

@@ -50,7 +50,7 @@ public sealed class ReadContractTests
         }
 
         Assert.Equal(ContractFile.Rows, rows);
-        Assert.Equal(3L * ContractFile.Rows, scan.Metrics.ValuesDecoded);
+        Assert.Equal(3L * ContractFile.Rows, scan.Counters.ValuesDecoded);
 
         // A parallel aggregation runs one scan per partition, cut at chunk boundaries.
         Scan<Reading> grouped = file.Scan<Reading>().With(options);
@@ -61,7 +61,7 @@ public sealed class ReadContractTests
         }
 
         Assert.Equal(ContractFile.Rows, counted);
-        Assert.Equal(ContractFile.Rows, grouped.Metrics.ValuesDecoded);
+        Assert.Equal(ContractFile.Rows, grouped.Counters.ValuesDecoded);
     }
 
     [Theory]
@@ -77,7 +77,7 @@ public sealed class ReadContractTests
         // decoded, so a scan after a plan on the same file would not ask for them again. That file
         // is opened as this one is, so that its tail holds what this one's holds.
         int planned = 0;
-        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, planning, query, () => planned = source.Ranges.Length);
+        (ScanPlan plan, ScanMetrics statistics) = await RunAsync(file, planning, query, () => planned = source.Ranges.Length);
         SegmentRange[] asked = source.Ranges[planned..];
 
         Assert.True(asked.Length > 0, $"{query}: the scan asked for nothing, so there is nothing to count");
@@ -124,10 +124,10 @@ public sealed class ReadContractTests
             "the plan consults no locating index: " + string.Join(", ", plan.Pruning) + "; indexes: "
                 + string.Join(", ", (await file.GetIndexesAsync(TestContext.Current.CancellationToken)).Select(index => $"{index.Column} {index.Kind}")));
         Assert.Equal(asked.Length, asked.Distinct().Count());
-        Assert.Equal(plan.Segments, scan.Statistics.Requests);
-        Assert.Equal(scan.Statistics.Requests, asked.Length);
-        Assert.Equal(plan.BytesToRead, scan.Statistics.BytesRequested);
-        Assert.Equal(scan.Statistics.BytesRequested, asked.Sum(range => (long)range.Length));
+        Assert.Equal(plan.Segments, scan.Metrics.Requests);
+        Assert.Equal(scan.Metrics.Requests, asked.Length);
+        Assert.Equal(plan.BytesToRead, scan.Metrics.BytesRequested);
+        Assert.Equal(scan.Metrics.BytesRequested, asked.Sum(range => (long)range.Length));
     }
 
     [Theory]
@@ -137,7 +137,7 @@ public sealed class ReadContractTests
         await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
         await using VortexFile planning = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
 
-        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, planning, query);
+        (ScanPlan plan, ScanMetrics statistics) = await RunAsync(file, planning, query);
 
         Assert.Equal(plan.Segments, statistics.Requests);
         Assert.Equal(plan.BytesToRead, statistics.BytesRequested);
@@ -149,7 +149,7 @@ public sealed class ReadContractTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
 
-        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, file, query);
+        (ScanPlan plan, ScanMetrics statistics) = await RunAsync(file, file, query);
 
         Assert.Equal(plan.LiveBlocks, statistics.BlocksDecoded);
         Assert.Equal(plan.Blocks, plan.LiveBlocks + plan.Pruning.Sum(step => step.BlocksPruned));
@@ -178,7 +178,7 @@ public sealed class ReadContractTests
 
         Scan<Reading> count = file.Scan<Reading>();
         Assert.Equal(ContractFile.Rows, await count.CountAsync(TestContext.Current.CancellationToken));
-        Assert.Equal(0, count.Statistics.Requests);
+        Assert.Equal(0, count.Metrics.Requests);
 
         // A filter the file statistics refute: neither its plan nor its count reads a zone map.
         ScanPlan refuted = await file.Scan<Reading>().Where(r => r.Day > 1_000_000).ExplainAsync(TestContext.Current.CancellationToken);
@@ -189,23 +189,23 @@ public sealed class ReadContractTests
 
         Scan<Reading> none = file.Scan<Reading>().Where(r => r.Day > 1_000_000);
         Assert.Equal(0, await none.CountAsync(TestContext.Current.CancellationToken));
-        Assert.Equal(0, none.Statistics.Requests);
+        Assert.Equal(0, none.Metrics.Requests);
 
         Scan<Reading> min = file.Scan<Reading>();
         Assert.Equal(0, await min.MinAsync(r => r.Day, TestContext.Current.CancellationToken));
-        Assert.Equal(0, min.Statistics.Requests);
+        Assert.Equal(0, min.Metrics.Requests);
 
         Scan<Reading> max = file.Scan<Reading>();
         Assert.Equal((ContractFile.Rows - 1) / 1_000, await max.MaxAsync(r => r.Day, TestContext.Current.CancellationToken));
-        Assert.Equal(0, max.Statistics.Requests);
+        Assert.Equal(0, max.Metrics.Requests);
 
         Scan<Reading> coldest = file.Scan<Reading>();
         Assert.Equal(10.1, await coldest.MinAsync(r => r.Celsius, TestContext.Current.CancellationToken));
-        Assert.Equal(0, coldest.Statistics.Requests);
+        Assert.Equal(0, coldest.Metrics.Requests);
 
         Scan<Reading> hottest = file.Scan<Reading>();
         Assert.Equal(49.9, await hottest.MaxAsync(r => r.Celsius, TestContext.Current.CancellationToken));
-        Assert.Equal(0, hottest.Statistics.Requests);
+        Assert.Equal(0, hottest.Metrics.Requests);
 
         Assert.Equal(opened, source.Ranges.Length);
     }
@@ -231,8 +231,8 @@ public sealed class ReadContractTests
         }
 
         Assert.Equal(ContractFile.Rows, grouped);
-        Assert.True(groups.Statistics.Batches > 0, "the groups were answered without reading a batch");
-        Assert.Equal(0, groups.Statistics.BlocksDecoded);
+        Assert.True(groups.Metrics.Batches > 0, "the groups were answered without reading a batch");
+        Assert.Equal(0, groups.Metrics.BlocksDecoded);
 
         Scan<Reading> sum = file.Scan<Reading>();
         long expected = 0;
@@ -242,8 +242,8 @@ public sealed class ReadContractTests
         }
 
         Assert.Equal(expected, await sum.SumAsync(r => r.Day, TestContext.Current.CancellationToken));
-        Assert.True(sum.Statistics.Batches > 0, "the sum was answered without reading a batch");
-        Assert.Equal(0, sum.Statistics.BlocksDecoded);
+        Assert.True(sum.Metrics.Batches > 0, "the sum was answered without reading a batch");
+        Assert.Equal(0, sum.Metrics.BlocksDecoded);
     }
 
     /// <summary>One query over the file: its plan, then what running it did.</summary>
@@ -251,7 +251,7 @@ public sealed class ReadContractTests
     /// <param name="query">The query's name, one of <see cref="Queries"/>.</param>
     /// <param name="planned">Called between the plan and the run, when given.</param>
     /// <summary>The plan of <paramref name="query"/> over <paramref name="planning"/>, then its scan over <paramref name="file"/>.</summary>
-    private static async Task<(ScanPlan Plan, ScanStatistics Statistics)> RunAsync(
+    private static async Task<(ScanPlan Plan, ScanMetrics Statistics)> RunAsync(
         VortexFile file, VortexFile planning, string query, Action? planned = null)
     {
         if (query == "projection")
@@ -264,7 +264,7 @@ public sealed class ReadContractTests
                 Assert.Single(batch.Schema);
             }
 
-            return (toolPlan, tool.Statistics);
+            return (toolPlan, tool.Metrics);
         }
 
         ScanPlan plan = await Query(planning, query).ExplainAsync(TestContext.Current.CancellationToken);
@@ -275,7 +275,7 @@ public sealed class ReadContractTests
             Assert.True(columns.RowCount > 0);
         }
 
-        return (plan, scan.Statistics);
+        return (plan, scan.Metrics);
     }
 
     private static Scan<Reading> Query(VortexFile file, string query) => query switch

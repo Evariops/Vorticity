@@ -6,23 +6,23 @@ own, on as many cores as the session allows.
 ```csharp
 Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
 Summary s = await recent
-    .AggAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+    .AggregateAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
 
 [VortexRecord]
 public partial record struct Summary(double? Min, double? Max, long Rows, long Cities);
 ```
 
 ```
-AggAsync, four answers             1.9 ms  min 10.1, max 49.9, 100000 rows, 8 cities; 1 blocks decoded
+AggregateAsync, four answers       1.9 ms  min 10.1, max 49.9, 100000 rows, 8 cities; 1 blocks decoded
 ```
 
 ## Several answers in one pass
 
-`AggAsync` takes a lambda over an `Aggregates<Reading>` and computes all its answers in a single pass
-over the rows the scan keeps. One answer comes back as itself, as in
-`await scan.AggAsync(a => a.Count())`. Several answers, any number of them, go into the record named
-by `AggAsync<TResult>`, whose members take them in order. Each member has the type of its answer or
-its nullable form.
+`AggregateAsync` takes a lambda over an `Aggregates<Reading>` and computes all its answers in a single
+pass over the rows the scan keeps. One answer comes back as itself, as in
+`await scan.AggregateAsync(a => a.Count())`. Several answers, any number of them, go into the record
+named by `AggregateAsync<TResult>`, whose members take them in order. Each member has the type of
+its answer or its nullable form.
 
 The members of `a` are `Count()`, `CountDistinct`, `Sum`, `Min`, `Max`, `Average`, `Variance`,
 `StandardDeviation` and `Aggregate`, each over a column named as in a filter. There are also `Count`,
@@ -36,7 +36,8 @@ Only one of them had a column brought to its plain form, and the others were rea
 dictionaries.
 
 For a single answer, the scan also has its own sinks: `CountAsync`, `AnyAsync`, `MinAsync`,
-`MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
+`MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync`, and `AggregateAsync` with an
+[aggregator of your own](#an-aggregator-of-your-own). An aggregate runs
 block by block on the encoded form, never hands a batch to your code, keeps one state per chunk and
 merges the states at the end. [The query design](../design/16-queries.md#92-aggregates-block-by-block)
 lists what each encoding lets it skip.
@@ -139,7 +140,7 @@ public partial record struct CityHeat(string City, long Rows, long Hot, double? 
 for some row of the group, and `g.All(r => p)` whether it holds for every row. The predicate uses the
 language of a scan's `Where`, and a row counts where it is true, not where it is unknown. Every
 temperature present is above 10, but one in fifty is missing, so `All` is false. Two `Where` calls
-keep the rows both keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same
+keep the rows both keep. In `AggregateAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same
 over the scan's rows.
 
 Each predicate is evaluated once per batch, however many aggregates read it, and its columns join

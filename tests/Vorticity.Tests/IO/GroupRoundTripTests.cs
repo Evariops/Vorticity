@@ -208,7 +208,7 @@ public sealed partial class GroupRoundTripTests
                 Options = new ScanOptions { DegreeOfParallelism = 1, Prefetch = 0 },
                 ReadAhead = readAhead ? Vorticity.Scanning.BatchAsyncEnumerator.ReadAheadSplits : 0,
             };
-            await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(spec, new Vorticity.Scanning.ScanMetrics()).WithCancellation(Ct))
+            await foreach (RecordBatch batch in new FileScanSource(file).BatchesAsync(spec, new Vorticity.Scanning.ScanCounters()).WithCancellation(Ct))
             {
                 rows += batch.RowCount;
             }

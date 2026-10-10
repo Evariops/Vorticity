@@ -125,7 +125,7 @@ public sealed class DatasetCompactionLoopTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 30, TimeSpan.Zero));
-        CompactionSchedule leasing = new CompactionSchedule { Leases = true, TimeProvider = clock };
+        CompactionSchedule leasing = new CompactionSchedule { UseLeases = true, TimeProvider = clock };
         CompactionPlan plan = new CompactionPlan { Jobs = [Job(0, 1), Job(1, 2), Job(3, 3)] };
 
         // The first loop leases the first job's levels; the second finds level 1 held, skips the job
@@ -212,7 +212,7 @@ public sealed class DatasetCompactionLoopTests
                 new CompactionSchedule { Loops = 0 },
                 new CompactionSchedule { Idle = TimeSpan.Zero },
                 new CompactionSchedule { BytesPerSecond = -1 },
-                new CompactionSchedule { Leases = true, LeaseSpan = TimeSpan.FromMilliseconds(10) },
+                new CompactionSchedule { UseLeases = true, LeaseSpan = TimeSpan.FromMilliseconds(10) },
             ])
         {
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => dataset.RunCompactionAsync(wrong, ct));

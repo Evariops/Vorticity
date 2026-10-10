@@ -12,12 +12,12 @@ internal static class Aggregates
         string path = await Demo.ReadingsAsync();
         await using VortexFile file = await VortexFile.OpenAsync(path);
 
-        await BestOfThreeAsync("AggAsync, four answers", async () =>
+        await BestOfThreeAsync("AggregateAsync, four answers", async () =>
         {
             Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
             Summary s = await recent
-                .AggAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
-            return $"min {s.Min}, max {s.Max}, {s.Rows} rows, {s.Cities} cities; {recent.Statistics.BlocksDecoded} blocks decoded";
+                .AggregateAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+            return $"min {s.Min}, max {s.Max}, {s.Rows} rows, {s.Cities} cities; {recent.Metrics.BlocksDecoded} blocks decoded";
         });
 
         string[] lines = [];
@@ -156,7 +156,7 @@ internal static class Aggregates
                 hours++;
             }
 
-            return $"{hours} hours; {day.Statistics.BlocksDecoded} blocks decoded";
+            return $"{hours} hours; {day.Metrics.BlocksDecoded} blocks decoded";
         });
 
         foreach (string line in lines)
@@ -192,7 +192,7 @@ internal static class Aggregates
     }
 
     private static string Describe(WelfordState s, Scan<Reading> scan) =>
-        $"{s.Count} values, mean {s.Mean:F4}, variance {s.Variance:F4}, {scan.Statistics.BlocksDecoded} blocks decoded";
+        $"{s.Count} values, mean {s.Mean:F4}, variance {s.Variance:F4}, {scan.Metrics.BlocksDecoded} blocks decoded";
 
     private static async Task<string> CompositeAsync(VortexFile file)
     {

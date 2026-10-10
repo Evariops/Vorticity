@@ -94,14 +94,14 @@ scans it ran. `ExplainAsync` reads statistics and zone maps without starting one
 The `EventSource` named `Vorticity` publishes eleven incrementing counters about the engine's inner
 work: `segments-requested`, `bytes-requested`, `zones-pruned`, `zones-total`, `index-runs-read`,
 `cursor-seeks`, `cursor-steps`, `count-blocks-proven`, `count-blocks-decoded`, `key-order-windows` and
-`key-order-window-splits`. They answer in production what a single scan's statistics answer in a
+`key-order-window-splits`. They answer in production what a single scan's metrics answer in a
 test, above all whether an index earns the bytes it costs. Watch them with
 `dotnet-counters monitor --counters Vorticity`. Nothing is paid until a listener attaches: every hook
 is one flag test, and the counters are only created once a listener asks for them.
 
 ## The figures of one scan
 
-The counters cover the whole process, while `Statistics` on a scan covers that scan alone and is
+The counters cover the whole process, while `Metrics` on a scan covers that scan alone and is
 valid once its sink has run:
 
 ```csharp
@@ -112,7 +112,7 @@ await foreach (Columns<Reading> batch in scan)
     rows += batch.RowCount;
 }
 
-ScanStatistics stats = scan.Statistics;
+ScanMetrics stats = scan.Metrics;
 Console.WriteLine($"scan {run}: {stats.Rows} rows in {stats.Batches} batches, {stats.Requests} requests, " +
     $"{stats.BytesRequested} bytes, {stats.BlocksDecoded} blocks decoded, {stats.BlocksPruned} pruned, {stats.CacheHits} cache hits");
 ```
@@ -122,16 +122,16 @@ scan 1: 100000 rows in 5 batches, 6 requests, 180368 bytes, 14 blocks decoded, 1
 scan 2: 100000 rows in 5 batches, 6 requests, 180368 bytes, 14 blocks decoded, 109 pruned, 6 cache hits
 ```
 
-`ScanStatistics` is a `readonly record struct` with seven `long`s (`Rows`, `Batches`, `Requests`,
+`ScanMetrics` is a `readonly record struct` with seven `long`s (`Rows`, `Batches`, `Requests`,
 `BytesRequested`, `BlocksDecoded`, `BlocksPruned` and `CacheHits`) plus `Grouping`, which a group by
-fills with a `GroupStatistics`: the groups found and the most held at once, the peak memory, the
+fills with a `GroupMetrics`: the groups found and the most held at once, the peak memory, the
 lanes, what was spilled and the time to the first batch. `Grouping` is null for a scan without a
 group by.
 
 `Requests` counts the segments the scan asked for, each once, including those the cache then served.
 The second scan finds all 6 of its requests in the cache, where the first found none. Neither asks
 for the zone maps it consults, nor for the other 6 segments its rows lie in, because those sit in the
-tail the open already read and the file serves them itself. The same statistics exist on the tool
+tail the open already read and the file serves them itself. The same metrics exist on the tool
 scan and on a grouped aggregation. What the scan will do before it runs is `ExplainAsync`, and
 [statistics-and-pruning.md](statistics-and-pruning.md) puts the two side by side.
 
@@ -151,22 +151,22 @@ cache: 8 hits, 19 misses, 0 bytes held
 
 A path passed to `OpenAsync` is memory-mapped by its first scan, unless the session's `MapFiles` is
 false, and a mapping has nothing to cache: its reads never reach the cache or its counters.
-`SegmentCache` exposes `Capacity`, `Size`, `Hits` and `Misses` for the whole session. A file's
+`SegmentCache` exposes `CapacityBytes`, `HeldBytes`, `Hits` and `Misses` for the whole session. A file's
 entries leave the cache when the file is disposed, which is why nothing is held at the end.
 [threads.md](threads.md) explains when a cache is worth its memory.
 
 ## What it costs
 
 Without a listener it costs nothing. A counter with no listener costs a flag check, and an activity
-is only created when a listener samples the source. A scan's own `Statistics` are counted either way, since
+is only created when a listener samples the source. A scan's own `Metrics` are counted either way, since
 the counters are built from them.
 
 ## Watch out
 
 * The meter's counters carry no tags. To tell two files or two tenants apart, use one session each
-  and the scan's `Statistics`, or the activities, which nest under your own.
+  and the scan's `Metrics`, or the activities, which nest under your own.
 * The scan counters are added when the scan ends.
-* A scan's `Statistics.CacheHits` counts the segments the cache served to that scan alone, even while
+* A scan's `Metrics.CacheHits` counts the segments the cache served to that scan alone, even while
   other scans of the session run. The cache's own `Hits` counts the whole session's.
 
 ## Run it

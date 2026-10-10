@@ -55,7 +55,7 @@ public sealed partial class SpillTests
             }
 
             Assert.Equal(Keys, read);
-            GroupStatistics grouping = sums.Statistics.Grouping!;
+            GroupMetrics grouping = sums.Metrics.Grouping!;
             Assert.True(grouping.SpilledParts > 0, $"no part spilled under {budget.CeilingBytes:N0} bytes of {peak:N0}");
             Assert.True(grouping.SpilledBytes > 0);
             Assert.Equal(0, budget.ReservedBytes);
@@ -172,7 +172,7 @@ public sealed partial class SpillTests
                 count++;
             }
 
-            Assert.True(sums.Statistics.Grouping!.SpilledParts > 0);
+            Assert.True(sums.Metrics.Grouping!.SpilledParts > 0);
             return count;
         }
     }
@@ -371,7 +371,7 @@ public sealed partial class SpillTests
             }
 
             Assert.Equal(Keys, read);
-            Assert.True(sums.Statistics.Grouping!.SpilledBytes > 0);
+            Assert.True(sums.Metrics.Grouping!.SpilledBytes > 0);
             Assert.Equal(0, room.ReservedBytes);
             Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
         }
@@ -408,7 +408,7 @@ public sealed partial class SpillTests
             List<int> bySum = [.. Enumerable.Range(0, Keys).OrderBy(k => expected[k]).ThenBy(k => k)];
             Aggregation<int> ordered = file.Scan<Row>().With(new ScanOptions { BatchRows = 1_024 }).GroupBy(r => r.Key).OrderBy(g => g.Sum(x => x.Value)).Select(g => g.Key);
             Assert.Equal(bySum, await ordered.ToListAsync(Ct));
-            Assert.True(ordered.Statistics.Grouping!.SpilledParts > 0);
+            Assert.True(ordered.Metrics.Grouping!.SpilledParts > 0);
 
             List<int> filtered = [.. bySum.Where(k => expected[k] > 300).Reverse().Skip(1_000).Take(50_000)];
             Assert.Equal(

@@ -6,7 +6,7 @@
 // ordinal StartsWith, for prefixes that end inside a multi-byte character, are longer than every
 // value, are empty, or match nothing: the answer has to agree row for row whichever path gave it,
 // and a null row is never selected. The quantity that shows the encoding answered is the scan's
-// `ScanMetrics.ValuesDecoded`, as in FilterPushDownTests.
+// `ScanCounters.ValuesDecoded`, as in FilterPushDownTests.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -147,7 +147,7 @@ public sealed class PrefixPushDownTests
 
     private static async Task<(List<string?> Values, long Decoded)> ReadAsync(string path, VortexExpr? filter)
     {
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         List<string?> values = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         ScanBuilder scan = file.ScanBuilder().WithMetrics(metrics);

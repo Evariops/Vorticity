@@ -301,7 +301,7 @@ public sealed record CompactionJob
             Bytes += input.Entry.Bytes;
         }
 
-        Objects = objects.MoveToImmutable();
+        ObjectKeys = objects.MoveToImmutable();
     }
 
     /// <summary>The level it empties.</summary>
@@ -320,7 +320,7 @@ public sealed record CompactionJob
     public long TargetBytes { get; init; }
 
     /// <summary>The keys of the objects it reads, the source level's first.</summary>
-    public ImmutableArray<string> Objects { get; init; }
+    public ImmutableArray<string> ObjectKeys { get; init; }
 
     /// <summary>The rows it reads, which are the rows it writes.</summary>
     public long Rows { get; init; }

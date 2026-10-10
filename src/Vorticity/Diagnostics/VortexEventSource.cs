@@ -6,7 +6,7 @@ namespace Vorticity.Diagnostics;
 
 /// <summary>
 /// The library's counters, published as <c>EventCounters</c> under the name <c>Vorticity</c>.
-/// They answer in production what <c>ScanMetrics</c> answers for a single scan — above all,
+/// They answer in production what <c>ScanCounters</c> answers for a single scan — above all,
 /// whether an index earns the bytes it costs.
 /// </summary>
 /// <remarks>

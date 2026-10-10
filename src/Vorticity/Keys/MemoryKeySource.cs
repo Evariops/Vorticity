@@ -77,9 +77,9 @@ internal abstract class MemoryKeySource : KeySource
         return source;
     }
 
-    internal sealed override ValueTask<bool> SeekAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    internal sealed override ValueTask<bool> SeekAsync(FilterLiteral key, SeekMode op, CancellationToken cancellationToken)
     {
-        if (op == SeekOp.Exact)
+        if (op == SeekMode.Exact)
         {
             int first = Bound(key, upper: false);
             _at = first < Bound(key, upper: true) ? first : -1;
@@ -88,9 +88,9 @@ internal abstract class MemoryKeySource : KeySource
         {
             _at = op switch
             {
-                SeekOp.AtOrAfter => Bound(key, upper: false),
-                SeekOp.After => Bound(key, upper: true),
-                SeekOp.AtOrBefore => Bound(key, upper: true) - 1,
+                SeekMode.AtOrAfter => Bound(key, upper: false),
+                SeekMode.After => Bound(key, upper: true),
+                SeekMode.AtOrBefore => Bound(key, upper: true) - 1,
                 _ => Bound(key, upper: false) - 1,
             };
         }
@@ -116,7 +116,7 @@ internal abstract class MemoryKeySource : KeySource
         return PositionedAsync();
     }
 
-    internal sealed override ValueTask<bool> PrevAsync(CancellationToken cancellationToken)
+    internal sealed override ValueTask<bool> PreviousAsync(CancellationToken cancellationToken)
     {
         _at--;
         return PositionedAsync();
@@ -128,7 +128,7 @@ internal abstract class MemoryKeySource : KeySource
         return PositionedAsync();
     }
 
-    internal sealed override ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken)
+    internal sealed override ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken)
     {
         _at = KeyGallop.Past(new Run(this, _at), _at, 0, forward: false);
         return PositionedAsync();
@@ -149,7 +149,7 @@ internal abstract class MemoryKeySource : KeySource
         return PositionedAsync();
     }
 
-    internal sealed override ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal sealed override ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         int end = KeyGallop.Past(new Run(this, _at), _at, Count - 1, forward: true);
         int before = KeyGallop.Past(new Run(this, _at), _at, 0, forward: false);

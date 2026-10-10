@@ -18,7 +18,7 @@ internal static class Aggregators
         ArgumentNullException.ThrowIfNull(column);
         if (binding is null)
         {
-            throw new InvalidOperationException("An aggregate is built inside the lambda of Select or AggAsync, which hands it its columns.");
+            throw new InvalidOperationException("An aggregate is built inside the lambda of Select or AggregateAsync, which hands it its columns.");
         }
 
         ColumnSym read = column(new Probe<TRecord>(binding)).Column;
@@ -73,7 +73,7 @@ internal static class Aggregators
         ArgumentNullException.ThrowIfNull(predicate);
         if (binding is null)
         {
-            throw new InvalidOperationException("A filtered group is built inside the lambda of Select or AggAsync, which hands it its columns.");
+            throw new InvalidOperationException("A filtered group is built inside the lambda of Select or AggregateAsync, which hands it its columns.");
         }
 
         return predicate(new Probe<TRecord>(binding));
@@ -727,7 +727,7 @@ internal sealed class StatisticsView
     /// <summary>The view of <paramref name="source"/> for <paramref name="spec"/>, or null when the statistics do not describe the scan's rows.</summary>
     internal static StatisticsView? For(ScanSource source, ScanSpec spec) =>
         source is FileScanSource file && file.File.HasFileStatistics && spec.Filter is null && !spec.MatchesNothing
-        && spec.Rows is null && spec.Take is null && spec.Options.Pruning
+        && spec.Rows is null && spec.Take is null && spec.Options.UseStatistics
             ? new StatisticsView(file.File)
             : null;
 

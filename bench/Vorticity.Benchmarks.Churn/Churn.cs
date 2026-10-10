@@ -338,8 +338,8 @@ internal static class Churn
 
                 return rows;
             }),
-            ("seek +10", 20, (dataset, random) => SeekAsync(dataset, 2 * random.NextInt64(keySpace / 2), SeekOp.AtOrAfter)),
-            ("seek back -10", 20, (dataset, random) => SeekAsync(dataset, 2 * random.NextInt64(keySpace / 2), SeekOp.AtOrBefore)),
+            ("seek +10", 20, (dataset, random) => SeekAsync(dataset, 2 * random.NextInt64(keySpace / 2), SeekMode.AtOrAfter)),
+            ("seek back -10", 20, (dataset, random) => SeekAsync(dataset, 2 * random.NextInt64(keySpace / 2), SeekMode.AtOrBefore)),
             ("rows 100", 20, async (dataset, random) =>
             {
                 long start = random.NextInt64(Math.Max(dataset.RowCount - 100, 1));
@@ -410,7 +410,7 @@ internal static class Churn
         return rows;
     }
 
-    private static async ValueTask<long> SeekAsync(VortexDataset dataset, long key, SeekOp op)
+    private static async ValueTask<long> SeekAsync(VortexDataset dataset, long key, SeekMode op)
     {
         KeyCursor<long> cursor = await dataset.Scan<ChurnRow>().Keys(r => r.Key).OpenAsync().ConfigureAwait(false);
         await using (cursor.ConfigureAwait(false))
@@ -423,8 +423,8 @@ internal static class Churn
 
             for (int i = 0; i < 10; i++)
             {
-                bool moved = op == SeekOp.AtOrBefore
-                    ? await cursor.PrevAsync().ConfigureAwait(false)
+                bool moved = op == SeekMode.AtOrBefore
+                    ? await cursor.PreviousAsync().ConfigureAwait(false)
                     : await cursor.NextAsync().ConfigureAwait(false);
                 if (!moved)
                 {

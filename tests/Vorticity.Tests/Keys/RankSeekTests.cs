@@ -74,7 +74,7 @@ public sealed class RankSeekTests
 
                 for (int step = 0; step < 5 && at > 0; step++)
                 {
-                    Assert.True(await cursor.PrevAsync(ct));
+                    Assert.True(await cursor.PreviousAsync(ct));
                     AssertAt(cursor, oracle, --at, strings);
                 }
             }

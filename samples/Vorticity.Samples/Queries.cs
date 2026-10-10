@@ -62,7 +62,7 @@ internal static class Queries
                 if (dayGroups++ == 0)
                 {
                     firstDay = Math.Min(firstDay, clock.Elapsed.TotalMilliseconds);
-                    batchesAtFirst = days.Statistics.Batches;
+                    batchesAtFirst = days.Metrics.Batches;
                 }
             }
 
@@ -78,7 +78,7 @@ internal static class Queries
         Scan<Reading> lastDays = readings.Scan<Reading>();
         List<DayRows> seven = await ToListAsync(lastDays.GroupBy(r => r.Day).OrderByDescending(g => g.Key).Take(7)
             .Select(g => (g.Key, g.Count())).As<DayRows>());
-        Console.WriteLine($"the last seven days, {seven[0].Day} down to {seven[^1].Day}: {lastDays.Statistics.Rows} rows read of a million");
+        Console.WriteLine($"the last seven days, {seven[0].Day} down to {seven[^1].Day}: {lastDays.Metrics.Rows} rows read of a million");
 
         // An order on a key that does not stream, under a take: each lane keeps its best keys alone.
         List<DurationVisits> shortest = [];

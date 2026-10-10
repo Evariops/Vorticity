@@ -63,7 +63,7 @@ two columns of a file, and it buys names, batches by default, and no cap on the 
 | `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection` | `Skip`, `Take`, and `Distinct()` on a projection | the same kind, or an aggregation for `Distinct` |
 | `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection` | `As<TRecord>()` | `Scan<TRecord>` over the result ([`As<TRecord>`](#71-astrecord)) |
 | `Aggregation<T>`, `Projection<T>` | `WithCancellation`, `ToListAsync`, `ToArrayAsync`, `ToValuesAsync` | the same kind, `ValueTask<…>` ([values and records](#72-values-and-records)), or `IAsyncEnumerable<T>` |
-| `Scan<TRecord>` | `AggAsync(a => e)`, `AggAsync<TResult>(a => (e1, e2, …))`, `CountAsync`, `AverageAsync` and the other single answers | `ValueTask<…>` ([one row](#8-one-row-the-aggregates-of-the-whole-scan)) |
+| `Scan<TRecord>` | `AggregateAsync(a => e)`, `AggregateAsync<TResult>(a => (e1, e2, …))`, `CountAsync`, `AverageAsync` and the other single answers | `ValueTask<…>` ([one row](#8-one-row-the-aggregates-of-the-whole-scan)) |
 
 An operator that returns a query only describes it and runs nothing. `await foreach` runs it,
 `ExplainAsync` plans it without reading a data segment, and a method that returns a `ValueTask` runs
@@ -95,12 +95,12 @@ What does not compile marks where a query over one table ends:
 | arithmetic on a column or a result | the operators are `[Obsolete(error)]`, since computing with results is C# after the sink |
 | a literal of a different type from the symbol's | as in a filter ([the symbolic algebra](14-public-api.md#52-the-symbolic-algebra)) |
 | `await` on a builder, `foreach` over a `GroupedScan` | a builder is not awaitable, and a group is not a value: a `Select` says what to deliver of it |
-| several values read without a record: `await foreach` over a `select (a, b)`, `AggAsync(a => (x, y))` | several values have no .NET type until a record gives them one (CS8411, CS0411) |
+| several values read without a record: `await foreach` over a `select (a, b)`, `AggregateAsync(a => (x, y))` | several values have no .NET type until a record gives them one (CS8411, CS0411) |
 
 What compiles but still cannot run throws when the operator runs ([errors](#11-errors-cancellation-disposal)),
 and an analyzer flags it at compile time where it can see it: VX1009 for a key component that is not
-a symbol, and VX1010 for an `As<TRecord>` or an `AggAsync<TResult>` whose record does not match the
-values. VX1011 accompanies the compiler's error of the last row and names the fix, `As<TRecord>()`
+a symbol, and VX1010 for an `As<TRecord>` or an `AggregateAsync<TResult>` whose record does not match
+the values. VX1011 accompanies the compiler's error of the last row and names the fix, `As<TRecord>()`
 and the record to declare.
 
 ## 2. The flow
@@ -135,7 +135,7 @@ records](#72-values-and-records)).
 | `OrderBy` on a key that streams in that order | nothing more | its input's |
 | `OrderBy` then `Take(k)` | `k` groups | the end of its input |
 | `OrderBy`, any other | every group | the end of its input |
-| `AggAsync` and the single answers | one state per aggregate | the end of its input, or at once when the statistics answer ([one row](#8-one-row-the-aggregates-of-the-whole-scan)) |
+| `AggregateAsync` and the single answers | one state per aggregate | the end of its input, or at once when the statistics answer ([one row](#8-one-row-the-aggregates-of-the-whole-scan)) |
 
 This gives three promises, each backed by a gate ([how it is tested](#13-how-it-is-tested)):
 
@@ -200,7 +200,7 @@ the order may depend on row order (a window, a first or last row, a tie, a custo
 backwards the rows of a group come last first and a window would take the groups from the other end.
 Without a window, a descending order uses the blocking pass, on every lane and with the blocks the
 zone maps settle (see [statistics and zone maps](#93-statistics-and-zone-maps)). The plan says which
-component streams, or why none does ([plan and statistics](#10-plan-and-statistics)).
+component streams, or why none does ([plan and metrics](#10-plan-and-metrics)).
 
 ### 2.4 Stopping early
 
@@ -329,8 +329,8 @@ decimal by its unscaled value (since a column has one scale), and a timestamp by
 
 ## 5. Aggregates
 
-The aggregates are the members of `Group<TRecord, TKey>`, and of `Aggregates<TRecord>` for `AggAsync`
-([one row](#8-one-row-the-aggregates-of-the-whole-scan)), which has every one but `Key`. Each takes a
+The aggregates are the members of `Group<TRecord, TKey>`, and of `Aggregates<TRecord>` for
+`AggregateAsync` ([one row](#8-one-row-the-aggregates-of-the-whole-scan)), which has every one but `Key`. Each takes a
 lambda over the rows' probe, as LINQ's do, and the probe only exists inside it.
 
 | member | result | skips | with no value |
@@ -349,8 +349,8 @@ lambda over the rows' probe, as LINQ's do, and the probe only exists inside it.
 when it is unknown (see [three-valued logic](08-semantics.md#3-three-valued-logic)).
 `All(x => p)` is `Count(x => p) == Count()`, and `Any(x => p)` is `Count(x => p) > 0`. "With no
 value" only happens in a group for an aggregate of a filtered group ([a filtered
-group](#52-a-filtered-group)) or of a column whose every row is null, and in `AggAsync` for a scan
-that keeps no row.
+group](#52-a-filtered-group)) or of a column whose every row is null, and in `AggregateAsync` for a
+scan that keeps no row.
 
 ### 5.1 Sums: exact, and the same bits whatever the cut
 
@@ -412,7 +412,7 @@ select (g.Key, g.Count(), g.Where(x => x.Status >= 500).Count(), g.Where(x => x.
 `g.Count(x => p)` is `g.Where(x => p).Count()`, two `Where` calls join with `AND`, and
 `a.Where(x => p)` filters the scan's aggregates the same way. The predicate is evaluated once per
 batch however many aggregates read it, on the encoded form as a scan's filter is, and the columns it
-reads join the pass, which the plan shows ([plan and statistics](#10-plan-and-statistics)).
+reads join the pass, which the plan shows ([plan and metrics](#10-plan-and-metrics)).
 
 ### 5.3 A chosen row
 
@@ -466,8 +466,8 @@ block](#91-keys-block-by-block)).
 A state is a result like any other, so its type must be one a column can hold: a number, a decimal,
 text, a date or a time, a uuid, a bool, or a `[VortexRecord]`, which a result holds as a struct
 column of its members and which a record of the selection declares as a member of that type. `Select`
-refuses a state of any other type with `VortexSchemaException`, while `AggregateAsync`, one answer
-over a whole scan, delivers any state as it is.
+refuses a state of any other type with `VortexSchemaException`, while `AggregateAsync` of a single
+answer over a whole scan delivers any state as it is.
 
 ### 5.5 One aggregate, wherever it is written
 
@@ -588,12 +588,12 @@ await foreach (var (hour, city, readings, mean) in hourly)        // the Scan<Ci
 | on a result's scan | what it does |
 |---|---|
 | `await foreach`, `ToBatchesAsync`, `ToRecordsAsync` | the result's batches, borrowed or owned, or its records |
-| `Where`, `Select`, `GroupBy`, `AggAsync`, `CountAsync` and the single answers | the same operators over the result's batches: a filter evaluated on each, a projection, an aggregate of an aggregate (daily from hourly) |
+| `Where`, `Select`, `GroupBy`, `AggregateAsync`, `CountAsync` and the single answers | the same operators over the result's batches: a filter evaluated on each, a projection, an aggregate of an aggregate (daily from hourly) |
 | `OrderBy`, `OrderByDescending` | free when the result arrives in that order, from a group by that streams on that key or an `orderby` in its query. Otherwise the result is sorted, a blocking stage under the session's memory budget, in memory while it fits and in runs written to scratch and merged back past that ([memory](#95-memory)) |
 | `Keys(r => …)` | the key cursor over the result's keys, sorted in memory unless the result arrives in their order, reserved under the session's memory budget until the cursor is disposed |
 | `Rows(range)`, `Rows(indices)` | positions in the order the result is delivered, read as a skip and a take of the stream |
 | `With(options)` | the options of what runs on the result, while the query keeps its own |
-| `ExplainAsync`, `Statistics` | the query's plan with the result's operators after it, and what the whole pipeline did |
+| `ExplainAsync`, `Metrics` | the query's plan with the result's operators after it, and what the whole pipeline did |
 
 A result has no zone maps and no indexes, so its filters evaluate every batch, and a filter on a key
 is better written before the `select`, where it prunes ([groups kept](#62-groups-kept-where)). A
@@ -663,20 +663,21 @@ bits however the log was split ([sums](#51-sums-exact-and-the-same-bits-whatever
 
 ## 8. One row: the aggregates of the whole scan
 
-`scan.AggAsync(a => e)` computes one answer, and `scan.AggAsync<TResult>(a => (e1, e2, …))` computes
-as many as are written, in one pass, into the record `TResult`, whose members take the answers in
-order the way `As` has them take a `select`'s values, VX1010 included. The one type argument is all
-the call names:
+`scan.AggregateAsync(a => e)` computes one answer, and
+`scan.AggregateAsync<TResult>(a => (e1, e2, …))` computes as many as are written, in one pass, into
+the record `TResult`, whose members take the answers in order the way `As` has them take a
+`select`'s values, VX1010 included. The one type argument is all the call names:
 
 ```csharp
-long readings = await scan.AggAsync(a => a.Count());
-Summary s = await scan.AggAsync<Summary>(a => (a.Min(x => x.Celsius), a.Max(x => x.Celsius), a.Count()));
+long readings = await scan.AggregateAsync(a => a.Count());
+Summary s = await scan.AggregateAsync<Summary>(a => (a.Min(x => x.Celsius), a.Max(x => x.Celsius), a.Count()));
 ```
 
 The answers come from the catalog of [aggregates](#5-aggregates), except the key, with a chosen row
 taken in the order of the whole scan, and `a.Where(x => p)` filters them. A single answer also has its
 own call: `CountAsync`, `AnyAsync`, `MinAsync`, `MaxAsync`, `SumAsync`, `AverageAsync`,
-`CountDistinctAsync`, `AggregateAsync`. The file statistics answer a count, a minimum and a maximum
+`CountDistinctAsync`, and `AggregateAsync<T, TAggregator, TState>` for [an aggregator of one's
+own](#54-an-aggregator-of-ones-own). The file statistics answer a count, a minimum and a maximum
 before any read, and the sum and the mean of an integer or a decimal column when they carry a sum
 (this library's writer records none, but another writer may), and the `ValueTask` is then already
 complete (see [answers without rows](12-index-reads.md#4-answers-without-rows)). A float column's sum
@@ -1040,7 +1041,7 @@ the merge is done, a million keys took 0.83 of the time and four aggregates 0.68
 
 Not done yet: a key cursor over a result larger than its budget, which a merge of runs cannot seek in.
 
-## 10. Plan and statistics
+## 10. Plan and metrics
 
 `ExplainAsync` on an aggregation returns the scan's `ScanPlan` with `Grouping`, a `GroupPlan`, which
 is null without a group by. It states what costs, so the shape of LINQ does not hide it, from the
@@ -1059,8 +1060,8 @@ query and the statistics alone:
 | `MostGroups` | the most groups the statistics allow, when they bound every component |
 
 A key's form is only known once its block is read, so the plan says what is possible and the
-statistics say what happened. Once the result is read, its `ScanStatistics` carry `Grouping`, a
-`GroupStatistics` with:
+metrics say what happened. Once the result is read, its `ScanMetrics` carry `Grouping`, a
+`GroupMetrics` with:
 
 * `Groups`, the groups the pass found before any operator on them, and `PeakGroups`, the most held at
   once, which a streaming group by keeps small, and which a core delivering part by part limits to
@@ -1086,7 +1087,7 @@ counters, which every batch touches.
 | when | what |
 |---|---|
 | compile time | the table in [the shape](#1-the-shape), and VX1009, VX1010, VX1011 |
-| the operator runs, and the lambda with it | a key component that is not a symbol (`ArgumentException`), a key or input type that does not group or aggregate (`VortexSchemaException`), a result that is not one or a chosen row's column used as an input (`InvalidOperationException`), an order on a result that has none (`ArgumentException`), a function's argument out of range (`ArgumentOutOfRangeException`), `As` or `AggAsync<TResult>` on a record that does not match (`VortexSchemaException`) |
+| the operator runs, and the lambda with it | a key component that is not a symbol (`ArgumentException`), a key or input type that does not group or aggregate (`VortexSchemaException`), a result that is not one or a chosen row's column used as an input (`InvalidOperationException`), an order on a result that has none (`ArgumentException`), a function's argument out of range (`ArgumentOutOfRangeException`), `As` or `AggregateAsync<TResult>` on a record that does not match (`VortexSchemaException`) |
 | enumeration | a sum past its type (`OverflowException`), a query over its memory budget (`VortexMemoryException`), and the file's own errors (see [exceptions](14-public-api.md#7-options-plans-reports-diagnostics-exceptions)) |
 
 Cancellation is checked at every batch boundary, and, in the work a blocking operator does after its
@@ -1152,7 +1153,9 @@ by, which is what the sum's overhead is set against. The query bench turns each 
 |---|---|
 | `GroupBy(…).AggAsync(g => …)` | `GroupBy(…).Select(g => …)` |
 | `await foreach (var (city, n) in ….AggAsync(g => (g.Key, g.Count())))`, a tuple per group | `….Select(g => (g.Key, g.Count())).As<CityCount>()`, read as batches or with `ToRecordsAsync()` |
-| `var (min, max) = await scan.AggAsync(a => (…, …))` | `MinMax m = await scan.AggAsync<MinMax>(a => (…, …))` |
+| `var (min, max) = await scan.AggAsync(a => (…, …))` | `MinMax m = await scan.AggregateAsync<MinMax>(a => (…, …))` |
+| `scan.AggAsync(a => e)` | `scan.AggregateAsync(a => e)` |
+| `scan.Statistics`, `ScanStatistics`, `GroupStatistics` | `scan.Metrics`, `ScanMetrics`, `GroupMetrics` |
 | at most eight values in a selection | as many as the record has members |
 | `GroupBy(r => (r.City, r.Day))`, then `g.Key.Item1` | `g.Key.City` |
 | `Avg`, `AvgAsync` | `Average`, `AverageAsync` |
@@ -1163,3 +1166,5 @@ by, which is what the sum's overhead is set against. The query bench turns each 
 | `Sum` of a `float` as a `float` | as a `double` |
 | a float sum whose last bits depended on the degree | the same bits whatever the degree and the split, and closer to the exact sum |
 | `g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)` | the same, or `g.Welford(x => x.Celsius)` through the aggregator's extension |
+
+The other members renamed since are listed in [the public API design](14-public-api.md#renamed).

@@ -581,7 +581,7 @@ public sealed class DatasetPageCacheTests
     private static async Task<int> CountAsync(VortexDataset dataset, CancellationToken ct)
     {
         int count = 0;
-        await foreach (DataObject _ in dataset.ObjectsAsync(ct))
+        await foreach (DataObject _ in dataset.ListObjectsAsync(ct))
         {
             count++;
         }

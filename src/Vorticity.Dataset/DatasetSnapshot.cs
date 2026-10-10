@@ -85,7 +85,7 @@ internal sealed class DatasetSnapshot
         SummaryPruner? pruner,
         long from,
         long to,
-        DatasetScanMetrics? metrics,
+        DatasetScanCounters? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // Each node and each entry is asked about the pruner's columns alone, decoded out of its
@@ -361,7 +361,7 @@ internal sealed class DatasetSnapshot
         long from,
         long to,
         Func<InternalEntry, bool>? mayMatch,
-        DatasetScanMetrics? metrics,
+        DatasetScanCounters? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         List<DatasetTree> trees = [];

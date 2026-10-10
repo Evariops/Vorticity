@@ -18,25 +18,25 @@ internal static class KeysInOrder
             await cursor.NextKeyAsync();
             Console.WriteLine($"next distinct key {cursor.Key} at row {cursor.Row}");
 
-            if (await cursor.SeekAsync(900, SeekOp.AtOrAfter))
+            if (await cursor.SeekAsync(900, SeekMode.AtOrAfter))
             {
                 Console.WriteLine($"seek to 900 landed on {cursor.Key} at row {cursor.Row}");
             }
 
             Console.WriteLine($"rank of 900: {await cursor.RankAsync(900)}");
-            Console.WriteLine($"{await cursor.KeyCountAsync()} entries share key {cursor.Key}");
+            Console.WriteLine($"{await cursor.CountAtKeyAsync()} entries share key {cursor.Key}");
             await cursor.SeekRankAsync(123_456);
             Console.WriteLine($"entry of rank 123456: key {cursor.Key} at row {cursor.Row}");
             await cursor.SeekLastAsync();
             Console.WriteLine($"last key {cursor.Key} at row {cursor.Row}");
 
-            bool found = await cursor.SeekAsync(1_234, SeekOp.Exact);
+            bool found = await cursor.SeekAsync(1_234, SeekMode.Exact);
             Console.WriteLine($"an exact seek to a key that is not there: {found}, cursor valid: {cursor.IsValid}");
 
             long inRange = await cursor.RankAsync(102) - await cursor.RankAsync(100);
             Console.WriteLine($"rows with 100 <= day < 102, from two ranks: {inRange}");
 
-            await cursor.SeekAsync(700, SeekOp.AtOrBefore);
+            await cursor.SeekAsync(700, SeekMode.AtOrBefore);
             long row = cursor.Row;
             Console.WriteLine($"seek at or before 700: key {cursor.Key} at row {row}, the last of its run");
             await foreach (Columns<Reading> cols in file.Scan<Reading>().Rows(row))
@@ -50,7 +50,7 @@ internal static class KeysInOrder
             Stopwatch watch = Stopwatch.StartNew();
             for (int key = 0; key < 1_000; key++)
             {
-                await cursor.SeekAsync(key, SeekOp.AtOrAfter);
+                await cursor.SeekAsync(key, SeekMode.AtOrAfter);
             }
 
             Console.WriteLine($"1000 seeks in {watch.Elapsed.TotalMilliseconds:F1} ms");

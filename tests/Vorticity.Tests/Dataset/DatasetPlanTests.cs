@@ -253,7 +253,7 @@ public sealed class DatasetPlanTests
         CompactionJob job = Assert.IsType<CompactionJob>(plan.Job);
         Assert.Equal((CompactionTrigger.LevelSize, 2, 3), (job.Trigger, job.FromLevel, job.ToLevel));
         Assert.Equal(objects.Where(o => o.Level == 2).Max(o => o.Entry.Bytes), job.Inputs[0].Entry.Bytes);
-        Assert.InRange(job.Objects.Length, 2, 6);
+        Assert.InRange(job.ObjectKeys.Length, 2, 6);
 
         Console.Out.Write(FormattableString.Invariant(
             $"COMPACTION PLAN: {objects.Count} objects over three levels: a descent asked the store for {asked} pages, a full read for {read}.\n"));
@@ -635,7 +635,7 @@ public sealed class DatasetPlanTests
         CompactionJob other = Assert.IsType<CompactionJob>(actual.Job);
         Assert.Equal((job.Trigger, job.FromLevel, job.ToLevel, job.TargetBytes, job.Rows, job.Bytes), (other.Trigger, other.FromLevel, other.ToLevel, other.TargetBytes, other.Rows, other.Bytes));
         Assert.Equal((job.Style, job.FirstRow, Convert.ToHexString(job.Stop.Span)), (other.Style, other.FirstRow, Convert.ToHexString(other.Stop.Span)));
-        Assert.True(job.Objects.SequenceEqual(other.Objects), $"{shape}: {string.Join(",", job.Objects)} against {string.Join(",", other.Objects)}");
+        Assert.True(job.ObjectKeys.SequenceEqual(other.ObjectKeys), $"{shape}: {string.Join(",", job.ObjectKeys)} against {string.Join(",", other.ObjectKeys)}");
         Assert.Equal(
             job.Inputs.Select(input => (input.Level, Convert.ToHexString(input.Key.Span))),
             other.Inputs.Select(input => (input.Level, Convert.ToHexString(input.Key.Span))));

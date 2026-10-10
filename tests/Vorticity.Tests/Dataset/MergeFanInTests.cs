@@ -46,7 +46,7 @@ public sealed class MergeFanInTests
             expected.Add(key);
         }
 
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         List<long> walked = [];
         await foreach (RecordBatch batch in dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key")
             .ExecuteAsync(ct).WithCancellation(CancellationToken.None))
@@ -179,7 +179,7 @@ public sealed class MergeFanInTests
         }
 
         Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder(), ct));
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder().WithMetrics(metrics), ct));
 
         Assert.Equal(Objects, metrics.ObjectsOpened);
@@ -206,7 +206,7 @@ public sealed class MergeFanInTests
 
         Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder(), ct));
         Interlocked.Exchange(ref store.Count, 0);
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder().WithMetrics(metrics), ct));
 
         Assert.Equal(metrics.ObjectsOpened - metrics.CacheHits, Volatile.Read(ref store.Count));

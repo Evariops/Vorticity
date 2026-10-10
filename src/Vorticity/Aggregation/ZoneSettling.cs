@@ -59,7 +59,7 @@ internal sealed class ZoneSettling
     /// <param name="metrics">The scan's sink, to which the zone maps read here are added.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal static async ValueTask<ZoneSettling?> PlanAsync(
-        ScanSource source, ScanSpec pass, AggregationPlan plan, ScanMetrics metrics, CancellationToken cancellationToken)
+        ScanSource source, ScanSpec pass, AggregationPlan plan, ScanCounters metrics, CancellationToken cancellationToken)
     {
         if (source is not FileScanSource { File: { } file } || !Applies(pass, plan) || !file.Schema.RootIsStruct)
         {
@@ -211,7 +211,7 @@ internal sealed class ZoneSettling
     /// </summary>
     private static bool Applies(ScanSpec pass, AggregationPlan plan)
     {
-        if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.Pruning
+        if (!plan.Grouped || pass.Take is not null || pass.MatchesNothing || !pass.Options.UseStatistics
             || plan.Filters.Filters.Length > 0 || plan.Chosen.Length > 0
             || !Array.Exists(plan.Keys, key => key.Field is FunctionFieldExpr))
         {

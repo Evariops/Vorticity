@@ -21,21 +21,21 @@ namespace Vorticity.Keys
 
         ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken = default);
 
-        ValueTask<bool> SeekAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken = default);
+        ValueTask<bool> SeekAsync(FilterLiteral key, SeekMode op, CancellationToken cancellationToken = default);
 
         ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken = default);
 
         ValueTask<bool> NextAsync(CancellationToken cancellationToken = default);
 
-        ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default);
+        ValueTask<bool> PreviousAsync(CancellationToken cancellationToken = default);
 
         ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken = default);
 
-        ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default);
+        ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken = default);
 
         ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken = default);
 
-        ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default);
+        ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken = default);
     }
 }
 
@@ -132,25 +132,25 @@ namespace Vorticity
 
         /// <summary>Positions relative to <paramref name="key"/>.</summary>
         /// <param name="key">The key, in the column's type.</param>
-        /// <param name="op">Exact, at or after, after, at or before, before.</param>
+        /// <param name="mode">Exact, at or after, after, at or before, before.</param>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether an entry satisfies it.</returns>
-        public ValueTask<bool> SeekAsync(TKey key, SeekOp op, CancellationToken cancellationToken = default)
+        public ValueTask<bool> SeekAsync(TKey key, SeekMode mode, CancellationToken cancellationToken = default)
         {
             SymLowering.Placement at = Place(key);
             if (at.Exact && at.Beyond == 0)
             {
-                return MoveAsync(_walker.SeekAsync(at.Floor, op, cancellationToken));
+                return MoveAsync(_walker.SeekAsync(at.Floor, mode, cancellationToken));
             }
 
             // No entry holds the key: it lies between two stored keys, or beyond them all, so an
             // ordering seeks the neighbour on its side, and a seek that has none, an exact one
             // included, seeks past the largest key a column can store, which leaves the cursor
             // unpositioned as any seek that finds nothing does.
-            bool forward = op is SeekOp.AtOrAfter or SeekOp.After;
-            if (op == SeekOp.Exact || (at.Beyond > 0 && forward) || (at.Beyond < 0 && !forward))
+            bool forward = mode is SeekMode.AtOrAfter or SeekMode.After;
+            if (mode == SeekMode.Exact || (at.Beyond > 0 && forward) || (at.Beyond < 0 && !forward))
             {
-                return MoveAsync(_walker.SeekAsync(FilterLiteral.From(long.MaxValue), SeekOp.After, cancellationToken));
+                return MoveAsync(_walker.SeekAsync(FilterLiteral.From(long.MaxValue), SeekMode.After, cancellationToken));
             }
 
             if (at.Beyond != 0)
@@ -158,7 +158,7 @@ namespace Vorticity
                 return MoveAsync(at.Beyond > 0 ? _walker.SeekLastAsync(cancellationToken) : _walker.SeekFirstAsync(cancellationToken));
             }
 
-            return MoveAsync(_walker.SeekAsync(at.Floor, forward ? SeekOp.After : SeekOp.AtOrBefore, cancellationToken));
+            return MoveAsync(_walker.SeekAsync(at.Floor, forward ? SeekMode.After : SeekMode.AtOrBefore, cancellationToken));
         }
 
         /// <summary>Positions on the entry of rank <paramref name="rank"/>, counting from zero in key order.</summary>
@@ -175,7 +175,7 @@ namespace Vorticity
         /// <summary>Moves to the previous entry.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.PrevAsync(cancellationToken));
+        public ValueTask<bool> PreviousAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.PreviousAsync(cancellationToken));
 
         /// <summary>Moves to the first entry of the next distinct key.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
@@ -185,7 +185,7 @@ namespace Vorticity
         /// <summary>Moves to the first entry of the previous distinct key.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.PrevKeyAsync(cancellationToken));
+        public ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.PreviousKeyAsync(cancellationToken));
 
         /// <summary>The number of entries whose key is below <paramref name="key"/>.</summary>
         /// <param name="key">The key.</param>
@@ -209,7 +209,7 @@ namespace Vorticity
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>The count, at least one.</returns>
         /// <exception cref="InvalidOperationException">The cursor is not positioned, or it walks distinct keys without rows.</exception>
-        public ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default) => Positioned().KeyCountAsync(cancellationToken);
+        public ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken = default) => Positioned().CountAtKeyAsync(cancellationToken);
 
         private IKeyWalker Positioned() =>
             _broken

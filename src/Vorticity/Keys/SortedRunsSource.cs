@@ -384,17 +384,17 @@ internal sealed partial class SortedRunsSource : KeySource
     // ------------------------------------------------------------------------------ positioning
 
     internal override async ValueTask<bool> SeekAsync(
-        FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+        FilterLiteral key, SeekMode op, CancellationToken cancellationToken)
     {
         switch (op)
         {
-            case SeekOp.After:
+            case SeekMode.After:
                 return await ForwardAsync(key, long.MaxValue, cancellationToken).ConfigureAwait(false);
-            case SeekOp.AtOrBefore:
+            case SeekMode.AtOrBefore:
                 return await BackwardAsync(key, long.MaxValue, cancellationToken).ConfigureAwait(false);
-            case SeekOp.Before:
+            case SeekMode.Before:
                 return await BackwardAsync(key, long.MinValue, cancellationToken).ConfigureAwait(false);
-            case SeekOp.AtOrAfter:
+            case SeekMode.AtOrAfter:
                 return await ForwardAsync(key, long.MinValue, cancellationToken).ConfigureAwait(false);
             default:
                 if (!await ForwardAsync(key, long.MinValue, cancellationToken).ConfigureAwait(false))
@@ -444,13 +444,13 @@ internal sealed partial class SortedRunsSource : KeySource
     internal override ValueTask<bool> NextAsync(CancellationToken cancellationToken) =>
         _direction > 0 ? StepAsync(cancellationToken) : FlipAsync(forward: true, cancellationToken);
 
-    internal override ValueTask<bool> PrevAsync(CancellationToken cancellationToken) =>
+    internal override ValueTask<bool> PreviousAsync(CancellationToken cancellationToken) =>
         _direction < 0 ? StepAsync(cancellationToken) : FlipAsync(forward: false, cancellationToken);
 
     internal override ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken) =>
         _direction > 0 ? PastKeyAsync(forward: true, cancellationToken) : ForwardAsync(Key, long.MaxValue, cancellationToken);
 
-    internal override ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken) =>
+    internal override ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken) =>
         _direction < 0 ? PastKeyAsync(forward: false, cancellationToken) : BackwardAsync(Key, long.MinValue, cancellationToken);
 
     /// <summary>
@@ -767,7 +767,7 @@ internal sealed partial class SortedRunsSource : KeySource
         return run.CurrentStart + first;
     }
 
-    internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         FilterLiteral key = Key;
         long count = 0;

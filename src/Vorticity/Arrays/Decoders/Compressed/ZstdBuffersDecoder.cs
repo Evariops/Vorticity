@@ -109,11 +109,11 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
         for (int i = 0; i < buffers; i++)
         {
             long size = sizes[i];
-            if (size < 0 || size > context.Options.MaxDecompressedSize)
+            if (size < 0 || size > context.Options.MaxDecompressedBytes)
             {
                 CompressedThrow.Format(
                     $"{Id}'s buffer {i} declares {size} bytes, above the " +
-                    $"{context.Options.MaxDecompressedSize}-byte decompression ceiling.");
+                    $"{context.Options.MaxDecompressedBytes}-byte decompression ceiling.");
             }
 
             int alignment = alignments[i] <= 0 ? 1 : alignments[i];

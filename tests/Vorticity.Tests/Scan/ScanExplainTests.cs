@@ -1,4 +1,4 @@
-// Explain and ScanMetrics: the plan without executing, and the same quantities after execution,
+// Explain and ScanCounters: the plan without executing, and the same quantities after execution,
 // without which nobody can tell whether an index earns its bytes.
 //
 // Three things are held. `ExplainAsync` reads nothing but the zone maps a filter can use (the
@@ -72,7 +72,7 @@ public sealed class ScanExplainTests
         Assert.True(plan.FileMayMatch);
 
         // The scan that follows, with its metrics set against what a caller counts by hand.
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         counting.ResetCounters();
         long rows = 0;
         long batches = 0;

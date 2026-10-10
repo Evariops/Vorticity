@@ -33,14 +33,14 @@ public sealed partial class FilteredFirstBatchTests
             Projection<long> fromSixteen = sixteen.Scan<Row>().Where(r => r.Noise > 5).Select(r => r.Key).Take(10);
             Assert.Equal(expected, await fromOne.ToListAsync(Ct));
             Assert.Equal(expected, await fromSixteen.ToListAsync(Ct));
-            Assert.Equal(fromOne.Statistics.Requests, fromSixteen.Statistics.Requests);
-            Assert.True(fromSixteen.Statistics.BytesRequested >= fromOne.Statistics.BytesRequested);
+            Assert.Equal(fromOne.Metrics.Requests, fromSixteen.Metrics.Requests);
+            Assert.True(fromSixteen.Metrics.BytesRequested >= fromOne.Metrics.BytesRequested);
 
             // The first batch of the scan alone, as a consumer that stops there reads it.
             Scan<Row> scanOne = one.Scan<Row>().Where(r => r.Noise > 5);
             Scan<Row> scanSixteen = sixteen.Scan<Row>().Where(r => r.Noise > 5);
             Assert.Equal(await FirstAsync(scanOne), await FirstAsync(scanSixteen));
-            Assert.Equal(scanOne.Statistics.Requests, scanSixteen.Statistics.Requests);
+            Assert.Equal(scanOne.Metrics.Requests, scanSixteen.Metrics.Requests);
         }
         finally
         {

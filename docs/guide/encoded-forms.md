@@ -68,7 +68,7 @@ writer chooses per column and per chunk, and its `WriteReport` lists what it cho
 | `AsDictionary()` | `DictionaryView<T>`: `Codes`, one `uint` per row, `Values`, the distinct values as a `Column<T>` in code order, and `Cardinality` | `InvalidOperationException` |
 | `AsRunEnd()` | `RunEndView<T>`: `RunEnds`, the exclusive end of each run in the batch, `Values`, one per run, and `RunCount` | `InvalidOperationException` |
 | `AsConstant()` | the one value | `InvalidOperationException` |
-| `Canonical()` | the column decoded once into contiguous memory | returns the column itself |
+| `AsCanonical()` | the column decoded once into contiguous memory | returns the column itself |
 
 These views are described in
 [the public API design](../design/14-public-api.md#54-encoded-views-and-the-selection). Check

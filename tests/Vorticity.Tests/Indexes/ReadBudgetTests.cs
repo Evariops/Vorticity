@@ -191,7 +191,7 @@ public sealed class ReadBudgetTests
         Assert.Equal(1, matches);
         await using (KeyCursor cursor = await file.Keys("k").WithSource(KeySourceKind.SortedRuns).OpenAsync())
         {
-            Assert.True(await cursor.SeekAsync(FilterLiteral.From(K(row)), SeekOp.Exact));
+            Assert.True(await cursor.SeekAsync(FilterLiteral.From(K(row)), SeekMode.Exact));
             Assert.Equal(row, cursor.Row);
         }
 

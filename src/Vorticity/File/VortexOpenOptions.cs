@@ -27,24 +27,24 @@ public enum VortexTornTailPolicy : byte
 /// <remarks>
 /// Every option here but <see cref="TornTail"/> exists to remove input/output or to bound work: a
 /// supplied <see cref="Schema"/> drops the dtype segment from the tail read, a supplied
-/// <see cref="Length"/> drops the length probe, and a raised <see cref="InitialReadSize"/> can only
+/// <see cref="Length"/> drops the length probe, and a raised <see cref="InitialReadBytes"/> can only
 /// reduce round trips.
 /// </remarks>
 public sealed record VortexOpenOptions
 {
-    private readonly int _initialReadSize = DefaultInitialReadSize;
+    private readonly int _initialReadSize = DefaultInitialReadBytes;
 
     /// <summary>The file length, or -1 for unknown.</summary>
     private readonly long _length = -1;
-    private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedSize;
+    private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedBytes;
 
     /// <summary>The batch ceiling, or 0 for none, a value no ceiling takes: a nullable would widen the record.</summary>
     private readonly long _maxBatchDecompressedSize;
     private readonly VortexReadOptions? _read;
     private readonly Switches _switches;
 
-    /// <summary><see cref="InitialReadSize"/> unless a caller raises it.</summary>
-    internal const int DefaultInitialReadSize = 65_536;
+    /// <summary><see cref="InitialReadBytes"/> unless a caller raises it.</summary>
+    internal const int DefaultInitialReadBytes = 65_536;
 
     /// <summary>The defaults.</summary>
     internal static VortexOpenOptions Default { get; } = new VortexOpenOptions();
@@ -57,7 +57,7 @@ public sealed record VortexOpenOptions
     /// 64 KiB do.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
-    public int InitialReadSize
+    public int InitialReadBytes
     {
         get => _initialReadSize;
         init
@@ -98,7 +98,7 @@ public sealed record VortexOpenOptions
 
     /// <summary>The most bytes one decode may produce; a decode is a block.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
-    public long MaxDecompressedSize
+    public long MaxDecompressedBytes
     {
         get => _maxDecompressedSize;
         init
@@ -110,13 +110,13 @@ public sealed record VortexOpenOptions
 
     /// <summary>The most bytes the decodes of one batch may produce together, across its columns; null, the default, sets no such ceiling.</summary>
     /// <remarks>
-    /// <see cref="MaxDecompressedSize"/> bounds each decode, so a file of many columns, each declared
+    /// <see cref="MaxDecompressedBytes"/> bounds each decode, so a file of many columns, each declared
     /// to decode near that ceiling, bounds a batch only at the ceiling times the columns. A service
     /// that reads files it does not trust sets this as well; a batch past it throws
     /// <see cref="VortexFormatException"/>.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
-    public long? MaxBatchDecompressedSize
+    public long? MaxBatchDecompressedBytes
     {
         get => _maxBatchDecompressedSize == 0 ? null : _maxBatchDecompressedSize;
         init
@@ -187,8 +187,8 @@ public sealed record VortexOpenOptions
             ? VortexReadOptions.Default
             : new VortexReadOptions
             {
-                MaxDecompressedSize = MaxDecompressedSize,
-                MaxBatchDecompressedSize = MaxBatchDecompressedSize ?? long.MaxValue,
+                MaxDecompressedBytes = MaxDecompressedBytes,
+                MaxBatchDecompressedBytes = MaxBatchDecompressedBytes ?? long.MaxValue,
                 VerifyStatistics = VerifyStatistics,
                 IndexCacheBytes = IndexCacheBytes,
                 IndexFragments = Fragments(IndexFragments),
@@ -202,8 +202,8 @@ public sealed record VortexOpenOptions
 
     /// <summary>Whether every value the read policy takes from these options is its default.</summary>
     private bool ReadsAsDefault =>
-        MaxDecompressedSize == VortexLimits.DefaultMaxDecompressedSize
-        && MaxBatchDecompressedSize is null
+        MaxDecompressedBytes == VortexLimits.DefaultMaxDecompressedBytes
+        && MaxBatchDecompressedBytes is null
         && !VerifyStatistics
         && IndexCacheBytes == VortexReadOptions.DefaultIndexCacheBytes
         && IndexFragments.IsDefaultOrEmpty

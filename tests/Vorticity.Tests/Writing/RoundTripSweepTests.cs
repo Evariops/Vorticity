@@ -363,7 +363,7 @@ public sealed class RoundTripSweepTests
         Assert.Equal((3L, 1L, CompactionStyle.Tiered), (result.ObjectsIn, result.ObjectsOut, result.Style));
 
         string key = string.Empty;
-        await foreach (DataObject held in dataset.ObjectsAsync())
+        await foreach (DataObject held in dataset.ListObjectsAsync())
         {
             key = held.Key;
         }

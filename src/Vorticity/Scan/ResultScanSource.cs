@@ -28,7 +28,7 @@ internal abstract class ResultQuery
     internal abstract VortexSession Session { get; }
 
     /// <summary>What the query's own scan did, which a result's scan reports as its own.</summary>
-    internal abstract ScanMetrics Metrics { get; }
+    internal abstract ScanCounters Counters { get; }
 
     /// <summary>The result's batches; the query runs as they are asked for.</summary>
     internal abstract IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken);
@@ -49,10 +49,10 @@ internal abstract class ResultQuery
     internal virtual IVortexRecord? RecordOf(int column) => null;
 
     /// <summary>What the query's group by did, once it ran; null without a group by.</summary>
-    internal virtual GroupStatistics? Grouping => null;
+    internal virtual GroupMetrics? Grouping => null;
 
-    /// <summary>The scan's statistics, with what its group by did.</summary>
-    internal ScanStatistics Statistics() => ScanStatistics.From(Metrics) with { Grouping = Grouping };
+    /// <summary>The scan's metrics, with what its group by did.</summary>
+    internal ScanMetrics Metrics() => ScanMetrics.From(Counters) with { Grouping = Grouping };
 
     /// <summary>The window [<paramref name="skip"/>, <paramref name="skip"/> + <paramref name="take"/>) of a window [<paramref name="skipped"/>, <paramref name="skipped"/> + <paramref name="taken"/>): the operators in the order written.</summary>
     internal static (long Skip, long Take) Within(long skipped, long taken, long skip, long take)
@@ -80,9 +80,9 @@ internal sealed class ResultScanSource : ScanSource
 
     internal override VortexSession Session => _query.Session;
 
-    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanMetrics metrics) => new Stream(this, spec);
+    internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) => new Stream(this, spec);
 
-    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         long count = 0;
         await foreach (RecordBatch batch in SelectedAsync(spec).WithCancellation(cancellationToken).ConfigureAwait(false))
@@ -93,7 +93,7 @@ internal sealed class ResultScanSource : ScanSource
         return count;
     }
 
-    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
         await foreach (RecordBatch batch in SelectedAsync(spec).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
@@ -106,7 +106,7 @@ internal sealed class ResultScanSource : ScanSource
         return false;
     }
 
-    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanMetrics metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         FilterLiteral best = FilterLiteral.Null;
         int[] rows = [];

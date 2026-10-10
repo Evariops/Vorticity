@@ -126,8 +126,8 @@ public sealed class SinkContractTests
         {
         }
 
-        Assert.Equal(0, cold.Statistics.CacheHits);
-        Assert.True(cold.Statistics.Requests > 0);
+        Assert.Equal(0, cold.Metrics.CacheHits);
+        Assert.True(cold.Metrics.Requests > 0);
 
         // A scan that runs while another scan of the session runs counts its own hits, not both.
         Scan<Reading> outer = file.Scan<Reading>();
@@ -141,7 +141,7 @@ public sealed class SinkContractTests
             {
             }
 
-            Assert.Equal(inner.Statistics.Requests, inner.Statistics.CacheHits);
+            Assert.Equal(inner.Metrics.Requests, inner.Metrics.CacheHits);
 
             while (await batches.MoveNextAsync())
             {
@@ -152,7 +152,7 @@ public sealed class SinkContractTests
             await batches.DisposeAsync();
         }
 
-        Assert.Equal(outer.Statistics.Requests, outer.Statistics.CacheHits);
-        Assert.Equal(cold.Statistics.Requests, outer.Statistics.Requests);
+        Assert.Equal(outer.Metrics.Requests, outer.Metrics.CacheHits);
+        Assert.Equal(cold.Metrics.Requests, outer.Metrics.Requests);
     }
 }

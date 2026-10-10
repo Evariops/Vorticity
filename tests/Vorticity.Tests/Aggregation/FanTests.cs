@@ -50,7 +50,7 @@ public sealed partial class FanTests
             }
 
             Assert.Equal(rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyTotal(g.Key, g.Count(), g.Sum(r => r.Value))), got);
-            GroupStatistics grouping = query.Statistics.Grouping!;
+            GroupMetrics grouping = query.Metrics.Grouping!;
             if (expected is null)
             {
                 return;
@@ -101,7 +101,7 @@ public sealed partial class FanTests
 
             Assert.Equal(rows.Length, count);
             Assert.Equal(rows.Sum(r => r.Value), total);
-            GroupStatistics grouping = query.Statistics.Grouping!;
+            GroupMetrics grouping = query.Metrics.Grouping!;
             Assert.Equal(expected, grouping.CoreReason);
             Assert.Equal(rows.Select(r => r.Key).Distinct().Count(), grouping.Groups);
             if (expected == GroupCoreReason.Projection)

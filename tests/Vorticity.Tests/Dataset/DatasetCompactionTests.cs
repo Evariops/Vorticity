@@ -294,7 +294,7 @@ public sealed class DatasetCompactionTests
         long counted = 0;
         foreach ((long low, long high) in ((long, long)[])[(100, 1_900), (0, 2_200), (777, 778), (1_500, 1_200)])
         {
-            DatasetScanMetrics metrics = new DatasetScanMetrics();
+            DatasetScanCounters metrics = new DatasetScanCounters();
             VortexExpr range = Expr.And(
                 Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(low))),
                 Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(high))));
@@ -313,7 +313,7 @@ public sealed class DatasetCompactionTests
         }
 
         // A filter the key's summaries cannot count opens what the summaries keep, and answers the same.
-        DatasetScanMetrics other = new DatasetScanMetrics();
+        DatasetScanCounters other = new DatasetScanCounters();
         VortexExpr measure = Expr.Lt(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(100.0)));
         Assert.Equal(appended.FindAll(key => key / 4.0 < 100.0).Count, await dataset.ScanBuilder().Where(measure).WithMetrics(other).CountAsync(ct));
         Assert.Equal(0, other.ObjectsCounted);

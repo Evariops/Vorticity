@@ -82,7 +82,7 @@ public sealed class VortexDataset : IAsyncDisposable
     public long Lag => Snapshot.Levels.LagAtLevelZero();
 
     /// <summary>The columns the dataset is ordered by, empty when objects are kept in the order they arrived.</summary>
-    public IReadOnlyList<string> ClusteringKeyPaths => Snapshot.Header.ClusteringKey;
+    public IReadOnlyList<string> ClusteringKey => Snapshot.Header.ClusteringKey;
 
     /// <summary>
     /// What the latest compaction run after a commit to fail on this handle raised
@@ -259,7 +259,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>Every data object of the version this handle holds, over every level, in the order a scan reads them.</summary>
     /// <param name="cancellationToken">Cancels the reads of the tree.</param>
     /// <returns>The objects; reading them reads tree pages only, never an object.</returns>
-    public async IAsyncEnumerable<DataObject> ObjectsAsync(
+    public async IAsyncEnumerable<DataObject> ListObjectsAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         await foreach (PositionedObject held in
@@ -422,18 +422,18 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>Removes data objects of the version this handle holds, in one commit.</summary>
-    /// <param name="objects">Objects from <see cref="ObjectsAsync"/>.</param>
+    /// <param name="objects">Objects from <see cref="ListObjectsAsync"/>.</param>
     /// <param name="cancellationToken">Cancels the commit.</param>
     /// <returns>The version created, and whether the removal applied; the latest version, unchanged, when it did not.</returns>
     /// <remarks>The objects stay in the store, readable by older versions, until vacuum deletes them.</remarks>
-    public ValueTask<ReplaceResult> RemoveAsync(IReadOnlyList<DataObject> objects, CancellationToken cancellationToken = default) =>
-        ReplaceAsync(objects, [], cancellationToken);
+    public ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject> objects, CancellationToken cancellationToken = default) =>
+        ReplaceObjectsAsync(objects, [], cancellationToken);
 
     /// <summary>
     /// Removes data objects and adds others written through <see cref="StartObject"/>, in one commit:
     /// a reader sees either the old objects or the new ones, never both nor neither.
     /// </summary>
-    /// <param name="removed">Objects from <see cref="ObjectsAsync"/>.</param>
+    /// <param name="removed">Objects from <see cref="ListObjectsAsync"/>.</param>
     /// <param name="added">Drafts whose rows are written; each is completed and put before the commit.</param>
     /// <param name="cancellationToken">Cancels the puts and the commit.</param>
     /// <returns>
@@ -447,7 +447,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </remarks>
     /// <exception cref="ArgumentException">An object does not come from this dataset's walk.</exception>
     /// <exception cref="InvalidOperationException">A draft belongs to another handle, was already committed, or its writer was abandoned.</exception>
-    public async ValueTask<ReplaceResult> ReplaceAsync(
+    public async ValueTask<ReplaceResult> ReplaceObjectsAsync(
         IReadOnlyList<DataObject> removed, IReadOnlyList<ObjectDraft> added, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(removed);
@@ -459,7 +459,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ArgumentNullException.ThrowIfNull(gone, nameof(removed));
             if (gone.TreeKey.Length == 0 || gone.Entry is not { } entry)
             {
-                throw new ArgumentException("An object to remove comes from ObjectsAsync, which knows where its entry is.", nameof(removed));
+                throw new ArgumentException("An object to remove comes from ListObjectsAsync, which knows where its entry is.", nameof(removed));
             }
 
             inputs.Add((gone.Level, Convert.FromHexString(gone.TreeKey)));
@@ -714,7 +714,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// A job is the one <see cref="CompactAsync"/> runs, so a loop is safe against every writer and
     /// every other loop. Loops that know one another spread over the due jobs by
     /// <see cref="CompactionSchedule.Loops"/>; loops that cannot count one another lease a job's
-    /// levels (<see cref="CompactionSchedule.Leases"/>).
+    /// levels (<see cref="CompactionSchedule.UseLeases"/>).
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The schedule's loop index, rate, sleep or lease span is out of range.</exception>
     public Task RunCompactionAsync(CompactionSchedule? schedule = null, CancellationToken cancellationToken = default) =>
@@ -764,7 +764,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 $"This store already holds a dataset at version {existing}; open it rather than creating it.");
         }
 
-        _ = ClusteringKey.Declared(options.ClusteringKey, schema);
+        _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema);
 
         CommitHeader template = new CommitHeader
         {
@@ -908,7 +908,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// their ancestors', do not refute the pruner, in key order. A null pruner keeps every object.
     /// </summary>
     internal IAsyncEnumerable<PositionedObject> WalkAsync(
-        SummaryPruner? pruner, long from, long to, DatasetScanMetrics? metrics, CancellationToken cancellationToken) =>
+        SummaryPruner? pruner, long from, long to, DatasetScanCounters? metrics, CancellationToken cancellationToken) =>
         Snapshot.WalkAsync(pruner, from, to, metrics, cancellationToken);
 
     /// <summary>

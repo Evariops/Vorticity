@@ -13,7 +13,7 @@ internal static class ScanATable
 
         double total = 0;
         long seen = 0;
-        ScanStatistics loop = default;
+        ScanMetrics loop = default;
         TimeSpan loopTime = default;
         for (int round = 0; round < 3; round++)
         {
@@ -31,21 +31,21 @@ internal static class ScanATable
                 seen += celsius.Length;
             }
 
-            (loop, loopTime) = (scan.Statistics, clock.Elapsed);
+            (loop, loopTime) = (scan.Metrics, clock.Elapsed);
         }
 
         Console.WriteLine($"the loop: mean {total / seen:F4} over {seen} rows, {loopTime.TotalMilliseconds:F1} ms");
         Console.WriteLine($"  {loop.Batches} batches, {loop.BlocksDecoded} blocks decoded, {loop.Requests} requests, {loop.BytesRequested} bytes");
 
         double? mean = null;
-        ScanStatistics avg = default;
+        ScanMetrics avg = default;
         TimeSpan avgTime = default;
         for (int round = 0; round < 3; round++)
         {
             Stopwatch clock = Stopwatch.StartNew();
             Scan<Reading> scan = file.Scan<Reading>();
             mean = await scan.AverageAsync(r => r.Celsius);
-            (avg, avgTime) = (scan.Statistics, clock.Elapsed);
+            (avg, avgTime) = (scan.Metrics, clock.Elapsed);
         }
 
         Console.WriteLine($"AverageAsync: mean {mean:F4}, {avgTime.TotalMilliseconds:F1} ms");
@@ -59,7 +59,7 @@ internal static class ScanATable
         bool hasDaySum = file.Statistics[0].TryGetSum(out long daySum);
         Scan<Reading> days = file.Scan<Reading>();
         double? meanDay = await days.AverageAsync(r => r.Day);
-        Console.WriteLine($"file statistics of Day: sum {(hasDaySum ? daySum.ToString() : "absent")}; AverageAsync(r => r.Day) {meanDay}, {days.Statistics.Requests} requests");
+        Console.WriteLine($"file statistics of Day: sum {(hasDaySum ? daySum.ToString() : "absent")}; AverageAsync(r => r.Day) {meanDay}, {days.Metrics.Requests} requests");
 
         long defaultBytes = await AllocatedAsync(file, new ScanOptions());
         (long defaultBatches, _, _) = await BatchesAsync(file, new ScanOptions());

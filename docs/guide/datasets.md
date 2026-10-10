@@ -76,7 +76,7 @@ imported: version 4, 120000 rows, 3 objects, lag 0
 
 `ImportAsync` takes a key in the store, not a path on disk, so putting the bytes there is up to you.
 The file's columns must read as the dataset's, either the current ones or those of an earlier
-schema of the dataset (see [Changing the schema](#changing-the-schema)). `ObjectsAsync()` lists the
+schema of the dataset (see [Changing the schema](#changing-the-schema)). `ListObjectsAsync()` lists the
 objects of the version from the commit tree, without opening any object.
 
 ## Reading
@@ -104,9 +104,9 @@ nothing, and `false` is a proof.
 
 Row positions are the dataset's. A batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows object after object, in the order a scan delivers them. A key cursor over the
-clustering key merges the cursors of the objects, and its `KeyCountAsync` is the number of entries
+clustering key merges the cursors of the objects, and its `CountAtKeyAsync` is the number of entries
 under the current key, here the thousand rows of day 75. It walks both ways like a file's cursor
-(`SeekLastAsync`, `PrevAsync`, `PrevKeyAsync`, `AtOrBefore`, `Before`), and a step against the
+(`SeekLastAsync`, `PreviousAsync`, `PreviousKeyAsync`, `AtOrBefore`, `Before`), and a step against the
 direction of the previous one seeks every object again at the current entry. Walking down, an object
 above level 0 opens only once the walk could reach its keys, while the level 0 objects all open at
 the seek since nothing bounds them from above. See [keys-in-order.md](keys-in-order.md).
@@ -143,7 +143,7 @@ await using (ObjectDraft rewritten = dataset.StartObject())
         .Rows(RowRange.FromLength(first.FirstRow, first.Rows))
         .Where(r => r.Celsius.IsNotNull)
         .ToRecordsAsync());
-    ReplaceResult replaced = await dataset.ReplaceAsync([first], [rewritten]);
+    ReplaceResult replaced = await dataset.ReplaceObjectsAsync([first], [rewritten]);
 }
 ```
 
@@ -153,9 +153,9 @@ removed the import: version 7, Applied, 109000 rows, 3 objects
 removing it again: Abandoned, version 7
 ```
 
-`ReplaceAsync(removed, added)` swaps objects in one commit. A reader sees either the old ones or the
-new ones, never both and never neither. `RemoveAsync(objects)` is the same with nothing added. Both
-take `DataObject`s from `ObjectsAsync()`. The removed objects stay in the store, readable by the
+`ReplaceObjectsAsync(removed, added)` swaps objects in one commit. A reader sees either the old ones
+or the new ones, never both and never neither. `RemoveObjectsAsync(objects)` is the same with nothing
+added. Both take `DataObject`s from `ListObjectsAsync()`. The removed objects stay in the store, readable by the
 versions that still name them, until vacuum deletes them. Removing an object the version no longer
 holds returns `Abandoned`: no version is created, the result names the latest one, and any objects
 a replace would have added are left for vacuum.

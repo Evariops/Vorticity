@@ -90,7 +90,7 @@ public sealed partial class VarianceTests
                 foreach (string file in new[] { path, other })
                 {
                     await using VortexFile open = await session.OpenAsync(file, cancellationToken: Ct);
-                    Whole whole = await open.Scan<Reading>().AggAsync<Whole>(a => (a.Variance(x => x.Celsius), a.StandardDeviation(x => x.Epoch)), Ct);
+                    Whole whole = await open.Scan<Reading>().AggregateAsync<Whole>(a => (a.Variance(x => x.Celsius), a.StandardDeviation(x => x.Epoch)), Ct);
                     List<Spread> groups = await ListAsync(open.Scan<Reading>()
                         .GroupBy(r => r.Station)
                         .OrderBy(g => g.Key)
@@ -119,7 +119,7 @@ public sealed partial class VarianceTests
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
-            Whole whole = await file.Scan<Reading>().AggAsync<Whole>(a => (a.Variance(x => x.Celsius), a.StandardDeviation(x => x.Epoch)), Ct);
+            Whole whole = await file.Scan<Reading>().AggregateAsync<Whole>(a => (a.Variance(x => x.Celsius), a.StandardDeviation(x => x.Epoch)), Ct);
             double expected = Deviation(rows.Select(r => r.Epoch))!.Value;
             Assert.True(Math.Abs(whole.EpochDeviation!.Value - expected) <= expected * 1e-12, $"{whole.EpochDeviation} against {expected}");
         }

@@ -102,7 +102,7 @@ internal sealed class ZoneFinality
         VortexFile file = ((FileScanSource)query.Host.Source).File;
         string path = query.Plan.Keys[0].Path;
         ZoneColumn? zones = (await ZonePruningPlan
-            .PlanAsync(file, file.LayoutTree, Expr.IsNotNull(Expr.Field(path)), cancellationToken, steps: null, query.Host.Metrics, indexes: false)
+            .PlanAsync(file, file.LayoutTree, Expr.IsNotNull(Expr.Field(path)), cancellationToken, steps: null, query.Host.Counters, indexes: false)
             .ConfigureAwait(false)).Zones?.Column(path);
         if (zones is not { HasStatistics: true } || zones.RowCount != file.RowCount)
         {

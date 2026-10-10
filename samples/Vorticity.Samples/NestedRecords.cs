@@ -71,7 +71,7 @@ internal static class NestedRecords
         {
         }
 
-        Console.WriteLine($"every column of Visit: {whole.Statistics.BytesRequested} bytes; Origin.Country alone: {country.Statistics.BytesRequested} bytes");
+        Console.WriteLine($"every column of Visit: {whole.Metrics.BytesRequested} bytes; Origin.Country alone: {country.Metrics.BytesRequested} bytes");
 
         await ParcelsAsync();
     }

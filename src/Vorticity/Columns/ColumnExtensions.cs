@@ -103,7 +103,7 @@ public static class ColumnExtensions
         /// <summary>The unscaled values as stored, of the storage's width: <c>sbyte</c> to <c>Int128</c>.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<decimal, TStorage>(column);
     }
 
@@ -122,7 +122,7 @@ public static class ColumnExtensions
         /// <summary>The unscaled values as stored.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<decimal?, TStorage>(column);
     }
 
@@ -138,7 +138,7 @@ public static class ColumnExtensions
         /// <summary>The unscaled values as stored.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<VortexDecimal, TStorage>(column);
     }
 
@@ -164,7 +164,7 @@ public static class ColumnExtensions
         /// <summary>The stored values: days in an <c>int</c>, or milliseconds in a <c>long</c>.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<DateOnly, TStorage>(column);
     }
 
@@ -193,7 +193,7 @@ public static class ColumnExtensions
         /// <summary>The stored values.</summary>
         /// <typeparam name="TStorage">The storage's .NET type: <c>int</c> for seconds and milliseconds, <c>long</c> otherwise.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<TimeOnly, TStorage>(column);
     }
 
@@ -224,7 +224,7 @@ public static class ColumnExtensions
 
         /// <summary>The stored values, since the Unix epoch in <c>Unit</c>.</summary>
         /// <returns>The storage column.</returns>
-        public Column<long> Storage() => StorageOf<DateTime, long>(column);
+        public Column<long> AsStorage() => StorageOf<DateTime, long>(column);
     }
 
     extension(Column<DateTime?> column)
@@ -241,7 +241,7 @@ public static class ColumnExtensions
 
         /// <summary>The stored values, since the Unix epoch in <c>Unit</c>.</summary>
         /// <returns>The storage column.</returns>
-        public Column<long?> Storage() => StorageOf<DateTime?, long?>(column);
+        public Column<long?> AsStorage() => StorageOf<DateTime?, long?>(column);
     }
 
     extension(Column<DateTimeOffset> column)
@@ -261,7 +261,7 @@ public static class ColumnExtensions
 
         /// <summary>The stored values, UTC since the Unix epoch in <c>Unit</c>.</summary>
         /// <returns>The storage column.</returns>
-        public Column<long> Storage() => StorageOf<DateTimeOffset, long>(column);
+        public Column<long> AsStorage() => StorageOf<DateTimeOffset, long>(column);
     }
 
     extension(Column<DateTimeOffset?> column)
@@ -316,7 +316,7 @@ public static class ColumnExtensions
         /// <summary>The unscaled values as stored, of the storage's width: <c>sbyte</c> to <c>Int128</c>, or 32 bytes.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<Int128, TStorage>(column);
     }
 
@@ -374,7 +374,7 @@ public static class ColumnExtensions
         /// <summary>The unscaled values as stored, of the storage's width.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => StorageOf<BigInteger, TStorage>(column);
     }
 
@@ -399,7 +399,7 @@ public static class ColumnExtensions
 
         /// <summary>The stored values: 100 ns ticks.</summary>
         /// <returns>The storage column.</returns>
-        public Column<long> Storage() => StorageOf<TimeSpan, long>(column);
+        public Column<long> AsStorage() => StorageOf<TimeSpan, long>(column);
     }
 
     extension(Column<TimeSpan?> column)
@@ -415,7 +415,7 @@ public static class ColumnExtensions
 
         /// <summary>The stored values: 100 ns ticks.</summary>
         /// <returns>The storage column.</returns>
-        public Column<long?> Storage() => StorageOf<TimeSpan?, long?>(column);
+        public Column<long?> AsStorage() => StorageOf<TimeSpan?, long?>(column);
     }
 
     extension<T>(Column<ReadOnlyMemory<T>> column)
@@ -489,7 +489,7 @@ public static class ExtensionColumnExtensions
         /// <summary>The stored values.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
-        public Column<TStorage> Storage<TStorage>()
+        public Column<TStorage> AsStorage<TStorage>()
             where TStorage : unmanaged => ColumnExtensions.StorageOf<T, TStorage>(column);
     }
 }

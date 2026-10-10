@@ -92,7 +92,7 @@ public sealed class CompositeKeyTests
         byte[] prefix = RowEncoder.EncodeKey([FilterLiteral.From(country)], [Asc]);
         await using KeyCursor cursor = await written.File.Keys("country", "city").OpenAsync(ct);
         List<long> rows = [];
-        for (bool ok = await cursor.SeekAsync(FilterLiteral.From(prefix), SeekOp.AtOrAfter, ct);
+        for (bool ok = await cursor.SeekAsync(FilterLiteral.From(prefix), SeekMode.AtOrAfter, ct);
              ok && cursor.KeyBytes.StartsWith(prefix);
              ok = await cursor.NextAsync(ct))
         {
@@ -127,7 +127,7 @@ public sealed class CompositeKeyTests
 
         // A seek at -1 lands on the first row whose number is -1.
         byte[] minusOne = RowEncoder.EncodeKey([FilterLiteral.From(-1L)], [I32], [Asc]);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(minusOne), SeekOp.AtOrAfter, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(minusOne), SeekMode.AtOrAfter, ct));
         Assert.Equal(-1, Number((int)cursor.Row));
         Assert.True(cursor.KeyBytes.StartsWith(minusOne));
 

@@ -48,7 +48,7 @@ public sealed record CompactionSchedule
     /// same, until the span ends. Nothing releases a lease, so that a store that refuses deletes still
     /// works. Vacuum deletes the leases that ended before its window.
     /// </summary>
-    public bool Leases { get; init; }
+    public bool UseLeases { get; init; }
 
     /// <summary>
     /// How long a lease holds its levels, the same for every loop of a dataset; a minute by default.
@@ -109,7 +109,7 @@ internal static class CompactionLoop
         ArgumentNullException.ThrowIfNull(schedule);
         schedule.Check();
         TimeProvider clock = schedule.TimeProvider;
-        int ranked = schedule.Leases ? Math.Max(LeasedJobs, schedule.Loops) : schedule.Loop + 1;
+        int ranked = schedule.UseLeases ? Math.Max(LeasedJobs, schedule.Loops) : schedule.Loop + 1;
         LeaseBook leases = new LeaseBook();
 
         // Off the caller's thread from the first turn: against a store that answers at once, the jobs
@@ -147,7 +147,7 @@ internal static class CompactionLoop
     internal static async ValueTask<CompactionJob?> ChooseAsync(
         IObjectStore store, CompactionSchedule schedule, CompactionPlan plan, LeaseBook leases, CancellationToken cancellationToken)
     {
-        if (!schedule.Leases)
+        if (!schedule.UseLeases)
         {
             return schedule.Loop < plan.Jobs.Length ? plan.Jobs[schedule.Loop] : null;
         }

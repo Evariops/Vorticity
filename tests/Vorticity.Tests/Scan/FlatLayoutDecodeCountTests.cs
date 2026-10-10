@@ -54,7 +54,7 @@ public sealed class FlatLayoutDecodeCountTests
         try
         {
 
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         long batches = 0;
         long rows = 0;
         await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
@@ -221,7 +221,7 @@ public sealed class FlatLayoutDecodeCountTests
                 expected.Add(all[(int)index]);
             }
 
-            ScanMetrics metrics = new ScanMetrics();
+            ScanCounters metrics = new ScanCounters();
             List<string> taken = [];
             await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
@@ -276,7 +276,7 @@ public sealed class FlatLayoutDecodeCountTests
         string path = await WriteSortedAsync(SortedRows);
         try
         {
-            ScanMetrics metrics = new ScanMetrics();
+            ScanCounters metrics = new ScanCounters();
             long rows = 0;
             VortexExpr band = Expr.And(
                 Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(Low))),

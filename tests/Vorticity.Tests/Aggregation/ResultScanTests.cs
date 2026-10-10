@@ -58,7 +58,7 @@ public sealed partial class ResultScanTests
     }
 
     [Fact]
-    public async Task TheAnswersOfAScanGoIntoTheRecordAggAsyncNames()
+    public async Task TheAnswersOfAScanGoIntoTheRecordAggregateAsyncNames()
     {
         (Visit[] rows, string path) = await WriteAsync();
         try
@@ -66,7 +66,7 @@ public sealed partial class ResultScanTests
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
             Totals totals = await file.Scan<Visit>()
                 .Where(r => r.Day >= 3)
-                .AggAsync<Totals>(a => (a.Count(), a.Sum(x => x.Pages), a.Max(x => x.City), a.Average(x => x.Seconds)), Ct);
+                .AggregateAsync<Totals>(a => (a.Count(), a.Sum(x => x.Pages), a.Max(x => x.City), a.Average(x => x.Seconds)), Ct);
 
             Visit[] kept = [.. rows.Where(r => r.Day >= 3)];
             Assert.Equal(kept.Length, totals.Count);
@@ -105,7 +105,7 @@ public sealed partial class ResultScanTests
             Assert.Contains("may be null", notNullable.Message, StringComparison.Ordinal);
 
             Func<Aggregates<Visit>, System.Runtime.CompilerServices.ITuple> twoCounts = a => (a.Count(), a.Count());
-            await Assert.ThrowsAsync<VortexSchemaException>(async () => await file.Scan<Visit>().AggAsync<CityCount>(twoCounts, Ct));
+            await Assert.ThrowsAsync<VortexSchemaException>(async () => await file.Scan<Visit>().AggregateAsync<CityCount>(twoCounts, Ct));
         }
         finally
         {
@@ -143,7 +143,7 @@ public sealed partial class ResultScanTests
             Assert.Equal(expected.Sum(g => g.Count), await Daily(file).SumAsync(g => g.Count, Ct));
             Assert.Equal(
                 new GroupsAndRows(expected.Length, expected.Sum(g => g.Count)),
-                await Daily(file).AggAsync<GroupsAndRows>(a => (a.Count(), a.Sum(x => x.Count)), Ct));
+                await Daily(file).AggregateAsync<GroupsAndRows>(a => (a.Count(), a.Sum(x => x.Count)), Ct));
 
             // Rows by their position in the order the result is delivered.
             List<CityDayCount> all = await ListAsync(Daily(file));
@@ -227,20 +227,20 @@ public sealed partial class ResultScanTests
                 Assert.Equal(expected, walked);
 
                 long middle = expected[expected.Length / 2].Key;
-                Assert.True(await counts.SeekAsync(middle, SeekOp.Exact, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekMode.Exact, Ct));
                 Assert.Equal(expected.First(e => e.Key == middle).Row, counts.Row);
-                Assert.Equal(expected.Count(e => e.Key == middle), await counts.KeyCountAsync(Ct));
+                Assert.Equal(expected.Count(e => e.Key == middle), await counts.CountAtKeyAsync(Ct));
                 Assert.Equal(expected.Count(e => e.Key < middle), await counts.RankAsync(middle, Ct));
-                Assert.True(await counts.SeekAsync(middle, SeekOp.Before, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekMode.Before, Ct));
                 Assert.Equal(expected.Last(e => e.Key < middle), (counts.Key, counts.Row));
-                Assert.True(await counts.SeekAsync(middle, SeekOp.After, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekMode.After, Ct));
                 Assert.Equal(expected.First(e => e.Key > middle), (counts.Key, counts.Row));
-                Assert.False(await counts.SeekAsync(expected[^1].Key, SeekOp.After, Ct));
-                Assert.False(await counts.SeekAsync(-1, SeekOp.Exact, Ct));
+                Assert.False(await counts.SeekAsync(expected[^1].Key, SeekMode.After, Ct));
+                Assert.False(await counts.SeekAsync(-1, SeekMode.Exact, Ct));
 
                 // Backwards a key at a time, each on its last entry.
                 List<(long, long)> lasts = [];
-                for (bool on = await counts.SeekLastAsync(Ct); on; on = await counts.PrevKeyAsync(Ct))
+                for (bool on = await counts.SeekLastAsync(Ct); on; on = await counts.PreviousKeyAsync(Ct))
                 {
                     lasts.Add((counts.Key, counts.Row));
                 }
@@ -260,8 +260,8 @@ public sealed partial class ResultScanTests
                 }
 
                 Assert.Equal(delivered.Select(g => g.City).Distinct().Order(StringComparer.Ordinal), walked);
-                Assert.True(await cities.SeekAsync("Caen", SeekOp.Exact, Ct));
-                Assert.Equal(delivered.Count(g => g.City == "Caen"), await cities.KeyCountAsync(Ct));
+                Assert.True(await cities.SeekAsync("Caen", SeekMode.Exact, Ct));
+                Assert.Equal(delivered.Count(g => g.City == "Caen"), await cities.CountAtKeyAsync(Ct));
             }
 
             // Floats, from a result that arrives in no order of theirs.

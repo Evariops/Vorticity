@@ -22,7 +22,7 @@ internal static class Datasets
         {
             ClusteringKey = [Reading.ColumnNames.Day],
         });
-        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, clustered by {string.Join(", ", dataset.ClusteringKeyPaths)}");
+        Console.WriteLine($"created: version {dataset.Version}, {dataset.RowCount} rows, clustered by {string.Join(", ", dataset.ClusteringKey)}");
 
         await using (ObjectDraft draft = dataset.StartObject())
         {
@@ -52,7 +52,7 @@ internal static class Datasets
         ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
         Console.WriteLine($"imported: version {imported}, {dataset.RowCount} rows, {dataset.ObjectCount} objects, lag {dataset.Lag}");
 
-        List<DataObject> objects = await dataset.ObjectsAsync().ToListAsync();
+        List<DataObject> objects = await dataset.ListObjectsAsync().ToListAsync();
         foreach (DataObject entry in objects)
         {
             Console.WriteLine($"  {entry.Key}: level {entry.Level}, rows {entry.FirstRow} to {entry.FirstRow + entry.Rows}, {entry.Bytes} bytes");
@@ -74,12 +74,12 @@ internal static class Datasets
 
         await using (KeyCursor<int> cursor = await dataset.Scan<Reading>().Keys(r => r.Day).OpenAsync())
         {
-            bool found = await cursor.SeekAsync(75, SeekOp.AtOrAfter);
-            Console.WriteLine($"key cursor: seek 75 found {found}, key {cursor.Key} at row {cursor.Row}; {await cursor.KeyCountAsync()} entries");
+            bool found = await cursor.SeekAsync(75, SeekMode.AtOrAfter);
+            Console.WriteLine($"key cursor: seek 75 found {found}, key {cursor.Key} at row {cursor.Row}; {await cursor.CountAtKeyAsync()} entries");
 
             await cursor.SeekLastAsync();
             (int last, long lastRow) = (cursor.Key, cursor.Row);
-            await cursor.PrevKeyAsync();
+            await cursor.PreviousKeyAsync();
             Console.WriteLine($"walking down: last key {last} at row {lastRow}; the key before it {cursor.Key}, its last entry at row {cursor.Row}");
         }
 
@@ -102,15 +102,15 @@ internal static class Datasets
                 .Rows(RowRange.FromLength(first.FirstRow, first.Rows))
                 .Where(r => r.Celsius.IsNotNull)
                 .ToRecordsAsync());
-            ReplaceResult replaced = await dataset.ReplaceAsync([first], [rewritten]);
+            ReplaceResult replaced = await dataset.ReplaceObjectsAsync([first], [rewritten]);
             Console.WriteLine($"replaced {first.Key} by the rows with a temperature: version {replaced.Version}, {replaced.Outcome}, {dataset.RowCount} rows");
         }
 
-        DataObject importedObject = (await dataset.ObjectsAsync().ToListAsync()).Single(o => o.Key.StartsWith("imports/", StringComparison.Ordinal));
-        ReplaceResult removed = await dataset.RemoveAsync([importedObject]);
+        DataObject importedObject = (await dataset.ListObjectsAsync().ToListAsync()).Single(o => o.Key.StartsWith("imports/", StringComparison.Ordinal));
+        ReplaceResult removed = await dataset.RemoveObjectsAsync([importedObject]);
         Console.WriteLine($"removed the import: version {removed.Version}, {removed.Outcome}, {dataset.RowCount} rows, {dataset.ObjectCount} objects");
 
-        ReplaceResult again = await dataset.RemoveAsync([importedObject]);
+        ReplaceResult again = await dataset.RemoveObjectsAsync([importedObject]);
         Console.WriteLine($"removing it again: {again.Outcome}, version {again.Version}");
 
         RowChangeResult deleted = await dataset.DeleteAsync<Reading>(r => r.Day < 10);

@@ -18,7 +18,7 @@ that each one is not deduced differently at each call site.
 | `KeyCursorBuilder<TKey>`, `KeyCursor<TKey>` | not thread-safe, like the scan |
 | `ColumnsBuilder`, `ColumnBuilder<T>` | one thread. The builder a writer hands out belongs to the writer and is reused after every `WriteAsync` |
 | `VortexFileWriter` (an append included), `VortexFileIndexer` | one writer per file. An append is not atomic, and `VortexFileRepair` truncates a torn one |
-| `ScanPlan`, `CountPlan`, `OrderPlan`, `KeyPlan`, `ScanStatistics`, `WriteReport` | immutable records |
+| `ScanPlan`, `CountPlan`, `OrderPlan`, `KeyPlan`, `ScanMetrics`, `WriteReport` | immutable records |
 | decoders and kernels | pure functions over borrowed memory, with no shared mutable state |
 
 ## 2. Parallelism
@@ -127,7 +127,7 @@ bytes: `segments-requested`, `bytes-requested`, `zones-pruned`, `zones-total`, `
 `cursor-seeks`, `cursor-steps`, `count-blocks-proven`, `count-blocks-decoded`, `key-order-windows`
 and `key-order-window-splits`.
 
-The third works per query: a scan's `ExplainAsync` is its plan before it runs, and its `Statistics`
+The third works per query: a scan's `ExplainAsync` is its plan before it runs, and its `Metrics`
 the same quantities measured afterwards ([observability.md](../guide/observability.md)).
 
 ## 6. Licensing and attribution

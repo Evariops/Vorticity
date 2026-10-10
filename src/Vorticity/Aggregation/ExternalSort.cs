@@ -34,7 +34,7 @@ internal readonly record struct SortKey(FieldExpr Field, VortexType Type, bool D
 /// </remarks>
 internal sealed class ExternalSort : IAsyncDisposable
 {
-    private static readonly VortexWriteOptions RunOptions = new VortexWriteOptions { Compression = CompressionProfile.Fastest, Statistics = false };
+    private static readonly VortexWriteOptions RunOptions = new VortexWriteOptions { Compression = CompressionProfile.Fastest, WriteStatistics = false };
 
     private readonly VortexSession _session;
     private readonly VortexSchema _schema;
@@ -562,7 +562,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         internal async ValueTask<bool> NextBatchAsync()
         {
             _batches ??= file.ScanSource
-                .BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanMetrics())
+                .BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanCounters())
                 .GetAsyncEnumerator(cancellationToken);
             while (await _batches.MoveNextAsync().ConfigureAwait(false))
             {

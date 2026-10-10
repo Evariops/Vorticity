@@ -38,21 +38,21 @@ internal sealed class SortedColumnWalker : KeySource
     internal override void Share(Scanning.ScanSegments held, Arrays.RetainedChunks retained) => _source.Share(held, retained);
 
     internal override async ValueTask<bool> SeekAsync(
-        FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+        FilterLiteral key, SeekMode op, CancellationToken cancellationToken)
     {
         long at;
         switch (op)
         {
-            case SeekOp.AtOrAfter:
+            case SeekMode.AtOrAfter:
                 at = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
                 break;
-            case SeekOp.After:
+            case SeekMode.After:
                 at = await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false);
                 break;
-            case SeekOp.AtOrBefore:
+            case SeekMode.AtOrBefore:
                 at = await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false) - 1;
                 break;
-            case SeekOp.Before:
+            case SeekMode.Before:
                 at = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false) - 1;
                 break;
             default:
@@ -87,13 +87,13 @@ internal sealed class SortedColumnWalker : KeySource
     internal override ValueTask<bool> NextAsync(CancellationToken cancellationToken) =>
         PositionAsync(_entry + 1, cancellationToken);
 
-    internal override ValueTask<bool> PrevAsync(CancellationToken cancellationToken) =>
+    internal override ValueTask<bool> PreviousAsync(CancellationToken cancellationToken) =>
         PositionAsync(_entry - 1, cancellationToken);
 
     internal override ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken) =>
         PastKeyAsync(forward: true, cancellationToken);
 
-    internal override ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken) =>
+    internal override ValueTask<bool> PreviousKeyAsync(CancellationToken cancellationToken) =>
         PastKeyAsync(forward: false, cancellationToken);
 
     /// <remarks>
@@ -154,7 +154,7 @@ internal sealed class SortedColumnWalker : KeySource
     internal override ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken) =>
         PositionAsync(rank, cancellationToken);
 
-    internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         FilterLiteral key = Key;
         long low = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);

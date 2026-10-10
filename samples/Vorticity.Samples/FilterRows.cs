@@ -26,7 +26,7 @@ internal static class FilterRows
             earliest = Math.Min(earliest, day[0]);
         }
 
-        ScanStatistics stats = scan.Statistics;
+        ScanMetrics stats = scan.Metrics;
 
         Console.WriteLine($"plan: {plan.LiveBlocks} of {plan.Blocks} blocks, {plan.Segments} segments, {plan.BytesToRead} bytes");
         foreach (PruningStep step in plan.Pruning)
@@ -94,7 +94,7 @@ internal static class FilterRows
     {
         ScanPlan plan = await scan.ExplainAsync();
         long count = await scan.CountAsync();
-        ScanStatistics stats = scan.Statistics;
+        ScanMetrics stats = scan.Metrics;
         string how = plan.Count.Exact ? "exact from the structures" : $"{plan.Count.Pruned} pruned, {plan.Count.Proven} proven, {plan.Count.Decoded} to evaluate";
         Console.WriteLine($"{text,-32} {count,7} rows  {plan.LiveBlocks,3} of {plan.Blocks} blocks live  {stats.Requests,3} requests {stats.BytesRequested,8} bytes  ({how})");
     }

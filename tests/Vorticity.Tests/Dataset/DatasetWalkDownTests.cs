@@ -34,7 +34,7 @@ public sealed class DatasetWalkDownTests
 
         await using DatasetKeyCursor cursor = await built.OpenAsync(distinct: false, ct);
         List<Entry> down = [];
-        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
         {
             down.Add(Entry.Of(cursor));
         }
@@ -42,7 +42,7 @@ public sealed class DatasetWalkDownTests
         down.Reverse();
         Assert.Equal(built.Walked, down);
         Assert.False(cursor.IsValid);
-        Assert.False(await cursor.PrevAsync(ct));
+        Assert.False(await cursor.PreviousAsync(ct));
         Assert.False(await cursor.NextAsync(ct));
     }
 
@@ -69,7 +69,7 @@ public sealed class DatasetWalkDownTests
             {
                 bool up = random.Next(3) == 0 ? random.Next(2) == 0 : (step / 40) % 2 == 0;
                 int expected = up ? at + 1 : at - 1;
-                bool moved = up ? await cursor.NextAsync(ct) : await cursor.PrevAsync(ct);
+                bool moved = up ? await cursor.NextAsync(ct) : await cursor.PreviousAsync(ct);
                 Assert.Equal(expected >= 0 && expected < walked.Count, moved);
                 if (!moved)
                 {
@@ -96,9 +96,9 @@ public sealed class DatasetWalkDownTests
         await using DatasetKeyCursor cursor = await built.OpenAsync(distinct: false, ct);
         foreach (FilterLiteral probe in built.Probes())
         {
-            foreach (SeekOp op in (SeekOp[])[SeekOp.AtOrBefore, SeekOp.Before])
+            foreach (SeekMode op in (SeekMode[])[SeekMode.AtOrBefore, SeekMode.Before])
             {
-                int expected = LastBelow(walked, probe, inclusive: op == SeekOp.AtOrBefore);
+                int expected = LastBelow(walked, probe, inclusive: op == SeekMode.AtOrBefore);
                 bool found = await cursor.SeekAsync(probe, op, ct);
                 Assert.Equal(expected >= 0, found);
                 if (!found)
@@ -113,7 +113,7 @@ public sealed class DatasetWalkDownTests
                 int at = expected;
                 for (int step = 0; step < 3 && at > 0; step++)
                 {
-                    Assert.True(await cursor.PrevAsync(ct));
+                    Assert.True(await cursor.PreviousAsync(ct));
                     Assert.Equal(walked[--at], Entry.Of(cursor));
                 }
 
@@ -141,9 +141,9 @@ public sealed class DatasetWalkDownTests
         while (true)
         {
             // Every entry of the key is counted wherever the walk stands among them.
-            Assert.Equal(CountOf(walked, walked[at].Key), await cursor.KeyCountAsync(ct));
+            Assert.Equal(CountOf(walked, walked[at].Key), await cursor.CountAtKeyAsync(ct));
             int previous = LastBelow(walked, walked[at].Key, inclusive: false);
-            bool moved = await cursor.PrevKeyAsync(ct);
+            bool moved = await cursor.PreviousKeyAsync(ct);
             Assert.Equal(previous >= 0, moved);
             if (!moved)
             {
@@ -160,7 +160,7 @@ public sealed class DatasetWalkDownTests
                 int next = at + 1;
                 Assert.True(await cursor.NextKeyAsync(ct));
                 Assert.Equal(walked[next], Entry.Of(cursor));
-                Assert.True(await cursor.PrevKeyAsync(ct));
+                Assert.True(await cursor.PreviousKeyAsync(ct));
                 Assert.Equal(walked[at], Entry.Of(cursor));
             }
         }
@@ -191,7 +191,7 @@ public sealed class DatasetWalkDownTests
         }
 
         List<Entry> down = [];
-        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
         {
             down.Add(Entry.Of(cursor));
         }
@@ -202,9 +202,9 @@ public sealed class DatasetWalkDownTests
 
         // A distinct seek below a key lands on the first entry of the key it finds.
         Entry middle = firsts[firsts.Count / 2];
-        Assert.True(await cursor.SeekAsync(middle.Key, SeekOp.AtOrBefore, ct));
+        Assert.True(await cursor.SeekAsync(middle.Key, SeekMode.AtOrBefore, ct));
         Assert.Equal(middle, Entry.Of(cursor));
-        Assert.True(await cursor.SeekAsync(middle.Key, SeekOp.Before, ct));
+        Assert.True(await cursor.SeekAsync(middle.Key, SeekMode.Before, ct));
         Assert.Equal(firsts[(firsts.Count / 2) - 1], Entry.Of(cursor));
     }
 
@@ -232,13 +232,13 @@ public sealed class DatasetWalkDownTests
         Assert.True(await cursor.SeekLastAsync(ct));
         Assert.True(cursor.Cursors <= levelZero + above, $"{cursor.Cursors} cursors after the last key");
 
-        Assert.True(await cursor.SeekAsync(built.Walked[0].Key, SeekOp.AtOrBefore, ct));
+        Assert.True(await cursor.SeekAsync(built.Walked[0].Key, SeekMode.AtOrBefore, ct));
         Assert.Equal(built.Walked[0].Key, cursor.Key);
 
         // The whole walk down reads every object, once.
         await using DatasetKeyCursor whole = await DatasetKeyCursor.OpenAsync(dataset, ct);
         long entries = 0;
-        for (bool ok = await whole.SeekLastAsync(ct); ok; ok = await whole.PrevAsync(ct))
+        for (bool ok = await whole.SeekLastAsync(ct); ok; ok = await whole.PreviousAsync(ct))
         {
             entries++;
         }

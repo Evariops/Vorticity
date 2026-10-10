@@ -392,7 +392,7 @@ public sealed class VortexSession : IAsyncDisposable
     /// Abandoned, or disposed without completing, it truncates the file back to what it was.
     /// </returns>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can continue.</exception>
-    public ValueTask<VortexFileWriter> AppendAsync(string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
+    public ValueTask<VortexFileWriter> OpenWriterAsync(string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();

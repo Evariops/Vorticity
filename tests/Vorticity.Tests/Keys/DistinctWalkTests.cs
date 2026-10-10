@@ -72,7 +72,7 @@ public sealed class DistinctWalkTests
             }
 
             Assert.Equal(lengths.Length, key);
-            for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
+            for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PreviousAsync(ct))
             {
                 key--;
                 Assert.Equal(key, cursor.Key.SignedValue);
@@ -123,12 +123,12 @@ public sealed class DistinctWalkTests
             Assert.True(await cursor.SeekLastAsync(ct));
             for (int key = lengths.Length - 2; key >= 0; key--)
             {
-                Assert.True(await cursor.PrevKeyAsync(ct));
+                Assert.True(await cursor.PreviousKeyAsync(ct));
                 Assert.Equal(key, cursor.Key.SignedValue);
                 Assert.Equal(lastRow[key], cursor.Row);
             }
 
-            Assert.False(await cursor.PrevKeyAsync(ct));
+            Assert.False(await cursor.PreviousKeyAsync(ct));
         }
         finally
         {

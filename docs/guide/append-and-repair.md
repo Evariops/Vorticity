@@ -3,7 +3,7 @@
 Add rows to a file you already wrote, give an append up, and recover a file whose tail was torn.
 
 ```csharp
-await using (VortexFileWriter appender = await session.AppendAsync(path))
+await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
 {
     long resumeAt = appender.RowCount;                         // the file's row count, since it ended on a block
     await appender.WriteAsync<Reading>(more.AsSpan(), ct);
@@ -18,7 +18,7 @@ appended 5000 rows to 20000: resumed at 16384, RowCount 25000 after the write, t
 
 ## Where an append resumes
 
-`AppendAsync` opens the file, keeps its chunks, and positions the writer after its rows. New rows
+`OpenWriterAsync` opens the file, keeps its chunks, and positions the writer after its rows. New rows
 always follow the file's last row. What `appender.RowCount` says right after the open is where the
 rewrite starts:
 
@@ -107,7 +107,7 @@ or that opens files it did not write, should set `Refuse`.
 ## Repairing
 
 ```csharp
-long valid = await VortexFileRepair.ValidLengthAsync(path, ct);
+long valid = await VortexFileRepair.GetValidLengthAsync(path, ct);
 VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);   // truncates to the last version that parses
 ```
 
@@ -116,18 +116,18 @@ valid length 29324; repaired: truncated True, 46919 -> 29324
 the repaired file appends again: 24576 rows
 ```
 
-`ValidLengthAsync` finds the longest prefix that opens, without changing the file. `RepairAsync`
+`GetValidLengthAsync` finds the longest prefix that opens, without changing the file. `RepairAsync`
 truncates the file to it, and leaves a valid file alone. After a repair, `TornTail` is null and the
 file accepts appends like any other.
 
 A file with no complete version has nothing to fall back to. A file cut short rather than appended
 to, such as an interrupted download or a full disk, throws `VortexFormatException` on open, and so do
-`ValidLengthAsync` and `RepairAsync`.
+`GetValidLengthAsync` and `RepairAsync`.
 
 ## Watch out
 
 * Nothing else may hold the file. An append opens it exclusively for writing, so a `VortexFile` still
-  open on the same path makes `AppendAsync` throw `IOException`.
+  open on the same path makes `OpenWriterAsync` throw `IOException`.
 * Each append draws a new identity, so every version of the bytes has its own. Pin it with
   `VortexWriteOptions.Identity` for a reproducible write ([writer-options.md](writer-options.md)).
 * An append takes the file's own settings when its options are null: the block size, the index

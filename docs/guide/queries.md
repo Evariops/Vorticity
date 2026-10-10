@@ -132,6 +132,9 @@ explains when each one does.
 | `GroupBy(r => (r.City, r.Day))`, then `g.Key.Item1` | `g.Key.City` |
 | the groups at the end of the pass | as soon as they are final, on a key that streams |
 
+On a whole scan, `AggAsync` became `AggregateAsync`, and
+[the public API design](../design/14-public-api.md#renamed) lists every other renamed member.
+
 ## Watch out
 
 * Without an order, which groups a `Take` keeps is not promised. On several lanes the groups come in

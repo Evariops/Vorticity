@@ -25,7 +25,7 @@ public sealed partial class DatasetReadAheadTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await CreateAsync(store);
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         List<long> keys = await KeysAsync(dataset.ScanBuilder().WithMetrics(metrics), batches: 1);
 
         Assert.Equal(Enumerable.Range(0, ObjectRows).Select(k => (long)k), keys);
@@ -41,7 +41,7 @@ public sealed partial class DatasetReadAheadTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await CreateAsync(store);
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         List<long> keys = await KeysAsync(
             dataset.ScanBuilder().WithOptions(new ScanOptions { Prefetch = prefetch }, keepEncodings: false).WithMetrics(metrics), int.MaxValue);
 
@@ -56,7 +56,7 @@ public sealed partial class DatasetReadAheadTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await CreateAsync(store);
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         long read = 0;
         int after = -1;
         await foreach (RecordBatch batch in dataset.ScanBuilder().WithOptions(new ScanOptions { BatchRows = 100 }, keepEncodings: false).WithMetrics(metrics).ExecuteAsync(Ct))
@@ -94,7 +94,7 @@ public sealed partial class DatasetReadAheadTests
         await using (VortexDataset written = await CreateAsync(store))
         {
             List<DataObject> objects = [];
-            await foreach (DataObject held in written.ObjectsAsync(Ct))
+            await foreach (DataObject held in written.ListObjectsAsync(Ct))
             {
                 objects.Add(held);
             }

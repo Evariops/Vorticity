@@ -55,6 +55,6 @@ internal static class HowItWorks
         }
 
         Console.WriteLine($"plan: {plan.LiveBlocks} of {plan.Blocks} blocks live, {plan.Segments} segments, {plan.BytesToRead} bytes; " +
-            $"ran: {rows} rows, {scan.Statistics.BlocksDecoded} blocks decoded, {scan.Statistics.BlocksPruned} pruned; the lambda ran {calls} time");
+            $"ran: {rows} rows, {scan.Metrics.BlocksDecoded} blocks decoded, {scan.Metrics.BlocksPruned} pruned; the lambda ran {calls} time");
     }
 }

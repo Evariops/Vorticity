@@ -46,7 +46,7 @@ public sealed class DatasetClusteringTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        Assert.Equal(["key"], dataset.ClusteringKeyPaths);
+        Assert.Equal(["key"], dataset.ClusteringKey);
         Assert.NotNull(dataset.Key);
 
         foreach (int residue in (int[])[3, 1, 0, 2])
@@ -87,7 +87,7 @@ public sealed class DatasetClusteringTests
         // The column is not sorted, and yet a key cursor opens and seeks: that is the run.
         Assert.False(IsSorted(file, "key"), "the keys were shuffled; a sorted column would void this test");
         await using KeyCursor cursor = await file.Keys("key").OpenAsync(ct);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(4L * 7), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(4L * 7), SeekMode.Exact, ct));
         Assert.Equal(4L * 7, cursor.Key.SignedValue);
     }
 
@@ -165,7 +165,7 @@ public sealed class DatasetClusteringTests
         }
 
         await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L), SeekOp.Exact, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L), SeekMode.Exact, ct));
 
         List<long> rest = [cursor.Key.SignedValue];
         while (await cursor.NextAsync(ct))
@@ -183,7 +183,7 @@ public sealed class DatasetClusteringTests
         Assert.Equal(expected, rest);
 
         // And a key no object holds is a refusal, not a position on the nearest one.
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekOp.Exact, ct));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekMode.Exact, ct));
         Assert.False(cursor.IsValid);
         Assert.False(await cursor.NextAsync(ct));
     }
@@ -298,7 +298,7 @@ public sealed class DatasetClusteringTests
             await dataset.ScanBuilder().Where(window).MaxAsync("key", ct));
 
         // A value no object holds: `Any` refutes it from the summaries alone.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-5L)));
         Assert.False(await dataset.ScanBuilder().Where(absent).WithMetrics(metrics).AnyAsync(ct));
         Assert.Equal(0, metrics.ObjectsOpened);

@@ -16,14 +16,14 @@ internal static class Limits
         Console.WriteLine($"metadata segments {VortexLimits.MaxMetadataSegments}, key length {VortexLimits.MaxMetadataKeyLength}, " +
             $"compression specs {VortexLimits.MaxCompressionSpecs}, alignment {VortexLimits.MaxAlignment} (exponent {VortexLimits.MaxAlignmentExponent}), " +
             $"postscript {VortexLimits.MaxPostscriptSize}");
-        Console.WriteLine($"decompression ceiling by default: {VortexLimits.DefaultMaxDecompressedSize} bytes per decode");
+        Console.WriteLine($"decompression ceiling by default: {VortexLimits.DefaultMaxDecompressedBytes} bytes per decode");
 
         string path = await Demo.ReadingsAsync();
-        foreach (long ceiling in new long[] { 4_096, 1024 * 1024, VortexLimits.DefaultMaxDecompressedSize })
+        foreach (long ceiling in new long[] { 4_096, 1024 * 1024, VortexLimits.DefaultMaxDecompressedBytes })
         {
             await using VortexFile file = await VortexSession.Default.OpenAsync(path, new VortexOpenOptions
             {
-                MaxDecompressedSize = ceiling,
+                MaxDecompressedBytes = ceiling,
                 VerifyStatistics = true,
             });
 

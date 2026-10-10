@@ -154,7 +154,7 @@ public sealed record VortexWriteOptions
     public VortexEdition TargetEdition { get; init; } = VortexEditions.Default;
 
     /// <summary>Whether the file carries its statistics: per column the null count and the order, and the exact minimum and maximum of a numeric column.</summary>
-    public bool Statistics { get; init; } = true;
+    public bool WriteStatistics { get; init; } = true;
 
     /// <summary>
     /// Whether a file this library opens, created or appended to, is on the device when
@@ -270,11 +270,11 @@ public sealed record VortexWriteOptions
         init => Compression = value ? (Compression == CompressionProfile.None ? CompressionProfile.Auto : Compression) : CompressionProfile.None;
     }
 
-    /// <summary><see cref="Statistics"/>, as the engine names it.</summary>
+    /// <summary><see cref="WriteStatistics"/>, as the engine names it.</summary>
     internal bool FileStatistics
     {
-        get => Statistics;
-        init => Statistics = value;
+        get => WriteStatistics;
+        init => WriteStatistics = value;
     }
 
     /// <summary>Rows per chunk, as a multiple; null writes one chunk per call, which only the engine's own tests ask for.</summary>

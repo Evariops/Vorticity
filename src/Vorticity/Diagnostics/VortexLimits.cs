@@ -44,7 +44,7 @@ public static class VortexLimits
     /// Default ceiling on the decompressed size of a single segment or buffer: a 1 KiB Zstd frame
     /// can claim to expand to 100 GiB. Configurable per open; this is the default.
     /// </summary>
-    public const long DefaultMaxDecompressedSize = 256L * 1024 * 1024;
+    public const long DefaultMaxDecompressedBytes = 256L * 1024 * 1024;
 
     /// <summary>
     /// Maximum depth of a FlatBuffers table traversal, independent of the semantic tree depths

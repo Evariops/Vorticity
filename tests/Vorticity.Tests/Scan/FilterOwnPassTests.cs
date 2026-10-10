@@ -112,7 +112,7 @@ public sealed class FilterOwnPassTests
         string path = Write();
         try
         {
-            ScanMetrics metrics = new ScanMetrics();
+            ScanCounters metrics = new ScanCounters();
             long rows = 0;
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
@@ -171,7 +171,7 @@ public sealed class FilterOwnPassTests
             // The first 2 000 rows of every zone: too few of a split to read the projection whole,
             // but every row of what they span, in a chunk of twelve batches that no window smaller
             // than the chunk cuts.
-            ScanMetrics metrics = new ScanMetrics();
+            ScanCounters metrics = new ScanCounters();
             List<long> got = [];
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
@@ -297,7 +297,7 @@ public sealed class FilterOwnPassTests
     /// <summary>Every column of every row the filter keeps, at a degree, and the values the scan decoded.</summary>
     private static async Task<(List<long> Values, long Decoded)> ReadAsync(string path, string filter, int degree)
     {
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         List<long> values = [];
         await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
         {

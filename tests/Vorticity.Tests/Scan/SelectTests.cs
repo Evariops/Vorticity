@@ -106,8 +106,8 @@ public sealed partial class SelectTests
             Assert.Equal(10, (await ten.ToListAsync(Ct)).Count);
             Projection<long> all = file.Scan<Trip>().Select(r => r.Id);
             Assert.Equal(Rows, (await all.ToListAsync(Ct)).Count);
-            Assert.Equal(1, ten.Statistics.Batches);
-            Assert.True(ten.Statistics.Requests < all.Statistics.Requests, $"{ten.Statistics.Requests} requests against {all.Statistics.Requests}");
+            Assert.Equal(1, ten.Metrics.Batches);
+            Assert.True(ten.Metrics.Requests < all.Metrics.Requests, $"{ten.Metrics.Requests} requests against {all.Metrics.Requests}");
         }
         finally
         {
@@ -133,7 +133,7 @@ public sealed partial class SelectTests
             // The first three cities met, without reading past the rows that hold them.
             Aggregation<string> three = file.Scan<Trip>().Select(r => r.City).Distinct().Take(3);
             Assert.Equal(rows.Select(r => r.City).Distinct().Take(3), await three.ToListAsync(Ct));
-            Assert.Equal(1, three.Statistics.Batches);
+            Assert.Equal(1, three.Metrics.Batches);
         }
         finally
         {

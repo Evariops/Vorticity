@@ -321,7 +321,7 @@ public sealed class MappedFileCacheTests
             await writer.CompleteAsync(ct);
         }
 
-        Assert.True(new FileInfo(path).Length > VortexOpenOptions.DefaultInitialReadSize);
+        Assert.True(new FileInfo(path).Length > VortexOpenOptions.DefaultInitialReadBytes);
         return sum;
     }
 

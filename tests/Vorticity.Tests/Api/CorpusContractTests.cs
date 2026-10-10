@@ -81,7 +81,7 @@ public sealed class CorpusContractTests
             GC.KeepAlive(batch.RowCount);
         }
 
-        ScanStatistics statistics = scan.Statistics;
+        ScanMetrics statistics = scan.Metrics;
         if (plan.Segments != statistics.Requests || plan.BytesToRead != statistics.BytesRequested || plan.LiveBlocks != statistics.BlocksDecoded)
         {
             failures.Add(string.Create(

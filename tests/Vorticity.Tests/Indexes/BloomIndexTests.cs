@@ -440,8 +440,8 @@ public sealed class BloomIndexTests
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
 
-        ScanMetrics on = new ScanMetrics();
-        ScanMetrics off = new ScanMetrics();
+        ScanCounters on = new ScanCounters();
+        ScanCounters off = new ScanCounters();
         Assert.Equal(
             await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(ct),
             await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync(ct));

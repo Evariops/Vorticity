@@ -57,7 +57,7 @@ public sealed class DurableWriteTests
             }
 
             List<long> flushes;
-            await using (VortexFileWriter append = await VortexSession.Default.AppendAsync(path, new VortexWriteOptions { Durable = true }, TestContext.Current.CancellationToken))
+            await using (VortexFileWriter append = await VortexSession.Default.OpenWriterAsync(path, new VortexWriteOptions { Durable = true }, TestContext.Current.CancellationToken))
             {
                 flushes = FilePipeWriter.WatchDiskFlushes(append.FilePipe!);
                 await WriteRowsAsync(append, Rows);

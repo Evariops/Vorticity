@@ -333,7 +333,7 @@ internal sealed class BloomPruner
         VortexFile file, int origin, SegmentRequestSet requests, CancellationToken cancellationToken)
     {
         ISegmentReader reader = file.IndexSourceOf(origin);
-        Segments += Scanning.ScanMetrics.Unread(requests, reader, out long bytes);
+        Segments += Scanning.ScanCounters.Unread(requests, reader, out long bytes);
         Bytes += bytes;
         await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
     }

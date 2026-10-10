@@ -102,11 +102,11 @@ internal static class CancelWork
 
         await using (KeyCursor<int> cursor = await file.Scan<Reading>().Keys(r => r.Day).OpenAsync())
         {
-            await cursor.SeekAsync(500, SeekOp.Exact);
-            await ProbeAsync("KeyCursor.SeekAsync", async () => await cursor.SeekAsync(900, SeekOp.Exact, ct));
+            await cursor.SeekAsync(500, SeekMode.Exact);
+            await ProbeAsync("KeyCursor.SeekAsync", async () => await cursor.SeekAsync(900, SeekMode.Exact, ct));
             Console.WriteLine($"  the cursor after it: valid {cursor.IsValid}");
             await ProbeAsync("  its Key", () => Task.FromResult(cursor.Key));
-            Console.WriteLine($"  a new seek with no token: {await cursor.SeekAsync(900, SeekOp.Exact)}, key {cursor.Key}");
+            Console.WriteLine($"  a new seek with no token: {await cursor.SeekAsync(900, SeekMode.Exact)}, key {cursor.Key}");
         }
 
         await WritesAsync(ct);
@@ -141,7 +141,7 @@ internal static class CancelWork
         }
 
         long length = new FileInfo(appended).Length;
-        await using (VortexFileWriter appender = await VortexSession.Default.AppendAsync(appended))
+        await using (VortexFileWriter appender = await VortexSession.Default.OpenWriterAsync(appended))
         {
             await appender.WriteAsync<Reading>(rows);
             await appender.FlushAsync();

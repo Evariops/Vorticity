@@ -20,13 +20,13 @@ internal static class ReadRowsByIndex
             }
         }
 
-        ScanStatistics took = take.Statistics;
+        ScanMetrics took = take.Metrics;
         Scan<Reading> all = file.Scan<Reading>();
         await foreach (Columns<Reading> _ in all)
         {
         }
 
-        ScanStatistics read = all.Statistics;
+        ScanMetrics read = all.Metrics;
         Console.WriteLine($"Rows(4, 900_000): {took.Requests} requests, {took.BytesRequested} bytes, {took.BlocksDecoded} blocks decoded");
         Console.WriteLine($"the whole file:   {read.Requests} requests, {read.BytesRequested} bytes, {read.BlocksDecoded} blocks decoded");
 

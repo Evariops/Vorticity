@@ -78,7 +78,7 @@ public static class VortexFileRepair
     /// <param name="cancellationToken">Cancels the scan.</param>
     /// <returns>The prefix's length: the file's own when it is valid.</returns>
     /// <exception cref="VortexFormatException">No prefix of the file is a valid Vortex file.</exception>
-    public static async ValueTask<long> ValidLengthAsync(string path, CancellationToken cancellationToken = default)
+    public static async ValueTask<long> GetValidLengthAsync(string path, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         return await ValidEndAsync(path, new FileInfo(path).Length, cancellationToken).ConfigureAwait(false);

@@ -1037,7 +1037,7 @@ internal static class CompressedValues
     {
         ArgumentNullException.ThrowIfNull(ctx);
 
-        long ceiling = ctx.Options.MaxDecompressedSize;
+        long ceiling = ctx.Options.MaxDecompressedBytes;
         if (byteLength > ceiling)
         {
             destination = default;
@@ -1051,7 +1051,7 @@ internal static class CompressedValues
     }
     /// <summary>
     /// Materializes a decoded buffer, refusing one larger than
-    /// <see cref="VortexReadOptions.MaxDecompressedSize"/>.
+    /// <see cref="VortexReadOptions.MaxDecompressedBytes"/>.
     /// </summary>
     /// <param name="ctx">The decode context.</param>
     /// <param name="byteLength">Bytes to allocate; already checked for 32-bit overflow.</param>
@@ -1071,7 +1071,7 @@ internal static class CompressedValues
     /// and here bounds the product.
     /// </para>
     /// <para>
-    /// The ceiling is <see cref="VortexReadOptions.MaxDecompressedSize"/>, applied per decoded
+    /// The ceiling is <see cref="VortexReadOptions.MaxDecompressedBytes"/>, applied per decoded
     /// node's output buffer, never a constant invented at the call site. A caller with a genuinely
     /// larger column raises that option.
     /// </para>
@@ -1083,7 +1083,7 @@ internal static class CompressedValues
     {
         ArgumentNullException.ThrowIfNull(ctx);
 
-        long ceiling = ctx.Options.MaxDecompressedSize;
+        long ceiling = ctx.Options.MaxDecompressedBytes;
         if (byteLength > ceiling)
         {
             destination = default;

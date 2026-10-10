@@ -351,10 +351,11 @@ every row of the result belongs in C# code after the query.
 A record does not match the values of a selection. This is an error.
 
 A selection of several values is read through a record: `As<TRecord>()` after a `Select`, and
-`AggAsync<TResult>` for the answers of a whole scan. The record's members, in declaration order, take
-the elements in order, one each, and each member has its element's type or its nullable form. `As` and
-`AggAsync` check this when they are built and throw `VortexSchemaException`, and the analyzer reads
-the types of the tuple's elements in the lambda to flag the problem at compile time.
+`AggregateAsync<TResult>` for the answers of a whole scan. The record's members, in declaration
+order, take the elements in order, one each, and each member has its element's type or its nullable
+form. `As` and `AggregateAsync` check this when they are built and throw `VortexSchemaException`,
+and the analyzer reads the types of the tuple's elements in the lambda to flag the problem at
+compile time.
 
 ```csharp
 [VortexRecord]
@@ -381,10 +382,11 @@ Declare one member per element, in the order of the tuple.
 Several values are read without a record. This is an error, reported beside the compiler's own.
 
 Several values have no .NET type until a record gives them one. So a `Select` of several values
-returns an `Aggregation`, which is not enumerable, and `AggAsync` of several answers needs the record
-they go into. The compiler refuses both cases, with CS8411 for an `await foreach`, and CS0411 for an
-`AggAsync` whose type it cannot infer or for `System.Linq` operators applied to an `Aggregation`, but
-its message does not say what to do. The analyzer reports this diagnostic beside it.
+returns an `Aggregation`, which is not enumerable, and `AggregateAsync` of several answers needs the
+record they go into. The compiler refuses both cases, with CS8411 for an `await foreach`, and CS0411
+for an `AggregateAsync` whose type it cannot infer or for `System.Linq` operators applied to an
+`Aggregation`, but its message does not say what to do. The analyzer reports this diagnostic beside
+it.
 
 ```csharp
 await foreach (var (city, count) in file.Scan<Reading>()
@@ -392,10 +394,10 @@ await foreach (var (city, count) in file.Scan<Reading>()
     .Select(g => (g.Key, g.Count())))            // CS8411 and VX1011
 
 var (min, max) = await file.Scan<Reading>()
-    .AggAsync(a => (a.Min(r => r.Day), a.Max(r => r.Day)));   // CS0411 and VX1011
+    .AggregateAsync(a => (a.Min(r => r.Day), a.Max(r => r.Day)));   // CS0411 and VX1011
 ```
 
 To fix it, declare a `[VortexRecord]` whose members take the values in order, and read the selection
 through it: `.As<CityCount>()`, enumerated as batches or with `ToRecordsAsync()`, or
-`AggAsync<MinMax>(a => (…))`. A selection of one value, such as `Select(g => g.Count())`, comes back as
-itself.
+`AggregateAsync<MinMax>(a => (…))`. A selection of one value, such as `Select(g => g.Count())`,
+comes back as itself.

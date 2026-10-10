@@ -12,7 +12,7 @@ await foreach (Columns<Reading> _ in scan)
 {
 }
 
-Print("Day >= 900", scan.Statistics);
+Print("Day >= 900", scan.Metrics);
 ```
 
 ```
@@ -49,10 +49,10 @@ by them, or left to decode.
 
 ## The numbers, after
 
-`scan.Statistics` is valid once a sink has run. It is a `ScanStatistics`: the `Rows` and `Batches`
+`scan.Metrics` is valid once a sink has run. It is a `ScanMetrics`: the `Rows` and `Batches`
 delivered, the `Requests` and `BytesRequested` made to the source, `BlocksDecoded`, `BlocksPruned`,
 and the `CacheHits` from the session's segment cache ([threads.md](threads.md)). For a group by,
-`Grouping` adds a `GroupStatistics`: the groups found and the most held at once, the peak memory, the
+`Grouping` adds a `GroupMetrics`: the groups found and the most held at once, the peak memory, the
 lanes, what was spilled, and the time to the first batch ([queries.md](queries.md)).
 
 The plan's bytes and the run's differ by the zone maps. The plan counts each segment once, 13 of them
@@ -147,8 +147,8 @@ own, with what they cost to consult.
   the file.
 * `Blocks` and `LiveBlocks` follow `Rows(...)`: a range of ten rows plans 1 block of 1, and a take of
   two rows 2 of 2, with `Rows` equal to 2 ([read-rows-by-index.md](read-rows-by-index.md)).
-* `Statistics` read before the sink has run are zeros, and a scan runs only one sink.
-* `ScanOptions.Pruning = false` and `UseIndexes = false` turn the structures off, to check them, never
+* `Metrics` read before the sink has run are zeros, and a scan runs only one sink.
+* `ScanOptions.UseStatistics = false` and `UseIndexes = false` turn the structures off, to check them, never
   to change a result.
 
 What each statistic allows is defined in
