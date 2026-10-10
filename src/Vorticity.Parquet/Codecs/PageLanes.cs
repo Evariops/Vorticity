@@ -94,6 +94,9 @@ internal sealed class PageLanes
     /// <summary>Gives a lane back.</summary>
     internal void Give() => Interlocked.Increment(ref _free);
 
+    /// <summary>Whether a work queued waits for a lane, or a column or another lane claimed it since.</summary>
+    internal bool Waiting => !_waiting.IsEmpty;
+
     /// <summary>
     /// Runs the oldest work waiting for a lane on the calling thread, passing over those a column or
     /// another thread has claimed: false when none waits.

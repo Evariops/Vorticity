@@ -18,9 +18,11 @@ namespace Vorticity.Parquet.Reading;
 /// <para>
 /// A field decodes batch <c>j</c> into slot <c>j % Slots</c> once the read has released batch
 /// <c>j - Slots</c>, the slot's last: the slot's context reset, and the pages its reader held for the
-/// batches released given back. A lane takes the field of the earliest batch that may run. The read
-/// waits for every field of the batch it asks for, rethrows the first error one met, and releases
-/// each batch as it asks for the next.
+/// batches released given back. A lane takes a field it decoded last, of the earliest batch it has
+/// one of, before another's: the field's dictionary and the blocks its contexts keep from batch to
+/// batch lie in that thread's cache. Else it takes the field of the earliest batch that may run. The
+/// read waits for every field of the batch it asks for, rethrows the first error one met, and
+/// releases each batch as it asks for the next.
 /// </para>
 /// <para>
 /// A batch's nodes reference their pages where they lie, so a reader holds the pages a batch retires
@@ -41,6 +43,9 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     private readonly int[] _nodes;
     private readonly int[] _next;
     private readonly bool[] _idle;
+
+    /// <summary>Per field, the managed thread that decoded it last, which takes it again first.</summary>
+    private readonly int[] _thread;
     private readonly int[] _pending = new int[Slots];
     private readonly ExceptionDispatchInfo?[] _errors = new ExceptionDispatchInfo?[Slots];
 
@@ -77,6 +82,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         _nodes = new int[readers.Length * Slots];
         _next = new int[readers.Length];
         _idle = new bool[readers.Length];
+        _thread = new int[readers.Length];
     }
 
     /// <summary>
@@ -85,6 +91,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     /// </summary>
     internal void Start(ReadOnlySpan<(int Skip, int Rows)> steps)
     {
+        int wake;
         lock (_gate)
         {
             if (_steps.Length < steps.Length)
@@ -114,8 +121,10 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
                 }
             }
 
-            Wake();
+            wake = Wake();
         }
+
+        Queue(wake);
     }
 
     /// <summary>Waits for every field of batch <paramref name="batch"/>; the slot its nodes lie in.</summary>
@@ -149,6 +158,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     /// <summary>Releases batch <paramref name="batch"/>, dead: its slot is free for the batch <see cref="Slots"/> on.</summary>
     internal void Release(int batch)
     {
+        int wake;
         lock (_gate)
         {
             int slot = batch % Slots;
@@ -168,8 +178,10 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
                 }
             }
 
-            Wake();
+            wake = Wake();
         }
+
+        Queue(wake);
     }
 
     /// <summary>
@@ -196,40 +208,45 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     }
 
     /// <summary>
-    /// A lane: the fields of the earliest batches decoded, a batch at a time, while one may run, and
-    /// before each the pages decompressing ahead that wait for a lane. The lanes would otherwise hold
-    /// the pool's threads while those pages queue behind them, and a field of large pages, which
-    /// takes longest, would decompress each one itself.
+    /// A lane: the fields of the earliest batches decoded, a batch at a time, while one may run, the
+    /// next taken in the same turn of the gate as the last one ends, and before each the pages
+    /// decompressing ahead that wait for a lane. The lanes would otherwise hold the pool's threads
+    /// while those pages queue behind them, and a field of large pages, which takes longest, would
+    /// decompress each one itself.
     /// </summary>
     public void Execute()
     {
+        int thread = Environment.CurrentManagedThreadId;
         bool fresh = true;
+        int field = -1;
         while (true)
         {
-            if (_pages is { } pages && pages.Help())
+            if (field < 0)
             {
-                continue;
-            }
-
-            int field;
-            lock (_gate)
-            {
-                if (fresh)
+                if (_pages is { } pages && pages.Help())
                 {
-                    _starting--;
-                    fresh = false;
+                    continue;
                 }
 
-                field = _stopping ? -1 : TakeEarliest();
-                if (field < 0)
+                lock (_gate)
                 {
-                    _runners--;
-                    Monitor.PulseAll(_gate);
-                    return;
+                    if (fresh)
+                    {
+                        _starting--;
+                        fresh = false;
+                    }
+
+                    field = _stopping ? -1 : Take(thread);
+                    if (field < 0)
+                    {
+                        _runners--;
+                        Monitor.PulseAll(_gate);
+                        return;
+                    }
                 }
             }
 
-            Decode(field);
+            field = Decode(field, thread);
         }
     }
 
@@ -241,8 +258,12 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         }
     }
 
-    /// <summary>Decodes field <paramref name="field"/>'s next batch into its slot, then makes it runnable again, or idle until a release.</summary>
-    private void Decode(int field)
+    /// <summary>
+    /// Decodes field <paramref name="field"/>'s next batch into its slot, then makes it runnable again,
+    /// or idle until a release; the field the lane takes next in the same turn of the gate, or -1 when
+    /// none may run or pages wait for a lane, which go first.
+    /// </summary>
+    private int Decode(int field, int thread)
     {
         int batch = _next[field];
         int slot = batch % Slots;
@@ -269,6 +290,8 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             error = ExceptionDispatchInfo.Capture(exception);
         }
 
+        int wake;
+        int next = -1;
         lock (_gate)
         {
             _next[field] = batch + 1;
@@ -283,7 +306,6 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
                 if (batch + 1 <= _released + Slots)
                 {
                     _runnable.Add(field);
-                    Wake();
                 }
                 else
                 {
@@ -295,19 +317,43 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             {
                 Monitor.PulseAll(_gate);
             }
+
+            if (!_stopping && _pages?.Waiting != true)
+            {
+                next = Take(thread);
+            }
+
+            wake = Wake();
         }
+
+        Queue(wake);
+        return next;
     }
 
-    /// <summary>The runnable field of the earliest batch, out of the runnable ones, or -1; under the gate.</summary>
-    private int TakeEarliest()
+    /// <summary>
+    /// The runnable field the lane on <paramref name="thread"/> decodes next, or -1; under the gate: one
+    /// it decoded last, of the earliest batch it has one of, else the field of the earliest batch.
+    /// </summary>
+    private int Take(int thread)
     {
         int at = -1;
+        int mine = -1;
         for (int i = 0; i < _runnable.Count; i++)
         {
             if (at < 0 || _next[_runnable[i]] < _next[_runnable[at]])
             {
                 at = i;
             }
+
+            if (_thread[_runnable[i]] == thread && (mine < 0 || _next[_runnable[i]] < _next[_runnable[mine]]))
+            {
+                mine = i;
+            }
+        }
+
+        if (mine >= 0)
+        {
+            at = mine;
         }
 
         if (at < 0)
@@ -316,18 +362,31 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         }
 
         int field = _runnable[at];
+        _thread[field] = thread;
         _runnable[at] = _runnable[^1];
         _runnable.RemoveAt(_runnable.Count - 1);
         return field;
     }
 
-    /// <summary>Queues lanes for the runnable fields, as many as the lanes allow; under the gate.</summary>
-    private void Wake()
+    /// <summary>The lanes to queue for the runnable fields, as many as the lanes allow, counted as running; under the gate.</summary>
+    private int Wake()
     {
+        int wake = 0;
         while (_runners < _lanes && _starting < _runnable.Count)
         {
             _runners++;
             _starting++;
+            wake++;
+        }
+
+        return wake;
+    }
+
+    /// <summary>Queues <paramref name="lanes"/> lanes on the pool, past the gate: a queue may wake a thread, microseconds the gate would be held for.</summary>
+    private void Queue(int lanes)
+    {
+        for (int i = 0; i < lanes; i++)
+        {
             ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
         }
     }
