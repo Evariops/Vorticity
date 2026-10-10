@@ -930,17 +930,17 @@ comes down. Speed is measured against baselines this repository owns:
   repository's writers, read through the same `Scan` in one process, each action warmed past the
   JIT's recompiling it, which two calls are not (`--format-cost`, `--columns` for each column
   alone, `--file` for a file of another writer against its rewrite as Vortex); the ratio informs
-  and gates nothing. On the report's million rows Parquet scans in 2.8 ms on one core against
-  Vortex's 3.4, whose medians move by a third from one table to the next, and in 1.36 on 32
-  against 1.51, projects its delta-encoded monotone column in 0.34 against 0.32, and writes back in
-  16.4 ms against 26.6 on one core and in 7.1 against 11.3 on 32. The January 2023 taxi trips,
-  GZIP's, scan in 180 ms on one core against their Vortex rewrite's 24, the inflate most of it,
-  and in 23 against 38 on 32, and are written back in 656 against 249 and in 154 against 214;
-  a projection of one of their columns, which no lane shares, reads in 2.8 ms on 32 as on one,
-  against 1.4. ClickBench's first file of hits, Snappy's, scans in 161 against 67 and 38.5 against
-  33.3, its codec and four columns of long strings, kept as plain byte arrays once their
-  dictionaries filled, holding most of the difference, and is written back in 1 236 against 1 382
-  and 367 against 1 269. Every file is mapped again at each open, as a cold read is: ClickBench's
+  and gates nothing. On the report's million rows Parquet scans in 2.9 ms on one core against
+  Vortex's 3.4 to 4.8, whose medians move that much from one table to the next, and in 1.43 on 32
+  against 1.51 to 1.68, projects its delta-encoded monotone column in 0.35 against 0.31, and writes
+  back in 17.7 ms against 25.5 on one core and in 7.2 against 10.7 on 32. The January 2023 taxi
+  trips, GZIP's, scan in 161 ms on one core against their Vortex rewrite's 23, the inflate most of
+  it, and in 22 against 35 on 32, and are written back in 609 against 232 and in 142 against 207; a
+  projection of one of their columns, which no lane shares, reads in 2.5 ms on 32 as on one,
+  against 1.8 to 2.0. ClickBench's first file of hits, Snappy's, scans in 162 against 68 and 39.5
+  against 34.6, its codec and four columns of long strings, kept as plain byte arrays once their
+  dictionaries filled, holding most of the difference, and is written back in 1 248 against 1 365
+  and 265 against 1 258. Every file is mapped again at each open, as a cold read is: ClickBench's
   scan on 32 lanes takes 27.6 ms when its mapping is kept;
 - **regressions**, as the ratio of two kept runners across commits (`bench/runners.sh`);
 - **real files**, read from the data disk under §9's metadata oracle: throughput, allocations, and the
