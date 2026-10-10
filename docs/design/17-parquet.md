@@ -729,7 +729,10 @@ through `System.IO.Compression`, whose GZIP stream allocates per page; a GZIP pa
 package's own decoder (§7).
 
 At a degree above one, the columns of a block stage their rows side by side on the writer's
-threads, each closing its own page; rows too few to pay for the threads stage on the writing one.
+threads, eight at most, each closing its own page; rows too few to pay for the threads stage on the
+writing one. Past eight threads, a block's wake-ups and its wait for its last column cost more than
+the staging they share: ClickBench's first file wrote back in 381 ms on 32 lanes against 292 on
+eight.
 A page then compresses on a lane of the writer's while its column encodes the next, its levels and
 values copied out of the column's buffers into a block of its own, and goes into its chunk in page
 order. A row group closes on its bytes as they are once stored, which are waited for only when the
