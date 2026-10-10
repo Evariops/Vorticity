@@ -118,6 +118,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             _columns[i] = new ColumnChunkWriter(map.Columns[i], _codec, level, _zstd, options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
             {
                 WriteChecksums = options.WriteChecksums,
+                PageBytes = options.PageBytes,
             };
         }
 

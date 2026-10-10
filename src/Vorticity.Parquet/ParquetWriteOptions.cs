@@ -48,6 +48,14 @@ public sealed record ParquetWriteOptions
     public long RowGroupBytes { get; init; } = 256L << 20;
 
     /// <summary>
+    /// The bytes a block's values may reach in one page: a block past them is written as pages of
+    /// power-of-two fractions of its rows, halved while they pass, down to 1 024 rows, and pages of
+    /// those that still pass are cut by bytes. 1 MiB by default. A page the dictionary codes is written
+    /// whole, its codes far smaller than its values.
+    /// </summary>
+    public int PageBytes { get; init; } = 1 << 20;
+
+    /// <summary>
     /// What the writer optimises for. <see cref="CompressionProfile.Auto"/>, the default, and
     /// <see cref="CompressionProfile.Smallest"/> write a dictionary where it pays, and otherwise the
     /// encoding of each page that saves the most: DELTA_BINARY_PACKED, the byte array deltas,
@@ -127,6 +135,7 @@ public sealed record ParquetWriteOptions
         }
 
         ArgumentOutOfRangeException.ThrowIfLessThan(RowGroupBytes, 1, nameof(RowGroupBytes));
+        ArgumentOutOfRangeException.ThrowIfLessThan(PageBytes, 1, nameof(PageBytes));
         if (!Enum.IsDefined(Profile))
         {
             throw new ArgumentOutOfRangeException(nameof(Profile), Profile, "Not a profile.");

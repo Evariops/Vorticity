@@ -146,8 +146,14 @@ internal sealed class ColumnChunkWriter : IDisposable
     private int _pageNestedRows;
     private int _pageEntries;
 
+    /// <summary>The fewest rows a page of a block cut into fractions holds: below them, a page is cut by bytes.</summary>
+    internal const int MinimumPageRows = 1_024;
+
     /// <summary>Whether each page gets a <c>crc</c>: the CRC-32 of its bytes as stored past its header.</summary>
     internal bool WriteChecksums { get; init; }
+
+    /// <summary>The bytes a block's staged values may reach in one page before the block is cut into fractions of itself.</summary>
+    internal int PageBytes { get; init; } = 1 << 20;
 
     internal ColumnChunkWriter(WriteColumn column, CompressionCodec codec, int level, ZstdCompressor? zstd, int blockRows, CompressionProfile profile, AlignedBufferPool pool, double bloomRate = 0, int rowGroupRows = 0)
     {
@@ -240,7 +246,16 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
     }
 
-    /// <summary>Closes the page being staged, if it holds a row: at the end of a row group.</summary>
+    /// <summary>
+    /// Closes the page being staged, if it holds a row: at the end of its block, or of a row group.
+    /// </summary>
+    /// <remarks>
+    /// A block whose staged values pass <see cref="PageBytes"/> is written as pages of power-of-two
+    /// fractions of it, each range halved while it passes, down to <see cref="MinimumPageRows"/>
+    /// rows, so that every page still starts on the grid; a range of those that still passes is cut
+    /// by bytes, which leaves the grid for this column alone. A page the dictionary codes is written
+    /// whole, its codes far smaller than its values, and so is a page of booleans, a bit a row.
+    /// </remarks>
     internal void ClosePage()
     {
         bool nested = _shredder is not null;
@@ -250,56 +265,158 @@ internal sealed class ColumnChunkWriter : IDisposable
             return;
         }
 
+        Fit(_pageRows);
+        if (!nested && _column.Nullable)
+        {
+            // Every row's level, of which each page encodes its own.
+            BitPacking.Unpack8(_validity, 1, _levelBytes.AsSpan(0, rows));
+        }
+
+        // The dictionary weighs the whole page first: a page it codes is never cut.
+        Coding coding = Coding.Plain;
+        if (_dictionary && _pageFirstCode >= 0)
+        {
+            coding = EncodeCodes(_pageRows, _values.Length);
+            if (coding == Coding.Fallback)
+            {
+                _dictionary = false;
+            }
+        }
+
         int entries = nested ? _pageEntries : rows;
-        int nulls = entries - _pageValues;
+        if (coding == Coding.Codes || _values.Length <= PageBytes || _column.Conversion == ValueConversion.Bool)
+        {
+            WritePage(new PageRange(0, rows, 0, entries, 0, _pageValues, 0, _values.Length), coding);
+        }
+        else
+        {
+            using PageCuts cuts = new(this, rows, entries);
+            Split(cuts, 0, _blockRows, rows);
+        }
+
+        _pageRows = 0;
+        _pageValues = 0;
+        _boolBits = 0;
+        _pageFirstCode = -1;
+        _values.Clear();
+        if (nested)
+        {
+            _pageNestedRows = 0;
+            _pageEntries = 0;
+            _repetitionLevels!.Clear();
+            _definitionLevels!.Clear();
+        }
+        else
+        {
+            Array.Clear(_validity);
+        }
+    }
+
+    /// <summary>
+    /// Writes the staged rows from <paramref name="from"/> of a range of the block of
+    /// <paramref name="size"/> rows, short of <paramref name="rows"/>: as one page when its values stay
+    /// within <see cref="PageBytes"/>, as its two halves while they hold <see cref="MinimumPageRows"/>,
+    /// and otherwise as pages of as many rows as stay within it, one at least.
+    /// </summary>
+    private void Split(PageCuts cuts, int from, int size, int rows)
+    {
+        int to = Math.Min(from + size, rows);
+        if (from >= to)
+        {
+            return;
+        }
+
+        if (cuts.Bytes(from, to) <= PageBytes)
+        {
+            WritePage(cuts.Range(from, to), Coding.Plain);
+            return;
+        }
+
+        int half = size / 2;
+        if (half >= MinimumPageRows)
+        {
+            Split(cuts, from, half, rows);
+            Split(cuts, from + half, size - half, rows);
+            return;
+        }
+
+        while (from < to)
+        {
+            int low = from + 1;
+            int high = to;
+            while (low < high)
+            {
+                int middle = low + ((high - low + 1) / 2);
+                if (cuts.Bytes(from, middle) <= PageBytes)
+                {
+                    low = middle;
+                }
+                else
+                {
+                    high = middle - 1;
+                }
+            }
+
+            WritePage(cuts.Range(from, low), Coding.Plain);
+            from = low;
+        }
+    }
+
+    /// <summary>
+    /// Encodes, compresses and appends the page of the staged rows <paramref name="range"/> covers:
+    /// as the dictionary's codes when <paramref name="coding"/> says the whole page took them.
+    /// </summary>
+    private void WritePage(in PageRange range, Coding coding)
+    {
+        bool nested = _shredder is not null;
+        int rows = range.To - range.From;
+        int entries = range.EndEntry - range.FirstEntry;
+        int values = range.EndValue - range.FirstValue;
+        int nulls = entries - values;
         _levels.Clear();
         int repetitionLength = 0;
         if (nested)
         {
             // The repetition levels, then the definition levels, each at the width of its maximum.
-            repetitionLength = Levels(_repetitionLevels!.WrittenSpan, _column.MaxRepetitionLevel);
-            Levels(_definitionLevels!.WrittenSpan, _column.MaxDefinitionLevel);
+            // A level of maximum 0 is neither staged nor written.
+            if (_column.MaxRepetitionLevel > 0)
+            {
+                repetitionLength = Levels(_repetitionLevels!.WrittenSpan[range.FirstEntry..range.EndEntry], _column.MaxRepetitionLevel);
+            }
+
+            if (_column.MaxDefinitionLevel > 0)
+            {
+                Levels(_definitionLevels!.WrittenSpan[range.FirstEntry..range.EndEntry], _column.MaxDefinitionLevel);
+            }
         }
         else if (_column.Nullable)
         {
-            Span<byte> levels = _levelBytes.AsSpan(0, rows);
-            BitPacking.Unpack8(_validity, 1, levels);
-            _levels.Truncate(RleHybridEncoder.Encode(levels, 1, _levels.Reserve(RleHybridEncoder.MaxSize(rows, 1))));
+            _levels.Truncate(RleHybridEncoder.Encode(_levelBytes.AsSpan(range.From, rows), 1, _levels.Reserve(RleHybridEncoder.MaxSize(rows, 1))));
         }
-
-        Fit(_pageRows);
 
         ReadOnlySpan<byte> body = _column.Conversion == ValueConversion.Bool
             ? _values.WrittenSpan[..((_boolBits + 7) / 8)]
-            : _values.WrittenSpan;
-        _statistics.AddPage(body, _pageValues, nulls);
+            : _values.WrittenSpan[range.FirstByte..range.EndByte];
+        _statistics.AddPage(body, values, nulls);
 
         ParquetEncoding encoding = ParquetEncoding.Plain;
-        if (_dictionary && _pageFirstCode >= 0)
+        if (coding == Coding.Codes)
         {
-            switch (EncodeCodes(_pageRows, body.Length))
-            {
-                case Coding.Codes:
-                    body = _codes.WrittenSpan;
-                    encoding = ParquetEncoding.RleDictionary;
-                    _frozenEntries = _entryCount;
-                    _frozenBytes = _entries.Length;
-                    break;
-                case Coding.Fallback:
-                    _dictionary = false;
-                    break;
-            }
+            body = _codes.WrittenSpan;
+            encoding = ParquetEncoding.RleDictionary;
+            _frozenEntries = _entryCount;
+            _frozenBytes = _entries.Length;
         }
 
         // A page of codes holds the dictionary's entries, which the filter takes as the chunk closes.
         if (encoding != ParquetEncoding.RleDictionary)
         {
-            _bloom?.AddPage(body, _pageValues);
+            _bloom?.AddPage(body, values);
         }
 
-        if (encoding == ParquetEncoding.Plain && _encodings && _pageValues > 0)
+        if (encoding == ParquetEncoding.Plain && _encodings && values > 0)
         {
-            encoding = Choose(ref body);
+            encoding = Choose(ref body, values);
         }
 
         _pagesBy[(int)encoding]++;
@@ -350,23 +467,127 @@ internal sealed class ColumnChunkWriter : IDisposable
         _chunkRows += rows;
         _chunkEntries += entries;
         _chunkNulls += nulls;
+    }
 
-        _pageRows = 0;
-        _pageValues = 0;
-        _boolBits = 0;
-        _pageFirstCode = -1;
-        _values.Clear();
-        if (nested)
+    /// <summary>A page's share of the staged rows: its rows, its entries, its values and their bytes.</summary>
+    private readonly record struct PageRange(int From, int To, int FirstEntry, int EndEntry, int FirstValue, int EndValue, int FirstByte, int EndByte);
+
+    /// <summary>
+    /// Where each staged row's entries, values and bytes begin, which a block cut into pages is cut
+    /// by: rows to entries by the repetition levels, entries to values by the definition levels or the
+    /// validity, values to bytes by their width or their lengths. Made only for a block that is cut,
+    /// over arrays of the shared pool.
+    /// </summary>
+    private sealed class PageCuts : IDisposable
+    {
+        /// <summary>Per row, and one past the last, its first entry.</summary>
+        private readonly int[] _entries;
+
+        /// <summary>Per entry, and one past the last, the values before it.</summary>
+        private readonly int[] _values;
+
+        /// <summary>Per value of a byte array, and one past the last, its first byte; null for a fixed width.</summary>
+        private readonly int[]? _bytes;
+
+        private readonly int _width;
+
+        internal PageCuts(ColumnChunkWriter writer, int rows, int entries)
         {
-            _pageNestedRows = 0;
-            _pageEntries = 0;
-            _repetitionLevels!.Clear();
-            _definitionLevels!.Clear();
+            WriteColumn column = writer._column;
+            bool nested = writer._shredder is not null;
+            _entries = ArrayPool<int>.Shared.Rent(rows + 1);
+            _values = ArrayPool<int>.Shared.Rent(entries + 1);
+            if (nested && column.MaxRepetitionLevel > 0)
+            {
+                // A row begins at each entry of repetition level 0.
+                ReadOnlySpan<byte> repetition = writer._repetitionLevels!.WrittenSpan;
+                int row = 0;
+                for (int entry = 0; entry < entries; entry++)
+                {
+                    if (repetition[entry] == 0)
+                    {
+                        _entries[row++] = entry;
+                    }
+                }
+            }
+            else
+            {
+                for (int row = 0; row < rows; row++)
+                {
+                    _entries[row] = row;
+                }
+            }
+
+            _entries[rows] = entries;
+            _values[0] = 0;
+            if (nested && column.MaxDefinitionLevel > 0)
+            {
+                ReadOnlySpan<byte> definition = writer._definitionLevels!.WrittenSpan;
+                int defined = column.MaxDefinitionLevel;
+                for (int entry = 0; entry < entries; entry++)
+                {
+                    _values[entry + 1] = _values[entry] + (definition[entry] == defined ? 1 : 0);
+                }
+            }
+            else if (!nested && column.Nullable)
+            {
+                for (int row = 0; row < rows; row++)
+                {
+                    _values[row + 1] = _values[row] + (CanonicalSupport.BitAt(writer._validity, row) ? 1 : 0);
+                }
+            }
+            else
+            {
+                for (int entry = 1; entry <= entries; entry++)
+                {
+                    _values[entry] = entry;
+                }
+            }
+
+            if (column.Conversion == ValueConversion.ByteArray)
+            {
+                int values = writer._pageValues;
+                _bytes = ArrayPool<int>.Shared.Rent(values + 1);
+                ReadOnlySpan<byte> plain = writer._values.WrittenSpan;
+                int at = 0;
+                for (int value = 0; value < values; value++)
+                {
+                    _bytes[value] = at;
+                    at += sizeof(int) + BinaryPrimitives.ReadInt32LittleEndian(plain[at..]);
+                }
+
+                _bytes[values] = at;
+            }
+            else
+            {
+                _width = column.ValueWidth;
+            }
         }
-        else
+
+        /// <summary>The staged bytes of the values of rows <paramref name="from"/> to <paramref name="to"/>.</summary>
+        internal long Bytes(int from, int to) => (long)ByteOf(_values[_entries[to]]) - ByteOf(_values[_entries[from]]);
+
+        /// <summary>The page of rows <paramref name="from"/> to <paramref name="to"/>.</summary>
+        internal PageRange Range(int from, int to)
         {
-            Array.Clear(_validity);
+            int firstEntry = _entries[from];
+            int endEntry = _entries[to];
+            int firstValue = _values[firstEntry];
+            int endValue = _values[endEntry];
+            return new PageRange(from, to, firstEntry, endEntry, firstValue, endValue, ByteOf(firstValue), ByteOf(endValue));
         }
+
+        public void Dispose()
+        {
+            ArrayPool<int>.Shared.Return(_entries);
+            ArrayPool<int>.Shared.Return(_values);
+            if (_bytes is not null)
+            {
+                ArrayPool<int>.Shared.Return(_bytes);
+            }
+        }
+
+        private int ByteOf(int value) => _bytes is null ? value * _width : _bytes[value];
     }
 
     /// <summary>A nested page's levels of one kind, RLE at the width of their maximum, after those already in the page's; their bytes.</summary>
@@ -729,7 +950,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// for booleans. An encoding is taken when it saves an eighth of the bytes, which pays for its
     /// slower decode, but for a byte array's lengths, which always do.
     /// </summary>
-    private ParquetEncoding Choose(ref ReadOnlySpan<byte> body)
+    private ParquetEncoding Choose(ref ReadOnlySpan<byte> body, int count)
     {
         switch (_column.Physical)
         {
@@ -791,11 +1012,11 @@ internal sealed class ColumnChunkWriter : IDisposable
             }
 
             case PhysicalType.ByteArray when _column.Conversion == ValueConversion.ByteArray:
-                return ChooseBytes(ref body);
+                return ChooseBytes(ref body, count);
 
             case PhysicalType.Boolean:
             {
-                Span<byte> values = _levelBytes.AsSpan(0, _pageValues);
+                Span<byte> values = _levelBytes.AsSpan(0, count);
                 BitPacking.Unpack8(body, 1, values);
                 int size = sizeof(int) + RleHybridEncoder.Size(values, 1);
                 if (size >= body.Length)
@@ -821,9 +1042,8 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// bytes, which the standard prefers to PLAIN, or DELTA_BYTE_ARRAY when the prefixes values share
     /// save an eighth more, its rebuild costing a copy per value on read.
     /// </summary>
-    private ParquetEncoding ChooseBytes(ref ReadOnlySpan<byte> body)
+    private ParquetEncoding ChooseBytes(ref ReadOnlySpan<byte> body, int count)
     {
-        int count = _pageValues;
         Span<int> lengths = _lengths.AsSpan(0, count);
         _data.Clear();
         int at = 0;
@@ -859,7 +1079,6 @@ internal sealed class ColumnChunkWriter : IDisposable
         return ParquetEncoding.DeltaLengthByteArray;
     }
 
-    /// <summary>The dictionary page, when a data page used the dictionary: the values coded until the last such page.</summary>
     /// <summary>The checksum of a page whose bytes past its header are <paramref name="levels"/> then <paramref name="stored"/>.</summary>
     private int Checksum(ReadOnlySpan<byte> levels, ReadOnlySpan<byte> stored)
     {
@@ -871,6 +1090,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         return unchecked((int)hash);
     }
 
+    /// <summary>The dictionary page, when a data page used the dictionary: the values coded until the last such page.</summary>
     private void WriteDictionaryPage()
     {
         _dictionaryPage.Clear();
