@@ -804,8 +804,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
             validityBuffer = CanonicalSupport.Allocate(decode, CanonicalSupport.BitmapByteCount(rows), 64, out bits);
         }
 
+        // Every slot is written by the pages it is copied from; a bitmap's bits past the rows are
+        // left zero.
         int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(rows) : checked(rows * _slot);
-        VortexBuffer values = CanonicalSupport.Allocate(decode, bytes, 64, out Span<byte> into);
+        Span<byte> into;
+        VortexBuffer values = _slot == 0
+            ? CanonicalSupport.Allocate(decode, bytes, 64, out into)
+            : CanonicalSupport.AllocateUninitialized(decode, bytes, 64, out into);
         int buffers = 0;
         int done = 0;
         int nulls = 0;
