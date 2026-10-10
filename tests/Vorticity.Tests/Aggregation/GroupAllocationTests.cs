@@ -57,9 +57,8 @@ public sealed partial class GroupAllocationTests
     /// process's shelf holds moves it by a hundred bytes or so; at four, the lanes' schedule moves
     /// the core's splits and batches by a few hundred kilobytes from one run to the next, and the
     /// process's shelf holds what the suite's other tests left, so a ceiling of the core is the highest
-    /// floor seen and 256 KiB, rounded up to 64 KiB (1 % for the one-lane axes whose floor moves too);
-    /// four lanes without the core move by a few kilobytes: the highest floor seen and 16 KiB, rounded
-    /// up to 4 KiB.
+    /// floor seen and 256 KiB, rounded up to 64 KiB; four lanes without the core move by a few
+    /// kilobytes: the highest floor seen and 16 KiB, rounded up to 4 KiB.
     /// </para>
     /// <para>
     /// Measured without the shuffle of every result's order the tests make: 3 to 4 MB less on the
@@ -82,30 +81,35 @@ public sealed partial class GroupAllocationTests
     /// their first use or on the stack: a lane alone's small axes three to five times lower, the core's
     /// axes a sixth to a third.
     /// </para>
+    /// <para>
+    /// The table a lane alone holds as the result, or the largest a merge in series kept, goes back to
+    /// the process's shelf once delivered, and its order is lent by it: a lane alone no longer grows a
+    /// table of its own at every query, its axes 2 to 1 000 times lower (six keys 105 MB to 108 KB).
+    /// </para>
     /// </remarks>
     private static readonly (string Axis, int Lanes, GroupCoreReason Path, long Ceiling, Func<VortexFile, int, Task<(long Rows, GroupCoreReason Path)>> Query)[] Axes =
     [
         // A thousand integers numbered by their value, a table a lane.
-        ("small integers", 1, GroupCoreReason.None, 76_800, SmallAsync),
-        ("small integers", 4, GroupCoreReason.None, 163_840, SmallAsync),
+        ("small integers", 1, GroupCoreReason.None, 35_840, SmallAsync),
+        ("small integers", 4, GroupCoreReason.None, 126_976, SmallAsync),
 
         // A thousand short texts, hashed as their words.
-        ("short texts", 1, GroupCoreReason.None, 155_136, NamesAsync),
-        ("short texts", 4, GroupCoreReason.None, 237_568, NamesAsync),
+        ("short texts", 1, GroupCoreReason.None, 37_376, NamesAsync),
+        ("short texts", 4, GroupCoreReason.None, 143_360, NamesAsync),
 
         // A long integer a row, hashed: at four lanes, a lane's first rows are all new groups.
-        ("hashed integers", 1, GroupCoreReason.None, 58_327_040, WideAsync),
+        ("hashed integers", 1, GroupCoreReason.None, 100_352, WideAsync),
         //
         // On this axis and the core's two others, each part is built in an order its shelf lends: 3 to
         // 4 MB less, four bytes a group.
         ("hashed integers", 4, GroupCoreReason.FirstRows, 1_245_184, WideAsync),
 
         // Integers in no order over a span of 2·10⁶, the one the statistics bound them to: the core by pages.
-        ("spread integers", 1, GroupCoreReason.None, 33_488_896, DenseAsync),
+        ("spread integers", 1, GroupCoreReason.None, 106_496, DenseAsync),
         ("spread integers", 4, GroupCoreReason.Spread, 1_245_184, DenseAsync),
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
-        ("six keys", 1, GroupCoreReason.None, 106_561_536, SixAsync),
+        ("six keys", 1, GroupCoreReason.None, 109_056, SixAsync),
         ("six keys", 4, GroupCoreReason.FirstRows, 1_638_400, SixAsync),
     ];
 

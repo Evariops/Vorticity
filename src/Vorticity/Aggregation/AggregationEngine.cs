@@ -655,7 +655,21 @@ internal sealed class AggregationOutcome
     /// <summary>What the result holds of its query's memory budget, until it is delivered; null for a result nobody counts.</summary>
     internal QueryMemory? Memory { get; set; }
 
-    /// <summary>Gives back what the result held of its query's budget: delivered, it is the caller's.</summary>
+    /// <summary>
+    /// The partition whose tables are the result, a lane's alone or the largest a merge in series kept
+    /// as it: its arrays go back to the process's shelf once the result is delivered, for the next query.
+    /// </summary>
+    internal AggregationPartition? Kept { get; init; }
+
+    /// <summary>Whether <see cref="Order"/> is lent by the process's shelf, which takes it back once the result is delivered.</summary>
+    internal bool OrderLent { get; init; }
+
+    private int _givenBack;
+
+    /// <summary>
+    /// Gives back what the result held of its query's budget: delivered, it is the caller's; and, once,
+    /// the tables and the order the shelves lent it, its batches dead with the reads that took them.
+    /// </summary>
     internal void Delivered()
     {
         Parts?.Close();
@@ -663,6 +677,15 @@ internal sealed class AggregationOutcome
         {
             _plan.LastPeakBytes = Math.Max(_plan.LastPeakBytes, memory.Peak);
             memory.Dispose();
+        }
+
+        if (Interlocked.Exchange(ref _givenBack, 1) == 0)
+        {
+            Kept?.Delivered();
+            if (OrderLent)
+            {
+                ArrayShelf.Retained.Give(Order);
+            }
         }
     }
 
@@ -1716,6 +1739,17 @@ internal sealed class AggregationPartition
         _componentRows = [];
         _followMap = [];
         _followComponents = [];
+    }
+
+    /// <summary>
+    /// The partition's tables, a result, delivered: their arrays back to the process's shelf for the
+    /// next query, which grew its own again while a collection took these; its query gave its memory
+    /// back whole, so its shelf counts them nowhere.
+    /// </summary>
+    internal void Delivered()
+    {
+        _arrays?.Forget();
+        Release();
     }
 
     /// <summary>
@@ -3455,7 +3489,8 @@ internal static class AggregationEngine
 
                 (GroupKeys held, AggregateSlot[] heldSlots, long heldBytes, CorePart[] spilled) = await engaged.FinishAsync(joined, lanes, cancellationToken).ConfigureAwait(false);
                 plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, 0, heldBytes) with { Core = engaged.Run() };
-                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, Shuffled(held.Order(sorted: false)));
+                (int[] heldOrder, bool heldLent) = LentWholeOrder(held.Count);
+                AggregationOutcome outcome = new AggregationOutcome(plan, heldSlots, held, heldOrder, held.Count) { OrderLent = heldLent };
                 if (spilled.Length == 0)
                 {
                     foreach (AggregationPartition partition in partitions)
@@ -3495,13 +3530,16 @@ internal static class AggregationEngine
             plan.LastRun = (Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts, mergedBytes) with { MergeEntries = entries }).Spilled(spill);
             spill?.Dispose();
 
-            // The lanes' tables die with the merge, but the one a merge in series kept as the result.
+            // The lanes' tables die with the merge, but the one a merge in series kept as the result,
+            // which goes back to the process's shelf once delivered.
             long result = mergedBytes;
+            AggregationPartition? whole = null;
             foreach (AggregationPartition partition in tables)
             {
                 if (ReferenceEquals(partition.Slots, slots))
                 {
                     result = partition.Footprint;
+                    whole = partition;
                 }
                 else
                 {
@@ -3510,8 +3548,14 @@ internal static class AggregationEngine
             }
 
             // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
-            int[] order = keys is null ? [0] : Shuffled(keys.Order(sorted: false));
-            return Counted(new AggregationOutcome(plan, slots, keys, order), memory, result);
+            // Lent by the process's shelf, and given back with the result.
+            if (keys is null)
+            {
+                return Counted(new AggregationOutcome(plan, slots, keys, [0]) { Kept = whole }, memory, result);
+            }
+
+            (int[] order, bool lent) = LentWholeOrder(keys.Count);
+            return Counted(new AggregationOutcome(plan, slots, keys, order, keys.Count) { Kept = whole, OrderLent = lent }, memory, result);
         }
         catch
         {
@@ -3626,6 +3670,24 @@ internal static class AggregationEngine
         int[] shuffled = order.AsSpan(0, count).ToArray();
         new Random(unchecked((int)(MergeHash.Seed ^ (ulong)count))).Shuffle(shuffled);
         return shuffled;
+    }
+
+    /// <summary>
+    /// The order of a whole result, the groups 0 to <paramref name="count"/> less one, lent by the
+    /// process's shelf a power of two long: the identity a result's keys made new at every query. Under
+    /// the tests' shuffle, the shuffled copy is the result's, and the lent one goes back at once.
+    /// </summary>
+    internal static (int[] Order, bool Lent) LentWholeOrder(int count)
+    {
+        int[] order = LentOrder(ArrayShelf.Retained, count);
+        int[] shuffled = Shuffled(order, count);
+        if (!ReferenceEquals(shuffled, order))
+        {
+            ArrayShelf.Retained.Give(order);
+            return (shuffled, false);
+        }
+
+        return (order, order.Length > 0);
     }
 
     /// <summary>

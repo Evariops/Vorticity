@@ -67,6 +67,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private readonly QueryMemory? _memory;
     private long _out;
     private long _credit;
+    private bool _forgotten;
 
     /// <summary>A query's shelf, which takes from the process's when it holds nothing of a length, and hands it what it holds at the end.</summary>
     internal ArrayShelf()
@@ -308,7 +309,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         if (Lane)
         {
-            if ((long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
+            if (!_forgotten && (long)array.Length * Unsafe.SizeOf<T>() is long bytes and >= LeastCounted)
             {
                 Unreserve(_memory!, bytes);
             }
@@ -432,6 +433,17 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             _out = 0;
             _credit = 0;
         }
+    }
+
+    /// <summary>
+    /// A lane's shelf whose tables are a result delivered, its query's memory given back whole: what
+    /// they give back goes to the process's shelf, counted nowhere.
+    /// </summary>
+    internal void Forget()
+    {
+        _out = 0;
+        _credit = 0;
+        _forgotten = true;
     }
 
     /// <summary>The bytes of an array a lane's shelf hands out, reserved from what it holds ahead, or else <see cref="Ahead"/> more.</summary>
