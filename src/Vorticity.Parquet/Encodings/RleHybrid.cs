@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Serialization;
 
@@ -78,7 +79,13 @@ internal struct RleHybridDecoder
         }
     }
 
-    /// <summary>Decodes <c>destination.Length</c> values of at most 8 bits, a byte each: levels.</summary>
+    /// <summary>Decodes <c>destination.Length</c> values of at most 8 bits, a byte each: levels, and a small dictionary's codes.</summary>
+    /// <remarks>
+    /// Runs of a few values each, as a column of few values that change often has, cost their
+    /// header and their dispatch more than their values: a repeated run is laid out a word at a
+    /// time, its last word ending at the run's end, and a bit-packed run's whole groups are laid out
+    /// here, a word of eight values each by one bit deposit, while each group's word lies in the data.
+    /// </remarks>
     internal void Read(ReadOnlySpan<byte> data, Span<byte> destination)
     {
         if (_bitWidth > 8)
@@ -86,26 +93,78 @@ internal struct RleHybridDecoder
             ParquetThrow.Format($"Levels of {_bitWidth} bits do not fit a byte.");
         }
 
+        int count = destination.Length;
+        ref byte output = ref MemoryMarshal.GetReference(destination);
+        ref byte input = ref MemoryMarshal.GetReference(data);
+        bool deposits = Bmi2.X64.IsSupported && BitConverter.IsLittleEndian && _bitWidth is > 0 and < 8;
+        ulong lanes = 0x0101010101010101UL * ((1UL << _bitWidth) - 1);
         int done = 0;
-        while (done < destination.Length)
+        while (done < count)
         {
             if (_remaining == 0)
             {
                 NextRun(data);
             }
 
-            int take = Math.Min(_remaining, destination.Length - done);
-            if (_packed)
+            int take = Math.Min(_remaining, count - done);
+            if (!_packed)
             {
-                UnpackBytes(data, destination.Slice(done, take));
+                Repeat(ref Unsafe.Add(ref output, done), take, (byte)_value);
+            }
+            else if (deposits && (_packedIndex & 7) == 0)
+            {
+                // The run's groups from its next, while the word of each lies in the data.
+                int at = _packedStart + ((_packedIndex >> 3) * _bitWidth);
+                int room = data.Length - 8 - at;
+                int groups = Math.Min(take >> 3, room < 0 ? 0 : (room / _bitWidth) + 1);
+                for (int group = 0; group < groups; group++)
+                {
+                    ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref input, at + (group * _bitWidth)));
+                    Unsafe.WriteUnaligned(ref Unsafe.Add(ref output, done + (group * 8)), Bmi2.X64.ParallelBitDeposit(word, lanes));
+                }
+
+                int laid = groups * 8;
+                _packedIndex += laid;
+                if (laid < take)
+                {
+                    UnpackBytes(data, destination.Slice(done + laid, take - laid));
+                }
             }
             else
             {
-                destination.Slice(done, take).Fill((byte)_value);
+                UnpackBytes(data, destination.Slice(done, take));
             }
 
             _remaining -= take;
             done += take;
+        }
+    }
+
+    /// <summary>Lays <paramref name="count"/> bytes of <paramref name="value"/> from <paramref name="into"/>, a word at a time.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Repeat(ref byte into, int count, byte value)
+    {
+        if (count < 8)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Unsafe.Add(ref into, i) = value;
+            }
+
+            return;
+        }
+
+        ulong word = 0x0101010101010101UL * value;
+        int at = 0;
+        for (; at <= count - 8; at += 8)
+        {
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref into, at), word);
+        }
+
+        // The last word ends at the run's end, over bytes already laid.
+        if (at < count)
+        {
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref into, count - 8), word);
         }
     }
 

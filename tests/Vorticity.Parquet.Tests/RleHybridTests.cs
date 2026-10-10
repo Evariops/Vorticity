@@ -152,6 +152,42 @@ public sealed class RleHybridTests
     }
 
     [Fact]
+    public void ByteDecodingResumesAcrossBatchesOfAnySize()
+    {
+        // Batches that end inside a group of eight, so that the next starts in it, and runs whose
+        // last words lie at the data's very end, which the words of eight values read past.
+        Random random = new(10);
+        for (int width = 0; width <= 8; width++)
+        {
+            uint[] wide = Runs(random, 10_000, width);
+            byte[] values = Array.ConvertAll(wide, v => (byte)v);
+            byte[] data = new byte[RleHybridEncoder.Size(values, width)];
+            RleHybridEncoder.Encode(values, width, data);
+
+            RleHybridDecoder decoder = new(width);
+            byte[] read = new byte[values.Length];
+            int done = 0;
+            while (done < values.Length)
+            {
+                int take = Math.Min(random.Next(1, 700), values.Length - done);
+                if (random.Next(5) == 0)
+                {
+                    decoder.Skip(data, take);
+                    Array.Copy(values, done, read, done, take);
+                }
+                else
+                {
+                    decoder.Read(data, read.AsSpan(done, take));
+                }
+
+                done += take;
+            }
+
+            Assert.Equal(values, read);
+        }
+    }
+
+    [Fact]
     public void WidthOneReadsStraightIntoABitmapAtAnyOffset()
     {
         Random random = new(1);
