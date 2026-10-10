@@ -26,6 +26,7 @@ build on those two.
 | [15-compaction.md](15-compaction.md) | compaction inline, on demand or in the background, planned from the top of the tree, and on a store that cannot delete |
 | [16-queries.md](16-queries.md) | projections, group by and aggregates in the shape of LINQ, run as a flow of batches: the first answer as soon as it is final, memory only for what is open, sums identical whatever the split, results that are scans themselves |
 | [17-parquet.md](17-parquet.md) | `Vorticity.Parquet`: where it sits on the core, reading and writing without copying, the kernels, what it decides where the Parquet standard is silent, and the gates that hold it |
+| [18-encryption.md](18-encryption.md) | a design to build: AES-256-GCM over everything the library stores, files, datasets and scratch, with the platform's cipher, transparent to the API and costing no request to the store |
 | [90-registry.md](90-registry.md) | every encoding, layout and dtype: its edition, whether it is read and written, how a take is served |
 | [99-sources.md](99-sources.md) | the primary sources, and how to verify them again |
 
