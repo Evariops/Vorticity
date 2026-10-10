@@ -608,6 +608,8 @@ internal static class Program
                                      --loop <format> <action> [secs]
                                                        one action in a bare loop, for a trace
                                      --degree N        the loop's lanes, default 1
+                                     --warm-maps       keep a file's mapping from one open to
+                                                       the next, its pages faulted in once
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
           --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,

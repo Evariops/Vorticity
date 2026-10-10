@@ -46,8 +46,10 @@ internal static class FormatCost
         Directory.CreateDirectory(directory);
         try
         {
-            // The report's session: no mapping kept past a close, so every open maps its file anew.
-            await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
+            // The report's session: no mapping kept past a close, so every open maps its file anew,
+            // its pages faulted in again; --warm-maps keeps them, as a process that reads a file again does.
+            bool warmMaps = Array.IndexOf(args, "--warm-maps") >= 0;
+            await using VortexSession session = warmMaps ? VortexSession.Create(_ => { }) : VortexSession.Create(options => options.MappedFileCacheCount = 0);
             // The report's table, written as Vortex then rewritten as Parquet; or, with --file, a
             // Parquet file of another writer as it is, rewritten as Vortex by ours.
             int fileAt = Array.IndexOf(args, "--file");
