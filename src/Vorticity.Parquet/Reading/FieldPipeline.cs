@@ -4,6 +4,7 @@ using System.Runtime.ExceptionServices;
 using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.File;
+using Vorticity.Parquet.Codecs;
 
 namespace Vorticity.Parquet.Reading;
 
@@ -34,6 +35,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     internal const int Slots = 2;
 
     private readonly ColumnChunkReader[] _readers;
+    private readonly PageLanes? _pages;
     private readonly int _lanes;
     private readonly ScanContext[] _contexts;
     private readonly int[] _nodes;
@@ -57,10 +59,14 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     private int _released;
     private bool _stopping;
 
-    /// <summary>A pipeline of <paramref name="readers"/>, a field each, on <paramref name="lanes"/> lanes at most.</summary>
-    internal FieldPipeline(ColumnChunkReader[] readers, VortexReadOptions options, int lanes)
+    /// <summary>
+    /// A pipeline of <paramref name="readers"/>, a field each, on <paramref name="lanes"/> lanes at most,
+    /// which run the pages <paramref name="pages"/> queues ahead before each field.
+    /// </summary>
+    internal FieldPipeline(ColumnChunkReader[] readers, VortexReadOptions options, int lanes, PageLanes? pages)
     {
         _readers = readers;
+        _pages = pages;
         _lanes = lanes;
         _contexts = new ScanContext[readers.Length * Slots];
         for (int i = 0; i < _contexts.Length; i++)
@@ -189,12 +195,22 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         }
     }
 
-    /// <summary>A lane: the fields of the earliest batches decoded, a batch at a time, while one may run.</summary>
+    /// <summary>
+    /// A lane: the fields of the earliest batches decoded, a batch at a time, while one may run, and
+    /// before each the pages decompressing ahead that wait for a lane. The lanes would otherwise hold
+    /// the pool's threads while those pages queue behind them, and a field of large pages, which
+    /// takes longest, would decompress each one itself.
+    /// </summary>
     public void Execute()
     {
         bool fresh = true;
         while (true)
         {
+            if (_pages is { } pages && pages.Help())
+            {
+                continue;
+            }
+
             int field;
             lock (_gate)
             {

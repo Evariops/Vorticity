@@ -77,6 +77,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The scan's degree, the threads a batch's fields decode on, the reading one included.</summary>
     private readonly int _degree;
+
+    /// <summary>The lanes the columns decompress their next pages on, shared by every column of the scan; none on one lane.</summary>
+    private readonly PageLanes? _lanes;
     private WorkFan? _fan;
     private FieldDecoding? _decoding;
 
@@ -216,6 +219,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // read: as many at once as its degree, shared by the columns.
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : file.Session.Options.MaxDegreeOfParallelism;
         PageLanes? lanes = degree > 1 ? new PageLanes(degree) : null;
+        _lanes = lanes;
         _degree = degree;
         _mayDecodeAcross = degree > 1 && fields.Length > 1;
         foreach (ColumnChunkReader reader in _readers)
@@ -504,7 +508,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 readers[i] = _readers[_flat[i]];
             }
 
-            _pipeline = new FieldPipeline(readers, _context.Options, _degree);
+            _pipeline = new FieldPipeline(readers, _context.Options, _degree, _lanes);
         }
 
         _pipeline.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_steps));

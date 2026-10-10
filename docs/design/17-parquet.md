@@ -535,14 +535,16 @@ releases each batch as it asks for the next, which frees its slot for the batch 
 holds the pages a batch retires until the read releases it, and a row group ends with every batch
 released. A row group read in windows (§5.3), a take's among them, decodes a batch at a time.
 
-A flat column's page of
+A lane of the pipeline runs, before each field, the pages that wait for a lane: they queue to the
+lanes' own queue as well as the pool's, and the pipeline's lanes would otherwise hold the pool's
+threads while the pages its longest fields wait for queue behind them. A flat column's page of
 PLAIN byte arrays is cut into views by the lane that decompresses it, while its bytes lie in that
 lane's cache: cut on another core, each length of the cut's chain waits for its line, and
 ClickBench's `Title`, a third of its file's bytes, cut its views in 17 ms of each scan on 32 lanes
 against 0.5. The read takes the lane's views where they are its page's values whole, and cuts the
 values again where they are not, which says what is wrong with them. The January 2023 yellow taxi
 trips, every page GZIP's, scan in 24 to 25 ms on 32 lanes and 174 on one; ClickBench's first file,
-105 columns under SNAPPY, in 34 on 32 lanes and 35 to 37 on 8, against 38 to 39 and 41 with its
+105 columns under SNAPPY, in 33 to 34 on 32 lanes and 35 on 8, against 38 to 39 and 41 with its
 views cut where they are read, and 125 on one, 65 of which inflate its pages.
 
 The answers are the same bits at every degree.

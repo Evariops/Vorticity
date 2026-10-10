@@ -1992,11 +1992,7 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         public void Dispose()
         {
-            if (!Claim())
-            {
-                Join();
-            }
-
+            Withdraw();
             _source.Dispose();
             _target.Dispose();
         }

@@ -1511,11 +1511,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>Drops a page decompressed ahead that no read takes: its lane is waited for, if it began, and its block given back.</summary>
     private static void Drop(AheadPage page)
     {
-        if (!page.Claim())
-        {
-            page.Join();
-        }
-
+        page.Withdraw();
         page.Block.Dispose();
         page.Views?.Dispose();
     }

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 using Vorticity.Parquet.Metadata;
@@ -10,6 +11,12 @@ namespace Vorticity.Parquet.Codecs;
 /// at once as its degree, shared by every column, so that a wide file's columns and a narrow one's
 /// next pages alike keep them busy.
 /// </summary>
+/// <remarks>
+/// A work queued waits in a queue of the lanes' own as well as the pool's: the pool's threads run the
+/// oldest work waiting as they come to it, and so does any thread that helps (<see cref="Help"/>),
+/// such as the scan's own lanes between two of their fields, which would otherwise hold every thread
+/// of the pool while the pages they wait for queue behind them.
+/// </remarks>
 internal sealed class PageLanes
 {
     /// <summary>The most data pages a column reader keeps decompressed or decompressing ahead of the one it reads.</summary>
@@ -22,6 +29,7 @@ internal sealed class PageLanes
     internal const int Bytes = 8 << 20;
 
     private readonly long _budget;
+    private readonly ConcurrentQueue<LaneWork> _waiting = new();
     private int _free;
     private long _ahead;
 
@@ -85,6 +93,34 @@ internal sealed class PageLanes
 
     /// <summary>Gives a lane back.</summary>
     internal void Give() => Interlocked.Increment(ref _free);
+
+    /// <summary>
+    /// Runs the oldest work waiting for a lane on the calling thread, passing over those a column or
+    /// another thread has claimed: false when none waits.
+    /// </summary>
+    internal bool Help()
+    {
+        while (_waiting.TryDequeue(out LaneWork? work))
+        {
+            if (work.TryRun())
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Queues <paramref name="work"/> for the pool and for the threads that help: each work queued
+    /// adds a run of the pool's, which takes one work waiting at least, so that the queue holds no
+    /// more than the pool's runs to come.
+    /// </summary>
+    internal void Post(LaneWork work)
+    {
+        _waiting.Enqueue(work);
+        ThreadPool.UnsafeQueueUserWorkItem(work, preferLocal: false);
+    }
 }
 
 /// <summary>
@@ -92,11 +128,12 @@ internal sealed class PageLanes
 /// itself when it comes to the page before the pool has run the lane: whichever claims the work runs
 /// it, and the column waits for a lane that did.
 /// </summary>
-/// <param name="lanes">The lanes, one of which the column took for the work, given back when the pool runs it.</param>
+/// <param name="lanes">The lanes, one of which the column took for the work it queues, given back by whichever claims it.</param>
 internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
 {
     private readonly object _gate = new();
     private int _claimed;
+    private bool _queued;
     private bool _done;
 
     /// <summary>What the work threw, which the column rethrows where it takes the page.</summary>
@@ -105,31 +142,33 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
     /// <summary>Whether the work is done: run, by a lane or by the column.</summary>
     internal bool Done => Volatile.Read(ref _done);
 
-    /// <summary>Queues the work for the pool to run on the lane taken for it.</summary>
-    internal void Queue() => ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: false);
-
-    /// <summary>Claims the work; false when a lane or the column has already.</summary>
-    internal bool Claim() => Interlocked.Exchange(ref _claimed, 1) == 0;
-
-    /// <summary>The lane's work: the codec, unless the column claimed it first; the lane given back either way.</summary>
-    public void Execute()
+    /// <summary>Queues the work on the lane taken for it, for the pool or a thread that helps to run.</summary>
+    internal void Queue()
     {
-        try
+        _queued = true;
+        lanes.Post(this);
+    }
+
+    /// <summary>A run of the pool's: the oldest work waiting for a lane, this one or another.</summary>
+    public void Execute() => lanes.Help();
+
+    /// <summary>Runs the work on a lane, unless the column or another lane has claimed it: false then.</summary>
+    internal bool TryRun()
+    {
+        if (!Claim())
         {
-            if (Claim())
-            {
-                Perform();
-                lock (_gate)
-                {
-                    _done = true;
-                    Monitor.PulseAll(_gate);
-                }
-            }
+            return false;
         }
-        finally
+
+        Perform();
+        lock (_gate)
         {
-            lanes.Give();
+            _done = true;
+            Monitor.PulseAll(_gate);
         }
+
+        Free();
+        return true;
     }
 
     /// <summary>The work done: here, when no lane has begun it, else once the lane that did has finished.</summary>
@@ -139,6 +178,20 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
         {
             Perform();
             Volatile.Write(ref _done, true);
+            Free();
+        }
+        else
+        {
+            Join();
+        }
+    }
+
+    /// <summary>The work given up, where no lane has begun it; else waited for, as the lane that did may still hold its bytes.</summary>
+    internal void Withdraw()
+    {
+        if (Claim())
+        {
+            Free();
         }
         else
         {
@@ -160,6 +213,18 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
 
     /// <summary>The codec's work, on whichever thread claimed it.</summary>
     protected abstract void Run();
+
+    /// <summary>Claims the work; false when a lane or the column has already.</summary>
+    private bool Claim() => Interlocked.Exchange(ref _claimed, 1) == 0;
+
+    /// <summary>Gives back the lane a queued work took, once claimed: the pool's later run of it finds nothing to do.</summary>
+    private void Free()
+    {
+        if (_queued)
+        {
+            lanes.Give();
+        }
+    }
 
     /// <summary>Runs the work, keeping what it throws for the column.</summary>
     private void Perform()
