@@ -1228,6 +1228,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>The reader the file was opened over.</summary>
     internal ISegmentReader Source => _source;
 
+    /// <summary>What the envelope of a sealed file says, its descriptor and its epochs; null for a plain file.</summary>
+    internal Sealing.SealedLayout? SealedLayout => (SessionReader.Unwrap(_source) as Sealing.SealedSegmentReader)?.Layout;
+
     /// <summary>Read-time policy, copied into every scan context.</summary>
     internal VortexReadOptions ReadOptions { get; }
 

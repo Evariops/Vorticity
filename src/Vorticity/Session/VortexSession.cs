@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
@@ -550,6 +551,40 @@ public sealed class VortexSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();
         return VortexFileWriter.AppendInSessionAsync(path, options, this, cancellationToken);
+    }
+
+    /// <summary>
+    /// Indexes the file at <paramref name="path"/> under <paramref name="policy"/> and appends the runs
+    /// behind it, as <see cref="VortexFileIndexer.AppendIndexesAsync(string, IndexPolicy, CancellationToken)"/> does, in this session: a sealed
+    /// file takes them as an epoch of its own, under the data key it names.
+    /// </summary>
+    /// <param name="path">A file this library wrote, or one of the same shape.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="cancellationToken">Cancels the read and the build; the copy behind the file, once begun, completes.</param>
+    /// <returns>What became of every index the policy asked for.</returns>
+    /// <exception cref="VortexEncryptionException">The file is sealed and its key cannot be had, or it is plain and the session seals what it writes.</exception>
+    public ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(string path, IndexPolicy policy, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return VortexFileIndexer.AppendIndexesAsync(path, policy, this, cancellationToken);
+    }
+
+    /// <summary>
+    /// Indexes the rows <paramref name="rows"/> of the file at <paramref name="path"/> into a fragment,
+    /// as <see cref="VortexFileIndexer.BuildFragmentAsync(string, IndexPolicy, RowRange?, CancellationToken)"/>
+    /// does, in this session: the fragment of a sealed file, or one built in a session that seals what
+    /// it writes, is sealed, and opens in a session whose keyring holds its key.
+    /// </summary>
+    /// <param name="path">The file, read and never written.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="rows">The rows to index, whole blocks; null for the whole file.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The fragment, and what became of every index the policy asked for.</returns>
+    /// <exception cref="VortexEncryptionException">The file is sealed and its key cannot be had.</exception>
+    public ValueTask<IndexFragment> BuildFragmentAsync(string path, IndexPolicy policy, RowRange? rows = null, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return VortexFileIndexer.BuildFragmentAsync(path, policy, rows, this, cancellationToken);
     }
 
     /// <summary>

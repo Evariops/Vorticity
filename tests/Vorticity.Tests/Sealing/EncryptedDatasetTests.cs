@@ -18,6 +18,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Tests.Api;
 using Xunit;
@@ -308,6 +309,45 @@ public sealed class EncryptedDatasetTests
     }
 
     [Fact]
+    public async Task AnIndexFragmentGoesSealedInItsCommitAndASessionThatRefusesPlaintextUsesIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        await using VortexSession strict = VortexSession.Create(o =>
+        {
+            o.Keyring = keyring;
+            o.RefusePlaintext = true;
+        });
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(strict), ct);
+        await AppendAsync(dataset, 0, ct);
+        IndexingResult indexed = await DatasetIndexer.IndexAsync(
+            dataset, await SingleObjectAsync(dataset, ct), WritePolicy.None.For("City", IndexSpec.Postings),
+            options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, cancellationToken: ct);
+        Assert.Equal(OperationOutcome.Applied, indexed.Outcome);
+
+        // The fragment lies in a sealed commit, so the store holds no value of it; read back plain from
+        // there, it is the dataset's own, and the session takes it.
+        await foreach (string key in store.ListAsync(string.Empty, null, ct))
+        {
+            Assert.True((await AllAsync(store, key, ct)).AsSpan().IndexOf("Nantes"u8) < 0, $"'{key}' holds a city's name in plain");
+        }
+
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(store, Encrypted(strict), ct);
+        PositionedObject target = await SingleObjectAsync(reopened, ct);
+        ObjectLease lease = await reopened.RentAsync(target.Entry, ct);
+        await using (lease)
+        {
+            Assert.Contains(await lease.File.ReadIndexesAsync(ct), index => index.Column == "City");
+            Assert.Equal([null], lease.File.IndexFragmentRefusals);
+        }
+
+        Assert.Equal(
+            SealedObjects.Rows(Rows).FindAll(r => r.City == "Nantes").Count,
+            await reopened.Scan<Reading>().Where(r => r.City == "Nantes").CountAsync(ct));
+    }
+
+    [Fact]
     public async Task OpeningAndScanningCostTheRequestsOfAPlainDataset()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -344,6 +384,17 @@ public sealed class EncryptedDatasetTests
     private static VortexSession Session(VortexKeyring keyring) => VortexSession.Create(o => o.Keyring = keyring);
 
     private static DatasetOptions Encrypted(VortexSession session) => new DatasetOptions { Session = session, Encrypted = true };
+
+    private static async Task<PositionedObject> SingleObjectAsync(VortexDataset dataset, CancellationToken ct)
+    {
+        List<PositionedObject> objects = [];
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync().WithCancellation(ct))
+        {
+            objects.Add(held);
+        }
+
+        return Assert.Single(objects);
+    }
 
     private static async Task<MemoryObjectStore> EncryptedStoreAsync(VortexKeyring keyring, int appends, CancellationToken ct)
     {
