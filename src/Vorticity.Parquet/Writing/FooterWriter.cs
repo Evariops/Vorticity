@@ -25,6 +25,9 @@ internal sealed class WrittenChunk
     internal long BloomFilterOffset { get; set; } = -1;
 
     internal int BloomFilterLength { get; set; }
+
+    /// <summary>What encrypted the chunk's modules, or null for a chunk in plaintext.</summary>
+    internal Encryption.ColumnEncryptor? Encryptor { get; init; }
 }
 
 /// <summary>A row group written to the file.</summary>
@@ -44,6 +47,11 @@ internal sealed class WrittenRowGroup
 internal static class FooterWriter
 {
     /// <summary>Writes the <c>FileMetaData</c>.</summary>
+    /// <remarks>
+    /// An encrypted file's: a column whose metadata its own key encrypts, or any encrypted column's
+    /// under a plaintext footer, holds it as a module of its own; a plaintext footer names the
+    /// algorithm and the key that signs it.
+    /// </remarks>
     internal static void WriteFileMetaData(
         ref ThriftCompactWriter writer,
         SchemaElement[] schema,
@@ -51,7 +59,9 @@ internal static class FooterWriter
         IReadOnlyList<WrittenRowGroup> rowGroups,
         IReadOnlyList<KeyValuePair<string, string>> keyValues,
         string createdBy,
-        WriteColumn[] columns)
+        WriteColumn[] columns,
+        Encryption.FileEncryptor? encryptor = null,
+        PooledBytes? scratch = null)
     {
         short saved = writer.BeginStruct();
         writer.WriteI32Field(1, 1);
@@ -65,7 +75,7 @@ internal static class FooterWriter
         writer.WriteListField(4, ThriftType.Struct, rowGroups.Count);
         foreach (WrittenRowGroup rowGroup in rowGroups)
         {
-            WriteRowGroup(ref writer, rowGroup);
+            WriteRowGroup(ref writer, rowGroup, scratch);
         }
 
         if (keyValues.Count > 0)
@@ -96,10 +106,15 @@ internal static class FooterWriter
             writer.EndStruct(order);
         }
 
+        if (encryptor is { PlaintextFooter: true })
+        {
+            encryptor.WriteFooterFields(ref writer);
+        }
+
         writer.EndStruct(saved);
     }
 
-    private static void WriteRowGroup(ref ThriftCompactWriter writer, WrittenRowGroup rowGroup)
+    private static void WriteRowGroup(ref ThriftCompactWriter writer, WrittenRowGroup rowGroup, PooledBytes? scratch)
     {
         long uncompressed = 0;
         long compressed = 0;
@@ -113,7 +128,7 @@ internal static class FooterWriter
         writer.WriteListField(1, ThriftType.Struct, rowGroup.Chunks.Length);
         foreach (WrittenChunk chunk in rowGroup.Chunks)
         {
-            WriteColumnChunk(ref writer, chunk);
+            WriteColumnChunk(ref writer, chunk, rowGroup.Ordinal, scratch);
         }
 
         writer.WriteI64Field(2, uncompressed);
@@ -133,15 +148,62 @@ internal static class FooterWriter
         writer.EndStruct(saved);
     }
 
-    private static void WriteColumnChunk(ref ThriftCompactWriter writer, WrittenChunk written)
+    private static void WriteColumnChunk(ref ThriftCompactWriter writer, WrittenChunk written, int rowGroup, PooledBytes? scratch)
     {
-        ChunkResult chunk = written.Chunk;
-        WriteColumn column = written.Column;
+        Encryption.ColumnEncryptor? encryptor = written.Encryptor;
         short saved = writer.BeginStruct();
 
         // Required by the structure and deprecated by the standard: 0, no metadata outside the footer.
         writer.WriteI64Field(2, 0);
-        short metadata = writer.BeginStructField(3);
+
+        // A column's metadata is a module of its own where its own key encrypts it, or the footer is
+        // in plaintext; a plaintext footer still holds it, stripped of its statistics.
+        bool module = encryptor is not null && (!encryptor.FooterKey || encryptor.PlaintextFooter);
+        if (!module || encryptor!.PlaintextFooter)
+        {
+            short metadata = writer.BeginStructField(3);
+            WriteColumnMetaData(ref writer, written, statistics: encryptor is not { PlaintextFooter: true });
+            writer.EndStruct(metadata);
+        }
+
+        if (written.OffsetIndexOffset >= 0)
+        {
+            writer.WriteI64Field(4, written.OffsetIndexOffset);
+            writer.WriteI32Field(5, written.OffsetIndexLength);
+        }
+
+        if (written.ColumnIndexOffset >= 0)
+        {
+            writer.WriteI64Field(6, written.ColumnIndexOffset);
+            writer.WriteI32Field(7, written.ColumnIndexLength);
+        }
+
+        if (encryptor is not null)
+        {
+            encryptor.WriteCryptoMetadata(ref writer);
+            if (module)
+            {
+                PooledBytes plain = scratch!;
+                plain.Clear();
+                ThriftCompactWriter inner = new(plain);
+                short own = inner.BeginStruct();
+                WriteColumnMetaData(ref inner, written, statistics: true);
+                inner.EndStruct(own);
+                inner.Flush();
+                System.Buffers.ArrayBufferWriter<byte> sealedBytes = new(plain.Length + Encryption.ModuleCipher.GcmOverhead);
+                encryptor.Encrypt(plain.Written.Span, Encryption.ModuleType.ColumnMetaData, rowGroup, -1, sealedBytes);
+                writer.WriteBinaryField(9, sealedBytes.WrittenSpan);
+            }
+        }
+
+        writer.EndStruct(saved);
+    }
+
+    /// <summary>A chunk's <c>ColumnMetaData</c>'s fields, its statistics among them when <paramref name="statistics"/>.</summary>
+    private static void WriteColumnMetaData(ref ThriftCompactWriter writer, WrittenChunk written, bool statistics)
+    {
+        ChunkResult chunk = written.Chunk;
+        WriteColumn column = written.Column;
         writer.WriteI32Field(1, (int)column.Physical);
         int encodings = System.Numerics.BitOperations.PopCount(chunk.Encodings);
         writer.WriteListField(2, ThriftType.I32, encodings);
@@ -169,7 +231,10 @@ internal static class FooterWriter
             writer.WriteI64Field(11, chunk.DictionaryPageOffset);
         }
 
-        WriteStatistics(ref writer, chunk);
+        if (statistics)
+        {
+            WriteStatistics(ref writer, chunk);
+        }
 
         // How many pages of each kind and encoding: what tells a reader every data page is codes.
         bool dictionary = chunk.DictionaryPageOffset >= 0;
@@ -199,23 +264,11 @@ internal static class FooterWriter
             writer.WriteI32Field(15, written.BloomFilterLength);
         }
 
-        chunk.Sizes?.WriteChunk(ref writer);
-        chunk.Statistics.Geospatial?.Write(ref writer, 17);
-
-        writer.EndStruct(metadata);
-        if (written.OffsetIndexOffset >= 0)
+        if (statistics)
         {
-            writer.WriteI64Field(4, written.OffsetIndexOffset);
-            writer.WriteI32Field(5, written.OffsetIndexLength);
+            chunk.Sizes?.WriteChunk(ref writer);
+            chunk.Statistics.Geospatial?.Write(ref writer, 17);
         }
-
-        if (written.ColumnIndexOffset >= 0)
-        {
-            writer.WriteI64Field(6, written.ColumnIndexOffset);
-            writer.WriteI32Field(7, written.ColumnIndexLength);
-        }
-
-        writer.EndStruct(saved);
     }
 
     private static void WriteEncodingStats(ref ThriftCompactWriter writer, PageType type, ParquetEncoding encoding, int count)

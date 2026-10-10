@@ -97,8 +97,19 @@ internal sealed class BloomCollector : IDisposable
 
     /// <summary>Writes the closed filter, its header then its bitset, and starts the chunk's next.</summary>
     /// <returns>The bytes written.</returns>
-    internal async ValueTask<int> WriteToAsync(ISegmentSink sink, CancellationToken cancellationToken)
+    /// <remarks>An encrypted column's header and bitset are each a module, under the row group <paramref name="rowGroup"/>'s AAD.</remarks>
+    internal async ValueTask<int> WriteToAsync(ISegmentSink sink, Encryption.ColumnEncryptor? encryptor, int rowGroup, CancellationToken cancellationToken)
     {
+        if (encryptor is not null)
+        {
+            System.Buffers.ArrayBufferWriter<byte> modules = new(_header.Length + _words.Length + (2 * Encryption.ModuleCipher.GcmOverhead));
+            encryptor.Encrypt(_header.Written.Span, Encryption.ModuleType.BloomFilterHeader, rowGroup, -1, modules);
+            encryptor.Encrypt(_words.Written.Span, Encryption.ModuleType.BloomFilterBitset, rowGroup, -1, modules);
+            await sink.WriteAsync(modules.WrittenMemory, cancellationToken).ConfigureAwait(false);
+            Reset();
+            return modules.WrittenCount;
+        }
+
         int length = _header.Length + _words.Length;
         await sink.WriteAsync(_header.Written, cancellationToken).ConfigureAwait(false);
         await sink.WriteAsync(_words.Written, cancellationToken).ConfigureAwait(false);

@@ -61,7 +61,8 @@ internal static class BloomPruning
         {
             slots[i] = -1;
             ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
-            if (chunk.BloomFilterOffset < 0 || chunk.IsEncrypted || !Asks(filter.Filter, filter.Fields[i].Path))
+            if (chunk.BloomFilterOffset < 0 || (chunk.IsEncrypted && (chunk.Hidden || chunk.BloomFilterLength <= 0 || file.Footer.Decryptor is null))
+                || !Asks(filter.Filter, filter.Fields[i].Path))
             {
                 continue;
             }
@@ -92,7 +93,10 @@ internal static class BloomPruning
                 continue;
             }
 
-            words[i] = await WordsAsync(file, footer.Chunk(group, filter.Columns[i]), requests.GetBuffer(slots[i]), metrics, cancellationToken).ConfigureAwait(false);
+            ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
+            words[i] = chunk.IsEncrypted
+                ? Decrypted(file, chunk, group, filter.Columns[i], requests.GetBuffer(slots[i]).Span)
+                : await WordsAsync(file, chunk, requests.GetBuffer(slots[i]), metrics, cancellationToken).ConfigureAwait(false);
         }
 
         return Absent(filter.Filter, filter, words);
@@ -132,6 +136,24 @@ internal static class BloomPruning
         return TryPlain(column, value, plain, out int length, out _)
             ? SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(plain[..length], BloomHash.XxHash64))
             : null;
+    }
+
+    /// <summary>
+    /// The words of an encrypted chunk's filter, its header and its bitset each a module, which the
+    /// chunk's <c>bloom_filter_length</c> spans; null where they are not a filter this build reads.
+    /// </summary>
+    private static uint[]? Decrypted(ParquetFile file, in ColumnChunkMetadata chunk, int group, int column, ReadOnlySpan<byte> modules)
+    {
+        int headerModule = Encryption.ModuleCipher.ModuleBytes(modules, Encryption.ModuleCipher.GcmOverhead);
+        byte[]? header = file.Decrypt(chunk, group, column, modules[..headerModule], Encryption.ModuleType.BloomFilterHeader);
+        if (header is null || !BloomFilterHeader.TryRead(header, out int headerLength, out int bitset) || headerLength != header.Length)
+        {
+            return null;
+        }
+
+        ReadOnlySpan<byte> rest = modules[headerModule..];
+        byte[]? words = file.Decrypt(chunk, group, column, rest[..Encryption.ModuleCipher.ModuleBytes(rest, Encryption.ModuleCipher.GcmOverhead)], Encryption.ModuleType.BloomFilterBitset);
+        return words is null || words.Length != bitset ? null : SplitBlockBloom.Words(words).ToArray();
     }
 
     /// <summary>The bytes a filter's first read takes: its length, or, where a writer left it out, its header's worth short of the footer.</summary>

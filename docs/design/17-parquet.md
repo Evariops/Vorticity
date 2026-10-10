@@ -497,9 +497,12 @@ pipelines, and the 4 KiB of keystream XORed in a vector at a time.
 - **Refused**: a module that fails its authentication, as malformed, since the file was altered or
   the key or the AAD prefix is not its own; a footer, a column or an AAD prefix the file needs and the
   caller does not give, as unsupported, naming it.
-- **Not yet**: an encrypted chunk's column index, offset index and Bloom filter are modules this
-  reader does not decrypt: such a chunk is read whole and pruned by its statistics alone. The suite's
-  file whose keys are wrapped by a KMS, in key material outside it, needs a resolver that unwraps them.
+- **Pruning**: an encrypted chunk's column index, offset index and Bloom filter are modules of
+  their own, decrypted where its key is given, and prune as a plaintext chunk's do. The chunk is
+  still read whole, never sparsely: a page skipped by its place, unread, would leave the next one's
+  ordinal unknown to its module's AAD.
+- **Not yet**: the suite's file whose keys are wrapped by a KMS, in key material outside it, needs a
+  resolver that unwraps them, which is the caller's.
 
 The suite's encrypted files, 128-bit and 256-bit keys, every footer mode, both algorithms, a prefix
 stored and one supplied, read as the rows of the C++ writer's test generator, every one.
@@ -634,6 +637,30 @@ then the row group's Bloom filters; every `ColumnIndex`, then every `OffsetIndex
 column, so that a reader's index reads coalesce; the footer, its length and the magic. `Abandon()` gives the file up as the core's writer does: a new file is deleted,
 a caller's pipe completed with an error.
 
+### 6.7 Encrypted files
+
+`ParquetWriteOptions.Encryption` writes a file of the standard's modular encryption: its footer
+encrypted, `PARE` at both ends, or in plaintext and signed, `PAR1`; every column under the footer's
+key, or the columns `ColumnKeys` names under their own, the others in plaintext; `AES_GCM_V1`, or
+`AES_GCM_CTR_V1` whose pages are in counter mode.
+
+- **Modules** each take a fresh random nonce, and their AAD the file's prefix, eight random bytes of
+  its own, the module's type and its row group's, column's and data page's ordinals: no module of
+  one file authenticates in another, nor in another place of the same file, under the same key.
+- **A page** is a header module then a body module, the body the page's levels and values, which
+  its header's `compressed_page_size` counts as the module's. A page is encrypted as it closes,
+  its first header at the chunk's close as a plaintext one is; the 64-byte alignment of uncompressed
+  pages is off, the module's length and nonce coming first.
+- **A column's metadata** is a module of its own where its own key encrypts it, and wherever the
+  footer is in plaintext, where the footer's copy is stripped of its statistics, sizes and box. Its
+  column index, offset index and Bloom filter are modules too.
+- **The footer** encrypted is its `FileCryptoMetaData`, then its module; in plaintext, it names the
+  algorithm and the signing key's metadata, and 28 bytes past it sign it.
+
+Read back, the five arrangements the tests write hold the rows their plaintext twin holds, prune as
+it does, statistics, page index and Bloom filters alike, and are refused without their keys, under
+another prefix, or with a byte altered.
+
 ## 7. Kernels
 
 Each is generic over its physical type and specialized by the compiler, vectorized with `Vector128`
@@ -749,7 +776,7 @@ comes down. Speed is measured against baselines this repository owns:
    spatial predicate; `FILE`, read and written as the struct of its fields, its references left to
    the caller to resolve; modular encryption, `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1`
    with AES in counter mode over `Aes.EncryptEcb`, keys from a resolver the caller gives, read
-   (§5.10) and then written; ordered reads on declared `sorting_columns`.
+   (§5.10) and written (§6.7); ordered reads on declared `sorting_columns`.
 
 LZ4 and LZO are in no phase: the standard gives neither format (§3.2 #8).
 

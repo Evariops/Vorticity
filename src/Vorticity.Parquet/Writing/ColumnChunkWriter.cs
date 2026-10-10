@@ -217,6 +217,18 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     internal bool AlignUncompressedPages { get; init; } = true;
 
+    /// <summary>What encrypts the column's modules, or null for a column written in plaintext.</summary>
+    internal Encryption.ColumnEncryptor? Encryptor { get; init; }
+
+    /// <summary>The ordinal of the row group the pages being written belong to, which their modules' AAD names.</summary>
+    internal int RowGroup { get; set; }
+
+    /// <summary>A module's plaintext, made whole before it is encrypted: a header, or a page's levels and values.</summary>
+    private PooledBytes? _plain;
+
+    /// <summary>The pool the writer's buffers are of.</summary>
+    private readonly AlignedBufferPool _pool;
+
     /// <summary>
     /// The encoding the caller pinned the column to, which the writer checked the column takes: a
     /// dictionary is then built whatever the profile and kept while it stays within its bound, and
@@ -269,6 +281,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _page = new PooledBytes(pool);
         _dictionaryPage = new PooledBytes(pool);
         _firstHeader = new PooledBytes(pool);
+        _pool = pool;
         _measured = new PooledBytes(pool);
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _levelBytes = new byte[blockRows];
@@ -319,7 +332,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// <summary>Writes the closed chunk's Bloom filter, its header then its bitset, after the row group's chunks.</summary>
     /// <returns>The bytes written.</returns>
     internal ValueTask<int> WriteBloomAsync(ISegmentSink sink, CancellationToken cancellationToken) =>
-        _bloom!.WriteToAsync(sink, cancellationToken);
+        _bloom!.WriteToAsync(sink, Encryptor, RowGroup, cancellationToken);
 
     /// <summary>
     /// Appends <paramref name="count"/> rows of <paramref name="node"/> from <paramref name="start"/>,
@@ -592,11 +605,28 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         // Values stored as they are start on a 64-byte boundary of the file, behind the header's
         // extension; what lies between the header and them is the levels, inside a v1 page's bytes.
-        bool aligned = AlignUncompressedPages && !compressed && body.Length > 0;
+        bool aligned = AlignUncompressedPages && Encryptor is null && !compressed && body.Length > 0;
         int lead = levels.Length + (stored.Length - body.Length);
         long pageStart = _chunk.Length;
         int headerLength = 0;
-        if (_pages.Count == 0)
+        if (Encryptor is { } encryptor)
+        {
+            // Two modules: the body, the page's levels and values, and the header, whose size of the
+            // page is the body's module, length to tag. The first header waits for the close.
+            header.CompressedPageSize = levels.Length + stored.Length + encryptor.Overhead(Encryption.ModuleType.DataPage);
+            if (_pages.Count == 0)
+            {
+                _first = header;
+                _origin = 0;
+            }
+            else
+            {
+                headerLength = EncryptHeader(encryptor, header, Encryption.ModuleType.DataPageHeader, _pages.Count, _chunk);
+            }
+
+            EncryptBody(encryptor, levels, stored, Encryption.ModuleType.DataPage, _pages.Count, _chunk);
+        }
+        else if (_pages.Count == 0)
         {
             // The chunk's first data page: its header waits for the close, and the pages count their
             // places from where its values start, a boundary when they are aligned.
@@ -612,13 +642,47 @@ internal sealed class ColumnChunkWriter : IDisposable
         }
 
         _aligned |= aligned;
-        _chunk.Write(levels);
-        _chunk.Write(stored);
+        if (Encryptor is null)
+        {
+            _chunk.Write(levels);
+            _chunk.Write(stored);
+        }
+
         _pages.Add(new PageLocation(pageStart, (int)(_chunk.Length - pageStart), _chunkRows));
         _chunkUncompressed += headerLength + header.UncompressedPageSize;
         _chunkRows += rows;
         _chunkEntries += entries;
         _chunkNulls += nulls;
+    }
+
+    /// <summary>
+    /// Appends <paramref name="header"/> to <paramref name="into"/> as a module of
+    /// <paramref name="type"/>, of data page <paramref name="page"/> or of the dictionary's; its bytes.
+    /// </summary>
+    private int EncryptHeader(Encryption.ColumnEncryptor encryptor, in PageHeader header, Encryption.ModuleType type, int page, System.Buffers.IBufferWriter<byte> into)
+    {
+        PooledBytes plain = _plain ??= new PooledBytes(_pool);
+        plain.Clear();
+        ThriftCompactWriter writer = new(plain);
+        header.Write(ref writer, default);
+        writer.Flush();
+        return encryptor.Encrypt(plain.Written.Span, type, RowGroup, page, into);
+    }
+
+    /// <summary>Appends a page's <paramref name="levels"/> then <paramref name="stored"/> values to <paramref name="into"/> as one module of <paramref name="type"/>.</summary>
+    private void EncryptBody(Encryption.ColumnEncryptor encryptor, ReadOnlySpan<byte> levels, ReadOnlySpan<byte> stored, Encryption.ModuleType type, int page, System.Buffers.IBufferWriter<byte> into)
+    {
+        if (levels.IsEmpty)
+        {
+            encryptor.Encrypt(stored, type, RowGroup, page, into);
+            return;
+        }
+
+        PooledBytes plain = _plain ??= new PooledBytes(_pool);
+        plain.Clear();
+        plain.Write(levels);
+        plain.Write(stored);
+        encryptor.Encrypt(plain.Written.Span, type, RowGroup, page, into);
     }
 
     /// <summary>
@@ -981,6 +1045,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _page.Dispose();
         _dictionaryPage.Dispose();
         _firstHeader.Dispose();
+        _plain?.Dispose();
         _measured.Dispose();
         _encoded.Dispose();
         _data.Dispose();
@@ -1534,6 +1599,12 @@ internal sealed class ColumnChunkWriter : IDisposable
             return;
         }
 
+        if (Encryptor is { } encryptor)
+        {
+            _chunkUncompressed += EncryptHeader(encryptor, _first, Encryption.ModuleType.DataPageHeader, 0, _firstHeader);
+            return;
+        }
+
         ThriftCompactWriter writer = new(_firstHeader);
         _first.Write(ref writer, _aligned ? Padding(_first, start - _origin, 0) : default);
         writer.Flush();
@@ -1566,6 +1637,15 @@ internal sealed class ColumnChunkWriter : IDisposable
         {
             header.HasCrc = true;
             header.Crc = Checksum(default, stored);
+        }
+
+        if (Encryptor is { } encryptor)
+        {
+            header.CompressedPageSize = stored.Length + encryptor.Overhead(Encryption.ModuleType.DictionaryPage);
+            int headerBytes = EncryptHeader(encryptor, header, Encryption.ModuleType.DictionaryPageHeader, -1, _dictionaryPage);
+            EncryptBody(encryptor, default, stored, Encryption.ModuleType.DictionaryPage, -1, _dictionaryPage);
+            _chunkUncompressed += headerBytes + values.Length;
+            return;
         }
 
         // Its values start on a 64-byte boundary when they are stored as they are.

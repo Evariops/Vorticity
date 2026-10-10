@@ -363,6 +363,22 @@ public sealed class ParquetFile : IAsyncDisposable
     internal bool Holds(long offset, long length) =>
         offset >= 4 && length > 0 && length <= int.MaxValue && offset <= Length - 8 - length;
 
+    /// <summary>
+    /// The plaintext of the module <paramref name="module"/>, of <paramref name="type"/>, of the
+    /// encrypted chunk <paramref name="chunk"/> of row group <paramref name="rowGroup"/> and column
+    /// <paramref name="column"/>: an index or a Bloom filter. Null where the chunk's key is not given.
+    /// </summary>
+    internal byte[]? Decrypt(in ColumnChunkMetadata chunk, int rowGroup, int column, ReadOnlySpan<byte> module, Encryption.ModuleType type)
+    {
+        if (Footer.Decryptor is not { } decryptor || chunk.Hidden)
+        {
+            return null;
+        }
+
+        byte[]? key = decryptor.ColumnKey(Footer.ColumnPaths[column], chunk.KeyMetadata.Of(Footer.Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
+        return key is null ? null : decryptor.Decrypt(key, module, type, Footer.Ordinal(rowGroup), column);
+    }
+
     /// <summary>Where a column chunk's pages lie, its dictionary page first; checked against the file's bytes.</summary>
     internal (long Start, int Length) ChunkRange(ColumnChunkMetadata chunk)
     {

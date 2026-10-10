@@ -34,6 +34,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 {
     private static readonly byte[] Magic = "PAR1"u8.ToArray();
 
+    /// <summary>The magic of a file whose footer is encrypted.</summary>
+    private static readonly byte[] EncryptedMagic = "PARE"u8.ToArray();
+
     private static readonly string CreatedBy = CreatedByOf(typeof(ParquetFileWriter).Assembly);
 
     private readonly VortexSession _session;
@@ -60,6 +63,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     private readonly FilePipeWriter? _filePipe;
     private readonly PipeWriter? _callerPipe;
     private readonly List<WrittenRowGroup> _rowGroups = [];
+
+    /// <summary>What encrypts the file, or null for a file in plaintext.</summary>
+    private readonly Encryption.FileEncryptor? _encryptor;
 
     /// <summary>The rows of the writer's builder, until a write takes them.</summary>
     private StructStore? _root;
@@ -110,8 +116,10 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
         HashSet<string> codecs = options.ColumnCompression is { } own ? new(own.Keys, StringComparer.Ordinal) : [];
         HashSet<string> hints = options.Hints is { } pinned ? new(pinned.Keys, StringComparer.Ordinal) : [];
+        HashSet<string> keys = options.Encryption?.ColumnKeys is { } columnKeys ? new(columnKeys.Keys, StringComparer.Ordinal) : [];
         try
         {
+            _encryptor = options.Encryption is { } encryption ? new Encryption.FileEncryptor(encryption) : null;
             for (int i = 0; i < _columns.Length; i++)
             {
                 // A column's options by its dotted path, which a top-level column's name is.
@@ -124,6 +132,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                 blooms.Remove(path);
                 codecs.Remove(path);
                 hints.Remove(path);
+                keys.Remove(path);
                 _columns[i] = new ColumnChunkWriter(
                     column, (CompressionCodec)codec.Compression, codec.Level, CompressorsOf(codec), options.BlockRows, options.Profile, session.Options.EnginePool, rate, options.RowGroupRows)
                 {
@@ -134,9 +143,11 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                     AlignUncompressedPages = options.AlignUncompressedPages,
                     AllowAlp = options.Alp,
                     Hint = hint,
+                    Encryptor = _encryptor?.Column(path, column.Path, i),
                 };
             }
 
+            RequireColumns(keys, "column keys");
             RequireColumns(blooms, "Bloom filters");
             RequireColumns(codecs, "column codecs");
             RequireColumns(hints, "hints");
@@ -144,6 +155,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         catch
         {
             ReleaseColumns();
+            _encryptor?.Dispose();
             throw;
         }
 
@@ -427,6 +439,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         ReleaseColumns();
+        _encryptor?.Dispose();
         if (_fan is { } fan)
         {
             WorkFan.Return(fan);
@@ -671,7 +684,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             ChunkResult chunk = column.Close(_sink.Position, partial);
             Debug.Assert(chunk.Rows == rows, "Every column closes the same rows.");
             await column.LendChunkAsync(_sink, cancellationToken).ConfigureAwait(false);
-            chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = column.Codec };
+            chunks[c] = new WrittenChunk { Column = column.Column, Chunk = chunk, Codec = column.Codec, Encryptor = column.Encryptor };
         }
 
         // The row group's Bloom filters after its chunks, the standard's other place for them: a
@@ -694,6 +707,12 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         _rowGroups.Add(new WrittenRowGroup { Chunks = chunks, Rows = rows, Ordinal = _rowGroups.Count });
+
+        // The next row group's pages name its ordinal in their modules' AAD.
+        foreach (ColumnChunkWriter column in _columns)
+        {
+            column.RowGroup = _rowGroups.Count;
+        }
         _groupRows -= rows;
     }
 
@@ -706,7 +725,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         _started = true;
-        return _sink.WriteAsync(Magic, cancellationToken);
+        return _sink.WriteAsync(_encryptor is { PlaintextFooter: false } ? EncryptedMagic : Magic, cancellationToken);
     }
 
     private async ValueTask WriteTailAsync(CancellationToken cancellationToken)
@@ -726,6 +745,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         // Every column index, then every offset index, by row group then column, so that a reader's
         // reads of each coalesce.
         ThriftCompactWriter writer = new(tail);
+        using PooledBytes plain = new(_session.Options.EnginePool);
         foreach (WrittenRowGroup rowGroup in _rowGroups)
         {
             foreach (WrittenChunk chunk in rowGroup.Chunks)
@@ -737,8 +757,21 @@ public sealed class ParquetFileWriter : IAsyncDisposable
                 }
 
                 int start = tail.Length;
-                ColumnIndex.Write(ref writer, statistics.Pages, statistics.Order, chunk.Chunk.Sizes);
-                writer.Flush();
+                if (chunk.Encryptor is { } encryptor)
+                {
+                    // An encrypted column's index is a module of its own.
+                    plain.Clear();
+                    ThriftCompactWriter inner = new(plain);
+                    ColumnIndex.Write(ref inner, statistics.Pages, statistics.Order, chunk.Chunk.Sizes);
+                    inner.Flush();
+                    encryptor.Encrypt(plain.Written.Span, Encryption.ModuleType.ColumnIndex, rowGroup.Ordinal, -1, tail);
+                }
+                else
+                {
+                    ColumnIndex.Write(ref writer, statistics.Pages, statistics.Order, chunk.Chunk.Sizes);
+                    writer.Flush();
+                }
+
                 chunk.ColumnIndexOffset = position + start;
                 chunk.ColumnIndexLength = tail.Length - start;
             }
@@ -749,20 +782,53 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             foreach (WrittenChunk chunk in rowGroup.Chunks)
             {
                 int start = tail.Length;
-                OffsetIndex.Write(ref writer, chunk.Chunk.Pages, chunk.Chunk.Sizes);
-                writer.Flush();
+                if (chunk.Encryptor is { } encryptor)
+                {
+                    plain.Clear();
+                    ThriftCompactWriter inner = new(plain);
+                    OffsetIndex.Write(ref inner, chunk.Chunk.Pages, chunk.Chunk.Sizes);
+                    inner.Flush();
+                    encryptor.Encrypt(plain.Written.Span, Encryption.ModuleType.OffsetIndex, rowGroup.Ordinal, -1, tail);
+                }
+                else
+                {
+                    OffsetIndex.Write(ref writer, chunk.Chunk.Pages, chunk.Chunk.Sizes);
+                    writer.Flush();
+                }
+
                 chunk.OffsetIndexOffset = position + start;
                 chunk.OffsetIndexLength = tail.Length - start;
             }
         }
 
         int footer = tail.Length;
-        FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns);
-        writer.Flush();
+        if (_encryptor is { PlaintextFooter: false } sealedFooter)
+        {
+            // The footer encrypted: its crypto metadata, then its module, both counted by the length.
+            plain.Clear();
+            ThriftCompactWriter inner = new(plain);
+            using PooledBytes scratch = new(_session.Options.EnginePool);
+            FooterWriter.WriteFileMetaData(ref inner, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, sealedFooter, scratch);
+            inner.Flush();
+            sealedFooter.WriteEncryptedFooter(tail, plain.Written.Span);
+        }
+        else
+        {
+            using PooledBytes scratch = new(_session.Options.EnginePool);
+            FooterWriter.WriteFileMetaData(ref writer, _map.Elements, _rowCount, _rowGroups, _keyValues, CreatedBy, _map.Columns, _encryptor, scratch);
+            writer.Flush();
+            if (_encryptor is { } signer)
+            {
+                // A plaintext footer of an encrypted file: its signature right after it.
+                Span<byte> signature = tail.Reserve(Encryption.ModuleCipher.NonceLength + Encryption.ModuleCipher.TagLength);
+                signer.Sign(tail.Written.Span[footer..^signature.Length], signature);
+            }
+        }
+
         int length = tail.Length - footer;
         Span<byte> end = tail.Reserve(8);
         BinaryPrimitives.WriteInt32LittleEndian(end, length);
-        Magic.CopyTo(end[4..]);
+        (_encryptor is { PlaintextFooter: false } ? EncryptedMagic : Magic).CopyTo(end[4..]);
     }
 
     private long BufferedBytes()

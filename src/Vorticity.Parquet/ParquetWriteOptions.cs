@@ -180,6 +180,12 @@ public sealed record ParquetWriteOptions
     /// </summary>
     public bool Alp { get; init; }
 
+    /// <summary>
+    /// The file's modular encryption, the standard's: its keys, the columns it encrypts, its footer
+    /// encrypted or signed; null to write the file in plaintext.
+    /// </summary>
+    public ParquetEncryption? Encryption { get; init; }
+
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
     public bool Durable { get; init; }
 

@@ -125,8 +125,9 @@ internal static class PagePruning
             ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
             columnSlots[i] = -1;
 
-            // An encrypted chunk's page index is a module of its own, which this reader does not decrypt.
-            if (chunk.IsEncrypted || !file.Holds(chunk.ColumnIndexOffset, chunk.ColumnIndexLength) || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
+            // An encrypted chunk's indexes are modules of their own, read where its key is given.
+            if ((chunk.IsEncrypted && (chunk.Hidden || file.Footer.Decryptor is null))
+                || !file.Holds(chunk.ColumnIndexOffset, chunk.ColumnIndexLength) || !file.Holds(chunk.OffsetIndexOffset, chunk.OffsetIndexLength))
             {
                 continue;
             }
@@ -156,13 +157,33 @@ internal static class PagePruning
             }
             else
             {
-                PageLocation[] pages = OffsetIndex.Read(requests.GetBuffer(offsetSlots[i]).Span, rows);
-                if (locations is not null)
+                ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
+                ReadOnlySpan<byte> offsets = requests.GetBuffer(offsetSlots[i]).Span;
+                byte[]? columnIndex = requests.GetBuffer(columnSlots[i]).Span.ToArray();
+                if (chunk.IsEncrypted)
+                {
+                    // Decrypted, they bound the batches; an encrypted chunk is still read whole, its
+                    // pages' modules naming their ordinals as their headers are read.
+                    byte[]? plain = file.Decrypt(chunk, group, filter.Columns[i], offsets, Encryption.ModuleType.OffsetIndex);
+                    columnIndex = plain is null ? null : file.Decrypt(chunk, group, filter.Columns[i], columnIndex, Encryption.ModuleType.ColumnIndex);
+                    offsets = plain;
+                }
+
+                if (columnIndex is null)
+                {
+                    // An encrypted chunk whose key is not given: its index bounds nothing.
+                    Array.Fill(bounds, ZoneBounds.Unknown);
+                    zones[i] = new ZoneColumn(filter.Fields[i], batchRows, rows, bounds, ColumnBounds.IsDecimal(column));
+                    continue;
+                }
+
+                PageLocation[] pages = OffsetIndex.Read(offsets, rows);
+                if (locations is not null && !chunk.IsEncrypted)
                 {
                     locations[filter.Columns[i]] = pages;
                 }
 
-                ColumnIndex index = ColumnIndex.Read(requests.GetBuffer(columnSlots[i]).Span.ToArray(), pages.Length);
+                ColumnIndex index = ColumnIndex.Read(columnIndex, pages.Length);
                 if (Believable(column, pages, index, rows))
                 {
                     Bound(column, pages, index, rows, batchRows, bounds);
