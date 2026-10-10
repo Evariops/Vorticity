@@ -264,6 +264,9 @@ internal sealed class QueryMemory : IDisposable
         if (Interlocked.Exchange(ref _left, 1) == 0)
         {
             _budget.Leave();
+
+            // The next query of its kind will hold as much: the process's shelf keeps up to that, for it.
+            ArrayShelf.Retained.Expect(Peak);
         }
     }
 
