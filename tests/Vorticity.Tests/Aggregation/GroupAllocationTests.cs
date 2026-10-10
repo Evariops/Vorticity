@@ -4,9 +4,10 @@
 // WHY EVERY THREAD. A group by folds on lanes the pool schedules and applies the core's parts on any
 // of them: the bytes the caller's thread allocates are a fraction of what the query costs. And what
 // the rest allocates is what stops every lane: a collection of the workstation collector suspends
-// every thread and collects on one. At fourteen lanes the stops took a fifth of the time of s7 and
-// q10 on 4·10⁶ rows (PLAN-DUCKDB.md, D9, 2026-10-09). So the figure is the process's, measured in
-// AllocationCollection, which runs alone; D9 drives every axis to zero.
+// every thread and collects on one. At fourteen lanes the stops took a fifth of the time of a group
+// by 10⁷ hashed keys and of db-benchmark's q10 on 4·10⁶ rows, measured on 2026-10-09. So the figure
+// is the process's, measured in AllocationCollection, which runs alone, and the aim is every axis at
+// zero.
 //
 // WHY THE FLOOR OF SEVERAL QUERIES. The lanes take ranges from a queue in the order the pool runs
 // them: the tables each grows, the sub-tables the core splits and the batches its lanes fill move a

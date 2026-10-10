@@ -1,7 +1,7 @@
 # Write text
 
 Append text without allocating a string: UTF-8 bytes as they are, a `string` transcoded once, a
-number or a date formatted straight into the column, and a long value written in place.
+number or a date formatted straight into the column, or a long value written in place.
 
 ```csharp
 ColumnsBuilder<Entry> b = writer.Builder<Entry>();
@@ -32,7 +32,7 @@ b.Note.Commit(length);
 ```
 
 `Entry` is `[VortexRecord] public partial record struct Entry(DateTime StartedAt, string City, string? Note)`.
-`b.City` is a `ColumnBuilder<string>` and `b.Note` a `ColumnBuilder<string?>`: the nullable one takes
+`b.City` is a `ColumnBuilder<string>` and `b.Note` a `ColumnBuilder<string?>`. The nullable one takes
 the same appends, plus `AppendNull` and `AppendNulls(count)`. Read back, the rows are:
 
 ```
@@ -47,14 +47,14 @@ the same appends, plus `AppendNull` and `AppendNulls(count)`. Read back, the row
 
 | append | what it does |
 |---|---|
-| `Append(ReadOnlySpan<byte>)` | copies the bytes as they are, after checking they are valid UTF-8 |
-| `Append(ReadOnlySpan<char>)` | transcodes with `Utf8.FromUtf16`, vectorised, straight into the column's buffer; a lone surrogate becomes U+FFFD. A `string` converts to it |
-| `Append<TValue>(TValue)` | formats an `IUtf8SpanFormattable` (a number, a date, a `Guid`) with `TryFormat` into the column's buffer, with the default format and the invariant culture |
-| `GetSpan(n)`, `Commit(length)` | hands out exactly `n` bytes of the column's buffer for one value; `Commit` appends the first `length` of them, after the UTF-8 check |
+| `Append(ReadOnlySpan<byte>)` | copies the bytes as they are, after checking that they are valid UTF-8 |
+| `Append(ReadOnlySpan<char>)` | transcodes with the vectorised `Utf8.FromUtf16`, straight into the column's buffer. A lone surrogate becomes U+FFFD, and a `string` converts to this overload |
+| `Append<TValue>(TValue)` | formats an `IUtf8SpanFormattable` (a number, a date, a `Guid`) into the column's buffer with `TryFormat`, using the default format and the invariant culture |
+| `GetSpan(n)`, `Commit(length)` | hands out exactly `n` bytes of the column's buffer for one value. `Commit` appends the first `length` of them, after the UTF-8 check |
 
-A value of twelve bytes or fewer is stored inside its sixteen-byte view; a longer one goes to the
-data buffer, with its first four bytes in the view. The builder does both, and the caller never sees
-a view.
+A value of twelve bytes or fewer is stored inside its sixteen-byte view. A longer one goes to the data
+buffer, with its first four bytes kept in the view. The builder handles both, and you never see a
+view.
 
 ## What it costs
 
@@ -65,24 +65,25 @@ per value, 1000000 appends: UTF-8 bytes 4.4 ns, a string 6.2 ns, an int formatte
 ```
 
 Keeping the names as UTF-8 byte arrays saves the transcoding, about 30 % of the append here.
-Formatting a number in place costs about what copying its bytes would, and allocates nothing.
+Formatting a number in place costs about as much as copying its bytes, and allocates nothing.
 
 ## Watch out
 
-* **The formatted append uses the default format.** Under the invariant culture a `DateOnly` comes
-  out as `09/22/2026`, not as an ISO date. For another format, write it yourself through
-  `GetSpan` and `TryFormat`, as the last row does.
-* **A text column refuses bytes that are not UTF-8**, with `VortexSchemaException`: *The column is
+* The formatted append uses the default format. Under the invariant culture, a `DateOnly` comes out
+  as `09/22/2026`, not as an ISO date. For another format, write it yourself through `GetSpan` and
+  `TryFormat`, as the last row does.
+* A text column refuses bytes that are not valid UTF-8 with `VortexSchemaException`: *The column is
   utf8: the bytes appended to it must be valid UTF-8.* Nothing is appended. A binary column
-  (`ColumnBuilder<ReadOnlyMemory<byte>>`) takes any bytes.
-* **`GetSpan(n)` gives exactly `n` bytes.** Ask for the most the value can take:
+  (`ColumnBuilder<ReadOnlyMemory<byte>>`) accepts any bytes.
+* `GetSpan(n)` gives exactly `n` bytes, so ask for the most the value can take:
   `Encoding.UTF8.GetMaxByteCount(text.Length)` for a string.
-* **`AppendNull` exists on every text builder**, and throws `VortexSchemaException` on a column that
-  is not nullable.
-* A `char` member is refused: it is not a type the format has ([records.md](records.md)).
-* A text column's zones carry string bounds by default, so equality and prefix filters on it prune:
-  `StringBoundBytes` in [writer-options.md](writer-options.md).
-* Reading text back without a string is [text-columns.md](text-columns.md).
+* `AppendNull` exists on every text builder, and throws `VortexSchemaException` on a column that is
+  not nullable.
+* A `char` member is not text. It maps to a `u16` column holding the UTF-16 code unit
+  ([records.md](records.md)), so use `string` for text.
+* A text column's zones carry string bounds by default, so equality and prefix filters on it prune
+  (`StringBoundBytes` in [writer-options.md](writer-options.md)).
+* Reading text back without allocating strings is covered in [text-columns.md](text-columns.md).
 
 ## Run it
 

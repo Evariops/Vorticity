@@ -135,9 +135,9 @@ public sealed record VortexOpenOptions
 
     /// <summary>
     /// Whether an index fragment binds only by the file's identity. A file this library writes has
-    /// one; a file without, from another writer, is otherwise bound by its length and modification
-    /// time, which a copy that keeps both can fool, and a fragment bound so is then left out, with
-    /// the reason in <see cref="VortexFile.IndexFragmentRefusals"/>.
+    /// one. A file from another writer has none and is otherwise bound by its length and
+    /// modification time, which a copy that keeps both can fool, so with this set a fragment bound
+    /// that way is left out. A fragment left out never fails the open, since an index is only a hint.
     /// </summary>
     public bool IndexFragmentsNeedIdentity
     {

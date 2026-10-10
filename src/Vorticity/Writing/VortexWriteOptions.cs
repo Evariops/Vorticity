@@ -137,9 +137,9 @@ public sealed record VortexWriteOptions
 
     /// <summary>
     /// The encoding to write a column with, by column path, for a caller who knows. A hint is priced
-    /// against each chunk and written when it still applies, under every profile; only an
-    /// arithmetic progression, which costs nothing per row, is written before it. An unknown path
-    /// throws at <c>CreateWriter</c>.
+    /// against each chunk and written when it still applies, under every profile. Only a constant
+    /// and an arithmetic progression, which cost nothing per row, are written before it. An unknown
+    /// path throws at <c>CreateWriter</c>.
     /// </summary>
     public ImmutableDictionary<string, EncodingHint> Hints
     {

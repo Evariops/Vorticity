@@ -1,7 +1,7 @@
 # Write nulls
 
-Append a missing value one at a time, in bulk with a bitmap, or many at once, and pay for the
-bitmap only when there is a null to record.
+Append a missing value one at a time, in bulk with a bitmap, or many at once, and pay for the bitmap
+only when there is a null to record.
 
 ```csharp
 ColumnsBuilder<Sample> b = writer.Builder<Sample>();
@@ -17,7 +17,7 @@ b.Station.AppendNulls(7);                                  // a nullable text co
 ```
 
 `Sample` is `[VortexRecord] public partial record struct Sample(int Day, double? Celsius, string? Station)`,
-`values` is `[18.5, 19.0, 19.5, 20.0, 20.5]` and `validity` is `[0b11011]`: the third value is
+`values` is `[18.5, 19.0, 19.5, 20.0, 20.5]` and `validity` is `[0b11011]`, so the third value is
 missing. The eight temperatures read back as:
 
 ```
@@ -26,12 +26,12 @@ missing. The eight temperatures read back as:
 
 ## What happens
 
-* `ColumnBuilder<double?>` takes `Append(double)`, `Append(double?)`, `AppendNull()`,
+* `ColumnBuilder<double?>` accepts `Append(double)`, `Append(double?)`, `AppendNull()`,
   `AppendNulls(count)` and the bulk `Append(values, validity)`. The text builder has the same null
   appends ([write-text.md](write-text.md)).
-* **The bitmap is lazy.** A nullable column has none until its first null. A bulk append whose bitmap
-  has every bit set, for the rows it covers, allocates nothing either.
-* On disk the validity is decided per chunk: a chunk without a null carries none.
+* The bitmap is created lazily. A nullable column has none until its first null, and a bulk append
+  whose bitmap has every bit set for the rows it covers allocates nothing either.
+* On disk, validity is decided per chunk, so a chunk without a null carries no bitmap.
 
 ## What it costs
 
@@ -39,33 +39,34 @@ A million rows, with `Celsius` written five ways:
 
 | `Celsius` | bytes | null count in the statistics | batches carrying a bitmap |
 |---|---|---|---|
-| no null, `Append(values)` | 1 504 820 | 0 | 0 of 17 |
-| no null, `Append(values, validity)` with every bit set | 1 504 820 | 0 | 0 of 17 |
-| one null, at row 500 000 | 1 504 948 | 1 | 1 of 17 |
-| one row in fifty | 1 508 212 | 20 000 | 17 of 17 |
-| every row, `AppendNulls` | 358 980 | 1 000 000 | 17 of 17 |
+| no null, `Append(values)` | 1 504 924 | 0 | 0 of 17 |
+| no null, `Append(values, validity)` with every bit set | 1 504 924 | 0 | 0 of 17 |
+| one null, at row 500 000 | 1 505 052 | 1 | 1 of 17 |
+| one row in fifty | 1 508 316 | 20 000 | 17 of 17 |
+| every row, `AppendNulls` | 356 908 | 1 000 000 | 17 of 17 |
 
-A nullable column with no null costs exactly what a column without nulls does. One null costs 128
-bytes, and only the chunk that holds it carries a bitmap, read here as a single batch. A column
-that is entirely null is written as runs, and most of the remaining 359 KB is the other two columns.
+A nullable column with no null costs exactly what a non-nullable column costs. One null costs 128
+bytes, and only the chunk that holds it carries a bitmap, read here as a single batch. A column that
+is entirely null is written as one constant per chunk, and most of the remaining 357 KB belongs to the
+other two columns.
 
-The null count comes back three ways: from the file's statistics (`file.Statistics[1].TryGetNullCount`),
-per batch from `Column<T>.NullCount`, and as `IsAllValid` on a batch without a bitmap. Reading
-nullable columns is [nullable-columns.md](nullable-columns.md).
+The null count comes back three ways: from the file's statistics
+(`file.Statistics[1].TryGetNullCount`), per batch from `Column<T>.NullCount`, and as `IsAllValid` on a
+batch without a bitmap. Reading nullable columns is covered in [nullable-columns.md](nullable-columns.md).
 
 ## Watch out
 
-* **A non-nullable column refuses a nullable builder.** Asking for `ColumnBuilder<int?>` over `Day`
-  throws `VortexSchemaException`: *Column 'Day' is i32, which is not nullable; ask for a builder of
-  int instead of int?.* The other way round is fine: a `ColumnBuilder<double>` over a nullable
-  column writes it all valid.
-* **The value under a null is not a value.** Whatever the slot holds is written, and a reader goes by
-  the bitmap.
-* **The bitmap must cover the values.** `Append(values, validity)` needs at least one bit per value,
-  and throws `ArgumentException` otherwise; bits past the last value are ignored.
-* **`AppendNull` on a non-nullable text column throws** `VortexSchemaException`; the method exists on
-  every text builder because nullability is not part of the builder's type there.
-* A null nested record is [write-lists-and-records.md](write-lists-and-records.md).
+* A non-nullable column refuses a nullable builder. Asking for a `ColumnBuilder<int?>` over `Day`
+  throws `VortexSchemaException`: *Column 'Day' is i32, which is not nullable; ask for a builder of int
+  instead of int?.* The other way round is fine: a `ColumnBuilder<double>` over a nullable column
+  writes every row as valid.
+* The value under a null is not a value. Whatever the slot holds is written, and a reader goes by the
+  bitmap.
+* The bitmap must cover the values. `Append(values, validity)` needs at least one bit per value and
+  throws `ArgumentException` otherwise. Bits past the last value are ignored.
+* `AppendNull` on a non-nullable text column throws `VortexSchemaException`. The method exists on
+  every text builder because nullability is not part of the builder's type for text.
+* Null nested records are covered in [write-lists-and-records.md](write-lists-and-records.md).
 
 ## Run it
 

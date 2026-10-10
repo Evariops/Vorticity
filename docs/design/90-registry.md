@@ -1,76 +1,77 @@
 # Component registry
 
-Every component of the format — array encodings, layouts, extension dtypes, zone-map aggregates —
-with the edition that introduced it, whether this library reads it and writes it, and how a take is
-served. The newest frozen edition is `core2026.08.3`, read by Vortex Rust from 0.85.0; the
+Every component of the format (array encodings, layouts, extension dtypes, zone-map aggregates), with
+the edition that introduced it, whether this library reads and writes it, and how a take is served.
+The newest frozen edition is `core2026.08.3`, read by Vortex Rust 0.85.0 and later, and the
 read-forever floor is `core2025.05.0`, Vortex 0.36.0. The edition records are vendored in
 [spec/editions](../../spec/editions).
 
 ## 1. Array encodings
 
-37 ids have a decoder (`src/Vorticity/Arrays/Decoders`). **Take** says how a take of a few rows is
-served: *selective* decoders implement `DecodeSelected` and decode only the rows asked for, or only
-the frames or chunks that hold them; the others decode the chunk once per scan and gather.
+37 ids have a decoder (`src/Vorticity/Arrays/Decoders`). The take column says how a take of a few
+rows is served. Selective decoders implement `DecodeSelected` and decode only the rows asked for, or
+only the frames or chunks that hold them, while the others decode the chunk once per scan and gather.
 
 | id | role | edition | written | take |
 |---|---|---|---|---|
 | `vortex.null` | all-null | `core2025.05.0` | yes | gather |
-| `vortex.bool` | bit-packed booleans, a bit offset under 8 | `core2025.05.0` | yes | gather |
-| `vortex.primitive` | a fixed-width buffer; the plain form of numbers | `core2025.05.0` | yes | gather |
+| `vortex.bool` | bit-packed booleans, with a bit offset under 8 | `core2025.05.0` | yes | gather |
+| `vortex.primitive` | a fixed-width buffer, the plain form of numbers | `core2025.05.0` | yes | gather |
 | `vortex.decimal` | the plain form of decimals | `core2025.05.0` | yes | gather |
-| `vortex.varbinview` | 16-byte views, Arrow's string view; the plain form of text | `core2025.05.0` | yes | gather |
+| `vortex.varbinview` | 16-byte views, Arrow's string view, the plain form of text | `core2025.05.0` | yes | gather |
 | `vortex.varbin` | offsets and bytes, Arrow's string | `core2025.05.0` | yes, when smaller than views | selective |
 | `vortex.struct` | a child per field | `core2025.05.0` | yes | per field |
-| `vortex.list` | Arrow's list, offsets | `core2025.05.0` | yes, for lists whose rows abut: one offset a row | gather |
-| `vortex.listview` | offsets and sizes; the plain form of lists | `core2025.10.0` | yes, for lists whose rows do not abut, and a map's entries | gather |
+| `vortex.list` | Arrow's list, with offsets | `core2025.05.0` | yes, for lists whose rows abut, one offset per row | gather |
+| `vortex.listview` | offsets and sizes, the plain form of lists | `core2025.10.0` | yes, for lists whose rows do not abut, and for a map's entries | gather |
 | `vortex.fixed_size_list` | a fixed-size list | `core2025.10.0` | yes | gather |
 | `vortex.map` | a list view of key-value structs under the map dtype | `core2026.08.2` | yes | gather |
 | `vortex.ext` | an extension's storage | `core2025.05.0` | yes | its storage's |
-| `vortex.chunked` | a concatenation | `core2025.05.0` | no: chunks are a layout here | per chunk |
-| `vortex.constant` | one value repeated | `core2025.05.0` | yes: a chunk of one value, or of nulls only, whatever its dtype | selective |
+| `vortex.chunked` | a concatenation | `core2025.05.0` | no, since chunks are a layout here | per chunk |
+| `vortex.constant` | one value repeated | `core2025.05.0` | yes, for a chunk of one value or of nulls only, whatever its dtype | selective |
 | `vortex.masked` | a validity applied to a child | `core2025.10.0` | no | gather |
 | `fastlanes.bitpacked` | bit-packing in 1 024-value transposed blocks, with patches | `core2025.05.0` | yes | selective, through the inverse transposition |
 | `fastlanes.for` | frame of reference over bit-packing | `core2025.05.0` | yes | selective |
-| `fastlanes.rle` | run-length in FastLanes blocks | `core2025.10.0` | no: without `fastlanes.delta`, which no edition carries, its per-row indices cost more than run-end's ends at every run length | gather |
-| `fastlanes.delta` | per-lane deltas | none: written only with edition enforcement off | no | gather |
+| `fastlanes.rle` | run-length in FastLanes blocks | `core2025.10.0` | no. Without `fastlanes.delta`, which no edition carries, its per-row indices cost more than run-end's ends at every run length | gather |
+| `fastlanes.delta` | per-lane deltas | none, only written with edition enforcement off | no | gather |
 | `vortex.zigzag` | signed integers made non-negative | `core2025.05.0` | yes | selective |
 | `vortex.sequence` | `base + i × step` | `core2025.06.0` | yes | selective |
-| `vortex.runend` | run ends and values | `core2025.05.0` | yes | selective, a binary search in the ends |
+| `vortex.runend` | run ends and values | `core2025.05.0` | yes | selective, by a binary search in the ends |
 | `vortex.dict` | codes and values | `core2025.05.0` | yes | selective, on the codes |
-| `vortex.sparse` | a fill value and patches | `core2025.05.0` | yes, with a null fill: a chunk nulls dominate, when their runs would cost more | selective |
+| `vortex.sparse` | a fill value and patches | `core2025.05.0` | yes, with a null fill, for a chunk dominated by nulls when their runs would cost more | selective |
 | `vortex.bytebool` | a byte per boolean | `core2025.05.0` | no | gather |
 | `vortex.alp` | adaptive lossless floating point: decimals scaled to integers, with patches | `core2025.05.0` | yes | selective |
 | `vortex.alprd` | ALP for real doubles: high bits into a small dictionary | `core2025.05.0` | yes | selective |
 | `vortex.fsst` | a static symbol table, 255 codes and an escape | `core2025.05.0` | yes | selective, through each row's code offsets |
-| `vortex.onpair` | a pair-merging dictionary of tokens | `core2026.08.1` | yes: text a trained dictionary spells in a tenth fewer bytes than FSST | selective |
-| `vortex.datetimeparts` | days, seconds and subseconds apart | `core2025.05.0` | yes: a timestamp coarser than its unit, priced against its instants' own plan | selective |
-| `vortex.decimal_byte_parts` | decimals split by bytes; the lower part must be empty | `core2025.05.0` | yes: every decimal chunk whose values fit 64 bits | gather |
-| `vortex.zstd` | zstd frames | `core2025.06.0` | yes, a frame per block | selective, by frame |
-| `vortex.pco` | Pcodec: entropy-coded bins after a delta or a divisor | `core2025.06.0` | yes: under the size-first profile and a pin, for numbers of 16 bits and more | gather |
-| `vortex.zstd_buffers` | each buffer of another array compressed apart | draft `zstd2026.02.0` | no | gather |
-| `vortex.variant` | a variant over its storage | `core2026.08.3` | no: written as `vortex.parquet.variant` | selective |
+| `vortex.onpair` | a pair-merging dictionary of tokens | `core2026.08.1` | yes, for text a trained dictionary spells in a tenth fewer bytes than FSST | selective |
+| `vortex.datetimeparts` | days, seconds and subseconds stored apart | `core2025.05.0` | yes, for a timestamp coarser than its unit, priced against its instants' own plan | selective |
+| `vortex.decimal_byte_parts` | decimals split by bytes, the lower part empty | `core2025.05.0` | yes, for every decimal chunk whose values fit in 64 bits | gather |
+| `vortex.zstd` | zstd frames | `core2025.06.0` | yes, one frame per block | selective, by frame |
+| `vortex.pco` | Pcodec: entropy-coded bins after a delta or a divisor | `core2025.06.0` | yes, under the size-first profile and a hint, for numbers of 16 bits and more | gather |
+| `vortex.zstd_buffers` | each buffer of another array compressed separately | draft `zstd2026.02.0` | no | gather |
+| `vortex.variant` | a variant over its storage | `core2026.08.3` | no, written as `vortex.parquet.variant` | selective |
 | `vortex.parquet.variant` | the Parquet variant binary format | `core2026.08.3` | yes | gather |
-| `vortex.patched` | patches over a patch-free child | none: written only with edition enforcement off | no | gather |
+| `vortex.patched` | patches over a patch-free child | none, only written with edition enforcement off | no | gather |
 
 A patched ALP or bit-packed array written normally carries its patches in its own metadata and needs
 no `vortex.patched` node. In-memory arrays with no wire id (slices, filters, shared arrays) have
 nothing to read.
 
-**Refused by name**: the legacy two-buffer `vortex.fsst`, which keeps its codes as a nested
-`vortex.varbin` array that the arena canonicalizes on the way in, inlining short codes into views, so
-the contiguous code stream the decode needs no longer exists; every writer since the encoding
-stabilized emits the three-buffer form, and the corpus generator can produce the other if a file in
-the read-forever range ever needs it. And a shredded variant child, refused by its decoder with a
-message naming it.
+Two forms are refused by name. The first is the legacy two-buffer `vortex.fsst`, which keeps its codes
+as a nested `vortex.varbin` array. The arena canonicalizes that array on the way in, inlining short
+codes into views, so the contiguous code stream the decode needs no longer exists. Every writer since
+the encoding stabilized emits the three-buffer form, and the corpus generator can produce the other
+one if a file in the read-forever range ever needs it. The second is a shredded variant child, refused
+by its decoder with a message naming it.
 
-**A selection is pushed down, not gathered up.** A decoder that has nothing to say about a take
-decodes the node once and gathers; one with `DecodeSelected` receives the selection through the
-layout tree, in the coordinates of the row range beside it: `vortex.chunked` is the one layout that
-re-partitions rows, so the one that rebases the selection, and a dictionary layout keeps the
-selection for its codes and drops it for its shared values. Patches merge against the selection once,
-for every encoding that carries them. A decoder that falls back decodes its chunk once per scan, never
-once per row taken. Correctness is a corpus-wide differential: a scattered set of indices from every
-file, both ends and both sides of a 1 024-value block, equals what a full scan put there.
+A selection is pushed down, not gathered up. A decoder that has nothing to say about a take decodes
+the node once and gathers. One with `DecodeSelected` receives the selection through the layout tree,
+in the coordinates of the row range next to it. `vortex.chunked` is the one layout that repartitions
+rows, so it is the one that rebases the selection, and a dictionary layout keeps the selection for its
+codes and drops it for its shared values. Patches merge against the selection once, for every
+encoding that carries them. A decoder that falls back decodes its chunk once per scan, never once per
+row taken. Correctness is checked by a corpus-wide differential test: a scattered set of indices from
+every file, covering both ends and both sides of a 1 024-value block, must equal what a full scan put
+there.
 
 ## 2. Layouts
 
@@ -79,31 +80,32 @@ file, both ends and both sides of a 1 024-value block, equals what a full scan p
 | `vortex.flat` | one serialized array | `core2025.05.0` | yes |
 | `vortex.chunked` | a row-wise partition | `core2025.05.0` | yes |
 | `vortex.struct` | a child per field | `core2025.05.0` | yes |
-| `vortex.zoned` | a zone map for pruning | `core2026.08.0` | yes, a zone per block |
-| `vortex.stats` | the zone map's predecessor | `core2025.05.0` | no: no Vortex release ever emitted one |
-| `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | no ([11-write-strategy.md](11-write-strategy.md) §7) |
-| `vortex.list` | elements, offsets and validity apart | none: experimental upstream | no |
+| `vortex.zoned` | a zone map for pruning | `core2026.08.0` | yes, one zone per block |
+| `vortex.stats` | the zone map's predecessor | `core2025.05.0` | no, since no Vortex release ever emitted one |
+| `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | no (see [determinism and its limit](11-write-strategy.md#7-determinism-and-its-limit)) |
+| `vortex.list` | elements, offsets and validity stored apart | none, experimental upstream | no |
 
 ## 3. Extension dtypes and aggregates
 
-`vortex.date`, `vortex.time` and `vortex.timestamp` arrived in `core2025.05.0`, `vortex.uuid` in
-`core2026.08.3`; each is a storage dtype plus metadata, which carries the unit and the time zone
+`vortex.date`, `vortex.time` and `vortex.timestamp` arrived in `core2025.05.0`, and `vortex.uuid` in
+`core2026.08.3`. Each is a storage dtype plus metadata, which carries the unit and the time zone
 ([07-dotnet-mapping.md](07-dotnet-mapping.md)).
 
-The zone-map aggregates — `vortex.min`, `vortex.max`, `vortex.bounded_min`, `vortex.bounded_max`,
-`vortex.nan_count`, `vortex.null_count` — arrived with `vortex.zoned` in `core2026.08.0`. An unknown
-aggregate disables the pruning it would have given and never fails the read. A file-level sum lives
-in a fixed field of `ArrayStats`, not in an aggregate.
+The zone-map aggregates (`vortex.min`, `vortex.max`, `vortex.bounded_min`, `vortex.bounded_max`,
+`vortex.nan_count`, `vortex.null_count`) arrived with `vortex.zoned` in `core2026.08.0`. An unknown
+aggregate disables the pruning it would have given and never fails the read. A file-level sum lives in
+a fixed field of `ArrayStats`, not in an aggregate.
 
 ## 4. What an unknown id gets told
 
-An id this library does not decode raises `VortexUnsupportedException` naming the id and its kind,
-when a read needs it ([08-semantics.md](08-semantics.md) §4). Every id any Rust release can write has a
-reader, so an id that reaches that throw comes from a future edition.
+An id this library does not decode raises a `VortexUnsupportedException` naming the id and its kind,
+when a read needs it (see [unknown
+components](08-semantics.md#4-unknown-components-resolve-lazily-fail-on-use)). Every id any Rust
+release can write has a reader, so an id that reaches that exception comes from a future edition.
 
 ## 5. The writer's schemes and their ids
 
-The writer's schemes are named after algorithms, and editions constrain ids:
+The writer's schemes are named after algorithms, and editions constrain the ids:
 
 | scheme | writes |
 |---|---|
@@ -111,7 +113,7 @@ The writer's schemes are named after algorithms, and editions constrain ids:
 | progression | `vortex.sequence` |
 | runs | `vortex.runend` |
 | nulls on nine rows in ten or more | `vortex.sparse`, with a null fill |
-| a decimal whose values fit 64 bits | `vortex.decimal_byte_parts`, over the integers' own scheme |
+| a decimal whose values fit in 64 bits | `vortex.decimal_byte_parts`, over the integers' own scheme |
 | a timestamp coarser than its unit | `vortex.datetimeparts`, each part under its own scheme |
 | bit-packing, in the raw, zigzag or frame-of-reference domain | `fastlanes.bitpacked`, under `vortex.zigzag` or `fastlanes.for` |
 | dictionary | `vortex.dict` |
@@ -119,39 +121,42 @@ The writer's schemes are named after algorithms, and editions constrain ids:
 | FSST | `vortex.fsst`, its row tables under the integer schemes |
 | OnPair | `vortex.onpair`, its codes, offsets and lengths under the integer schemes |
 | zstd | `vortex.zstd` |
+| pco, under the size-first profile or a hint | `vortex.pco` |
 | the plain form | `vortex.primitive`, `vortex.bool`, `vortex.decimal`, and for text `vortex.varbin` or `vortex.varbinview`, whichever is smaller |
 
 A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an
 extension's storage, a dictionary's or a run's values, a sparse chunk's positions and values, a
-decimal's integers and a timestamp's parts. Validity bitmaps are one bit a row and stay
-plain. How the chooser prices each is [11-write-strategy.md](11-write-strategy.md) §3.4. Over the 876
-files of the conformance corpus, the writer's files are smaller than the reference's, held under a
-ceiling by `WrittenSizeTests`, which prints the ratio and the files worst by bytes lost.
+decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain. How
+the chooser prices each scheme is described in [choosing
+encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials). Over the 876 files of
+the conformance corpus, the writer's files are smaller than the reference's, held under a ceiling by
+`WrittenSizeTests`, which prints the ratio and the files that lose the most bytes.
 
 ## 6. Edition targeting
 
-`VortexWriteOptions.TargetEdition` names the frozen edition every component of a file must belong
-to. The edition records are transcribed into `EditionRegistry`, which stores which edition introduced
-each id, so that membership is one comparison.
+`VortexWriteOptions.TargetEdition` names the frozen edition every component of a file must belong to.
+The edition records are transcribed into `EditionRegistry`, which stores which edition introduced
+each id, so membership is a single comparison.
 
-**The candidate schemes are derived from the target before anything is priced**, as upstream's writer
-does: otherwise the chooser would elect a scheme on suitable data and the write would fail at
-serialization. The allowlist at serialization then fires only on a bug, and **fails the write** rather
-than produce a file its target's readers cannot open: array and layout ids are checked where every id
-of the file is interned, extension dtypes against the schema when the writer is created, aggregates
-where the zone map is written. Every failure names the id and the edition that introduced it.
+The candidate schemes are derived from the target before anything is priced, as upstream's writer
+does, because otherwise the chooser would pick a scheme on suitable data and the write would fail at
+serialization. The allowlist at serialization then only fires on a bug, and it fails the write rather
+than produce a file its target's readers cannot open. Array and layout ids are checked where every id
+of the file is interned, extension dtypes against the schema when the writer is created, and
+aggregates where the zone map is written. Every failure names the id and the edition that introduced
+it.
 
-The default is **`core2026.08.3`**, the newest frozen edition, which the reference writer also
-defaults to, and the first with `vortex.uuid`. Lower targets are honoured, not approximated:
+The default is `core2026.08.3`, the newest frozen edition, which the reference writer also defaults
+to, and the first one with `vortex.uuid`. Lower targets are honoured, not approximated:
 
 | target | what changes |
 |---|---|
-| `core2026.08.0` and later | nothing: this is what the writer emits |
-| below `core2026.08.0` | the zone map is **omitted**, since `vortex.zoned` and its aggregates arrived then; `vortex.stats` is not written instead, since no release ever emitted it and pruning's absence costs no correctness |
-| below `core2025.10.0` | a fixed-size list column **fails the write**, and so does a list whose rows do not abut: their forms, `vortex.fixed_size_list` and `vortex.listview`, arrived then; a list whose rows abut, which is every list a builder fills, goes out as `vortex.list` |
+| `core2026.08.0` and later | nothing, this is what the writer emits |
+| below `core2026.08.0` | the zone map is omitted, since `vortex.zoned` and its aggregates arrived then. `vortex.stats` is not written instead, since no release ever emitted it, and the absence of pruning costs no correctness |
+| below `core2025.10.0` | a fixed-size list column fails the write, and so does a list whose rows do not abut, since their forms, `vortex.fixed_size_list` and `vortex.listview`, arrived then. A list whose rows abut, which is every list a builder fills, goes out as `vortex.list` |
 | below `core2026.08.2`, `core2026.08.3` | a map, a variant or a uuid column fails the write |
-| below `core2025.06.0` | progressions and zstd are not candidates |
+| below `core2025.06.0` | progressions, zstd and pco are not candidates |
 
 `EditionTargetTests` asserts this on the written file, reading its encoding tables back, rather than at
-the call sites: a writer that checked itself and then emitted something else would pass a test
+the call sites, since a writer that checked itself and then emitted something else would pass a test
 written the other way round.

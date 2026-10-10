@@ -18,23 +18,23 @@ await using (KeyCursor<int> cursor = await file.Scan<Reading>().Keys(r => r.Day)
     }
 
     Console.WriteLine($"rank of 900: {await cursor.RankAsync(900)}");
-    Console.WriteLine($"{await cursor.KeyCountAsync()} distinct keys");
+    Console.WriteLine($"{await cursor.KeyCountAsync()} entries share key {cursor.Key}");
 }
 ```
 
-A cursor is not a scan. It walks the **keys** of one column in the file's order and tells you which
-row each one is at; you read the row afterwards if you want it. It is the shape for a lookup, a
-range walk, or "how many values are below this one".
+A cursor is not a scan. It walks the keys of one column in order and tells you which row each one is
+at. You read the row afterwards if you need it. This is the right tool for a lookup, a range walk, or
+a question like "how many values are below this one".
 
 `Keys(r => r.Day)` infers the key type from the member, so the cursor is a `KeyCursor<int>` and
-`SeekAsync` takes an `int`. On the demonstration file, whose `Day` rises by one every thousand rows:
+`SeekAsync` takes an `int`. On the demonstration file, whose `Day` grows by one every thousand rows:
 
 ```
 first key 0 at row 0
 next distinct key 1 at row 1000
 seek to 900 landed on 900 at row 900000
 rank of 900: 900000
-1000 distinct keys
+1000 entries share key 900
 entry of rank 123456: key 123 at row 123456
 last key 999 at row 999999
 an exact seek to a key that is not there: False, cursor valid: False
@@ -45,23 +45,22 @@ seek at or before 700: key 700 at row 700999, the last of its run
 
 ## The moves
 
-Every move is a `ValueTask<bool>`: `false` means there was nowhere to go, and `IsValid` is then
-false.
+Every move is a `ValueTask<bool>`. `false` means there was nowhere to go, and `IsValid` is then false.
 
 | move | what it does |
 |---|---|
-| `SeekFirstAsync`, `SeekLastAsync` | the ends |
+| `SeekFirstAsync`, `SeekLastAsync` | go to either end |
 | `SeekAsync(key, op)` | `Exact`, `AtOrAfter`, `After`, `AtOrBefore`, `Before` |
-| `SeekRankAsync(n)` | the entry at position *n*, counting from zero |
-| `NextAsync`, `PrevAsync` | one entry |
-| `NextKeyAsync`, `PrevKeyAsync` | the first entry of the next or previous distinct key |
-| `RankAsync(key)` | how many entries have a smaller key |
-| `KeyCountAsync()` | how many distinct keys there are |
+| `SeekRankAsync(n)` | go to the entry at position *n*, counting from zero |
+| `NextAsync`, `PrevAsync` | move by one entry |
+| `NextKeyAsync`, `PrevKeyAsync` | move to the first entry of the next or previous distinct key |
+| `RankAsync(key)` | count the entries whose key is smaller |
+| `KeyCountAsync()` | count the entries that share the current key, without moving |
 
-A key repeated over many rows is many entries, ordered by row: `Exact` lands on the first of them
-and `AtOrBefore` on the last, which is why the seek to 700 above stops at row 700 999. Two ranks
-count a range without walking it: `RankAsync(102) - RankAsync(100)` is the 2 000 rows whose day is
-100 or 101. `Row` is then the argument to hand to [`Rows(...)`](read-rows-by-index.md) on a scan.
+A key repeated over many rows is many entries, ordered by row. `Exact` lands on the first of them and
+`AtOrBefore` on the last, which is why the seek to 700 above stops at row 700 999. Two ranks count a
+range without walking it: `RankAsync(102) - RankAsync(100)` is the 2 000 rows whose day is 100 or
+101. `Row` is the value to pass to [`Rows(...)`](read-rows-by-index.md) on a scan.
 
 ## What the file needs
 
@@ -79,24 +78,24 @@ day: source SortedColumn, 1 run, 1000000 entries, rows reachable: True
   turned down Dictionary: it holds keys without rows, which only a Distinct() cursor takes
 ```
 
-Two sources serve a cursor with rows:
+Two sources can serve a cursor that returns rows:
 
-* **A sorted column.** The file's statistics say the column is sorted, so the column is its own
-  index. It costs nothing to write: order the rows by the column. A seek is a binary search over
-  the zone maps and one block decoded; a thousand seeks took 3.6 ms here.
-* **A sorted-runs index**, which the writer builds when asked:
+* A sorted column: when the file statistics say a column is sorted, the column is its own index, and
+  it costs nothing to write: just order the rows by that column. A seek is a binary search over the
+  zone maps followed by one decoded block. A thousand seeks took 3.8 ms here.
+* A sorted-runs index, which the writer builds when asked:
 
   ```csharp
   new VortexWriteOptions { Indexes = IndexPolicy.None.SortedRuns(Reading.ColumnNames.City) }
   ```
 
-  On a 100 000-row copy of the readings whose `City` cycles row by row, that index is two runs
-  and 100 000 entries, and the cursor walks the eight cities in order, each with the rank of its
-  first entry. It is not free: it took 212 880 bytes against 154 708 bytes of data. The default
-  budget of 100 per mille abandoned it, and the write report said so; it was built only once the
-  budget was raised with `WithBudgetPerMille(20_000)`. The budget weighs the index before it is
-  encoded, 2 637 485 bytes here, so the figure to raise it by is the report's, not the file's.
-  [indexes.md](indexes.md) covers the budget.
+  On a 100 000-row copy of the readings whose `City` changes every row, that index has two runs and
+  100 000 entries, and the cursor walks the eight cities in order, each with the rank of its first
+  entry. It is not free. It took 212 880 bytes against 154 708 bytes of data. The default budget of
+  100 per mille dropped it, and the write report said so. It was only built once the budget was
+  raised with `WithBudgetPerMille(20_000)`. The budget weighs the index before it is encoded, here
+  2 637 485 bytes, so use the figure from the report, not the size on disk, when deciding how far to
+  raise it. [indexes.md](indexes.md) covers the budget.
 
 A column with neither has no cursor:
 
@@ -109,18 +108,18 @@ celsius: source None
   file with VortexFileIndexer.AppendIndexesAsync.
 ```
 
-`Distinct()` on the builder asks for one stop per key instead of one per entry. A postings index or
-a dictionary can serve it, since it needs keys without rows; on the sorted `Day` column it stops
-1 000 times and still knows its rows (`HasRows` is true).
+`Distinct()` on the builder asks for one stop per key instead of one per entry. A postings index or a
+dictionary can serve it, since it needs keys without rows. On the sorted `Day` column it stops 1 000
+times and still knows its rows (`HasRows` is true).
 
 ## Over a result
 
 The scan of a query's result, such as a group by read through `As<TRecord>()`
-([aggregates.md](aggregates.md)), has no zone map and no index. Its cursor is the one that sorts:
+([aggregates.md](aggregates.md)), has no zone map and no index, so its cursor is the one that sorts.
 `OpenAsync` runs the query, keeps the column's non-null values, and sorts them in memory unless they
 already arrive in order, as they do from a group by that streams on that key. The plan's source is
-`InMemory`. `Row` is a position in the order the result is delivered, which `Rows(...)` on a scan
-of the same result reads. A bool or a decimal column has no key order and throws
+then `InMemory`. `Row` is a position in the order the result is delivered, which `Rows(...)` on a
+scan of the same result can read. A bool or a decimal column has no key order and throws
 `NotSupportedException`.
 
 ## Batches in key order
@@ -129,8 +128,8 @@ of the same result reads. A bool or a decimal column has no key order and throws
 Scan<Reading> ordered = file.Scan<Reading>().OrderByDescending(r => r.Day);
 ```
 
-The batches then arrive in the key's order rather than the file's, from the same sources a cursor
-uses. `ExplainAsync().Order` says which:
+The batches then arrive in key order instead of file order, from the same sources a cursor uses.
+`ExplainAsync().Order` says which one:
 
 ```
 ordered scan: source SortedColumn, 1 run, 1000000 entries, descending True
@@ -138,24 +137,24 @@ ordered scan: source SortedColumn, 1 run, 1000000 entries, descending True
   123 batches
 ```
 
-A null key comes last in either direction. An aggregation ignores the order: it gives the same
-answer either way, and [aggregates.md](aggregates.md) says what order a group by returns.
+A null key comes last in both directions. An aggregation ignores the order and gives the same answer
+either way, and [aggregates.md](aggregates.md) explains what order a group by returns.
 
 ## Watch out
 
-* **`Keys` takes the whole column.** On a scan that already has a `Where` or a `Rows`, it throws
+* `Keys` takes the whole column. On a scan that already has a `Where` or a `Rows`, it throws
   `InvalidOperationException: A key cursor walks the whole column; build it on a scan without Where
   or Rows.`
 * A failed seek leaves the cursor invalid, not where it was. Seek again before reading `Key`.
-* The order of keys is the file's order for the type, and there is no comparer on the cursor:
-  compare keys you got from the cursor, which already arrive in that order. A text key is ordered
-  by its UTF-8 bytes.
-* A cursor is not thread-safe, and it holds its source until disposed: `await using` it.
+* Keys follow the file's order for their type, and the cursor takes no comparer. Compare the keys
+  you get from the cursor, which already arrive in that order. A text key is ordered by its UTF-8
+  bytes.
+* A cursor is not thread-safe, and it holds its source until it is disposed, so use `await using`.
 * `SeekAsync` refuses a null key with `ArgumentNullException`.
 
-For the design — sources of order, the cursor's positioning rules, key-ordered delivery — see
-[12-index-reads.md](../design/12-index-reads.md), and §5.7 of
-[14-public-api.md](../design/14-public-api.md) for the surface.
+The design behind this page (the sources of order, how a cursor is positioned, delivery in key
+order) is in [12-index-reads.md](../design/12-index-reads.md), and the surface in
+[the public API design](../design/14-public-api.md#57-the-key-cursor).
 
 ## Run it
 

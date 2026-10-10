@@ -13,8 +13,10 @@ namespace Vorticity;
 /// <typeparam name="TKey">The key: the symbol of one column, or the tuple of symbols of a composite key.</typeparam>
 /// <remarks>
 /// A key read from a dictionary block groups by code, a key the statistics say is sorted groups by
-/// run, any other key by hash; the groups arrive in key order, nulls last, in the first two cases,
-/// and in an unspecified order otherwise. The memory is one state per group.
+/// run, and any other key by hash. Without an <c>OrderBy</c> the groups come in no promised order:
+/// a group by that streams on a sorted key delivers them in that key's order, and any other in an
+/// unspecified one. The memory is one state per group, or only the groups still open on a key that
+/// streams.
 /// </remarks>
 public sealed class GroupedScan<TRecord, TKey>
     where TRecord : IVortexRecord<TRecord>

@@ -145,7 +145,7 @@ internal static partial class Indexes
         catch (VortexException e)
         {
             Console.WriteLine($"a required index over its budget: {e.GetType().Name}: {e.Message}");
-            Console.WriteLine($"  the file is left behind: {System.IO.File.Exists(path)}");
+            Console.WriteLine($"  the path still holds the file written before it: {System.IO.File.Exists(path)}");
         }
 
         try

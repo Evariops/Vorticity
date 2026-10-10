@@ -1,31 +1,31 @@
 # Getting started
 
-Declare a record, write a hundred thousand rows, read them back, take a mean and count a filter.
-One file of code, a few minutes, and the only page that shows both directions.
+This page declares a record, writes a hundred thousand rows, reads them back, computes a mean and
+counts the rows of a filter. It takes one file of code and a few minutes, and it is the only page
+that shows both directions at once.
 
 ## Reference the library
 
-The library ships on nuget.org. Reference its packages from a project that targets .NET 11; the
-generator is a build-time dependency, which `PrivateAssets` keeps out of whatever your project
-packs:
+The packages ship on nuget.org. Reference them from a project that targets .NET 11. The generator
+only runs at build time, and `PrivateAssets` keeps it out of whatever your project packs:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Vorticity" Version="0.1.0" />
-  <PackageReference Include="Vorticity.Generators" Version="0.1.0" PrivateAssets="all" />
+  <PackageReference Include="Vorticity" Version="0.5.1" />
+  <PackageReference Include="Vorticity.Generators" Version="0.5.1" PrivateAssets="all" />
 </ItemGroup>
 ```
 
-`Vorticity` is the whole format: opening, scanning, filtering, aggregating, indexes and the
-writer, with `System.IO.Hashing` and `Vorticity.Zstd`, this repository's managed Zstandard, as its
-only dependencies. `Vorticity.Generators` runs at build time only: it turns a `[VortexRecord]`
-type into the code that reads and writes it, and ships the analyzers. The two other packages are
-separate subjects, both experimental, and referenced the same way at the same version as the core:
-`Vorticity.Dataset` for a versioned dataset over an object store ([datasets.md](datasets.md)),
-`Vorticity.RowEncoding` for byte-sortable keys ([row-keys.md](row-keys.md)).
+`Vorticity` is the whole format: opening, scanning, filtering, aggregating, indexes and the writer.
+Its only dependencies are `System.IO.Hashing` and `Vorticity.Zstd`, the managed Zstandard of this
+repository. `Vorticity.Generators` turns a `[VortexRecord]` type into the code that reads and writes
+it, and ships the analyzers. Two more packages cover separate subjects. Both are experimental and
+referenced the same way, at the same version as the core: `Vorticity.Dataset` for a versioned
+dataset over an object store ([datasets.md](datasets.md)), and `Vorticity.RowEncoding` for
+byte-sortable keys ([row-keys.md](row-keys.md)).
 
-Everything that touches bytes is asynchronous: a file is opened with `await`, a scan is consumed
-with `await foreach`, a writer is fed with `WriteAsync`. There is no synchronous path to look for.
+Everything that touches bytes is asynchronous. A file is opened with `await`, a scan is consumed with
+`await foreach`, and a writer is fed with `WriteAsync`. There is no synchronous variant to look for.
 
 ## Declare a record
 
@@ -34,11 +34,11 @@ with `await foreach`, a writer is fed with `WriteAsync`. There is no synchronous
 public partial record struct Reading(int Day, double? Celsius, string City);
 ```
 
-A record is a schema, not a row: its members are the columns, in declaration order, under their
-own names. `double?` makes `Celsius` a nullable column; `int` and `string` are not nullable. The
-type must be `partial`, because the generator adds the `IVortexRecord<Reading>` implementation and
-the members the examples below use (`r.Celsius`, the deconstruction of a batch).
-[records.md](records.md) says what else a record can hold.
+A record is a schema rather than a row. Its members are the columns, in declaration order and under
+their own names. `double?` makes `Celsius` a nullable column, while `int` and `string` are not
+nullable. The type must be `partial`, because the generator adds the `IVortexRecord<Reading>`
+implementation and the members the examples below rely on (`r.Celsius`, the deconstruction of a
+batch). [records.md](records.md) lists everything a record can hold.
 
 ## Write a file
 
@@ -60,8 +60,8 @@ await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Readin
 }
 ```
 
-`CompleteAsync` is what makes the bytes a file: it writes the last block, the statistics, the zone
-maps and the footer. A writer disposed without it deletes what it wrote.
+`CompleteAsync` is what turns the bytes into a file. It writes the last block, the statistics, the
+zone maps and the footer. A writer disposed without it deletes what it wrote.
 
 ## Read it back
 
@@ -86,7 +86,7 @@ long hot = await file.Scan<Reading>().Where(r => r.Celsius > 45.0 && r.City == "
 It prints:
 
 ```
-wrote 100000 rows in 157980 bytes
+wrote 100000 rows in 157988 bytes
 struct{Day: i32, Celsius: f64?, City: utf8}, 100000 rows
 3 batches, 100000 rows, 2000 without a temperature
 mean 30.00 degrees
@@ -95,24 +95,27 @@ mean 30.00 degrees
 
 ## What happened
 
-* **The rows became columns.** About 1.85 MB of values became a file of 157 980 bytes, because the
-  writer chose an encoding per column and per chunk instead of storing what it was handed.
-* **The scan came back in batches, not rows**: 3 of them, one per chunk the writer made of the
-  file's 8 192-row blocks. `day`, `celsius` and `city` are `Column<T>` values over the decoded
-  batch. They are borrowed: valid inside the loop body, and the compiler refuses to let one outlive
-  it ([scan-a-table.md](scan-a-table.md)).
-* **`AverageAsync` ran inside the scan.** No batch reached the caller; the nulls were skipped for you.
-  An aggregate is an operator, not a loop you write ([aggregates.md](aggregates.md)).
-* **The filter is not a delegate.** The lambda given to `Where` runs once, when the scan is built,
-  over a symbolic record: `r.Celsius` is a `Sym<double?>`, and `>` records a predicate instead of
-  comparing. A breakpoint inside the lambda sees `Sym<double?>`, not values, and hits once. What
-  compiles is exactly what the scan can push down ([filter-rows.md](filter-rows.md)).
+The rows became columns. About 1.85 MB of values turned into a file of 157 988 bytes, because the
+writer picked an encoding for each column and each chunk instead of storing what it was handed.
+
+The scan came back in batches, not rows: 3 of them, one per chunk the writer made out of the file's
+8 192-row blocks. `day`, `celsius` and `city` are `Column<T>` values over the decoded batch. They are
+borrowed, valid inside the loop body only, and the compiler refuses to let one outlive it
+([scan-a-table.md](scan-a-table.md)).
+
+`AverageAsync` ran inside the scan. No batch reached your code, and the nulls were skipped for you.
+An aggregate is an operator of the scan, not a loop you write ([aggregates.md](aggregates.md)).
+
+The filter is not a delegate. The lambda given to `Where` runs once, when the scan is built, over a
+symbolic record: `r.Celsius` is a `Sym<double?>`, and `>` records a predicate instead of comparing
+values. A breakpoint inside the lambda sees `Sym<double?>` rather than values, and it hits once.
+Whatever compiles is exactly what the scan can push down ([filter-rows.md](filter-rows.md)).
 
 ## Next
 
-* [open-a-file.md](open-a-file.md): the ways in, and what an open reads.
+* [open-a-file.md](open-a-file.md): the ways to open a file, and what an open reads.
 * [scan-a-table.md](scan-a-table.md): the loop above, and who owns what.
-* [filter-rows.md](filter-rows.md): how not to read the rows you do not want.
+* [filter-rows.md](filter-rows.md): how to avoid reading the rows you do not want.
 * [write-a-file.md](write-a-file.md): the writer, column by column.
 
 ## Run it

@@ -3,24 +3,24 @@
 Zstandard ([RFC 8878](https://www.rfc-editor.org/rfc/rfc8878)) compression and decompression for .NET,
 in fully managed C#.
 
-- **No native code.** No bundled library, no P/Invoke: Vorticity.Zstd runs wherever .NET runs, and it is
-  trimming- and Native AOT-compatible.
-- **The same frames as libzstd.** At every compression level, Vorticity.Zstd writes exactly the bytes that
-  libzstd 1.5.7 writes. That holds with dictionaries, with long-distance matching and in multithreaded
+- It contains no native code: no bundled library and no P/Invoke, so it runs wherever .NET runs, and
+  it is compatible with trimming and Native AOT.
+- It writes the same frames as libzstd. At every compression level, Vorticity.Zstd writes exactly the
+  bytes that libzstd 1.5.7 writes, with dictionaries, with long-distance matching and in multithreaded
   compression.
-- **Fast.** Decompression is 1.11–1.21× as fast as libzstd on the Silesia corpus, and 1.36–1.52× on
-  small frames with a dictionary. Compression of large inputs is within a few percent of libzstd. See
-  [Performance](#performance).
-- **Allocation-free.** A warm compressor or decompressor allocates nothing.
+- It is fast. Decompression is 1.11–1.21× as fast as libzstd on the Silesia corpus, and 1.36–1.52× on
+  small frames with a dictionary. Compression of large inputs is within a few percent of libzstd (see
+  [Performance](#performance)).
+- A warm compressor or decompressor allocates nothing.
 
-Vorticity.Zstd is an independent implementation of the format. It is not affiliated with the zstd project or
-with Meta.
+Vorticity.Zstd is an independent implementation of the format. It is not affiliated with the zstd
+project or with Meta.
 
 ## Requirements
 
-Vorticity.Zstd targets .NET 11 (`net11.0`). Its only dependency is `System.IO.Hashing`, for the XXH64 frame
-checksums. It ships with Vorticity, which reads and writes `vortex.zstd` through it, at the same
-version; from source, reference `src/Vorticity.Zstd/Vorticity.Zstd.csproj`.
+Vorticity.Zstd targets .NET 11 (`net11.0`). Its only dependency is `System.IO.Hashing`, for the XXH64
+frame checksums. It ships with Vorticity, which reads and writes `vortex.zstd` through it, at the same
+version. From source, reference `src/Vorticity.Zstd/Vorticity.Zstd.csproj`.
 
 ## Usage
 
@@ -48,8 +48,9 @@ if (ZstdDecompressor.TryGetFrameContentSize(frame, out ulong size))
 | `DestinationTooSmall` | The content does not fit in the destination. |
 | `InvalidData` | The source is not a valid frame. |
 
-After `NeedMoreData` or `DestinationTooSmall`, nothing has been consumed: call again with the whole
-frame or a larger destination. Checksums are verified when a frame has one. A skippable frame decodes to nothing.
+After `NeedMoreData` or `DestinationTooSmall`, nothing has been consumed, so call again with the whole
+frame or a larger destination. Checksums are verified when a frame has one. A skippable frame decodes
+to nothing.
 
 ### Compression
 
@@ -60,7 +61,7 @@ byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
 compressor.Compress(content, frame, out _, out int length);   // the frame is frame[..length]
 ```
 
-`Compress` writes one whole frame per call. The frame always declares its content size. Set
+`Compress` writes one whole frame per call, and the frame always declares its content size. Set
 `AppendChecksum = true` to end each frame with a checksum of its content. Level 0 selects
 `ZstdCompressor.DefaultLevel`, which is 3.
 
@@ -73,20 +74,21 @@ var compressor = new ZstdCompressor(level: 3, dictionary);
 var decompressor = new ZstdDecompressor(dictionary);
 ```
 
-The dictionary is prepared once, in the constructor, and then used for every frame. Vorticity.Zstd does not
-train dictionaries: use `zstd --train`, or `ZstandardDictionary.Train` from `System.IO.Compression`.
+The dictionary is prepared once, in the constructor, and then used for every frame. Vorticity.Zstd
+does not train dictionaries, so use `zstd --train`, or `ZstandardDictionary.Train` from
+`System.IO.Compression`.
 
-A decompressor can also take the dictionary with each frame, which lets one decompressor serve frames of
-any dictionary:
+A decompressor can also take the dictionary with each frame, which lets one decompressor serve frames
+of any dictionary:
 
 ```csharp
 var decompressor = new ZstdDecompressor();
 OperationStatus status = decompressor.Decompress(frame, content, dictionary, out int consumed, out int written);
 ```
 
-The dictionary is copied for the call and not kept. Its tables are kept, for the next calls that give the
-same dictionary: from then on, a frame costs a copy of its dictionary and nothing more, as if the
-decompressor had been created with it. Another dictionary rebuilds the tables without allocating.
+The dictionary is copied for the call and not kept, but its tables are kept for the next calls that
+pass the same dictionary. From then on, a frame costs a copy of its dictionary and nothing more, as if
+the decompressor had been created with it. Another dictionary rebuilds the tables without allocating.
 
 ### Parallel compression
 
@@ -95,34 +97,34 @@ int length = await compressor.CompressAsync(content, frame, maxDegreeOfParalleli
 ```
 
 `CompressAsync` cuts the source into jobs and compresses them on the thread pool. It writes the same
-frame as libzstd with worker threads (`ZSTD_c_nbWorkers`), so the frame does not depend on the degree of
-parallelism. Up to 512 KiB, it writes the same frame as `Compress`.
+frame as libzstd with worker threads (`ZSTD_c_nbWorkers`), so the frame does not depend on the degree
+of parallelism. Up to 512 KiB, it writes the same frame as `Compress`.
 
 ### Threading
 
-Instances are not thread-safe: use one per thread, or one per concurrent operation.
+Instances are not thread-safe. Use one per thread, or one per concurrent operation.
 
 ## Compatibility with libzstd
 
-**Decompression** follows libzstd's decoding and validation, so the two accept and reject the same
-frames. Vorticity.Zstd additionally enforces RFC 8878's limit on the size of a block in every case; libzstd
-enforces it only partly in one-shot decoding.
+Decompression follows libzstd's decoding and validation, so the two accept and reject the same frames.
+Vorticity.Zstd also enforces RFC 8878's limit on the size of a block in every case, where libzstd only
+partly enforces it in one-shot decoding.
 
-**Compression** reproduces libzstd 1.5.7's `ZSTD_compress` byte for byte, at every level from -131072
-to 22. This covers:
+Compression reproduces libzstd 1.5.7's `ZSTD_compress` byte for byte, at every level from -131072 to
+22. This covers:
 
-- the nine strategies, from `fast` to `btultra2`;
-- the pre- and post-block splitters;
-- the long-distance matching that libzstd turns on at level 22 for sources over 64 MiB.
+- the nine strategies, from `fast` to `btultra2`
+- the pre- and post-block splitters
+- the long-distance matching that libzstd turns on at level 22 for sources over 64 MiB
 
-With a dictionary, Vorticity.Zstd writes the frames libzstd writes when the dictionary is prepared at the same
-level (`ZSTD_createCDict`, then `ZSTD_CCtx_refCDict`). That is also how the `ZstandardDictionary` of
-`System.IO.Compression` uses it. `CompressAsync` reproduces libzstd's multithreaded compression (zstdmt),
-including dictionaries and long-distance matching.
+With a dictionary, Vorticity.Zstd writes the frames libzstd writes when the dictionary is prepared at
+the same level (`ZSTD_createCDict`, then `ZSTD_CCtx_refCDict`), which is also how the
+`ZstandardDictionary` of `System.IO.Compression` uses it. `CompressAsync` reproduces libzstd's
+multithreaded compression (zstdmt), dictionaries and long-distance matching included.
 
-**Limitations**
+The limitations are these:
 
-- There is no streaming API: a frame is compressed or decompressed in one call, from and into memory.
+- There is no streaming API. A frame is compressed or decompressed in one call, from and into memory.
 - Sources and frames must fit in a span, so they are limited to 2 GiB.
 - Compression takes a level, a dictionary and the checksum option. libzstd's advanced parameters, such
   as the window size or the strategy, are not exposed.
@@ -142,26 +144,26 @@ The ranges span compression levels 1 to 19.
 
 The measurements use the data of zstd's own benchmarks, which `bench/zstd-corpus.sh` downloads:
 
-- **silesia.tar**: the [Silesia corpus](https://sun.aei.polsl.pl//~sdeor/index.php?page=silesia), which
-  the benchmarks in zstd's README use. It is taken as one tar of 211,948,032 bytes, compressed into one
-  frame.
-- **github**: the 500 JSON records of GitHub users from zstd's regression tests, 407,963 bytes in all.
+- silesia.tar is the [Silesia corpus](https://sun.aei.polsl.pl//~sdeor/index.php?page=silesia), which
+  the benchmarks in zstd's README use, taken as one tar of 211,948,032 bytes compressed into one frame.
+- github is the 500 JSON records of GitHub users from zstd's regression tests, 407,963 bytes in all.
   Each record is its own frame, and all frames go through one compressor or decompressor.
-- **github + dict**: the same records with `github.dict`, the 110 KiB dictionary that zstd's tests use
-  with them.
+- github + dict is the same records with `github.dict`, the 110 KiB dictionary zstd's tests use with
+  them.
 
 Three implementations are compared:
 
-- libzstd 1.5.7 compiled at `-O3` with Apple clang 21. This is the reference.
-- `ZstandardEncoder` and `ZstandardDecoder` from .NET 11, which wrap the libzstd that the runtime ships.
-- Vorticity.Zstd, compiled with Native AOT.
+- libzstd 1.5.7 compiled at `-O3` with Apple clang 21, the reference
+- `ZstandardEncoder` and `ZstandardDecoder` from .NET 11, which wrap the libzstd the runtime ships
+- Vorticity.Zstd, compiled with Native AOT
 
 The machine is an Apple M4 Pro running macOS 26.7, on one thread. The three implementations run in one
-process and take turns, and each figure is the median of its rounds. MB/s are millions of bytes of
+process and take turns, and each figure is the median of its rounds. MB/s means millions of bytes of
 uncompressed data per second. At every level the three write identical frames, which the benchmark
-checks, so one ratio holds for all of them. Decompression decodes libzstd's frames at each level.
+checks, so one compression ratio holds for all of them. Decompression decodes libzstd's frames at each
+level.
 
-**Compression ratio**
+### Compression ratio
 
 | level | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -169,7 +171,7 @@ checks, so one ratio holds for all of them. Decompression decodes libzstd's fram
 | github | 2.866 | 2.992 | 3.019 | 3.019 | 3.019 | 3.070 | 3.063 | 3.070 |
 | github + dict | 9.886 | 9.922 | 10.527 | 10.524 | 10.344 | 10.225 | 10.764 | 10.760 |
 
-**Compression, MB/s**
+### Compression, MB/s
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -183,7 +185,7 @@ checks, so one ratio holds for all of them. Decompression decodes libzstd's fram
 |  | .NET 11 (System.IO.Compression) | 1149 | 1096 | 439 | 230 | 143 | 70.6 | 5.92 | 5.98 |
 |  | Vorticity.Zstd (Native AOT) | 1133 | 1035 | 395 | 202 | 133 | 88.7 | 7.82 | 7.80 |
 
-**Compression, speedup over libzstd 1.5.7 (native)**
+### Compression, speedup over libzstd 1.5.7 (native)
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -194,7 +196,7 @@ checks, so one ratio holds for all of them. Decompression decodes libzstd's fram
 | github + dict | .NET 11 (System.IO.Compression) | 0.97× | 0.97× | 0.99× | 0.99× | 0.99× | 1.00× | 0.96× | 0.95× |
 |  | Vorticity.Zstd (Native AOT) | 0.95× | 0.91× | 0.89× | 0.87× | 0.92× | 1.26× | 1.26× | 1.25× |
 
-**Decompression, MB/s**
+### Decompression, MB/s
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -208,7 +210,7 @@ checks, so one ratio holds for all of them. Decompression decodes libzstd's fram
 |  | .NET 11 (System.IO.Compression) | 2781 | 2849 | 2961 | 2520 | 2431 | 2556 | 2946 | 2982 |
 |  | Vorticity.Zstd (Native AOT) | 4993 | 5361 | 5820 | 4439 | 4210 | 4425 | 5913 | 5930 |
 
-**Decompression, speedup over libzstd 1.5.7 (native)**
+### Decompression, speedup over libzstd 1.5.7 (native)
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
@@ -228,8 +230,8 @@ artifacts/perf/Vorticity.Zstd.Perf --corpus silesia,github,github-dict --results
 ```
 
 On Windows x64, from Git Bash, the reference is built with a GNU-compatible clang such as
-[llvm-mingw](https://github.com/mstorsjo/llvm-mingw): MSVC builds neither zstd's assembly Huffman
-decoder nor its BMI2 dispatch, which libzstd has wherever a GNU-compatible compiler builds it.
+[llvm-mingw](https://github.com/mstorsjo/llvm-mingw), because MSVC builds neither zstd's assembly
+Huffman decoder nor its BMI2 dispatch, which libzstd has wherever a GNU-compatible compiler builds it.
 `--core N` keeps the timed thread on one logical processor:
 
 ```sh
@@ -242,20 +244,20 @@ artifacts/perf/Vorticity.Zstd.Perf --core 2 --corpus silesia,github,github-dict 
 
 Correctness is checked against libzstd itself:
 
-- **Differential tests** against the libzstd of .NET's `System.IO.Compression`. Vorticity.Zstd must give back
-  the content libzstd decodes, and write libzstd's compressed frames byte for byte, with and without
-  dictionaries.
-- **zstd's golden files** for decompression, decompression errors and dictionaries.
-- **A decodecorpus corpus**: random valid frames from zstd's own generator. They exercise the modes an
+- Differential tests against the libzstd of .NET's `System.IO.Compression`: Vorticity.Zstd must give
+  back the content libzstd decodes, and write libzstd's compressed frames byte for byte, with and
+  without dictionaries.
+- zstd's golden files, for decompression, decompression errors and dictionaries.
+- A decodecorpus corpus: random valid frames from zstd's own generator. They exercise the modes an
   encoder rarely emits, such as RLE and repeated tables, treeless literals and direct Huffman weights.
+- Fuzzing, with buffers placed against guard pages.
+- Multithreaded compression, checked against libzstd built with threads. These tests are skipped until
+  `tools/native-ref/build.sh mt` has built that library.
 
-The golden files and the decodecorpus corpus are binary files, written rather than kept in the
-repository: `tools/native-ref/testdata.sh` writes them, from zstd 1.5.7's sources, into
+The golden files and the decodecorpus corpus are binary files that are generated rather than kept in
+the repository. `tools/native-ref/testdata.sh` writes them from zstd 1.5.7's sources into
 `tests/Vorticity.Zstd.Tests/testdata/`. The tests that read them are skipped without them, and fail in
 CI, which writes them first.
-- **Fuzzing**, with buffers placed against guard pages.
-- **Multithreaded compression** checked against libzstd built with threads. These tests are skipped
-  until `tools/native-ref/build.sh mt` has built that library.
 
 ## Building
 
@@ -265,12 +267,12 @@ dotnet build -c Release
 dotnet test
 ```
 
-The SDK version is pinned in `global.json`. `testdata.sh` downloads the zstd 1.5.7 sources once, checks
-their SHA-256, builds zstd's `decodecorpus` with the system C compiler and writes the test data; it
-runs on macOS and Linux, and on Windows from Git Bash with a GNU-compatible clang as `CC`. The
-native reference that `tools/native-ref/build.sh` builds is needed only for the
-multithreaded-compression tests and for the benchmarks: dylibs on macOS, DLLs on Windows (with the
-same `CC`), shared objects elsewhere.
+The SDK version is pinned in `global.json`. `testdata.sh` downloads the zstd 1.5.7 sources once,
+checks their SHA-256, builds zstd's `decodecorpus` with the system C compiler and writes the test
+data. It runs on macOS and Linux, and on Windows from Git Bash with a GNU-compatible clang as `CC`. The
+native reference that `tools/native-ref/build.sh` builds is only needed for the multithreaded
+compression tests and for the benchmarks: dylibs on macOS, DLLs on Windows (with the same `CC`), and
+shared objects elsewhere.
 
 ## Repository layout
 
@@ -281,11 +283,11 @@ same `CC`), shared objects elsewhere.
 | `bench/Vorticity.Zstd.Perf` | Native AOT benchmarks against libzstd and the platform, in turns (`--corpus`, `--compress`) |
 | `bench/Vorticity.Zstd.Benchmarks` | BenchmarkDotNet benchmarks |
 | `bench/zstd-corpus.sh` | downloads the benchmark data into `tests/Vorticity.Zstd.Tests/testdata/corpus` |
-| `tools/native-ref` | the native reference, libzstd 1.5.7 built from source and its timing harness (`build.sh`), and the test data's generator (`testdata.sh`) |
-| `tests/Vorticity.Zstd.Tests/testdata` | written, not kept: zstd's golden files and the decodecorpus corpus (`testdata.sh`), the benchmark data (`zstd-corpus.sh`) |
+| `tools/native-ref` | the native reference, libzstd 1.5.7 built from source with its timing harness (`build.sh`), and the test data's generator (`testdata.sh`) |
+| `tests/Vorticity.Zstd.Tests/testdata` | generated, not kept: zstd's golden files and the decodecorpus corpus (`testdata.sh`), and the benchmark data (`zstd-corpus.sh`) |
 
 ## License
 
-Vorticity.Zstd is licensed under the [Apache License 2.0](../../LICENSE). Its compressor is derived from libzstd
-1.5.7, and that part remains under zstd's BSD license. The test data copied from the zstd repository
-also stays under that license. See [NOTICE](../../NOTICE).
+Vorticity.Zstd is licensed under the [Apache License 2.0](../../LICENSE). Its compressor is derived
+from libzstd 1.5.7, and that part remains under zstd's BSD license, as does the test data copied from
+the zstd repository. See [NOTICE](../../NOTICE).

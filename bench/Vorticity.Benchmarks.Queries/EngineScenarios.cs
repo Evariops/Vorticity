@@ -7,45 +7,45 @@ using Vorticity.Aggregating;
 namespace Vorticity.Benchmarks.Queries;
 
 /// <summary>
-/// The queries of the engine's stage (PLAN-QUERIES-STREAMING.md, 6j): each line of the stage is judged
-/// on one of them, and a query that tracks its aggregation reports its lanes and its merge.
+/// The queries the group-by engine is judged on, one per strategy, and a query that tracks its
+/// aggregation reports its lanes and its merge.
 /// </summary>
 internal static class EngineScenarios
 {
     internal static IEnumerable<(string File, Scenario Scenario)> All(int large)
     {
-        // 6k: the group by that streams, against the same query forced to block.
+        // The group by that streams, against the same query forced to block.
         yield return ("readings", new Scenario("group by city day (composite), count avg, blocking", (file, run) => CityDayAsync(file, run, blocking: true), 1_000));
         yield return ("readings", new Scenario("group by day (sorted), welford", (file, run) => DayWelfordAsync(file, run, blocking: false), 100));
         yield return ("readings", new Scenario("group by day (sorted), welford, blocking", (file, run) => DayWelfordAsync(file, run, blocking: true), 100));
 
-        // 6l: a filter that keeps 7 % of the rows, contiguous, on a sorted key.
+        // A filter that keeps 7 % of the rows, contiguous, on a sorted key.
         yield return ($"readings-{large}", new Scenario($"group by city under a 7 % day filter, {large / 1_000_000}M", CitiesOfSomeDaysAsync));
 
-        // 6m, 6n, 6o, 6p: what follows the pass.
+        // What follows the pass: a top-k, a chosen row, an order on the key, a window without order.
         yield return ("names", new Scenario("order by count take 100, text key (1M groups)", TopNamesAsync));
         yield return ("requests", new Scenario("order by max take 10 with its row, 1M groups", SlowestUsersAsync));
         yield return ("requests", new Scenario("ohlc by day (first, max, min, last)", OhlcAsync));
 
-        // 6n: every group's chosen row, read after the pass, against the same query without it.
+        // Every group's chosen row, read after the pass, against the same query without it.
         yield return ("requests", new Scenario("max by user with its row, every group (1M groups)", (file, run) => SlowestOfEveryUserAsync(file, run, row: true)));
         yield return ("requests", new Scenario("max by user, every group (1M groups)", (file, run) => SlowestOfEveryUserAsync(file, run, row: false)));
         yield return ("draws", new Scenario("order by key take 10, random int (1M groups)", FirstKeysAsync));
         yield return ("readings", new Scenario("order by key descending take 7, 1000 days", LastDaysAsync));
         yield return ("draws", new Scenario("take 10 without order, random int (1M groups)", AnyKeysAsync));
 
-        // 6c, 6q, 6d1: a table of keys and a merge, by cardinality.
+        // A table of keys and a merge, by cardinality.
         yield return ("draws", new Scenario("group by random int (4 groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K4)));
         yield return ("draws", new Scenario("group by random int (100 groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K100)));
         yield return ("draws", new Scenario("group by random int (1000 groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K1000)));
         yield return ("draws", new Scenario("group by random int (100k groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K100k), 10_000));
         yield return ("draws", new Scenario("group by random int (1M groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K1M), 100_000));
 
-        // 6b: a key of two fixed-width columns, at a few thousand groups and at nearly a group a row.
+        // A key of two fixed-width columns, at a few thousand groups and at nearly a group a row.
         yield return ("draws", new Scenario("group by (random int, random int) (4 000 groups), count sum", (file, run) => PairsAsync(file, run, d => d.K4, d => d.K1000)));
         yield return ("draws", new Scenario("group by (random int, random int) (1.8M groups), count sum", (file, run) => PairsAsync(file, run, d => d.K100k, d => d.K100), 100_000));
 
-        // 6d2: a hot key and a long tail, and keys each seen twenty times.
+        // A hot key and a long tail, and keys each seen twenty times.
         yield return ("skewed", new Scenario("group by skewed key (one key 30 %, 1M rare), count sum", KeyedAsync, 100_000));
 
         // The same key on a file of many chunks a lane: what the last ranges a queue hands out weigh.
@@ -273,7 +273,7 @@ internal static class EngineScenarios
         return rows;
     }
 
-    /// <summary>A key its zones prove final as the read goes (6g), or the same query forced to block.</summary>
+    /// <summary>A key its zones prove final as the read goes, or the same query forced to block.</summary>
     private static async Task<long> LateKeysAsync(VortexFile file, Run run, bool blocking, bool zones = false)
     {
         long rows = 0;

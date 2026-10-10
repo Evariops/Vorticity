@@ -18,23 +18,28 @@ AggAsync, four answers             1.9 ms  min 10.1, max 49.9, 100000 rows, 8 ci
 
 ## Several answers in one pass
 
-`AggAsync` takes a lambda over an `Aggregates<Reading>` and computes its answers in a single pass
-over the rows the scan keeps: one answer comes as itself, `await scan.AggAsync(a => a.Count())`,
-and several, of any number, go into the record `AggAsync<TResult>` names, whose members take them
-in order, each of its answer's type or of its nullable form. The members of `a` are `Count()`,
-`CountDistinct`, `Sum`, `Min`, `Max`, `Average`, `Variance`, `StandardDeviation` and `Aggregate`,
-each over a column named as in a filter, and `Count`, `Any` and `All` of a predicate, and `Where`,
-which filters the aggregates that follow it ([a filtered group](#a-filtered-group)). `Variance` and
-`StandardDeviation` are of the sample, over `n − 1`, and null below two values. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
-your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
-14 left, of which one had a column brought to the canonical form; the others were read as runs and
+`AggAsync` takes a lambda over an `Aggregates<Reading>` and computes all its answers in a single pass
+over the rows the scan keeps. One answer comes back as itself, as in
+`await scan.AggAsync(a => a.Count())`. Several answers, any number of them, go into the record named
+by `AggAsync<TResult>`, whose members take them in order. Each member has the type of its answer or
+its nullable form.
+
+The members of `a` are `Count()`, `CountDistinct`, `Sum`, `Min`, `Max`, `Average`, `Variance`,
+`StandardDeviation` and `Aggregate`, each over a column named as in a filter. There are also `Count`,
+`Any` and `All` of a predicate, and `Where`, which filters the aggregates that follow it (see
+[a filtered group](#a-filtered-group)). `Variance` and `StandardDeviation` are the sample statistics,
+divided by `n − 1`, and null below two values.
+
+As with a filter, the lambda runs once and describes the work. Nothing is evaluated per row in your
+code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the 14 left.
+Only one of them had a column brought to its plain form, and the others were read as runs and
 dictionaries.
 
-For one answer there are the sinks of the scan itself: `CountAsync`, `AnyAsync`, `MinAsync`,
+For a single answer, the scan also has its own sinks: `CountAsync`, `AnyAsync`, `MinAsync`,
 `MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
-block by block on the encoded form, never hands a batch to your code, keeps one state per chunk,
-and merges the states at the end; §5.5 of [14-public-api.md](../design/14-public-api.md) tables
-what each encoding lets it skip.
+block by block on the encoded form, never hands a batch to your code, keeps one state per chunk and
+merges the states at the end. [The query design](../design/16-queries.md#92-aggregates-block-by-block)
+lists what each encoding lets it skip.
 
 ## Group by
 
@@ -59,18 +64,19 @@ public partial record struct CitySpread(string City, double? Mean, WelfordState 
   Lille      mean 30.0009  variance 133.6092
 ```
 
-`Welford<double>` is the aggregator of the next section, a mean and a variance in one pass.
-`g.Key` is the key, and the other members of `g` are those of `Aggregates`. A selection of one
-value, `Select(g => g.Count())`, is an `Aggregation<long>`, enumerated with `await foreach`, a
-`long` per group. Several values have no .NET type until a record gives them one: the selection is
-an `Aggregation`, and `As<TRecord>()` makes it a `Scan<TRecord>` of the result, whose members take
-the values in order. It is read as a file's scan is: as batches, the default, whose columns are
-borrowed and allocate nothing per group, or as records through `ToRecordsAsync()`, a record per
-group. A state is a column like the others: `WelfordState` is a `[VortexRecord]`, three columns
-in one.
+`Welford<double>` is the aggregator of [the section below](#an-aggregator-of-your-own): a mean and a
+variance in one pass. `g.Key` is the key, and the other members of `g` are those of `Aggregates`.
 
-A composite key is a tuple of columns, of any length, whose names are the key's, `g.Key.City` and
-`g.Key.Day`:
+A selection of one value, such as `Select(g => g.Count())`, is an `Aggregation<long>` that you
+enumerate with `await foreach`, one `long` per group. Several values have no .NET type until a record
+gives them one. The selection is then an `Aggregation`, and `As<TRecord>()` turns it into a
+`Scan<TRecord>` of the result, whose members take the values in order. You read it like a file's
+scan: as batches by default, whose columns are borrowed and allocate nothing per group, or as
+records through `ToRecordsAsync()`, one record per group. A state is a column like any other.
+`WelfordState` is a `[VortexRecord]`, three columns in one.
+
+A composite key is a tuple of columns of any length, and its names become the key's, as in
+`g.Key.City` and `g.Key.Day`:
 
 ```csharp
 await foreach (var (city, day, total, state) in file.Scan<Reading>()
@@ -80,7 +86,7 @@ await foreach (var (city, day, total, state) in file.Scan<Reading>()
     .ToRecordsAsync())
 ```
 
-The same query in query syntax is the same plan:
+The same query in query syntax builds the same plan:
 
 ```csharp
 (from r in file.Scan<Reading>()
@@ -89,20 +95,22 @@ The same query in query syntax is the same plan:
 .As<CityDayTotal>()
 ```
 
-The result's scan is a scan: a `Where` filters its batches, a `GroupBy` aggregates it again, the
-daily from the hourly, `CountAsync` and the other single answers read it, and a writer writes it,
-`writer.WriteAsync(result)`, a batch at a time.
+The result's scan is a scan like any other. A `Where` filters its batches, a `GroupBy` aggregates it
+again (the daily totals from the hourly ones), `CountAsync` and the other single answers read it, and
+a writer writes it with `writer.WriteAsync(result)`, a batch at a time.
 
-Groups arrive in key order, nulls last, when the key comes from a dictionary or from a column the
-statistics say is sorted. Otherwise their order is not defined: on one thread they come in the order
-their keys were first met, on more, part by part of the key space, cut the same way by every run of a
-query in one process; an order to rely on is asked for with `OrderBy`. A null key is a group of its
-own. Memory follows the number of groups, 8 000 for this composite key, not the number of rows.
+Without an `OrderBy`, the order of the groups is not defined. On one lane they come in the order
+their keys were first met, and on several lanes part by part of the key space, cut the same way by
+every run of a query in one process. A group by on a key the statistics say is sorted delivers its
+groups in key order as they close ([queries.md](queries.md)). When your code relies on an order, ask
+for it with `OrderBy`. A null key is a group of its own. Memory follows the number of groups, 8 000
+for this composite key, not the number of rows.
 
 ## A filtered group
 
-`g.Where(r => p)` is the group's rows where `p` is true, with every aggregate: SQL's
-`FILTER (WHERE …)`, computed beside the aggregates of the whole group in the same pass.
+`g.Where(r => p)` is the subset of the group's rows where `p` is true, with every aggregate
+available. It is SQL's `FILTER (WHERE …)`, computed beside the aggregates of the whole group in the
+same pass.
 
 ```csharp
 await foreach (CityHeat city in file.Scan<Reading>()
@@ -127,23 +135,24 @@ public partial record struct CityHeat(string City, long Rows, long Hot, double? 
   ...
 ```
 
-`g.Count(r => p)` is `g.Where(r => p).Count()`; `g.Any(r => p)` asks whether `p` is true for a row
-of the group, `g.All(r => p)` whether it is true for every one. The predicate is in the language of
-a scan's `Where`, and a row counts where it is true, not where it is unknown: every temperature
-present is above 10, but one in fifty is missing, so `All` is false. Two `Where` keep the rows both
-keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same over the scan's rows.
+`g.Count(r => p)` is shorthand for `g.Where(r => p).Count()`. `g.Any(r => p)` asks whether `p` holds
+for some row of the group, and `g.All(r => p)` whether it holds for every row. The predicate uses the
+language of a scan's `Where`, and a row counts where it is true, not where it is unknown. Every
+temperature present is above 10, but one in fifty is missing, so `All` is false. Two `Where` calls
+keep the rows both keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same
+over the scan's rows.
 
-Each predicate is evaluated once a batch, however many aggregates read it, and its columns join the
-pass. On a million requests grouped by endpoint, the count, the failures and their mean latency took
-3.4 ms in one pass, and the failures alone, filtered before the group by, 4.6 ms. A filter written
-before the group by is still the one to write when the other rows are not wanted and the zone maps
-can skip blocks with it.
+Each predicate is evaluated once per batch, however many aggregates read it, and its columns join
+the pass. On a million requests grouped by endpoint, the count, the failures and their mean latency
+took 3.4 ms in one pass, against 4.6 ms for the failures alone filtered before the group by. A
+filter before the group by is still the right choice when the other rows are not wanted and the zone
+maps can skip blocks with it.
 
 ## Chosen rows
 
-`g.First()` and `g.Last()` are the group's first and last row in file order, `g.MinBy(r => e)` and
-`g.MaxBy(r => e)` the row holding the smallest and the largest value of `e`. Each is a probe whose
-columns are results of the group:
+`g.First()` and `g.Last()` are the group's first and last rows in file order. `g.MinBy(r => e)` and
+`g.MaxBy(r => e)` are the rows holding the smallest and the largest value of `e`. Each one is a probe
+whose columns are results of the group:
 
 ```csharp
 .Select(g => (g.Key, g.First().Celsius, g.Max(r => r.Celsius), g.MaxBy(r => r.Celsius).Day, g.Last().Celsius))
@@ -159,21 +168,21 @@ public partial record struct CityHottest(string City, double? First, double? Hot
   ...
 ```
 
-File order is the order the rows the scan keeps lie in the file, whatever its `OrderBy`, and it is
-the same at every degree: of equal values, `MinBy` and `MaxBy` take the first row, and a null or a
-NaN is never chosen. Paris's first row has no temperature, so its `First` is null: `First()` is a
-row, not the first value. Columns read from one chosen row are one row: `g.MaxBy(r => r.Celsius).Day`
-and `.City` come from the same reading. A group with no candidate, every value null, reads null
-where the member is nullable and a value type's default where it is not.
+File order is the order in which the rows the scan keeps lie in the file, whatever its `OrderBy`, and
+it is the same at every degree of parallelism. Among equal values, `MinBy` and `MaxBy` take the first
+row, and a null or a NaN is never chosen. Paris's first row has no temperature, so its `First` is
+null: `First()` is a row, not the first value. Columns read from one chosen row come from the same
+row, so `g.MaxBy(r => r.Celsius).Day` and `.City` describe the same reading. A group with no
+candidate, every value null, reads null where the member is nullable and the type's default where it
+is not.
 
-The pass keeps each group's row as its position and the value it is chosen by; the columns read
-from the rows are fetched once the groups are known, by position, which decodes only those rows
-where the encoding allows: for the groups the result delivers, or, when a `Where` or an `OrderBy`
-after the group by compares one, for the groups that reach it. An `OrderByDescending` with a
-`Take(10)` reads ten rows whatever the number of groups, and the first and last rows of a day share
-one read. A group by that streams fetches them for each batch of groups it closes. A chosen row's
-column is a result: a `Where` or an `OrderBy` after the group by compares it, and an aggregate does
-not read it.
+The pass keeps each group's chosen row as a position and the value it was chosen by. The columns
+read from those rows are fetched once the groups are known, by position, and only those rows are
+decoded where the encoding allows it. This happens for the groups the result delivers, or, when a
+`Where` or an `OrderBy` after the group by compares one of these columns, for the groups that reach
+it. So an `OrderByDescending` with `Take(10)` reads ten rows whatever the number of groups, and the
+first and last rows of a day share one read. A chosen row's column is a result: a `Where` or an
+`OrderBy` after the group by can compare it, but an aggregate cannot read it.
 
 ## Buckets of time and of numbers
 
@@ -198,31 +207,32 @@ GroupBy(StartedAt, by hour)        0.7 ms  24 hours; 5 blocks decoded
   ...
 ```
 
-`Truncate(unit)` is the start of the `Minute`, `Hour`, `Day`, `Week` (from Monday), `Month`,
-`Quarter` or `Year` holding an instant or a date, `Truncate(unit, zone)` the same on a zone's
-calendar, and `Bucket(width)` the bucket of a `TimeSpan` holding an instant, counted from
-1970-01-01. Each is a column of the column's type, valid wherever a column is: a key, a filter, an
-aggregate's input, a selection. A `DateTime` is truncated as it is stored, here in UTC, so the day
-is the UTC day and its hours, on Paris's calendar, start at 02:00 in Paris. On a zone's calendar each
-instant takes its interval's offset: the autumn's repeated hour is two hours, and its day one of 25
-hours. A `DateTimeOffset` read from a zoned column is truncated on its column's calendar. A null
-stays null.
+`Truncate(unit)` returns the start of the `Minute`, `Hour`, `Day`, `Week` (starting on Monday),
+`Month`, `Quarter` or `Year` that holds an instant or a date. `Truncate(unit, zone)` does the same on
+a time zone's calendar. `Bucket(width)` returns the bucket of a `TimeSpan` that holds an instant,
+counted from 1970-01-01. Each of these is a column of the column's type, usable anywhere a column is:
+as a key, in a filter, as an aggregate's input, in a selection.
 
-The filter is not evaluated through the function. A comparison of a function with a constant is the
-range of the column it stands for, the day `StartedAt >= 2026-09-02 && StartedAt < 2026-09-03`, so
-the zone maps, the statistics and a sorted column prune, count and locate it as they would the range
-written by hand: the scan decoded the 5 blocks of 13 that hold the day. The instants being sorted,
-their hours are too, and the group by streams, an hour at a time.
+A `DateTime` is truncated as it is stored, here in UTC, so the day is the UTC day, and its hours on
+Paris's calendar start at 02:00 in Paris. On a zone's calendar, each instant takes the offset of its
+interval, so the hour repeated in autumn appears as two hours, and that day has 25. A
+`DateTimeOffset` read from a zoned column is truncated on its column's calendar. A null stays null.
 
-When every aggregate is a count, a minimum or a maximum, a block whose rows all fall in one bucket
-is not read at all: its zone map gives the bucket, the block's rows and the extremes of its columns,
-and the group by decodes only the blocks that straddle a boundary. On a log of a million requests,
-one a second, the days with their count, their fastest and their slowest request took 1.3 ms, against
-4.1 ms reading every block. Under a filter, a block is left to its zone map when the zone maps prove
-the filter keeps it whole.
+The filter is not evaluated through the function. A comparison of a function with a constant becomes
+the range of the underlying column, here `StartedAt >= 2026-09-02 && StartedAt < 2026-09-03`, so the
+zone maps, the statistics and a sorted column prune, count and locate it exactly as they would the
+range written by hand. The scan decoded only the 5 blocks out of 13 that hold that day. The instants
+are sorted, so their hours are too, and the group by streams an hour at a time.
 
-On a number, `Bucket(width)` is `⌊v / w⌋ × w`, in integers for an integer column and rounded to the
-column's type for a float:
+When every aggregate is a count, a minimum or a maximum, a block whose rows all fall in one bucket is
+not read at all. Its zone map gives the bucket, the row count and the extremes of its columns, and
+the group by decodes only the blocks that straddle a boundary. On a log of a million requests, one
+per second, the days with their count, their fastest and their slowest request took 1.3 ms, against
+4.1 ms when every block is read. Under a filter, a block is answered from its zone map when the zone
+maps prove the filter keeps it whole.
+
+On a number, `Bucket(width)` computes `⌊v / w⌋ × w`, in integers for an integer column and rounded to
+the column's type for a float:
 
 ```csharp
 .GroupBy(v => v.DurationMs.Bucket(15_000))
@@ -237,10 +247,10 @@ column's type for a float:
   from  75000 ms  15000 visits
 ```
 
-A comparison with a float's bucket, an `In` over a function and two functions compared are evaluated
-through the function, and prune by the zones' bounds taken through it. A decimal's bucket is not
-there yet. A function has no key source of its own, so it cannot be the key of a scan's `OrderBy` or
-of `Keys`.
+A comparison with a float's bucket, an `In` over a function and a comparison of two functions are
+evaluated through the function, and prune with the zone bounds mapped through it. Buckets of a
+decimal column are not supported yet and throw `NotSupportedException`. A function has no key source
+of its own, so it cannot be the key of a scan's `OrderBy` or of `Keys`.
 
 ## An aggregator of your own
 
@@ -290,16 +300,16 @@ public readonly struct Welford<T> : IEncodedAggregator<T, WelfordState>
 ```
 
 The sample holds the rest: `StepDictionary`, which counts the rows per code and adds each distinct
-value once with its weight, the `Selected` popcount helper, and `WelfordState`, a count, a mean and
-a sum of squared deviations with a weighted `Add`.
+value once with its weight, the `Selected` popcount helper, and `WelfordState`, a count, a mean and a
+sum of squared deviations with a weighted `Add`.
 
-Every member is static, so the scan calls them monomorphised, without a virtual call per value.
-`Step` receives a block in canonical form: the values, the validity words and the rows that passed
-the filter, and it must honour both. An `IAggregator` has only `Step`, `Seed` and `Merge`, and
-forces the decode of the column it reads; an `IEncodedAggregator` adds a step per encoded form,
-called with the nulls already folded out of `rows`. `Merge` joins the states of two chunks, which is
-what makes the parallel run correct. `T` is the column's storage primitive, exactly: `int` for an
-`i32` column, `double` for `f64`; another type is refused with `VortexSchemaException`.
+Every member is static, so the scan calls them monomorphised, without a virtual call per value. `Step`
+receives a block in its plain form: the values, the validity words and the rows that passed the
+filter, and it must honour both. An `IAggregator` only has `Step`, `Seed` and `Merge`, and forces the
+decode of the column it reads. An `IEncodedAggregator` adds a step per encoded form, called with the
+nulls already removed from `rows`. `Merge` joins the states of two chunks, which is what makes a
+parallel run correct. `T` must be exactly the column's storage type, `int` for an `i32` column and
+`double` for `f64`, and any other type is refused with `VortexSchemaException`.
 
 What the encoded steps are worth, against `CanonicalWelford<T>`, the same fold with `Step` only:
 
@@ -310,11 +320,11 @@ Welford(Day), encoded              0.2 ms  1000000 values, mean 499.5000, varian
 Welford(Day), canonical            3.8 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
 ```
 
-`Day` is stored as runs: `StepRunEnd` sees 1 121 runs instead of a million values, more than ten
-times faster. `Celsius` is a dictionary whose distinct values include the null, and such a block is
-handed to `Step` decoded, so the two are equal ([encoded-forms.md](encoded-forms.md)).
-`BlocksDecoded` counts the blocks where a column reached the canonical form: every block of
-`Celsius`, and none of `Day`, every block going to `StepRunEnd` as runs.
+`Day` is stored as runs, so `StepRunEnd` sees 1 121 runs instead of a million values and runs more
+than ten times faster. `Celsius` is a dictionary whose distinct values include the null, and such a
+block is handed to `Step` decoded, so the two variants cost the same
+([encoded-forms.md](encoded-forms.md)). `BlocksDecoded` counts the blocks where a column reached its
+plain form: every block of `Celsius`, and none of `Day`.
 
 ## On more cores
 
@@ -329,29 +339,29 @@ GroupBy(City, Day), degree 14      6.3 ms  8000 groups, the widest spread Lille 
 Welford(Celsius), degree 14        1.5 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
 ```
 
-Parallelism is the session's, 1 by default: a library does not take a host's cores without being
-asked. With it, chunks aggregate concurrently, one state per group per chunk, and `Merge` joins
-them: the same answers, 3 times faster for the composite group by on 14 cores, 4.5 times for the
-Welford fold. A group by whose key streams streams on every lane too: ranges of rows are grouped
-side by side and each follows the one before it in the order of the rows, so the groups still come
-out in key order as they close, the first ones once the first block is grouped, and the memory is
-that of the ranges in flight. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
-([threads.md](threads.md)).
+Parallelism comes from the session and is 1 by default, because a library should not take a host's
+cores without being asked. With it, chunks aggregate concurrently, one state per group per chunk,
+and `Merge` joins them. The answers are identical, 3 times faster for the composite group by on 14
+cores and 4.5 times for the Welford fold. A group by whose key streams keeps streaming on every lane:
+ranges of rows are grouped side by side, each following the one before it in row order, so the
+groups still come out in key order as they close, the first ones as soon as the first block is
+grouped, and memory stays at the ranges in flight. `ScanOptions.DegreeOfParallelism` overrides the
+session for one scan ([threads.md](threads.md)).
 
-The first groups of an order on the key cost what they keep. `OrderBy(g => g.Key).Take(10)` keeps,
-on each lane, the ten best keys it has met, trimmed back as others come, and a row whose integer key
-lies past them is not grouped at all: a key of a million values is held ten groups a lane at a time.
-On a sorted key, `OrderByDescending(g => g.Key).Take(7)` reads the file's chunks from the last one
-back and stops once the seventh group is out. A top on an aggregate,
-`OrderByDescending(g => g.Count()).Take(10)`, holds every group to the end, since a count is known
-only then.
+The first groups of an order on the key cost only what they keep. `OrderBy(g => g.Key).Take(10)`
+keeps, on each lane, the ten best keys met so far and trims the rest as others arrive, and a row
+whose integer key lies beyond them is not grouped at all. A key of a million values is held ten
+groups per lane at a time. On a sorted key, `OrderByDescending(g => g.Key).Take(7)` reads the file's
+chunks from the last one backwards and stops once the seventh group is out. A top on an aggregate,
+such as `OrderByDescending(g => g.Count()).Take(10)`, holds every group until the end, because a
+count is only known then.
 
-## Decimals, at any precision
+## Decimals at any precision
 
-A decimal column sums exactly, whatever its precision and its row count: the total is kept in 320
-bits, spilled from a 128-bit or 256-bit total only when that would overflow, so a column holding
-the largest value of 76 digits and its opposite in turn sums to what it should. The sum is
-converted once, at the end:
+A decimal column sums exactly, whatever its precision and its row count. The total is kept in 320
+bits, spilled from a 128-bit or 256-bit total only when that would overflow, so a column alternating
+the largest 76-digit value and its opposite sums to exactly what it should. The sum is converted
+once, at the end:
 
 ```csharp
 decimal total = await file.Scan<Invoice>().SumAsync(i => i.Amount);          // decimal(18, 2): as decimal
@@ -359,52 +369,46 @@ VortexDecimal wide = await file.Scan<Ledger>().SumAsync(l => l.Balance);     // 
 double? mean = await file.Scan<Ledger>().AverageAsync(l => l.Balance);
 ```
 
-A sum as `VortexDecimal` carries 38 digits while it fits them, as a SQL sum of a narrower decimal
-does, and 76 beyond; one past 76 digits throws `OverflowException`, as a `decimal` sum past 96 bits
-does. An `Int128`, a `UInt128` or a `BigInteger` member sums as its own type, the last never
-throwing. `MinAsync` and `MaxAsync` order decimals as the numbers they are, the group keys of a
-`GroupBy` may be decimals of 256 bits, and every aggregate reads the column where it lies, a
-dictionary or run-end block included.
+A sum returned as `VortexDecimal` carries 38 digits while it fits them, like a SQL sum of a narrower
+decimal, and 76 beyond that. Past 76 digits it throws `OverflowException`, just as a `decimal` sum
+does past 96 bits. An `Int128`, a `UInt128` or a `BigInteger` member sums as its own type, and the
+`BigInteger` sum never throws. `MinAsync` and `MaxAsync` order decimals as the numbers they are,
+group keys may be 256-bit decimals, and every aggregate reads the column where it lies, dictionary
+and run-end blocks included.
 
 ## Watch out
 
-* **A sum widens what could overflow.** An `sbyte`, `short` or `int` column sums as a `long`, a
-  `byte`, `ushort` or `uint` one as a `ulong`, a `Half` or a `float` one as a `double`:
-  `SumAsync(v => v.DurationMs)` over the `int` column of the visits file is a `long`, where it used
-  to overflow an `int`. A `long`, a `ulong` or a `decimal` column sums as itself, exactly, and
-  throws `OverflowException` only when the exact total does not fit it. The engine keeps 64 bits a
-  group where the file statistics prove the rows times the column's largest value fit them, and 128
-  otherwise.
-* **The file carries no sum.** `MinAsync`, `MaxAsync` and `CountAsync` without a filter answer from
-  the file statistics; `SumAsync` and `AverageAsync` read the column ([scan-a-table.md](scan-a-table.md)).
-* **NaN is skipped** by a float sum, mean, minimum and maximum, and counted as one value by a
-  distinct count. An aggregation ignores the scan's `OrderBy`.
-* **A float sum is the same bits** at every degree, in every order of the rows and however the
-  data is cut into files or objects, and closer to the exact sum than a plain one: each value is
-  split into three integer parts on a grid of exponents, summed exactly, and the total is rounded
-  once. It takes 69 billion values in one group or one scan, and throws `OverflowException` past
-  them. Grouped row by row, it costs about a fifth more than a plain sum would; over runs and
-  sorted keys, nothing measurable.
-* **Encoded steps need generic instantiation at run time.** Under Native AOT the scan calls `Step`
-  with the canonical form instead ([native-aot.md](native-aot.md)).
-* **The first passes of a process run on code the JIT has not optimized yet.** Tiered compilation
-  starts every method unoptimized and recompiles the ones called often, so the best of three passes
-  of a query on one lane takes a fifth to half as long again as with every method optimized from
-  the start: 12.4 ms against 10.2 for `GroupBy(City)`, 19.2 against 12.7 for `GroupBy(City, Day)`.
-  A library cannot choose this for its host. The host can: with
-  `<TieredCompilation>false</TieredCompilation>` in its project, every method is optimized on its
-  first call, at the cost of a slower start, and in this sample the passes are then those 10.2 and
-  12.7 ms, and 4.8 for Welford against 6.7. Under Native AOT, nothing is left to warm. The cost grows with the lanes: on group
-  bys of a million to ten million keys over 4 to 20 million rows, measured on 2026-10-08, the first
-  three passes at fourteen lanes took 1.6 to 3.8 times what the same code compiled ahead of time
-  took (205 to 218 ms against 76 to 78 from the second pass, for ten million keys). Once warm, at one
-  lane, the tiered code is between 16 % slower and 22 % faster than the native. With tiered
-  compilation off, the first pass pays for compiling everything, three to five times the native one,
-  and the second already runs as fast.
+* A sum widens what could overflow. An `sbyte`, `short` or `int` column sums as a `long`, a `byte`,
+  `ushort` or `uint` column as a `ulong`, and a `Half` or `float` column as a `double`. So
+  `SumAsync(v => v.DurationMs)` over the `int` column of the visits file returns a `long`. A `long`,
+  a `ulong` or a `decimal` column sums as itself, exactly, and throws `OverflowException` only when
+  the exact total does not fit. Internally the engine keeps 64 bits per group when the file
+  statistics prove the rows times the column's largest value fit, and 128 bits otherwise.
+* The file carries no sum. `MinAsync`, `MaxAsync` and `CountAsync` without a filter are answered
+  from the file statistics, while `SumAsync` and `AverageAsync` read the column
+  ([scan-a-table.md](scan-a-table.md)).
+* NaN is skipped by a float sum, mean, minimum and maximum, and counts as one value in a distinct
+  count. An aggregation ignores the scan's `OrderBy`.
+* A float sum gives the same bits at every degree, in every order of the rows and however the data
+  is cut into files or objects, and it is closer to the exact sum than a plain loop. Each value is
+  split into three integer parts on a grid of exponents, those parts are summed exactly, and the total
+  is rounded once. It accepts 2^36 values, about 69 billion, in one group or one scan, and throws
+  `OverflowException` beyond that. Grouped row by row it costs about a fifth more than a plain sum,
+  and nothing measurable over runs and sorted keys.
+* Encoded steps need generic instantiation at run time. Under Native AOT, the scan calls `Step` with
+  the plain form instead ([native-aot.md](native-aot.md)).
+* The first passes of a process run on code the JIT has not optimized yet. Tiered compilation starts
+  every method unoptimized and recompiles the busy ones, so the best of three passes on one lane is a
+  fifth to a half slower than with everything optimized from the start: 12.4 ms against 10.2 for
+  `GroupBy(City)`, 19.2 against 12.7 for `GroupBy(City, Day)`. The gap grows with the lanes. On
+  group bys of one to ten million keys at fourteen lanes, the first three passes took 1.6 to 3.8
+  times as long as the same code compiled ahead of time. The library cannot choose this for its host,
+  but the host can: `<TieredCompilation>false</TieredCompilation>` optimizes every method on its
+  first call at the cost of a slower start, and Native AOT leaves nothing to warm up.
 
-The figures come from the sample on the demonstration file of a million rows, on a machine of 14
-cores: each timing is the best of three passes in a process, and the median of seven processes
-(2026-10-09); from one process to the next they vary by a fifth or more.
+The figures come from the sample on the demonstration file of a million rows, on a 14-core machine.
+Each timing is the best of three passes in a process and the median of seven processes. From one
+process to the next they vary by a fifth or more.
 
 ## Run it
 

@@ -1,44 +1,47 @@
 # Benchmarks on x64
 
-[The benchmark page](benchmarks.md) on an x64 machine: an AMD Ryzen 9 7950X (Zen 4,
-16 cores and 32 threads, AVX-512) under Windows 11, against the same Vortex Rust 0.86.1 built the
-same way for that machine. The instruments, the files, the rows and the rules are that page's own,
-section for section; what changes is the processor, the operating system and the file system under
-the page cache. [05-benchmarks.md](../design/05-benchmarks.md) says what is compared and how each
-instrument measures; [bench/README.md](../../bench/README.md) how to run them.
+This is [the benchmark page](benchmarks.md) on an x64 machine: an AMD Ryzen 9 7950X (Zen 4, 16
+cores and 32 threads, AVX-512) under Windows 11, against the same Vortex Rust 0.86.1 built the same
+way for that machine. The instruments, files, rows and rules are the same as on that page, section
+for section. What changes is the processor, the operating system and the file system under the page
+cache. [05-benchmarks.md](../design/05-benchmarks.md) explains what is compared and how each
+instrument measures, and [bench/README.md](../../bench/README.md) how to run them.
 
 Vortex™ is a trademark of LF Projects, LLC. Vorticity is an independent implementation,
 not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
 
-**Rust's ratios here are this machine's.** Its `vxbench` is built here, and the ceilings that
-`--ratio-check` and `--throughput --check` hold the ratios to are set on the arm64 machine, against
-its own build: the in-process axes, the takes and the writes on this page are measured and held to
-none. The per-encoding corpus is the generator's current one, 61 files where the arm64 page has 57:
-`pco_f32`, `pco_i16`, `pco_u32` and `pco_nullable` are on this page alone. The kernel tables'
-speedups are computed from the Mean column of their run.
+Rust's ratios on this page belong to this machine. Its `vxbench` is built here, while the ceilings
+that `--ratio-check` and `--throughput --check` enforce are set on the arm64 machine against its own
+build, so the in-process axes, the takes and the writes on this page are measured but held to no
+ceiling. The per-encoding corpus is the generator's current one, with 61 files where the arm64 page
+has 57: `pco_f32`, `pco_i16`, `pco_u32` and `pco_nullable` appear on this page only. The kernel
+tables' speedups are computed from the Mean column of their run.
 
-* **The two sides.** Vorticity as a Native AOT binary built for the machine's instruction set,
-  with the workstation garbage collector, where a section says so, and on the JIT otherwise. Vortex
-  Rust 0.86.1 built as upstream builds its own benchmarks (mimalloc, `-C target-cpu=native`, one
-  codegen unit, no LTO), through [tools/vxbench-rs](../../tools/vxbench-rs): `target-cpu=native`
-  gives its compiler this machine's instruction set, AVX-512 included, as .NET's JIT has it. Both
-  map the file and read it where it lies, decode every value they return to its plain form, a
-  constant column kept as one value on both, and must return the same rows or the run fails.
-* **Rust at its faster setting.** On one core every Rust figure is the faster of its two ways of
-  splitting a scan, its default and one split per chunk, measured file by file; on all cores it
+The ground rules:
+
+* Vorticity runs as a Native AOT binary built for the machine's instruction set, with the
+  workstation garbage collector, where a section says so, and on the JIT otherwise. Vortex Rust
+  0.86.1 is built the way upstream builds its own benchmarks (mimalloc, `-C target-cpu=native`, one
+  codegen unit, no LTO), through [tools/vxbench-rs](../../tools/vxbench-rs). `target-cpu=native`
+  gives its compiler this machine's instruction set, AVX-512 included, just as .NET's JIT has it.
+  Both sides map the file and read it where it lies, decode every value they return to its plain
+  form (a constant column kept as one value on both), and must return the same rows or the run
+  fails.
+* Rust gets its faster setting. On one core, every Rust figure is the faster of its two ways of
+  splitting a scan (its default, and one split per chunk), measured file by file. On all cores it
   keeps its default, as on [the benchmark page](benchmarks.md).
-* **Speedup** is Rust's time over Vorticity's: above 1.00x, Vorticity took less.
-* **Throughput** is the plain size of the rows returned over the time, as on [the benchmark
+* Speedup is Rust's time over Vorticity's. Above 1.00x, Vorticity took less.
+* Throughput is the plain size of the rows returned divided by the time, as on [the benchmark
   page](benchmarks.md).
-* **All cores** are the 32 hardware threads, simultaneous multithreading included, where the arm64
-  page's are 14 cores of two kinds.
-* **The page cache is warm** for every run, on both sides, and every call maps its file anew, on
-  both sides, as on [the benchmark page](benchmarks.md).
+* All cores means the 32 hardware threads, simultaneous multithreading included, where the arm64
+  page has 14 cores of two kinds.
+* The page cache is warm for every run, and every call maps its file anew, on both sides, as on
+  [the benchmark page](benchmarks.md).
 
 Each section is regenerated on an x64 machine by `dotnet run -c Release --project
-bench/Vorticity.Benchmarks --` and the arguments below, which rewrite that section of this page and
-leave the others. The Native AOT runner that `--report` times is published first (`dotnet publish -c
-Release bench/Vorticity.Benchmarks.Runner`): an older one times older code.
+bench/Vorticity.Benchmarks --` with the arguments below, which rewrite that section of this page and
+leave the others alone. Publish the Native AOT runner that `--report` times first (`dotnet publish -c
+Release bench/Vorticity.Benchmarks.Runner`), since an older runner times older code.
 
 | section | arguments |
 |---|---|
@@ -886,12 +889,12 @@ It keeps the writer's choice under every goal on the 9 other columns.
 
 ## Kernels, against their baselines
 
-Each hot loop of the library against a baseline, the plain loop it stands in for or the floor of the work it
-does, measured by BenchmarkDotNet in one process on one clock, both checked to give the same result
-before any is timed. A **Speedup** column is the mean time of the row's baseline, the row whose
-`MannWhitney(5%)` cell reads `Baseline`, over the row's own: above 1.00x, the row took less. These
-are the fast profile's figures, which tell a direction: `--full` before a class's name runs the
-reference profile on that class, the one to quote a small difference from.
+Each hot loop of the library is measured against a baseline, either the plain loop it replaces or
+the floor of the work it does. BenchmarkDotNet times both in one process on one clock, after
+checking that they give the same result. The Speedup column is the mean time of the baseline (the
+row whose `MannWhitney(5%)` cell reads `Baseline`) over the row's own, so above 1.00x the row took
+less. These figures come from the fast profile and show a direction. To quote a small difference,
+run the reference profile on that class with `--full` before its name.
 
 <!-- results: kernel:FastLanesKernelBenchmarks -->
 ### `FastLanesKernelBenchmarks`
@@ -959,13 +962,13 @@ Benchmarks with issues:
 
 ## What this does not measure
 
-* **A cold cache.** The page cache is warm for every run, on both sides; upstream's own benchmarks
-  flush it before each query.
-* **Pinned cores.** Windows pins no process, and two hardware threads share each core's execution
-  units; both sides see all 32. Upstream measures on 94 pinned cores of one kind.
-* **Another operating system on this processor.** The file system, the page cache and the thread
-  scheduler are Windows' here, and macOS' on [the benchmark page](benchmarks.md): a difference
-  between the two pages is the machine's as much as the processor's.
-* **Your data and your machine.** A handful of tables and one machine: a column the compressor likes
-  less, or a filter the zone maps cannot prune, moves these numbers more than either implementation
-  does.
+* Nothing here runs on a cold cache. The page cache is warm for every run, on both sides, while
+  upstream's own benchmarks flush it before each query.
+* Cores are not pinned. Windows pins no process, and two hardware threads share each core's
+  execution units, so both sides see all 32. Upstream measures on 94 pinned cores of a single kind.
+* The operating system differs between the two pages. The file system, the page cache and the
+  thread scheduler are Windows' here and macOS' on [the benchmark page](benchmarks.md), so a
+  difference between the two pages comes from the whole machine as much as from the processor.
+* Your data and your machine will differ. This is a handful of tables on one machine, and a column
+  the compressor likes less, or a filter the zone maps cannot prune, moves these numbers more than
+  either implementation does.

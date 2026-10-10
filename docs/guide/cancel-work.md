@@ -30,34 +30,35 @@ using (CancellationTokenSource cts = new CancellationTokenSource())
 borrowed columns: cancelled after 2 batches
 ```
 
-Every call that reads or writes takes a token as its last argument, defaulted. What comes out when
-it fires is `OperationCanceledException`; catch that, since `TaskCanceledException` derives from it.
+Every call that reads or writes takes a token as its last argument, with a default value. When the
+token fires, what comes out is an `OperationCanceledException`. Catch that type, since
+`TaskCanceledException` derives from it.
 
 ## A scan of borrowed columns
 
-`await foreach` passes no token by itself, and a scan whose batches are borrowed `ref struct`
-columns is not an `IAsyncEnumerable<T>`, so the scan carries the token: `WithCancellation(ct)`, as
-above, in the builder chain like `With(options)`. `MoveNextAsync` checks it at each batch boundary
-and hands it to the reads under it, and the enumerator, which returns the scan's buffers, is
-disposed on the way out, cancelled or not. A loop written out by hand passes the token to
-`GetAsyncEnumerator(ct)` instead, which takes precedence.
+`await foreach` passes no token by itself, and a scan whose batches are borrowed `ref struct` columns
+is not an `IAsyncEnumerable<T>`, so the scan carries the token: call `WithCancellation(ct)` in the
+builder chain, like `With(options)`. `MoveNextAsync` checks it at each batch boundary and passes it to
+the reads underneath. The enumerator, which returns the scan's buffers, is disposed on the way out,
+cancelled or not. A loop written out by hand passes the token to `GetAsyncEnumerator(ct)` instead,
+which takes precedence.
 
-Breaking out of an `await foreach` is the other clean way to stop: the enumerator is disposed, the
+Breaking out of an `await foreach` is the other clean way to stop. The enumerator is disposed, the
 scan stops, and nothing throws.
 
 ## Rows and owned batches
 
-`ToRecordsAsync(ct)` and `ToBatchesAsync(ct)` take the token directly, and `WithCancellation` works
-on them too. They check it at a batch boundary:
+`ToRecordsAsync(ct)` and `ToBatchesAsync(ct)` take the token directly, and `WithCancellation` works on
+them too. They check it at batch boundaries:
 
 ```
 rows: cancelled after 65536 rows
 owned batches: cancelled after 3, each disposed by its using
 ```
 
-The rows of the batch in hand are still yielded, so the cancellation above, asked at the 10 000th
-row, surfaced at the end of the batch that held it, the first, of 65 536 rows. An owned batch
-already handed out stays yours to dispose ([owned-batches.md](owned-batches.md)).
+The rows of the batch in hand are still yielded. So the cancellation above, requested at the
+10 000th row, surfaced at the end of the batch that held it, the first one, of 65 536 rows. An owned
+batch already handed out stays yours to dispose ([owned-batches.md](owned-batches.md)).
 
 ## A token cancelled before the call
 
@@ -66,23 +67,23 @@ A call that has nothing to read does not look at the token:
 | call | with a cancelled token |
 |---|---|
 | `OpenAsync` | throws |
-| `CountAsync`, no filter | **answers**: the row count is in the footer |
+| `CountAsync`, no filter | answers, since the row count is in the footer |
 | `CountAsync`, with a filter | throws |
-| `AnyAsync`, no filter | **answers** |
-| `MaxAsync` | **answers**: the file's statistics hold it |
-| `SumAsync`, with or without a filter | throws: this library's files record no sum |
+| `AnyAsync`, no filter | answers |
+| `MaxAsync` | answers, since the file's statistics hold it |
+| `SumAsync`, with or without a filter | throws, since this library's files record no sum |
 | `ExplainAsync` | throws |
-| `GetIndexesAsync` | **answers**: the directory is already read |
+| `GetIndexesAsync` | answers, since the index directory is already read |
 | borrowed columns, `ToRecordsAsync` | throw |
 | `Keys(...).OpenAsync`, `KeyCursor.SeekAsync` | throw |
 
-This is not a bug to work around: a call that reads nothing has nothing to abandon. It does mean a
-cancelled token is not an assertion that nothing ran; check the token yourself if you need one.
+This is not a bug to work around. A call that reads nothing has nothing to abandon. It does mean that
+a cancelled token does not guarantee nothing ran, so check the token yourself if you need that.
 
 ## A cursor
 
-A cancelled move throws and leaves the cursor unpositioned: `IsValid` says false, and `Key`, `Row`
-and `KeyCountAsync` throw `InvalidOperationException` until a move succeeds. Seek again:
+A cancelled move throws and leaves the cursor without a position. `IsValid` returns false, and `Key`,
+`Row` and `KeyCountAsync` throw `InvalidOperationException` until a move succeeds. Seek again:
 
 ```
   the cursor after it: valid False
@@ -94,22 +95,22 @@ and `KeyCountAsync` throw `InvalidOperationException` until a move succeeds. See
 
 | call | what a cancellation leaves |
 |---|---|
-| `WriteAsync` | throws before taking anything when the token is already cancelled: `RowCount` said 50 000 after a cancelled second write of 50 000, and a builder keeps its rows; cancelled while the rows are being written, the rows are taken |
+| `WriteAsync` | throws before taking anything when the token is already cancelled. `RowCount` still said 50 000 after a cancelled second write of 50 000 rows, and a builder keeps its rows. Cancelled while the rows are being written, the rows are taken |
 | `FlushAsync` | throws |
 | `CompleteAsync` | throws, and the writer is done: a second `CompleteAsync` throws `ObjectDisposedException` |
 
-A writer that is disposed without completing abandons the file. A created file is deleted — it did
-not exist afterwards — and an append is truncated back to what the file was: 4 532 bytes and 50 000
-rows before, the same after a cancelled `CompleteAsync` of an append that had flushed 50 000 more.
-`Abandon()` says the same explicitly. A file whose tail a crash tore is another case,
+A writer disposed without completing abandons its file. A created file is deleted, and an append is
+truncated back to what the file was: 4 220 bytes and 50 000 rows before, and the same after a
+cancelled `CompleteAsync` of an append that had flushed 50 000 more rows. `Abandon()` does the same
+explicitly. A file whose tail was torn by a crash is a different case, covered in
 [append-and-repair.md](append-and-repair.md).
 
 ## Watch out
 
-* **The token is not stored.** One given to `OpenAsync` cancels the open and nothing after it; each
+* The token is not stored. A token given to `OpenAsync` cancels the open and nothing after it. Each
   later call takes its own.
-* A scan is single-use, cancelled or not: build another one to start again.
-* Cancelling does not dispose the file, the cursor or the writer: `await using` still does.
+* A scan is single-use, cancelled or not. Build another one to start again.
+* Cancelling does not dispose the file, the cursor or the writer. `await using` still does that.
 
 ## Run it
 

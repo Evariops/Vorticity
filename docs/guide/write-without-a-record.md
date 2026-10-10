@@ -1,6 +1,6 @@
 # Write without a record
 
-Write a file whose columns are known only when the program runs: a schema built as a value, and
+Write a file whose columns are only known when the program runs: a schema built as a value, and
 column builders asked for by position or by name.
 
 ```csharp
@@ -26,45 +26,46 @@ await using (VortexFileWriter writer = session.CreateWriter(path, schema))
 ```
 
 ```
-100000 rows, 222388 bytes; id Sequence x7; payload Zstd x7; origin {country: Dictionary} x7
+100000 rows, 222396 bytes; id Sequence x7; payload Zstd x7; origin {country: Dictionary} x7
 schema struct{id: i64, payload: binary?, origin: struct{country: utf8}}
 read back by name: ids summing to 104999950000, 33334 null payloads, 2666523 payload bytes
 ```
 
 ## What happens
 
-* **A schema is a value**: a collection expression of `(name, VortexType)` pairs. `VortexType` has a
-  member per type the format has (`Int64`, `Utf8`, `Binary`, `Decimal(p, s)`, `List(element)`,
-  `Struct(fields)`, `Timestamp(unit, zone)`, `Uuid` and the rest), and `.Nullable` makes any of them
-  nullable.
-* **`Builder()` is the untyped view of the writer's builder**, the same rows `Builder<T>()` would
-  show through a record. `Column<T>(index)` and `Column<T>(name)` hand out a column's builder; `T`
-  is the .NET type the column maps to: `long` for an i64, `ReadOnlyMemory<byte>?` for a nullable
-  binary, `string` for text. The type is checked once, when the builder is asked for.
-* **A struct column is a builder of its own**: `Struct(index)` returns a `ColumnsBuilder` over its
+* A schema is a value: a collection expression of `(name, VortexType)` pairs. `VortexType` has a
+  member for every type the format has (`Int64`, `Utf8`, `Binary`, `Decimal(p, s)`, `List(element)`,
+  `Struct(fields)`, `Map(key, value)`, `Timestamp(unit, zone)`, `Uuid` and the rest), and `.Nullable`
+  makes any of them nullable.
+* `Builder()` is the untyped view of the writer's builder, the same rows `Builder<T>()` shows through
+  a record. `Column<T>(index)` and `Column<T>(name)` hand out a column's builder, where `T` is the .NET
+  type the column maps to: `long` for an i64, `ReadOnlyMemory<byte>?` for a nullable binary column,
+  `string` for text. The type is checked once, when the builder is requested.
+* A struct column has a builder of its own. `Struct(index)` returns a `ColumnsBuilder` over its
   fields, whose rows count as the parent's.
-* From there everything is as with a record: the appends of [write-a-file.md](write-a-file.md),
+* From there everything works as with a record: the appends of [write-a-file.md](write-a-file.md),
   [write-text.md](write-text.md) and [write-nulls.md](write-nulls.md), then `WriteAsync` and
   `CompleteAsync`.
 
-Reading such a file back uses the same names: `file.Scan("id", "payload")` yields `BatchView`s whose
+Reading such a file back uses the same names. `file.Scan("id", "payload")` yields `BatchView`s whose
 `Column<long>("id")` and `Column<ReadOnlyMemory<byte>?>("payload")` are the typed columns
 ([untyped-files.md](untyped-files.md)).
 
 ## Watch out
 
-* **A type that does not fit throws when the builder is asked for**, with `VortexSchemaException`:
-  *Column 'id' is a column of i64, which int does not map to: a int maps to a i32 column exactly;
-  convert it before a write or after a read.* There is no conversion on the way in.
-* **Names match exactly.** `Column<T>(name)` compares ordinally, and a name the schema does not have
+* A type that does not fit throws `VortexSchemaException` when the builder is requested: *Column 'id'
+  is a column of i64, which int does not map to: a int maps to a i32 column exactly; convert it before
+  a write or after a read.* There is no conversion on the way in.
+* Names are matched exactly. `Column<T>(name)` compares ordinally, and a name the schema does not have
   throws: *The builder has no column 'identifier'; its schema is struct{…}.* A record binds with a
-  case-insensitive fallback; the untyped builder does not.
-* **A binary value can be written in place.** `ColumnBuilder<ReadOnlyMemory<byte>?>` offers
-  `GetSpan(n)` and `Commit(length)` beside `Append(bytes)`, and `AppendNull()` or
-  `AppendNulls(count)` for the rows without a payload, as the text builders do.
-* The report reads a struct column field by field, `{country: Dictionary}`, the way it reads a list
-  by its elements ([write-lists-and-records.md](write-lists-and-records.md)).
-* The mapping between types and .NET types is [07-dotnet-mapping.md](../design/07-dotnet-mapping.md).
+  case-insensitive fallback, but the untyped builder does not.
+* A binary value can be written in place. `ColumnBuilder<ReadOnlyMemory<byte>?>` offers `GetSpan(n)`
+  and `Commit(length)` next to `Append(bytes)`, plus `AppendNull()` and `AppendNulls(count)` for rows
+  without a payload, as the text builders do.
+* The report reads a struct column field by field, as in `{country: Dictionary}`, the same way it
+  reads a list by its elements ([write-lists-and-records.md](write-lists-and-records.md)).
+* The mapping between column types and .NET types is described in
+  [07-dotnet-mapping.md](../design/07-dotnet-mapping.md).
 
 ## Run it
 

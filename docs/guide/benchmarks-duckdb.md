@@ -1,51 +1,54 @@
 # Benchmarks against DuckDB
 
-Our group bys against DuckDB's, on the same files: DuckDB reads them through its Vortex extension,
-and again from a table of its own it loaded from them first. Both sides answer the same query, and
+Our group bys against DuckDB's, on the same files. DuckDB reads them through its Vortex extension,
+and again from a table of its own loaded from them beforehand. Both sides answer the same query, and
 the answers are compared. [benchmarks.md](benchmarks.md) compares Vorticity with Vortex's Rust
-implementation; this page has a reference of its own, so that neither blurs the other.
+implementation, and this page keeps its own reference so that neither comparison blurs the other.
 
 Vortex™ is a trademark of LF Projects, LLC. DuckDB is a trademark of the DuckDB Foundation.
 Vorticity is an independent implementation, not affiliated with or endorsed by the Vortex project,
 LF Projects, LLC, DuckDB or the DuckDB Foundation.
 
-* **The two sides.** Ours: the bench's runner (`bench/Vorticity.Benchmarks.Runner`) compiled with
-  Native AOT, a process a block of runs. DuckDB 1.5.2 (`8a5851971f`) and its `vortex` extension
-  (`6ea8bd7`), a process a file kept open for the whole session, at the same number of threads
-  (`SET threads`).
-* **Two bases.** Each query is timed twice. Warm: our runner with its file kept mapped, as a session
+How the comparison is run:
+
+* Our side is the bench's runner (`bench/Vorticity.Benchmarks.Runner`) compiled with Native AOT, one
+  process per block of runs. DuckDB's side is DuckDB 1.5.2 (`8a5851971f`) with its `vortex`
+  extension (`6ea8bd7`), one process per file, kept open for the whole session, at the same number
+  of threads (`SET threads`).
+* Each query is timed on two bases. Warm pits our runner, with its file kept mapped the way a session
   keeps its 64 most recent files by default, against DuckDB's own table, loaded from the file before
-  anything is timed. Cold: our runner mapping the file anew at every run against DuckDB's Vortex
+  anything is timed. Cold pits our runner mapping the file anew at every run against DuckDB's Vortex
   reader, which reads the file at every query. A table already in memory against a file mapped anew
   would compare page faults rather than engines.
-* **The same work on both sides.** Each query is a group by whose result is aggregated once more:
+* Both sides do the same work. Each query is a group by whose result is aggregated once more:
   DuckDB's outer query sums every column the group by computes, and the runner sums the same columns
-  as it reads the groups. The two sums are the answer, and every row of the tables below gave the
-  same one on both sides, to a part in 10⁹ (a float's sum depends on its order).
-* **The files** are the bench's own, written by its generators, canonical, at edition `core2025.10`,
-  the one the extension reads (it does not know `vortex.zoned`); both sides read the same file, read
-  once before anything is timed so that its pages are in the cache. 40 million rows of keys at random
-  of 10³, 10⁶ and 10⁷ values, and the same number of keys spread by a stride, which no span bounds and
-  every table hashes. And db-benchmark's group by at 10⁷ rows, the benchmark H2O.ai started and DuckDB
-  Labs has kept since 2023: its data drawn by the laws of its `groupby-datagen.R` from the bench's own
-  stream, not R's, and the queries our native aggregates cover, q1 to q5, q7 and q10. q6 (a median),
-  q8 (the two largest of each group) and q9 (a correlation) are not covered, and not run.
-* **In turns, in pairs.** A block of DuckDB's runs and a process of ours alternate, DuckDB then us, us
-  then DuckDB (ABBA), so that a drift of the machine weighs on both. A block is 10 runs of which the
-  first 3 are dropped, or 5 and 2 once the query passes 100 ms; a side's figure is the median of its
-  runs. A pair's speedup is the ratio of its two medians, a query's the median of its pairs': 3 pairs,
-  then more while the 95 % interval of that median is wider than ±5 %, 8 at most. Fixed canary runs
-  before and after each query, and the machine's busiest process, swap and power, decide whether it
-  runs again.
-* **DuckDB's time** is the latency its JSON profile gives, to the nanosecond, for a query under 20 ms,
-  and its timer's past that, which counts whole milliseconds: the profile cost 2 % on q10.
-* **Two sessions**, one after the other: a figure is published when they agree within 10 %, a third
-  session deciding otherwise. The tables give the mean of the two that agreed, the wider of their 95 %
-  intervals and their pairs.
-* **Speedup** is DuckDB's time over ours: above 1.00x, Vorticity took less.
+  as it reads the groups. Those sums are the answer, and every row of the tables below gave the same
+  one on both sides, to a part in 10⁹ (a float sum depends on its order).
+* The files are the bench's own, written by its generators, canonical, at edition `core2025.10`,
+  which is the one the extension reads (it does not know `vortex.zoned`). Both sides read the same
+  file, read once before timing so its pages are in the cache. There are 40 million rows with keys
+  drawn at random from 10³, 10⁶ and 10⁷ values, and the same number of keys spread by a stride, which
+  no span bounds and every table has to hash. There is also db-benchmark's group by at 10⁷ rows (the
+  benchmark H2O.ai started and DuckDB Labs has maintained since 2023), with data drawn by the laws of
+  its `groupby-datagen.R` from the bench's own random stream rather than R's. The queries run are
+  those our native aggregates cover: q1 to q5, q7 and q10. q6 (a median), q8 (the two largest of each
+  group) and q9 (a correlation) are not covered and not run.
+* Runs alternate in pairs. A block of DuckDB runs and a process of ours take turns, DuckDB then us,
+  us then DuckDB (ABBA), so any drift of the machine weighs on both. A block is 10 runs with the
+  first 3 dropped, or 5 runs with 2 dropped once a query passes 100 ms, and a side's figure is the
+  median of its runs. A pair's speedup is the ratio of its two medians, and a query's speedup is the
+  median over its pairs: 3 pairs, then more while the 95 % interval of that median is wider than
+  ±5 %, up to 8. Fixed canary runs before and after each query, plus the machine's busiest process,
+  swap and power state, decide whether a query runs again.
+* DuckDB's time is the latency from its JSON profile, to the nanosecond, for a query under 20 ms, and
+  its timer's past that, which counts whole milliseconds (the profile cost 2 % on q10).
+* Two sessions run one after the other, and a figure is published when they agree within 10 %,
+  with a third session deciding otherwise. The tables give the mean of the two that agreed, the wider
+  of their 95 % intervals, and their pairs.
+* Speedup is DuckDB's time over ours. Above 1.00x, Vorticity took less.
 
-These figures inform; they gate nothing. Each change to the group by is judged against the
-engine's own earlier runs ([05-benchmarks.md](../design/05-benchmarks.md)).
+These figures inform and gate nothing. Changes to the group by are judged against the engine's own
+earlier runs ([05-benchmarks.md](../design/05-benchmarks.md)).
 
 ## One thread
 
@@ -123,34 +126,30 @@ Cold: our file mapped anew at every run, DuckDB's Vortex reader.
 | db q7: max v1 − min v2 by id3 | 10M | 24.4 | 60.0 | 2.47x | 2.36–2.52 | 6 |
 | db q10: sum v3, count by id1:id6 | 10M | 91.5 | 129 | 1.39x | 1.31–1.42 | 6 |
 
-## Where Vorticity leads, and where it trails
+## Reading the results
 
-* **On one thread it leads every query on both bases**: 1.43x to 6.15x over DuckDB's own table, 1.58x
-  to 5.65x over its reader. db-benchmark's q10, six keys of which three are texts and a group for
-  nearly every one of 10⁷ rows, leads by the least: 1.43x and 1.58x.
-* **On fourteen threads it leads every query on both bases**: 1.18x to 3.50x over DuckDB's own table
-  and 1.39x to 4.47x over its reader. Integer keys of 10³ to 10⁷ values lead by 2.06x to 3.50x warm,
-  hashed ones by 1.75x and 1.87x, and db-benchmark's q1 to q7 by 1.35x to 2.56x warm, 1.60x to 3.44x
-  cold.
-* **db-benchmark's q10 leads by the least on fourteen threads**: 1.18x over DuckDB's own table, its
-  interval 1.15x to 1.20x, and 1.39x over its reader. Its six keys are held as one tuple of their
-  values, 64 bytes, which the lanes hand to a shared table of groups by parts; DuckDB packs the same
-  keys into 38 bytes before it groups them, and writes rows nearly all unique straight to its
-  partitions. It trailed at 0.51x on 2026-10-09, as 10⁷ hashed keys did at 0.96x (1.75x now): the
-  memory of the groups is now kept from one query to the next rather than made anew, each part of the
-  shared table is held whole rather than split as it grows, a key is hashed once on its way, and the
-  keys are written into the result a part at a time.
+Vorticity leads every query on both bases, on one thread and on fourteen.
 
-Measured on 2026-10-10 on an Apple M4 Pro (14 cores: 10 performance, 4 efficiency) under macOS, at
-commit `7734c472`: two sessions one after the other, from 05:45 to 05:57 and from 05:57 to 06:07, and a
-third for the one row they did not agree on (10³ keys on fourteen threads, cold, which took 3.85x and
-4.64x, then 4.31x). The machine was near rest: the canaries strayed up to 9.8 % and 10.3 % from their
-first values, another process held a query back 8 s and 6 s in all, and one row of the first session
-ran again.
+On one thread the lead runs from 1.43x to 6.15x over DuckDB's own table, and from 1.58x to 5.65x
+over its Vortex reader. The smallest lead is db-benchmark's q10, with six keys of which three are
+text, and a group for nearly every one of its 10⁷ rows.
 
-Until 2026-10-09 this page timed every DuckDB query, then every one of ours: a perturbation of the
-machine weighed on one side unseen, and DuckDB's q10 on fourteen threads read 257 ms where it took 102
-the same day. It also set our runner mapping its file anew against DuckDB's table already in memory.
+On fourteen threads the lead runs from 1.18x to 3.50x over DuckDB's own table, and from 1.39x to
+4.47x over its reader. Integer keys of 10³ to 10⁷ values lead by 2.06x to 3.50x warm, hashed keys by
+1.75x and 1.87x, and db-benchmark's q1 to q7 by 1.35x to 2.56x warm and 1.60x to 3.44x cold.
+
+q10 on fourteen threads is the narrowest margin, 1.18x warm (interval 1.15x to 1.20x) and 1.39x
+cold. Its six keys are held as one 64-byte tuple of their values, which the lanes hand to a shared
+table of groups split into parts. DuckDB packs the same keys into 38 bytes before grouping them, and
+writes rows that are nearly all unique straight to its partitions. Narrower tuples are the open lead
+for this query.
+
+The figures were measured on 2026-10-10 on an Apple M4 Pro (14 cores: 10 performance, 4 efficiency)
+under macOS, at commit `7734c472`. Two sessions ran back to back, from 05:45 to 05:57 and from 05:57
+to 06:07, and a third settled the one row they disagreed on (10³ keys on fourteen threads, cold,
+which gave 3.85x and 4.64x, then 4.31x). The machine was close to idle: the canaries strayed up to
+9.8 % and 10.3 % from their first values, another process held queries back 8 s and 6 s in total,
+and one row of the first session ran again.
 
 ## Run it again
 
@@ -160,11 +159,11 @@ bench/duckdb.sh --set all --threads 1,14
 bench/duckdb.sh --publish bench/.runs/duckdb-<first> bench/.runs/duckdb-<second>
 ```
 
-`duckdb` on the `PATH` (or `DUCKDB` naming it) with its extension installed (`INSTALL vortex`), as
-`cargo` is for the comparison with Rust: a workstation's dependency, never CI's. Each session writes
-any file it lacks first, through `bench/Vorticity.Benchmarks.Queries --fixture`, keeps the runner of
-the commit it measures (`--runner`, `HEAD` by default), and keeps every run under
-`bench/.runs/duckdb-<date>/`; `--publish` builds the tables above from two sessions, or three when two
-do not agree. `--set hc` or `--set db` runs one half, `--rows` and `--db-rows` change the sizes,
-`--only db-q4,total-k7` keeps the rows named by the runner's scenario. A session took 11 to 17 minutes
-here.
+This needs `duckdb` on the `PATH` (or `DUCKDB` pointing at it) with its extension installed
+(`INSTALL vortex`), the same way `cargo` is needed for the comparison with Rust. It is a
+workstation's dependency, never CI's. Each session first writes any file it lacks through
+`bench/Vorticity.Benchmarks.Queries --fixture`, keeps the runner of the commit it measures
+(`--runner`, `HEAD` by default), and stores every run under `bench/.runs/duckdb-<date>/`. `--publish`
+builds the tables above from two sessions, or three when two do not agree. `--set hc` or `--set db`
+runs one half, `--rows` and `--db-rows` change the sizes, and `--only db-q4,total-k7` keeps only the
+rows named by the runner's scenario. A session took 11 to 17 minutes here.
