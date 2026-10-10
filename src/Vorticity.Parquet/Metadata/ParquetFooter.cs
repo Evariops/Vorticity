@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using Vorticity.Parquet.Thrift;
@@ -51,7 +52,7 @@ internal sealed class ParquetFooter
     {
         _bytes = bytes;
         _chunkStarts = new int[]?[rowGroups];
-        _decrypted = new ReadOnlyMemory<byte>?[]?[rowGroups];
+        _decrypted = new StrongBox<ReadOnlyMemory<byte>>?[]?[rowGroups];
     }
 
     /// <summary>The footer's bytes, which every <see cref="ByteRange"/> of this footer points into.</summary>
@@ -85,8 +86,12 @@ internal sealed class ParquetFooter
     /// <summary>What decrypts the chunks' encrypted metadata, set once the open has the keys.</summary>
     internal Encryption.FileDecryptor? Decryptor { get; set; }
 
-    /// <summary>Per row group, the chunks' encrypted metadata decrypted, each the first time it is asked for.</summary>
-    private readonly ReadOnlyMemory<byte>?[]?[] _decrypted;
+    /// <summary>
+    /// Per row group, the chunks' encrypted metadata decrypted, each the first time it is asked for:
+    /// boxed, so that a scan's lanes, or the choice of the next group beside the decoding of one, see
+    /// a decryption whole or not at all.
+    /// </summary>
+    private readonly StrongBox<ReadOnlyMemory<byte>>?[]?[] _decrypted;
 
     /// <summary>Reads a <c>FileMetaData</c>.</summary>
     internal static ParquetFooter Read(ReadOnlyMemory<byte> bytes)
@@ -315,10 +320,10 @@ internal sealed class ParquetFooter
             return chunk;
         }
 
-        ReadOnlyMemory<byte>?[] decrypted = Volatile.Read(ref _decrypted[rowGroup])
-            ?? Interlocked.CompareExchange(ref _decrypted[rowGroup], new ReadOnlyMemory<byte>?[RowGroups[rowGroup].ColumnCount], null)
+        StrongBox<ReadOnlyMemory<byte>>?[] decrypted = Volatile.Read(ref _decrypted[rowGroup])
+            ?? Interlocked.CompareExchange(ref _decrypted[rowGroup], new StrongBox<ReadOnlyMemory<byte>>?[RowGroups[rowGroup].ColumnCount], null)
             ?? _decrypted[rowGroup]!;
-        if (decrypted[column] is not { } plaintext)
+        if (Volatile.Read(ref decrypted[column]) is not { } plaintext)
         {
             byte[]? key = decryptor.ColumnKey(ColumnPaths[column], chunk.KeyMetadata.Of(Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
             if (key is null)
@@ -326,11 +331,12 @@ internal sealed class ParquetFooter
                 return chunk;
             }
 
-            plaintext = decryptor.Decrypt(key, chunk.EncryptedMetadata.Of(Bytes), Encryption.ModuleType.ColumnMetaData, Ordinal(rowGroup), column);
-            decrypted[column] = plaintext;
+            plaintext = new StrongBox<ReadOnlyMemory<byte>>(
+                decryptor.Decrypt(key, chunk.EncryptedMetadata.Of(Bytes), Encryption.ModuleType.ColumnMetaData, Ordinal(rowGroup), column));
+            Volatile.Write(ref decrypted[column], plaintext);
         }
 
-        chunk.Decrypted(plaintext);
+        chunk.Decrypted(plaintext.Value);
         return chunk;
     }
 
