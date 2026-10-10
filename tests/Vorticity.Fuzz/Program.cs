@@ -27,6 +27,7 @@
 //
 //     dotnet run --project tests/Vorticity.Fuzz -c Release -- --parquet <corpus-dir> [iterations] [seed]
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -160,8 +161,9 @@ internal static class Program
 
         // Small seeds: a mutation read twice and verified costs a few of their reads.
         string[] seeds = Array.FindAll(
-            Directory.GetFiles(corpus, "*.parquet", SearchOption.AllDirectories),
-            path => new FileInfo(path).Length is > 64 and < (2 << 20));
+            Directory.GetFiles(corpus, "*.parquet*", SearchOption.AllDirectories),
+            path => (path.EndsWith(".parquet", StringComparison.Ordinal) || path.EndsWith(".parquet.encrypted", StringComparison.Ordinal))
+                && new FileInfo(path).Length is > 64 and < (2 << 20));
         Array.Sort(seeds, StringComparer.Ordinal);
         if (seeds.Length == 0)
         {
@@ -184,7 +186,7 @@ internal static class Program
                 (byte[] mutated, string what) = ParquetMutator.Apply(original, random, random.Next(ParquetMutator.Kinds));
                 string path = Path.Combine(directory, $"m{i}.parquet");
                 System.IO.File.WriteAllBytes(path, mutated);
-                (Finding? finding, Reach reach) = await RunParquet(path, positional).ConfigureAwait(false);
+                (Finding? finding, Reach reach) = await RunParquet(path, positional, SuiteKeys.For(source)).ConfigureAwait(false);
                 TryDelete(path);
                 switch (reach)
                 {
@@ -234,7 +236,7 @@ internal static class Program
     /// Opens, scans and verifies the Parquet file at <paramref name="path"/>, mapped in a session of
     /// its own, which lets the file go when it is disposed, then by positional reads.
     /// </summary>
-    private static async Task<(Finding?, Reach)> RunParquet(string path, VortexSession positional)
+    private static async Task<(Finding?, Reach)> RunParquet(string path, VortexSession positional, ParquetOpenOptions? options)
     {
         Stopwatch clock = Stopwatch.StartNew();
         Reach reach = Reach.RejectedAtOpen;
@@ -242,7 +244,7 @@ internal static class Program
         {
             await using (VortexSession mapped = VortexSession.Create(options => options.MapFiles = true))
             {
-                await using ParquetFile file = await mapped.OpenParquetAsync(path, null, CancellationToken.None).ConfigureAwait(false);
+                await using ParquetFile file = await mapped.OpenParquetAsync(path, options, CancellationToken.None).ConfigureAwait(false);
                 reach = Reach.RejectedWhileDecoding;
                 await foreach (BatchView batch in file.Scan())
                 {
@@ -253,7 +255,7 @@ internal static class Program
                 }
             }
 
-            await using (ParquetFile file = await positional.OpenParquetAsync(path, null, CancellationToken.None).ConfigureAwait(false))
+            await using (ParquetFile file = await positional.OpenParquetAsync(path, options, CancellationToken.None).ConfigureAwait(false))
             {
                 await foreach (BatchView batch in file.Scan())
                 {
@@ -294,6 +296,54 @@ internal static class Program
                 ? new Finding("Timeout", $"took {clock.Elapsed.TotalSeconds:F1}s, budget {Budget.TotalSeconds}s")
                 : null,
             reach);
+    }
+
+    /// <summary>
+    /// The keys the standard's suite encrypted its files with, which its README publishes: a seed
+    /// of the suite read with them is decrypted, so that its mutations reach the modules' checks and
+    /// the pages that counter mode leaves unauthenticated.
+    /// </summary>
+    private static class SuiteKeys
+    {
+        private static readonly Dictionary<string, byte[]> Keys128 = new()
+        {
+            ["kf"] = System.Text.Encoding.ASCII.GetBytes("0123456789012345"),
+            ["kc1"] = System.Text.Encoding.ASCII.GetBytes("1234567890123450"),
+            ["kc2"] = System.Text.Encoding.ASCII.GetBytes("1234567890123451"),
+        };
+
+        private static readonly Dictionary<string, byte[]> Keys256 = new()
+        {
+            ["kf"] = System.Text.Encoding.ASCII.GetBytes("01234567890123456789012345678901"),
+            ["kc1"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789012"),
+            ["kc2"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789013"),
+            ["kc3"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789014"),
+            ["kc4"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789015"),
+            ["kc5"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789016"),
+            ["kc6"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789017"),
+            ["kc7"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789018"),
+            ["kc8"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789019"),
+        };
+
+        /// <summary>The options a seed opens with: the suite's keys and AAD prefix for an encrypted one, none for another.</summary>
+        internal static ParquetOpenOptions? For(string seed)
+        {
+            if (!seed.EndsWith(".encrypted", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            Dictionary<string, byte[]> keys = seed.Contains("aes256", StringComparison.Ordinal) ? Keys256 : Keys128;
+            string prefix = Path.GetFileName(seed).Contains("aad", StringComparison.Ordinal) ? "tester" : "";
+            return new ParquetOpenOptions
+            {
+                Decryption = new ParquetDecryption
+                {
+                    KeyResolver = request => keys.TryGetValue(System.Text.Encoding.UTF8.GetString(request.KeyMetadata.Span), out byte[]? key) ? key : ReadOnlyMemory<byte>.Empty,
+                    AadPrefix = System.Text.Encoding.UTF8.GetBytes(prefix),
+                },
+            };
+        }
     }
 
     private static void TryDelete(string path, bool recursive = false)
