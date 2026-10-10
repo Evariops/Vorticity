@@ -143,6 +143,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The block a lane decompressed the page being decoded into, until its decode takes it.</summary>
     private NativeSegmentOwner? _decompressed;
 
+    /// <summary>The decompressed bytes of the pages in <see cref="_ahead"/>.</summary>
+    private int _aheadBytes;
+
     /// <summary>
     /// The ZSTD decompressors the reader's pages decompressed ahead use, one a page in flight, kept from
     /// one page to the next: the core's pool keeps sixteen, and a scan's lanes may be more.
@@ -291,6 +294,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
         _rowsLeft = rows;
         _rowsUnread = rows;
         _pastFirstPage = false;
+
+        // The chunk's first data pages decompress while the chunks before it are read, its dictionary
+        // page passed over: a column of few pages would otherwise inflate most of its bytes on the read.
+        Prefetch();
     }
 
     /// <summary>
@@ -661,7 +668,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         // The pages decompressed ahead read the chunk's bytes: none is left reading them past its end.
         while (_ahead.Count > 0)
         {
-            Drop(_ahead.Dequeue());
+            Drop(Dequeue());
         }
 
         _decompressed?.Dispose();
@@ -1106,7 +1113,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             // A page decompressed ahead is the one here, or one a skip has stepped past since.
             while (_ahead.Count > 0 && _ahead.Peek().Position < _position)
             {
-                Drop(_ahead.Dequeue());
+                Drop(Dequeue());
             }
 
             PageHeader header;
@@ -1114,7 +1121,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             int stored;
             if (_ahead.Count > 0 && _ahead.Peek().Position == _position)
             {
-                AheadPage ahead = _ahead.Dequeue();
+                AheadPage ahead = Dequeue();
                 (header, at, stored) = (ahead.Header, ahead.At, ahead.Stored);
                 _decompressed = Wait(ahead);
             }
@@ -1199,10 +1206,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
     /// <summary>
     /// Starts the decompression of the data pages after the one read on the scan's lanes, where one is
-    /// free, up to <see cref="PageLanes.Depth"/> pages ahead: of a chunk read whole, compressed and in
-    /// plaintext, whose bytes stay where they lie until the chunk ends. A header this cannot take as it
-    /// is, a dictionary page, or a page of no compressed values ends the walk or is passed, and is the
-    /// read's to decide.
+    /// free, up to <see cref="PageLanes.Depth"/> pages ahead, from the chunk's start: of a chunk read
+    /// whole, compressed and in plaintext, whose bytes stay where they lie until the chunk ends. A
+    /// header this cannot take as it is ends the walk, a dictionary or index page, or a page of no
+    /// compressed values, is passed over, and each is the read's to decide.
     /// </summary>
     private void Prefetch()
     {
@@ -1218,7 +1225,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             position = queued.At + queued.Stored;
         }
 
-        while (_ahead.Count < PageLanes.Depth && position < _chunkLength)
+        while (_ahead.Count < PageLanes.Depth && (_ahead.Count == 0 || _aheadBytes < PageLanes.Bytes) && position < _chunkLength)
         {
             ReadOnlySpan<byte> rest = _chunk.Span[position..];
             PageHeader header;
@@ -1255,7 +1262,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     size = header.UncompressedPageSize;
                     break;
                 default:
-                    return;
+                    // A dictionary page, which the read decodes, or an index page: passed over.
+                    size = 0;
+                    break;
             }
 
             if (size > 0 && size <= _cap)
@@ -1268,6 +1277,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes);
                 ThreadPool.UnsafeQueueUserWorkItem(page, preferLocal: false);
                 _ahead.Enqueue(page);
+                _aheadBytes += size;
             }
 
             position = at + stored;
@@ -1300,6 +1310,14 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         ZstdDecoders.Return(zstd);
+    }
+
+    /// <summary>The page decompressed ahead first in the chunk, out of the queue and its bytes.</summary>
+    private AheadPage Dequeue()
+    {
+        AheadPage page = _ahead.Dequeue();
+        _aheadBytes -= page.Block.WritableSpan.Length;
+        return page;
     }
 
     /// <summary>The block a page was decompressed into ahead: here, when its lane has not begun it, else once its lane has.</summary>

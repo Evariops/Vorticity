@@ -505,13 +505,15 @@ An aggregation's lanes decode splits side by side, each on a context and arenas 
 shared; a large row group is cut into splits at its page boundaries so that it spreads.
 
 A scan that delivers its batches reads them as one stream, in row order, and its lanes decompress
-pages instead: a column chunk read whole, compressed and in plaintext has its next two data pages
-decompressed on them while the pages before are read, as many at once as the degree, shared by the
-columns, so that a wide file's columns and a narrow one's next pages alike keep them busy. A page
-whose lane has not begun when its read comes to it is decompressed by the read itself, which never
-waits for a lane the pool has not run, and a page a skip steps over is dropped. The January 2023
-yellow taxi trips, every page GZIP's, scan in 68 ms on 32 lanes against 197 to 200 on one. A chunk
-read in windows has its own read-ahead (§5.3), an encrypted one none.
+pages instead: a column chunk read whole, compressed and in plaintext has its data pages
+decompressed on them ahead of the read, from the chunk's start, its dictionary page passed over, up
+to 2 MiB decompressed or eight pages ahead a column, two of the megabyte pages other writers cut and
+eight of this writer's; as many at once as the degree, shared by the columns, so that a wide file's
+columns and a narrow one's next pages alike keep them busy. A page whose lane has not begun when its
+read comes to it is decompressed by the read itself, which never waits for a lane the pool has not
+run, and a page a skip steps over is dropped. On 32 lanes the January 2023 yellow taxi trips, every
+page GZIP's, scan in 51 to 53 ms against 197 to 200 on one, and the report's table, ZSTD's, in 2.0
+to 2.2 ms against 3.2. A chunk read in windows has its own read-ahead (§5.3), an encrypted one none.
 
 The answers are the same bits at every degree.
 

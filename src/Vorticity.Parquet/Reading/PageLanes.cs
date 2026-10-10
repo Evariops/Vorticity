@@ -10,8 +10,14 @@ namespace Vorticity.Parquet.Reading;
 /// <param name="lanes">The decompressions that may run at once.</param>
 internal sealed class PageLanes(int lanes)
 {
-    /// <summary>The data pages a column reader keeps decompressed or decompressing ahead of the one it reads.</summary>
-    internal const int Depth = 2;
+    /// <summary>The most data pages a column reader keeps decompressed or decompressing ahead of the one it reads.</summary>
+    internal const int Depth = 8;
+
+    /// <summary>
+    /// The decompressed bytes past which a column reader takes no further page ahead, though it takes
+    /// one at least: two of the megabyte pages other writers cut, eight of this writer's smaller ones.
+    /// </summary>
+    internal const int Bytes = 2 << 20;
 
     private int _free = lanes;
 
