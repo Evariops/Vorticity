@@ -313,6 +313,8 @@ internal static class BitPacking
             return;
         }
 
+        // Fewer than 32 bits wait before each value, so that a value always fits the word: each
+        // 32 bits filled go out in one store, and what is left a byte at a time.
         ulong buffer = 0;
         int filled = 0;
         int written = 0;
@@ -320,17 +322,19 @@ internal static class BitPacking
         {
             buffer |= (ulong)value << filled;
             filled += bitWidth;
-            while (filled >= 8)
+            if (filled >= 32)
             {
-                destination[written++] = (byte)buffer;
-                buffer >>= 8;
-                filled -= 8;
+                BinaryPrimitives.WriteUInt32LittleEndian(destination[written..], (uint)buffer);
+                written += sizeof(uint);
+                buffer >>= 32;
+                filled -= 32;
             }
         }
 
-        if (filled > 0)
+        for (; filled > 0; filled -= 8)
         {
-            destination[written] = (byte)buffer;
+            destination[written++] = (byte)buffer;
+            buffer >>= 8;
         }
     }
 
@@ -409,25 +413,33 @@ internal static class BitPacking
             return;
         }
 
-        UInt128 buffer = 0;
+        // Fewer than 64 bits wait before each value: what fills the word goes out in one store, and
+        // the value's bits past it start the next.
+        ulong buffer = 0;
         int filled = 0;
         int written = 0;
-        UInt128 mask = bitWidth == 64 ? ulong.MaxValue : (1UL << bitWidth) - 1;
-        foreach (ulong value in values)
+        ulong mask = bitWidth == 64 ? ulong.MaxValue : (1UL << bitWidth) - 1;
+        foreach (ulong raw in values)
         {
-            buffer |= ((UInt128)value & mask) << filled;
+            ulong value = raw & mask;
+            buffer |= value << filled;
             filled += bitWidth;
-            while (filled >= 8)
+            if (filled >= 64)
             {
-                destination[written++] = (byte)buffer;
-                buffer >>= 8;
-                filled -= 8;
+                BinaryPrimitives.WriteUInt64LittleEndian(destination[written..], buffer);
+                written += sizeof(ulong);
+                filled -= 64;
+
+                // The bits of the value that did not fit; none when it ended the word.
+                int spent = bitWidth - filled;
+                buffer = spent == 64 ? 0 : value >> spent;
             }
         }
 
-        if (filled > 0)
+        for (; filled > 0; filled -= 8)
         {
-            destination[written] = (byte)buffer;
+            destination[written++] = (byte)buffer;
+            buffer >>= 8;
         }
     }
 

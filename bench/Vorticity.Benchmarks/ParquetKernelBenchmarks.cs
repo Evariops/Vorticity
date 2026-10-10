@@ -26,6 +26,8 @@ public class ParquetKernelBenchmarks
     private readonly byte[] _gathered = new byte[Count * sizeof(double)];
     private readonly byte[] _splitLongs = new byte[Count * sizeof(long)];
     private readonly byte[] _splitInts = new byte[Count * sizeof(int)];
+    private byte[] _written64 = [];
+    private byte[] _written32 = [];
 
     /// <summary>The values' shape: climbing by one, small or medium deltas, or noise.</summary>
     [Params("climbing", "small", "medium", "noise")]
@@ -53,6 +55,8 @@ public class ParquetKernelBenchmarks
         DeltaBinaryPacked.Encode64(_longs, _deltas64);
         _deltas32 = new byte[DeltaBinaryPacked.Size32(_ints)];
         DeltaBinaryPacked.Encode32(_ints, _deltas32);
+        _written64 = new byte[_deltas64.Length];
+        _written32 = new byte[_deltas32.Length];
         ByteStreamSplit.Encode(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_longs.AsSpan()), sizeof(double), _split);
     }
 
@@ -76,6 +80,15 @@ public class ParquetKernelBenchmarks
         DeltaBinaryPacked.Decode32(_deltas32, _decodedInts);
         return _decodedInts[^1];
     }
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED written, INT64")]
+    public int Written64() => DeltaBinaryPacked.Encode64(_longs, _written64);
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED written, INT32")]
+    public int Written32() => DeltaBinaryPacked.Encode32(_ints, _written32);
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED priced, INT32")]
+    public int Priced32() => DeltaBinaryPacked.Size32(_ints);
 
     [Benchmark(Description = "BYTE_STREAM_SPLIT, 8 bytes")]
     public byte Split()

@@ -310,7 +310,7 @@ internal static class RleHybridEncoder
     internal static int Size(ReadOnlySpan<byte> values, int bitWidth)
     {
         Sizer sizer = new(bitWidth);
-        PlanBytes(values, bitWidth, ref sizer);
+        Plan(values, bitWidth, ref sizer);
         return sizer.Bytes;
     }
 
@@ -338,7 +338,7 @@ internal static class RleHybridEncoder
     internal static int Encode(ReadOnlySpan<byte> values, int bitWidth, Span<byte> destination)
     {
         Writer<byte> writer = new(values, bitWidth, destination);
-        PlanBytes(values, bitWidth, ref writer);
+        Plan(values, bitWidth, ref writer);
         return writer.Written;
     }
 
@@ -359,6 +359,14 @@ internal static class RleHybridEncoder
         void Repeated(uint value, int count);
     }
 
+    /// <summary>
+    /// The runs of <paramref name="values"/>: a run of at least <see cref="MinimumRun"/> equal values
+    /// repeated, once the values before it are packed in whole groups of eight, borrowing from its
+    /// start what completes their last group, and every other value packed. Runs are found where
+    /// neighbours differ, a vector of pairs compared at a time: thirty-two levels, eight codes. When a
+    /// run to repeat must be longer than a vector, only the run that ends at a vector's first change
+    /// and the one that starts at its last can be, and the changes between are not visited.
+    /// </summary>
     private static void Plan<T, TSink>(ReadOnlySpan<T> values, int bitWidth, ref TSink sink)
         where T : unmanaged, IEquatable<T>
         where TSink : struct, IRunSink, allows ref struct
@@ -366,63 +374,18 @@ internal static class RleHybridEncoder
         int minimum = MinimumRun(bitWidth);
         int count = values.Length;
         int pending = 0;
-        int i = 0;
-        while (i < count)
-        {
-            T value = values[i];
-            int j = i + 1;
-            while (j < count && values[j].Equals(value))
-            {
-                j++;
-            }
-
-            int length = j - i;
-            if (length >= minimum)
-            {
-                int borrow = (8 - ((i - pending) & 7)) & 7;
-                if (length - borrow >= minimum)
-                {
-                    if (i + borrow > pending)
-                    {
-                        sink.Packed(pending, i + borrow - pending, last: false);
-                    }
-
-                    sink.Repeated(ToUInt32(value), length - borrow);
-                    pending = j;
-                }
-            }
-
-            i = j;
-        }
-
-        if (pending < count)
-        {
-            sink.Packed(pending, count - pending, last: true);
-        }
-    }
-
-    /// <summary>
-    /// The plan of byte-wide values, levels, as <see cref="Plan"/> makes it, its runs found where
-    /// neighbours differ, thirty-two pairs compared at a time. A run that is to repeat is at least
-    /// <see cref="MinimumRun"/> long; when that is past 32, only the run that ends at a block's first
-    /// change and the one that starts at its last can be, and the changes between are not visited.
-    /// </summary>
-    private static void PlanBytes<TSink>(ReadOnlySpan<byte> values, int bitWidth, ref TSink sink)
-        where TSink : struct, IRunSink, allows ref struct
-    {
-        int minimum = MinimumRun(bitWidth);
-        int count = values.Length;
-        int pending = 0;
         int start = 0;
         int i = 1;
-        ref byte input = ref MemoryMarshal.GetReference(values);
+        ref T input = ref MemoryMarshal.GetReference(values);
         if (Vector256.IsHardwareAccelerated)
         {
-            bool longRuns = minimum > Vector256<byte>.Count;
-            for (; i <= count - Vector256<byte>.Count; i += Vector256<byte>.Count)
+            int lanes = Vector256<T>.Count;
+            uint all = lanes == 32 ? uint.MaxValue : (1u << lanes) - 1;
+            bool longRuns = minimum > lanes;
+            for (; i <= count - lanes; i += lanes)
             {
                 // Bit k: the value at i + k differs from the one before it.
-                uint changes = ~Vector256.Equals(Vector256.LoadUnsafe(ref input, (nuint)i), Vector256.LoadUnsafe(ref input, (nuint)(i - 1))).ExtractMostSignificantBits();
+                uint changes = ~Vector256.Equals(Vector256.LoadUnsafe(ref input, (nuint)i), Vector256.LoadUnsafe(ref input, (nuint)(i - 1))).ExtractMostSignificantBits() & all;
                 if (changes == 0)
                 {
                     continue;
@@ -446,7 +409,7 @@ internal static class RleHybridEncoder
 
         for (; i < count; i++)
         {
-            if (values[i] != values[i - 1])
+            if (!values[i].Equals(values[i - 1]))
             {
                 Close(values, start, i, minimum, ref pending, ref sink);
                 start = i;
@@ -462,7 +425,8 @@ internal static class RleHybridEncoder
 
     /// <summary>The run of equal values from <paramref name="start"/> to <paramref name="end"/>: repeated where it pays, the values before it packed.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Close<TSink>(ReadOnlySpan<byte> values, int start, int end, int minimum, ref int pending, ref TSink sink)
+    private static void Close<T, TSink>(ReadOnlySpan<T> values, int start, int end, int minimum, ref int pending, ref TSink sink)
+        where T : unmanaged
         where TSink : struct, IRunSink, allows ref struct
     {
         int length = end - start;
@@ -482,7 +446,7 @@ internal static class RleHybridEncoder
             sink.Packed(pending, start + borrow - pending, last: false);
         }
 
-        sink.Repeated(values[start], length - borrow);
+        sink.Repeated(ToUInt32(values[start]), length - borrow);
         pending = end;
     }
 

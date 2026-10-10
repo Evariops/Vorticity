@@ -460,14 +460,20 @@ what the choice needs: distinct values through the chunk's table, runs, deltas a
 miniblock of 32, common prefixes between neighbouring byte arrays. Every candidate's cost is then an
 exact formula of those statistics, the encoder's own planning, so that a cost is the bytes the encoder
 writes; a trial runs only where no formula exists, as BYTE_STREAM_SPLIT does, whose worth is what a
-codec makes of it.
+codec makes of it. Where the encoding is the likelier outcome, the price is the write itself: a page of
+integers is written as DELTA_BINARY_PACKED, and a page's dictionary codes as their runs, into room for
+the worst case, and dropped when they do not pay, so that nothing priced is walked twice.
 
 A column chunk keeps one distinct table, codes assigned as rows arrive. While the dictionary holds —
 it wins on the formulas and its page stays under `DictionaryPageBytes`, 1 MiB — the chunk's pages are
 RLE_DICTIONARY; once it stops holding, the rest of the chunk's pages take the best other encoding,
-and the dictionary page holds the values coded so far. A column remembers its plan from one row group
-to the next and re-prices only that plan while its bytes stay within 5 % of the prediction, as the
-core's plan memory does.
+and the dictionary page holds the values coded so far.
+
+**Why no plan memory.** The core remembers a column's plan from one chunk to the next; this writer
+re-weighs each row group. What a row group re-weighs is the dictionary on its first page and a trial
+of one page, about one page in 128 of a row group of 1 048 576 rows, and every other price is the
+write itself. Rewriting ClickBench's first file, a row group of 105 columns, choosing every page's
+encoding takes 178 ms of 2 081, nearly all of it the encoding a remembered plan would run as well.
 
 ### 6.3 Encodings
 
@@ -539,8 +545,8 @@ again with hardware intrinsics disabled and compares bit for bit
 | kernel | serves | vector form |
 |---|---|---|
 | unpack, least significant bit first, widths 0 to 64 | hybrid runs, dictionary codes, delta miniblocks, ALP | AVX-512 VBMI: a byte permute gathers the bytes each value spans, then shift and mask, a register of values a step; elsewhere a byte shuffle (`PSHUFB`, `TBL`) and a variable shift; one table per width, chosen once per run |
-| pack | every bit-packed output | the inverse |
-| RLE runs | levels, codes, booleans | broadcast stores |
+| pack | every bit-packed output | a word at a time: one store per 32 or 64 bits filled, the bits past it carried into the next |
+| RLE runs | levels, codes, booleans | broadcast stores; to encode, runs found where neighbours differ, a vector of pairs compared at a time, 32 levels or 8 codes |
 | levels to validity | maximum definition level 1 | bit-packed runs copied as bitmaps with a shift, RLE runs filled by words, population count |
 | levels to offsets and validity | nesting | comparison masks per level, positions compressed out of them, prefix sums |
 | expand | dense values to the rows' slots | a mask-driven expand, `VPEXPAND` where the runtime exposes it, shuffle tables otherwise |

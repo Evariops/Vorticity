@@ -1035,7 +1035,13 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         int width = Math.Max(1, 32 - BitOperations.LeadingZeroCount((uint)(_entryCount - 1)));
         ReadOnlySpan<uint> pageCodes = _pageCodes.AsSpan(0, count);
-        int size = 1 + RleHybridEncoder.Size(pageCodes, width);
+
+        // Priced by writing them, and dropped when the dictionary stops here.
+        _codes.Clear();
+        Span<byte> into = _codes.Reserve(1 + RleHybridEncoder.MaxSize(count, width));
+        into[0] = (byte)width;
+        int size = 1 + RleHybridEncoder.Encode(pageCodes, width, into[1..]);
+        _codes.Truncate(size);
 
         // The dictionary pays while the chunk's codes and the dictionary page together take fewer
         // bytes than the values they stand for: a column of values that seldom repeat stops here,
@@ -1047,11 +1053,6 @@ internal sealed class ColumnChunkWriter : IDisposable
 
         _codeBytes += size;
         _plainBytes += plain;
-
-        _codes.Clear();
-        Span<byte> into = _codes.Reserve(size);
-        into[0] = (byte)width;
-        RleHybridEncoder.Encode(pageCodes, width, into[1..]);
         return Coding.Codes;
     }
 
@@ -1069,15 +1070,16 @@ internal sealed class ColumnChunkWriter : IDisposable
         {
             case PhysicalType.Int32:
             {
+                // Priced by writing it, and dropped when it does not pay.
                 ReadOnlySpan<int> values = MemoryMarshal.Cast<byte, int>(body);
-                int size = DeltaBinaryPacked.Size32(values);
+                _encoded.Clear();
+                int size = DeltaBinaryPacked.Encode32(values, _encoded.Reserve(DeltaBinaryPacked.MaxSize32(values.Length)));
                 if (size > body.Length - (body.Length / 8))
                 {
                     return Split(ref body, sizeof(int));
                 }
 
-                _encoded.Clear();
-                DeltaBinaryPacked.Encode32(values, _encoded.Reserve(size));
+                _encoded.Truncate(size);
                 body = _encoded.WrittenSpan;
                 return ParquetEncoding.DeltaBinaryPacked;
             }
@@ -1085,14 +1087,14 @@ internal sealed class ColumnChunkWriter : IDisposable
             case PhysicalType.Int64:
             {
                 ReadOnlySpan<long> values = MemoryMarshal.Cast<byte, long>(body);
-                int size = DeltaBinaryPacked.Size64(values);
+                _encoded.Clear();
+                int size = DeltaBinaryPacked.Encode64(values, _encoded.Reserve(DeltaBinaryPacked.MaxSize64(values.Length)));
                 if (size > body.Length - (body.Length / 8))
                 {
                     return Split(ref body, sizeof(long));
                 }
 
-                _encoded.Clear();
-                DeltaBinaryPacked.Encode64(values, _encoded.Reserve(size));
+                _encoded.Truncate(size);
                 body = _encoded.WrittenSpan;
                 return ParquetEncoding.DeltaBinaryPacked;
             }
@@ -1205,14 +1207,14 @@ internal sealed class ColumnChunkWriter : IDisposable
             case ParquetEncoding.DeltaBinaryPacked when _column.Physical == PhysicalType.Int32:
             {
                 ReadOnlySpan<int> values = MemoryMarshal.Cast<byte, int>(body);
-                DeltaBinaryPacked.Encode32(values, _encoded.Reserve(DeltaBinaryPacked.Size32(values)));
+                _encoded.Truncate(DeltaBinaryPacked.Encode32(values, _encoded.Reserve(DeltaBinaryPacked.MaxSize32(values.Length))));
                 break;
             }
 
             case ParquetEncoding.DeltaBinaryPacked:
             {
                 ReadOnlySpan<long> values = MemoryMarshal.Cast<byte, long>(body);
-                DeltaBinaryPacked.Encode64(values, _encoded.Reserve(DeltaBinaryPacked.Size64(values)));
+                _encoded.Truncate(DeltaBinaryPacked.Encode64(values, _encoded.Reserve(DeltaBinaryPacked.MaxSize64(values.Length))));
                 break;
             }
 

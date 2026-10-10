@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Encodings;
@@ -20,9 +21,10 @@ namespace Vorticity.Parquet.Encodings;
 /// miniblocks past the last value have no bytes at all.
 /// </para>
 /// <para>
-/// The writer cuts blocks of 128 values in four miniblocks of 32, and prices an encoding exactly:
-/// <see cref="Size32"/> and <see cref="Size64"/> walk the same blocks <see cref="Encode32"/> and
-/// <see cref="Encode64"/> write.
+/// The writer cuts blocks of 128 values in four miniblocks of 32, their deltas taken and their widths
+/// found a vector at a time, and prices an encoding exactly: <see cref="Size32"/> and
+/// <see cref="Size64"/> walk the same blocks <see cref="Encode32"/> and <see cref="Encode64"/> write, and
+/// a writer that expects to keep the encoding writes it into room for <see cref="MaxSize32"/> instead.
 /// </para>
 /// </remarks>
 internal static class DeltaBinaryPacked
@@ -247,6 +249,12 @@ internal static class DeltaBinaryPacked
         }
     }
 
+    /// <summary>The most bytes <see cref="Encode32"/> writes for <paramref name="count"/> values: every miniblock 32 bits wide.</summary>
+    internal static int MaxSize32(int count) => MaxSize(count, sizeof(int));
+
+    /// <summary>The most bytes <see cref="Encode64"/> writes for <paramref name="count"/> values: every miniblock 64 bits wide.</summary>
+    internal static int MaxSize64(int count) => MaxSize(count, sizeof(long));
+
     /// <summary>The bytes <see cref="Encode32"/> writes for <paramref name="values"/>.</summary>
     internal static int Size32(ReadOnlySpan<int> values)
     {
@@ -279,6 +287,16 @@ internal static class DeltaBinaryPacked
         return output.Position;
     }
 
+    /// <summary>
+    /// A header of four varints, the first value's of ten bytes at most, then per block a minimum of
+    /// ten, a width a miniblock, and every delta at the type's full width.
+    /// </summary>
+    private static int MaxSize(int count, int width)
+    {
+        int blocks = (Math.Max(count - 1, 0) + BlockValues - 1) / BlockValues;
+        return 5 + 5 + 5 + 10 + (blocks * (10 + MiniblocksPerBlock + (BlockValues * width)));
+    }
+
     private static void Write32(ReadOnlySpan<int> values, ref Output output)
     {
         output.Varint(BlockValues);
@@ -292,32 +310,9 @@ internal static class DeltaBinaryPacked
             int count = Math.Min(BlockValues, values.Length - start);
 
             // The deltas wrap, and so does their distance from the least of them.
-            int minimum = int.MaxValue;
-            for (int i = 0; i < count; i++)
-            {
-                int delta = values[start + i] - values[start + i - 1];
-                deltas[i] = (uint)delta;
-                minimum = Math.Min(minimum, delta);
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                deltas[i] -= (uint)minimum;
-            }
-
+            int minimum = Deltas(values.Slice(start - 1, count + 1), deltas);
             output.Varint(Varint.ZigZagEncode64(minimum));
-            for (int m = 0; m < MiniblocksPerBlock; m++)
-            {
-                int from = m * MiniblockValues;
-                uint bits = 0;
-                for (int i = from; i < Math.Min(count, from + MiniblockValues); i++)
-                {
-                    bits |= deltas[i];
-                }
-
-                widths[m] = (byte)(32 - BitOperations.LeadingZeroCount(bits));
-            }
-
+            Widths(deltas, count, (uint)minimum, widths);
             output.Bytes(widths);
             for (int m = 0; m * MiniblockValues < count; m++)
             {
@@ -340,32 +335,9 @@ internal static class DeltaBinaryPacked
         for (int start = 1; start < values.Length; start += BlockValues)
         {
             int count = Math.Min(BlockValues, values.Length - start);
-            long minimum = long.MaxValue;
-            for (int i = 0; i < count; i++)
-            {
-                long delta = values[start + i] - values[start + i - 1];
-                deltas[i] = (ulong)delta;
-                minimum = Math.Min(minimum, delta);
-            }
-
-            for (int i = 0; i < count; i++)
-            {
-                deltas[i] -= (ulong)minimum;
-            }
-
+            long minimum = Deltas(values.Slice(start - 1, count + 1), deltas);
             output.Varint(Varint.ZigZagEncode64(minimum));
-            for (int m = 0; m < MiniblocksPerBlock; m++)
-            {
-                int from = m * MiniblockValues;
-                ulong bits = 0;
-                for (int i = from; i < Math.Min(count, from + MiniblockValues); i++)
-                {
-                    bits |= deltas[i];
-                }
-
-                widths[m] = (byte)(64 - BitOperations.LeadingZeroCount(bits));
-            }
-
+            Widths(deltas, count, (ulong)minimum, widths);
             output.Bytes(widths);
             for (int m = 0; m * MiniblockValues < count; m++)
             {
@@ -373,6 +345,154 @@ internal static class DeltaBinaryPacked
                 block[Math.Min(MiniblockValues, count - (m * MiniblockValues))..].Clear();
                 output.Pack64(block, widths[m]);
             }
+        }
+    }
+
+    /// <summary>
+    /// The deltas of <paramref name="values"/>, each from the one before it and wrapping, into
+    /// <paramref name="deltas"/>, one fewer than the values; the least of them. A vector of values
+    /// less the same vector loaded a value earlier, the minimum by lanes.
+    /// </summary>
+    private static int Deltas(ReadOnlySpan<int> values, Span<uint> deltas)
+    {
+        int count = values.Length - 1;
+        int minimum = int.MaxValue;
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated && count >= Vector256<int>.Count)
+        {
+            ref int value = ref MemoryMarshal.GetReference(values);
+            ref uint delta = ref MemoryMarshal.GetReference(deltas);
+            Vector256<int> least = Vector256.Create(int.MaxValue);
+            for (; i <= count - Vector256<int>.Count; i += Vector256<int>.Count)
+            {
+                Vector256<int> step = Vector256.LoadUnsafe(ref value, (nuint)(i + 1)) - Vector256.LoadUnsafe(ref value, (nuint)i);
+                step.AsUInt32().StoreUnsafe(ref delta, (nuint)i);
+                least = Vector256.Min(least, step);
+            }
+
+            for (int lane = 0; lane < Vector256<int>.Count; lane++)
+            {
+                minimum = Math.Min(minimum, least.GetElement(lane));
+            }
+        }
+
+        for (; i < count; i++)
+        {
+            int step = values[i + 1] - values[i];
+            deltas[i] = (uint)step;
+            minimum = Math.Min(minimum, step);
+        }
+
+        return minimum;
+    }
+
+    /// <inheritdoc cref="Deltas(ReadOnlySpan{int}, Span{uint})"/>
+    private static long Deltas(ReadOnlySpan<long> values, Span<ulong> deltas)
+    {
+        int count = values.Length - 1;
+        long minimum = long.MaxValue;
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated && count >= Vector256<long>.Count)
+        {
+            ref long value = ref MemoryMarshal.GetReference(values);
+            ref ulong delta = ref MemoryMarshal.GetReference(deltas);
+            Vector256<long> least = Vector256.Create(long.MaxValue);
+            for (; i <= count - Vector256<long>.Count; i += Vector256<long>.Count)
+            {
+                Vector256<long> step = Vector256.LoadUnsafe(ref value, (nuint)(i + 1)) - Vector256.LoadUnsafe(ref value, (nuint)i);
+                step.AsUInt64().StoreUnsafe(ref delta, (nuint)i);
+                least = Vector256.Min(least, step);
+            }
+
+            for (int lane = 0; lane < Vector256<long>.Count; lane++)
+            {
+                minimum = Math.Min(minimum, least.GetElement(lane));
+            }
+        }
+
+        for (; i < count; i++)
+        {
+            long step = values[i + 1] - values[i];
+            deltas[i] = (ulong)step;
+            minimum = Math.Min(minimum, step);
+        }
+
+        return minimum;
+    }
+
+    /// <summary>
+    /// Takes <paramref name="minimum"/> from each of a block's <paramref name="count"/> deltas, and
+    /// the bits each miniblock's widest then needs into <paramref name="widths"/>: an OR of its lanes,
+    /// then a leading-zero count.
+    /// </summary>
+    private static void Widths(Span<uint> deltas, int count, uint minimum, Span<byte> widths)
+    {
+        Vector256<uint> least = Vector256.Create(minimum);
+        ref uint delta = ref MemoryMarshal.GetReference(deltas);
+        for (int m = 0; m < MiniblocksPerBlock; m++)
+        {
+            int i = m * MiniblockValues;
+            int end = Math.Min(count, i + MiniblockValues);
+            uint bits = 0;
+            if (Vector256.IsHardwareAccelerated)
+            {
+                Vector256<uint> any = Vector256<uint>.Zero;
+                for (; i <= end - Vector256<uint>.Count; i += Vector256<uint>.Count)
+                {
+                    Vector256<uint> less = Vector256.LoadUnsafe(ref delta, (nuint)i) - least;
+                    less.StoreUnsafe(ref delta, (nuint)i);
+                    any |= less;
+                }
+
+                for (int lane = 0; lane < Vector256<uint>.Count; lane++)
+                {
+                    bits |= any.GetElement(lane);
+                }
+            }
+
+            for (; i < end; i++)
+            {
+                deltas[i] -= minimum;
+                bits |= deltas[i];
+            }
+
+            widths[m] = (byte)(32 - BitOperations.LeadingZeroCount(bits));
+        }
+    }
+
+    /// <inheritdoc cref="Widths(Span{uint}, int, uint, Span{byte})"/>
+    private static void Widths(Span<ulong> deltas, int count, ulong minimum, Span<byte> widths)
+    {
+        Vector256<ulong> least = Vector256.Create(minimum);
+        ref ulong delta = ref MemoryMarshal.GetReference(deltas);
+        for (int m = 0; m < MiniblocksPerBlock; m++)
+        {
+            int i = m * MiniblockValues;
+            int end = Math.Min(count, i + MiniblockValues);
+            ulong bits = 0;
+            if (Vector256.IsHardwareAccelerated)
+            {
+                Vector256<ulong> any = Vector256<ulong>.Zero;
+                for (; i <= end - Vector256<ulong>.Count; i += Vector256<ulong>.Count)
+                {
+                    Vector256<ulong> less = Vector256.LoadUnsafe(ref delta, (nuint)i) - least;
+                    less.StoreUnsafe(ref delta, (nuint)i);
+                    any |= less;
+                }
+
+                for (int lane = 0; lane < Vector256<ulong>.Count; lane++)
+                {
+                    bits |= any.GetElement(lane);
+                }
+            }
+
+            for (; i < end; i++)
+            {
+                deltas[i] -= minimum;
+                bits |= deltas[i];
+            }
+
+            widths[m] = (byte)(64 - BitOperations.LeadingZeroCount(bits));
         }
     }
 
