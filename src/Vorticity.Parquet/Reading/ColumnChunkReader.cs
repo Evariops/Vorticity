@@ -1180,6 +1180,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>
+    /// The context's ZSTD decompressor for a chunk of ZSTD pages, null for any other codec: a context
+    /// rents one when first asked, and a scan's fields decode side by side, each in a context of its own.
+    /// </summary>
+    private Zstd.ZstdDecompressor? ZstdOf(ScanContext context) => _codec == CompressionCodec.Zstd ? context.Zstd : null;
+
+    /// <summary>
     /// <paramref name="size"/> bytes of <paramref name="source"/> decompressed: the block a lane
     /// decompressed them into while the pages before were read, or a block they are decompressed into
     /// now.
@@ -1198,7 +1204,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         try
         {
             Counters?.AddDecompression();
-            PageCodecs.Decompress(_codec, source, values.WritableSpan, context.Zstd);
+            PageCodecs.Decompress(_codec, source, values.WritableSpan, ZstdOf(context));
         }
         catch
         {
@@ -1281,6 +1287,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes);
                 page.Queue();
+                Counters?.AddAhead();
                 _ahead.Enqueue(page);
                 _aheadBytes += size;
             }
@@ -1366,9 +1373,6 @@ internal sealed partial class ColumnChunkReader : IDisposable
         internal int Stored { get; } = stored;
 
         internal NativeSegmentOwner Block { get; } = block;
-
-        /// <summary>Counts the page a lane decompressed.</summary>
-        protected override void Ran() => reader.Counters?.AddAhead();
 
         /// <summary>Decompresses the page's bytes into its block, with a decompressor of the pool's for ZSTD.</summary>
         protected override void Run()
@@ -2393,7 +2397,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 try
                 {
                     Counters?.AddDecompression();
-                    PageCodecs.Decompress(_codec, body.Span, values.WritableSpan, context.Zstd);
+                    PageCodecs.Decompress(_codec, body.Span, values.WritableSpan, ZstdOf(context));
                 }
                 catch
                 {

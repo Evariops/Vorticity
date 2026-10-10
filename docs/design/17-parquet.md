@@ -511,9 +511,17 @@ to 2 MiB decompressed or eight pages ahead a column, two of the megabyte pages o
 eight of this writer's; as many at once as the degree, shared by the columns, so that a wide file's
 columns and a narrow one's next pages alike keep them busy. A page whose lane has not begun when its
 read comes to it is decompressed by the read itself, which never waits for a lane the pool has not
-run, and a page a skip steps over is dropped. On 32 lanes the January 2023 yellow taxi trips, every
-page GZIP's, scan in 51 to 53 ms against 197 to 200 on one, and the report's table, ZSTD's, in 2.0
-to 2.2 ms against 3.2. A chunk read in windows has its own read-ahead (§5.3), an encrypted one none.
+run, and a page a skip steps over is dropped. A chunk read in windows has its own read-ahead (§5.3),
+an encrypted one none.
+
+The fields of a batch decode side by side on the scan's lanes, each into a context and an arena of
+its own, the longest first by what each took the batch before; the batch's arena then references
+their nodes, whose bytes stay where they were decoded until the batch is dead. A batch waits for
+its slowest field, the one that begins a page: on ClickBench's first file, 105 columns under
+SNAPPY, a scan takes 46 to 47 ms on 32 lanes against 93 when only the pages decompressed side by
+side, and its `Title` column, a third of its bytes, holds 58 of its 124 batches. The January 2023
+yellow taxi trips, every page GZIP's, scan in 31 to 34 ms on 32 lanes against 51 to 53, and 197 to
+200 on one.
 
 The answers are the same bits at every degree.
 

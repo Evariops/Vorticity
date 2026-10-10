@@ -27,7 +27,10 @@ internal sealed class PageCounters
     /// <summary>Batches whose values were copied out of the pages they span: any other batch is one page's slots, in place.</summary>
     internal long Gathers => Interlocked.Read(ref _gathers);
 
-    /// <summary>Data pages a lane of the scan decompressed while the pages before them were read.</summary>
+    /// <summary>
+    /// Data pages a column of the scan took a lane to decompress while the pages before them are read,
+    /// whichever thread then decompresses them: the lane, or the column when it comes to the page first.
+    /// </summary>
     internal long Ahead => Interlocked.Read(ref _ahead);
 
     internal void AddPage() => Interlocked.Increment(ref _pages);

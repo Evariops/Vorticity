@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -13,6 +14,7 @@ using Vorticity.Parquet.Schema;
 using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
+using Vorticity.Writing;
 
 namespace Vorticity.Parquet.Reading;
 
@@ -63,6 +65,18 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>A flat field's reader.</summary>
     private readonly int[] _flat;
     private readonly int[] _nodes;
+
+    /// <summary>
+    /// Per field, the context its readers decode into when a batch's fields decode side by side on
+    /// the scan's lanes, each into an arena of its own; null when they decode one after the other
+    /// into the batch's.
+    /// </summary>
+    private readonly ScanContext[]? _fieldContexts;
+
+    /// <summary>The scan's degree, the threads a batch's fields decode on, the reading one included.</summary>
+    private readonly int _degree;
+    private WorkFan? _fan;
+    private FieldDecoding? _decoding;
 
     /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
     private readonly FilterColumns? _pruning;
@@ -172,6 +186,15 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // read: as many at once as its degree, shared by the columns.
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : file.Session.Options.MaxDegreeOfParallelism;
         PageLanes? lanes = degree > 1 ? new PageLanes(degree) : null;
+        _degree = degree;
+        if (degree > 1 && fields.Length > 1)
+        {
+            _fieldContexts = new ScanContext[fields.Length];
+            for (int i = 0; i < fields.Length; i++)
+            {
+                _fieldContexts[i] = new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = cap });
+            }
+        }
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.VerifyChecksums = file.Options.VerifyChecksums;
@@ -214,6 +237,13 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // The batch handed out last is dead: what it read goes back before the next is cut.
         _current?.Dispose();
         _context.ResetBatch();
+        if (_fieldContexts is { } contexts)
+        {
+            foreach (ScanContext context in contexts)
+            {
+                context.ResetBatch();
+            }
+        }
 
         // The windows every reader is past go back as soon as the batch that held their last pages
         // is dead: a group holds a few windows of its reads, not all of them.
@@ -265,14 +295,30 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             await WindowsAsync((int)(_groupRead / _batchRows)).ConfigureAwait(false);
         }
 
-        for (int i = 0; i < _nodes.Length; i++)
+        CanonicalArena arena = _context.Canonical;
+        if (_fieldContexts is { } fieldContexts)
         {
-            _nodes[i] = _nested[i] is { } nested ? nested.Read(_context, rows) : _readers[_flat[i]].Read(_context, rows);
+            // The fields side by side, each into its own arena, whose nodes the batch's then
+            // references: their bytes stay where they were decoded, until the batch is dead.
+            WorkFan fan = _fan ??= WorkFan.Rent(_degree);
+            FieldDecoding decoding = _decoding ??= new FieldDecoding(this);
+            decoding.Order(fan.Items(_nodes.Length));
+            fan.Run(decoding, _nodes.Length, null, rows);
+            for (int i = 0; i < _nodes.Length; i++)
+            {
+                _nodes[i] = arena.ReferenceFrom(fieldContexts[i].Canonical, _nodes[i]);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < _nodes.Length; i++)
+            {
+                _nodes[i] = Read(_context, i, rows);
+            }
         }
 
         // A batch is a block: what a pruned one is not.
         _metrics.AddBlocksDecoded(1);
-        CanonicalArena arena = _context.Canonical;
         int root = arena.AddStruct(_struct, rows, Validity.NonNullable, _nodes);
         _current = RecordBatch.Over(arena, root, _groupStart + _groupRead, _current);
         _groupRead += rows;
@@ -324,7 +370,64 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _offsets.Dispose();
         _dictionaries?.Dispose();
         _context.Dispose();
+        if (_fieldContexts is { } contexts)
+        {
+            foreach (ScanContext context in contexts)
+            {
+                context.Dispose();
+            }
+        }
+
+        if (_fan is { } fan)
+        {
+            _fan = null;
+            WorkFan.Return(fan);
+        }
+
         _abandon.Dispose();
+    }
+
+    /// <summary>Field <paramref name="field"/>'s next <paramref name="rows"/> rows, decoded into <paramref name="context"/>.</summary>
+    private int Read(ScanContext context, int field, int rows) =>
+        _nested[field] is { } nested ? nested.Read(context, rows) : _readers[_flat[field]].Read(context, rows);
+
+    /// <summary>
+    /// A batch's fields decoded by the work fan, a field an item, each into its own context, on
+    /// whichever of the scan's threads claims it.
+    /// </summary>
+    /// <remarks>
+    /// The items go longest first, by what each field's took the batch before: the reading thread
+    /// claims the first while the others wake, and the field that holds every batch is not the one
+    /// that waits for a thread.
+    /// </remarks>
+    private sealed class FieldDecoding(ParquetBatches batches) : IFanWork
+    {
+        /// <summary>Per field, the ticks its item took the last time it ran.</summary>
+        private readonly long[] _took = new long[batches._nodes.Length];
+
+        /// <summary>Lays the fields out in <paramref name="order"/>, longest first.</summary>
+        internal void Order(Span<int> order)
+        {
+            for (int f = 0; f < order.Length; f++)
+            {
+                int at = f;
+                while (at > 0 && _took[order[at - 1]] < _took[f])
+                {
+                    order[at] = order[at - 1];
+                    at--;
+                }
+
+                order[at] = f;
+            }
+        }
+
+        public void Run(WorkFan fan, int item)
+        {
+            int field = fan.Item(item);
+            long began = Stopwatch.GetTimestamp();
+            batches._nodes[field] = batches.Read(batches._fieldContexts![field], field, fan.Value);
+            _took[field] = Stopwatch.GetTimestamp() - began;
+        }
     }
 
     /// <summary>

@@ -77,7 +77,6 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
             if (Claim())
             {
                 Perform();
-                Ran();
                 lock (_gate)
                 {
                     _done = true;
@@ -119,11 +118,6 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem
 
     /// <summary>The codec's work, on whichever thread claimed it.</summary>
     protected abstract void Run();
-
-    /// <summary>What a lane does once it has run the work, before its column may take it.</summary>
-    protected virtual void Ran()
-    {
-    }
 
     /// <summary>Runs the work, keeping what it throws for the column.</summary>
     private void Perform()

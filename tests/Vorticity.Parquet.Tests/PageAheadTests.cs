@@ -49,9 +49,9 @@ public sealed class PageAheadTests : IDisposable
         Assert.Equal(Rows, one.Count);
         Assert.Equal(one, four);
 
-        // On one lane nothing is decompressed ahead; on four, pages are.
+        // On one lane no page is taken ahead; on four, pages are.
         Assert.Equal(0, aheadOnOne);
-        Assert.True(aheadOnFour > 0, "No page was decompressed ahead on four lanes.");
+        Assert.True(aheadOnFour > 0, "No page was taken ahead on four lanes.");
 
         // A filter and a take step over pages a lane may have decompressed ahead.
         VortexExpr band = Expr.And(Expr.Ge(Expr.Field("id"), Expr.Literal(FilterLiteral.From(12_000L))), Expr.Lt(Expr.Field("id"), Expr.Literal(FilterLiteral.From(13_500L))));
@@ -87,7 +87,7 @@ public sealed class PageAheadTests : IDisposable
         Assert.Equal(await RowsAsync(1, scan => scan), await RowsAsync(4, scan => scan));
     }
 
-    /// <summary>Every row of the file on <paramref name="degree"/> lanes, and the pages its lanes decompressed ahead.</summary>
+    /// <summary>Every row of the file on <paramref name="degree"/> lanes, and the pages its columns took ahead.</summary>
     private async Task<(List<string> Rows, long Ahead)> CountedRowsAsync(int degree)
     {
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
