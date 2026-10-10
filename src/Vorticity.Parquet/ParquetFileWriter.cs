@@ -60,6 +60,14 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// </summary>
     private const int AcrossCells = 16_384;
 
+    /// <summary>
+    /// The most threads a block's columns stage on side by side, whatever the degree: past eight, each
+    /// block's wake-ups and the wait for its last column cost more than the staging the threads would
+    /// share, ClickBench's first file written back in 372 ms on 32 lanes against 281 on eight, the
+    /// taxi trips in 159 against 149. The pages still compress on every lane of the degree.
+    /// </summary>
+    private const int StageLanes = 8;
+
     /// <summary>The threads the columns stage their rows and close their pages on, the writing one included.</summary>
     private readonly int _lanes;
     private WorkFan? _fan;
@@ -574,7 +582,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
         if (across || closes)
         {
-            WorkFan fan = _fan ??= WorkFan.Rent(_lanes);
+            WorkFan fan = _fan ??= WorkFan.Rent(Math.Min(_lanes, StageLanes));
             BlockWork work = _blockWork ??= new BlockWork(this);
             work.Start = start;
             work.Stages = across;
