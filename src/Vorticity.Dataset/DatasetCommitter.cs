@@ -370,7 +370,8 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// Whether the commit object of <paramref name="version"/> is whole: read in full and checked from
-    /// its preamble to its trailer, which a writer that stopped early never wrote.
+    /// its preamble to its trailer, which a writer that stopped early never wrote. A sealed one read
+    /// without the dataset's keys is checked by its envelope's header and trailer instead.
     /// </summary>
     public static async ValueTask<bool> IsWholeAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
     {
@@ -412,6 +413,17 @@ internal static class DatasetCommitter
             }
 
             range.Bytes.CopyTo(bytes.AsSpan(at));
+        }
+
+        // A sealed commit read without the dataset's keys is judged by its envelope, which is whole
+        // exactly when its writer finished it.
+        if (bytes.AsSpan().StartsWith(Sealing.SealedFormat.HeaderMagic))
+        {
+            Vorticity.IO.MemorySegmentSource envelope = new Vorticity.IO.MemorySegmentSource(bytes);
+            await using (envelope.ConfigureAwait(false))
+            {
+                return await Sealing.SealedFiles.IsWholeAsync(envelope, bytes.Length, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         try
