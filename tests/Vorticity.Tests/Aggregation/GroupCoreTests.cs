@@ -58,8 +58,8 @@ public sealed partial class GroupCoreTests
 
             // Delivered part by part, every group once, a part let go before the next; and whole, as
             // an order over the groups asks it, the same again.
-            Assert.Equal(held.Count, core.Statistics.Grouping!.Groups);
-            Assert.InRange(core.Statistics.Grouping.PeakGroups, 1, held.Count);
+            Assert.Equal(held.Count, core.Metrics.Grouping!.Groups);
+            Assert.InRange(core.Metrics.Grouping.PeakGroups, 1, held.Count);
             Vorticity.Aggregation whole = Query(file, plan =>
             {
                 Tiny(plan);

@@ -63,7 +63,7 @@ internal static class VortexTelemetry
     }
 
     /// <summary>Adds what a finished scan did to the counters, and to its activity.</summary>
-    internal static void ScanEnded(ScanMetrics metrics, Activity? activity)
+    internal static void ScanEnded(ScanCounters metrics, Activity? activity)
     {
         // Each instrument on its own: a listener may enable some and not others, and an Add to an
         // instrument nobody listens to returns at once.

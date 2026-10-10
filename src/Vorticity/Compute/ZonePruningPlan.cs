@@ -51,7 +51,7 @@ internal static class ZonePruningPlan
     /// </remarks>
     internal static async ValueTask<BlockMask?> RefineAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
-        List<PruningStep>? steps = null, Scanning.ScanMetrics? metrics = null, bool indexes = true) =>
+        List<PruningStep>? steps = null, Scanning.ScanCounters? metrics = null, bool indexes = true) =>
         (await PlanAsync(file, tree, filter, cancellationToken, steps, metrics, indexes).ConfigureAwait(false)).Live;
 
     /// <summary>The mask, and the structures that refined it -- which a count asks again, per block.</summary>
@@ -81,7 +81,7 @@ internal static class ZonePruningPlan
     /// </param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
-        List<PruningStep>? steps = null, Scanning.ScanMetrics? metrics = null, bool indexes = true,
+        List<PruningStep>? steps = null, Scanning.ScanCounters? metrics = null, bool indexes = true,
         BlockMask? scope = null)
     {
         (ZonePruner? zones, int segments, long bytes) =
@@ -89,7 +89,7 @@ internal static class ZonePruningPlan
         // The price of consulting a structure belongs to the scan's cost: the zone maps read here
         // are bytes the scan asked its source for, and they go to the same sink the batches feed,
         // so that the sink and the source agree about what was requested.
-        Scanning.ScanMetrics.Note(metrics, segments, bytes);
+        Scanning.ScanCounters.Note(metrics, segments, bytes);
 
         long blockRows = Scanning.SplitPlan.NaturalBatchRows(tree);
         Indexes.BloomPruner? blooms = indexes && blockRows > 0
@@ -119,7 +119,7 @@ internal static class ZonePruningPlan
         {
             before = Counted(live, scope);
             await blooms.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
-            Scanning.ScanMetrics.Note(metrics, blooms.Segments, blooms.Bytes);
+            Scanning.ScanCounters.Note(metrics, blooms.Segments, blooms.Bytes);
             Diagnostics.VortexEventSource.RunsRead(blooms.Segments);
             steps?.Add(new PruningStep("bloom filter", before - Counted(live, scope), blooms.Segments, blooms.Bytes));
         }
@@ -130,7 +130,7 @@ internal static class ZonePruningPlan
         {
             before = Counted(live, scope);
             await locating.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
-            Scanning.ScanMetrics.Note(metrics, locating.Segments, locating.Bytes);
+            Scanning.ScanCounters.Note(metrics, locating.Segments, locating.Bytes);
             Diagnostics.VortexEventSource.RunsRead(locating.Segments);
             steps?.Add(new PruningStep("locating index", before - Counted(live, scope), locating.Segments, locating.Bytes));
             located = locating.LocatesRows;
@@ -150,7 +150,7 @@ internal static class ZonePruningPlan
     /// group by whether its key lies scattered over its span or in the order of the rows.
     /// </summary>
     internal static async ValueTask<ZoneColumn?> ZonesAsync(
-        VortexFile file, FieldExpr field, Scanning.ScanMetrics? metrics, CancellationToken cancellationToken)
+        VortexFile file, FieldExpr field, Scanning.ScanCounters? metrics, CancellationToken cancellationToken)
     {
         if (!TryLocate(file.LayoutTree, field, out LayoutNode node, out ZoneMap map))
         {
@@ -164,7 +164,7 @@ internal static class ZonePruningPlan
 
         ZoneColumn[] columns = new ZoneColumn[1];
         (int segments, long bytes) = await DecodeAsync(file, [new Candidate(field, node, map)], columns, metrics, cancellationToken).ConfigureAwait(false);
-        Scanning.ScanMetrics.Note(metrics, segments, bytes);
+        Scanning.ScanCounters.Note(metrics, segments, bytes);
         return columns[0];
     }
 
@@ -189,7 +189,7 @@ internal static class ZonePruningPlan
     /// consulting the zone maps cost this scan.
     /// </summary>
     private static async ValueTask<(ZonePruner? Pruner, int Segments, long Bytes)> BuildCountedAsync(
-        VortexFile file, LayoutTree tree, VortexExpr filter, Scanning.ScanMetrics? metrics,
+        VortexFile file, LayoutTree tree, VortexExpr filter, Scanning.ScanCounters? metrics,
         CancellationToken cancellationToken)
     {
         // The filter's own field references, whose paths are already split and encoded; a filter
@@ -246,7 +246,7 @@ internal static class ZonePruningPlan
     /// them in and keeps them on the file; returns the segments and bytes asked for.
     /// </summary>
     private static async ValueTask<(int Segments, long Bytes)> DecodeAsync(
-        VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Scanning.ScanMetrics? metrics,
+        VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Scanning.ScanCounters? metrics,
         CancellationToken cancellationToken)
     {
         // Sized for metadata rather than for a batch, and that choice is most of what pruning
@@ -276,7 +276,7 @@ internal static class ZonePruningPlan
 
         // Counted at the asking, like a batch's requests: the distinct zone-map segments and their
         // bytes, whatever the source then does about them.
-        int segments = Scanning.ScanMetrics.Unread(context.Segments, file.Segments, out long bytes);
+        int segments = Scanning.ScanCounters.Unread(context.Segments, file.Segments, out long bytes);
 
         await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
 

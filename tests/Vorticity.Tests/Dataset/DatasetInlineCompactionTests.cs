@@ -89,7 +89,7 @@ public sealed class DatasetInlineCompactionTests
         ChangeRow[] rows = [.. Enumerable.Range(0, 50).Select(i => new ChangeRow(90_000L + i, 1.0, Cities[i % Cities.Length]))];
         ObjectDraft draft = dataset.StartObject();
         await draft.Writer.WriteAsync<ChangeRow>(rows, ct);
-        ReplaceResult replaced = await dataset.ReplaceAsync([], [draft], ct);
+        ReplaceResult replaced = await dataset.ReplaceObjectsAsync([], [draft], ct);
         Assert.Equal((OperationOutcome.Applied, replaced.Version + 1), (replaced.Outcome, dataset.Version));
         Assert.Equal(0, dataset.Lag);
     }

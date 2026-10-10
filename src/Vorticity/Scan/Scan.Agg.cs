@@ -9,12 +9,12 @@ namespace Vorticity;
 
 public sealed partial class Scan<TRecord>
 {
-    /// <summary>One answer over the rows the scan keeps: <c>await scan.AggAsync(a =&gt; a.Count())</c>.</summary>
+    /// <summary>One answer over the rows the scan keeps: <c>await scan.AggregateAsync(a =&gt; a.Count())</c>.</summary>
     /// <typeparam name="T">The answer's type.</typeparam>
     /// <param name="aggregate">A lambda over the scan's aggregates.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The answer.</returns>
-    public async ValueTask<T> AggAsync<T>(Func<Aggregates<TRecord>, Sym<T>> aggregate, CancellationToken cancellationToken = default)
+    public async ValueTask<T> AggregateAsync<T>(Func<Aggregates<TRecord>, Sym<T>> aggregate, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(aggregate);
         ResultNode<T> node = AggregationPlan.Result(aggregate(new Aggregates<TRecord>(Binding)));
@@ -31,7 +31,7 @@ public sealed partial class Scan<TRecord>
 
     /// <summary>
     /// Several answers over the rows the scan keeps, computed in one pass, into a record whose
-    /// members take them in order: <c>await scan.AggAsync&lt;Summary&gt;(a =&gt; (a.Min(x =&gt; x.Celsius), a.Count()))</c>.
+    /// members take them in order: <c>await scan.AggregateAsync&lt;Summary&gt;(a =&gt; (a.Min(x =&gt; x.Celsius), a.Count()))</c>.
     /// </summary>
     /// <typeparam name="TResult">The record, whose members, in declaration order, are of the answers' types or their nullable forms.</typeparam>
     /// <param name="aggregates">A lambda over the scan's aggregates, returning a tuple of any length of them.</param>
@@ -39,7 +39,7 @@ public sealed partial class Scan<TRecord>
     /// <returns>The answers.</returns>
     /// <exception cref="ArgumentException">An element of the tuple is not a symbol.</exception>
     /// <exception cref="VortexSchemaException">The record has another number of members, or a member does not take its answer.</exception>
-    public async ValueTask<TResult> AggAsync<TResult>(Func<Aggregates<TRecord>, ITuple> aggregates, CancellationToken cancellationToken = default)
+    public async ValueTask<TResult> AggregateAsync<TResult>(Func<Aggregates<TRecord>, ITuple> aggregates, CancellationToken cancellationToken = default)
         where TResult : IVortexRecord<TResult>
     {
         ArgumentNullException.ThrowIfNull(aggregates);

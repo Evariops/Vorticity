@@ -149,7 +149,7 @@ internal abstract class MemoryKeySource : KeySource
         return PositionedAsync();
     }
 
-    internal sealed override ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal sealed override ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         int end = KeyGallop.Past(new Run(this, _at), _at, Count - 1, forward: true);
         int before = KeyGallop.Past(new Run(this, _at), _at, 0, forward: false);

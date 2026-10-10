@@ -219,7 +219,7 @@ internal sealed class KeyCursorBuilder
     /// </remarks>
     internal static async ValueTask<(KeySource? Source, KeySourceKind Kind)> OpenSourceAsync(
         VortexFile file, string path, bool indexes, CancellationToken cancellationToken,
-        Compute.ZoneColumn? zones = null, Scanning.ScanMetrics? metrics = null)
+        Compute.ZoneColumn? zones = null, Scanning.ScanCounters? metrics = null)
     {
         bool runs = indexes && file.HasIndexDirectory;
         if (StatedSorted(file, path))

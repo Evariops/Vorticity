@@ -23,10 +23,10 @@ public sealed record PruningStep(string Structure, int BlocksPruned, int Segment
 /// <param name="LiveBlocks">Of those, the blocks no structure could prove empty: the ones the scan decodes.</param>
 /// <param name="Segments">
 /// Segments the scan asks its source for: each data segment of the live blocks once, and what
-/// consulting each structure reads. The execution's <see cref="ScanStatistics.Requests"/> is the same count.
+/// consulting each structure reads. The execution's <see cref="ScanMetrics.Requests"/> is the same count.
 /// </param>
 /// <param name="BytesToRead">
-/// Their bytes; the execution's <see cref="ScanStatistics.BytesRequested"/> is the same sum, and what
+/// Their bytes; the execution's <see cref="ScanMetrics.BytesRequested"/> is the same sum, and what
 /// a source transfers exceeds it only by the gaps it bridges to coalesce neighbouring segments.
 /// </param>
 /// <param name="MayMatch">False when the file's statistics or filters prove the scan empty.</param>
@@ -88,14 +88,14 @@ public sealed record OrderPlan(string Source, int Runs, long? Entries, bool Desc
 /// </param>
 /// <param name="BlocksPruned">Blocks skipped by statistics, zone maps or indexes.</param>
 /// <param name="CacheHits">Segments served by the session's cache.</param>
-public readonly record struct ScanStatistics(
+public readonly record struct ScanMetrics(
     long Rows, long Batches, long Requests, long BytesRequested, long BlocksDecoded, long BlocksPruned, long CacheHits)
 {
     /// <summary>What a group by did with the rows; null without a group by, or before it ran.</summary>
-    public GroupStatistics? Grouping { get; init; }
+    public GroupMetrics? Grouping { get; init; }
 
-    internal static ScanStatistics From(ScanMetrics metrics) => new ScanStatistics(
-        metrics.Rows, metrics.Batches, metrics.SegmentRequests, metrics.BytesRequested, metrics.BlocksDecoded, metrics.BlocksPruned, metrics.CacheHits);
+    internal static ScanMetrics From(ScanCounters counters) => new ScanMetrics(
+        counters.Rows, counters.Batches, counters.SegmentRequests, counters.BytesRequested, counters.BlocksDecoded, counters.BlocksPruned, counters.CacheHits);
 }
 
 /// <summary>

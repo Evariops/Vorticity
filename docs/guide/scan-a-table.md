@@ -77,7 +77,7 @@ beyond its iteration, copy it once with `ToOwned()`, or ask for owned batches wi
 ([owned-batches.md](owned-batches.md)).
 
 A scan is single-use. Each builder accepts one sink, and a second one throws
-`InvalidOperationException`. You may call `ExplainAsync` before the sink and read `Statistics` after
+`InvalidOperationException`. You may call `ExplainAsync` before the sink and read `Metrics` after
 it. The sinks and what each one costs are listed in
 [the public API design](../design/14-public-api.md#56-the-sinks).
 

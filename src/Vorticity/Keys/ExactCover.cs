@@ -86,7 +86,7 @@ internal sealed class ExactCover : IAsyncDisposable
     /// <param name="metrics">The scan's sink, to which a sorted column adds what it reads; null when nobody asks.</param>
     internal static async ValueTask<ExactCover?> TryCreateAsync(
         VortexFile file, VortexExpr filter, bool indexes, CancellationToken cancellationToken,
-        Compute.ZonePruner? zones = null, Scanning.ScanMetrics? metrics = null)
+        Compute.ZonePruner? zones = null, Scanning.ScanCounters? metrics = null)
     {
         string? path = null;
         if (!OneColumn(filter, ref path) || path is null)

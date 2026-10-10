@@ -19,7 +19,7 @@ internal static class StatisticsAndPruning
         {
         }
 
-        Print("Day >= 900", scan.Statistics);
+        Print("Day >= 900", scan.Metrics);
 
         ScanPlan hot = await file.Scan<Reading>().Where(r => r.Celsius > 45.0).ExplainAsync();
         Print("Celsius > 45", hot);
@@ -28,14 +28,14 @@ internal static class StatisticsAndPruning
         {
         }
 
-        Print("Celsius > 45", hotScan.Statistics);
+        Print("Celsius > 45", hotScan.Metrics);
 
         Scan<Reading> everything = file.Scan<Reading>();
         await foreach (Columns<Reading> _ in everything)
         {
         }
 
-        Print("no filter", everything.Statistics);
+        Print("no filter", everything.Metrics);
 
         ScanPlan none = await file.Scan<Reading>().Where(r => r.Day >= 5_000).ExplainAsync();
         Print("Day >= 5000", none);
@@ -44,7 +44,7 @@ internal static class StatisticsAndPruning
         {
         }
 
-        Print("Day >= 5000", noneScan.Statistics);
+        Print("Day >= 5000", noneScan.Metrics);
 
         VortexFileStatistics statistics = file.Statistics;
         for (int i = 0; i < statistics.Count; i++)
@@ -115,6 +115,6 @@ internal static class StatisticsAndPruning
         Console.WriteLine($"  count: exact {count.Exact}, {count.Rows} rows, {count.Pruned} pruned, {count.Proven} proven, {count.Decoded} decoded");
     }
 
-    private static void Print(string what, ScanStatistics stats) =>
+    private static void Print(string what, ScanMetrics stats) =>
         Console.WriteLine($"ran, {what}: {stats.Rows} rows in {stats.Batches} batches, {stats.Requests} requests, {stats.BytesRequested} bytes, {stats.BlocksDecoded} blocks decoded, {stats.BlocksPruned} pruned");
 }

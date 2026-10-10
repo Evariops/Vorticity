@@ -49,7 +49,7 @@ internal sealed class TerminalScan
     private readonly bool _prune;
     private readonly bool _indexes;
     private readonly TerminalTiers _tiers;
-    private readonly ScanMetrics? _metrics;
+    private readonly ScanCounters? _metrics;
 
     /// <summary>The rows a count leaves out whatever the filter says; null for none. Never with a take.</summary>
     private readonly IRowExclusion? _excluded;
@@ -65,7 +65,7 @@ internal sealed class TerminalScan
         RowSelection? take,
         bool prune,
         TerminalTiers tiers,
-        ScanMetrics? metrics,
+        ScanCounters? metrics,
         bool indexes = true,
         IRowExclusion? excluded = null)
     {
@@ -310,7 +310,7 @@ internal sealed class TerminalScan
         decodes.Held.Claim(context.Segments, batch, waiter: null);
         try
         {
-            if (ScanMetrics.Note(_metrics, context.Segments))
+            if (ScanCounters.Note(_metrics, context.Segments))
             {
                 await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
             }
@@ -327,9 +327,9 @@ internal sealed class TerminalScan
 
         decodes.Held.Publish(context.Segments, batch);
         decodes.Held.Release(batch);
-        ScanMetrics.Served(_metrics, context.Segments);
+        ScanCounters.Served(_metrics, context.Segments);
         int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
-        if (_metrics is not null && ScanMetrics.Decoded(context.Canonical, root))
+        if (_metrics is not null && ScanCounters.Decoded(context.Canonical, root))
         {
             _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take, decodes.Live));
         }

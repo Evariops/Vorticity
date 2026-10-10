@@ -106,7 +106,7 @@ are cut there however they arrive.
 * Flush when you need the bytes out, to bound memory or to feed a slow sink
   ([stream-to-an-object.md](stream-to-an-object.md)), not after every write.
 * An append keeps the file's block size, whatever its options say, and chunks its columns the same
-  way the file does. `AppendAsync` refuses a file whose columns were given chunks of their own
+  way the file does. `OpenWriterAsync` refuses a file whose columns were given chunks of their own
   (`ColumnChunkTargetBytes`) with `VortexUnsupportedException`. Rewrite such a file instead
   ([copy-a-file.md](copy-a-file.md)).
 * [11-write-strategy.md](../design/11-write-strategy.md) describes the design of the ingest, the

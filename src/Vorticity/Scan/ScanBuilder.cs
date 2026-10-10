@@ -42,7 +42,7 @@ internal sealed class ScanBuilder
     private int _maxBatchRows;
     private int _windowRows = FlatLayoutReader.WindowRows;
     private int _degree = Volatile.Read(ref s_defaultDegree);
-    private ScanMetrics? _metrics;
+    private ScanCounters? _metrics;
     private TerminalTiers _tiers = TerminalTiers.All;
     private string? _orderPath;
     private string[]? _orderComposite;
@@ -358,7 +358,7 @@ internal sealed class ScanBuilder
     /// <para>
     /// <b>What it costs</b> is the key's correlation with file order: a window of a sorted column
     /// is one contiguous read, while a window of runs over an uncorrelated column can touch a
-    /// split per row. <see cref="ScanMetrics.WindowSplits"/> reports which. It is the tool for a
+    /// split per row. <see cref="ScanCounters.WindowSplits"/> reports which. It is the tool for a
     /// selective range or a top-k, not for ordering a whole uncorrelated column.
     /// </para>
     /// <para>
@@ -619,7 +619,7 @@ internal sealed class ScanBuilder
     /// and bytes asked of the source, the values the flat reader materialized, the batches and
     /// rows produced -- the same quantities, once the scan has actually run.
     /// </remarks>
-    public ScanBuilder WithMetrics(ScanMetrics metrics)
+    public ScanBuilder WithMetrics(ScanCounters metrics)
     {
         ArgumentNullException.ThrowIfNull(metrics);
         _metrics = metrics;
@@ -708,7 +708,7 @@ internal sealed class ScanBuilder
         // What the scan's first step does after the pruning: ask the filter's exact source, when
         // it has one, for the rows it proves, unless the zone maps already show they cannot fit a
         // batch. When they fit, the scan reads the splits holding them and nothing else.
-        (RowSelection? proven, string? structure, ScanMetrics? probe) =
+        (RowSelection? proven, string? structure, ScanCounters? probe) =
             await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false);
 
         // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
@@ -727,7 +727,7 @@ internal sealed class ScanBuilder
         // they are registered with the scan's own; and opening it reads the column's zone map when
         // the filter's pruning did not read it already, which the scan counts as it does.
         Compute.ZoneColumn? keyZones = null;
-        ScanMetrics? orderCost = null;
+        ScanCounters? orderCost = null;
         FieldMask walk = read.RootMask;
         if (_orderPath is not null && _orderComposite is null && Keys.KeyCursorBuilder.StatedSorted(_file, _orderPath))
         {
@@ -735,7 +735,7 @@ internal sealed class ScanBuilder
             keyZones = pruning.Zones?.Column(_orderPath);
             if (keyZones is null)
             {
-                orderCost = new ScanMetrics();
+                orderCost = new ScanCounters();
                 keyZones = (await Compute.ZonePruningPlan
                     .PlanAsync(_file, tree, Expr.IsNotNull(Expr.Field(_orderPath)), cancellationToken, steps: null, orderCost)
                     .ConfigureAwait(false)).Zones?.Column(_orderPath);
@@ -794,7 +794,7 @@ internal sealed class ScanBuilder
             // The data segments of the live splits, plus what consulting each structure cost:
             // the same asking the metrics count, so that plan and outcome are one quantity. A
             // segment the scan holds is asked for once, so the distinct ones are what it asks for.
-            int toRead = ScanMetrics.Unread(segments, _file.Segments, out long bytes);
+            int toRead = ScanCounters.Unread(segments, _file.Segments, out long bytes);
 
             for (int i = 0; i < steps.Count; i++)
             {
@@ -880,7 +880,7 @@ internal sealed class ScanBuilder
     /// What the scan's first step asks the filter's exact source, as <c>FilteredBatches</c> asks it:
     /// the rows it proves when they fit a batch, the structure that answered, and what asking cost.
     /// </summary>
-    private async System.Threading.Tasks.ValueTask<(RowSelection? Proven, string? Structure, ScanMetrics? Cost)> ProbeAsync(
+    private async System.Threading.Tasks.ValueTask<(RowSelection? Proven, string? Structure, ScanCounters? Cost)> ProbeAsync(
         RowRange rows, long natural, SplitPlan plan, Compute.ZonePruningPlan.PruningPlan pruning,
         System.Threading.CancellationToken cancellationToken)
     {
@@ -892,7 +892,7 @@ internal sealed class ScanBuilder
             return (null, null, null);
         }
 
-        ScanMetrics cost = new ScanMetrics();
+        ScanCounters cost = new ScanCounters();
         Keys.ExactCover? cover = await Keys.ExactCover
             .TryCreateAsync(_file, _filter, _indexes, cancellationToken, zones, cost)
             .ConfigureAwait(false);

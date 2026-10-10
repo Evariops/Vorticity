@@ -23,7 +23,7 @@ internal static class EncodedForms
         await BestOfThreeAsync("City by run, by hand", async () => (byRun = await CelsiusByCityAsync(file)).Length);
 
         Dictionary<string, double> grouped = [];
-        ScanStatistics cityStats = default;
+        ScanMetrics cityStats = default;
         await BestOfThreeAsync("GroupBy(r => r.City)", async () =>
         {
             grouped.Clear();
@@ -36,7 +36,7 @@ internal static class EncodedForms
                 grouped[city] = total;
             }
 
-            cityStats = byCity.Statistics;
+            cityStats = byCity.Metrics;
             return grouped.Count;
         });
 
@@ -52,7 +52,7 @@ internal static class EncodedForms
         await BestOfThreeAsync("Referrer by code, by hand", async () => (byCode = await VisitsByReferrerAsync(visitFile)).Count);
 
         Dictionary<string, (long Visits, long Duration)> byGroup = [];
-        ScanStatistics referrerStats = default;
+        ScanMetrics referrerStats = default;
         await BestOfThreeAsync("GroupBy(v => v.Referrer)", async () =>
         {
             byGroup.Clear();
@@ -65,7 +65,7 @@ internal static class EncodedForms
                 byGroup[referrer ?? "(null)"] = (count, duration);
             }
 
-            referrerStats = byReferrer.Statistics;
+            referrerStats = byReferrer.Metrics;
             return byGroup.Count;
         });
 

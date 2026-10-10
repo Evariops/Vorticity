@@ -1,7 +1,7 @@
 // An equality a string encoding answers from what it stores, and the proof that the column is
 // never built to answer it.
 //
-// The quantity is the scan's `ScanMetrics.ValuesDecoded`, the same count the block-pruning tests read:
+// The quantity is the scan's `ScanCounters.ValuesDecoded`, the same count the block-pruning tests read:
 // it counts what a scan materialized, so a push that works shows as a count near the number of
 // rows the predicate keeps rather than near the number of rows the file holds. Correctness is
 // asserted against the same scan without a predicate, filtered in memory, so the two paths have to
@@ -100,7 +100,7 @@ public sealed class FilterPushDownTests
     private static async Task<(List<string> Values, long Decoded)> ReadAsync(
         string path, VortexExpr? filter)
     {
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         List<string> values = [];
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         ScanBuilder scan = file.ScanBuilder().WithMetrics(metrics);

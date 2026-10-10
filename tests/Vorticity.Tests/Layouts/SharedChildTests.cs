@@ -60,7 +60,7 @@ public sealed class SharedChildTests
             }
 
             Assert.Equal(Rows, seen);
-            Assert.Equal(2L * Rows, scan.Metrics.ValuesDecoded);
+            Assert.Equal(2L * Rows, scan.Counters.ValuesDecoded);
             Assert.Equal(1, ArrayDecodeContext.SharedChildrenDecoded - before);
         }
         finally

@@ -23,7 +23,7 @@ public sealed partial class Scan<TRecord>
     where TRecord : IVortexRecord<TRecord>
 {
     private readonly ScanSource _source;
-    private readonly ScanMetrics _metrics;
+    private readonly ScanCounters _counters;
     private RecordBinding? _binding;
     private Predicate _filter = Predicate.All;
     private RowRange? _rows;
@@ -36,15 +36,15 @@ public sealed partial class Scan<TRecord>
     private int _used;
 
     internal Scan(ScanSource source)
-        : this(source, new ScanMetrics())
+        : this(source, new ScanCounters())
     {
     }
 
     /// <summary>A scan that reports <paramref name="metrics"/> as its own: a result's, whose reads are its query's.</summary>
-    internal Scan(ScanSource source, ScanMetrics metrics)
+    internal Scan(ScanSource source, ScanCounters metrics)
     {
         _source = source;
-        _metrics = metrics;
+        _counters = metrics;
     }
 
     internal RecordBinding Binding => _binding ??= RecordBinding.For<TRecord>(_source.Schema, _source.Session.Options.Extensions);
@@ -161,7 +161,7 @@ public sealed partial class Scan<TRecord>
     }
 
     /// <summary>What the last sink did; valid once it has run.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_metrics);
+    public ScanMetrics Metrics => ScanMetrics.From(_counters);
 
     /// <summary>Enumerates the batches as borrowed columns: <c>await foreach (var (day, celsius, city) in scan)</c>.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
@@ -174,7 +174,7 @@ public sealed partial class Scan<TRecord>
         // The one sink whose consumer can read a column encoded: Column<T>.Encoding and its views.
         ScanSpec spec = Spec() with { KeepEncodings = true };
         CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
-        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _metrics).GetAsyncEnumerator(token), binding);
+        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _counters).GetAsyncEnumerator(token), binding);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -185,7 +185,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return Own(batch);
             }
@@ -206,7 +206,7 @@ public sealed partial class Scan<TRecord>
         TRecord[] rows = [];
         try
         {
-            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int count = Fill(batch, binding, ref rows);
                 for (int i = 0; i < count; i++)
@@ -234,7 +234,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+            return await _source.CountAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -250,7 +250,7 @@ public sealed partial class Scan<TRecord>
         Begin();
         try
         {
-            return await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+            return await _source.AnyAsync(Spec(), _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -293,7 +293,7 @@ public sealed partial class Scan<TRecord>
         Options = _take is not null && _filter.IsAll ? _options with { Compact = false } : _options,
     };
 
-    internal ScanMetrics Metrics => _metrics;
+    internal ScanCounters Counters => _counters;
 
     internal Predicate Filter => _filter;
 
@@ -316,7 +316,7 @@ public sealed partial class Scan<TRecord>
             return;
         }
 
-        VortexTelemetry.ScanEnded(_metrics, _activity);
+        VortexTelemetry.ScanEnded(_counters, _activity);
         _activity = null;
     }
 
@@ -331,7 +331,7 @@ public sealed partial class Scan<TRecord>
         FilterLiteral value;
         try
         {
-            value = await _source.ExtremeAsync(Spec(), target.Field, min, _metrics, cancellationToken).ConfigureAwait(false);
+            value = await _source.ExtremeAsync(Spec(), target.Field, min, _counters, cancellationToken).ConfigureAwait(false);
         }
         finally
         {

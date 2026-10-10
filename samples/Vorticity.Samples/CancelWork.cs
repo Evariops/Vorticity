@@ -141,7 +141,7 @@ internal static class CancelWork
         }
 
         long length = new FileInfo(appended).Length;
-        await using (VortexFileWriter appender = await VortexSession.Default.AppendAsync(appended))
+        await using (VortexFileWriter appender = await VortexSession.Default.OpenWriterAsync(appended))
         {
             await appender.WriteAsync<Reading>(rows);
             await appender.FlushAsync();

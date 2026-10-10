@@ -112,7 +112,7 @@ double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
 
 Spread spread = await file.Scan<Reading>()
     .Where(r => r.Day >= 900)
-    .AggAsync<Spread>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.CountDistinct(r => r.City)));
+    .AggregateAsync<Spread>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.CountDistinct(r => r.City)));
 
 [VortexRecord]
 public partial record struct Spread(double? Min, double? Max, long Cities);   // several answers go into a record

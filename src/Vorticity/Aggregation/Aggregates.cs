@@ -5,7 +5,7 @@ using Vorticity.Aggregating;
 namespace Vorticity;
 
 /// <summary>
-/// The aggregates of a scan, for the lambda of <c>AggAsync</c>: each member is a symbol that stands
+/// The aggregates of a scan, for the lambda of <c>AggregateAsync</c>: each member is a symbol that stands
 /// for one answer, and every answer the lambda returns is computed in one pass.
 /// </summary>
 /// <typeparam name="TRecord">The record the scan is typed by.</typeparam>
@@ -244,7 +244,7 @@ public readonly struct Aggregates<TRecord>
     /// <summary>A probe of the row a choice keeps, of the rows the filter keeps.</summary>
     private Probe<TRecord> Chosen(AggregateKind kind, ColumnShape? by) =>
         new Probe<TRecord>(
-            _binding ?? throw new InvalidOperationException("A chosen row is taken inside the lambda of AggAsync, which hands it its columns."),
+            _binding ?? throw new InvalidOperationException("A chosen row is taken inside the lambda of AggregateAsync, which hands it its columns."),
             null,
             Aggregators.Chosen(kind, by, _filter));
 

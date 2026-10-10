@@ -91,7 +91,7 @@ internal abstract class KeySource : IAsyncDisposable
     internal abstract ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken);
 
     /// <summary>The entries sharing the current key; the position does not move.</summary>
-    internal abstract ValueTask<long> KeyCountAsync(CancellationToken cancellationToken);
+    internal abstract ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken);
 
     /// <summary>The runs holding an entry of <paramref name="slices"/>; the position is lost.</summary>
     internal virtual ValueTask<int> RunsOverlappingAsync(

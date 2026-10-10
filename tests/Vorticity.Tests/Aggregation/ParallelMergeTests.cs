@@ -46,7 +46,7 @@ public sealed partial class ParallelMergeTests
             Assert.Contains(int.MinValue, read.Keys);
 
             // Each group counted once, as its part is read, whether the merge or the reader went ahead.
-            Assert.Equal(expected.Length, byKey.Statistics.Grouping!.Groups);
+            Assert.Equal(expected.Length, byKey.Metrics.Grouping!.Groups);
             foreach (IGrouping<int?, Row> group in expected)
             {
                 KeyStats got = read[group.Key ?? int.MinValue];

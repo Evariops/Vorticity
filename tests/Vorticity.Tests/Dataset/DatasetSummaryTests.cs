@@ -55,8 +55,8 @@ public sealed class DatasetSummaryTests
             Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(3_100L))),
             Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(3_200L))));
 
-        DatasetScanMetrics pruned = new DatasetScanMetrics();
-        DatasetScanMetrics whole = new DatasetScanMetrics();
+        DatasetScanCounters pruned = new DatasetScanCounters();
+        DatasetScanCounters whole = new DatasetScanCounters();
         List<long> withSummaries = await KeysAsync(dataset.ScanBuilder().Where(filter).WithMetrics(pruned));
         List<long> without = await KeysAsync(
             dataset.ScanBuilder().Where(filter).WithSummaries(false).WithMetrics(whole));
@@ -95,7 +95,7 @@ public sealed class DatasetSummaryTests
         }
 
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-1L)));
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics)));
         Assert.Equal(0, metrics.ObjectsOpened);
         Assert.Equal(4, metrics.ObjectsSkipped);
@@ -126,14 +126,14 @@ public sealed class DatasetSummaryTests
         Assert.True(dataset.Depth >= 3, $"sixteen objects in pages of 400 bytes should nest; depth is {dataset.Depth}");
 
         VortexExpr absent = Expr.Gt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(1_000_000L)));
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics)));
         Assert.True(metrics.SubtreesSkipped > 0, "a node's summaries should have refuted the predicate");
         Assert.Equal(0, metrics.ObjectsConsidered);
         Assert.Equal(0, metrics.ObjectsOpened);
 
         // And the acceptance again: with the summaries off, the same empty answer the long way.
-        DatasetScanMetrics whole = new DatasetScanMetrics();
+        DatasetScanCounters whole = new DatasetScanCounters();
         Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithSummaries(false).WithMetrics(whole)));
         Assert.Equal(objects, whole.ObjectsConsidered);
         Assert.Equal(0, whole.SubtreesSkipped);
@@ -182,7 +182,7 @@ public sealed class DatasetSummaryTests
         }
 
         // And it does not open what it does not need: rows 2 000..2 500 are object 2's alone.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(500, (await KeysAsync(dataset.ScanBuilder().Rows(2_000, 2_500).WithMetrics(metrics))).Count);
         Assert.Equal(1, metrics.ObjectsOpened);
         Assert.Equal(1, metrics.ObjectsConsidered);
@@ -218,7 +218,7 @@ public sealed class DatasetSummaryTests
         }
 
         // And the point: the subtrees below the filter were counted, not read.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(80, (await KeysAsync(dataset.ScanBuilder().Where(filter).Rows(1_350, 1_430).WithMetrics(metrics))).Count);
         Assert.True(metrics.SubtreesSkipped > 0, "a node's summaries should have refuted the predicate");
     }
@@ -248,7 +248,7 @@ public sealed class DatasetSummaryTests
             Assert.Equal(await KeysAsync(dataset.ScanBuilder().Where(filter).WithSummaries(false).Rows(from, to)), pruned);
         }
 
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.NotEmpty(await KeysAsync(dataset.ScanBuilder().Where(filter).Rows(1_200, 1_300).WithMetrics(metrics)));
         Assert.True(metrics.SubtreesSkipped > 0, "the subtrees no object of level 0 falls in should not be read");
     }
@@ -297,8 +297,8 @@ public sealed class DatasetSummaryTests
             await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows), ct);
         }
 
-        DatasetScanMetrics first = new DatasetScanMetrics();
-        DatasetScanMetrics second = new DatasetScanMetrics();
+        DatasetScanCounters first = new DatasetScanCounters();
+        DatasetScanCounters second = new DatasetScanCounters();
         List<long> once = await KeysAsync(dataset.ScanBuilder().WithMetrics(first));
         List<long> twice = await KeysAsync(dataset.ScanBuilder().WithMetrics(second));
 

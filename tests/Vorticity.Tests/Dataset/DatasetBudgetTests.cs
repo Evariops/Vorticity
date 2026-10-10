@@ -375,7 +375,7 @@ public sealed class DatasetBudgetTests
         long sought = 2L * (interleaved ? (100L * objects) + (objects / 2) : ((long)(objects / 2) * rows) + 100);
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options);
         store.Reset();
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         long found = await dataset.ScanBuilder()
             .Where(Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(sought))))
             .WithMetrics(metrics)

@@ -69,7 +69,7 @@ internal sealed partial class SortedRunsSource
 
                 context.ResetBatch();
                 int slot = context.Segments.Add(SpecOf(file, flat));
-                if (Scanning.ScanMetrics.Unread(context.Segments, file.Segments, out long bytes) > 0)
+                if (Scanning.ScanCounters.Unread(context.Segments, file.Segments, out long bytes) > 0)
                 {
                     asked++;
                     read += bytes;

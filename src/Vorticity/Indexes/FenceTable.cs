@@ -612,7 +612,7 @@ internal sealed class FenceTable
         using (SegmentRequestSet requests = new SegmentRequestSet(1))
         {
             int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
-            asked = Scanning.ScanMetrics.Unread(requests, source, out _) > 0;
+            asked = Scanning.ScanCounters.Unread(requests, source, out _) > 0;
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             VortexBuffer bytes = requests.GetBuffer(slot);
             if (!region.Holds(bytes.Span))

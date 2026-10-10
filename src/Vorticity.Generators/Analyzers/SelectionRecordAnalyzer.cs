@@ -11,7 +11,7 @@ namespace Vorticity.Generators.Analyzers;
 
 /// <summary>
 /// The records a selection of several values is read through. VX1010: an <c>As&lt;TRecord&gt;()</c>
-/// or an <c>AggAsync&lt;TResult&gt;</c> whose record does not take the elements of the selection,
+/// or an <c>AggregateAsync&lt;TResult&gt;</c> whose record does not take the elements of the selection,
 /// position by position, which they refuse when they run. VX1011: several values read without a
 /// record, which the compiler refuses with an error that does not name the fix.
 /// </summary>
@@ -50,7 +50,7 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
         });
     }
 
-    /// <summary>VX1010: the record of an <c>As</c> or an <c>AggAsync</c> against the elements the compiler sees.</summary>
+    /// <summary>VX1010: the record of an <c>As</c> or an <c>AggregateAsync</c> against the elements the compiler sees.</summary>
     private static void AnalyzeRecord(OperationAnalysisContext context, KnownSymbols known)
     {
         IInvocationOperation invocation = (IInvocationOperation)context.Operation;
@@ -66,7 +66,7 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
                 || KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.ValueProjection) =>
                 [((INamedTypeSymbol)method.ContainingType).TypeArguments[0]],
             "As" when IsSeveral(method.ContainingType, known) => SelectedBy(invocation.Instance, known),
-            "AggAsync" when KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.TypedScan) && invocation.Arguments.Length > 0
+            "AggregateAsync" when KnownSymbols.Is(method.ContainingType.OriginalDefinition, known.TypedScan) && invocation.Arguments.Length > 0
                 && method.Parameters[0].Type is INamedTypeSymbol { TypeArguments.Length: 2 } lambda && lambda.TypeArguments[1].Name == "ITuple" =>
                 Elements(invocation.Arguments[0].Value, known),
             _ => null,
@@ -134,11 +134,11 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
             $"A selection of several values has no {access.Name.Identifier.ValueText}: read it through a [VortexRecord] whose members take them in order, .As<TRecord>()"));
     }
 
-    /// <summary>VX1011: <c>AggAsync(a =&gt; (…))</c> with no record named.</summary>
+    /// <summary>VX1011: <c>AggregateAsync(a =&gt; (…))</c> with no record named.</summary>
     private static void AnalyzeAnswers(SyntaxNodeAnalysisContext context, KnownSymbols known)
     {
         InvocationExpressionSyntax invocation = (InvocationExpressionSyntax)context.Node;
-        if (invocation.Expression is not MemberAccessExpressionSyntax { Name: IdentifierNameSyntax { Identifier.ValueText: "AggAsync" } } access
+        if (invocation.Expression is not MemberAccessExpressionSyntax { Name: IdentifierNameSyntax { Identifier.ValueText: "AggregateAsync" } } access
             || invocation.ArgumentList.Arguments.Count == 0
             || invocation.ArgumentList.Arguments[0].Expression is not LambdaExpressionSyntax { ExpressionBody: TupleExpressionSyntax }
             || context.SemanticModel.GetTypeInfo(access.Expression, context.CancellationToken).Type is not INamedTypeSymbol scan
@@ -150,7 +150,7 @@ public sealed class SelectionRecordAnalyzer : DiagnosticAnalyzer
         context.ReportDiagnostic(Diagnostic.Create(
             Descriptors.SeveralValuesWithoutRecord,
             access.Name.GetLocation(),
-            "Several answers go into a record: declare a [VortexRecord] whose members take them in order, and name it, AggAsync<TResult>(…)"));
+            "Several answers go into a record: declare a [VortexRecord] whose members take them in order, and name it, AggregateAsync<TResult>(…)"));
     }
 
     /// <summary>

@@ -298,7 +298,7 @@ internal sealed class KeyIndexPruner
             }
 
             ISegmentReader reader = file.IndexSourceOf(origin);
-            Segments += Scanning.ScanMetrics.Unread(requests, reader, out long bytes);
+            Segments += Scanning.ScanCounters.Unread(requests, reader, out long bytes);
             Bytes += bytes;
             await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             using ScanContext context = file.CreateIndexContext(origin);

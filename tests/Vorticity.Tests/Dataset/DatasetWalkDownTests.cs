@@ -141,7 +141,7 @@ public sealed class DatasetWalkDownTests
         while (true)
         {
             // Every entry of the key is counted wherever the walk stands among them.
-            Assert.Equal(CountOf(walked, walked[at].Key), await cursor.KeyCountAsync(ct));
+            Assert.Equal(CountOf(walked, walked[at].Key), await cursor.CountAtKeyAsync(ct));
             int previous = LastBelow(walked, walked[at].Key, inclusive: false);
             bool moved = await cursor.PrevKeyAsync(ct);
             Assert.Equal(previous >= 0, moved);

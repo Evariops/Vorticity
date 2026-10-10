@@ -138,7 +138,7 @@ all.
 ### 3.5 Rank, select, and the count of a key
 
 `RankAsync(k)` is the number of entries with a key `< k`, `SeekRankAsync(i)` positions on the entry
-of rank `i`, and `KeyCountAsync()` is the number of entries that share the current key. All three
+of rank `i`, and `CountAtKeyAsync()` is the number of entries that share the current key. All three
 are exact on the two sources with rows, and refused on the others. A sorted array is its own
 counter: rank is the sum over runs of each run's lower bound, in `O(r log n)`, and select is a binary
 search over positions with a rank computed at each probe, in `O(r log² n)`.
@@ -239,7 +239,7 @@ process](05-benchmarks.md#3-in-one-process-after-warm-up), measured on [the benc
 page](../guide/benchmarks.md#in-one-process-after-warm-up)). So it is the tool for a selective range,
 a top-k or a merge, not for a whole uncorrelated column, where sorting the scan's output costs less.
 The plan's `OrderPlan` states the source, the runs the range reaches and the entries it admits
-before the read, and the scan's statistics count the windows and the splits they touched afterwards.
+before the read, and the scan's metrics count the windows and the splits they touched afterwards.
 
 The dataset's key-ordered reads and its compaction merge are built on this, one call per object (see
 [what a compaction does](13-dataset.md#53-what-a-compaction-does) and [order beyond the

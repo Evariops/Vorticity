@@ -83,7 +83,7 @@ a cancelled token does not guarantee nothing ran, so check the token yourself if
 ## A cursor
 
 A cancelled move throws and leaves the cursor without a position. `IsValid` returns false, and `Key`,
-`Row` and `KeyCountAsync` throw `InvalidOperationException` until a move succeeds. Seek again:
+`Row` and `CountAtKeyAsync` throw `InvalidOperationException` until a move succeeds. Seek again:
 
 ```
   the cursor after it: valid False

@@ -103,7 +103,7 @@ internal sealed class DistinctQuery : ResultQuery
 
     internal override VortexSession Session => Projection.Session;
 
-    internal override ScanMetrics Metrics => Projection.Metrics;
+    internal override ScanCounters Counters => Projection.Counters;
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new DistinctBatches(this, cancellationToken);
 
@@ -272,7 +272,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             };
             plan.Watch?.Invoke([_partition]);
             _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
-            _inner = projection.Host.Source.BatchesAsync(spec, projection.Metrics).GetAsyncEnumerator(_cancellationToken);
+            _inner = projection.Host.Source.BatchesAsync(spec, projection.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the values asked for are met the scan is asked for nothing more.
@@ -547,7 +547,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         Exception? failure = null;
         try
         {
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(projection.Host.Source, spec, projection.Metrics, plan, cancellationToken).ConfigureAwait(false);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(projection.Host.Source, spec, projection.Counters, plan, cancellationToken).ConfigureAwait(false);
             try
             {
                 if (outcome.Parts is CoreParts parts)

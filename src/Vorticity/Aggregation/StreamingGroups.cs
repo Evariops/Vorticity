@@ -310,7 +310,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             _partition!.Settle(_settling, rest);
         }
 
-        _inner = _query.Host.Source.BatchesAsync(pass with { Rows = rest }, _query.Host.Metrics).GetAsyncEnumerator(_cancellationToken);
+        _inner = _query.Host.Source.BatchesAsync(pass with { Rows = rest }, _query.Host.Counters).GetAsyncEnumerator(_cancellationToken);
     }
 
     /// <summary>The end of the rows: every group closes, the null group last, and the plan keeps what the run did.</summary>
@@ -392,7 +392,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         // close in: forward only, as the ranges grouped side by side are, and on a sorted key.
         ZoneSettling? settling = descending || _zones is not null
             ? null
-            : await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false);
+            : await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Counters, _cancellationToken).ConfigureAwait(false);
         if (settling is not null)
         {
             pass = settling.Pass(pass);
@@ -414,7 +414,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             }
 
             _pass = pass;
-            _inner = host.Source.BatchesAsync(pass, host.Metrics).GetAsyncEnumerator(_cancellationToken);
+            _inner = host.Source.BatchesAsync(pass, host.Counters).GetAsyncEnumerator(_cancellationToken);
             return;
         }
 
@@ -423,7 +423,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         if (settling is null && pass.Filter is { } filter && pass.Options.Pruning && host.Source is FileScanSource file)
         {
             BlockMask? live = await ZonePruningPlan
-                .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(filter), _cancellationToken, steps: null, host.Metrics, pass.Options.UseIndexes)
+                .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(filter), _cancellationToken, steps: null, host.Counters, pass.Options.UseIndexes)
                 .ConfigureAwait(false);
             pass = pass with { Pruned = true, Live = live };
         }
@@ -448,7 +448,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
                 try
                 {
-                    await AggregationEngine.RunPartitionAsync(host.Source, lane with { Rows = rows }, host.Metrics, range, token).ConfigureAwait(false);
+                    await AggregationEngine.RunPartitionAsync(host.Source, lane with { Rows = rows }, host.Counters, range, token).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -531,7 +531,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         int count = Through(0, reader, _closedCount);
         if (chosen && count > 0)
         {
-            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Metrics, _closed.AsMemory(0, count), _cancellationToken)
+            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Counters, _closed.AsMemory(0, count), _cancellationToken)
                 .ConfigureAwait(false);
         }
 

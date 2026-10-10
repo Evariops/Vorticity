@@ -113,7 +113,7 @@ public sealed class PublicSurfaceTests
     /// <summary>The types a member returns when it describes a query rather than running it.</summary>
     private static readonly string[] Builders = ["Scan", "GroupedScan", "OrderedGroupedScan", "Aggregation", "Projection", "KeyCursorBuilder"];
 
-    /// <summary>The return type and the name of a rendered method line: <c>method ValueTask&lt;T1&gt; AggAsync&lt;T1&gt;(…)</c>.</summary>
+    /// <summary>The return type and the name of a rendered method line: <c>method ValueTask&lt;T1&gt; AggregateAsync&lt;T1&gt;(…)</c>.</summary>
     private static bool TryMethod(string line, out string returned, out string name)
     {
         returned = name = string.Empty;

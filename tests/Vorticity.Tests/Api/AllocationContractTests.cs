@@ -142,7 +142,7 @@ public sealed class AllocationContractTests
         [
             ("SumAsync", all, async scan => await scan.SumAsync(r => r.Day)),
             ("AverageAsync", all, async scan => await scan.AverageAsync(r => r.Celsius)),
-            ("AggAsync", all, async scan => await scan.AggAsync<SumAndCount>(a => (a.Sum(r => r.Celsius), a.Count()))),
+            ("AggregateAsync", all, async scan => await scan.AggregateAsync<SumAndCount>(a => (a.Sum(r => r.Celsius), a.Count()))),
             ("GroupBy", all, async scan =>
             {
                 await foreach (CityCount group in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Count())).As<CityCount>().ToRecordsAsync())
@@ -157,7 +157,7 @@ public sealed class AllocationContractTests
                     GC.KeepAlive(group.City);
                 }
             }),
-            ("AggAsync, filtered", all, async scan => await scan.AggAsync<SumAndCount>(a => (a.Where(r => r.Celsius > 30.0).Sum(r => r.Celsius), a.Count()))),
+            ("AggregateAsync, filtered", all, async scan => await scan.AggregateAsync<SumAndCount>(a => (a.Where(r => r.Celsius > 30.0).Sum(r => r.Celsius), a.Count()))),
             ("CountAsync", filtered, async scan => await scan.CountAsync()),
             ("SumAsync, filtered", filtered, async scan => await scan.SumAsync(r => r.Day)),
         ];

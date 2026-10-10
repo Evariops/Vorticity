@@ -202,7 +202,7 @@ public sealed class DatasetChangeFuzzTests
         long pivot = keys[random.Next(keys.Count)];
         Assert.Equal(keys.Count(key => key < pivot), await cursor.RankAsync(Vorticity.Expressions.FilterLiteral.From(pivot), ct));
         Assert.True(await cursor.SeekAsync(Vorticity.Expressions.FilterLiteral.From(pivot), SeekOp.AtOrAfter, ct));
-        Assert.Equal(keys.Count(key => key == pivot), await cursor.KeyCountAsync(ct));
+        Assert.Equal(keys.Count(key => key == pivot), await cursor.CountAtKeyAsync(ct));
         for (int step = 0; step < 8; step++)
         {
             Assert.Equal(scanned[(int)cursor.Row].Key, cursor.Key.SignedValue);
@@ -238,7 +238,7 @@ public sealed class DatasetChangeFuzzTests
     private static async Task<int> MarkedAsync(VortexDataset reader, CancellationToken ct)
     {
         int marked = 0;
-        await foreach (DataObject held in reader.ObjectsAsync(ct))
+        await foreach (DataObject held in reader.ListObjectsAsync(ct))
         {
             marked += held.DeletedRows > 0 ? 1 : 0;
         }

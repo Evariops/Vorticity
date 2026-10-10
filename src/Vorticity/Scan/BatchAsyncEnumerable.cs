@@ -44,7 +44,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     private readonly bool _reverse;
     private readonly VortexExpr? _filter;
     private readonly RowSelection? _take;
-    private readonly ScanMetrics? _metrics;
+    private readonly ScanCounters? _metrics;
     private readonly DType _schema;
 
     /// <param name="file">The open file.</param>
@@ -69,7 +69,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         int degree,
         VortexExpr? filter,
         RowSelection? take,
-        ScanMetrics? metrics,
+        ScanCounters? metrics,
         bool reverse = false)
     {
         if (reverse && degree != 1)
@@ -223,7 +223,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal LayoutTree Tree => _tree;
 
     /// <summary>The caller's metrics sink, for the pruning pass to add its own reads to.</summary>
-    internal ScanMetrics? Metrics => _metrics;
+    internal ScanCounters? Metrics => _metrics;
 
     /// <summary>The split plan, which a key-ordered scan asks for the split of a row.</summary>
     internal SplitPlan Plan => _plan;
@@ -273,7 +273,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly int _widenRows;
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
-    private readonly ScanMetrics? _metrics;
+    private readonly ScanCounters? _metrics;
     private readonly CancellationToken _token;
     private readonly Lane?[] _lanes;
     private readonly ScanSegments _segments;
@@ -328,7 +328,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         VortexExpr? filter,
         RowSelection? take,
         BlockMask? live,
-        ScanMetrics? metrics,
+        ScanCounters? metrics,
         CancellationToken cancellationToken,
         bool filterProven = false,
         bool reverse = false,
@@ -391,7 +391,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>A lane on a context of its own, bound to what outlives every batch of the scan.</summary>
-    private Lane NewLane(VortexFile file, BlockMask? live, ScanMetrics? metrics, bool keepEncodings)
+    private Lane NewLane(VortexFile file, BlockMask? live, ScanCounters? metrics, bool keepEncodings)
     {
         // The mask, the metrics sink and the encoded delivery outlive every batch of the scan, so
         // they are set once here and never by `ResetBatch`; the readers read the mask in file
@@ -552,7 +552,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             throw;
         }
 
-        ScanMetrics.Served(_metrics, lane.Context.Segments);
+        ScanCounters.Served(_metrics, lane.Context.Segments);
         _segments.Release(lane.Sequence);
         bool produced = CompleteBatch();
 
@@ -586,7 +586,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         await read.ConfigureAwait(false);
 
         _currentLane = lane;
-        ScanMetrics.Served(_metrics, lane.Context.Segments);
+        ScanCounters.Served(_metrics, lane.Context.Segments);
         _segments.Release(lane.Sequence);
 
         // The place this split leaves goes to the next one, whose read runs while this one decodes
@@ -934,7 +934,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// cache may serve some without a read.
     /// </summary>
     /// <returns>Whether there is anything to ask.</returns>
-    private bool NoteRequests(ScanContext context) => ScanMetrics.Note(_metrics, context.Segments);
+    private bool NoteRequests(ScanContext context) => ScanCounters.Note(_metrics, context.Segments);
 
     /// <summary>Reads what the scan does not hold, or completes the set when it holds everything.</summary>
     private ValueTask ReadAsync(SegmentRequestSet segments, bool read)
@@ -1711,7 +1711,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 _segments.Publish(context.Segments, batch);
             }
 
-            ScanMetrics.Served(_metrics, context.Segments);
+            ScanCounters.Served(_metrics, context.Segments);
             if (!_compact && !_filterProven)
             {
                 return ExecuteSelected(lane, rows);
@@ -1826,8 +1826,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         if (_sinkDecodes
-            && !ScanMetrics.Decoded(batch.Arena, batch.RootIndex)
-            && !ScanMetrics.Decoded(batch.Arena, lane.ReadRoot))
+            && !ScanCounters.Decoded(batch.Arena, batch.RootIndex)
+            && !ScanCounters.Decoded(batch.Arena, lane.ReadRoot))
         {
             return;
         }

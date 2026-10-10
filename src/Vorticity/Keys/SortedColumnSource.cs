@@ -76,7 +76,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="metrics">The scan's sink, to which the zone map and the zones this source decodes are added; null when nobody asks.</param>
     /// <returns>The source, or null with the reason it is not available.</returns>
     internal static async ValueTask<(SortedColumnSource? Source, string? Reason)> OpenAsync(
-        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null, ScanMetrics? metrics = null)
+        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null, ScanCounters? metrics = null)
     {
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -165,7 +165,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>The scan's sink, to which the zones this source decodes are added; null when nobody asks.</summary>
-    private ScanMetrics? Metrics { get; init; }
+    private ScanCounters? Metrics { get; init; }
 
     /// <summary>
     /// Makes the source read through what a scan holds, rather than through segments and chunks of
@@ -517,7 +517,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         held.Claim(_context.Segments, ticket, waiter: null);
         try
         {
-            if (ScanMetrics.Note(Metrics, _context.Segments))
+            if (ScanCounters.Note(Metrics, _context.Segments))
             {
                 await _file.Segments.ReadManyAsync(_context.Segments, cancellationToken).ConfigureAwait(false);
             }
@@ -534,7 +534,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             throw;
         }
 
-        ScanMetrics.Served(Metrics, _context.Segments);
+        ScanCounters.Served(Metrics, _context.Segments);
         int root = SplitExecution.Execute(_context, _tree, in _mask, range, take: null);
         if (_ownsHeld)
         {

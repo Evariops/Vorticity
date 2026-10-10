@@ -88,9 +88,9 @@ public sealed partial class GroupPlanTests
 
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Aggregation<long> counts = file.Scan<Row>().GroupBy(r => r.Key).Select(g => g.Count());
-            Assert.Null(counts.Statistics.Grouping);
+            Assert.Null(counts.Metrics.Grouping);
             Assert.Equal(10_000, (await counts.ToListAsync(Ct)).Count);
-            GroupStatistics grouping = counts.Statistics.Grouping!;
+            GroupMetrics grouping = counts.Metrics.Grouping!;
             Assert.Equal(10_000, grouping.Groups);
             Assert.Equal(10_000, grouping.PeakGroups);
             Assert.True(grouping.PeakBytes > 0);
@@ -111,7 +111,7 @@ public sealed partial class GroupPlanTests
             Assert.Equal(256, plan.CacheCapacity);
             Assert.True(plan.Alpha >= 1);
             Assert.Equal(10_000, (await held.ToListAsync(Ct)).Count);
-            GroupStatistics core = held.Statistics.Grouping!;
+            GroupMetrics core = held.Metrics.Grouping!;
             Assert.True(core.Core);
             Assert.True(core.CacheEvictions > 0);
             Assert.True(core.Tables > 0);

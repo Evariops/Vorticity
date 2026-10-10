@@ -154,7 +154,7 @@ internal sealed class SortedColumnWalker : KeySource
     internal override ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken) =>
         PositionAsync(rank, cancellationToken);
 
-    internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         FilterLiteral key = Key;
         long low = await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);

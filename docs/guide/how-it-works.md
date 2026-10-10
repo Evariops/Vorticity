@@ -93,7 +93,7 @@ Nothing is copied for you and nothing is left to dispose.
 Anything beyond borrowed columns is a sink you choose and pay for. `ToBatchesAsync` copies each batch
 once into buffers you own, `ToRecordsAsync` builds rows, and `CountAsync`, `SumAsync` and
 `GroupBy(…).Select(…)` run as operators of the scan, on the encoded blocks, answering from the
-statistics when those are enough. `ExplainAsync` shows the plan before the run, and `Statistics`
+statistics when those are enough. `ExplainAsync` shows the plan before the run, and `Metrics`
 shows what the scan did after it. See [scan-a-table.md](scan-a-table.md) and
 [statistics-and-pruning.md](statistics-and-pruning.md).
 

@@ -113,7 +113,7 @@ internal sealed class AggregationQuery : ResultQuery
 
     internal override VortexSession Session => Host.Source.Session;
 
-    internal override ScanMetrics Metrics => Host.Metrics;
+    internal override ScanCounters Counters => Host.Counters;
 
     internal override ResultQuery As(VortexSchema record, Type type) => Typed(record, type);
 
@@ -170,7 +170,7 @@ internal sealed class AggregationQuery : ResultQuery
         : ZoneFinality.Candidate(this) ? new ZoneDecidedGroups(this, cancellationToken)
         : new GroupBatches(this, cancellationToken);
 
-    internal override GroupStatistics? Grouping => Plan.Grouped ? Plan.Statistics() : null;
+    internal override GroupMetrics? Grouping => Plan.Grouped ? Plan.Metrics() : null;
 
     internal override async ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken)
     {
@@ -820,14 +820,14 @@ internal static class GroupSelection
 
         if (reader < operators)
         {
-            await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
             return await OperatorsAsync(query, outcome, reader, operators, groups, count, degree, cancellationToken).ConfigureAwait(false);
         }
 
         // No operator reads them: the result's window alone is read.
         int from = windowed ? (int)Math.Min(query.Skip, count) : 0;
         int to = windowed ? (int)Math.Min(count, Saturated(query.Skip, query.Take)) : count;
-        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(from, to - from), cancellationToken).ConfigureAwait(false);
+        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(from, to - from), cancellationToken).ConfigureAwait(false);
         return (groups, count);
     }
 

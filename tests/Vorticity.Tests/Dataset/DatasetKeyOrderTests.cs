@@ -62,7 +62,7 @@ public sealed class DatasetKeyOrderTests
         reversed.Reverse();
         foreach (bool summaries in (bool[])[true, false])
         {
-            DatasetScanMetrics metrics = new DatasetScanMetrics();
+            DatasetScanCounters metrics = new DatasetScanCounters();
             Assert.Equal(
                 sorted,
                 await RowsAsync(dataset.ScanBuilder().WithSummaries(summaries).WithMetrics(metrics).InKeyOrder("key")));
@@ -158,16 +158,16 @@ public sealed class DatasetKeyOrderTests
 
         // Upward on the clustering key, by the tree's exact minima: one object for the first ten,
         // and two for the first three hundred, which cross one boundary and not a second.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(sorted[..10], await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key"), 10));
         Assert.Equal(1, metrics.ObjectsOpened);
 
-        metrics = new DatasetScanMetrics();
+        metrics = new DatasetScanCounters();
         Assert.Equal(sorted[..300], await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key"), 300));
         Assert.Equal(2, metrics.ObjectsOpened);
 
         // Downward, by the summaries' maxima.
-        metrics = new DatasetScanMetrics();
+        metrics = new DatasetScanCounters();
         Assert.Equal(
             reversed[..10],
             await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key", descending: true), 10));
@@ -176,7 +176,7 @@ public sealed class DatasetKeyOrderTests
         // Without the summaries, the same rows and every object opened: they are what bought the skip.
         foreach (bool descending in (bool[])[false, true])
         {
-            metrics = new DatasetScanMetrics();
+            metrics = new DatasetScanCounters();
             Assert.Equal(
                 descending ? reversed[..10] : sorted[..10],
                 await FirstAsync(
@@ -224,7 +224,7 @@ public sealed class DatasetKeyOrderTests
         }
 
         // A key no object holds: the summaries refute every object, and nothing is opened.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         VortexExpr absent = Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-1L)));
         Assert.Empty(await RowsAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics).InKeyOrder("key")));
         Assert.Equal(0, metrics.ObjectsOpened);
@@ -321,7 +321,7 @@ public sealed class DatasetKeyOrderTests
 
         // Output-sensitive, and still pruned by the summaries: their minima say which quarter
         // holds the first ten rows, and the other three are not opened.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(sorted[..10], await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key"), 10));
         Assert.Equal(1, metrics.ObjectsOpened);
     }
@@ -485,11 +485,11 @@ public sealed class DatasetKeyOrderTests
         Assert.Equal("key", plan.Order);
         Assert.Equal(cursors, plan.Cursors);
 
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         Assert.Equal(sorted, await RowsAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key")));
         Assert.Equal(cursors, metrics.Cursors);
 
-        metrics = new DatasetScanMetrics();
+        metrics = new DatasetScanCounters();
         Assert.Equal(reversed, await RowsAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key", descending: true)));
         Assert.Equal(cursors, metrics.Cursors);
 

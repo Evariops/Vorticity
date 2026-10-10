@@ -53,7 +53,7 @@ public sealed partial class ZoneFinalityTests
 
             // On one lane; on four, this file's few chunks are all in flight before the first range
             // is followed.
-            Assert.True(degree > 1 || scan.Statistics.Rows < Rows / 2, $"{scan.Statistics.Rows} rows read for five groups");
+            Assert.True(degree > 1 || scan.Metrics.Rows < Rows / 2, $"{scan.Metrics.Rows} rows read for five groups");
 
             // Down, the key's zones prove nothing: every group held, the same answers.
             List<AtTotal> down = await ListAsync(file.Scan<Event>().GroupBy(r => r.At).OrderByDescending(g => g.Key).Take(3).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))).As<AtTotal>());

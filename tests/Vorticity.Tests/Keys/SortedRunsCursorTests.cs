@@ -189,7 +189,7 @@ public sealed class SortedRunsCursorTests
             Assert.True(await cursor.SeekRankAsync(i, ct));
             AssertAt(cursor, oracle, i);
             FilterLiteral key = cursor.Key;
-            long count = await cursor.KeyCountAsync(ct);
+            long count = await cursor.CountAtKeyAsync(ct);
             Assert.Equal(Upper(oracle, key) - Lower(oracle, key), count);
 
             // The count leaves the position where it was.
@@ -337,11 +337,11 @@ public sealed class SortedRunsCursorTests
 
         Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekOp.Exact, ct));
         Assert.True(double.IsNegative(cursor.Key.FloatValue));
-        long negative = await cursor.KeyCountAsync(ct);
+        long negative = await cursor.CountAtKeyAsync(ct);
         Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekOp.Exact, ct));
         Assert.False(double.IsNegative(cursor.Key.FloatValue));
         Assert.Equal(Rows / Floats.Length, negative);
-        Assert.Equal(Rows / Floats.Length, await cursor.KeyCountAsync(ct));
+        Assert.Equal(Rows / Floats.Length, await cursor.CountAtKeyAsync(ct));
 
         // The NaNs are the ends: nothing after the positive one, nothing before the negative one,
         // and each is a key of its own.
@@ -377,7 +377,7 @@ public sealed class SortedRunsCursorTests
         VortexFile file = written.File;
 
         // The count and the membership, from the runs alone: no data segment is read.
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithMetrics(metrics).CountAsync(ct));
         Assert.Equal(0, metrics.ValuesDecoded);
         Assert.Equal(oracle.Count > 0, await file.ScanBuilder().Where(filter).AnyAsync(ct));
@@ -401,8 +401,8 @@ public sealed class SortedRunsCursorTests
 
         // The scan delivers exactly the proven rows, with the index and without; with it, a batch's
         // worth of rows or fewer is a take, which decodes no more than the pruned scan does.
-        ScanMetrics indexed = new ScanMetrics();
-        ScanMetrics unindexed = new ScanMetrics();
+        ScanCounters indexed = new ScanCounters();
+        ScanCounters unindexed = new ScanCounters();
         List<long> on = await RowsOf(file.ScanBuilder().Where(filter).WithMetrics(indexed));
         List<long> off = await RowsOf(file.ScanBuilder().Where(filter).WithIndexes(false).WithMetrics(unindexed));
         Assert.True(
@@ -727,7 +727,7 @@ public sealed class SortedRunsCursorTests
         {
             Assert.Null(cursor.EntryCount);
             Assert.Throws<InvalidOperationException>(() => cursor.Row);
-            await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.KeyCountAsync());
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.CountAtKeyAsync());
             await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.RankAsync(firsts[0].Key));
             await Assert.ThrowsAsync<InvalidOperationException>(async () => await cursor.SeekRankAsync(0));
         }
@@ -780,7 +780,7 @@ public sealed class SortedRunsCursorTests
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         Vorticity.Scanning.ScanBuilder scan = written.File.ScanBuilder()
             .InKeyOrder(column, descending)
             .WithDegreeOfParallelism(degree)
@@ -881,14 +881,14 @@ public sealed class SortedRunsCursorTests
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        ScanMetrics first = new ScanMetrics();
+        ScanCounters first = new ScanCounters();
         await foreach (RecordBatch batch in written.File.ScanBuilder().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(first).ExecuteAsync())
         {
             Assert.Equal(10, batch.RowCount);
             break;
         }
 
-        ScanMetrics all = new ScanMetrics();
+        ScanCounters all = new ScanCounters();
         await foreach (RecordBatch batch in written.File.ScanBuilder().InKeyOrder("text").WithMaxBatchRows(10).WithMetrics(all).ExecuteAsync())
         {
             Assert.True(batch.RowCount <= 10);

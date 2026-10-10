@@ -133,7 +133,7 @@ public sealed class FileStatisticsWriteTests
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(new VortexWriteOptions { RowBlockSize = Block });
 
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         FilterLiteral min = await written.File.ScanBuilder().WithMetrics(metrics).MinAsync("strict_i64", ct);
         FilterLiteral max = await written.File.ScanBuilder().WithMetrics(metrics).MaxAsync("dups_u32", ct);
 

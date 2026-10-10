@@ -41,7 +41,7 @@ internal static class Threads
         SegmentCache cache = session.Options.SegmentCache!;
         Scan<Reading> again = file.Scan<Reading>();
         await CountRowsAsync(again);
-        Console.WriteLine($"a fifth scan: {again.Statistics.Requests} requests, {again.Statistics.CacheHits} served by the cache");
+        Console.WriteLine($"a fifth scan: {again.Metrics.Requests} requests, {again.Metrics.CacheHits} served by the cache");
         Console.WriteLine($"the cache: {cache.Size / 1024} KiB held, {cache.Hits} hits, {cache.Misses} misses");
 
         Scan<Reading> once = file.Scan<Reading>();

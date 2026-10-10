@@ -242,7 +242,7 @@ public sealed class LyingIndexTests
             _ = await cursor.SeekLastAsync(timeout.Token);
             _ = await cursor.PrevAsync(timeout.Token);
             _ = await cursor.RankAsync(probe, timeout.Token);
-            _ = await cursor.KeyCountAsync(timeout.Token);
+            _ = await cursor.CountAtKeyAsync(timeout.Token);
         }
 
         await using (KeyCursor distinct = await file.Keys(distinctColumn).Distinct().OpenAsync(timeout.Token))

@@ -321,11 +321,11 @@ internal sealed class KeyCursor : IKeyWalker
     /// <returns>The count, at least one.</returns>
     /// <remarks>The cursor's position does not move.</remarks>
     /// <exception cref="InvalidOperationException">The cursor is not positioned, or its source has no rows (<see cref="HasRows"/>).</exception>
-    public ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default)
+    public ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken = default)
     {
         RequireValid();
-        RequireRows(nameof(KeyCountAsync));
-        return _source.KeyCountAsync(cancellationToken);
+        RequireRows(nameof(CountAtKeyAsync));
+        return _source.CountAtKeyAsync(cancellationToken);
     }
 
     /// <inheritdoc/>

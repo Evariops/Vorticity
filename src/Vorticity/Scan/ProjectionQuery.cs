@@ -179,7 +179,7 @@ internal sealed class ProjectionQuery : ResultQuery
 
     internal override VortexSession Session => Host.Source.Session;
 
-    internal override ScanMetrics Metrics => Host.Metrics;
+    internal override ScanCounters Counters => Host.Counters;
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new ProjectedBatches(this, cancellationToken);
 
@@ -294,7 +294,7 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
         {
             _query.Host.Begin();
             _begun = true;
-            _inner = _query.Host.Source.BatchesAsync(_spec, _query.Metrics).GetAsyncEnumerator(_cancellationToken);
+            _inner = _query.Host.Source.BatchesAsync(_spec, _query.Counters).GetAsyncEnumerator(_cancellationToken);
         }
 
         // Once the window is served the scan is asked for nothing more: a Take stops the reads.

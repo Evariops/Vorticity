@@ -35,7 +35,7 @@ namespace Vorticity.Keys
 
         ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken = default);
 
-        ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default);
+        ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken = default);
     }
 }
 
@@ -209,7 +209,7 @@ namespace Vorticity
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>The count, at least one.</returns>
         /// <exception cref="InvalidOperationException">The cursor is not positioned, or it walks distinct keys without rows.</exception>
-        public ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default) => Positioned().KeyCountAsync(cancellationToken);
+        public ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken = default) => Positioned().CountAtKeyAsync(cancellationToken);
 
         private IKeyWalker Positioned() =>
             _broken

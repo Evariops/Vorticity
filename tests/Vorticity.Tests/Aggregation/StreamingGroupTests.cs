@@ -145,19 +145,19 @@ public sealed partial class StreamingGroupTests
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
             Aggregation<long> all = file.Scan<Tick>().GroupBy(r => r.Hour).Select(g => g.Count());
             await all.ToListAsync(Ct);
-            long batches = all.Statistics.Batches;
+            long batches = all.Metrics.Batches;
 
             // The first group closes with the first batch: the answer does not wait for the file.
             Aggregation<long> first = file.Scan<Tick>().GroupBy(r => r.Hour).Select(g => g.Count());
             await using (IAsyncEnumerator<long> counts = first.GetAsyncEnumerator(Ct))
             {
                 Assert.True(await counts.MoveNextAsync());
-                Assert.True(batches >= 4 && first.Statistics.Batches <= 2, $"{first.Statistics.Batches} batches read for the first group of {batches}");
+                Assert.True(batches >= 4 && first.Metrics.Batches <= 2, $"{first.Metrics.Batches} batches read for the first group of {batches}");
             }
 
             Aggregation<long> three = file.Scan<Tick>().GroupBy(r => r.Hour).Take(3).Select(g => g.Count());
             Assert.Equal(rows.Where(r => r.Hour is not null).GroupBy(r => r.Hour).OrderBy(g => g.Key).Take(3).Select(g => (long)g.Count()), await three.ToListAsync(Ct));
-            Assert.True(three.Statistics.Batches <= 2, $"{three.Statistics.Batches} batches read for three groups of {batches}");
+            Assert.True(three.Metrics.Batches <= 2, $"{three.Metrics.Batches} batches read for three groups of {batches}");
 
             // A filter and an order on the key stream with it; the order the other way, under a take,
             // streams too, the rows read backwards.
@@ -192,7 +192,7 @@ public sealed partial class StreamingGroupTests
             List<HourStats> read = await ListAsync(last.As<HourStats>());
             Assert.Equal(hours.Take(7).Select(g => (g.Key, (long)g.Count())), read.Select(h => (h.Hour, h.Count)));
             Assert.True(((AggregationQuery)last.Query).PeakGroups < hours.Length / 2, $"{((AggregationQuery)last.Query).PeakGroups} groups held of {hours.Length}");
-            Assert.True(scan.Statistics.Rows < Rows / 2, $"{scan.Statistics.Rows} rows read for seven hours of {Rows}");
+            Assert.True(scan.Metrics.Rows < Rows / 2, $"{scan.Metrics.Rows} rows read for seven hours of {Rows}");
 
             Vorticity.Aggregation blocking = file.Scan<Tick>().GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Take(7).Select(g => (g.Key, g.Count(), g.Average(x => x.Price)));
             ((AggregationQuery)blocking.Query).Plan.Blocking = true;

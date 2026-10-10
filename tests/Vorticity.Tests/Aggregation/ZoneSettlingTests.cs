@@ -36,20 +36,20 @@ public sealed partial class ZoneSettlingTests
             Scan<Tick> streamed = file.Scan<Tick>();
             List<DayRange> days = await ListAsync(streamed.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).Select(g => (g.Key, g.Count(), g.Min(t => t.Level), g.Max(t => t.At), g.Max(t => t.Price))).As<DayRange>());
             Assert.Equal(expected, days.Select(Utc));
-            Assert.Equal(straddling, streamed.Statistics.BlocksDecoded);
+            Assert.Equal(straddling, streamed.Metrics.BlocksDecoded);
 
             // Blocking, in the reverse order of the days, and on several lanes.
             Scan<Tick> blocking = file.Scan<Tick>();
             days = await ListAsync(blocking.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).OrderByDescending(g => g.Key).Select(g => (g.Key, g.Count(), g.Min(t => t.Level), g.Max(t => t.At), g.Max(t => t.Price))).As<DayRange>());
             Assert.Equal(expected.Reverse(), days.Select(Utc));
-            Assert.Equal(straddling, blocking.Statistics.BlocksDecoded);
+            Assert.Equal(straddling, blocking.Metrics.BlocksDecoded);
 
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
             await using VortexFile shared = await session.OpenAsync(path, cancellationToken: Ct);
             Scan<Tick> lanes = shared.Scan<Tick>();
             days = await ListAsync(lanes.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).OrderByDescending(g => g.Key).Select(g => (g.Key, g.Count(), g.Min(t => t.Level), g.Max(t => t.At), g.Max(t => t.Price))).As<DayRange>());
             Assert.Equal(expected.Reverse(), days.Select(Utc));
-            Assert.Equal(straddling, lanes.Statistics.BlocksDecoded);
+            Assert.Equal(straddling, lanes.Metrics.BlocksDecoded);
         }
         finally
         {
@@ -71,13 +71,13 @@ public sealed partial class ZoneSettlingTests
             Scan<Tick> whole = file.Scan<Tick>().Where(t => t.Level >= -500);
             List<DayCount> days = await ListAsync(whole.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).Select(g => (g.Key, g.Count())).As<DayCount>());
             Assert.Equal(rows.GroupBy(t => Day(t.At)).Select(g => (g.Key, (long)g.Count())), days.Select(d => (new DateTime(d.Day.Ticks, DateTimeKind.Utc), d.Count)));
-            Assert.Equal(straddling, whole.Statistics.BlocksDecoded);
+            Assert.Equal(straddling, whole.Metrics.BlocksDecoded);
 
             // A level above 0 is in every zone and not all of one: every block is read and filtered.
             Scan<Tick> some = file.Scan<Tick>().Where(t => t.Level > 0);
             days = await ListAsync(some.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).Select(g => (g.Key, g.Count())).As<DayCount>());
             Assert.Equal(rows.Where(t => t.Level > 0).GroupBy(t => Day(t.At)).Select(g => (g.Key, (long)g.Count())), days.Select(d => (new DateTime(d.Day.Ticks, DateTimeKind.Utc), d.Count)));
-            Assert.Equal((Rows + Block - 1) / Block, some.Statistics.BlocksDecoded);
+            Assert.Equal((Rows + Block - 1) / Block, some.Metrics.BlocksDecoded);
 
             // A range of days: the blocks of the days it keeps whole settle, the others are pruned.
             DateTime from = Day(Start).AddDays(3);
@@ -85,7 +85,7 @@ public sealed partial class ZoneSettlingTests
             days = await ListAsync(range.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).Select(g => (g.Key, g.Count())).As<DayCount>());
             Tick[] kept = [.. rows.Where(t => Day(t.At) >= from && Day(t.At) < from.AddDays(2))];
             Assert.Equal(kept.GroupBy(t => Day(t.At)).Select(g => (g.Key, (long)g.Count())), days.Select(d => (new DateTime(d.Day.Ticks, DateTimeKind.Utc), d.Count)));
-            Assert.True(range.Statistics.BlocksDecoded <= 3, $"{range.Statistics.BlocksDecoded} blocks decoded");
+            Assert.True(range.Metrics.BlocksDecoded <= 3, $"{range.Metrics.BlocksDecoded} blocks decoded");
         }
         finally
         {
@@ -106,14 +106,14 @@ public sealed partial class ZoneSettlingTests
             Scan<Tick> summed = file.Scan<Tick>();
             List<DaySum> sums = await ListAsync(summed.GroupBy(t => t.At.Truncate(CalendarUnit.Day)).Select(g => (g.Key, g.Count(), g.Sum(t => t.Level))).As<DaySum>());
             Assert.Equal(rows.GroupBy(t => Day(t.At)).Select(g => (g.Key, (long)g.Count(), (long)g.Sum(t => t.Level))), sums.Select(d => (new DateTime(d.Day.Ticks, DateTimeKind.Utc), d.Count, d.Levels)));
-            Assert.Equal((Rows + Block - 1) / Block, summed.Statistics.BlocksDecoded);
+            Assert.Equal((Rows + Block - 1) / Block, summed.Metrics.BlocksDecoded);
 
             Scan<Tick> nullable = file.Scan<Tick>();
             List<SeenCount> seen = await ListAsync(nullable.GroupBy(t => t.Seen.Truncate(CalendarUnit.Day)).Select(g => (g.Key, g.Count())).As<SeenCount>());
             Assert.Equal(
                 rows.GroupBy(t => t.Seen is { } s ? Day(s) : (DateTime?)null).Select(g => (g.Key, (long)g.Count())).OrderBy(g => g.Key ?? DateTime.MaxValue),
                 seen.Select(s => (s.Day is { } d ? new DateTime(d.Ticks, DateTimeKind.Utc) : (DateTime?)null, s.Count)).OrderBy(g => g.Item1 ?? DateTime.MaxValue));
-            Assert.True(nullable.Statistics.BlocksDecoded > (Rows / Block) - 2, $"{nullable.Statistics.BlocksDecoded} blocks decoded");
+            Assert.True(nullable.Metrics.BlocksDecoded > (Rows / Block) - 2, $"{nullable.Metrics.BlocksDecoded} blocks decoded");
         }
         finally
         {

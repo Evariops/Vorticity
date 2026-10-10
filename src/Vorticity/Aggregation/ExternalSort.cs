@@ -562,7 +562,7 @@ internal sealed class ExternalSort : IAsyncDisposable
         internal async ValueTask<bool> NextBatchAsync()
         {
             _batches ??= file.ScanSource
-                .BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanMetrics())
+                .BatchesAsync(new ScanSpec { Options = ScanOptions.Default with { BatchRows = sort._batchRows } }, new ScanCounters())
                 .GetAsyncEnumerator(cancellationToken);
             while (await _batches.MoveNextAsync().ConfigureAwait(false))
             {

@@ -74,7 +74,7 @@ public enum GroupOrdering
 /// <param name="KeyBlocksByCode">Key blocks grouped by the codes of their dictionary, one lookup a distinct value.</param>
 /// <param name="KeyBlocksHashed">Key blocks grouped row by row, each value hashed.</param>
 /// <param name="TimeToFirstBatch">From the first move of the result to its first batch.</param>
-public sealed record GroupStatistics(
+public sealed record GroupMetrics(
     long Groups,
     long PeakGroups,
     long PeakBytes,

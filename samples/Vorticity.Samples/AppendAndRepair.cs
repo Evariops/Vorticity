@@ -18,7 +18,7 @@ internal static class AppendAndRepair
         Guid identity = await IdentityOf(path);
         Reading[] more = rows[16_384..24_576];
 
-        await using (VortexFileWriter appender = await session.AppendAsync(path))
+        await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
         {
             long resumeAt = appender.RowCount;                         // the file's row count, since it ended on a block
             await appender.WriteAsync<Reading>(more.AsSpan(), ct);
@@ -29,7 +29,7 @@ internal static class AppendAndRepair
         Console.WriteLine($"the identity is {(identity == await IdentityOf(path) ? "unchanged" : "drawn anew")} by an append");
 
         await Create(session, path, rows.AsMemory(0, 20_000));
-        await using (VortexFileWriter appender = await session.AppendAsync(path))
+        await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
         {
             long resumeAt = appender.RowCount;
             await appender.WriteAsync<Reading>(rows.AsSpan(20_000, 5_000), ct);
@@ -57,7 +57,7 @@ internal static class AppendAndRepair
         long total = initial;
         for (int round = 0; round < rounds; round++)
         {
-            await using VortexFileWriter appender = await session.AppendAsync(path);
+            await using VortexFileWriter appender = await session.OpenWriterAsync(path);
             long resumed = appender.RowCount;
             await appender.WriteAsync<Reading>(rows.AsSpan((int)total, each));
             WriteReport report = await appender.CompleteAsync();
@@ -75,7 +75,7 @@ internal static class AppendAndRepair
     {
         await Create(session, path, rows.AsMemory(0, 16_384));
         long length = new FileInfo(path).Length;
-        await using (VortexFileWriter appender = await session.AppendAsync(path))
+        await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
         {
             await appender.WriteAsync<Reading>(rows.AsSpan(16_384, 50_000));
             await appender.FlushAsync();
@@ -84,7 +84,7 @@ internal static class AppendAndRepair
             Console.WriteLine($"an append abandoned after a flush: {grown} bytes on disk before Abandon, {new FileInfo(path).Length} after, {length} before the append");
         }
 
-        await using (VortexFileWriter appender = await session.AppendAsync(path))
+        await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
         {
             await appender.WriteAsync<Reading>(rows.AsSpan(16_384, 50_000));
             await appender.FlushAsync();
@@ -112,7 +112,7 @@ internal static class AppendAndRepair
         try
         {
             await using VortexFile open = await VortexFile.OpenAsync(path);
-            await using VortexFileWriter refused = await session.AppendAsync(path);
+            await using VortexFileWriter refused = await session.OpenWriterAsync(path);
             Console.WriteLine("an append while the file is open for reading: accepted");
             refused.Abandon();
         }
@@ -127,7 +127,7 @@ internal static class AppendAndRepair
     {
         await Create(session, path, rows.AsMemory(0, 16_384));
         long before = new FileInfo(path).Length;
-        await using (VortexFileWriter appender = await session.AppendAsync(path))
+        await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
         {
             await appender.WriteAsync<Reading>(rows.AsSpan(16_384, 8_192));
             await appender.CompleteAsync();
@@ -161,7 +161,7 @@ internal static class AppendAndRepair
 
         try
         {
-            await using VortexFileWriter refused = await session.AppendAsync(path);
+            await using VortexFileWriter refused = await session.OpenWriterAsync(path);
         }
         catch (VortexFormatException e)
         {
@@ -172,7 +172,7 @@ internal static class AppendAndRepair
         VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);   // truncates to the last version that parses
         Console.WriteLine($"valid length {valid}; repaired: truncated {repaired.Truncated}, {repaired.OriginalLength} -> {repaired.Length}");
 
-        await using (VortexFileWriter again = await session.AppendAsync(path))
+        await using (VortexFileWriter again = await session.OpenWriterAsync(path))
         {
             await again.WriteAsync<Reading>(rows.AsSpan(16_384, 8_192), ct);
             WriteReport report = await again.CompleteAsync(ct);

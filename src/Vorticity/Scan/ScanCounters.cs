@@ -10,7 +10,7 @@ namespace Vorticity.Scanning;
 /// same instance, so running a scan twice sums, and a fresh count means a fresh object. The
 /// additions are interlocked because a scan above degree one runs its lanes on the thread pool.
 /// </summary>
-internal sealed class ScanMetrics
+internal sealed class ScanCounters
 {
     private long _segmentRequests;
     private long _bytesRequested;
@@ -127,7 +127,7 @@ internal sealed class ScanMetrics
     /// <param name="metrics">The scan's sink, or null.</param>
     /// <param name="segments">The request set, registered, filled with what the scan and the file's tail hold, and not yet read.</param>
     /// <returns>Whether there is anything to ask: when not, the set is complete already and the source is not called.</returns>
-    internal static bool Note(ScanMetrics? metrics, IO.SegmentRequestSet segments)
+    internal static bool Note(ScanCounters? metrics, IO.SegmentRequestSet segments)
     {
         int count = Unread(segments, out long bytes);
         if (count == 0)
@@ -143,7 +143,7 @@ internal sealed class ScanMetrics
     /// <param name="metrics">The scan's sink, or null.</param>
     /// <param name="segments">Segments asked for.</param>
     /// <param name="bytes">Their bytes.</param>
-    internal static void Note(ScanMetrics? metrics, long segments, long bytes)
+    internal static void Note(ScanCounters? metrics, long segments, long bytes)
     {
         metrics?.AddRequests(segments, bytes);
         Diagnostics.VortexEventSource.Requested(segments, bytes);
@@ -155,7 +155,7 @@ internal sealed class ScanMetrics
     /// </summary>
     /// <param name="metrics">The scan's sink, or null.</param>
     /// <param name="segments">The request set, read.</param>
-    internal static void Served(ScanMetrics? metrics, IO.SegmentRequestSet segments)
+    internal static void Served(ScanCounters? metrics, IO.SegmentRequestSet segments)
     {
         int hits = segments.CacheHits;
         if (hits > 0 && metrics is not null)

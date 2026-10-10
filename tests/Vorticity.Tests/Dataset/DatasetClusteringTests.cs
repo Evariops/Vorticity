@@ -298,7 +298,7 @@ public sealed class DatasetClusteringTests
             await dataset.ScanBuilder().Where(window).MaxAsync("key", ct));
 
         // A value no object holds: `Any` refutes it from the summaries alone.
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-5L)));
         Assert.False(await dataset.ScanBuilder().Where(absent).WithMetrics(metrics).AnyAsync(ct));
         Assert.Equal(0, metrics.ObjectsOpened);

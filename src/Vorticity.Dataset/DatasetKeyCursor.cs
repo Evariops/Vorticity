@@ -651,7 +651,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// would have opened before the walk reached a key it could hold.
     /// </summary>
     /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
-    public async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken = default)
     {
         FilterLiteral key = Key;
         long count = 0;
@@ -664,7 +664,7 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
 
             if (slot.Live && KeyCursor.Compare(cursor.Key, key) == 0)
             {
-                count += await cursor.KeyCountAsync(cancellationToken).ConfigureAwait(false);
+                count += await cursor.CountAtKeyAsync(cancellationToken).ConfigureAwait(false);
             }
             else if (_direction < 0)
             {

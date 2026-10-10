@@ -98,7 +98,7 @@ public sealed class DatasetRankSeekTests
             // Every object is left where the merge would have it, the ones past the key included, and
             // the walk from there crosses every boundary between objects, the ones still waiting too.
             FilterLiteral key = walked[rank].Key;
-            Assert.Equal(walked.FindAll(entry => entry.Key == key).Count, await cursor.KeyCountAsync(ct));
+            Assert.Equal(walked.FindAll(entry => entry.Key == key).Count, await cursor.CountAtKeyAsync(ct));
             for (int at = rank + 1; at < Math.Min(rank + 18, walked.Count); at++)
             {
                 Assert.True(await cursor.NextAsync(ct));

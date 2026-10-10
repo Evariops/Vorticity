@@ -74,11 +74,11 @@ internal static class Queries
 
     // The answers of a scan go into their record by the same rule.
     internal static async Task<CityCount> AnswersOfOtherTypes(VortexFile file) =>
-        await file.Scan<Reading>().AggAsync<CityCount>(a => (a.Max(r => r.City), a.Average(r => r.Celsius))); // expect: VX1010 "Element 2"
+        await file.Scan<Reading>().AggregateAsync<CityCount>(a => (a.Max(r => r.City), a.Average(r => r.Celsius))); // expect: VX1010 "Element 2"
 
-    // The answers of a whole scan, several of them, go into the record AggAsync<TResult> names.
+    // The answers of a whole scan, several of them, go into the record AggregateAsync<TResult> names.
     internal static async Task<object> SeveralAnswersWithoutARecord(VortexFile file) =>
-        await file.Scan<Reading>().AggAsync(a => (a.Count(), a.Max(r => r.Day))); // expect: CS0411 VX1011
+        await file.Scan<Reading>().AggregateAsync(a => (a.Count(), a.Max(r => r.Day))); // expect: CS0411 VX1011
 
     // Computing with results is C# after the sink, not the plan's.
     internal static object ArithmeticOnAResult(VortexFile file) =>

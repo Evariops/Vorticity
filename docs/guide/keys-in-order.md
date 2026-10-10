@@ -18,7 +18,7 @@ await using (KeyCursor<int> cursor = await file.Scan<Reading>().Keys(r => r.Day)
     }
 
     Console.WriteLine($"rank of 900: {await cursor.RankAsync(900)}");
-    Console.WriteLine($"{await cursor.KeyCountAsync()} entries share key {cursor.Key}");
+    Console.WriteLine($"{await cursor.CountAtKeyAsync()} entries share key {cursor.Key}");
 }
 ```
 
@@ -55,7 +55,7 @@ Every move is a `ValueTask<bool>`. `false` means there was nowhere to go, and `I
 | `NextAsync`, `PrevAsync` | move by one entry |
 | `NextKeyAsync`, `PrevKeyAsync` | move to the first entry of the next or previous distinct key |
 | `RankAsync(key)` | count the entries whose key is smaller |
-| `KeyCountAsync()` | count the entries that share the current key, without moving |
+| `CountAtKeyAsync()` | count the entries that share the current key, without moving |
 
 A key repeated over many rows is many entries, ordered by row. `Exact` lands on the first of them and
 `AtOrBefore` on the last, which is why the seek to 700 above stops at row 700 999. Two ranks count a

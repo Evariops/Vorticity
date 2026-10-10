@@ -42,7 +42,7 @@ Vorticity:     method Aggregation Skip(int)
 Vorticity:     method Aggregation Take(int)
 Vorticity:     method Scan<TRecord> As<TRecord>()
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
-Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.Aggregation<TResult>
 Vorticity:     method Aggregation<TResult> Skip(int)
 Vorticity:     method Aggregation<TResult> Take(int)
@@ -53,7 +53,7 @@ Vorticity:     method Scan<TRecord> As<TRecord>()
 Vorticity:     method ValueTask<List<TResult>> ToListAsync(CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = default)
-Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.AlignedMemoryPool : MemoryPool<byte>
 Vorticity:     ctor AlignedMemoryPool(int = default, long = default)
 Vorticity:     method IMemoryOwner<byte> Rent(int = default)
@@ -929,6 +929,38 @@ Vorticity:     method void Deconstruct(out string, out bool, out Nullable<long>)
 Vorticity:     property Nullable<long> Values { get; init; }
 Vorticity:     property bool Sorted { get; init; }
 Vorticity:     property string Column { get; init; }
+Vorticity: sealed class Vorticity.GroupMetrics : IEquatable<GroupMetrics>
+Vorticity:     ctor GroupMetrics(long, long, long, int, int, bool, long, long, long, long, long, int, int, int, long, long, long, long, TimeSpan)
+Vorticity:     method GroupMetrics <Clone>$()
+Vorticity:     method bool Equals(GroupMetrics)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(GroupMetrics, GroupMetrics)
+Vorticity:     method bool op_Inequality(GroupMetrics, GroupMetrics)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out long, out long, out long, out int, out int, out bool, out long, out long, out long, out long, out long, out int, out int, out int, out long, out long, out long, out long, out TimeSpan)
+Vorticity:     property GroupCoreReason CoreReason { get; init; }
+Vorticity:     property TimeSpan TimeToFirstBatch { get; init; }
+Vorticity:     property bool Core { get; init; }
+Vorticity:     property int Lanes { get; init; }
+Vorticity:     property int MergeParts { get; init; }
+Vorticity:     property int SpilledParts { get; init; }
+Vorticity:     property int SpilledRuns { get; init; }
+Vorticity:     property int TableSplits { get; init; }
+Vorticity:     property int Tables { get; init; }
+Vorticity:     property long Bursts { get; init; }
+Vorticity:     property long BypassedRows { get; init; }
+Vorticity:     property long CacheEvictions { get; init; }
+Vorticity:     property long Groups { get; init; }
+Vorticity:     property long KeyBlocksByCode { get; init; }
+Vorticity:     property long KeyBlocksByRange { get; init; }
+Vorticity:     property long KeyBlocksHashed { get; init; }
+Vorticity:     property long PeakBytes { get; init; }
+Vorticity:     property long PeakGroups { get; init; }
+Vorticity:     property long PendingBytes { get; init; }
+Vorticity:     property long ReloadedBytes { get; init; }
+Vorticity:     property long SpilledBytes { get; init; }
+Vorticity:     property long TurnedAfterRows { get; init; }
 Vorticity: enum Vorticity.GroupOrdering
 Vorticity:     const GroupOrdering None = 0
 Vorticity:     const GroupOrdering Sort = 3
@@ -958,38 +990,6 @@ Vorticity:     property int ChosenRows { get; init; }
 Vorticity:     property int Degree { get; init; }
 Vorticity:     property string NotStreaming { get; init; }
 Vorticity:     property string RowFilter { get; init; }
-Vorticity: sealed class Vorticity.GroupStatistics : IEquatable<GroupStatistics>
-Vorticity:     ctor GroupStatistics(long, long, long, int, int, bool, long, long, long, long, long, int, int, int, long, long, long, long, TimeSpan)
-Vorticity:     method GroupStatistics <Clone>$()
-Vorticity:     method bool Equals(GroupStatistics)
-Vorticity:     method bool Equals(object)
-Vorticity:     method bool op_Equality(GroupStatistics, GroupStatistics)
-Vorticity:     method bool op_Inequality(GroupStatistics, GroupStatistics)
-Vorticity:     method int GetHashCode()
-Vorticity:     method string ToString()
-Vorticity:     method void Deconstruct(out long, out long, out long, out int, out int, out bool, out long, out long, out long, out long, out long, out int, out int, out int, out long, out long, out long, out long, out TimeSpan)
-Vorticity:     property GroupCoreReason CoreReason { get; init; }
-Vorticity:     property TimeSpan TimeToFirstBatch { get; init; }
-Vorticity:     property bool Core { get; init; }
-Vorticity:     property int Lanes { get; init; }
-Vorticity:     property int MergeParts { get; init; }
-Vorticity:     property int SpilledParts { get; init; }
-Vorticity:     property int SpilledRuns { get; init; }
-Vorticity:     property int TableSplits { get; init; }
-Vorticity:     property int Tables { get; init; }
-Vorticity:     property long Bursts { get; init; }
-Vorticity:     property long BypassedRows { get; init; }
-Vorticity:     property long CacheEvictions { get; init; }
-Vorticity:     property long Groups { get; init; }
-Vorticity:     property long KeyBlocksByCode { get; init; }
-Vorticity:     property long KeyBlocksByRange { get; init; }
-Vorticity:     property long KeyBlocksHashed { get; init; }
-Vorticity:     property long PeakBytes { get; init; }
-Vorticity:     property long PeakGroups { get; init; }
-Vorticity:     property long PendingBytes { get; init; }
-Vorticity:     property long ReloadedBytes { get; init; }
-Vorticity:     property long SpilledBytes { get; init; }
-Vorticity:     property long TurnedAfterRows { get; init; }
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
 Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
 Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)
@@ -1124,7 +1124,7 @@ Vorticity:     method ValueTask<bool> SeekAsync(TKey, SeekOp, CancellationToken 
 Vorticity:     method ValueTask<bool> SeekFirstAsync(CancellationToken = default)
 Vorticity:     method ValueTask<bool> SeekLastAsync(CancellationToken = default)
 Vorticity:     method ValueTask<bool> SeekRankAsync(long, CancellationToken = default)
-Vorticity:     method ValueTask<long> KeyCountAsync(CancellationToken = default)
+Vorticity:     method ValueTask<long> CountAtKeyAsync(CancellationToken = default)
 Vorticity:     method ValueTask<long> RankAsync(TKey, CancellationToken = default)
 Vorticity:     property TKey Key { get; }
 Vorticity:     property bool HasRows { get; }
@@ -1243,7 +1243,7 @@ Vorticity:     method Projection Skip(int)
 Vorticity:     method Projection Take(int)
 Vorticity:     method Scan<TRecord> As<TRecord>()
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
-Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.Projection<TResult>
 Vorticity:     method Aggregation<TResult> Distinct()
 Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
@@ -1255,7 +1255,7 @@ Vorticity:     method Scan<TRecord> As<TRecord>()
 Vorticity:     method ValueTask<List<TResult>> ToListAsync(CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<TResult[]> ToArrayAsync(CancellationToken = default)
-Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.PruningStep : IEquatable<PruningStep>
 Vorticity:     ctor PruningStep(string, int, int, long)
 Vorticity:     method PruningStep <Clone>$()
@@ -1313,7 +1313,7 @@ Vorticity:     method Scan.AsyncEnumerator GetAsyncEnumerator(CancellationToken 
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<bool> AnyAsync(CancellationToken = default)
 Vorticity:     method ValueTask<long> CountAsync(CancellationToken = default)
-Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.Scan.AsyncEnumerator : IAsyncDisposable
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask<bool> MoveNextAsync()
@@ -1337,12 +1337,12 @@ Vorticity:     method Scan<TRecord>.AsyncEnumerator<TRecord> GetAsyncEnumerator(
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
-Vorticity:     method ValueTask<T> AggAsync<T>(Func<Aggregates<TRecord>, Sym<T>>, CancellationToken = default)
+Vorticity:     method ValueTask<T> AggregateAsync<T>(Func<Aggregates<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<T> MaxAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<T> MinAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
-Vorticity:     method ValueTask<TResult> AggAsync<TResult>(Func<Aggregates<TRecord>, ITuple>, CancellationToken = default)
+Vorticity:     method ValueTask<TResult> AggregateAsync<TResult>(Func<Aggregates<TRecord>, ITuple>, CancellationToken = default)
 Vorticity:     method ValueTask<TState> AggregateAsync<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<TState> AggregateAsync<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<bool> AnyAsync(CancellationToken = default)
@@ -1364,11 +1364,28 @@ Vorticity:     method ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<Nullabl
 Vorticity:     method ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<byte>>, CancellationToken = default)
 Vorticity:     method ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<uint>>, CancellationToken = default)
 Vorticity:     method ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<ushort>>, CancellationToken = default)
-Vorticity:     property ScanStatistics Statistics { get; }
+Vorticity:     property ScanMetrics Metrics { get; }
 Vorticity: sealed class Vorticity.Scan<TRecord>.AsyncEnumerator<TRecord> : IAsyncDisposable
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask<bool> MoveNextAsync()
 Vorticity:     property Columns<TRecord> Current { get; }
+Vorticity: struct Vorticity.ScanMetrics : IEquatable<ScanMetrics>
+Vorticity:     ctor ScanMetrics(long, long, long, long, long, long, long)
+Vorticity:     method bool Equals(ScanMetrics)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(ScanMetrics, ScanMetrics)
+Vorticity:     method bool op_Inequality(ScanMetrics, ScanMetrics)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out long, out long, out long, out long, out long, out long, out long)
+Vorticity:     property GroupMetrics Grouping { get; init; }
+Vorticity:     property long Batches { get; init; }
+Vorticity:     property long BlocksDecoded { get; init; }
+Vorticity:     property long BlocksPruned { get; init; }
+Vorticity:     property long BytesRequested { get; init; }
+Vorticity:     property long CacheHits { get; init; }
+Vorticity:     property long Requests { get; init; }
+Vorticity:     property long Rows { get; init; }
 Vorticity: sealed class Vorticity.ScanOptions : IEquatable<ScanOptions>
 Vorticity:     ctor ScanOptions()
 Vorticity:     method ScanOptions <Clone>$()
@@ -1403,23 +1420,6 @@ Vorticity:     property int Blocks { get; init; }
 Vorticity:     property int LiveBlocks { get; init; }
 Vorticity:     property int Segments { get; init; }
 Vorticity:     property long BytesToRead { get; init; }
-Vorticity:     property long Rows { get; init; }
-Vorticity: struct Vorticity.ScanStatistics : IEquatable<ScanStatistics>
-Vorticity:     ctor ScanStatistics(long, long, long, long, long, long, long)
-Vorticity:     method bool Equals(ScanStatistics)
-Vorticity:     method bool Equals(object)
-Vorticity:     method bool op_Equality(ScanStatistics, ScanStatistics)
-Vorticity:     method bool op_Inequality(ScanStatistics, ScanStatistics)
-Vorticity:     method int GetHashCode()
-Vorticity:     method string ToString()
-Vorticity:     method void Deconstruct(out long, out long, out long, out long, out long, out long, out long)
-Vorticity:     property GroupStatistics Grouping { get; init; }
-Vorticity:     property long Batches { get; init; }
-Vorticity:     property long BlocksDecoded { get; init; }
-Vorticity:     property long BlocksPruned { get; init; }
-Vorticity:     property long BytesRequested { get; init; }
-Vorticity:     property long CacheHits { get; init; }
-Vorticity:     property long Requests { get; init; }
 Vorticity:     property long Rows { get; init; }
 Vorticity: sealed class Vorticity.ScratchBudget
 Vorticity:     ctor ScratchBudget(long)
@@ -1854,10 +1854,10 @@ Vorticity:     method bool Equals(VortexSchema)
 Vorticity:     method bool Equals(object)
 Vorticity:     method bool TryFormat(Span<byte>, out int, ReadOnlySpan<char>, IFormatProvider)
 Vorticity:     method bool TryFormat(Span<char>, out int, ReadOnlySpan<char>, IFormatProvider)
-Vorticity:     method bool TryGetField(ReadOnlySpan<byte>, out int)
 Vorticity:     method bool op_Equality(VortexSchema, VortexSchema)
 Vorticity:     method bool op_Inequality(VortexSchema, VortexSchema)
 Vorticity:     method int GetHashCode()
+Vorticity:     method int IndexOf(ReadOnlySpan<byte>)
 Vorticity:     method int IndexOf(string)
 Vorticity:     method string ToString()
 Vorticity:     method string ToString(string, IFormatProvider)
@@ -1885,7 +1885,7 @@ Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync(VortexFile, Encoding
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync<TRecord>(ReadOnlyMemory<TRecord>, EncodingGoal = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(ISegmentSource, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(string, VortexOpenOptions = default, CancellationToken = default)
-Vorticity:     method ValueTask<VortexFileWriter> AppendAsync(string, VortexWriteOptions = default, CancellationToken = default)
+Vorticity:     method ValueTask<VortexFileWriter> OpenWriterAsync(string, VortexWriteOptions = default, CancellationToken = default)
 Vorticity:     method VortexFileWriter CreateWriter(PipeWriter, VortexSchema, VortexWriteOptions = default)
 Vorticity:     method VortexFileWriter CreateWriter(string, VortexSchema, VortexWriteOptions = default)
 Vorticity:     method VortexFileWriter CreateWriter<TRecord>(string, VortexWriteOptions = default)
@@ -2374,7 +2374,7 @@ Vorticity.Dataset:     property TimeSpan Window { get; init; }
 Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDataset : IAsyncDisposable
-Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ObjectsAsync(CancellationToken = default)
+Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ListObjectsAsync(CancellationToken = default)
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
@@ -2384,8 +2384,8 @@ Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(Comp
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullable<ulong> = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveAsync(IReadOnlyList<DataObject>, CancellationToken = default)
-Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceObjectsAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, CancellationToken = default)

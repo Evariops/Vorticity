@@ -767,7 +767,7 @@ internal sealed partial class SortedRunsSource : KeySource
         return run.CurrentStart + first;
     }
 
-    internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         FilterLiteral key = Key;
         long count = 0;

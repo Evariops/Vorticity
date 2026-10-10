@@ -19,7 +19,7 @@ namespace Vorticity.Dataset;
 /// What a dataset scan skipped, and how: counters rather than timings, so that a caller can check
 /// how few objects were read instead of believing a speed.
 /// </summary>
-internal sealed class DatasetScanMetrics
+internal sealed class DatasetScanCounters
 {
     /// <summary>Leaf entries the walk reached.</summary>
     public long ObjectsConsidered { get; internal set; }
@@ -67,8 +67,8 @@ internal sealed class DatasetScanBuilder
     private long[]? _take;
     private string[]? _orderPaths;
     private bool _descending;
-    private DatasetScanMetrics? _metrics;
-    private ScanMetrics? _counters;
+    private DatasetScanCounters? _metrics;
+    private ScanCounters? _counters;
     private ScanOptions _options = ScanOptions.Default;
     private bool _keepEncodings;
     private bool _sinkDecodes;
@@ -216,14 +216,14 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>Records what the walk skipped.</summary>
-    public DatasetScanBuilder WithMetrics(DatasetScanMetrics metrics)
+    public DatasetScanBuilder WithMetrics(DatasetScanCounters metrics)
     {
         _metrics = metrics;
         return this;
     }
 
     /// <summary>Adds what every object's own scan requests, decodes and delivers to <paramref name="counters"/>.</summary>
-    public DatasetScanBuilder WithCounters(ScanMetrics counters)
+    public DatasetScanBuilder WithCounters(ScanCounters counters)
     {
         _counters = counters;
         return this;
@@ -497,7 +497,7 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     public async ValueTask<DatasetPlan> ExplainAsync(CancellationToken cancellationToken = default)
     {
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        DatasetScanCounters metrics = new DatasetScanCounters();
         long objects = 0;
         long rows = 0;
         List<long> keptByLevel = [];

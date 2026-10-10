@@ -170,9 +170,9 @@ public sealed partial class Scan<TRecord>
 
         internal override ScanSource Source => _scan.Source;
 
-        internal override ScanMetrics Metrics => _scan.Metrics;
+        internal override ScanCounters Counters => _scan.Counters;
 
-        internal override ScanStatistics Statistics => _scan.Statistics;
+        internal override ScanMetrics Metrics => _scan.Metrics;
 
         internal override ScanSpec Spec() => _scan.Spec();
 

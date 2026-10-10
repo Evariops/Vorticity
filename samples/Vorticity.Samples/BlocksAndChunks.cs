@@ -68,7 +68,7 @@ internal static class BlocksAndChunks
 
         long written = new FileInfo(path).Length;
         long resumesAt;
-        await using (VortexFileWriter appender = await session.AppendAsync(path))
+        await using (VortexFileWriter appender = await session.OpenWriterAsync(path))
         {
             resumesAt = appender.RowCount;
             appender.Abandon();

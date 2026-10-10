@@ -53,7 +53,7 @@ internal static class ReadRows
         (_, TimeSpan maxTime, long maxBytes) = await MeasureAsync(async () => (long)(await file.Scan<Reading>().MaxAsync(r => r.Celsius) ?? 0));
         Scan<Reading> pushed = file.Scan<Reading>();
         double? max = await pushed.MaxAsync(r => r.Celsius);
-        Console.WriteLine($"MaxAsync, pushed: {max} in {maxTime.TotalMilliseconds:F3} ms, {maxBytes} bytes allocated, {pushed.Statistics.Requests} requests, {pushed.Statistics.BlocksDecoded} blocks decoded");
+        Console.WriteLine($"MaxAsync, pushed: {max} in {maxTime.TotalMilliseconds:F3} ms, {maxBytes} bytes allocated, {pushed.Metrics.Requests} requests, {pushed.Metrics.BlocksDecoded} blocks decoded");
 
         (long hot, TimeSpan hotTime, long hotBytes) = await MeasureAsync(() => HottestAsync(file));
         Console.WriteLine($"the hottest rows, filtered before the sink: {hot} rows in {hotTime.TotalMilliseconds:F0} ms, {hotBytes / 1024} KiB allocated");

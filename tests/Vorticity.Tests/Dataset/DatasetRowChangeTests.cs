@@ -80,7 +80,7 @@ public sealed class DatasetRowChangeTests
         await using (dataset)
         {
             // Object 1 holds the keys 1000 to 1199: all of them go, and the object with them.
-            List<DataObject> objects = await dataset.ObjectsAsync(ct).ToListAsync(ct);
+            List<DataObject> objects = await dataset.ListObjectsAsync(ct).ToListAsync(ct);
             RowChangeResult removed = await dataset.DeleteAsync<ChangeRow>(r => r.Key >= 1_000 & r.Key < 2_000, ct);
             Assert.Equal(PerObject, removed.Rows);
             Assert.Equal(1, removed.ObjectsIn);
@@ -91,14 +91,14 @@ public sealed class DatasetRowChangeTests
 
             // Fifty keys of object 2, which now starts at row 200: it is rewritten with the other
             // hundred and fifty, and the others, whose summaries refute the filter, are left as they are.
-            List<string> untouched = (await dataset.ObjectsAsync(ct).ToListAsync(ct))
+            List<string> untouched = (await dataset.ListObjectsAsync(ct).ToListAsync(ct))
                 .Where(o => o.FirstRow != PerObject).Select(o => o.Key).ToList();
             Assert.Equal(Objects - 2, untouched.Count);
             RowChangeResult rewritten = await dataset.DeleteAsync<ChangeRow>(r => r.Key >= 2_050 & r.Key < 2_100, ct);
             Assert.Equal(50, rewritten.Rows);
             Assert.Equal(1, rewritten.ObjectsIn);
             Assert.Equal(1, rewritten.ObjectsOut);
-            List<string> now = (await dataset.ObjectsAsync(ct).ToListAsync(ct)).Select(o => o.Key).ToList();
+            List<string> now = (await dataset.ListObjectsAsync(ct).ToListAsync(ct)).Select(o => o.Key).ToList();
             Assert.Equal(Objects - 1, now.Count);
             Assert.Equal(untouched, now.Intersect(untouched));
 

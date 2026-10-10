@@ -182,7 +182,7 @@ internal sealed class ExcludingKeySource : KeySource
         }
     }
 
-    internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAtKeyAsync(CancellationToken cancellationToken)
     {
         FilterLiteral key = _inner.Key;
         return await UpperRankAsync(key, cancellationToken).ConfigureAwait(false)

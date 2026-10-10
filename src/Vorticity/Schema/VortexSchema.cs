@@ -82,21 +82,18 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
         return Find(path);
     }
 
-    /// <summary>The UTF-8 form of <see cref="IndexOf"/>, without allocating.</summary>
+    /// <summary>The UTF-8 form of <see cref="IndexOf(string)"/>, without allocating.</summary>
     /// <param name="pathUtf8">The name or the <c>.</c>-separated path, as UTF-8.</param>
-    /// <param name="index">The field's index within its own struct.</param>
-    /// <returns>Whether a field matches.</returns>
-    public bool TryGetField(ReadOnlySpan<byte> pathUtf8, out int index)
+    /// <returns>The index, or -1 when no field matches or the bytes are not UTF-8.</returns>
+    public int IndexOf(ReadOnlySpan<byte> pathUtf8)
     {
         Span<char> chars = pathUtf8.Length <= 256 ? stackalloc char[256] : new char[pathUtf8.Length];
         if (Utf8.ToUtf16(pathUtf8, chars, out _, out int written) != System.Buffers.OperationStatus.Done)
         {
-            index = -1;
-            return false;
+            return -1;
         }
 
-        index = Find(chars[..written]);
-        return index >= 0;
+        return Find(chars[..written]);
     }
 
     /// <summary>The index of the first top-level field named exactly <paramref name="name"/>, or -1.</summary>

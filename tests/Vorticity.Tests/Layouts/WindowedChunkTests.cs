@@ -48,7 +48,7 @@ public sealed class WindowedChunkTests
             }
 
             Assert.Equal(Rows, seen);
-            Assert.Equal(5L * Rows, scan.Metrics.ValuesDecoded);
+            Assert.Equal(5L * Rows, scan.Counters.ValuesDecoded);
         }
         finally
         {
@@ -91,7 +91,7 @@ public sealed class WindowedChunkTests
             }
 
             Assert.Equal(Rows, seen);
-            Assert.Equal(Rows, scan.Metrics.ValuesDecoded);
+            Assert.Equal(Rows, scan.Counters.ValuesDecoded);
         }
         finally
         {

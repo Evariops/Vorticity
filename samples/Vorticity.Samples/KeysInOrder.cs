@@ -24,7 +24,7 @@ internal static class KeysInOrder
             }
 
             Console.WriteLine($"rank of 900: {await cursor.RankAsync(900)}");
-            Console.WriteLine($"{await cursor.KeyCountAsync()} entries share key {cursor.Key}");
+            Console.WriteLine($"{await cursor.CountAtKeyAsync()} entries share key {cursor.Key}");
             await cursor.SeekRankAsync(123_456);
             Console.WriteLine($"entry of rank 123456: key {cursor.Key} at row {cursor.Row}");
             await cursor.SeekLastAsync();

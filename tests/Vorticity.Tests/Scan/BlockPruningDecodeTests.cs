@@ -7,7 +7,7 @@
 // rows as a counted range -- and an encoding that selects without a full decode materializes the
 // live block and nothing else.
 //
-// The quantity is the scan's `ScanMetrics.ValuesDecoded`, the count `FlatLayoutDecodeCountTests`
+// The quantity is the scan's `ScanCounters.ValuesDecoded`, the count `FlatLayoutDecodeCountTests`
 // holds the scan and the take to, and it is exact here too: one block's rows, pruned; the whole chunk,
 // unpruned. Two shapes, because two readers have the branch: a file whose single chunk IS the root
 // (the flat reader sees the mask in file coordinates), and a file of many chunks (the chunked
@@ -145,8 +145,8 @@ public sealed class BlockPruningDecodeTests
                 proven += least >= low && greatest < high ? 1 : 0;
             }
 
-            ScanMetrics pruned = new ScanMetrics();
-            ScanMetrics unpruned = new ScanMetrics();
+            ScanCounters pruned = new ScanCounters();
+            ScanCounters unpruned = new ScanCounters();
             List<long> kept = await Collect(path, band, prune: true, pruned);
             List<long> all = await Collect(path, band, prune: false, unpruned);
 
@@ -165,7 +165,7 @@ public sealed class BlockPruningDecodeTests
         }
     }
 
-    private static async Task<List<long>> Collect(string path, VortexExpr filter, bool prune, ScanMetrics metrics)
+    private static async Task<List<long>> Collect(string path, VortexExpr filter, bool prune, ScanCounters metrics)
     {
         List<long> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes("v");
@@ -244,7 +244,7 @@ public sealed class BlockPruningDecodeTests
     private static async Task<(List<int> Values, long Decoded)> ReadField(
         string path, VortexExpr filter, bool prune, int cap)
     {
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         List<int> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes(string.Empty);
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
@@ -290,7 +290,7 @@ public sealed class BlockPruningDecodeTests
 
     private static async Task<(List<long> Values, long Decoded)> Read(string path, VortexExpr filter, bool prune)
     {
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         List<long> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes("v");
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);

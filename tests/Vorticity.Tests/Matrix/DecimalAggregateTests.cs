@@ -55,7 +55,7 @@ public sealed class DecimalAggregateTests
 
         // In one pass: the answers a single scan computes together are the ones computed apart.
         (VortexDecimal? min, VortexDecimal? max, long distinct, double? mean) = await file.Scan<AllTypes>()
-            .AggAsync<WideSummary>(a => (a.Min(r => r.Wide256), a.Max(r => r.Wide256), a.CountDistinct(r => r.Wide256), a.Average(r => r.Wide256)), ct);
+            .AggregateAsync<WideSummary>(a => (a.Min(r => r.Wide256), a.Max(r => r.Wide256), a.CountDistinct(r => r.Wide256), a.Average(r => r.Wide256)), ct);
         List<BigInteger> wide = rows.Wide256.Select(v => Unscaled(v!.Value, 10)).ToList();
         Assert.Equal(wide.Min(), Unscaled(min!.Value, 10));
         Assert.Equal(wide.Max(), Unscaled(max!.Value, 10));

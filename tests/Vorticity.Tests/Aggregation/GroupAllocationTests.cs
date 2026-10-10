@@ -225,7 +225,7 @@ public sealed partial class GroupAllocationTests
             rows += Sum(batch.Column<long>(counted).Values);
         }
 
-        return (rows, query.Statistics.Grouping!.CoreReason);
+        return (rows, query.Metrics.Grouping!.CoreReason);
     }
 
     private static long Sum(ReadOnlySpan<long> values)

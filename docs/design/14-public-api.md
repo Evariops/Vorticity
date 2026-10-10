@@ -197,7 +197,7 @@ record reads, with as many values as the record has members, through `As<TRecord
 scan delivers a `Projection<T>` or a `Projection` of computed values the same way. `As<TRecord>()`
 turns any of them into a `Scan<TRecord>` over the result, filled by the result's columns, on which
 every operator and sink of a scan runs again: a filter, a group by of the groups, a write.
-`AggAsync<TResult>` answers a whole scan into a record the same way.
+`AggregateAsync<TResult>` answers a whole scan into a record the same way.
 
 A query runs block by block on the encoded form (a dictionary key by code, a run-end key by run, a
 sorted key by run detection, a constant one whole) and never hands a batch to the caller's code. It
@@ -225,8 +225,8 @@ in no promised order without one.
 | `ToRecordsAsync()` | `IAsyncEnumerable<TRecord>` | a copy per row, and an allocation per row for text, lists and nested classes | the first split |
 | `Select(r => e)` | `Projection<T>`, a value computed per row | the same as `ToRecordsAsync`, for the columns its element names | the first split |
 | `Select(r => (…)).As<TRecord>()` | a `Scan<TRecord>` of values computed per row | nothing per batch, for the columns its elements name | the first split |
-| `CountAsync`, `AnyAsync`, `MinAsync`, `MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync`, `AggregateAsync`, `AggAsync(a => e)` | one value | the statistics when they settle it, blocks otherwise (see [answers without rows](12-index-reads.md#4-answers-without-rows)) | at once when the statistics settle it, at the end of the pass otherwise |
-| `AggAsync<TResult>(a => (…))` | several answers in one pass, into the record `TResult` | the same | the same |
+| `CountAsync`, `AnyAsync`, `MinAsync`, `MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync`, `AggregateAsync(a => e)`, and `AggregateAsync<T, TAggregator, TState>` with an aggregator of one's own | one value | the statistics when they settle it, blocks otherwise (see [answers without rows](12-index-reads.md#4-answers-without-rows)) | at once when the statistics settle it, at the end of the pass otherwise |
+| `AggregateAsync<TResult>(a => (…))` | several answers in one pass, into the record `TResult` | the same | the same |
 | `GroupBy(…).Select(g => r)` | `Aggregation<T>`, one value per group | one state per group, only the open groups on a key that streams, and `k` groups for a top-k | the first group closed on a key that streams, the end of the pass otherwise |
 | `GroupBy(…).Select(g => (…)).As<TRecord>()` | a `Scan<TRecord>` over the groups, its batches borrowed | the same, and nothing per batch or per group | the same |
 | `writer.WriteAsync(scan)` | the batches of any scan, written as they come | the writer's own work, and a rollup builds no record | |
@@ -282,14 +282,14 @@ guide's writing pages show each form.
 | `ScanOptions` | batch cap, prefetch, degree, `Compact`, and the `Pruning` and `UseIndexes` switches, which exist to check the structures and never change a result |
 | `VortexWriteOptions` | blocks and chunk targets, the compression profile and per-column hints, the target edition, statistics, string bounds, the index policy, the identity, user metadata, the degree |
 | `IndexPolicy`, `EncodingHint`, `CompressionProfile` | see [the index policy](10-indexes.md#6-the-policy) and [choosing encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials) |
-| `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `GroupPlan`, `GroupKeyPlan`, `GroupOrdering` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, and how a count, an order and a group by will be answered (see [plan and statistics](16-queries.md#10-plan-and-statistics)) |
-| `ScanStatistics`, `GroupStatistics` | the same quantities, measured after the scan, and for a group by its groups, the most held at once and their bytes, what its core did, how each key block was grouped, and the time to its first batch |
+| `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `GroupPlan`, `GroupKeyPlan`, `GroupOrdering` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, and how a count, an order and a group by will be answered (see [plan and metrics](16-queries.md#10-plan-and-metrics)) |
+| `ScanMetrics`, `GroupMetrics` | the same quantities, measured after the scan, and for a group by its groups, the most held at once and their bytes, what its core did, how each key block was grouped, and the time to its first batch |
 | `WriteReport` | what the writer chose, per column and per chunk, and every index built or abandoned |
 | `VortexDiagnostics` | the names of the meter and the activity source (see [observability](09-contracts.md#5-observability)) |
 | `VortexException` and its four kinds | a malformed file, an unsupported component with its id and `ComponentKind`, a schema that does not fit, and a query that outgrows its memory or scratch budget (see [error handling](03-architecture.md#5-error-handling)) |
 | `VortexEditions` | the default, newest and floor editions, and the Rust version that reads each |
 
-The plan and the statistics count in the same units. A plan's `Segments` and `BytesToRead` are what
+The plan and the metrics count in the same units. A plan's `Segments` and `BytesToRead` are what
 the source will be asked for, each segment once, and `Requests` and `BytesRequested` are what it was
 asked for, so on a file with statistics the two agree. `BlocksDecoded` counts the blocks that reached
 the plain form, so a block answered from a dictionary's codes or a run's lengths is not counted as
@@ -339,7 +339,7 @@ The analyzers ship in `Vorticity.Generators` ([diagnostics.md](../guide/diagnost
 | VX1007 | a type that cannot be a record: generic, `ref struct`, static, abstract, file-local, or without a usable constructor |
 | VX1008 | a member the reader cannot fill |
 | VX1009 | a component of a `GroupBy` key that is not a symbol of the scan, such as a literal or a captured value |
-| VX1010 | an `As<TRecord>()` or an `AggAsync<TResult>` whose record members do not take the selected values, position by position |
+| VX1010 | an `As<TRecord>()` or an `AggregateAsync<TResult>` whose record members do not take the selected values, position by position |
 | VX1011 | several selected values read without a record (enumerated, or awaited without `TResult`). It names `As<TRecord>()` and the record to declare |
 
 VX1001 to VX1004 are warnings. VX1005 to VX1008 are errors, and the generator emits nothing for a type

@@ -84,7 +84,7 @@ internal static class OpenAFile
             _ = columns.RowCount;
         }
 
-        return ((source?.Requests ?? 0) - requests, (source?.Bytes ?? 0) - bytes, scan.Statistics.CacheHits);
+        return ((source?.Requests ?? 0) - requests, (source?.Bytes ?? 0) - bytes, scan.Metrics.CacheHits);
     }
 
     private sealed class CountingSource(ISegmentSource inner) : ISegmentSource

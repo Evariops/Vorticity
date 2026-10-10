@@ -63,9 +63,9 @@ public sealed class DatasetDeletionVectorTests
             Assert.Equal(0, byRewrites.ObjectsMarked);
         }
 
-        Assert.True((await marked.ObjectsAsync(ct).ToListAsync(ct)).Exists(held => held.DeletedRows > 0));
+        Assert.True((await marked.ListObjectsAsync(ct).ToListAsync(ct)).Exists(held => held.DeletedRows > 0));
         Assert.All(
-            (await marked.ObjectsAsync(ct).ToListAsync(ct)).Where(held => held.DeletedRows > 0),
+            (await marked.ListObjectsAsync(ct).ToListAsync(ct)).Where(held => held.DeletedRows > 0),
             held => Assert.Equal(outOfLine || held.Entry!.VectorBytes > 256, held.Entry!.VectorAt.Exists));
         await AgreeAsync(marked, rewritten, clustered, ct);
         Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
@@ -86,7 +86,7 @@ public sealed class DatasetDeletionVectorTests
         // Compaction writes the live rows only, and the marks end with the objects that held them.
         await DrainAsync(marked, ct, new CompactionOptions { LevelZeroCeiling = 0, TargetBytesAtLevelOne = 1 << 20 });
         await DrainAsync(rewritten, ct, new CompactionOptions { LevelZeroCeiling = 0, TargetBytesAtLevelOne = 1 << 20 });
-        Assert.All(await marked.ObjectsAsync(ct).ToListAsync(ct), held => Assert.Equal(0, held.DeletedRows));
+        Assert.All(await marked.ListObjectsAsync(ct).ToListAsync(ct), held => Assert.Equal(0, held.DeletedRows));
         Assert.Equal(Sorted(await RowsAsync(rewritten, ct)), Sorted(await RowsAsync(marked, ct)));
         Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
     }
@@ -116,7 +116,7 @@ public sealed class DatasetDeletionVectorTests
         await using KeyCursor<string> cursor = await dataset.Scan<ChangeRow>().Keys(r => r.City).OpenAsync(ct);
         Assert.Equal(model.Count(row => string.CompareOrdinal(row.City, "Lyon") < 0), await cursor.RankAsync("Lyon", ct));
         Assert.True(await cursor.SeekAsync("Lyon", SeekOp.Exact, ct));
-        Assert.Equal(model.Count(row => row.City == "Lyon"), await cursor.KeyCountAsync(ct));
+        Assert.Equal(model.Count(row => row.City == "Lyon"), await cursor.CountAtKeyAsync(ct));
         Assert.False(await cursor.SeekAsync("Nice", SeekOp.Exact, ct));
 
         List<string> walked = [];
@@ -221,7 +221,7 @@ public sealed class DatasetDeletionVectorTests
         Assert.Equal(0, second.ObjectsMarked);
         Assert.Equal(5, second.ObjectsIn);
         Assert.Equal(5, second.ObjectsOut);
-        Assert.All(await dataset.ObjectsAsync(ct).ToListAsync(ct), held => Assert.Equal(0, held.DeletedRows));
+        Assert.All(await dataset.ListObjectsAsync(ct).ToListAsync(ct), held => Assert.Equal(0, held.DeletedRows));
         Assert.Equal(5 * 170, dataset.RowCount);
         Assert.DoesNotContain(await RowsAsync(dataset, ct), row => row.Key % 1_000 < 30);
     }
@@ -329,7 +329,7 @@ public sealed class DatasetDeletionVectorTests
         await using VortexDataset rewritten = await CreateAsync(rewrittenStore, Options(clustered: true, marking: false), ct);
         await DrainAsync(marked, ct);
         await DrainAsync(rewritten, ct);
-        DataObject before = Assert.Single(await marked.ObjectsAsync(ct).ToListAsync(ct));
+        DataObject before = Assert.Single(await marked.ListObjectsAsync(ct).ToListAsync(ct));
 
         // Half the rows in one run; or every other row of three hundred, in two deletes, each of which
         // a delete still marks, whose vector passes half a kilobyte.
@@ -342,7 +342,7 @@ public sealed class DatasetDeletionVectorTests
             await rewritten.DeleteAsync(delete, ct);
         }
 
-        DataObject held = Assert.Single(await marked.ObjectsAsync(ct).ToListAsync(ct));
+        DataObject held = Assert.Single(await marked.ListObjectsAsync(ct).ToListAsync(ct));
         Assert.True(due == "share" ? held.DeletedRows * 2 >= held.Rows + held.DeletedRows : held.Entry!.VectorBytes * 2 >= 1 << 10);
 
         CompactionPlan plan = await marked.PlanCompactionAsync(null, ct);
@@ -352,7 +352,7 @@ public sealed class DatasetDeletionVectorTests
 
         CompactionResult purged = Assert.IsType<CompactionResult>(await marked.CompactAsync(null, ct));
         Assert.Equal((OperationOutcome.Applied, CompactionTrigger.Marks, 1L, 1L, held.Rows), (purged.Outcome, purged.Trigger, purged.ObjectsIn, purged.ObjectsOut, purged.Rows));
-        DataObject after = Assert.Single(await marked.ObjectsAsync(ct).ToListAsync(ct));
+        DataObject after = Assert.Single(await marked.ListObjectsAsync(ct).ToListAsync(ct));
         Assert.Equal((before.Level, 0L, held.Rows), (after.Level, after.DeletedRows, after.Rows));
         Assert.Null((await marked.PlanCompactionAsync(null, ct)).Job);
 
@@ -374,7 +374,7 @@ public sealed class DatasetDeletionVectorTests
         await using CountingObjectStore store = new CountingObjectStore(inner);
         await using VortexDataset dataset = await CreateAsync(store, Options(clustered: true, marking: true), ct);
         await DrainAsync(dataset, ct);
-        int level = Assert.Single(await dataset.ObjectsAsync(ct).ToListAsync(ct)).Level;
+        int level = Assert.Single(await dataset.ListObjectsAsync(ct).ToListAsync(ct)).Level;
 
         // Unmarked, the leaf rides in the header of a commit that does not change its level.
         await AppendAsync(dataset, 9_000, ct);
@@ -397,11 +397,11 @@ public sealed class DatasetDeletionVectorTests
         // request. A reader opening the version reads it in one, and proves as much once it has it.
         store.Reset();
         Assert.False(dataset.MayMatch<ChangeRow>(r => r.Key == 50_000));
-        int objects = (await dataset.ObjectsAsync(ct).ToListAsync(ct)).Count;
+        int objects = (await dataset.ListObjectsAsync(ct).ToListAsync(ct)).Count;
         Assert.Equal(0, store.Requests);
         await using VortexDataset cold = await VortexDataset.OpenAsync(store, Options(clustered: true, marking: true), ct);
         store.Reset();
-        Assert.Equal(objects, (await cold.ObjectsAsync(ct).ToListAsync(ct)).Count);
+        Assert.Equal(objects, (await cold.ListObjectsAsync(ct).ToListAsync(ct)).Count);
         Assert.Equal(1, store.Requests);
         Assert.False(cold.MayMatch<ChangeRow>(r => r.Key == 50_000));
         Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
@@ -459,13 +459,13 @@ public sealed class DatasetDeletionVectorTests
                 break;
             }
 
-            marked = (await dataset.ObjectsAsync(ct).ToListAsync(ct)).Single(held => held.DeletedRows > 0).Entry!.Deletions.EncodedBytes;
+            marked = (await dataset.ListObjectsAsync(ct).ToListAsync(ct)).Single(held => held.DeletedRows > 0).Entry!.Deletions.EncodedBytes;
         }
 
         // The last marks fit the bound, and one run more, at two varints of the object's row
         // count, would not have: the bound counts the vector's own bytes, not a guess at them.
         Assert.InRange(marked, 256 - (2 * 2) + 1, 256);
-        Assert.All(await dataset.ObjectsAsync(ct).ToListAsync(ct), held => Assert.Equal(0, held.DeletedRows));
+        Assert.All(await dataset.ListObjectsAsync(ct).ToListAsync(ct), held => Assert.Equal(0, held.DeletedRows));
         Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
     }
 
@@ -641,7 +641,7 @@ public sealed class DatasetDeletionVectorTests
             Assert.True(await byMarks.SeekRankAsync(rank, ct));
             Assert.True(await byRewrites.SeekRankAsync(rank, ct));
             Assert.Equal(byRewrites.Key, byMarks.Key);
-            Assert.Equal(await byRewrites.KeyCountAsync(ct), await byMarks.KeyCountAsync(ct));
+            Assert.Equal(await byRewrites.CountAtKeyAsync(ct), await byMarks.CountAtKeyAsync(ct));
         }
     }
 

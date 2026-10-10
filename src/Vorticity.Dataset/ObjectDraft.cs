@@ -7,7 +7,7 @@ namespace Vorticity.Dataset;
 /// A data object being written for a dataset: a core writer over a fresh key, which the dataset
 /// completes, puts in the store and commits when it is handed to
 /// <see cref="VortexDataset.AppendAsync(ObjectDraft, System.Threading.CancellationToken)"/> or
-/// <see cref="VortexDataset.ReplaceAsync"/>.
+/// <see cref="VortexDataset.ReplaceObjectsAsync"/>.
 /// </summary>
 /// <remarks>
 /// Write the rows through <see cref="Writer"/> and leave its completion to the dataset. Disposing a

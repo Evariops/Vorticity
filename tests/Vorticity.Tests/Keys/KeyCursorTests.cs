@@ -133,7 +133,7 @@ public sealed class KeyCursorTests
             Assert.True(await cursor.SeekRankAsync(i, ct), $"rank {i}");
             FilterLiteral key = cursor.Key;
             long rank = await cursor.RankAsync(key, ct);
-            long count = await cursor.KeyCountAsync(ct);
+            long count = await cursor.CountAtKeyAsync(ct);
 
             // The invariant of rank and select: select lands inside its key's own slice.
             Assert.True(rank <= i, $"{column}: rank {rank} above {i}");
@@ -224,7 +224,7 @@ public sealed class KeyCursorTests
         await using KeyCursor cursor = await written.File.Keys("floats_f64").OpenAsync(ct);
         Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekOp.Exact, ct));
         Assert.Equal(0, cursor.Row);
-        Assert.Equal(3L, await cursor.KeyCountAsync(ct));
+        Assert.Equal(3L, await cursor.CountAtKeyAsync(ct));
         Assert.True(double.IsNegative(cursor.Key.FloatValue));
 
         Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekOp.Exact, ct));
@@ -374,7 +374,7 @@ public sealed class KeyCursorTests
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        ScanMetrics metrics = new ScanMetrics();
+        ScanCounters metrics = new ScanCounters();
         List<long> values = [];
         await foreach (RecordBatch batch in written.File.ScanBuilder()
             .InKeyOrder("strict_i64", descending)

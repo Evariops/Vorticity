@@ -166,7 +166,7 @@ internal static class ChosenFetch
     /// <param name="groups">The groups whose rows are read.</param>
     /// <param name="cancellationToken">Cancels the take.</param>
     internal static async ValueTask FetchAsync(
-        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
     {
         // What the fetch sorts and reads by, an entry a group and choice — its position, its owner,
         // its row and group, the take's position — reserved under the result's memory while it runs.
@@ -184,7 +184,7 @@ internal static class ChosenFetch
     }
 
     private static async ValueTask FetchRowsAsync(
-        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, QueryMemory? memory, CancellationToken cancellationToken)
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, QueryMemory? memory, CancellationToken cancellationToken)
     {
         IChosenColumn[] chosen = outcome.Plan.Chosen;
         (IAggregateNode Row, int[] Columns)[] choices = outcome.Plan.ChosenRows;

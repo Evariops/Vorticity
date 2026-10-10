@@ -52,7 +52,7 @@ internal static class ProjectColumns
             rows += columns.RowCount;
         }
 
-        ScanStatistics stats = scan.Statistics;
+        ScanMetrics stats = scan.Metrics;
         Console.WriteLine($"{name,-12} {Leaves(TRecord.Schema),8} {plan.Segments,9} {plan.BytesToRead,10} {stats.Requests,9} {stats.BytesRequested,10}  ({rows} rows)");
     }
 

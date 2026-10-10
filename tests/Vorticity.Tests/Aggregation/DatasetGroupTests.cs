@@ -167,7 +167,7 @@ public sealed partial class DatasetGroupTests
 
             // One object of many chunks, read on one lane and then on four: the four take it in
             // ranges, each a run of whole chunks, so every segment is asked for once either way.
-            (string Answers, ScanStatistics Statistics, AggregationRun Run)[] reads = new (string, ScanStatistics, AggregationRun)[2];
+            (string Answers, ScanMetrics Metrics, AggregationRun Run)[] reads = new (string, ScanMetrics, AggregationRun)[2];
             foreach ((int at, int degree) in ((int, int)[])[(0, 1), (1, 4)])
             {
                 Scan<Trade> scan = dataset.Scan<Trade>().With(new ScanOptions { DegreeOfParallelism = degree });
@@ -175,14 +175,14 @@ public sealed partial class DatasetGroupTests
                 List<DeskSum> read = await ListAsync(desks.As<DeskSum>());
                 reads[at] = (
                     string.Join(";", read.OrderBy(d => d.Desk, StringComparer.Ordinal).Select(d => $"{d.Desk}={d.Count}/{BitConverter.DoubleToInt64Bits(d.Sum):X}")),
-                    scan.Statistics,
+                    scan.Metrics,
                     desks.Plan.LastRun!);
             }
 
             Assert.True(reads[1].Run.Lanes.Sum(lane => lane.Ranges) >= 4, $"{reads[1].Run.Lanes.Sum(lane => lane.Ranges)} ranges");
             Assert.Equal(reads[0].Answers, reads[1].Answers);
-            Assert.Equal(reads[0].Statistics.Requests, reads[1].Statistics.Requests);
-            Assert.Equal(reads[0].Statistics.BytesRequested, reads[1].Statistics.BytesRequested);
+            Assert.Equal(reads[0].Metrics.Requests, reads[1].Metrics.Requests);
+            Assert.Equal(reads[0].Metrics.BytesRequested, reads[1].Metrics.BytesRequested);
         }
         finally
         {
@@ -242,7 +242,7 @@ public sealed partial class DatasetGroupTests
     private static async Task<int> MarkedAsync(VortexDataset dataset)
     {
         int marked = 0;
-        await foreach (DataObject held in dataset.ObjectsAsync(Ct))
+        await foreach (DataObject held in dataset.ListObjectsAsync(Ct))
         {
             marked += held.DeletedRows > 0 ? 1 : 0;
         }

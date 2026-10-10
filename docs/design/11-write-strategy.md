@@ -232,7 +232,7 @@ summarizes on one thread.
 
 ### 3.8 Appending to a file
 
-`VortexSession.AppendAsync(path)` returns a writer that continues a file whose shape this writer can
+`VortexSession.OpenWriterAsync(path)` returns a writer that continues a file whose shape this writer can
 extend (a struct of columns, each a chunked layout of flat segments, all chunked alike), and refuses
 any other file with the advice to rewrite it. The old segments stay where they are. New blocks are
 numbered from the old row count, so their boundaries are the ones a single write would have made.
@@ -328,7 +328,7 @@ Two more promises complete the contract:
 
 - A scan takes one lease per segment. The live splits register their segments in one request, each
   distinct segment is read once in as few requests as coalescing allows, and every block in it
-  decodes from that lease. `ScanStatistics.Requests` is the plan's distinct segments, and
+  decodes from that lease. `ScanMetrics.Requests` is the plan's distinct segments, and
   `BytesRequested` their bytes, within the coalescing gap.
 - A selection can replace a compaction. A filtered batch is compacted to its surviving rows by
   default. With `ScanOptions.Compact = false`, each live block is delivered whole with the
@@ -343,7 +343,7 @@ The index directory is read lazily, on the first filter that could use it, and u
 the tail the open already read. The runs are read on the first query that needs them and cached on
 the file, shared by every scan. `ExplainAsync` returns the plan without executing it (blocks, blocks
 pruned by each structure with what consulting it cost, segments and bytes to read), and the scan's
-`Statistics` report the same quantities once it has run, counted by the same sink.
+`Metrics` report the same quantities once it has run, counted by the same sink.
 
 ## 7. Determinism, and its limit
 

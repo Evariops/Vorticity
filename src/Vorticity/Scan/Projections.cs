@@ -24,7 +24,7 @@ public sealed class Projection<TResult>
     internal Projection(ProjectionQuery query) => _query = query;
 
     /// <summary>What the scan did; valid once the projection has been enumerated.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);
+    public ScanMetrics Metrics => ScanMetrics.From(_query.Counters);
 
     /// <summary>Makes <paramref name="cancellationToken"/> cancel the enumeration, as <c>WithCancellation</c> does a stream's.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
@@ -105,7 +105,7 @@ public sealed class Projection
     internal Projection(ProjectionQuery query) => _query = query;
 
     /// <summary>What the scan did; valid once the projection has been read.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);
+    public ScanMetrics Metrics => ScanMetrics.From(_query.Counters);
 
     /// <summary>The rows past the first <paramref name="count"/> the scan keeps.</summary>
     /// <param name="count">The rows to pass over.</param>

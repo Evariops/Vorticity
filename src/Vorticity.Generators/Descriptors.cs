@@ -100,7 +100,7 @@ internal static class Descriptors
     public static readonly DiagnosticDescriptor RecordDoesNotTakeSelection = new DiagnosticDescriptor(
         "VX1010",
         "A record does not take the values of a selection",
-        "{0}; As and AggAsync throw when they run",
+        "{0}; As and AggregateAsync throw when they run",
         "Usage",
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
@@ -114,6 +114,6 @@ internal static class Descriptors
         "Usage",
         DiagnosticSeverity.Error,
         isEnabledByDefault: true,
-        "Several values have no .NET type until a record gives them one: declare a [VortexRecord] whose members take them in order, and read the selection with As<TRecord>(), or the answers of a scan with AggAsync<TResult>.",
+        "Several values have no .NET type until a record gives them one: declare a [VortexRecord] whose members take them in order, and read the selection with As<TRecord>(), or the answers of a scan with AggregateAsync<TResult>.",
         HelpLink + "vx1011");
 }
