@@ -200,6 +200,7 @@ internal static class FooterWriter
         }
 
         chunk.Sizes?.WriteChunk(ref writer);
+        chunk.Statistics.Geospatial?.Write(ref writer, 17);
 
         writer.EndStruct(metadata);
         if (written.OffsetIndexOffset >= 0)

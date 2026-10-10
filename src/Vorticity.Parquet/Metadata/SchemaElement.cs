@@ -292,6 +292,19 @@ internal struct LogicalTypeInfo
                 }
 
                 break;
+            case LogicalTypeKind.Geometry:
+            case LogicalTypeKind.Geography:
+                if (Crs is { } crs)
+                {
+                    writer.WriteStringField(1, crs);
+                }
+
+                if (Kind == LogicalTypeKind.Geography && EdgeAlgorithm >= 0)
+                {
+                    writer.WriteI32Field(2, EdgeAlgorithm);
+                }
+
+                break;
         }
 
         writer.EndStruct(member);

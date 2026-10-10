@@ -160,6 +160,9 @@ once, from the standard's own text, and held by a test.
 | 18 | an array's elements ["must be present"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L145-L147) | an element both of whose columns are null | the variant null, as where a value is required at the top |
 | 19 | a variant group holds a `value` that ["must be annotated"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantEncoding.md#L50) required or optional, and a shredded field's group [is required](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L193) | a group without its `value`, a field's group that is optional | read: a column that is not there is null in every row, and a null field's group is a missing field |
 | 20 | a shredded decimal's [physical type](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantShredding.md#L94-L96) names decimal4, decimal8 or decimal16, and so does [its precision](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/VariantEncoding.md#L444-L446) | a DECIMAL(5, 2) stored in INT64, which the two tables place apart | the precision's: the variant's width is the one the encoding's decimal table gives, and the value is the same either way |
+| 21 | a CRS may be [`projjson:` and a key](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Geospatial.md#L52) of the file's key-value metadata | what a type read from the file and written elsewhere names | the PROJJSON the key holds, which the type then carries itself; a key the file does not have leaves the CRS as written |
+| 22 | a GEOGRAPHY's box [bounds its values on the sphere](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Geospatial.md#L107-L115), its edges geodesics | a writer's box, and a reader's check of one | the writer gives a box only where no value has an edge, the box of its vertices then exact; the verifier holds a box to the vertices alone, within 1e-9 degrees, as a box worked out on the sphere takes its vertices through unit vectors and back, a few units in the last place off |
+| 23 | the types are ["from all instances"](https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/Geospatial.md#L132-L151) | whether a collection's parts count | a value's own type alone, as GeoParquet's `geometry_types` lists them; a value that is not ISO WKB of the table's seven types, EWKB's flags among them, leaves the chunk without geospatial statistics |
 
 Two more are not gaps but choices the standard leaves to a writer, and are §6's: a page whose
 values do not shrink is stored uncompressed in a compressed chunk, which
@@ -201,7 +204,8 @@ physical type ([LogicalTypes.md][lt], *Unsupported Logical Types*).
 | `LIST`, and a repeated field outside `LIST` and `MAP` | `List` of the element, the latter a required list of required elements | levels |
 | `MAP` | `Map`, a list view of key-value entries as the core holds one | levels |
 | `VARIANT` | `Variant`: the core's struct of the `metadata` and `value` binaries, under the variant dtype | the metadata a view; the value a view where nothing is shredded, else rebuilt (§5.6) |
-| `GEOMETRY`, `GEOGRAPHY`, `FILE` | phase 3 (§11): binary with its CRS and edges, a struct | — |
+| `GEOMETRY`, `GEOGRAPHY` | `parquet.geometry`, `parquet.geography` over `Binary`: its WKB, the extension's metadata the CRS's UTF-8, a GEOGRAPHY's after a byte of its edge algorithm (§3.2 #21) | views over the page |
+| `FILE` | phase 3 (§11): a struct | — |
 
 A file this writer made carries its Vortex schema in its key-value metadata (§6.1). Top-level column
 by top-level column, where that schema agrees with the Parquet schema, it restores what Parquet
@@ -227,6 +231,7 @@ are kept and shown by `Metadata`.
 | `Variant` | a group annotated `VARIANT(1)` of a required BYTE_ARRAY `metadata` and a required BYTE_ARRAY `value`: the unshredded form |
 | `Null` | INT32 with `UNKNOWN` |
 | `parquet.interval` | FIXED_LEN_BYTE_ARRAY(12) with the `INTERVAL` converted type |
+| `parquet.geometry`, `parquet.geography` | BYTE_ARRAY with `GEOMETRY` or `GEOGRAPHY`, its CRS and edge algorithm; no bounds, and the chunk's `GeospatialStatistics` (§6.1) |
 | `parquet.int96` | refused: INT96 is deprecated |
 | a union | unsupported |
 
@@ -478,6 +483,7 @@ data otherwise.
 | statistics | `min_value` and `max_value` with their exactness, `null_count` always, `nan_count` for floats; byte arrays bounded at `StatisticsBoundBytes`, 64 (§3.2 #15); neither the legacy `min` and `max` nor statistics in page headers, which readers of the page index ignore ([PageIndex.md][pi]) |
 | column orders | `TYPE_ORDER`; `IEEE_754_TOTAL_ORDER` for FLOAT, DOUBLE and FLOAT16, as the standard recommends |
 | size statistics | the byte arrays' unencoded bytes and the level histograms, per chunk and per page |
+| geospatial statistics | a GEOMETRY's box of every vertex, NaN skipped, and its values' types; a GEOGRAPHY's types, and its box where no value has an edge; neither where a value is not ISO WKB (§3.2 #22, #23). Vertices of little-endian XY points are bounded two coordinates to a vector |
 | key-value metadata | `vorticity.schema`: the Vortex dtype the file was written from, its FlatBuffers bytes in base64 (§4.1), and the caller's own pairs |
 | `created_by` | `Vorticity.Parquet version <version> (build <commit>)`, the form the standard asks for |
 | Bloom filters | by `BloomFilters`, off by default: per column, a false-positive rate. A value is inserted as its page closes, into a filter sized by the core's sizing for the most values the chunk can hold, a page of dictionary codes by the dictionary's entries as the chunk closes; the filter is then folded, bit for bit the filter built smaller, to the size of the dictionary's exact count plus every other value counted as one, at most 1 MiB. Written after the row group's chunks, the standard's other place for them, so that a writer holds no filter past its row group |
@@ -704,7 +710,8 @@ comes down. Speed is measured against baselines this repository owns:
 3. **The rest of the standard.** ALP in both directions, the writer's behind its option while the
    standard says Preview; `VARIANT`, read unshredded and shredded and written unshredded, through
    the core's Parquet variant encoding; `GEOMETRY` and `GEOGRAPHY` with their bounding-box
-   statistics; `FILE`; modular encryption,
+   statistics, written and verified, which no filter prunes by until the core's expressions have a
+   spatial predicate; `FILE`; modular encryption,
    `AES_GCM_V1` through `AesGcm` and `AES_GCM_CTR_V1` with AES in counter mode over `Aes.EncryptEcb`,
    keys from a resolver the caller gives; ordered reads on declared `sorting_columns`.
 

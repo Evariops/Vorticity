@@ -103,7 +103,26 @@ public sealed class ParquetMetadata
             chunk.ColumnIndexOffset >= 0,
             chunk.OffsetIndexOffset >= 0,
             chunk.BloomFilterOffset >= 0,
-            chunk.HasEncodingStats ? chunk.AllDataPagesDictionary : null);
+            chunk.HasEncodingStats ? chunk.AllDataPagesDictionary : null,
+            Geospatial(chunk.GeospatialStatistics.Of(file.Footer.Bytes)));
+    }
+
+    /// <summary>A chunk's geospatial statistics, or null when its metadata has none.</summary>
+    private static ParquetGeospatialInfo? Geospatial(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
+        {
+            return null;
+        }
+
+        GeospatialStatistics statistics = GeospatialStatistics.Read(bytes);
+        ParquetBoundingBox? box = statistics.HasBox
+            ? new ParquetBoundingBox(
+                statistics.XMin, statistics.XMax, statistics.YMin, statistics.YMax,
+                statistics.HasZ ? statistics.ZMin : null, statistics.HasZ ? statistics.ZMax : null,
+                statistics.HasM ? statistics.MMin : null, statistics.HasM ? statistics.MMax : null)
+            : null;
+        return new ParquetGeospatialInfo(box, statistics.Types ?? []);
     }
 
     private static ParquetStatisticsInfo? Statistics(ParquetFile file, ParquetColumn column, in ColumnStatistics statistics)
@@ -277,6 +296,7 @@ public sealed record ParquetRowGroupInfo(int Ordinal, long FirstRow, long RowCou
 /// <param name="HasOffsetIndex">Whether an offset index places its pages.</param>
 /// <param name="HasBloomFilter">Whether a Bloom filter holds its values.</param>
 /// <param name="AllDataPagesDictionary">Whether its <c>encoding_stats</c> say every data page is dictionary codes; null without them.</param>
+/// <param name="Geospatial">A GEOMETRY's or GEOGRAPHY's bounding box and types, or null when its metadata has none.</param>
 public sealed record ParquetChunkInfo(
     string Column,
     string Codec,
@@ -289,7 +309,28 @@ public sealed record ParquetChunkInfo(
     bool HasColumnIndex,
     bool HasOffsetIndex,
     bool HasBloomFilter,
-    bool? AllDataPagesDictionary);
+    bool? AllDataPagesDictionary,
+    ParquetGeospatialInfo? Geospatial);
+
+/// <summary>A GEOMETRY or GEOGRAPHY column chunk's geospatial statistics.</summary>
+/// <param name="Box">The bounding box of its values, or null when it gives none.</param>
+/// <param name="Types">The WKB codes of its values' types, unique; empty when they are not known.</param>
+public sealed record ParquetGeospatialInfo(ParquetBoundingBox? Box, IReadOnlyList<int> Types);
+
+/// <summary>
+/// A bounding box: X and Y, and Z and M where some value has them. Where <see cref="XMin"/> is past
+/// <see cref="XMax"/>, X wraps across the antimeridian: the box holds the X at or past the first or
+/// at or before the second.
+/// </summary>
+/// <param name="XMin">The least X, or the westernmost.</param>
+/// <param name="XMax">The greatest X, or the easternmost.</param>
+/// <param name="YMin">The least Y.</param>
+/// <param name="YMax">The greatest Y.</param>
+/// <param name="ZMin">The least Z, or null.</param>
+/// <param name="ZMax">The greatest Z, or null.</param>
+/// <param name="MMin">The least M, or null.</param>
+/// <param name="MMax">The greatest M, or null.</param>
+public sealed record ParquetBoundingBox(double XMin, double XMax, double YMin, double YMax, double? ZMin, double? ZMax, double? MMin, double? MMax);
 
 /// <summary>A column chunk's statistics.</summary>
 /// <param name="NullCount">Its nulls, or null when not counted.</param>

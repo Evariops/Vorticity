@@ -186,6 +186,9 @@ internal struct ColumnChunkMetadata
 
     internal ByteRange SizeStatistics;
 
+    /// <summary>The <c>GeospatialStatistics</c> of a GEOMETRY or GEOGRAPHY chunk, field 17, where it has them.</summary>
+    internal ByteRange GeospatialStatistics;
+
     /// <summary>The offset index's offset, or -1.</summary>
     internal long OffsetIndexOffset;
 
@@ -216,6 +219,7 @@ internal struct ColumnChunkMetadata
         chunk.OffsetIndexOffset = -1;
         chunk.ColumnIndexOffset = -1;
         chunk.SizeStatistics = ByteRange.None;
+        chunk.GeospatialStatistics = ByteRange.None;
         chunk.PathInSchema = ByteRange.None;
         bool hasMetadata = false;
         short saved = reader.EnterStruct();
@@ -339,6 +343,11 @@ internal struct ColumnChunkMetadata
                     int sizeStart = reader.Position;
                     reader.Skip(type);
                     chunk.SizeStatistics = new ByteRange(origin + sizeStart, reader.Position - sizeStart);
+                    break;
+                case 17 when type == ThriftType.Struct:
+                    int geospatialStart = reader.Position;
+                    reader.Skip(type);
+                    chunk.GeospatialStatistics = new ByteRange(origin + geospatialStart, reader.Position - geospatialStart);
                     break;
                 default:
                     reader.Skip(type);

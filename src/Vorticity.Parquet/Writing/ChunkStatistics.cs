@@ -7,6 +7,7 @@ using System.Numerics;
 using System.Text;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
+using Vorticity.Parquet.Geospatial;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Writing;
 
@@ -26,7 +27,8 @@ internal sealed record WrittenStatistics(
     bool CountsNans,
     long Nans,
     PageStatistics[] Pages,
-    BoundaryOrder Order)
+    BoundaryOrder Order,
+    GeospatialStatistics? Geospatial = null)
 {
     /// <summary>Whether the chunk's pages are bounded, so that a column index is written for it.</summary>
     internal bool Indexed => HasBounds || Pages.Length > 0 && Array.TrueForAll(Pages, page => page.NullPage);
@@ -57,6 +59,8 @@ internal sealed class ChunkStatistics(WriteColumn column)
     internal const int BoundBytes = 64;
 
     private readonly StatisticsDomain _domain = column.Domain;
+    private readonly LogicalTypeKind _geospatial = column.Geospatial;
+    private readonly WkbBounds? _box = column.Geospatial == LogicalTypeKind.None ? null : new WkbBounds();
     private readonly int _width = column.ValueWidth;
     private readonly List<PageStatistics> _pages = [];
     private byte[] _min = [];
@@ -74,6 +78,7 @@ internal sealed class ChunkStatistics(WriteColumn column)
     internal void AddPage(ReadOnlySpan<byte> plain, int values, int nulls)
     {
         _nulls += nulls;
+        _box?.AddPlain(plain, values);
         if (_domain == StatisticsDomain.None)
         {
             return;
@@ -114,7 +119,8 @@ internal sealed class ChunkStatistics(WriteColumn column)
     {
         PageStatistics[] pages = [.. _pages];
         WrittenStatistics written = new(
-            _bounded, _min, _max, _minExact, _maxExact, _nulls, CountsNans, _nans, pages, OrderOf(pages));
+            _bounded, _min, _max, _minExact, _maxExact, _nulls, CountsNans, _nans, pages, OrderOf(pages),
+            _box?.Close(_geospatial == LogicalTypeKind.Geography));
         _pages.Clear();
         _min = [];
         _max = [];

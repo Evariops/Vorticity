@@ -175,6 +175,15 @@ internal sealed class ParquetSchema
     /// <summary>The extension id an INTERVAL reads as: its three little-endian unsigned counts of months, days and milliseconds.</summary>
     internal const string IntervalExtensionId = "parquet.interval";
 
+    /// <summary>The extension id a GEOMETRY reads as: its WKB as binary, its metadata the CRS's UTF-8, empty when the file sets none.</summary>
+    internal const string GeometryExtensionId = "parquet.geometry";
+
+    /// <summary>
+    /// The extension id a GEOGRAPHY reads as: its WKB as binary, its metadata the edge algorithm's
+    /// value in a byte, SPHERICAL's 0 where the file sets none, then the CRS's UTF-8.
+    /// </summary>
+    internal const string GeographyExtensionId = "parquet.geography";
+
     /// <summary>
     /// The key-value pair under which this package's writer keeps the Vortex schema a file was written
     /// from: its dtype's FlatBuffers bytes in base64.
@@ -197,12 +206,15 @@ internal sealed class ParquetSchema
     /// <summary>The Vortex schema the file reads as.</summary>
     internal VortexSchema Vortex { get; }
 
-    /// <summary>Compiles a footer's schema list, with the footer's column orders.</summary>
-    internal static ParquetSchema Compile(SchemaElement[] elements, ColumnOrderKind[] orders)
+    /// <summary>
+    /// Compiles a footer's schema list, with the footer's column orders and, where a CRS names one,
+    /// the value of its key-value pair <paramref name="keys"/> gives.
+    /// </summary>
+    internal static ParquetSchema Compile(SchemaElement[] elements, ColumnOrderKind[] orders, Func<string, string?>? keys = null)
     {
         Node[] nodes = BuildTree(elements);
         List<ParquetColumn> columns = [];
-        Collect(elements, nodes, 0, [], columns, orders);
+        Collect(elements, nodes, 0, [], columns, orders, keys);
         if (orders.Length != 0 && orders.Length != columns.Count)
         {
             ParquetThrow.Format($"The footer declares {orders.Length} column orders for {columns.Count} columns.");
@@ -297,7 +309,8 @@ internal sealed class ParquetSchema
         }
 
         // An extension Parquet has no annotation for, written as its storage.
-        return written.ExtensionId is not (ExtensionIds.Date or ExtensionIds.Time or ExtensionIds.Uuid or IntervalExtensionId or Int96ExtensionId)
+        return written.ExtensionId is not (ExtensionIds.Date or ExtensionIds.Time or ExtensionIds.Uuid or IntervalExtensionId or Int96ExtensionId
+                or GeometryExtensionId or GeographyExtensionId)
             && Equals(written.StorageType, read)
             ? written
             : null;
@@ -410,13 +423,13 @@ internal sealed class ParquetSchema
         return nodes;
     }
 
-    private static void Collect(SchemaElement[] elements, Node[] nodes, int index, List<string> path, List<ParquetColumn> columns, ColumnOrderKind[] orders)
+    private static void Collect(SchemaElement[] elements, Node[] nodes, int index, List<string> path, List<ParquetColumn> columns, ColumnOrderKind[] orders, Func<string, string?>? keys)
     {
         ref readonly Node node = ref nodes[index];
         if (node.FirstChild < 0)
         {
             int ordinal = columns.Count;
-            columns.Add(Leaf(elements[index], index, ordinal, [.. path], node, orders.Length == 0 ? ColumnOrderKind.Undefined : orders[ordinal]));
+            columns.Add(Leaf(elements[index], index, ordinal, [.. path], node, orders.Length == 0 ? ColumnOrderKind.Undefined : orders[ordinal], keys));
             return;
         }
 
@@ -424,7 +437,7 @@ internal sealed class ParquetSchema
         for (int i = 0; i < node.ChildCount; i++)
         {
             path.Add(elements[child].Name);
-            Collect(elements, nodes, child, path, columns, orders);
+            Collect(elements, nodes, child, path, columns, orders, keys);
             path.RemoveAt(path.Count - 1);
             child = Next(nodes, child);
         }
@@ -458,7 +471,7 @@ internal sealed class ParquetSchema
     }
 
     /// <summary>A leaf's annotation, form and Vortex type, from its physical type and its annotations.</summary>
-    private static ParquetColumn Leaf(in SchemaElement element, int index, int ordinal, string[] path, in Node node, ColumnOrderKind order)
+    private static ParquetColumn Leaf(in SchemaElement element, int index, int ordinal, string[] path, in Node node, ColumnOrderKind order, Func<string, string?>? keys)
     {
         PhysicalType physical = element.Type;
         if (physical is < PhysicalType.Boolean or > PhysicalType.FixedLenByteArray)
@@ -490,6 +503,16 @@ internal sealed class ParquetSchema
 
         bool nullable = element.Repetition == FieldRepetition.Optional;
         (LeafForm form, PType storage, VortexType? type) = Map(physical, typeLength, ref logical, interval, string.Join('.', path));
+        if (type is not null && logical.Kind is LogicalTypeKind.Geometry or LogicalTypeKind.Geography
+            && logical.Crs is { } crs && crs.StartsWith(ProjjsonPrefix, StringComparison.Ordinal) && keys?.Invoke(crs[ProjjsonPrefix.Length..]) is { } projjson)
+        {
+            // A CRS the file keeps in its key-value metadata: its PROJJSON itself, so that the type
+            // stands without the file, as one written elsewhere does.
+            LogicalTypeInfo embedded = logical;
+            embedded.Crs = projjson;
+            type = Geospatial(embedded);
+        }
+
         if (type is null)
         {
             // An annotation on a physical type it does not allow: dropped, with the column's order,
@@ -679,9 +702,10 @@ internal sealed class ParquetSchema
                     case LogicalTypeKind.None:
                     case LogicalTypeKind.Unrecognized:
                     case LogicalTypeKind.Bson:
+                        return (LeafForm.Binary, default, VortexType.Binary);
                     case LogicalTypeKind.Geometry:
                     case LogicalTypeKind.Geography:
-                        return (LeafForm.Binary, default, VortexType.Binary);
+                        return Geospatial(logical) is { } geospatial ? (LeafForm.Binary, default, geospatial) : default;
                     case LogicalTypeKind.String:
                     case LogicalTypeKind.Enum:
                     case LogicalTypeKind.Json:
@@ -716,6 +740,29 @@ internal sealed class ParquetSchema
                 }
         }
     }
+
+    /// <summary>
+    /// A GEOMETRY's or GEOGRAPHY's type: its WKB as binary, under an extension whose metadata keeps
+    /// the CRS and a GEOGRAPHY's edge algorithm; null for an algorithm the standard does not name,
+    /// which drops the annotation.
+    /// </summary>
+    private static VortexType? Geospatial(in LogicalTypeInfo logical)
+    {
+        byte[] crs = logical.Crs is { } text ? Encoding.UTF8.GetBytes(text) : [];
+        if (logical.Kind == LogicalTypeKind.Geometry)
+        {
+            return VortexType.Extension(GeometryExtensionId, VortexType.Binary, crs);
+        }
+
+        int algorithm = Math.Max(logical.EdgeAlgorithm, 0);
+        return algorithm > MaxEdgeAlgorithm ? null : VortexType.Extension(GeographyExtensionId, VortexType.Binary, (byte[])[(byte)algorithm, .. crs]);
+    }
+
+    /// <summary>The prefix of a CRS that names a key of the file's key-value metadata holding its PROJJSON.</summary>
+    internal const string ProjjsonPrefix = "projjson:";
+
+    /// <summary>The last edge algorithm the standard names: KARNEY.</summary>
+    internal const int MaxEdgeAlgorithm = 4;
 
     /// <summary>The most digits a Vortex decimal holds.</summary>
     private const int VortexDecimalDigits = 76;

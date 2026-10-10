@@ -263,7 +263,7 @@ public sealed class ParquetFile : IAsyncDisposable
                     "The file encrypts its columns; this version of the reader reads plaintext files.");
             }
 
-            ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
+            ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders, metadata.Value).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
             return new ParquetFile(reader, session, options, length, metadata, schema, memory);
         }
         catch

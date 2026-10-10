@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Types;
 
@@ -116,6 +117,9 @@ internal sealed record WriteColumn
 
     /// <summary>How min and max compare: as signed or unsigned integers, as floats, or bytewise.</summary>
     internal StatisticsDomain Domain { get; init; }
+
+    /// <summary>A GEOMETRY's or GEOGRAPHY's: whose statistics are a bounding box and the types of its values.</summary>
+    internal LogicalTypeKind Geospatial { get; init; }
 
     /// <summary>The fields above a nested column, from the top-level one down; empty for a top-level column.</summary>
     internal ShredStep[] Steps { get; init; } = [];
@@ -486,6 +490,9 @@ internal sealed class WriteSchema
                 };
             case Schema.ParquetSchema.Int96ExtensionId:
                 throw new ParquetUnsupportedException("INT96", ParquetComponentKind.PhysicalType, "The standard deprecates INT96 for writers.");
+            case Schema.ParquetSchema.GeometryExtensionId:
+            case Schema.ParquetSchema.GeographyExtensionId:
+                return Geospatial(name, path, field, type, nullable);
             default:
                 WriteColumn storage = Leaf(name, field, type.StorageType!);
                 return new WriteColumn
@@ -496,6 +503,31 @@ internal sealed class WriteSchema
                     SourceWidth = storage.SourceWidth, ThroughStorage = true, FixedElements = storage.FixedElements, Domain = storage.Domain,
                 };
         }
+    }
+
+    /// <summary>
+    /// A GEOMETRY or GEOGRAPHY: BYTE_ARRAY of WKB annotated with its CRS and edge algorithm, which
+    /// has no order, so no bounds; its statistics are a box and the types of its values.
+    /// </summary>
+    private static WriteColumn Geospatial(string name, string[] path, int field, VortexType type, bool nullable)
+    {
+        bool geography = type.ExtensionId == Schema.ParquetSchema.GeographyExtensionId;
+        ReadOnlySpan<byte> metadata = type.ExtensionMetadata.Span;
+        if (type.StorageType is not { Kind: VortexTypeKind.Binary } || (geography && (metadata.IsEmpty || metadata[0] > Schema.ParquetSchema.MaxEdgeAlgorithm)))
+        {
+            throw new ParquetUnsupportedException(type.ExtensionId!, ParquetComponentKind.LogicalType,
+                $"The column '{name}' is a {type.ExtensionId} that is not binary under an edge algorithm the standard names.");
+        }
+
+        LogicalTypeInfo logical = Logical(geography ? LogicalTypeKind.Geography : LogicalTypeKind.Geometry);
+        ReadOnlySpan<byte> crs = geography ? metadata[1..] : metadata;
+        logical.Crs = crs.IsEmpty ? null : Encoding.UTF8.GetString(crs);
+        logical.EdgeAlgorithm = geography && metadata[0] != 0 ? metadata[0] : -1;
+        return new WriteColumn
+        {
+            Name = name, Path = path, Field = field, Physical = PhysicalType.ByteArray, Nullable = nullable, Logical = logical,
+            Conversion = ValueConversion.ByteArray, ThroughStorage = true, Geospatial = logical.Kind,
+        };
     }
 
     private static WriteColumn Temporal(string name, string[] path, int field, VortexType type, bool nullable)

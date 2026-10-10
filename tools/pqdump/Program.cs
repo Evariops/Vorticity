@@ -155,14 +155,25 @@ internal static class Program
                 if (chunk.Statistics is not { } statistics)
                 {
                     Line(output, $"  {chunk.Column}: none {beside}");
-                    continue;
+                }
+                else
+                {
+                    string min = statistics.Min is { } low ? (statistics.MinExact ? low : low + " (bound)") : "-";
+                    string max = statistics.Max is { } high ? (statistics.MaxExact ? high : high + " (bound)") : "-";
+                    string nulls = statistics.NullCount?.ToString(CultureInfo.InvariantCulture) ?? "?";
+                    string nans = statistics.NanCount is { } count ? $" nan {count}" : string.Empty;
+                    Line(output, $"  {chunk.Column}: min {min} max {max} nulls {nulls}{nans} {beside}");
                 }
 
-                string min = statistics.Min is { } low ? (statistics.MinExact ? low : low + " (bound)") : "-";
-                string max = statistics.Max is { } high ? (statistics.MaxExact ? high : high + " (bound)") : "-";
-                string nulls = statistics.NullCount?.ToString(CultureInfo.InvariantCulture) ?? "?";
-                string nans = statistics.NanCount is { } count ? $" nan {count}" : string.Empty;
-                Line(output, $"  {chunk.Column}: min {min} max {max} nulls {nulls}{nans} {beside}");
+                if (chunk.Geospatial is { } geospatial)
+                {
+                    string types = geospatial.Types.Count == 0 ? "unknown" : string.Join(',', geospatial.Types);
+                    string box = geospatial.Box is not { } b ? "none"
+                        : string.Create(CultureInfo.InvariantCulture, $"x [{b.XMin:R}, {b.XMax:R}] y [{b.YMin:R}, {b.YMax:R}]")
+                            + (b.ZMin is { } zmin ? string.Create(CultureInfo.InvariantCulture, $" z [{zmin:R}, {b.ZMax:R}]") : string.Empty)
+                            + (b.MMin is { } mmin ? string.Create(CultureInfo.InvariantCulture, $" m [{mmin:R}, {b.MMax:R}]") : string.Empty);
+                    Line(output, $"    box {box} types {types}");
+                }
             }
         }
     }

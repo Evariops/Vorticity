@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -8,6 +9,7 @@ using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.IO;
+using Vorticity.Parquet.Geospatial;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Reading;
 using Vorticity.Parquet.Schema;
@@ -107,6 +109,7 @@ internal static class ParquetVerifier
 
         ChunkValues values = await ValuesAsync(file, group, column, cancellationToken).ConfigureAwait(false);
         Statistics(group, column, chunk, footer, values, findings);
+        Geospatial(group, column, chunk, footer, values, findings);
         await PageIndexAsync(file, group, column, chunk, values, findings, cancellationToken).ConfigureAwait(false);
         await BloomAsync(file, group, column, chunk, values, findings, cancellationToken).ConfigureAwait(false);
     }
@@ -324,6 +327,96 @@ internal static class ParquetVerifier
 
         Bound(group, column, "min_value", bounds.HasMin, bounds.Min, min, lower: true, bounds.IsExact, decimals, findings);
         Bound(group, column, "max_value", bounds.HasMax, bounds.Max, max, lower: false, bounds.IsExact, decimals, findings);
+    }
+
+    /// <summary>
+    /// A GEOMETRY's or GEOGRAPHY's statistics against its values: no bound NaN, every coordinate in
+    /// the box, X across the antimeridian where the box wraps, and every value's type in a list
+    /// that is not empty. A GEOGRAPHY's edges may pass outside its vertices, which this does not
+    /// follow: its box is held to the vertices alone, within <see cref="SphereSlack"/> degrees, as a
+    /// box worked out on the sphere takes its vertices through unit vectors and back, which costs
+    /// them a few units in the last place.
+    /// </summary>
+    /// <summary>How far, in degrees, a GEOGRAPHY's vertex may lie outside its box: about a tenth of a millimetre.</summary>
+    private const double SphereSlack = 1e-9;
+
+    private static void Geospatial(int group, ParquetColumn column, ColumnChunkMetadata chunk, ParquetFooter footer, ChunkValues values, List<ParquetFinding> findings)
+    {
+        if (!chunk.GeospatialStatistics.IsPresent || values.Unbounded)
+        {
+            return;
+        }
+
+        GeospatialStatistics declared;
+        try
+        {
+            declared = GeospatialStatistics.Read(chunk.GeospatialStatistics.Of(footer.Bytes));
+        }
+        catch (ParquetFormatException e)
+        {
+            findings.Add(Finding(group, column, "geospatial_statistics", e.Message));
+            return;
+        }
+
+        double slack = column.Logical.Kind == LogicalTypeKind.Geography ? SphereSlack : 0;
+        WkbBounds found = new();
+        if (declared.HasBox && declared.XMin > declared.XMax)
+        {
+            // A box that wraps holds no X between its east end and its west end: each X is held to that gap.
+            found.Gap(declared.XMax + slack, declared.XMin - slack);
+        }
+
+        for (int row = 0; row < values.Valid.Length; row++)
+        {
+            if (values.Valid[row])
+            {
+                found.Add(values.Values[row].BytesValue);
+            }
+        }
+
+        if (found.Unknown)
+        {
+            findings.Add(Finding(group, column, "geospatial_statistics", "a value is not ISO WKB of the seven types the standard lists"));
+            return;
+        }
+
+        if (declared.Types is { Length: > 0 } types)
+        {
+            for (int bit = 0; bit < 28; bit++)
+            {
+                int code = (1000 * (bit / 7)) + (bit % 7) + 1;
+                if ((found.TypeBits & (1u << bit)) != 0 && Array.IndexOf(types, code) < 0)
+                {
+                    findings.Add(Finding(group, column, "geospatial_types", $"[{string.Join(", ", types)}] where a value is of type {code}"));
+                }
+            }
+        }
+
+        if (!declared.HasBox)
+        {
+            return;
+        }
+
+        Span<double> bounds = stackalloc double[8];
+        found.Bounds(bounds);
+        if (double.IsNaN(declared.XMin) || double.IsNaN(declared.XMax) || double.IsNaN(declared.YMin) || double.IsNaN(declared.YMax)
+            || (declared.HasZ && (double.IsNaN(declared.ZMin) || double.IsNaN(declared.ZMax)))
+            || (declared.HasM && (double.IsNaN(declared.MMin) || double.IsNaN(declared.MMax))))
+        {
+            findings.Add(Finding(group, column, "bbox", "a bound is NaN"));
+            return;
+        }
+
+        bool x = declared.XMin > declared.XMax ? found.InGap == 0 : bounds[0] > bounds[1] || (bounds[0] >= declared.XMin - slack && bounds[1] <= declared.XMax + slack);
+        bool y = bounds[2] > bounds[3] || (bounds[2] >= declared.YMin - slack && bounds[3] <= declared.YMax + slack);
+        bool z = !declared.HasZ || bounds[4] > bounds[5] || (bounds[4] >= declared.ZMin && bounds[5] <= declared.ZMax);
+        bool m = !declared.HasM || bounds[6] > bounds[7] || (bounds[6] >= declared.MMin && bounds[7] <= declared.MMax);
+        if (!(x && y && z && m))
+        {
+            findings.Add(Finding(group, column, "bbox", string.Create(
+                CultureInfo.InvariantCulture,
+                $"x [{declared.XMin}, {declared.XMax}] y [{declared.YMin}, {declared.YMax}] where the values reach x [{bounds[0]}, {bounds[1]}] y [{bounds[2]}, {bounds[3]}] z [{bounds[4]}, {bounds[5]}] m [{bounds[6]}, {bounds[7]}]")));
+        }
     }
 
     /// <summary>A bound against the extreme of the values it bounds: equal to it when exact, on its outer side otherwise.</summary>
