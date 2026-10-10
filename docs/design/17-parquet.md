@@ -899,15 +899,17 @@ comes down. Speed is measured against baselines this repository owns:
   repository's writers, read through the same `Scan` in one process, each action warmed past the
   JIT's recompiling it, which two calls are not (`--format-cost`, `--columns` for each column
   alone, `--file` for a file of another writer against its rewrite as Vortex); the ratio informs
-  and gates nothing. On the report's million rows Parquet scans in 2.75 ms on one core against
-  Vortex's 3.47 and in 1.34 on 32 against 1.55, projects its delta-encoded monotone column in 0.34
-  against 0.33, and writes back in 16.2 ms against 25.5 on one core and in 11.1 against 14.9 on 32.
-  The January 2023 taxi trips, GZIP's, scan in 190 ms on one core against their Vortex rewrite's
-  38, the inflate most of it, and in 36 against 35 on 32, and are written back in 786 against 257
-  and in 164 against 203; ClickBench's first file of hits, Snappy's, scans in 173 against 66 and
-  50 against 33, its codec and four columns of long strings, kept as plain byte arrays once their
-  dictionaries filled, holding most of the difference, and is written back in 1 288 against 1 457
-  and 426 against 1 381;
+  and gates nothing. On the report's million rows Parquet scans in 2.8 ms on one core against
+  Vortex's 3.5 to 4.9, whose medians move that much from one table to the next, and in 1.41 on 32
+  against 1.62, projects its delta-encoded monotone column in 0.34 against 0.31, and writes back in
+  17.5 ms against 25.7 on one core and in 6.9 against 11.5 on 32. The January 2023 taxi trips,
+  GZIP's, scan in 190 ms on one core against their Vortex rewrite's 27.5, the inflate most of it,
+  and in 29.8 against 35.6 on 32, and are written back in 666 against 239 and in 154 against 204;
+  a projection of one of their columns, which no lane shares, reads in 3.8 ms on 32 as on one,
+  against 1.3. ClickBench's first file of hits, Snappy's, scans in 170 against 68 and 51.6 against
+  35.8, its codec and four columns of long strings, kept as plain byte arrays once their
+  dictionaries filled, holding most of the difference, and is written back in 1 274 against 1 369
+  and 359 against 1 260. Every file is mapped again at each open, as a cold read is;
 - **regressions**, as the ratio of two kept runners across commits (`bench/runners.sh`);
 - **real files**, read from the data disk under §9's metadata oracle: throughput, allocations, and the
   oracle's verdict.
