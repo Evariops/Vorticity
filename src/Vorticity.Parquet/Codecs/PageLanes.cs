@@ -35,12 +35,15 @@ internal sealed class PageLanes
 
     /// <summary>
     /// Lanes for <paramref name="lanes"/> codecs at once, and the decompressed bytes all the scan's
-    /// columns hold ahead: 2 MiB a lane, 16 MiB at least, which a column's first page ahead may pass.
+    /// columns hold ahead: 2 MiB a lane, 48 MiB at least, six columns' worth of <see cref="Bytes"/>, so
+    /// that a file's few columns of long text keep their pages ahead on few lanes as on many; a
+    /// column's first page ahead may pass it. ClickBench's first file scanned in 34 ms on 8 lanes
+    /// under 16 MiB, its four columns of text sharing two columns' worth, against 29 under 48.
     /// </summary>
     internal PageLanes(int lanes)
     {
         _free = lanes;
-        _budget = Math.Max(16L << 20, lanes * (2L << 20));
+        _budget = Math.Max(48L << 20, lanes * (2L << 20));
     }
 
     /// <summary>
