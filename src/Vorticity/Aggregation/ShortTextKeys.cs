@@ -222,6 +222,14 @@ internal sealed class ShortTextKeys : GroupKeys
             for (int start = 0; start < rows; start += Chunk)
             {
                 int end = Math.Min(rows, start + Chunk);
+
+                // Views this library cut are the words already: read where they lie.
+                if (validity.IsEmpty && canonical.TryWordsInPlace(start, end - start, out ReadOnlySpan<TextWord> inPlace))
+                {
+                    words.TwoPasses(inPlace, validity, start, rowGroups);
+                    continue;
+                }
+
                 if (!FillWords(canonical, validity, start, end))
                 {
                     Demote();

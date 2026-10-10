@@ -357,17 +357,21 @@ internal readonly ref struct BytesBlock
     // The first data buffer, resolved once: the one a decoded block's values lie in, as a rule.
     private readonly ReadOnlySpan<byte> _first;
 
-    private BytesBlock(CanonicalArena arena, ReadOnlySpan<byte> views, int dataStart, int dataCount, int length)
+    private BytesBlock(CanonicalArena arena, ReadOnlySpan<byte> views, int dataStart, int dataCount, int length, bool padded = false)
     {
         _arena = arena;
         _views = views;
         _dataStart = dataStart;
         _dataCount = dataCount;
         _first = dataCount > 0 ? arena.DataBufferAt(dataStart).Span : default;
+        _padded = padded;
         Length = length;
     }
 
     internal int Length { get; }
+
+    // Whether the views are this library's, zero past each inline value (CanonicalRecord.PaddedViews).
+    private readonly bool _padded;
 
     /// <summary>The block of <paramref name="node"/> in canonical form, decoding it when it is encoded, and its validity.</summary>
     internal static BytesBlock Canonical(CanonicalArena arena, int node, out ReadOnlySpan<ulong> validity)
@@ -375,7 +379,39 @@ internal readonly ref struct BytesBlock
         int views = EncodedForms.Canonical(arena, node);
         validity = ArenaWords.Validity(arena, views);
         ref readonly CanonicalRecord record = ref arena.RecordRef(views);
-        return new BytesBlock(arena, record.BufferA.Span, record.DataBufferStart, record.DataBufferCount, record.Length);
+        return new BytesBlock(arena, record.BufferA.Span, record.DataBufferStart, record.DataBufferCount, record.Length, record.PaddedViews);
+    }
+
+    /// <summary>
+    /// The words of <paramref name="count"/> rows from <paramref name="start"/> where their views lie, as
+    /// <see cref="TryWords"/> would copy them: when this library's kernels wrote the views, each inline value
+    /// zero past its bytes, and every value is twelve bytes or fewer, which a pass over the lengths alone
+    /// tells. Copying views that already are words took a tenth of the cycles of a sum by two columns of a
+    /// hundred short texts (q2 at fourteen lanes, 2026-10-10).
+    /// </summary>
+    internal bool TryWordsInPlace(int start, int count, out ReadOnlySpan<TextWord> words)
+    {
+        words = default;
+        if (!_padded)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> views = _views.Slice(start * ViewSize, count * ViewSize);
+        ref byte view = ref MemoryMarshal.GetReference(views);
+        uint longest = 0;
+        for (int i = 0; i < count; i++)
+        {
+            longest = Math.Max(longest, Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, i * ViewSize)));
+        }
+
+        if (longest > MaxInline)
+        {
+            return false;
+        }
+
+        words = MemoryMarshal.Cast<byte, TextWord>(views);
+        return true;
     }
 
     /// <summary>A canonical block over its views and data buffers, resolved once by a caller that compares many of its values.</summary>
