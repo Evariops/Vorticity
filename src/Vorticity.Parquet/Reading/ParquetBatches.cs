@@ -105,6 +105,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>The row group's batch the pipeline hands out next, or -1 while the group's batches decode as they are asked for.</summary>
     private int _piped = -1;
 
+    /// <summary>The batches the pipeline decodes, each the rows its fields step over first and its own.</summary>
+    private readonly List<(int Skip, int Rows)> _steps = [];
+
     /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
     private readonly FilterColumns? _pruning;
 
@@ -320,7 +323,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 await WindowsAsync((int)(_groupRead / _batchRows)).ConfigureAwait(false);
             }
 
-            SkipRows(checked((int)(_groupRead - from)));
+            // Fields that decode ahead step over the batches pruned before each of theirs themselves.
+            if (_piped < 0)
+            {
+                SkipRows(checked((int)(_groupRead - from)));
+            }
+
             _metrics.AddBlocksPruned(pruned);
         }
 
@@ -453,12 +461,37 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// Starts the row group's batches decoding ahead of the read, a field at a time, when its fields
-    /// would decode side by side and are all flat, its rows read whole and in place, none pruned.
+    /// would decode side by side and are all flat, and its rows are read in place: the batches the
+    /// page index leaves, each field stepping over those it rules out before each of its own.
     /// </summary>
     private void Pipe()
     {
-        if (!_mayDecodeAcross || _live is not null || _group.Windowed || _groupRead == _groupRows
+        if (!_mayDecodeAcross || _group.Windowed || _groupRead == _groupRows
             || !(_nodes.Length >= AcrossFields || _decoded >= AcrossTicks) || Array.Exists(_nested, nested => nested is not null))
+        {
+            return;
+        }
+
+        // The batches as the read will ask for them, each after the rows pruned before it.
+        _steps.Clear();
+        int skip = 0;
+        for (long at = _groupRead; at < _groupRows;)
+        {
+            int rows = (int)Math.Min(_batchRows, _groupRows - at);
+            if (_live is null || _live.IsLive((int)(at / _batchRows)))
+            {
+                _steps.Add((skip, rows));
+                skip = 0;
+            }
+            else
+            {
+                skip = checked(skip + rows);
+            }
+
+            at += rows;
+        }
+
+        if (_steps.Count == 0)
         {
             return;
         }
@@ -474,7 +507,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             _pipeline = new FieldPipeline(readers, _context.Options, _degree);
         }
 
-        _pipeline.Start(_groupRows - _groupRead, _batchRows);
+        _pipeline.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_steps));
         _piped = 0;
     }
 

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Expressions;
 using Xunit;
 
 namespace Vorticity.Parquet.Tests;
@@ -47,6 +48,25 @@ public sealed partial class FieldPipelineTests : IDisposable
             (List<string> ahead, long piped) = await RowsAsync(degree, batchRows);
             Assert.Equal(one, ahead);
             Assert.True(piped > 0, $"No batch was decoded ahead on {degree} lanes.");
+        }
+    }
+
+    [Fact]
+    public async Task ReadsAheadOnlyTheBatchesThePageIndexLeaves()
+    {
+        await WriteAsync(new ParquetWriteOptions { BlockRows = 1_000, RowGroupRows = 12_000 });
+
+        // A band of ids across the first two row groups, and rows spread over all three: each field
+        // steps over the batches the page index rules out before each of its own.
+        VortexExpr band = Expr.And(Expr.Ge(Expr.Field("Id"), Expr.Literal(FilterLiteral.From(9_000L))), Expr.Lt(Expr.Field("Id"), Expr.Literal(FilterLiteral.From(14_500L))));
+        long[] spread = [.. Enumerable.Range(0, 40).Select(i => (long)i * 743)];
+        foreach (Func<Scan, Scan> shape in (Func<Scan, Scan>[])[scan => scan.Where(band), scan => scan.Rows(spread)])
+        {
+            (List<string> one, _) = await RowsAsync(1, 1_000, shape);
+            (List<string> ahead, long piped) = await RowsAsync(4, 1_000, shape);
+            Assert.NotEmpty(one);
+            Assert.Equal(one, ahead);
+            Assert.True(piped > 0, "No batch was decoded ahead.");
         }
     }
 
@@ -120,14 +140,16 @@ public sealed partial class FieldPipelineTests : IDisposable
     }
 
     /// <summary>
-    /// Every row of the file on <paramref name="degree"/> lanes, each value rendered, in batches of
-    /// <paramref name="batchRows"/> rows or the scan's own, and the batches decoded ahead.
+    /// Every row the scan <paramref name="shape"/> makes of the file on <paramref name="degree"/> lanes,
+    /// each value rendered, in batches of <paramref name="batchRows"/> rows or the scan's own, and the
+    /// batches decoded ahead.
     /// </summary>
-    private async Task<(List<string> Rows, long Piped)> RowsAsync(int degree, int batchRows)
+    private async Task<(List<string> Rows, long Piped)> RowsAsync(int degree, int batchRows, Func<Scan, Scan>? shape = null)
     {
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
         await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
         Scan scan = batchRows > 0 ? file.Scan().With(new ScanOptions { BatchRows = batchRows }) : file.Scan();
+        scan = shape is null ? scan : shape(scan);
         List<string> rows = [];
         await foreach (RecordBatch batch in scan.ToBatchesAsync(Ct))
         {

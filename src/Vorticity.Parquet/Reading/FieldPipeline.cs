@@ -23,8 +23,9 @@ namespace Vorticity.Parquet.Reading;
 /// </para>
 /// <para>
 /// A batch's nodes reference their pages where they lie, so a reader holds the pages a batch retires
-/// until the read releases it. Only flat fields take part, within a row group read whole and in
-/// place, every batch of which is released before the group ends.
+/// until the read releases it. Only flat fields take part, within a row group read in place, every
+/// batch of which is released before the group ends: the batches the page index leaves, each field
+/// stepping over those it rules out before each of its own.
 /// </para>
 /// </remarks>
 internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
@@ -50,8 +51,9 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     /// <summary>The lanes queued that have not yet taken a field.</summary>
     private int _starting;
     private int _batches;
-    private long _rows;
-    private int _batchRows;
+
+    /// <summary>Per batch of the row group, the rows its fields step over before it, pruned, and its own.</summary>
+    private (int Skip, int Rows)[] _steps = [];
     private int _released;
     private bool _stopping;
 
@@ -72,16 +74,20 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     }
 
     /// <summary>
-    /// Starts the decode of the readers' next <paramref name="rows"/> rows, in batches of
-    /// <paramref name="batchRows"/>: the read then asks for batches 0, 1 and on.
+    /// Starts the decode of the readers' next batches, each the rows its fields step over first,
+    /// pruned, and its own, in <paramref name="steps"/>: the read then asks for batches 0, 1 and on.
     /// </summary>
-    internal void Start(long rows, int batchRows)
+    internal void Start(ReadOnlySpan<(int Skip, int Rows)> steps)
     {
         lock (_gate)
         {
-            _rows = rows;
-            _batchRows = batchRows;
-            _batches = checked((int)((rows + batchRows - 1) / batchRows));
+            if (_steps.Length < steps.Length)
+            {
+                _steps = new (int Skip, int Rows)[steps.Length];
+            }
+
+            steps.CopyTo(_steps);
+            _batches = steps.Length;
             _released = -1;
             _stopping = false;
             _failed = null;
@@ -226,7 +232,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         int slot = batch % Slots;
         ColumnChunkReader reader = _readers[field];
         ScanContext context = _contexts[(field * Slots) + slot];
-        int rows = (int)Math.Min(_batchRows, _rows - ((long)batch * _batchRows));
+        (int skip, int rows) = _steps[batch];
         ExceptionDispatchInfo? error = null;
         try
         {
@@ -234,6 +240,12 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             reader.ReleaseHeld(Volatile.Read(ref _released));
             context.ResetBatch();
             reader.Batch = batch;
+            if (skip > 0)
+            {
+                // The batches the page index ruled out before this one: stepped over, whole pages unread.
+                reader.Skip(context, skip);
+            }
+
             _nodes[(field * Slots) + slot] = reader.Read(context, rows);
         }
         catch (Exception exception)
