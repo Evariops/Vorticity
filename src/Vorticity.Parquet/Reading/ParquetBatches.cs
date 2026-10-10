@@ -335,6 +335,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         {
             // Decoded ahead, a field at a time: the batch's arena references their nodes where they lie.
             int slot = _pipeline!.Wait(_piped++);
+            _file.Counters.AddPiped();
             for (int i = 0; i < _nodes.Length; i++)
             {
                 int node = _pipeline.Node(i, slot, out ScanContext context);

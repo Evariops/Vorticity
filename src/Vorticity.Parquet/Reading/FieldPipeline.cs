@@ -40,6 +40,9 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
     private readonly bool[] _idle;
     private readonly int[] _pending = new int[Slots];
     private readonly ExceptionDispatchInfo?[] _errors = new ExceptionDispatchInfo?[Slots];
+
+    /// <summary>The first error a field met, after which its later batches are not decoded: any batch waited for then rethrows it.</summary>
+    private ExceptionDispatchInfo? _failed;
     private readonly List<int> _runnable = [];
     private readonly object _gate = new();
     private int _runners;
@@ -81,6 +84,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             _batches = checked((int)((rows + batchRows - 1) / batchRows));
             _released = -1;
             _stopping = false;
+            _failed = null;
             for (int slot = 0; slot < Slots; slot++)
             {
                 _pending[slot] = slot < _batches ? _readers.Length : 0;
@@ -108,9 +112,14 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
         int slot = batch % Slots;
         lock (_gate)
         {
-            while (_pending[slot] > 0)
+            while (_pending[slot] > 0 && _failed is null)
             {
                 Monitor.Wait(_gate);
+            }
+
+            if (_pending[slot] > 0)
+            {
+                _failed!.Throw();
             }
 
             _errors[slot]?.Throw();
@@ -238,6 +247,8 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IDisposable
             if (error is not null)
             {
                 _errors[slot] ??= error;
+                _failed ??= error;
+                Monitor.PulseAll(_gate);
             }
             else if (batch + 1 < _batches)
             {
