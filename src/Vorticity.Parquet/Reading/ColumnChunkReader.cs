@@ -988,11 +988,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
         CanonicalArena arena = context.Canonical;
         int from = page.Read;
         Validity validity = SliceValidity(arena, page, from, rows, out int valid);
-        ReadOnlySpan<uint> codes = NextCodes(page, valid);
         Page dictionary = _dictionary!;
         _data[0] = dictionary.Data;
         if (KeepEncodings && _form != LeafForm.FixedBytes)
         {
+            ReadOnlySpan<uint> codes = NextCodes(page, valid);
             int outside = RowKernels.FirstCodeOutside(codes, (uint)dictionary.Rows);
             if (outside >= 0)
             {
@@ -1006,7 +1006,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         VortexBuffer values = CanonicalSupport.AllocateUninitialized(context.Decode, rows * _slot, 64, out Span<byte> into);
-        GatherRows(page, codes, into[..(rows * _slot)], from, rows);
+        GatherRows(page, NextCodes(page, valid, out PType type), type, valid, into[..(rows * _slot)], from, rows);
         return Node(arena, rows, validity, values, _data);
     }
 
@@ -1018,19 +1018,49 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private void CopyLazily(Page page, int take, Span<byte> into, int done, ref int buffers)
     {
         int valid = page.Validity is { } bits ? BitmapKernels.CountSet(bits.Buffer.Span, page.Read, take) : take;
-        ReadOnlySpan<uint> codes = NextCodes(page, valid);
+        ReadOnlySpan<byte> codes = NextCodes(page, valid, out PType type);
         if (!_views)
         {
-            GatherRows(page, codes, into.Slice(done * _slot, take * _slot), page.Read, take);
+            GatherRows(page, codes, type, valid, into.Slice(done * _slot, take * _slot), page.Read, take);
             return;
         }
 
         Span<byte> rows = Room(ref _batchRows, take * _slot);
-        GatherRows(page, codes, rows, page.Read, take);
+        GatherRows(page, codes, type, valid, rows, page.Read, take);
         CopyRows(rows, _dictionary!.Data, take, into, done, ref buffers);
     }
 
-    /// <summary>The codes of the next <paramref name="count"/> valid rows of a page read a batch at a time.</summary>
+    /// <summary>
+    /// The codes of the next <paramref name="count"/> valid rows of a page read a batch at a time,
+    /// of <paramref name="type"/>: a byte each where the page's codes are eight bits wide or
+    /// narrower, which its dictionary then is small enough for a gather to permute in registers,
+    /// else four.
+    /// </summary>
+    private ReadOnlySpan<byte> NextCodes(Page page, int count, out PType type)
+    {
+        int width = page.Cursor.BitWidth;
+        if (width > 8)
+        {
+            type = PType.U32;
+            return MemoryMarshal.AsBytes(NextCodes(page, count));
+        }
+
+        type = PType.U8;
+        Span<byte> codes = Room(ref _batchCodes, count);
+        if (width == 0)
+        {
+            // Codes of no width: every one names the dictionary's first entry.
+            codes.Clear();
+        }
+        else
+        {
+            page.Cursor.Read(page.CodeRuns.Span, codes);
+        }
+
+        return codes;
+    }
+
+    /// <summary>The codes of the next <paramref name="count"/> valid rows of a page read a batch at a time, four bytes each.</summary>
     private ReadOnlySpan<uint> NextCodes(Page page, int count)
     {
         Span<uint> codes = MemoryMarshal.Cast<byte, uint>(Room(ref _batchCodes, count * sizeof(uint)));
@@ -1078,20 +1108,21 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <paramref name="rows"/> rows from <paramref name="from"/>, name: gathered into
     /// <paramref name="into"/> and spread over the rows' nulls, every code held to the dictionary.
     /// </summary>
-    private void GatherRows(Page page, ReadOnlySpan<uint> codes, Span<byte> into, int from, int rows)
+    private void GatherRows(Page page, ReadOnlySpan<byte> codes, PType type, int count, Span<byte> into, int from, int rows)
     {
         Page dictionary = _dictionary!;
-        int bytes = codes.Length * _slot;
+        int bytes = count * _slot;
         Span<byte> dense = into;
         if (page.Validity is not null)
         {
             dense = Room(ref _batchValues, bytes);
         }
 
-        int bad = RowKernels.Gather(MemoryMarshal.AsBytes(codes), PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, dense[..bytes], codes.Length);
+        int bad = RowKernels.Gather(codes, type, dictionary.Values.Span, _slot, dictionary.Rows, dense[..bytes], count);
         if (bad >= 0)
         {
-            ParquetThrow.Format($"A code of '{Name}', {codes[bad]}, passes its dictionary's {dictionary.Rows} entries.");
+            uint code = type == PType.U8 ? codes[bad] : MemoryMarshal.Cast<byte, uint>(codes)[bad];
+            ParquetThrow.Format($"A code of '{Name}', {code}, passes its dictionary's {dictionary.Rows} entries.");
         }
 
         if (page.Validity is not null)
