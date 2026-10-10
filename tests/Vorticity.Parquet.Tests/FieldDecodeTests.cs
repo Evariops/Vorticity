@@ -52,6 +52,42 @@ public sealed partial class FieldDecodeTests : IDisposable
         Assert.Equal(await RowsAsync(1, scan => scan.Rows(spread)), await RowsAsync(4, scan => scan.Rows(spread)));
     }
 
+    [Fact]
+    public async Task AScanStoppedWhileBatchesDecodeAheadLeavesNothingBehind()
+    {
+        Visit[] visits = Visits();
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Visit>(_path, new ParquetWriteOptions { BlockRows = 1_000, RowGroupRows = 12_000 }))
+        {
+            await writer.WriteAsync<Visit>(visits, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        // Stopped at a batch while the fields decode those after it, in the first row group and in
+        // the second: the pages they hold go back, and the file then reads whole.
+        await using (VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4))
+        {
+            foreach (int stop in (int[])[1, 2, 3, 14])
+            {
+                await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
+                int seen = 0;
+                await foreach (RecordBatch batch in file.Scan().With(new ScanOptions { BatchRows = 1_000 }).ToBatchesAsync(Ct))
+                {
+                    using (batch)
+                    {
+                        if (++seen == stop)
+                        {
+                            break;
+                        }
+                    }
+                }
+
+                Assert.Equal(stop, seen);
+            }
+        }
+
+        Assert.Equal(await RowsAsync(1, scan => scan), await RowsAsync(4, scan => scan));
+    }
+
     /// <summary>Every row the scan <paramref name="shape"/> makes of the file, on <paramref name="degree"/> lanes, each value rendered.</summary>
     private async Task<List<string>> RowsAsync(int degree, Func<Scan, Scan> shape)
     {

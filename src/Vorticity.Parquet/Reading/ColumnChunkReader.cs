@@ -75,6 +75,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private readonly long _cap;
     private readonly List<Page> _retired = [];
     private readonly Stack<Page> _free = [];
+
+    /// <summary>The pages retired by the reads of batches not yet released, oldest first, while <see cref="HoldsRetired"/>.</summary>
+    private readonly Queue<(long Batch, List<Page> Pages)> _held = new();
+
+    /// <summary>Lists of <see cref="_held"/> given back, for the next reads' retired pages.</summary>
+    private readonly Stack<List<Page>> _heldLists = new();
     private readonly VortexBuffer[] _data = new VortexBuffer[1];
 
     private CompressionCodec _codec;
@@ -504,8 +510,13 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>The next <paramref name="rows"/> rows, as a node of <paramref name="context"/>'s arena.</summary>
     internal int Read(ScanContext context, int rows)
     {
-        // The batch that read the retired pages was released when this one was asked for.
-        ReleaseRetired();
+        // The batch that read the retired pages was released when this one was asked for; a batch
+        // read ahead of the scan's holds them until the scan releases it.
+        if (!HoldsRetired)
+        {
+            ReleaseRetired();
+        }
+
         if (rows > _rowsLeft)
         {
             ParquetThrow.Format($"The column chunk of '{Name}' holds fewer rows than its row group.");
@@ -550,7 +561,42 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         _rowsLeft -= rows;
+        if (HoldsRetired && _retired.Count > 0)
+        {
+            List<Page> pages = _heldLists.Count > 0 ? _heldLists.Pop() : [];
+            pages.AddRange(_retired);
+            _retired.Clear();
+            _held.Enqueue((Batch, pages));
+        }
+
         return node;
+    }
+
+    /// <summary>
+    /// Whether the pages a read retires are held past the next read, until the scan releases the
+    /// batch that read them: a scan whose fields decode batches ahead of its read, which then frees
+    /// them by <see cref="ReleaseHeld"/>.
+    /// </summary>
+    internal bool HoldsRetired { get; set; }
+
+    /// <summary>The batch the next read belongs to, which holds its retired pages.</summary>
+    internal long Batch { get; set; }
+
+    /// <summary>Gives back the pages held for the batches up to <paramref name="through"/>, which the scan has released.</summary>
+    internal void ReleaseHeld(long through)
+    {
+        while (_held.Count > 0 && _held.Peek().Batch <= through)
+        {
+            List<Page> pages = _held.Dequeue().Pages;
+            foreach (Page page in pages)
+            {
+                page.Release();
+                _free.Push(page);
+            }
+
+            pages.Clear();
+            _heldLists.Push(pages);
+        }
     }
 
     /// <summary>
@@ -686,6 +732,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         ReleaseRetired();
+        ReleaseHeld(long.MaxValue);
         if (_page is { } page)
         {
             page.Release();
@@ -1283,13 +1330,20 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
             if (size >= PageLanes.Worth(_codec) && size <= _cap)
             {
-                if (!lanes.TryTake())
+                if (!lanes.TryReserve(size, _ahead.Count == 0))
                 {
                     _walked = position;
                     return;
                 }
 
-                AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes);
+                if (!lanes.TryTake())
+                {
+                    lanes.Unreserve(size);
+                    _walked = position;
+                    return;
+                }
+
+                AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, _pool.Rent(size, 64), lanes, size);
                 page.Queue();
                 Counters?.AddAhead();
                 _ahead.Enqueue(page);
@@ -1334,7 +1388,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private AheadPage Dequeue()
     {
         AheadPage page = _ahead.Dequeue();
-        _aheadBytes -= page.Block.WritableSpan.Length;
+        _aheadBytes -= page.Size;
+        Lanes!.Unreserve(page.Size);
         return page;
     }
 
@@ -1367,9 +1422,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// by the lane when it begins, or by the read when it comes to the page first, which then
     /// decompresses it itself rather than waiting for a lane the pool has not yet run.
     /// </summary>
-    private sealed class AheadPage(ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block, PageLanes lanes)
+    private sealed class AheadPage(ColumnChunkReader reader, int position, PageHeader header, int at, int stored, VortexBuffer source, CompressionCodec codec, NativeSegmentOwner block, PageLanes lanes, int size)
         : LaneWork(lanes)
     {
+        /// <summary>The bytes the page decompresses to, which its block holds at least.</summary>
+        internal int Size { get; } = size;
+
         internal int Position { get; } = position;
 
         internal PageHeader Header { get; } = header;

@@ -10,19 +10,48 @@ namespace Vorticity.Parquet.Codecs;
 /// at once as its degree, shared by every column, so that a wide file's columns and a narrow one's
 /// next pages alike keep them busy.
 /// </summary>
-/// <param name="lanes">The codecs that may run at once.</param>
-internal sealed class PageLanes(int lanes)
+internal sealed class PageLanes
 {
     /// <summary>The most data pages a column reader keeps decompressed or decompressing ahead of the one it reads.</summary>
     internal const int Depth = 8;
 
     /// <summary>
     /// The decompressed bytes past which a column reader takes no further page ahead, though it takes
-    /// one at least: two of the megabyte pages other writers cut, eight of this writer's smaller ones.
+    /// one at least: eight of the megabyte pages other writers cut, as many as <see cref="Depth"/>.
     /// </summary>
-    internal const int Bytes = 2 << 20;
+    internal const int Bytes = 8 << 20;
 
-    private int _free = lanes;
+    private readonly long _budget;
+    private int _free;
+    private long _ahead;
+
+    /// <summary>
+    /// Lanes for <paramref name="lanes"/> codecs at once, and the decompressed bytes all the scan's
+    /// columns hold ahead: 2 MiB a lane, 16 MiB at least, which a column's first page ahead may pass.
+    /// </summary>
+    internal PageLanes(int lanes)
+    {
+        _free = lanes;
+        _budget = Math.Max(16L << 20, lanes * (2L << 20));
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="size"/> decompressed bytes of the scan's for a page ahead: false when
+    /// they would pass its budget, but for a column's <paramref name="first"/> page ahead.
+    /// </summary>
+    internal bool TryReserve(int size, bool first)
+    {
+        if (Interlocked.Add(ref _ahead, size) <= _budget || first)
+        {
+            return true;
+        }
+
+        Interlocked.Add(ref _ahead, -size);
+        return false;
+    }
+
+    /// <summary>Gives back the bytes <see cref="TryReserve"/> reserved for a page ahead, read or dropped.</summary>
+    internal void Unreserve(int size) => Interlocked.Add(ref _ahead, -size);
 
     /// <summary>
     /// The decompressed bytes from which a page of <paramref name="codec"/> is worth a lane: about ten

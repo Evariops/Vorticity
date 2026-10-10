@@ -99,6 +99,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>Whether the last batch's fields decoded side by side, into the fields' contexts.</summary>
     private bool _across;
 
+    /// <summary>The pipeline a row group's batches decode in ahead of the read, made for the first group that does.</summary>
+    private FieldPipeline? _pipeline;
+
+    /// <summary>The row group's batch the pipeline hands out next, or -1 while the group's batches decode as they are asked for.</summary>
+    private int _piped = -1;
+
     /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
     private readonly FilterColumns? _pruning;
 
@@ -259,6 +265,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
         }
 
+        // The batch just dead frees its slot of the pipeline for the batch a pipeline's depth on.
+        if (_piped > 0)
+        {
+            _pipeline!.Release(_piped - 1);
+        }
+
         // The windows every reader is past go back as soon as the batch that held their last pages
         // is dead: a group holds a few windows of its reads, not all of them.
         if (_released < _window)
@@ -271,10 +283,18 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         {
             while (_groupRead == _groupRows)
             {
+                if (_piped >= 0)
+                {
+                    _pipeline!.Finish();
+                    _piped = -1;
+                }
+
                 if (!await NextRowGroupAsync().ConfigureAwait(false))
                 {
                     return false;
                 }
+
+                Pipe();
             }
 
             rows = (int)Math.Min(_batchRows, _groupRows - _groupRead);
@@ -311,7 +331,19 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
         CanonicalArena arena = _context.Canonical;
         long began = Stopwatch.GetTimestamp();
-        if (_mayDecodeAcross && (_nodes.Length >= AcrossFields || _decoded >= AcrossTicks))
+        if (_piped >= 0)
+        {
+            // Decoded ahead, a field at a time: the batch's arena references their nodes where they lie.
+            int slot = _pipeline!.Wait(_piped++);
+            for (int i = 0; i < _nodes.Length; i++)
+            {
+                int node = _pipeline.Node(i, slot, out ScanContext context);
+                _nodes[i] = arena.ReferenceFrom(context.Canonical, node);
+            }
+
+            _across = false;
+        }
+        else if (_mayDecodeAcross && (_nodes.Length >= AcrossFields || _decoded >= AcrossTicks))
         {
             ScanContext[] fieldContexts = _fieldContexts ??= FieldContexts();
             // The fields side by side, each into its own arena, whose nodes the batch's then
@@ -351,6 +383,15 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     {
         await _abandon.CancelAsync().ConfigureAwait(false);
         _current?.Dispose();
+
+        // The lanes still decoding batches ahead are waited for before their readers go.
+        if (_piped >= 0)
+        {
+            _pipeline!.Finish();
+            _piped = -1;
+        }
+
+        _pipeline?.Dispose();
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.Dispose();
@@ -407,6 +448,33 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _abandon.Dispose();
+    }
+
+    /// <summary>
+    /// Starts the row group's batches decoding ahead of the read, a field at a time, when its fields
+    /// would decode side by side and are all flat, its rows read whole and in place, none pruned.
+    /// </summary>
+    private void Pipe()
+    {
+        if (!_mayDecodeAcross || _live is not null || _group.Windowed || _groupRead == _groupRows
+            || !(_nodes.Length >= AcrossFields || _decoded >= AcrossTicks) || Array.Exists(_nested, nested => nested is not null))
+        {
+            return;
+        }
+
+        if (_pipeline is null)
+        {
+            ColumnChunkReader[] readers = new ColumnChunkReader[_nodes.Length];
+            for (int i = 0; i < readers.Length; i++)
+            {
+                readers[i] = _readers[_flat[i]];
+            }
+
+            _pipeline = new FieldPipeline(readers, _context.Options, _degree);
+        }
+
+        _pipeline.Start(_groupRows - _groupRead, _batchRows);
+        _piped = 0;
     }
 
     /// <summary>A context a field, with the batch's read options.</summary>

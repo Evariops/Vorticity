@@ -507,9 +507,10 @@ shared; a large row group is cut into splits at its page boundaries so that it s
 A scan that delivers its batches reads them as one stream, in row order, and its lanes decompress
 pages instead: a column chunk read whole, compressed and in plaintext has its data pages
 decompressed on them ahead of the read, from the chunk's start, its dictionary page passed over, up
-to 2 MiB decompressed or eight pages ahead a column, two of the megabyte pages other writers cut and
-eight of this writer's; as many at once as the degree, shared by the columns, so that a wide file's
-columns and a narrow one's next pages alike keep them busy. A page worth less than a hand-off to
+to eight pages or 8 MiB decompressed ahead a column, eight of the megabyte pages other writers cut,
+and 2 MiB a lane for the scan's columns together, 16 MiB at least, which a column's first page
+ahead may pass; as many at once as the degree, shared by the columns, so that a wide file's columns
+and a narrow one's next pages alike keep them busy. A page worth less than a hand-off to
 another thread, about ten microseconds of its codec's work — 64 KiB decompressed under SNAPPY and
 LZ4_RAW, 16 KiB under ZSTD, 4 KiB under GZIP and BROTLI — is decompressed where it is read: the
 report's projection of one column takes 0.28 ms on 32 lanes as on one, where taking its small pages
@@ -522,11 +523,19 @@ its own, the longest first by what each took the batch before; the batch's arena
 their nodes, whose bytes stay where they were decoded until the batch is dead. They do when they
 are eight or more, or when the batches before took 50 µs to decode on average: below, waking the
 threads costs more than the decode they would share, and the report's table of four fields decodes
-one field after the other. A batch waits for its slowest field, the one that begins a page:
-ClickBench's first file, 105 columns under SNAPPY, scans in 50 ms on 32 lanes against 173 on one,
-where its `Title` column, a third of its bytes, holds 58 of its 124 batches, and against 105 when
-only its pages decompressed side by side; the January 2023 yellow taxi trips, every page GZIP's, in
-36 against 190, and against 51 to 53.
+one field after the other. Side by side, a batch waits for its slowest field, the one that begins a
+page, while the others idle.
+
+So a row group whose fields are all flat, read whole and in place with no batch pruned, decodes
+ahead of the read a field at a time: each field's batches one after the other, up to two past the
+last the read released, each into a context of its own, on as many lanes as the degree, a lane
+taking the field of the earliest batch that may run. The read waits for every field of the batch it
+asks for and releases each batch as it asks for the next, which frees its slot for the batch two on;
+a reader holds the pages a batch retires until the read releases it, and a row group ends with
+every batch released. The January 2023 yellow taxi trips, every page GZIP's, scan in 29 to 31 ms on
+32 lanes against 33 to 36 side by side, 51 to 53 when only their pages decompressed on the lanes,
+and 190 on one; ClickBench's first file, 105 columns under SNAPPY, in 45 to 46 against 45 to 53 and
+105, and 173 on one, its `Title` column, a third of its bytes, the field each batch waits for.
 
 The answers are the same bits at every degree.
 
