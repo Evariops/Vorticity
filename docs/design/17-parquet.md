@@ -881,6 +881,14 @@ this writer's files under every page version, codec and forced encoding (`FuzzSe
 `VX_FUZZ_SEEDS` names the directory). 300 000 mutations of the suite and 100 000 of this writer's
 files read or fail cleanly; a third of the suite's read to the end.
 
+The package's own decoders, SNAPPY, LZ4_RAW and GZIP's DEFLATE, stop a fast loop where too little
+room is left, as the bytes left or as the first position past the room, the buffer's start where the
+buffer is shorter; never at its end less a margin: an empty buffer is a null pointer, which the
+subtraction wraps past every other address. Twenty thousand mutations of this writer's files found
+three GZIP pages whose header declared no byte and whose DEFLATE loop then wrote at address zero;
+each decoder now also reads two thousand mutated streams into destinations of 0, 1, n - 1, n and
+n + 1 bytes.
+
 ## 9. Correctness without an external reference
 
 | layer | question | holds |
