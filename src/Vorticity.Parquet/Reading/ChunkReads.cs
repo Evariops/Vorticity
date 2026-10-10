@@ -24,6 +24,13 @@ internal static class ChunkReads
 {
     /// <summary>The bytes of a group's chunks past which a read that does not read in place is cut into windows.</summary>
     internal const long WindowedBytes = 4L << 20;
+
+    /// <summary>
+    /// The bytes past which a window's batches stop doubling: the windows after it take as many
+    /// batches, so that what a group holds of its reads, a window decoded and the next read, stays
+    /// within a few of them whatever the group's size.
+    /// </summary>
+    internal const long MaxWindowBytes = 8L << 20;
     /// <summary>
     /// The rows of a group of <paramref name="rows"/> rows starting at <paramref name="firstRow"/> that a
     /// scan of <paramref name="range"/> reads, from its first batch it reaches to the end of its last.
@@ -194,8 +201,9 @@ internal static class ChunkReads
     /// <summary>
     /// Cuts the read of row group <paramref name="group"/> into <paramref name="windows"/>: each the pages
     /// of a run of batches its rows from <paramref name="first"/> to <paramref name="end"/> need, which
-    /// <paramref name="live"/> leaves, twice as many batches as the window before it from one, the first
-    /// with what precedes each chunk's first page; and places each reader's pages in
+    /// <paramref name="live"/> leaves, twice as many batches as the window before it from one until a
+    /// window holds half of <see cref="MaxWindowBytes"/>, as many after, the first with what precedes
+    /// each chunk's first page; and places each reader's pages in
     /// <paramref name="maps"/>, from its chunk's start. A page goes with the window of its first row:
     /// a batch's pages are all read once the windows up to its own are. False, and nothing cut, where the
     /// group is read in one request: from a source that reads in place, under
@@ -248,7 +256,7 @@ internal static class ChunkReads
         int[] next = new int[leaves.Length];
         int firstBatch = (int)(first / batchRows);
         int endBatch = (int)((end + batchRows - 1) / batchRows);
-        for (int from = firstBatch, size = 1; from < endBatch; from += size, size = Math.Min(size * 2, endBatch))
+        for (int from = firstBatch, size = 1; from < endBatch;)
         {
             long limit = Math.Min((long)from + size, endBatch) * batchRows;
             ReadWindow window = new() { FirstBatch = from };
@@ -283,6 +291,12 @@ internal static class ChunkReads
             if (window.Runs.Count > 0)
             {
                 windows.Add(window);
+            }
+
+            from += size;
+            if (window.Bytes * 2 <= MaxWindowBytes)
+            {
+                size = Math.Min(size * 2, endBatch);
             }
         }
 
@@ -370,11 +384,15 @@ internal sealed class ReadWindow
     /// <summary>The slot of each range in the request that reads the window, as the scan made it.</summary>
     internal List<int> Slots { get; } = [];
 
+    /// <summary>The bytes the window reads.</summary>
+    internal long Bytes { get; private set; }
+
     internal void Add(int reader, long from, long to)
     {
         if (to > from)
         {
             Runs.Add((reader, from, to));
+            Bytes += to - from;
         }
     }
 }

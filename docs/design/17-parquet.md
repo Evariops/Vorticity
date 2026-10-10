@@ -331,15 +331,19 @@ units as the execution, so the core's gates hold unchanged ([14-public-api.md](1
 From a source that does not read in place, a row group whose chunks hold more than 4 MiB is read in
 windows of batches, so that its first batch waits for its own pages and not its group's: each
 window the pages its batches need that the windows before it did not read, the first with what
-precedes each chunk's first page, and twice as many batches as the window before it from one, so
-that a group of n batches is log₂ n requests a chunk. A page goes with the window of its first row.
+precedes each chunk's first page, and twice as many batches as the window before it from one until
+a window holds 4 MiB, as many after. A page goes with the window of its first row. A window past the
+first goes back as soon as every column reader is past it, its next byte and every page it holds
+beyond the window's end, so that a group holds a few windows of its reads rather than all of them,
+in blocks the pool keeps from one window to the next.
 The next window is read while one is decoded, and given to the column readers before the batch
 that needs it, or before a skip that ends inside one of its pages. Their offset indexes are read
 for it, in the one request a sparse read makes, and a group whose chunks lack them, or an encrypted
 one, is read in one request. The plan cuts the same windows. Over positional reads of a file of
 four million rows, 39 MB in one row group, the first batch takes 268 µs where a read of the group in
-one request took 6.08 ms, and the whole scan 7.85 ms against 13.2, its reads under its decoding;
-groups sixteen times smaller, each read whole, give their first batch in 328 µs.
+one request took 6.08 ms, and the whole scan 4.51 ms, its reads under its decoding, where windows
+held to the group's end took 6.06; groups sixteen times smaller, each read whole, give their first
+batch in 328 µs.
 
 The
 predicate's columns are decoded first for each batch; the other columns are decoded only for the

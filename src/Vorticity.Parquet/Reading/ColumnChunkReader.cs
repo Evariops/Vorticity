@@ -408,6 +408,46 @@ internal sealed partial class ColumnChunkReader : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// The first byte of the chunk started last that the reader may still read, or hold in a page:
+    /// its next page's, or the first stored byte of a page it decoded and keeps, whose values may lie
+    /// in the chunk. A windowed read gives back a window every reader is past. The dictionary, in the
+    /// chunk's first window, is left out: that window stays with the group.
+    /// </summary>
+    internal int Earliest
+    {
+        get
+        {
+            int earliest = _position;
+            if (_page is { At: >= 0 } page)
+            {
+                earliest = Math.Min(earliest, page.At);
+            }
+
+            if (_batchPage is { At: >= 0 } batchPage)
+            {
+                earliest = Math.Min(earliest, batchPage.At);
+            }
+
+            foreach (Page retired in _retired)
+            {
+                if (retired.At >= 0)
+                {
+                    earliest = Math.Min(earliest, retired.At);
+                }
+            }
+
+            return earliest;
+        }
+    }
+
+    /// <summary><paramref name="page"/>, a data page whose stored bytes start at <paramref name="at"/> of the chunk.</summary>
+    private static Page Placed(Page page, int at)
+    {
+        page.At = at;
+        return page;
+    }
+
     /// <summary>The chunk's dictionary: the one a pruning handed over, or its page decoded.</summary>
     private Page Dictionary(ScanContext context, in PageHeader header, int at, int stored)
     {
@@ -838,10 +878,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
             {
                 case PageType.DataPageV2:
                     Counters?.AddPage();
-                    return DecodeV2(context, header, Body(header, at, stored, out owner), owner);
+                    return Placed(DecodeV2(context, header, Body(header, at, stored, out owner), owner), at);
                 case PageType.DataPage:
                     Counters?.AddPage();
-                    return DecodeV1(context, header, Body(header, at, stored, out owner), owner);
+                    return Placed(DecodeV1(context, header, Body(header, at, stored, out owner), owner), at);
                 case PageType.DictionaryPage:
                     _dictionary = Dictionary(context, header, at, stored);
                     continue;
@@ -2106,6 +2146,9 @@ internal sealed partial class ColumnChunkReader : IDisposable
         /// <summary>A nested column's rows that start in the page past what batches have read.</summary>
         internal int RowsUnread;
 
+        /// <summary>Where a data page's stored bytes start in its chunk, which its values may lie in; -1 for a page that holds none of the chunk's.</summary>
+        internal int At = -1;
+
         /// <summary>
         /// Whether the page's last row ends in it, as a v2 page's does: the standard splits no row
         /// across pages of the second version, so the page after it need not be read to say so.
@@ -2160,6 +2203,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             EntriesRead = 0;
             RowsUnread = 0;
             EndsRows = false;
+            At = -1;
         }
     }
 }

@@ -104,6 +104,12 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private int _window;
     private Task? _ahead;
 
+    /// <summary>The first window past the first not given back yet: those before it every reader was past.</summary>
+    private int _released;
+
+    /// <summary>Per reader, where its chunk of the row group being read starts in the file.</summary>
+    private readonly long[] _chunkStarts;
+
     private RecordBatch? _current;
     private int _rowGroup = -1;
     private long _groupStart;
@@ -182,6 +188,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _decryptions = new Encryption.PageDecryption?[_readers.Length];
+        _chunkStarts = new long[_readers.Length];
         _group = new GroupRead(schema.Columns.Length, _readers.Length);
         _spare = new GroupRead(schema.Columns.Length, _readers.Length);
         _readsAhead = !file.Reader.ReadsInPlace && spec.Take is null;
@@ -200,6 +207,14 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // The batch handed out last is dead: what it read goes back before the next is cut.
         _current?.Dispose();
         _context.ResetBatch();
+
+        // The windows every reader is past go back as soon as the batch that held their last pages
+        // is dead: a group holds a few windows of its reads, not all of them.
+        if (_released < _window)
+        {
+            ReleasePassed();
+        }
+
         int rows;
         while (true)
         {
@@ -347,6 +362,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < _readers.Length; i++)
         {
             ColumnChunkMetadata chunk = footer.Chunk(_rowGroup, _leaves[i]);
+            _chunkStarts[i] = _file.ChunkRange(chunk).Start;
             _readers[i].Encrypted(chunk.IsEncrypted ? Decryption(i, chunk) : null);
             if (read.Maps[i] is not { } map)
             {
@@ -368,6 +384,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         if (read.Windowed)
         {
             _window = 1;
+            _released = 1;
             _ahead = read.Windows.Count > 1 ? ReadAheadAsync(read.Windows[1], WindowRead(1)) : null;
         }
 
@@ -532,7 +549,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             for (int i = 0; i < _readers.Length; i++)
             {
                 _runs.Clear();
-                long start = _file.ChunkRange(footer.Chunk(_rowGroup, _leaves[i])).Start;
+                long start = _chunkStarts[i];
                 for (; run < window.Runs.Count && window.Runs[run].Reader == i; run++)
                 {
                     _runs.Add(((int)(window.Runs[run].From - start), read.GetBuffer(window.Slots[run])));
@@ -607,6 +624,29 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _window = 0;
+        _released = 0;
+    }
+
+    /// <summary>
+    /// Gives back, in order, the windows past the first whose every range each reader is past, its
+    /// next byte and every page it holds beyond the range's end.
+    /// </summary>
+    private void ReleasePassed()
+    {
+        List<ReadWindow> windows = _group.Windows;
+        while (_released < _window)
+        {
+            foreach ((int reader, long _, long to) in windows[_released].Runs)
+            {
+                if (_readers[reader].Earliest < to - _chunkStarts[reader])
+                {
+                    return;
+                }
+            }
+
+            _windowReads[_released - 1].Release();
+            _released++;
+        }
     }
 
     /// <summary>
