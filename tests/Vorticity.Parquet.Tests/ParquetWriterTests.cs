@@ -1,7 +1,10 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.Pipelines;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -246,6 +249,46 @@ public sealed partial class ParquetWriterTests
 
             return ints;
         }
+    }
+
+    [Fact]
+    public async Task WritesANonStructRootAsItsOneColumn()
+    {
+        // A Vortex file whose root is not a struct has a schema of one unnamed column: its rows are
+        // written as that column, under the empty name its path has in the core, and read back as
+        // a struct of it.
+        using TempPath path = new();
+        VortexSchema schema = VortexSchema.Single(VortexType.Int64.Nullable);
+        ParquetSortingColumn[] sorting = [new("", NullsFirst: true)];
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(path.Value, schema, new() { SortingColumns = sorting, BlockRows = 1_024 }))
+        {
+            ColumnBuilder<long?> column = writer.Builder().Column<long?>(0);
+            column.AppendNull();
+            for (long i = 0; i < 3_000; i++)
+            {
+                column.Append(i * 3);
+            }
+
+            await writer.WriteAsync(writer.Builder(), Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        await using ParquetFile file = await ParquetFile.OpenAsync(path.Value, Ct);
+        Assert.Equal([new VortexField("", VortexType.Int64.Nullable)], file.Schema);
+        Assert.Equal(sorting, Assert.Single(file.Metadata.RowGroups).SortingColumns);
+        List<string> values = [];
+        await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
+        {
+            using (batch)
+            {
+                for (int r = 0; r < batch.RowCount; r++)
+                {
+                    values.Add(Render.Row(batch, 0, r));
+                }
+            }
+        }
+
+        Assert.Equal(["null", .. Enumerable.Range(0, 3_000).Select(i => (i * 3L).ToString(CultureInfo.InvariantCulture))], values);
     }
 
     [Fact]

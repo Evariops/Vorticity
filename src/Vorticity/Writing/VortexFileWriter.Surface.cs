@@ -362,7 +362,7 @@ public sealed partial class VortexFileWriter
         if (_root is { Committed: > 0 } rest)
         {
             tail = BuilderArena();
-            tailRoot = BuildRoot(tail, rest.Committed);
+            tailRoot = rest.BuildRoot(tail, rest.Committed);
         }
 
         try
@@ -564,7 +564,7 @@ public sealed partial class VortexFileWriter
         CanonicalArena arena = BuilderArena();
         try
         {
-            int node = BuildRoot(arena, rows);
+            int node = root.BuildRoot(arena, rows);
             long chunk = seal ? ChunkRows(root) : rows;
             for (long start = 0; start < rows; start += chunk)
             {
@@ -667,24 +667,8 @@ public sealed partial class VortexFileWriter
         return _members!;
     }
 
-    private StructStore Root()
-    {
-        if (_root is { } root)
-        {
-            return root;
-        }
-
-        VortexSessionOptions options = Session.Options;
-        ColumnStore store = ColumnStores.Create(_schema, options.EnginePool, options.Extensions);
-        _root = _isTabular
-            ? (StructStore)store
-            : new StructStore(_schema, VortexType.Struct([new VortexField(string.Empty, store.Type)]), [store], options.EnginePool);
-        return _root;
-    }
-
-    /// <summary>The node of the builder's first <paramref name="rows"/> rows, in the shape of the file's root.</summary>
-    private int BuildRoot(CanonicalArena arena, int rows) =>
-        _isTabular ? _root!.Build(arena, rows) : _root!.Children[0].Build(arena, rows);
+    private StructStore Root() =>
+        _root ??= ColumnStores.Root(_schema, Session.Options.EnginePool, Session.Options.Extensions);
 
     private CanonicalArena BuilderArena() => _builderArena ??= new CanonicalArena(64, Session.Options.EnginePool);
 

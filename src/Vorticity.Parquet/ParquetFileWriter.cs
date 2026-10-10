@@ -42,6 +42,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     private readonly VortexSession _session;
     private readonly DType _dtype;
 
+    /// <summary>Whether the root is a struct of the columns: one whose root is not is its one column, with no struct level above it.</summary>
+    private readonly bool _isTabular;
+
     /// <summary>The key-value metadata the footer carries.</summary>
     private readonly KeyValuePair<string, string>[] _keyValues;
     private readonly WriteSchema _map;
@@ -106,6 +109,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     {
         Schema = schema;
         _dtype = VortexTypes.ToDType(schema, new DTypeArena());
+        _isTabular = _dtype.Kind == DTypeKind.Struct;
         _keyValues = KeyValues(_dtype, options);
         _map = map;
         _options = options;
@@ -290,6 +294,11 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     {
         ThrowIfDone();
         cancellationToken.ThrowIfCancellationRequested();
+        if (!_isTabular)
+        {
+            throw new VortexSchemaException("A record's columns are written to a file whose root is a struct.");
+        }
+
         int[] members = MembersOf<TRecord>();
         CanonicalArena scratch = _scratch ??= new CanonicalArena(64, _session.Options.EnginePool);
         try
@@ -586,7 +595,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         CanonicalArena arena = _arena ??= new CanonicalArena(64, _session.Options.EnginePool);
         try
         {
-            await IngestAsync(arena, root.Build(arena, root.Committed), cancellationToken).ConfigureAwait(false);
+            await IngestAsync(arena, root.BuildRoot(arena, root.Committed), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -609,8 +618,9 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stages the rows of <paramref name="root"/>, a struct of the file's columns, a block at a time
-    /// across the columns, so that a row group closes on the block that fills it.
+    /// Stages the rows of <paramref name="root"/>, a struct of the file's columns or the one column of
+    /// a file whose root is not a struct, a block at a time across the columns, so that a row group
+    /// closes on the block that fills it.
     /// </summary>
     private async ValueTask IngestAsync(CanonicalArena arena, int root, CancellationToken cancellationToken)
     {
@@ -627,7 +637,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         {
             WriteColumn column = _columns[c].Column;
             // A nested column is given its top-level field, which it shreds down to its leaf.
-            int node = EncodedForms.Canonical(arena, arena.GetNode(root).GetFieldIndex(column.Field));
+            int node = EncodedForms.Canonical(arena, _isTabular ? arena.GetNode(root).GetFieldIndex(column.Field) : root);
             if (column.ThroughStorage && !column.Nested)
             {
                 node = EncodedForms.Canonical(arena, arena.GetNode(node).StorageIndex);
@@ -637,7 +647,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         }
 
         // Rows out of the declared order are refused before any column holds them.
-        _sorted?.Check(arena, root, rows);
+        _sorted?.Check(arena, _nodes, rows);
 
         // Until every column holds the batch's rows, the columns disagree: a failure past here
         // leaves the file to be abandoned.
@@ -863,7 +873,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     }
 
     private StructStore Root() =>
-        _root ??= (StructStore)ColumnStores.Create(_dtype, _session.Options.EnginePool, _session.Options.Extensions);
+        _root ??= ColumnStores.Root(_dtype, _session.Options.EnginePool, _session.Options.Extensions);
 
     /// <summary>Gives the builder's buffers back to the pool.</summary>
     private void Release()

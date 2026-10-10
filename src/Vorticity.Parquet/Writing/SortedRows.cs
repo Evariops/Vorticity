@@ -106,9 +106,9 @@ internal sealed class SortedRows
         return new SortedRows(keys);
     }
 
-    /// <summary>Holds the <paramref name="rows"/> rows of <paramref name="root"/>, a struct of the file's columns, to the declared order.</summary>
+    /// <summary>Holds the <paramref name="rows"/> rows of the file's columns, each at its node in <paramref name="columns"/>, to the declared order.</summary>
     /// <exception cref="ArgumentException">A row comes before the one before it.</exception>
-    internal void Check(CanonicalArena arena, int root, int rows)
+    internal void Check(CanonicalArena arena, ReadOnlySpan<int> columns, int rows)
     {
         if (rows == 0)
         {
@@ -117,11 +117,10 @@ internal sealed class SortedRows
 
         try
         {
-            CanonicalNode struct_ = arena.GetNode(root);
             for (int k = 0; k < _keys.Length; k++)
             {
                 // A time, or any extension, is held to the order of its storage, nulls and all.
-                int node = EncodedForms.Canonical(arena, struct_.GetFieldIndex(_keys[k].Field));
+                int node = columns[_keys[k].Leaf];
                 while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
                 {
                     node = EncodedForms.Canonical(arena, arena.GetNode(node).StorageIndex);

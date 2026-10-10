@@ -241,6 +241,12 @@ too, as the standard requires of a writer; a local `TIME` or `TIMESTAMP` takes t
 annotation as the standard's forward-compatibility tables say. `INTERVAL` is the one annotation
 written as a `ConvertedType` alone: its `LogicalType` is reserved and has no definition.
 
+A schema whose root is not a struct, a Vortex file's of one unnamed column, is written as that
+column under the empty name, the path the core gives it: a Parquet root is a group, so the file
+reads back as a struct of the one column. Its rows come as the bare column from a batch and as the
+builder's struct of it, which builds the column alone, as the core's writer does; a record's
+columns are refused.
+
 ## 5. Reading
 
 ### 5.1 The open
