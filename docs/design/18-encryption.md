@@ -419,7 +419,10 @@ once when it is full, with the frame index as its nonce, under a key drawn for t
 no keyring wraps, held in native memory and never written anywhere. Nothing outside the process reads
 the file, so it has no header and no trailer, and the frame being filled is served from memory. After
 a crash the scratch is unreadable, which is what scratch should be. A spill reads its sections by
-offset, which maps onto frames as any range does.
+offset, which maps onto frames as any range does, and a frame a read covers whole is decrypted straight
+into it. Measured on arm64 under macOS (`SealedScratchBenchmarks`), 64 MiB of scratch write in about
+24 ms sealed against 16 to 23 ms plain, and read back from the page cache in 18 ms against 4 ms: the
+cipher's pass, which a spill pays once each way, against a disk it pays anyway.
 
 ## 7. What it costs
 
@@ -436,12 +439,27 @@ offset, which maps onto frames as any range does.
 The frame size trades the amplification of small reads against the tags and the call per frame. At
 4 KiB, a point read decrypts little, the file grows by 0.4 % and the calls into the platform's library
 weigh most. At 1 MiB, the file grows by about 15 parts per million and a point read decrypts a megabyte.
-64 KiB is the starting point, and the write option that sets it per file or per dataset stays, since the
-right value depends on the reads.
+64 KiB is the default, and the write option that sets it per file or per dataset stays, since the right
+value depends on the reads.
 
-The loss of the mapping is the largest local cost: a held mapping reads two to three times faster than
-a positional read ([I/O](03-architecture.md#35-io)). It is the price of sealing a local file, and it is
-measured with the cipher's own cost, on both instruction sets.
+A sealed local file also loses its mapping. A held mapping reads two to three times faster than a
+positional read when the reads are small and many ([I/O](03-architecture.md#35-io)), while a scan reads
+in long runs, where the mapping saves much less.
+
+Measured on arm64 under macOS, whose platform library is CryptoKit, over a file of a million rows in the
+page cache (`SealedScanBenchmarks`, a curve of the benchmark host):
+
+| read | plain, mapped | plain, positional | sealed, 64 KiB frames |
+|---|---|---|---|
+| a scan that decodes every column | 6.7 ms | 7.0 ms | 8.4 ms |
+| an open | 39 µs | 44 µs | 79 µs |
+| an open and one row | 81 µs | 98 µs | 214 µs |
+
+The cipher costs about a fifth of a scan, and the lost mapping about a twentieth. Frames of 16 and
+256 KiB scan a few percent slower than frames of 64 KiB, and frames of 4 KiB and 1 MiB about half as
+slow again: the first for their calls, the second for the bytes a read decrypts beyond those it wants.
+A point read pays the most, since it decrypts whole frames around the few segments it needs. The same
+figures on x64, and under Linux and Windows, whose libraries differ, are still to be taken.
 
 ## 8. Mistakes this design rules out
 
@@ -518,7 +536,7 @@ And the classic mistakes with GCM:
 | an envelope rather than the format's reserved fields | the envelope | it reads the same in every Vortex reader once decrypted, seals every object the same way, and hides the structures too |
 | the cipher | the platform's `AesGcm` and `HKDF`, decided | faster where the processor has VAES, audited and constant time, validated on a host configured for it, and allocation-free through its span methods |
 | the construction | the segments of Tink's streaming AEAD, with the AWS Encryption SDK's key commitment | known and reviewed constructions, adapted rather than invented |
-| the default frame size | 64 KiB, to measure | small reads against the tags and the call per frame |
+| the default frame size | 64 KiB, the fastest scan measured on arm64, to confirm on x64 | small reads against the tags and the call per frame |
 | a dataset's data key | one, shared by its writers, changed by a rekey | one call to the key service per process to read a dataset and none to write, while each object keeps keys of its own |
 | how a dataset records that it is encrypted | by its sealed commits, with no field in the commit header | the dataset's format does not change, and a dataset that mixes sealed and plain objects is refused |
 | scratch sealed whenever files are | yes | plaintext of sealed data should not reach a disk |
@@ -548,6 +566,6 @@ proposal of this design, to be measured.
 | key commitment derived with the data key, and the encryption context kept in clear in the message header | source: AWS Encryption SDK developer guide, key commitment and message format |
 | Parquet's modular encryption: a key per column, GCM per module, and `AES_GCM_CTR_V1`, which leaves pages unauthenticated | source: Apache Parquet format, `Encryption.md` |
 | DuckDB's four encryption flaws, fixed in 1.4.2 | source: CVE-2025-64429, published 2025-11-12 |
-| the cost of one call into the platform's library per frame, against the frame size | proposal, measured in the first phase |
-| 64 KiB frames, a first read of two frames and the trailer | proposal, starting points to set by measurement |
-| the cost of sealed scratch against the cost of the spill's disk | proposal, to measure |
+| the cost of one call into the platform's library per frame, against the frame size | measured on arm64 under macOS, in this repository; x64 and the other systems to measure |
+| 64 KiB frames, a first read of two frames and the trailer | measured on arm64 under macOS, in this repository (`SealedScanBenchmarks`); x64 to measure |
+| the cost of sealed scratch against the cost of the spill's disk | measured on arm64 under macOS, in this repository (`SealedScratchBenchmarks`); x64 to measure |
