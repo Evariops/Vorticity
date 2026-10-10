@@ -574,11 +574,13 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
         if (across || closes)
         {
+            WorkFan fan = _fan ??= WorkFan.Rent(_lanes);
             BlockWork work = _blockWork ??= new BlockWork(this);
             work.Start = start;
             work.Stages = across;
             work.Closes = closes;
-            (_fan ??= WorkFan.Rent(_lanes)).Run(work, _columns.Length, arena, count);
+            work.Order(fan.Items(_columns.Length));
+            fan.Run(work, _columns.Length, arena, count);
         }
     }
 
@@ -587,8 +589,16 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// it: the column's rows staged, but a nested column's, and its page closed when the rows end the
     /// block.
     /// </summary>
+    /// <remarks>
+    /// The items go longest first, by what each column's took the block before: the writing thread
+    /// claims the first while the others wake, and a column that holds every block is not the one
+    /// that waits for a thread.
+    /// </remarks>
     private sealed class BlockWork(ParquetFileWriter writer) : IFanWork
     {
+        /// <summary>Per column, the ticks its item took the last time it ran.</summary>
+        private readonly long[] _took = new long[writer._columns.Length];
+
         /// <summary>The batch's first row the block takes.</summary>
         internal int Start { get; set; }
 
@@ -598,7 +608,31 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         /// <summary>Whether the rows end the block, whose pages then close.</summary>
         internal bool Closes { get; set; }
 
+        /// <summary>Lays the columns out in <paramref name="order"/>, longest first.</summary>
+        internal void Order(Span<int> order)
+        {
+            for (int c = 0; c < order.Length; c++)
+            {
+                int at = c;
+                while (at > 0 && _took[order[at - 1]] < _took[c])
+                {
+                    order[at] = order[at - 1];
+                    at--;
+                }
+
+                order[at] = c;
+            }
+        }
+
         public void Run(WorkFan fan, int item)
+        {
+            int index = fan.Item(item);
+            long began = Stopwatch.GetTimestamp();
+            RunColumn(fan, index);
+            _took[index] = Stopwatch.GetTimestamp() - began;
+        }
+
+        private void RunColumn(WorkFan fan, int item)
         {
             ColumnChunkWriter column = writer._columns[item];
             if (Stages && !column.Column.Nested)
