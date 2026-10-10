@@ -101,6 +101,41 @@ public sealed partial class PruningTests : IDisposable
         }
     }
 
+    [VortexRecord]
+    public partial record struct Keyed(string Key, double Score);
+
+    [Fact]
+    public async Task PrunesOnTextAndFloatsAsOnIntegers()
+    {
+        Keyed[] rows = new Keyed[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            rows[i] = new Keyed($"key-{i:D6}", i == 50_000 ? double.NaN : i * 0.5);
+        }
+
+        await using (ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter<Keyed>(
+            _path, new ParquetWriteOptions { RowGroupRows = GroupRows, BlockRows = GroupRows }))
+        {
+            await writer.WriteAsync<Keyed>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);
+        Scan<Keyed> text = file.Scan<Keyed>().Where(k => k.Key >= "key-090000");
+        Assert.Equal(Rows - 90_000, await text.CountAsync(Ct));
+        Assert.Equal(10, (await file.Scan<Keyed>().Where(k => k.Key >= "key-090000").ExplainAsync(Ct)).Pruning.Sum(step => step.BlocksPruned));
+
+        // The scores climb but for one NaN, which neither bound takes in and a comparison never selects.
+        Scan<Keyed> low = file.Scan<Keyed>().Where(k => k.Score < 100.0);
+        Assert.Equal(200, await low.CountAsync(Ct));
+        Assert.Equal(1, low.Metrics.BlocksDecoded);
+        Assert.Equal(49_999, await file.Scan<Keyed>().Where(k => k.Score >= 25_000.0).CountAsync(Ct));
+        Assert.Equal(49_999, await file.Scan<Keyed>().Where(k => k.Score >= 25_000.0).With(new ScanOptions { UseStatistics = false }).CountAsync(Ct));
+        Assert.Equal(
+            await file.Scan<Keyed>().Where(k => !(k.Score < 30_000.0)).With(new ScanOptions { UseStatistics = false }).CountAsync(Ct),
+            await file.Scan<Keyed>().Where(k => !(k.Score < 30_000.0)).CountAsync(Ct));
+    }
+
     private async Task<ParquetFile> OpenAsync()
     {
         Event[] rows = new Event[Rows];

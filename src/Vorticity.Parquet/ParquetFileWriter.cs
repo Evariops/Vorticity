@@ -559,7 +559,27 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// </summary>
     private void WriteTail(PooledBytes tail, long position)
     {
+        // Every column index, then every offset index, by row group then column, so that a
+        // reader's index reads coalesce.
         ThriftCompactWriter writer = new(tail);
+        foreach (WrittenRowGroup rowGroup in _rowGroups)
+        {
+            foreach (WrittenChunk chunk in rowGroup.Chunks)
+            {
+                WrittenStatistics statistics = chunk.Chunk.Statistics;
+                if (!statistics.Indexed)
+                {
+                    continue;
+                }
+
+                int start = tail.Length;
+                ColumnIndex.Write(ref writer, statistics.Pages, statistics.Order);
+                writer.Flush();
+                chunk.ColumnIndexOffset = position + start;
+                chunk.ColumnIndexLength = tail.Length - start;
+            }
+        }
+
         foreach (WrittenRowGroup rowGroup in _rowGroups)
         {
             foreach (WrittenChunk chunk in rowGroup.Chunks)

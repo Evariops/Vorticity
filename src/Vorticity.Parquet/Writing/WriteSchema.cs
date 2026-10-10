@@ -135,11 +135,36 @@ internal sealed record WriteColumn
 /// <summary>How a column's bounds compare.</summary>
 internal enum StatisticsDomain : byte
 {
+    /// <summary>No order the standard defines: no bounds.</summary>
     None,
     Signed32,
     Signed64,
     Unsigned32,
     Unsigned64,
+
+    /// <summary>FLOAT in IEEE 754's total order.</summary>
+    Float32,
+
+    /// <summary>DOUBLE in IEEE 754's total order.</summary>
+    Float64,
+
+    /// <summary>FLOAT16, a FIXED_LEN_BYTE_ARRAY(2), in IEEE 754's total order.</summary>
+    Float16,
+
+    /// <summary>BOOLEAN, false first.</summary>
+    Boolean,
+
+    /// <summary>BYTE_ARRAY as unsigned bytes.</summary>
+    Binary,
+
+    /// <summary>BYTE_ARRAY of UTF-8 as unsigned bytes, a cut bound kept UTF-8.</summary>
+    Utf8,
+
+    /// <summary>FIXED_LEN_BYTE_ARRAY as unsigned bytes.</summary>
+    Fixed,
+
+    /// <summary>A FIXED_LEN_BYTE_ARRAY decimal: big-endian two's complement.</summary>
+    Decimal,
 }
 
 /// <summary>
@@ -307,7 +332,7 @@ internal sealed class WriteSchema
                     Logical = Logical(LogicalTypeKind.Unknown), Conversion = ValueConversion.Null, ValueWidth = 4,
                 };
             case VortexTypeKind.Bool:
-                return new WriteColumn { Name = name, Path = path, Field = field, Physical = PhysicalType.Boolean, Nullable = nullable, Conversion = ValueConversion.Bool };
+                return new WriteColumn { Name = name, Path = path, Field = field, Physical = PhysicalType.Boolean, Nullable = nullable, Conversion = ValueConversion.Bool, Domain = StatisticsDomain.Boolean };
             case VortexTypeKind.Primitive:
                 return Primitive(name, path, field, type.PrimitiveType, nullable);
             case VortexTypeKind.Decimal:
@@ -317,14 +342,16 @@ internal sealed class WriteSchema
                 {
                     Name = name, Path = path, Field = field, Physical = PhysicalType.ByteArray, Nullable = nullable,
                     Logical = Logical(LogicalTypeKind.String), ConvertedType = (int)Metadata.ConvertedType.Utf8, Conversion = ValueConversion.ByteArray,
+                    Domain = StatisticsDomain.Utf8,
                 };
             case VortexTypeKind.Binary:
-                return new WriteColumn { Name = name, Path = path, Field = field, Physical = PhysicalType.ByteArray, Nullable = nullable, Conversion = ValueConversion.ByteArray };
+                return new WriteColumn { Name = name, Path = path, Field = field, Physical = PhysicalType.ByteArray, Nullable = nullable, Conversion = ValueConversion.ByteArray, Domain = StatisticsDomain.Binary };
             case VortexTypeKind.FixedSizeList when IsBytes(type):
                 return new WriteColumn
                 {
                     Name = name, Path = path, Field = field, Physical = PhysicalType.FixedLenByteArray, TypeLength = type.FixedSize, Nullable = nullable,
                     Conversion = ValueConversion.Same, ValueWidth = type.FixedSize, SourceWidth = type.FixedSize, FixedElements = true,
+                    Domain = StatisticsDomain.Fixed,
                 };
             case VortexTypeKind.Extension:
                 return Extension(name, path, field, type, nullable);
@@ -346,9 +373,9 @@ internal sealed class WriteSchema
             PType.U16 => (PhysicalType.Int32, Integer(16, false), (int)Metadata.ConvertedType.UInt16, ValueConversion.WidenUInt16, 4, 2, StatisticsDomain.Unsigned32),
             PType.U32 => (PhysicalType.Int32, Integer(32, false), (int)Metadata.ConvertedType.UInt32, ValueConversion.Same, 4, 4, StatisticsDomain.Unsigned32),
             PType.U64 => (PhysicalType.Int64, Integer(64, false), (int)Metadata.ConvertedType.UInt64, ValueConversion.Same, 8, 8, StatisticsDomain.Unsigned64),
-            PType.F16 => (PhysicalType.FixedLenByteArray, Logical(LogicalTypeKind.Float16), -1, ValueConversion.Same, 2, 2, StatisticsDomain.None),
-            PType.F32 => (PhysicalType.Float, default(LogicalTypeInfo), -1, ValueConversion.Same, 4, 4, StatisticsDomain.None),
-            PType.F64 => (PhysicalType.Double, default(LogicalTypeInfo), -1, ValueConversion.Same, 8, 8, StatisticsDomain.None),
+            PType.F16 => (PhysicalType.FixedLenByteArray, Logical(LogicalTypeKind.Float16), -1, ValueConversion.Same, 2, 2, StatisticsDomain.Float16),
+            PType.F32 => (PhysicalType.Float, default(LogicalTypeInfo), -1, ValueConversion.Same, 4, 4, StatisticsDomain.Float32),
+            PType.F64 => (PhysicalType.Double, default(LogicalTypeInfo), -1, ValueConversion.Same, 8, 8, StatisticsDomain.Float64),
             _ => throw new ArgumentOutOfRangeException(nameof(ptype), ptype, "Not a primitive type."),
         };
         return new WriteColumn
@@ -399,7 +426,7 @@ internal sealed class WriteSchema
         {
             Name = name, Path = path, Field = field, Physical = PhysicalType.FixedLenByteArray, TypeLength = bytes, Nullable = nullable,
             Logical = logical, ConvertedType = (int)Metadata.ConvertedType.Decimal, Scale = scale, Precision = precision,
-            Conversion = ValueConversion.DecimalToBigEndian, ValueWidth = bytes,
+            Conversion = ValueConversion.DecimalToBigEndian, ValueWidth = bytes, Domain = StatisticsDomain.Decimal,
         };
     }
 
@@ -432,7 +459,7 @@ internal sealed class WriteSchema
                 {
                     Name = name, Path = path, Field = field, Physical = PhysicalType.FixedLenByteArray, TypeLength = 16, Nullable = nullable,
                     Logical = Logical(LogicalTypeKind.Uuid), Conversion = ValueConversion.Same, ValueWidth = 16, SourceWidth = 16, ThroughStorage = true,
-                    FixedElements = true,
+                    FixedElements = true, Domain = StatisticsDomain.Fixed,
                 };
             case Schema.ParquetSchema.IntervalExtensionId:
                 return new WriteColumn

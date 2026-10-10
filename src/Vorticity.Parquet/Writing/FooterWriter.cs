@@ -17,6 +17,10 @@ internal sealed class WrittenChunk
     internal long OffsetIndexOffset { get; set; } = -1;
 
     internal int OffsetIndexLength { get; set; }
+
+    internal long ColumnIndexOffset { get; set; } = -1;
+
+    internal int ColumnIndexLength { get; set; }
 }
 
 /// <summary>A row group written to the file.</summary>
@@ -74,13 +78,16 @@ internal static class FooterWriter
 
         writer.WriteStringField(6, createdBy);
 
-        // The order each leaf's bounds are given in. Bounds are written only for the integer
-        // domains, whose order is the type's.
+        // The order each leaf's bounds are given in: a float's IEEE 754's total order, as the
+        // standard recommends, every other's its type's.
         writer.WriteListField(7, ThriftType.Struct, columns.Length);
         for (int i = 0; i < columns.Length; i++)
         {
+            ColumnOrderKind kind = columns[i].Domain is StatisticsDomain.Float32 or StatisticsDomain.Float64 or StatisticsDomain.Float16
+                ? ColumnOrderKind.Ieee754TotalOrder
+                : ColumnOrderKind.TypeDefined;
             short order = writer.BeginStruct();
-            short member = writer.BeginStructField((short)ColumnOrderKind.TypeDefined);
+            short member = writer.BeginStructField((short)kind);
             writer.EndStruct(member);
             writer.EndStruct(order);
         }
@@ -189,6 +196,12 @@ internal static class FooterWriter
             writer.WriteI32Field(5, written.OffsetIndexLength);
         }
 
+        if (written.ColumnIndexOffset >= 0)
+        {
+            writer.WriteI64Field(6, written.ColumnIndexOffset);
+            writer.WriteI32Field(7, written.ColumnIndexLength);
+        }
+
         writer.EndStruct(saved);
     }
 
@@ -201,18 +214,23 @@ internal static class FooterWriter
         writer.EndStruct(saved);
     }
 
+    /// <summary>The chunk's <c>Statistics</c>: its null count always, its bounds and their exactness where it has them, a float's NaN count.</summary>
     private static void WriteStatistics(ref ThriftCompactWriter writer, ChunkResult chunk)
     {
+        WrittenStatistics statistics = chunk.Statistics;
         short saved = writer.BeginStructField(12);
-        writer.WriteI64Field(3, chunk.Nulls);
-        if (chunk.Bounds.Present)
+        writer.WriteI64Field(3, statistics.Nulls);
+        if (statistics.HasBounds)
         {
-            Span<byte> max = stackalloc byte[8];
-            Span<byte> min = stackalloc byte[8];
-            writer.WriteBinaryField(5, chunk.Bounds.Plain(chunk.Bounds.Max, max));
-            writer.WriteBinaryField(6, chunk.Bounds.Plain(chunk.Bounds.Min, min));
-            writer.WriteBooleanField(7, true);
-            writer.WriteBooleanField(8, true);
+            writer.WriteBinaryField(5, statistics.Max);
+            writer.WriteBinaryField(6, statistics.Min);
+            writer.WriteBooleanField(7, statistics.MaxExact);
+            writer.WriteBooleanField(8, statistics.MinExact);
+        }
+
+        if (statistics.CountsNans)
+        {
+            writer.WriteI64Field(9, statistics.Nans);
         }
 
         writer.EndStruct(saved);

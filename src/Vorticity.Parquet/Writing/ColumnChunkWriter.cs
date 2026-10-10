@@ -123,7 +123,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     private long _chunkEntries;
     private long _chunkNulls;
     private long _chunkUncompressed;
-    private Bounds _chunkBounds;
+    private readonly ChunkStatistics _statistics;
 
     /// <summary>Whether the staged rows carry a validity bitmap: a flat column's that may be null.</summary>
     private readonly bool _rowValidity;
@@ -165,7 +165,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         _levelBytes = new byte[blockRows];
         _mask = new ulong[(blockRows + 63) >> 6];
         _pageCodes = new uint[blockRows];
-        _chunkBounds = Bounds.Empty;
+        _statistics = new ChunkStatistics(column);
         _eligible = profile != CompressionProfile.None && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
         _encodings = profile is CompressionProfile.Auto or CompressionProfile.Smallest;
         _encoded = new PooledBytes(pool);
@@ -249,8 +249,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         ReadOnlySpan<byte> body = _column.Conversion == ValueConversion.Bool
             ? _values.WrittenSpan[..((_boolBits + 7) / 8)]
             : _values.WrittenSpan;
-        Bounds bounds = Bounds.Of(_column.Domain, body, _pageValues);
-        _chunkBounds = _chunkBounds.Merge(bounds);
+        _statistics.AddPage(body, _pageValues, nulls);
 
         ParquetEncoding encoding = ParquetEncoding.Plain;
         if (_dictionary && _pageFirstCode >= 0)
@@ -482,7 +481,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             _chunkUncompressed,
             _chunk.Length + dictionary,
             encodings,
-            _chunkBounds,
+            _statistics.Close(),
             pages,
             (int[])_pagesBy.Clone());
     }
@@ -496,7 +495,6 @@ internal sealed class ColumnChunkWriter : IDisposable
         _chunkEntries = 0;
         _chunkNulls = 0;
         _chunkUncompressed = 0;
-        _chunkBounds = Bounds.Empty;
         _table?.Reset();
         _entries.Clear();
         _dictionaryPage.Clear();
@@ -1093,7 +1091,7 @@ internal sealed class ColumnChunkWriter : IDisposable
 /// <param name="UncompressedSize">Its pages' bytes, headers included, before compression.</param>
 /// <param name="CompressedSize">Its bytes in the file.</param>
 /// <param name="Encodings">The encodings its pages use, a bit per encoding.</param>
-/// <param name="Bounds">Its least and greatest values, where its domain has them.</param>
+/// <param name="Statistics">Its bounds and counts, and its pages'.</param>
 /// <param name="Pages">Where each data page lies, for the offset index.</param>
 /// <param name="PagesByEncoding">Per encoding, the data pages that took it.</param>
 internal sealed record ChunkResult(
@@ -1106,68 +1104,6 @@ internal sealed record ChunkResult(
     long UncompressedSize,
     long CompressedSize,
     uint Encodings,
-    Bounds Bounds,
+    WrittenStatistics Statistics,
     PageLocation[] Pages,
     int[] PagesByEncoding);
-
-/// <summary>A column's least and greatest values, compared in its domain, as the PLAIN bytes statistics hold.</summary>
-internal readonly record struct Bounds(bool Present, StatisticsDomain Domain, long Min, long Max)
-{
-    internal static readonly Bounds Empty = new(false, StatisticsDomain.None, 0, 0);
-
-    /// <summary>The bounds of <paramref name="count"/> PLAIN values of <paramref name="domain"/>.</summary>
-    internal static Bounds Of(StatisticsDomain domain, ReadOnlySpan<byte> values, int count)
-    {
-        if (count == 0 || domain == StatisticsDomain.None)
-        {
-            return new Bounds(false, domain, 0, 0);
-        }
-
-        switch (domain)
-        {
-            case StatisticsDomain.Signed32:
-                BlockStatsPass.Bounds(MemoryMarshal.Cast<byte, int>(values[..(count * 4)]), out int min32, out int max32);
-                return new Bounds(true, domain, min32, max32);
-            case StatisticsDomain.Unsigned32:
-                BlockStatsPass.Bounds(MemoryMarshal.Cast<byte, uint>(values[..(count * 4)]), out uint minU32, out uint maxU32);
-                return new Bounds(true, domain, minU32, maxU32);
-            case StatisticsDomain.Signed64:
-                BlockStatsPass.Bounds(MemoryMarshal.Cast<byte, long>(values[..(count * 8)]), out long min64, out long max64);
-                return new Bounds(true, domain, min64, max64);
-            default:
-                BlockStatsPass.Bounds(MemoryMarshal.Cast<byte, ulong>(values[..(count * 8)]), out ulong minU64, out ulong maxU64);
-                return new Bounds(true, domain, (long)minU64, (long)maxU64);
-        }
-    }
-
-    /// <summary>The bounds of both.</summary>
-    internal Bounds Merge(Bounds other)
-    {
-        if (!other.Present)
-        {
-            return this;
-        }
-
-        if (!Present)
-        {
-            return other;
-        }
-
-        return Domain == StatisticsDomain.Unsigned64
-            ? new Bounds(true, Domain, (long)Math.Min((ulong)Min, (ulong)other.Min), (long)Math.Max((ulong)Max, (ulong)other.Max))
-            : new Bounds(true, Domain, Math.Min(Min, other.Min), Math.Max(Max, other.Max));
-    }
-
-    /// <summary>Writes the bound <paramref name="value"/> as PLAIN bytes of the domain's width, returning them.</summary>
-    internal ReadOnlySpan<byte> Plain(long value, Span<byte> buffer)
-    {
-        if (Domain is StatisticsDomain.Signed32 or StatisticsDomain.Unsigned32)
-        {
-            BinaryPrimitives.WriteInt32LittleEndian(buffer, (int)value);
-            return buffer[..4];
-        }
-
-        BinaryPrimitives.WriteInt64LittleEndian(buffer, value);
-        return buffer[..8];
-    }
-}
