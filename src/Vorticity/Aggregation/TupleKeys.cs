@@ -367,6 +367,18 @@ internal sealed class TupleKeys : GroupKeys
     {
         BytesBlock values = BytesBlock.Canonical(arena, node, out ReadOnlySpan<ulong> validity);
         int rows = end - start;
+
+        // Views this library cut are the words already: into the tuples from where they lie.
+        if (validity.IsEmpty && values.TryWordsInPlace(start, rows, out ReadOnlySpan<TextWord> inPlace))
+        {
+            for (int i = 0; i < rows; i++)
+            {
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref first, ((nint)i * TupleLayout.Bytes) + offset), inPlace[i]);
+            }
+
+            return;
+        }
+
         Scratch.Grow(ref _words, rows);
         Span<TextWord> words = _words.AsSpan(0, rows);
         if (validity.IsEmpty && values.TryWords(start, words))
