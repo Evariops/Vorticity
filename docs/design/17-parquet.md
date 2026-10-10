@@ -509,22 +509,24 @@ pages instead: a column chunk read whole, compressed and in plaintext has its da
 decompressed on them ahead of the read, from the chunk's start, its dictionary page passed over, up
 to 2 MiB decompressed or eight pages ahead a column, two of the megabyte pages other writers cut and
 eight of this writer's; as many at once as the degree, shared by the columns, so that a wide file's
-columns and a narrow one's next pages alike keep them busy. A page whose lane has not begun when its
-read comes to it is decompressed by the read itself, which never waits for a lane the pool has not
-run, and a page a skip steps over is dropped. A chunk read in windows has its own read-ahead (§5.3),
-an encrypted one none.
+columns and a narrow one's next pages alike keep them busy. A page worth less than a hand-off to
+another thread, about ten microseconds of its codec's work — 64 KiB decompressed under SNAPPY and
+LZ4_RAW, 16 KiB under ZSTD, 4 KiB under GZIP and BROTLI — is decompressed where it is read: the
+report's projection of one column takes 0.28 ms on 32 lanes as on one, where taking its small pages
+ahead made it 0.47. A page whose lane has not begun when its read comes to it is decompressed by the
+read itself, which never waits for a lane the pool has not run, and a page a skip steps over is
+dropped. A chunk read in windows has its own read-ahead (§5.3), an encrypted one none.
 
 The fields of a batch decode side by side on the scan's lanes, each into a context and an arena of
 its own, the longest first by what each took the batch before; the batch's arena then references
 their nodes, whose bytes stay where they were decoded until the batch is dead. They do when they
 are eight or more, or when the batches before took 50 µs to decode on average: below, waking the
 threads costs more than the decode they would share, and the report's table of four fields decodes
-one field after the other. A batch waits for
-its slowest field, the one that begins a page: on ClickBench's first file, 105 columns under
-SNAPPY, a scan takes 46 to 47 ms on 32 lanes against 93 when only the pages decompressed side by
-side, and its `Title` column, a third of its bytes, holds 58 of its 124 batches. The January 2023
-yellow taxi trips, every page GZIP's, scan in 31 to 34 ms on 32 lanes against 51 to 53, and 197 to
-200 on one.
+one field after the other. A batch waits for its slowest field, the one that begins a page:
+ClickBench's first file, 105 columns under SNAPPY, scans in 50 ms on 32 lanes against 173 on one,
+where its `Title` column, a third of its bytes, holds 58 of its 124 batches, and against 105 when
+only its pages decompressed side by side; the January 2023 yellow taxi trips, every page GZIP's, in
+36 against 190, and against 51 to 53.
 
 The answers are the same bits at every degree.
 
@@ -801,7 +803,7 @@ again with hardware intrinsics disabled and compares bit for bit
 | checked narrowing | `INT(8)`, `INT(16)` | the core's kernels: the page's extremes against the annotation's range, two accumulators a register, then truncation by vector narrowing: four million values in 0.62 ms against 2.2 |
 | dictionary gather | materializing a dictionary column | gathers of 4 and 8 bytes, views by pairs of 8 |
 | UTF-8 | text | `System.Text.Unicode.Utf8.IsValid` |
-| SNAPPY, LZ4_RAW | the codecs | copies as overlapping 16-byte stores within the slack, short match offsets by pattern shuffles; encoders by a hash table, greedy, LZ4's end-of-block rules kept |
+| SNAPPY, LZ4_RAW | the codecs | Snappy's elements read from a table of their tag while the input holds 64 bytes past it and the output 80, a literal of up to 60 bytes and a copy of up to 64 stored whole in 16-byte vectors, a short offset's pattern doubled into a word, the next tag found from the tag alone: ClickBench's `Title` column, a third of its bytes, reads in 26 ms against 40; LZ4's copies as overlapping 16-byte stores within the slack; encoders by a hash table, greedy, LZ4's end-of-block rules kept |
 | checksums, hashes | CRC32, XXH64, the split-block filter | `System.IO.Hashing`; the core's `SplitBlockBloom` |
 
 **What the core's ALP brings, and what it does not.** The exponent and factor search and the
@@ -888,14 +890,15 @@ comes down. Speed is measured against baselines this repository owns:
   repository's writers, read through the same `Scan` in one process, each action warmed past the
   JIT's recompiling it, which two calls are not (`--format-cost`, `--columns` for each column
   alone, `--file` for a file of another writer against its rewrite as Vortex); the ratio informs
-  and gates nothing. On the report's million rows Parquet scans in 2.88 ms on one core against
-  Vortex's 3.56 and in 1.31 on 32 against 1.82, projects its delta-encoded monotone column in 0.34
-  against 0.31, and writes back in 25.6 ms against 25.4 on one core but in 20.9 against 10.8 on 32,
-  its pages closed a block at a time, four columns at most at once. The January 2023 taxi trips,
-  GZIP's, scan in 189 ms on one core against their Vortex rewrite's 22.6, the inflate most of it,
-  and in 48 against 34 on 32; ClickBench's first file of hits, Snappy's, in 214 against 69 and 105
-  against 35, four columns of long strings, kept as plain byte arrays once their dictionaries
-  filled, holding most of the difference;
+  and gates nothing. On the report's million rows Parquet scans in 2.75 ms on one core against
+  Vortex's 3.47 and in 1.34 on 32 against 1.55, projects its delta-encoded monotone column in 0.34
+  against 0.33, and writes back in 16.2 ms against 25.5 on one core and in 11.1 against 14.9 on 32.
+  The January 2023 taxi trips, GZIP's, scan in 190 ms on one core against their Vortex rewrite's
+  38, the inflate most of it, and in 36 against 35 on 32, and are written back in 786 against 257
+  and in 164 against 203; ClickBench's first file of hits, Snappy's, scans in 173 against 66 and
+  50 against 33, its codec and four columns of long strings, kept as plain byte arrays once their
+  dictionaries filled, holding most of the difference, and is written back in 1 288 against 1 457
+  and 426 against 1 381;
 - **regressions**, as the ratio of two kept runners across commits (`bench/runners.sh`);
 - **real files**, read from the data disk under §9's metadata oracle: throughput, allocations, and the
   oracle's verdict.
