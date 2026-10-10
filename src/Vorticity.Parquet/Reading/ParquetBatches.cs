@@ -68,15 +68,36 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// Per field, the context its readers decode into when a batch's fields decode side by side on
-    /// the scan's lanes, each into an arena of its own; null when they decode one after the other
-    /// into the batch's.
+    /// the scan's lanes, each into an arena of its own: made for the first batch that does.
     /// </summary>
-    private readonly ScanContext[]? _fieldContexts;
+    private ScanContext[]? _fieldContexts;
+
+    /// <summary>Whether a batch's fields may decode side by side: those of a scan of several, on several lanes.</summary>
+    private readonly bool _mayDecodeAcross;
 
     /// <summary>The scan's degree, the threads a batch's fields decode on, the reading one included.</summary>
     private readonly int _degree;
     private WorkFan? _fan;
     private FieldDecoding? _decoding;
+
+    /// <summary>The fields from which a batch's fields decode side by side whatever the batches before took.</summary>
+    private const int AcrossFields = 8;
+
+    /// <summary>
+    /// The ticks the batches before must take to decode, on average, for a batch of fewer fields to
+    /// decode side by side, 50 microseconds: below, waking the threads costs more than the decode
+    /// they would share.
+    /// </summary>
+    private static readonly long AcrossTicks = Stopwatch.Frequency / 20_000;
+
+    /// <summary>
+    /// The ticks the batches before took to decode, side by side or not, each weighing an eighth: the
+    /// batch that begins a page takes many times the others'.
+    /// </summary>
+    private long _decoded;
+
+    /// <summary>Whether the last batch's fields decoded side by side, into the fields' contexts.</summary>
+    private bool _across;
 
     /// <summary>The filter's columns the page index may bound, or null when the scan prunes nothing.</summary>
     private readonly FilterColumns? _pruning;
@@ -187,14 +208,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : file.Session.Options.MaxDegreeOfParallelism;
         PageLanes? lanes = degree > 1 ? new PageLanes(degree) : null;
         _degree = degree;
-        if (degree > 1 && fields.Length > 1)
-        {
-            _fieldContexts = new ScanContext[fields.Length];
-            for (int i = 0; i < fields.Length; i++)
-            {
-                _fieldContexts[i] = new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = cap });
-            }
-        }
+        _mayDecodeAcross = degree > 1 && fields.Length > 1;
         foreach (ColumnChunkReader reader in _readers)
         {
             reader.VerifyChecksums = file.Options.VerifyChecksums;
@@ -237,9 +251,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // The batch handed out last is dead: what it read goes back before the next is cut.
         _current?.Dispose();
         _context.ResetBatch();
-        if (_fieldContexts is { } contexts)
+        if (_across)
         {
-            foreach (ScanContext context in contexts)
+            foreach (ScanContext context in _fieldContexts!)
             {
                 context.ResetBatch();
             }
@@ -296,8 +310,10 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         CanonicalArena arena = _context.Canonical;
-        if (_fieldContexts is { } fieldContexts)
+        long began = Stopwatch.GetTimestamp();
+        if (_mayDecodeAcross && (_nodes.Length >= AcrossFields || _decoded >= AcrossTicks))
         {
+            ScanContext[] fieldContexts = _fieldContexts ??= FieldContexts();
             // The fields side by side, each into its own arena, whose nodes the batch's then
             // references: their bytes stay where they were decoded, until the batch is dead.
             WorkFan fan = _fan ??= WorkFan.Rent(_degree);
@@ -308,6 +324,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             {
                 _nodes[i] = arena.ReferenceFrom(fieldContexts[i].Canonical, _nodes[i]);
             }
+
+            _across = true;
         }
         else
         {
@@ -315,7 +333,11 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             {
                 _nodes[i] = Read(_context, i, rows);
             }
+
+            _across = false;
         }
+
+        _decoded += (Stopwatch.GetTimestamp() - began - _decoded) / 8;
 
         // A batch is a block: what a pruned one is not.
         _metrics.AddBlocksDecoded(1);
@@ -385,6 +407,18 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _abandon.Dispose();
+    }
+
+    /// <summary>A context a field, with the batch's read options.</summary>
+    private ScanContext[] FieldContexts()
+    {
+        ScanContext[] contexts = new ScanContext[_nodes.Length];
+        for (int i = 0; i < contexts.Length; i++)
+        {
+            contexts[i] = new ScanContext([], _context.Options);
+        }
+
+        return contexts;
     }
 
     /// <summary>Field <paramref name="field"/>'s next <paramref name="rows"/> rows, decoded into <paramref name="context"/>.</summary>
