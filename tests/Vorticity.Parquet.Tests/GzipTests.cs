@@ -233,6 +233,19 @@ public sealed class GzipTests
     }
 
     [Fact]
+    public void DataPastAnEmptyDestinationIsRefused()
+    {
+        // An empty destination is a null pointer: the decoder's fast loop must measure the room it
+        // has, not hold the output to a limit taken off that pointer, which would wrap past any other.
+        Random random = new(14);
+        byte[] data = Shaped(random, 5_000, 1);
+        byte[] member = Gzipped(data, CompressionLevel.Optimal);
+        Assert.Throws<ParquetFormatException>(() => Gzip.Decompress(member, Span<byte>.Empty));
+        Assert.Throws<ParquetFormatException>(() => Gzip.Decompress([.. member, .. member], new byte[data.Length]));
+        Assert.Throws<ParquetFormatException>(() => Inflate.Decode(member.AsSpan(10), Span<byte>.Empty, new uint[Inflate.TableEntries], out _));
+    }
+
+    [Fact]
     public void AMutatedMemberIsReadOrRefusedAndNothingElse()
     {
         Random random = new(13);

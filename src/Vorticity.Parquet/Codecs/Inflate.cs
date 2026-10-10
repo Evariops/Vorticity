@@ -158,7 +158,7 @@ internal static class Inflate
                         throw Corrupt();
                 }
 
-                if (!Fast(ref bits, ref count, ref inNext, inEnd - FastInput, output, ref outNext, outEnd - FastOutput, litlen, offsets))
+                if (!Fast(ref bits, ref count, ref inNext, FastLimit(input, source.Length, FastInput), output, ref outNext, FastLimit(output, destination.Length, FastOutput), litlen, offsets))
                 {
                     Slow(ref bits, ref count, ref inNext, inEnd, ref overread, output, ref outNext, outEnd, litlen, offsets);
                 }
@@ -177,9 +177,9 @@ internal static class Inflate
     }
 
     /// <summary>
-    /// A block's symbols, from <paramref name="outNextRef"/>, while the input holds the bytes a refill
-    /// loads before <paramref name="inLimit"/> and the output a match and its slack before
-    /// <paramref name="outLimit"/>, with no check but the codes' and the distances': true at the
+    /// A block's symbols, from <paramref name="outNextRef"/>, while the input is before
+    /// <paramref name="inFast"/> and the output before <paramref name="outFast"/>, where
+    /// <see cref="FastLimit"/> puts them, with no check but the codes' and the distances': true at the
     /// block's end, false where either limit stops them first.
     /// </summary>
     /// <remarks>
@@ -188,15 +188,15 @@ internal static class Inflate
     /// most, and up to three literals of 15 bits at most.
     /// </remarks>
     private static unsafe bool Fast(
-        ref ulong bitsRef, ref int countRef, ref byte* inNextRef, byte* inLimit,
-        byte* output, ref byte* outNextRef, byte* outLimit, uint* litlen, uint* offsets)
+        ref ulong bitsRef, ref int countRef, ref byte* inNextRef, byte* inFast,
+        byte* output, ref byte* outNextRef, byte* outFast, uint* litlen, uint* offsets)
     {
         ulong bits = bitsRef;
         nint count = countRef;
         byte* inNext = inNextRef;
         byte* outNext = outNextRef;
         bool ended = false;
-        while (inNext <= inLimit && outNext <= outLimit)
+        while (inNext < inFast && outNext < outFast)
         {
             // Eight bytes loaded, as many as the word has room for kept: the bits above the count
             // are the stream's next, which the next load writes again.
@@ -376,6 +376,14 @@ internal static class Inflate
             outNext += length;
         }
     }
+
+    /// <summary>
+    /// The first position of a buffer of <paramref name="length"/> bytes from <paramref name="start"/>
+    /// with fewer than <paramref name="room"/> bytes after it, which the fast loops stop at; the start
+    /// itself where the buffer is shorter. Never a limit taken off a shorter buffer's end: an empty one
+    /// is a null pointer, which the subtraction would wrap past every other.
+    /// </summary>
+    private static unsafe byte* FastLimit(byte* start, int length, int room) => length >= room ? start + (length - room + 1) : start;
 
     /// <summary>
     /// Copies a match of <paramref name="length"/> bytes from <paramref name="distance"/> back, which may

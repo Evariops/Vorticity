@@ -128,6 +128,20 @@ public sealed class PageCodecTests
         Assert.Throws<ParquetFormatException>(() => Snappy.Decompress(stream, read));
     }
 
+    [Fact]
+    public void ASnappyStreamPastAnEmptyDestinationIsRefused()
+    {
+        // A stream that declares no byte, then eighty bytes of literals: the destination is empty, a
+        // null pointer, whose room the decoder's fast elements must measure rather than take a limit off.
+        byte[] stream = new byte[1 + (5 * 17)];
+        for (int i = 1; i < stream.Length; i += 17)
+        {
+            stream[i] = 0x3C;
+        }
+
+        Assert.Throws<ParquetFormatException>(() => Snappy.Decompress(stream, Span<byte>.Empty));
+    }
+
     [Theory]
     [InlineData(new byte[] { 0x35, 0x61, 0x62, 0x63, 0x00, 0x00, 0x00 })]
     [InlineData(new byte[] { 0x35, 0x61, 0x62, 0x63, 0x04, 0x00, 0x00 })]

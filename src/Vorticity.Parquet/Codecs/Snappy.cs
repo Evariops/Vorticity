@@ -95,7 +95,7 @@ internal static class Snappy
             while (ip < ipEnd)
             {
                 // As far as the elements go without checks of their own lengths, then one with them.
-                (nint fastIn, nint fastOut) = FastElements(ip, ipEnd - FastInput, op, opEnd - FastOutput, output);
+                (nint fastIn, nint fastOut) = FastElements(ip, FastLimit(input, source.Length, FastInput), op, FastLimit(output, destination.Length, FastOutput), output);
                 ip = (byte*)fastIn;
                 op = (byte*)fastOut;
                 if (ip >= ipEnd)
@@ -289,6 +289,14 @@ internal static class Snappy
 
         return ((nint)ip, (nint)op);
     }
+
+    /// <summary>
+    /// The first position of a buffer of <paramref name="length"/> bytes from <paramref name="start"/>
+    /// with no more than <paramref name="room"/> bytes after it, which the fast elements stop at; the
+    /// start itself where the buffer is shorter. Never a limit taken off a shorter buffer's end: an
+    /// empty one is a null pointer, which the subtraction would wrap past every other.
+    /// </summary>
+    private static unsafe byte* FastLimit(byte* start, int length, int room) => length > room ? start + (length - room) : start;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]
