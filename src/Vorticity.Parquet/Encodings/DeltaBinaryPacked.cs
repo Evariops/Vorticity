@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Vorticity.Compute;
 using Vorticity.Serialization;
 
 namespace Vorticity.Parquet.Encodings;
@@ -111,6 +112,17 @@ internal static class DeltaBinaryPacked
             {
                 uint minimum = (uint)Varint.ZigZagDecode64(Varint.Read64<Errors>(data, ref position));
                 ReadOnlySpan<byte> widths = Take(data, ref position, header.Miniblocks);
+                if (!widths.ContainsAnyExcept((byte)0))
+                {
+                    // Every delta of the block is its minimum: the block is a progression, written
+                    // at once.
+                    int run = Math.Min(header.BlockValues, header.Count - done);
+                    Progression.Fill(MemoryMarshal.Cast<int, uint>(destination.Slice(done, run)), last + minimum, minimum);
+                    last += minimum * (uint)run;
+                    done += run;
+                    continue;
+                }
+
                 for (int m = 0; m < header.Miniblocks && done < header.Count; m++)
                 {
                     int width = widths[m];
@@ -130,11 +142,8 @@ internal static class DeltaBinaryPacked
                     if (width == 0)
                     {
                         // Every delta is the minimum: a progression.
-                        for (int i = 0; i < take; i++)
-                        {
-                            last += minimum;
-                            Unsafe.Add(ref into, i) = (int)last;
-                        }
+                        Progression.Fill(MemoryMarshal.Cast<int, uint>(destination.Slice(done, take)), last + minimum, minimum);
+                        last += minimum * (uint)take;
                     }
                     else
                     {
@@ -195,6 +204,17 @@ internal static class DeltaBinaryPacked
             {
                 ulong minimum = (ulong)Varint.ZigZagDecode64(Varint.Read64<Errors>(data, ref position));
                 ReadOnlySpan<byte> widths = Take(data, ref position, header.Miniblocks);
+                if (!widths.ContainsAnyExcept((byte)0))
+                {
+                    // Every delta of the block is its minimum: the block is a progression, written
+                    // at once.
+                    int run = Math.Min(header.BlockValues, header.Count - done);
+                    Progression.Fill(MemoryMarshal.Cast<long, ulong>(destination.Slice(done, run)), last + minimum, minimum);
+                    last += minimum * (ulong)run;
+                    done += run;
+                    continue;
+                }
+
                 for (int m = 0; m < header.Miniblocks && done < header.Count; m++)
                 {
                     int width = widths[m];
@@ -214,12 +234,8 @@ internal static class DeltaBinaryPacked
                     if (width == 0)
                     {
                         // Every delta is the minimum: a progression.
-                        ref long first = ref MemoryMarshal.GetReference(into);
-                        for (int i = 0; i < take; i++)
-                        {
-                            last += minimum;
-                            Unsafe.Add(ref first, i) = (long)last;
-                        }
+                        Progression.Fill(MemoryMarshal.Cast<long, ulong>(into), last + minimum, minimum);
+                        last += minimum * (ulong)take;
                     }
                     else if (width <= 57)
                     {
