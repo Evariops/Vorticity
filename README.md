@@ -1,27 +1,38 @@
 # Vorticity
 
-A **pure .NET, dependency-free** implementation of the [Vortex](https://vortex.dev) columnar
-file format (LF AI & Data).
+Vorticity is a **high-performance**, pure .NET implementation of the [Vortex](https://vortex.dev)
+columnar file format, with no dependencies: it reads and writes Vortex files faster than Vortex's
+own Rust implementation, and its group bys run faster than DuckDB's.
 
 ## Performance
 
-**Faster than Vortex's Rust implementation on most of what is measured**, process against process
-on the same machine, both sides doing the same work. A table of four columns and 1,048,576 rows,
-Native AOT on an Apple M4 Pro, Rust's time over Vorticity's:
+Each speedup below is the other side's time divided by Vorticity's, so anything above 1.00x means
+Vorticity is faster. Both sides run as separate processes on the same machine, an Apple M4 Pro with
+Native AOT, and do the same work.
 
-| scenario | one core | all 14 cores |
+Against Vortex's own Rust implementation, Vorticity is faster in every scenario, and often twice as
+fast. On a table of four columns and a million rows:
+
+| scenario | speedup, one core | speedup, 14 cores |
 |---|---:|---:|
-| read every column | 1.98x | 2.31x |
-| read one column of four | 2.23x | 2.24x |
-| filter, 1 % of the rows | 1.35x | 2.89x |
-| filter, half the rows | 2.05x | 2.31x |
-| take 1,000 scattered rows | 1.59x | 1.17x |
-| write the table back out | 2.39x | 1.37x |
+| read every column | 1.99x | 2.48x |
+| read one column of four | 2.31x | 2.51x |
+| filter, 1 % of the rows | 1.45x | 3.01x |
+| filter, half the rows | 2.08x | 2.37x |
+| take 1,000 scattered rows | 1.64x | 1.11x |
+| write the table back out | 2.37x | 1.35x |
 
-Per encoding, on one core: decoding faster on 50 of 57 files (median 1.27x), taking rows faster
-from all 57 (median 1.14x), writing faster on all 56 (median 3.82x). A scan allocates next to
-nothing per batch. [How it is measured](#how-performance-is-measured), and every figure on [the
-benchmark page](docs/guide/benchmarks.md).
+Against DuckDB, its group bys win all 13 queries we measured, on the same files and with the same
+number of threads:
+
+| DuckDB reading | speedup, one thread | speedup, 14 threads |
+|---|---:|---:|
+| its own table, loaded beforehand | 1.43x to 6.15x | 1.18x to 3.50x |
+| the file, through its Vortex extension | 1.58x to 5.65x | 1.39x to 4.47x |
+
+You can read [how it is measured](#how-performance-is-measured) below, and find every figure on the
+pages [against Rust](docs/guide/benchmarks.md), [against DuckDB](docs/guide/benchmarks-duckdb.md)
+and [on x64](docs/guide/benchmarks-x64.md).
 
 ## Features
 
@@ -154,7 +165,7 @@ at the same version as the core.
 | [docs/guide/](docs/guide/README.md) | **Using the library**: pages named by what you are trying to do, each one a program the samples project compiles and runs |
 | [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | Every figure the bench publishes: what this costs against the Rust implementation, and each kernel against its baseline |
 | [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | The same page from an x64 machine, a Zen 4 processor under Windows, against a Rust built there |
-| [docs/guide/benchmarks-duckdb.md](docs/guide/benchmarks-duckdb.md) | Our group bys against DuckDB's on the same files, through its Vortex reader and from its own table: where we lead and where we trail |
+| [docs/guide/benchmarks-duckdb.md](docs/guide/benchmarks-duckdb.md) | Our group bys against DuckDB's on the same files, through its Vortex reader and from its own table, query by query, on one thread and on fourteen |
 | [docs/design/](docs/design/README.md) | **Why it is shaped this way**: the design documents, from the scope to the byte layout to the public API |
 
 ## How performance is measured
@@ -167,12 +178,12 @@ and hands what it writes to a sink that keeps nothing; on one core, Rust is time
 of its two ways of splitting a scan. The speedup is Rust's time over Vorticity's: above 1.00x,
 Vorticity is faster. The table above is read from the file Vorticity writes.
 
-Per encoding, Vorticity is well ahead on text, nested and compressed integer columns (`varbin`
-5.70x, `struct` 5.10x, `map` 3.11x, `pco` 2.96x), and level or behind on 7 files by a fifth at
-most: booleans that start at a bit offset (0.80x and 0.99x), masked columns (0.93x to 0.99x),
-`onpair` (0.97x) and `decimal` (1.00x). Its file is no more than 5 % larger than Rust's, or
-smaller, on 45 of 56. Both readers warmed up in one process, Rust is faster on 2 of 19 cases: a
-prefix filter on FSST strings (0.93x) and a band over bit-packed integers (0.98x).
+Per encoding, Vorticity is well ahead on nested, text and compressed integer columns (`struct`
+6.92x, `varbin` 6.08x, `map` 3.28x, `pco` 3.06x), and level or behind on 10 files by a tenth at
+most: plain booleans (0.90x), `onpair` (0.95x), `decimal` (0.96x), masked columns (0.96x to
+1.00x), patched bit-packed integers (0.98x), `alprd` and `sequence` (1.00x). Its file is no more
+than 5 % larger than Rust's, or smaller, on 44 of 56. Both readers warmed up in one process, Rust
+is faster on 1 of 19 cases: a prefix filter on FSST strings (0.93x).
 
 Every figure is on [the benchmark page](docs/guide/benchmarks.md), each section with the machine
 and the commit it was measured on, and [its x64 twin](docs/guide/benchmarks-x64.md) holds the
