@@ -20,8 +20,8 @@ public sealed class ParquetAllocationCollection
 
 /// <summary>
 /// A scan of a Parquet file allocates nothing per batch: a full scan of a row group of 64 batches
-/// costs what one of 16 does, once warm, under every codec but GZIP, whose stream allocates per page,
-/// for pages v1 and v2, and over every encoding the writer makes, a nested list's among them.
+/// costs what one of 16 does, once warm, under every codec, for pages v1 and v2, and over every
+/// encoding the writer makes, a nested list's among them.
 /// </summary>
 /// <remarks>
 /// Not an equality: the 48 batches more would show as 1 152 bytes at the least, the smallest object
@@ -51,7 +51,9 @@ public sealed class ScanAllocationTests : IDisposable
     [InlineData(ParquetCompression.Zstd, DataPageVersion.V2)]
     [InlineData(ParquetCompression.Lz4Raw, DataPageVersion.V2)]
     [InlineData(ParquetCompression.Brotli, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Gzip, DataPageVersion.V2)]
     [InlineData(ParquetCompression.Zstd, DataPageVersion.V1)]
+    [InlineData(ParquetCompression.Gzip, DataPageVersion.V1)]
     public async Task AScanAllocatesNothingPerBatch(ParquetCompression compression, DataPageVersion pages)
     {
         DebuggableAttribute? debuggable = typeof(ParquetFile).Assembly.GetCustomAttribute<DebuggableAttribute>();

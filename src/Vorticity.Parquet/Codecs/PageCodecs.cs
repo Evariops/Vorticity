@@ -18,12 +18,9 @@ namespace Vorticity.Parquet.Codecs;
 /// A decompression writes into a destination of exactly the page's uncompressed length, which the
 /// caller has held to its cap before allocating it, and a page that decompresses to any other length
 /// is <see cref="ParquetFormatException"/>. ZSTD goes through <c>Vorticity.Zstd</c>, with the
-/// decompressor the caller's scan holds; SNAPPY and LZ4_RAW are this package's; GZIP and BROTLI are
-/// the base class library's. LZO and the deprecated LZ4 have no format the standard gives, and are
-/// refused, as is a codec number the standard does not define.
-/// </para>
-/// <para>
-/// GZIP is the one codec that allocates per page: the base class library reads it through a stream.
+/// decompressor the caller's scan holds; SNAPPY, LZ4_RAW and GZIP's decoding are this package's;
+/// GZIP's encoding and BROTLI are the base class library's. LZO and the deprecated LZ4 have no format
+/// the standard gives, and are refused, as is a codec number the standard does not define.
 /// </para>
 /// </remarks>
 internal static class PageCodecs
@@ -51,7 +48,7 @@ internal static class PageCodecs
                 DecompressZstd(source, destination, zstd ?? throw new ArgumentNullException(nameof(zstd)));
                 return;
             case CompressionCodec.Gzip:
-                DecompressGzip(source, destination);
+                Gzip.Decompress(source, destination);
                 return;
             case CompressionCodec.Brotli:
                 if (!BrotliDecoder.TryDecompress(source, destination, out int written) || written != destination.Length)
@@ -91,50 +88,6 @@ internal static class PageCodecs
         if (written != destination.Length)
         {
             ParquetThrow.Format("A ZSTD page decompresses to fewer bytes than its header declares.");
-        }
-    }
-
-    private static unsafe void DecompressGzip(ReadOnlySpan<byte> source, Span<byte> destination)
-    {
-        if (source.IsEmpty)
-        {
-            // Even an empty member has a header and a trailer; no bytes at all hold no member.
-            if (!destination.IsEmpty)
-            {
-                ParquetThrow.Format("A GZIP page holds no member.");
-            }
-
-            return;
-        }
-
-        fixed (byte* input = source)
-        {
-            using UnmanagedMemoryStream stream = new(input, source.Length);
-            using GZipStream gzip = new(stream, CompressionMode.Decompress);
-            int written = 0;
-            try
-            {
-                while (written < destination.Length)
-                {
-                    int read = gzip.Read(destination[written..]);
-                    if (read == 0)
-                    {
-                        break;
-                    }
-
-                    written += read;
-                }
-
-                Span<byte> probe = stackalloc byte[1];
-                if (written != destination.Length || gzip.Read(probe) != 0)
-                {
-                    ParquetThrow.Format("A GZIP page decompresses to another length than its header declares.");
-                }
-            }
-            catch (InvalidDataException exception)
-            {
-                throw new ParquetFormatException("A GZIP page is corrupt.", exception);
-            }
         }
     }
 

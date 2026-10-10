@@ -48,7 +48,7 @@ written; interoperability with other readers is not measured.
 | what a page decodes into | the core's canonical arena, the nodes a Vortex block decodes into | 5.5 |
 | the pages it writes | data pages v2, on a grid of 8 192 rows shared by every column | 6.1 |
 | the encodings it writes | chosen per page by exact formulas from one statistics pass, as the core's writer chooses | 6.2 |
-| the codecs | ZSTD through `Vorticity.Zstd`; SNAPPY and LZ4_RAW written here; GZIP and BROTLI through the base class library; neither LZ4 nor LZO, whose formats the standard does not give | 6.4, 3.2 |
+| the codecs | ZSTD through `Vorticity.Zstd`; SNAPPY, LZ4_RAW and GZIP's decoding written here; GZIP's encoding and BROTLI through the base class library; neither LZ4 nor LZO, whose formats the standard does not give | 6.4, 3.2, 7 |
 | the gaps in the standard | sixteen, each decided | 3.2 |
 
 ## 2. Where it sits
@@ -87,7 +87,7 @@ await writer.CompleteAsync();
 | `Metadata/` | the footer's index and its lazy views; the schema compiled to leaves and levels |
 | `Pages/` | page headers, decompression into place, checksums |
 | `Encodings/` | every encoding of the standard, decoded and encoded |
-| `Codecs/` | SNAPPY and LZ4_RAW; adapters to `Vorticity.Zstd` and to the base class library's GZIP and Brotli |
+| `Codecs/` | SNAPPY, LZ4_RAW, and GZIP's members and DEFLATE data read; adapters to `Vorticity.Zstd` and to the base class library's GZIP encoder and Brotli |
 | `Levels/` | definition and repetition levels, to and from the arena's validity and list offsets |
 | `Reading/` | `ParquetScanSource`: the planner, the pruning cascade, the column cursors |
 | `Writing/` | the writer, one column writer per leaf, the page index, the Bloom filters, the footer |
@@ -125,7 +125,7 @@ against every decision that cites the text it changes.
 |---|---|---|
 | [Apache Parquet format][pf] | 2.14.0, commit `04d56f291f` | everything below: [README.md][readme] (layout, levels, data pages, checksums), [parquet.thrift][thrift] (every structure), [Encodings.md][enc], [AlpEncoding.md][alp], [Compression.md][comp], [LogicalTypes.md][lt], [PageIndex.md][pi], [BloomFilter.md][bloom], [Encryption.md][crypt], [VariantEncoding.md][var], [VariantShredding.md][shred], [Geospatial.md][geo], [BinaryProtocolExtensions.md][ext], and [CONTRIBUTING.md][contrib] for what a new feature may break |
 | [Thrift compact protocol][compact] | Thrift 0.25.0, commit `27e8a425ff` | the bytes of every structure of `parquet.thrift` |
-| [RFC 1952][rfc1952], [RFC 7932][rfc7932], [RFC 8878][rfc8878] | — | GZIP, BROTLI, ZSTD |
+| [RFC 1951][rfc1951], [RFC 1952][rfc1952], [RFC 7932][rfc7932], [RFC 8878][rfc8878] | — | DEFLATE, GZIP, BROTLI, ZSTD |
 | [Snappy format][snappy] | snappy 1.3.1 | SNAPPY |
 | [LZ4 block format][lz4] | lz4 1.10.0 | LZ4_RAW |
 | [xxHash specification][xxh] | 0.1.1 | the Bloom filter's XXH64 |
@@ -725,8 +725,8 @@ shrink by an eighth is stored with `is_compressed` false, so its reader skips th
 page, which has no such flag, takes the chunk's codec. ZSTD goes through `Vorticity.Zstd`, one frame
 per page. SNAPPY and LZ4_RAW are this package's own, each a valid stream of its format by its own
 deterministic algorithm, with no claim to match another compressor's bytes. GZIP and BROTLI go
-through `System.IO.Compression`; its GZIP stream allocates per page, which the allocation gates name
-as the one exception.
+through `System.IO.Compression`, whose GZIP stream allocates per page; a GZIP page is read by this
+package's own decoder (§7).
 
 At a degree above one, the columns of a block stage their rows side by side on the writer's
 threads, each closing its own page; rows too few to pay for the threads stage on the writing one.
@@ -831,6 +831,7 @@ again with hardware intrinsics disabled and compares bit for bit
 | checked narrowing | `INT(8)`, `INT(16)` | the core's kernels: the page's extremes against the annotation's range, two accumulators a register, then truncation by vector narrowing: four million values in 0.62 ms against 2.2 |
 | dictionary gather | materializing a dictionary column | gathers of 4 and 8 bytes, views by pairs of 8; codes 8 bits wide or narrower unpacked a byte each, through which a dictionary of up to 128 bytes of values is permuted in registers, 64 bytes of output an instruction (`VPERMI2B`): ClickBench's first file, mostly such columns, scans in 127 ms on one lane against 146 through codes of four bytes |
 | UTF-8 | text | `System.Text.Unicode.Utf8.IsValid` |
+| GZIP | the codec's decoding | members and their trailers checked as zlib checks them; DEFLATE's symbols read from tables of their next bits, 2^11 entries for the literals and lengths and 2^8 for the distances, a longer codeword through a subtable, each entry the bits it takes with its extra bits and its value; the bits in a 64-bit word refilled with no branch while the input holds 16 bytes, up to three literals a refill, matches copied 16 bytes at a time while the output holds 290: the taxi trips' pages decode at 0.67 GB/s against the base class library's 0.59, their scan on one lane in 155 ms against 171, with no allocation per page |
 | SNAPPY, LZ4_RAW | the codecs | Snappy's elements read from a table of their tag while the input holds 64 bytes past it and the output 80, a literal of up to 60 bytes and a copy of up to 64 stored whole in 16-byte vectors, a short offset's pattern doubled into a word, the next tag found from the tag alone: ClickBench's `Title` column, a third of its bytes, reads in 26 ms against 40; LZ4's copies as overlapping 16-byte stores within the slack; encoders by a hash table, greedy, LZ4's end-of-block rules kept |
 | checksums, hashes | CRC32, XXH64, the split-block filter | `System.IO.Hashing`; the core's `SplitBlockBloom` |
 
@@ -894,7 +895,7 @@ files read or fail cleanly; a third of the suite's read to the end.
 
 | promise | gate |
 |---|---|
-| nothing allocated per batch | allocations counted, warm, across full scans of a row group of 64 batches and of one of 16, which cost the same within 256 bytes, for every encoding the writer makes, pages v1 and v2, and every codec but GZIP |
+| nothing allocated per batch | allocations counted, warm, across full scans of a row group of 64 batches and of one of 16, which cost the same within 256 bytes, for every encoding the writer makes, pages v1 and v2, and every codec |
 | a plain page without nulls is its column | on a mapped file of this writer, every `Values` of an uncompressed plain page lies inside the mapping; a v2 compressed plain page decompresses into the column's buffer, and the count of batches copied out of the pages they span stays at 0, where pages of three rows read in batches of four count theirs |
 | a page is decompressed once per scan | the file's pages walked by their headers: data and dictionary pages decoded equal theirs, decompressions equal those that go through the codec, under ZSTD, Snappy and none, pages v1 and v2, mapped and read; a dictionary decoded to prune is not decoded again |
 | a pruned page is neither read nor decoded | `Requests` and `BytesRequested` equal the plan's; pages decoded equal the pages of the batches the page index leaves, of every column, nested ones among them |
@@ -983,6 +984,7 @@ LZ4 and LZO are in no phase: the standard gives neither format (§3.2 #8).
 [ext]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/BinaryProtocolExtensions.md
 [contrib]: https://github.com/apache/parquet-format/blob/04d56f291ff963e98bc37ab8100e2fc133ff583c/CONTRIBUTING.md
 [compact]: https://github.com/apache/thrift/blob/27e8a425ffb498e190df3a12e239326bf5ba9ed6/doc/specs/thrift-compact-protocol.md
+[rfc1951]: https://www.rfc-editor.org/rfc/rfc1951
 [rfc1952]: https://www.rfc-editor.org/rfc/rfc1952
 [rfc7932]: https://www.rfc-editor.org/rfc/rfc7932
 [rfc8878]: https://www.rfc-editor.org/rfc/rfc8878
