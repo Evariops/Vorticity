@@ -198,13 +198,11 @@ internal static class Program
     {
         long rows = 0;
         int batches = 0;
-        await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(CancellationToken.None).ConfigureAwait(false))
+        // Borrowed batches, each valid until the next: a scan that copies none of them out.
+        await foreach (BatchView batch in file.Scan().WithCancellation(CancellationToken.None))
         {
-            using (batch)
-            {
-                rows += batch.RowCount;
-                batches++;
-            }
+            rows += batch.RowCount;
+            batches++;
         }
 
         Console.Out.WriteLine(string.Create(CultureInfo.InvariantCulture, $"scan        {rows} rows in {batches} batches"));
