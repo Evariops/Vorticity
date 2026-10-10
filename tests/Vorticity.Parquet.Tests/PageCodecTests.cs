@@ -151,6 +151,42 @@ public sealed class PageCodecTests
         Assert.Throws<ParquetFormatException>(() => Lz4Block.Decompress(block, new byte[12]));
 
     [Theory]
+    [InlineData(CompressionCodec.Snappy)]
+    [InlineData(CompressionCodec.Lz4Raw)]
+    [InlineData(CompressionCodec.Gzip)]
+    internal void AMutatedStreamIsReadOrRefusedIntoADestinationOfAnySize(CompressionCodec codec)
+    {
+        // This package's own decoders, each stream mutated a few bytes and read into a destination
+        // of the edge sizes, empty among them, as a page header that lies would give it.
+        Random random = new((int)codec * 41);
+        for (int trial = 0; trial < 2_000; trial++)
+        {
+            byte[] data = Shaped(random, random.Next(0, 3_000), random.Next(4));
+            byte[] compressed = new byte[PageCodecs.MaxCompressedLength(codec, data.Length)];
+            int size = PageCodecs.Compress(codec, 1, data, compressed, null);
+            byte[] stream = compressed.AsSpan(0, size).ToArray();
+            for (int e = random.Next(0, 3); e > 0; e--)
+            {
+                int at = random.Next(stream.Length);
+                stream[at] = random.Next(2) == 0 ? (byte)random.Next(256) : (byte)(stream[at] ^ (1 << random.Next(8)));
+            }
+
+            int length = random.Next(4) == 0 ? random.Next(stream.Length + 1) : stream.Length;
+            int[] sizes = [0, 1, Math.Max(0, data.Length - 1), data.Length, data.Length + 1, random.Next(data.Length + 200)];
+            foreach (int target in sizes)
+            {
+                try
+                {
+                    PageCodecs.Decompress(codec, stream.AsSpan(0, length), new byte[target], null);
+                }
+                catch (ParquetFormatException)
+                {
+                }
+            }
+        }
+    }
+
+    [Theory]
     [InlineData((int)CompressionCodec.Lzo)]
     [InlineData((int)CompressionCodec.Lz4)]
     [InlineData(99)]
