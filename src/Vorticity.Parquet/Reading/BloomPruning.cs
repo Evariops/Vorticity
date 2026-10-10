@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
@@ -65,8 +66,7 @@ internal static class BloomPruning
                 continue;
             }
 
-            // A writer that left out the length is read its header's worth first, short of the footer.
-            long length = chunk.BloomFilterLength > 0 ? chunk.BloomFilterLength : Math.Min(64, file.Length - 8 - chunk.BloomFilterOffset);
+            long length = Length(file, chunk);
             if (!file.Holds(chunk.BloomFilterOffset, length))
             {
                 continue;
@@ -92,34 +92,82 @@ internal static class BloomPruning
                 continue;
             }
 
-            ReadOnlySpan<byte> read = requests.GetBuffer(slots[i]).Span;
-            if (!BloomFilterHeader.TryRead(read, out int header, out int bitset))
-            {
-                continue;
-            }
-
-            if (read.Length < header + bitset)
-            {
-                // The length was left out, or is short of the header's: the bitset is read again whole.
-                ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
-                if (!file.Holds(chunk.BloomFilterOffset + header, bitset))
-                {
-                    continue;
-                }
-
-                using SegmentRequestSet again = new();
-                int slot = again.Add(new SegmentSpec((ulong)chunk.BloomFilterOffset + (ulong)header, (uint)bitset, 0, 0, 0));
-                ScanCounters.Note(metrics, 1, bitset);
-                await file.Reader.ReadManyAsync(again, cancellationToken).ConfigureAwait(false);
-                words[i] = SplitBlockBloom.Words(again.GetBuffer(slot).Span).ToArray();
-                again.Release();
-                continue;
-            }
-
-            words[i] = SplitBlockBloom.Words(read.Slice(header, bitset)).ToArray();
+            words[i] = await WordsAsync(file, footer.Chunk(group, filter.Columns[i]), requests.GetBuffer(slots[i]), metrics, cancellationToken).ConfigureAwait(false);
         }
 
         return Absent(filter.Filter, filter, words);
+    }
+
+    /// <summary>The words of a chunk's filter, read alone; null when it has none this build reads.</summary>
+    internal static async ValueTask<uint[]?> ReadFilterAsync(ParquetFile file, ColumnChunkMetadata chunk, ScanCounters? metrics, CancellationToken cancellationToken)
+    {
+        long length = Length(file, chunk);
+        if (chunk.BloomFilterOffset < 0 || !file.Holds(chunk.BloomFilterOffset, length))
+        {
+            return null;
+        }
+
+        using SegmentRequestSet requests = new();
+        int slot = requests.Add(new SegmentSpec((ulong)chunk.BloomFilterOffset, (uint)length, 0, 0, 0));
+        ScanCounters.Note(metrics, 1, length);
+        await file.Reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        uint[]? words = await WordsAsync(file, chunk, requests.GetBuffer(slot), metrics, cancellationToken).ConfigureAwait(false);
+        requests.Release();
+        return words;
+    }
+
+    /// <summary>
+    /// Whether a chunk's filter may hold <paramref name="value"/>: its PLAIN bytes, as a writer hashes
+    /// them, found; null when the value has no such bytes this build names.
+    /// </summary>
+    internal static bool? Holds(ParquetColumn column, FilterLiteral value, uint[] words, Span<byte> plain)
+    {
+        if (column.Physical == PhysicalType.ByteArray)
+        {
+            return column.Form is LeafForm.Binary or LeafForm.Utf8 && value.Kind == FilterLiteralKind.Bytes
+                ? SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(value.BytesValue, BloomHash.XxHash64))
+                : null;
+        }
+
+        return TryPlain(column, value, plain, out int length, out _)
+            ? SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(plain[..length], BloomHash.XxHash64))
+            : null;
+    }
+
+    /// <summary>The bytes a filter's first read takes: its length, or, where a writer left it out, its header's worth short of the footer.</summary>
+    private static long Length(ParquetFile file, ColumnChunkMetadata chunk) =>
+        chunk.BloomFilterLength > 0 ? chunk.BloomFilterLength : Math.Min(64, file.Length - 8 - chunk.BloomFilterOffset);
+
+    /// <summary>
+    /// The words of the filter whose first bytes <paramref name="read"/> holds, read at the chunk's
+    /// offset: the bitset read again whole where the first read stopped short of it, as it does where
+    /// a writer left the filter's length out; null when the bytes are no filter this build reads, or
+    /// its bitset would lie past the file's pages.
+    /// </summary>
+    private static async ValueTask<uint[]?> WordsAsync(ParquetFile file, ColumnChunkMetadata chunk, VortexBuffer read, ScanCounters? metrics, CancellationToken cancellationToken)
+    {
+        if (!BloomFilterHeader.TryRead(read.Span, out int header, out int bitset))
+        {
+            return null;
+        }
+
+        if (read.Length >= header + bitset)
+        {
+            return SplitBlockBloom.Words(read.Span.Slice(header, bitset)).ToArray();
+        }
+
+        if (!file.Holds(chunk.BloomFilterOffset + header, bitset))
+        {
+            return null;
+        }
+
+        using SegmentRequestSet again = new();
+        int slot = again.Add(new SegmentSpec((ulong)chunk.BloomFilterOffset + (ulong)header, (uint)bitset, 0, 0, 0));
+        ScanCounters.Note(metrics, 1, bitset);
+        await file.Reader.ReadManyAsync(again, cancellationToken).ConfigureAwait(false);
+        uint[] words = SplitBlockBloom.Words(again.GetBuffer(slot).Span).ToArray();
+        again.Release();
+        return words;
     }
 
     /// <summary>Whether <paramref name="path"/> is a column an equality of <paramref name="filter"/> asks about.</summary>
