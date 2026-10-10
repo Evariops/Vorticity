@@ -119,6 +119,21 @@ public sealed record DatasetOptions
     public bool LockedStore { get; init; }
 
     /// <summary>
+    /// Whether the dataset is encrypted. Set at creation, every object it writes is sealed, data
+    /// objects and commit objects, under a data key drawn for it and a dataset id minted with it, both
+    /// from <see cref="Session"/>'s keyring. Given to a handle of an existing dataset, it refuses one
+    /// that is plain.
+    /// </summary>
+    /// <remarks>
+    /// A dataset is also created encrypted when its session seals its files
+    /// (<see cref="VortexSessionOptions.EncryptFiles"/>) or refuses plaintext. It is encrypted when its
+    /// commit objects are sealed, and nothing in a commit header says so: a handle of a session with
+    /// the keyring opens it whatever this says, and refuses a dataset that mixes sealed and plain
+    /// objects. A plain dataset becomes encrypted only by being copied into a new one.
+    /// </remarks>
+    public bool Encrypted { get; init; }
+
+    /// <summary>
     /// The smallest object whose deleted rows are marked in its entry rather than rewritten out of
     /// it; 1 MiB by default, below which a rewrite costs a few milliseconds and keeps reads plain.
     /// </summary>

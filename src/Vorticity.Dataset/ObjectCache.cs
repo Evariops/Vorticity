@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.File;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
@@ -196,8 +197,9 @@ internal sealed class ObjectCache : IAsyncDisposable
         }
 
         // Through the session, so the store sees at most its reads in flight and a segment read once
-        // is served from its cache to every scan that asks again.
-        ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);
+        // is served from its cache to every scan that asks again. An encrypted dataset's object is
+        // opened through a sealed reader, its object id checked against the entry's uid.
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, cancellationToken).ConfigureAwait(false);
         try
         {
             VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), OpenOptionsWith(fragments), cancellationToken).ConfigureAwait(false);
@@ -321,11 +323,11 @@ internal sealed class ObjectCache : IAsyncDisposable
         await held.Source.DisposeAsync().ConfigureAwait(false);
     }
 
-    private sealed class Held(VortexFile file, ObjectSegmentSource source)
+    private sealed class Held(VortexFile file, ISegmentReader source)
     {
         internal VortexFile File { get; } = file;
 
-        internal ObjectSegmentSource Source { get; } = source;
+        internal ISegmentReader Source { get; } = source;
 
         internal int Leases { get; set; }
 

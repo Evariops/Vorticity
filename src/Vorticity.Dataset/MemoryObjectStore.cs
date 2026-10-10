@@ -136,7 +136,7 @@ public sealed class MemoryObjectStore : IObjectStore
             // An object's array is never written after it is stored, so a lease on it needs no copy
             // and no owner: a delete drops the map's reference, and the lease keeps its own.
             int available = (int)Math.Min(length, entry.Bytes.Length - offset);
-            return new ObjectRange(new SegmentLease(entry.Bytes.AsMemory((int)offset, available)), entry.Token);
+            return new ObjectRange(new SegmentLease(entry.Bytes.AsMemory((int)offset, available)), entry.Token, entry.Bytes.Length);
         }
     }
 

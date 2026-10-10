@@ -86,6 +86,12 @@ internal abstract record DatasetOperation
     /// <param name="To">The schema the dataset takes.</param>
     /// <param name="Retired">The names retired once it has, the earlier ones included.</param>
     public sealed record ChangeSchema(ReadOnlyMemory<byte> From, ReadOnlyMemory<byte> To, IReadOnlyList<RetiredColumn> Retired) : DatasetOperation;
+
+    /// <summary>
+    /// Publishes a version that changes nothing but the data key it is sealed under: the commit that
+    /// <see cref="VortexDataset.RekeyAsync"/> makes, which always applies.
+    /// </summary>
+    public sealed record Rekey : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>

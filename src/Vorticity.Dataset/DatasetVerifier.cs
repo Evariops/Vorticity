@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
 using Vorticity.File;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
@@ -331,11 +332,20 @@ internal static class DatasetVerifier
                 return;
             }
 
+            // A sealed object's envelope first: its frames all authenticate as its plaintext is hashed,
+            // and its two descriptors are the same bytes.
+            if (store is SealedObjectStore { Seals: true } sealedStore
+                && await sealedStore.CheckEnvelopeAsync(entry.Key, cancellationToken).ConfigureAwait(false) is { } envelope)
+            {
+                Problems.Add(envelope);
+                return;
+            }
+
             if (entry.Hash == UInt128.Zero)
             {
                 Unhashed++;
             }
-            else if (await HashAsync(entry.Key, found.Length).ConfigureAwait(false) is var hash && hash != entry.Hash)
+            else if (await HashAsync(entry, found.Length).ConfigureAwait(false) is { } hash && hash != entry.Hash)
             {
                 Problems.Add(Invariant($"'{entry.Key}' hashes to {hash:x32} and its entry says {entry.Hash:x32}"));
             }
@@ -362,7 +372,17 @@ internal static class DatasetVerifier
         private async ValueTask CheckFileAsync(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
         {
             VortexOpenOptions options = ObjectCache.OpenOptionsWith(fragments);
-            ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
+            ISegmentReader source;
+            try
+            {
+                source = await SealedObjectStore.OpenDataAsync(store, entry.Key, entry.Uid, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception unreadable) when (unreadable is VortexFormatException or VortexEncryptionException)
+            {
+                Problems.Add($"'{entry.Key}' does not open: {unreadable.Message}");
+                return;
+            }
+
             await using (source.ConfigureAwait(false))
             {
                 VortexFile file;
@@ -370,7 +390,7 @@ internal static class DatasetVerifier
                 {
                     file = await VortexFile.OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
                 }
-                catch (VortexFormatException unreadable)
+                catch (Exception unreadable) when (unreadable is VortexFormatException or VortexEncryptionException)
                 {
                     Problems.Add($"'{entry.Key}' does not open: {unreadable.Message}");
                     return;
@@ -453,39 +473,89 @@ internal static class DatasetVerifier
                     continue;
                 }
 
-                byte[] bytes = new byte[head.Length];
-                for (long at = 0; at < head.Length; at += HashChunk)
-                {
-                    using ObjectRange range = await store
-                        .GetRangeAsync(key, at, (int)Math.Min(HashChunk, head.Length - at), cancellationToken).ConfigureAwait(false);
-                    range.Bytes.CopyTo(bytes.AsSpan((int)at));
-                }
-
+                // A sealed commit is read whole as plaintext, every frame authenticated on the way,
+                // and its two descriptors are compared.
+                long length = head.Length;
                 try
                 {
+                    if (store is SealedObjectStore { Seals: true } sealedStore)
+                    {
+                        if (await sealedStore.CheckEnvelopeAsync(key, cancellationToken).ConfigureAwait(false) is { } envelope)
+                        {
+                            Problems.Add(envelope);
+                            continue;
+                        }
+
+                        length = await sealedStore.CommitLengthAsync(key, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    byte[] bytes = new byte[length];
+                    for (long at = 0; at < length; at += HashChunk)
+                    {
+                        using ObjectRange range = await store
+                            .GetRangeAsync(key, at, (int)Math.Min(HashChunk, length - at), cancellationToken).ConfigureAwait(false);
+                        range.Bytes.CopyTo(bytes.AsSpan((int)at));
+                    }
+
                     CommitObject.Open(bytes, bytes.Length);
                 }
-                catch (CommitFormatException torn)
+                catch (Exception torn) when (torn is CommitFormatException or VortexEncryptionException or VortexFormatException)
                 {
                     Problems.Add($"'{key}': {torn.Message}");
                 }
             }
         }
 
-        private async ValueTask<UInt128> HashAsync(string key, long length)
+        /// <summary>
+        /// The XXH3-128 of an object's content: its bytes, or a sealed object's plaintext, every
+        /// frame decrypted and checked on the way. Null, with the problem recorded, when it cannot be read.
+        /// </summary>
+        private async ValueTask<UInt128?> HashAsync(ObjectEntry entry, long length)
         {
             XxHash128 hash = new XxHash128();
-            for (long at = 0; at < length; at += HashChunk)
+            if (store is not SealedObjectStore { Seals: true })
             {
-                using ObjectRange range = await store
-                    .GetRangeAsync(key, at, (int)Math.Min(HashChunk, length - at), cancellationToken).ConfigureAwait(false);
-                foreach (ReadOnlyMemory<byte> segment in range.Bytes)
+                for (long at = 0; at < length; at += HashChunk)
                 {
-                    hash.Append(segment.Span);
+                    using ObjectRange range = await store
+                        .GetRangeAsync(entry.Key, at, (int)Math.Min(HashChunk, length - at), cancellationToken).ConfigureAwait(false);
+                    foreach (ReadOnlyMemory<byte> segment in range.Bytes)
+                    {
+                        hash.Append(segment.Span);
+                    }
                 }
+
+                return hash.GetCurrentHashAsUInt128();
             }
 
-            return hash.GetCurrentHashAsUInt128();
+            try
+            {
+                ISegmentReader plain = await SealedObjectStore.OpenDataAsync(store, entry.Key, entry.Uid, cancellationToken).ConfigureAwait(false);
+                await using (plain.ConfigureAwait(false))
+                {
+                    long plainLength = await plain.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+                    for (long at = 0; at < plainLength; at += HashChunk)
+                    {
+                        Buffers.SegmentOwner chunk = await plain
+                            .ReadRangeAsync(at, (int)Math.Min(HashChunk, plainLength - at), 1, cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            hash.Append(chunk.Buffer.Span);
+                        }
+                        finally
+                        {
+                            chunk.Release();
+                        }
+                    }
+                }
+
+                return hash.GetCurrentHashAsUInt128();
+            }
+            catch (Exception unreadable) when (unreadable is VortexFormatException or VortexEncryptionException)
+            {
+                Problems.Add($"'{entry.Key}' does not decrypt: {unreadable.Message}");
+                return null;
+            }
         }
 
         private static string Invariant(FormattableString text) => text.ToString(CultureInfo.InvariantCulture);

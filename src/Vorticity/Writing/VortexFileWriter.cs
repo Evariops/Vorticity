@@ -679,10 +679,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         ArgumentNullException.ThrowIfNull(path);
         Validate(schema, options, session.Options.Extensions);
+        options = Identified(options, session);
         FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool, options.Durable);
         try
         {
-            VortexFileWriter writer = Create(SinkOver(pipe, session), schema, options, session);
+            VortexFileWriter writer = Create(SinkOver(pipe, session, options), schema, options, session);
             writer._filePipe = pipe;
             writer.Session = session;
             return writer;
@@ -697,17 +698,34 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>; the writer completes the pipe.</summary>
     internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
     {
-        VortexFileWriter writer = Create(SinkOver(sink, session), schema, options, session);
+        options = Identified(options, session);
+        VortexFileWriter writer = Create(SinkOver(sink, session, options), schema, options, session);
         writer._callerPipe = sink;
         writer.Session = session;
         return writer;
     }
 
+    /// <summary>
+    /// The options of a file the session writes, its identity minted now when the file is sealed: a
+    /// sealed file's object id is its identity, so that a dataset importing it can check the one its
+    /// entry records against the one its envelope binds.
+    /// </summary>
+    private static VortexWriteOptions Identified(VortexWriteOptions options, VortexSession session) =>
+        session.Seals && options.Identity is null ? options.WithIdentity(Guid.NewGuid()) : options;
+
     /// <summary>The sink over <paramref name="pipe"/>: a sealing stage when the session seals its files, a plain one otherwise.</summary>
-    private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session) =>
-        session.Seals
-            ? new Sealing.SealingSegmentSink(pipe, Sealing.SealParameters.ForFile(), session.Keys!.FileKeyAsync)
-            : new PipeSegmentSink(pipe);
+    private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session, VortexWriteOptions options)
+    {
+        if (!session.Seals)
+        {
+            return new PipeSegmentSink(pipe);
+        }
+
+        byte[] objectId = new byte[Sealing.SealedFormat.ObjectIdBytes];
+        options.Identity!.Value.TryWriteBytes(objectId);
+        Sealing.SealParameters parameters = Sealing.SealParameters.ForFile() with { ObjectId = objectId };
+        return new Sealing.SealingSegmentSink(pipe, parameters, session.Keys!.FileKeyAsync);
+    }
 
     /// <summary>The session the writer belongs to.</summary>
     internal VortexSession Session { get; private set; } = VortexSession.Default;

@@ -2227,6 +2227,7 @@ Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
+Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
@@ -2320,11 +2321,13 @@ Vorticity.Dataset:     const ObjectOperation PutIfAbsent = 2
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: struct Vorticity.Dataset.ObjectRange : IDisposable
 Vorticity.Dataset:     ctor ObjectRange(SegmentLease, string)
+Vorticity.Dataset:     ctor ObjectRange(SegmentLease, string, long)
 Vorticity.Dataset:     method void Dispose()
 Vorticity.Dataset:     property ReadOnlyMemory<byte> Memory { get; }
 Vorticity.Dataset:     property ReadOnlySequence<byte> Bytes { get; }
 Vorticity.Dataset:     property bool IsContiguous { get; }
 Vorticity.Dataset:     property int Length { get; }
+Vorticity.Dataset:     property long ObjectLength { get; }
 Vorticity.Dataset:     property string Token { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectStoreException : VortexException
 Vorticity.Dataset:     ctor ObjectStoreException()
@@ -2427,11 +2430,13 @@ Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, Cancella
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> RekeyAsync(CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
 Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; }
 Vorticity.Dataset:     property VortexSchema Schema { get; }
 Vorticity.Dataset:     property VortexSession Session { get; }
+Vorticity.Dataset:     property bool IsEncrypted { get; }
 Vorticity.Dataset:     property long Lag { get; }
 Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
