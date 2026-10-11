@@ -74,6 +74,14 @@ internal sealed class SegmentRequestSet : IDisposable
     public bool IsPopulated => _populated;
 
     /// <summary>
+    /// Whether the set wants its own bytes and little else: small segments far apart, as the tails of
+    /// a file's chunks are. A source whose reads cross a network then reads them in ranges of their
+    /// own once bridging the gaps between them would read far more than they hold. Cleared by
+    /// <see cref="Release"/>.
+    /// </summary>
+    internal bool Sparse { get; set; }
+
+    /// <summary>
     /// Registers a segment and returns its slot.
     /// </summary>
     /// <param name="spec">The locator, straight off the wire.</param>
@@ -398,6 +406,7 @@ internal sealed class SegmentRequestSet : IDisposable
         _count = 0;
         _cacheHits = 0;
         _populated = false;
+        Sparse = false;
         Array.Clear(_table);
 
         failure?.Throw();

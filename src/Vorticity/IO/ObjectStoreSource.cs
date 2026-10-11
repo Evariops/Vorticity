@@ -37,6 +37,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
     private readonly SegmentReadOptions _options;
     private readonly bool _ownsStore;
     private readonly ReadWindow? _window;
+
+    // The budgets a sparse request set is planned with, made at its first.
+    private SegmentReadOptions? _sparse;
     private long _length;
     private string? _token;
     private SegmentOwner? _tail;
@@ -238,6 +241,18 @@ internal sealed class ObjectStoreSource : ISegmentReader
             }
 
             int runCount = SegmentCoalescer.Plan(sorted.AsSpan(0, pending), runs.AsSpan(0, pending), _options);
+            if (requests.Sparse && Wasted(sorted.AsSpan(0, pending), runs.AsSpan(0, runCount)) > SparseWasteBytes)
+            {
+                // Small segments far apart, which bridging would read the whole object for: each is
+                // read in its own range, the window keeping them in flight together.
+                _sparse ??= new SegmentReadOptions
+                {
+                    CoalesceGapBytes = Math.Min(SparseGapBytes, _options.CoalesceGapBytes),
+                    MaxCoalescedReadBytes = _options.MaxCoalescedReadBytes,
+                    MaxPooledBytes = _options.MaxPooledBytes,
+                };
+                runCount = SegmentCoalescer.Plan(sorted.AsSpan(0, pending), runs.AsSpan(0, pending), _sparse);
+            }
 
             // Started together, so the runs cost one step of the critical path however many they are,
             // each read straight into the block its segments will be slices of.
@@ -385,6 +400,34 @@ internal sealed class ObjectStoreSource : ISegmentReader
         {
             block.Release();
         }
+    }
+
+    /// <summary>
+    /// The bytes past what a sparse request set wants that its coalesced reads may fetch before its
+    /// segments are read in ranges of their own: 8 MiB, the time of a few requests on a fast link, so
+    /// that the tails of a small object still come in one read.
+    /// </summary>
+    internal const long SparseWasteBytes = 8L << 20;
+
+    /// <summary>The widest gap a sparse set's ranges bridge once they are read on their own: 4 KiB.</summary>
+    internal const int SparseGapBytes = 4 << 10;
+
+    /// <summary>The bytes <paramref name="runs"/> read past those of <paramref name="specs"/>, which they cover.</summary>
+    private static long Wasted(ReadOnlySpan<SegmentSpec> specs, ReadOnlySpan<CoalescedRun> runs)
+    {
+        long read = 0;
+        foreach (CoalescedRun run in runs)
+        {
+            read += run.Length;
+        }
+
+        long wanted = 0;
+        foreach (SegmentSpec spec in specs)
+        {
+            wanted += spec.Length;
+        }
+
+        return read - wanted;
     }
 
     /// <summary>One request for a range, in the window when there is one, its place given back once it is answered.</summary>
