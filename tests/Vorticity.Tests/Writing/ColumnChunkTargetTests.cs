@@ -197,7 +197,45 @@ public sealed class ColumnChunkTargetTests
         }
     }
 
-    private static async Task<WriteReport> WriteAsync(string path, VortexWriteOptions options)
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task AFileChunkedApartIsTheBytesOfOneWrittenOnOneThread(int degree)
+    {
+        // Two columns gather, at targets that close their chunks at different chunks of the file,
+        // beside one chunked with the file: on several threads each is gathered and compressed on
+        // its own, and the blobs still go out where one thread puts them.
+        Decoders.EnsureRegistered();
+        string one = Temp();
+        string many = Temp();
+        try
+        {
+            VortexWriteOptions both = Apart with
+            {
+                ColumnChunkTargetBytes = Apart.ColumnChunkTargetBytes.Add("measure", 96 << 10),
+            };
+            (WriteReport single, int alone) = await WriteCountingAsync(one, both with { DegreeOfParallelism = 1 });
+            (WriteReport report, int across) = await WriteCountingAsync(many, both with { DegreeOfParallelism = degree });
+            Assert.Equal(0, alone);
+            Assert.True(across > report.ChunkRows.Length, $"{across} column chunks compressed side by side");
+            Assert.True(report.ChunkRowsOf(1).Length > 1 && report.ChunkRowsOf(2).Length > 1);
+            Assert.NotEqual(report.ChunkRowsOf(1), report.ChunkRowsOf(2));
+            Assert.Equal(single.ChunkRowsOf(2), report.ChunkRowsOf(2));
+            CancellationToken ct = TestContext.Current.CancellationToken;
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(one, ct), await System.IO.File.ReadAllBytesAsync(many, ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(one);
+            System.IO.File.Delete(many);
+        }
+    }
+
+    private static async Task<WriteReport> WriteAsync(string path, VortexWriteOptions options) =>
+        (await WriteCountingAsync(path, options)).Report;
+
+    /// <summary>Writes the table and returns the report and the column chunks compressed side by side.</summary>
+    private static async Task<(WriteReport Report, int Across)> WriteCountingAsync(string path, VortexWriteOptions options)
     {
         (DType schema, CanonicalArena arena, int root) = Build();
         await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
@@ -209,7 +247,8 @@ public sealed class ColumnChunkTargetTests
             await writer.WriteAsync(batch);
         }
 
-        return await writer.CompleteAsync();
+        WriteReport report = await writer.CompleteAsync();
+        return (report, writer.ColumnChunksAcross);
     }
 
     private static async Task<List<string>> ReadAsync(ScanBuilder scan)

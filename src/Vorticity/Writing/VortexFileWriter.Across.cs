@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Editions;
 using Vorticity.Writing;
 
@@ -33,7 +34,7 @@ public sealed partial class VortexFileWriter
     /// watches compresses on its own thread.
     /// </remarks>
     private bool CompressesAcross =>
-        _lanes > 1 && _isTabular && _fieldCount > 1 && _gathering is null && _arrayEncodings.Count > 0 &&
+        _lanes > 1 && _isTabular && _fieldCount > 1 && (_gathering is null || !_mayShareChildren) && _arrayEncodings.Count > 0 &&
         ColumnCompressor.Differential.Value is null && ArrayBlobWriter.ElementsHanded.Value is null;
 
     /// <summary>
@@ -66,14 +67,24 @@ public sealed partial class VortexFileWriter
         int firstBlock = _emittedBlocks;
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
         columns.Prepare(_fieldCount, _arrayEncodings);
+        columns.Spread(checked((int)rows), firstBlock, blocks);
         CanonicalNode root = arena.GetNode(rootIndex);
         for (int field = 0; field < _fieldCount; field++)
         {
             // A list column is narrowed on its thread, in its own arena (see ChunkColumns.Compress):
-            // its statistics read only the node's kind and rows, which the narrowing keeps.
+            // its statistics read only the node's kind and rows, which the narrowing keeps. A column
+            // with a chunk target of its own gathers on its thread, and its statistics are taken
+            // there, over the rows it gathered, once they reach the target.
             int node = root.GetFieldIndex(field);
             columns.Nodes[field] = node;
-            columns.Stats[field] = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+            if (_gathering?[field] is { } gathering)
+            {
+                columns.Gather(field, gathering);
+            }
+            else
+            {
+                columns.Stats[field] = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+            }
         }
 
         WorkFan fan = Fan!;
@@ -81,8 +92,53 @@ public sealed partial class VortexFileWriter
         {
             columns.Order(fan.Items(_fieldCount));
             fan.Run(columns, _fieldCount, arena);
-            ColumnChunksAcross += _fieldCount;
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            columns.Drop();
+        }
+    }
+
+    /// <summary>
+    /// Writes what every column with a target of its own holds, at a flush or the completion, the
+    /// columns compressed side by side and their blobs written in column order, where a write on
+    /// one thread puts them.
+    /// </summary>
+    private async ValueTask EmitGatheredAcrossAsync(Gathering?[] gathering, WorkFan fan, CancellationToken cancellationToken)
+    {
+        ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
+        columns.Prepare(_fieldCount, _arrayEncodings);
+        columns.Flush();
+        int count = 0;
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is { Rows: > 0 } column)
+            {
+                columns.Gather(field, column);
+                count++;
+            }
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            Span<int> items = fan.Items(count);
+            int next = 0;
+            for (int field = 0; field < gathering.Length; field++)
+            {
+                if (columns.GatheredOf(field) is not null)
+                {
+                    items[next++] = field;
+                }
+            }
+
+            fan.Run(columns, count);
+            await WriteColumnBlobsAsync(columns, 0, 0, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -96,7 +152,7 @@ public sealed partial class VortexFileWriter
     /// side by side, and the batch would be ingested across the threads too.
     /// </summary>
     private bool IngestsWithColumns(int rows) =>
-        CompressesAcross && _indexes is null && _blockRows > 0 && rows >= _blockRows && Fan is not null;
+        CompressesAcross && _gathering is null && _indexes is null && _blockRows > 0 && rows >= _blockRows && Fan is not null;
 
     /// <summary>
     /// Ingests a chunk cut whole from a batch and compresses its columns in one pass across the
@@ -133,7 +189,6 @@ public sealed partial class VortexFileWriter
             fan.Run(columns, count, arena, rows);
             _blockFilled = (_blockFilled + rows) % _blockRows;
             BatchesIngestedAcross++;
-            ColumnChunksAcross += _fieldCount;
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -144,13 +199,34 @@ public sealed partial class VortexFileWriter
         await CloseChunkAsync(rows, blocks, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Writes the chunk's blobs in column order, each column's new ids made the file's.</summary>
+    /// <summary>
+    /// Writes the chunk's blobs in column order, each column's new ids made the file's: those of the
+    /// columns chunked with the file, and of the columns that gather the chunks of their own their
+    /// rows reached the target of, which a write on one thread puts in the same places.
+    /// </summary>
     private async ValueTask WriteColumnBlobsAsync(ChunkColumns columns, int firstBlock, int blocks, CancellationToken cancellationToken)
     {
         for (int field = 0; field < _fieldCount; field++)
         {
-            ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
-            await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+            if (columns.GatheredOf(field) is not { } gathering)
+            {
+                if (columns.Flushing)
+                {
+                    continue;
+                }
+
+                ColumnChunksAcross++;
+                ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
+                await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+            }
+            else if (columns.Wrote(field))
+            {
+                ColumnChunksAcross++;
+                (int first, int count, int rows) = columns.GatheredChunk(field);
+                ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
+                await WriteColumnBlobAsync(field, blob, first, count, cancellationToken).ConfigureAwait(false);
+                gathering.ChunkRows.Add(rows);
+            }
         }
     }
 
@@ -196,6 +272,14 @@ public sealed partial class VortexFileWriter
         private int _firstBlock;
         private int _blocks;
 
+        // In a chunk with columns that gather rows to a target of their own (see Gather): per
+        // column, the gathering its thread adds the chunk's rows to, and when the rows reach the
+        // target, the blocks and rows of the chunk of its own it then wrote.
+        private Gathering?[] _gathered = [];
+        private int[] _gatheredFirst = [];
+        private int[] _gatheredBlocks = [];
+        private int[] _gatheredRows = [];
+
         /// <summary>Per column, the chunk's node the column is read from.</summary>
         internal Span<int> Nodes => _nodes;
 
@@ -217,6 +301,7 @@ public sealed partial class VortexFileWriter
             Array.Clear(_stats);
             Array.Clear(_took);
             Array.Clear(_known);
+            Array.Clear(_gathered);
             foreach (string[] fresh in _fresh)
             {
                 Array.Clear(fresh);
@@ -238,11 +323,17 @@ public sealed partial class VortexFileWriter
                 _fresh = new string[fields][];
                 _freshCounts = new int[fields];
                 _took = new long[fields];
+                _gathered = new Gathering?[fields];
+                _gatheredFirst = new int[fields];
+                _gatheredBlocks = new int[fields];
+                _gatheredRows = new int[fields];
                 for (int field = 0; field < fields; field++)
                 {
                     _fresh[field] = new string[4];
                 }
             }
+
+            Array.Clear(_gathered, 0, fields);
 
             int count = file.Count;
             if (_known.Length < count)
@@ -311,17 +402,66 @@ public sealed partial class VortexFileWriter
         }
 
         /// <summary>
-        /// Compresses one column on the thread that claimed it; or, in an ingest across, runs one of
-        /// a column's accumulators and compresses the column when it was the last of them.
+        /// Gives column <paramref name="field"/> of the chunk to its <paramref name="gathering"/>
+        /// rather than compressing it: its thread adds the chunk's rows to the gathering, and
+        /// compresses what it gathered once that reaches its target.
+        /// </summary>
+        internal void Gather(int field, Gathering gathering) => _gathered[field] = gathering;
+
+        /// <summary>The gathering column <paramref name="field"/> was given to in this chunk, or null.</summary>
+        internal Gathering? GatheredOf(int field) => _gathered[field];
+
+        /// <summary>Whether column <paramref name="field"/> wrote a blob in this chunk: every column but one that only gathered.</summary>
+        internal bool Wrote(int field) => _blobs[field].Length > 0;
+
+        /// <summary>The first block, the blocks and the rows of the chunk of its own column <paramref name="field"/> wrote.</summary>
+        internal (int FirstBlock, int Blocks, int Rows) GatheredChunk(int field) =>
+            (_gatheredFirst[field], _gatheredBlocks[field], _gatheredRows[field]);
+
+        /// <summary>The rows and blocks of the file's chunk, which the columns that gather add to what they hold.</summary>
+        internal void Spread(int rows, int firstBlock, int blocks)
+        {
+            _rows = rows;
+            _firstBlock = firstBlock;
+            _blocks = blocks;
+            _flushing = false;
+        }
+
+        /// <summary>
+        /// Readies a flush: the columns given to their gatherings (see <see cref="Gather"/>) write
+        /// what they hold, whatever their targets, and no other column writes anything.
+        /// </summary>
+        internal void Flush() => _flushing = true;
+
+        /// <summary>Whether this run writes what the gatherings hold rather than a chunk of the file.</summary>
+        internal bool Flushing => _flushing;
+
+        private bool _flushing;
+
+        /// <summary>
+        /// Compresses one column on the thread that claimed it, or adds its rows to its gathering
+        /// and compresses what that holds once it reaches its target; or, in an ingest across, runs
+        /// one of a column's accumulators and compresses the column when it was the last of them.
         /// </summary>
         public void Run(WorkFan fan, int item)
         {
-            CanonicalArena chunk = (CanonicalArena)fan.State!;
+            CanonicalArena? state = fan.State as CanonicalArena;
             if (!_fused)
             {
-                Compress(fan.Item(item), chunk);
+                int column = fan.Item(item);
+                if (_gathered[column] is { } gathering)
+                {
+                    RunGathered(column, gathering, state);
+                }
+                else
+                {
+                    Compress(column, state!);
+                }
+
                 return;
             }
+
+            CanonicalArena chunk = state!;
 
             int entry = fan.Item(item);
             int field = entry >> 3;
@@ -336,6 +476,49 @@ public sealed partial class VortexFileWriter
                 _nodes[field] = node;
                 _stats[field] = writer.ChunkStatsOf(field, chunk, node, _rows, _firstBlock, _blocks);
                 Compress(field, chunk);
+            }
+        }
+
+        /// <summary>
+        /// Adds the chunk's rows of column <paramref name="field"/> to its gathering, and once that
+        /// reaches its target, compresses what it gathered as a chunk of the column's own, as one
+        /// thread writing the file does, and lets the gathered rows go.
+        /// </summary>
+        private void RunGathered(int field, Gathering gathering, CanonicalArena? chunk)
+        {
+            VortexFileWriter writer = _writer!;
+            if (!_flushing)
+            {
+                writer.Gather(gathering, chunk!, _nodes[field], _rows, _blocks);
+                if (gathering.Bytes < gathering.Target)
+                {
+                    return;
+                }
+            }
+
+            ScanContext context = gathering.Context!;
+            int rows = checked((int)gathering.Rows);
+            int node = gathering.Nodes.Count == 1
+                ? gathering.Nodes[0]
+                : CanonicalConcat.Concat(
+                    context.Decode, writer._isTabular ? writer._schema.GetField(field) : writer._schema, rows,
+                    System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
+            _gatheredFirst[field] = gathering.FirstBlock;
+            _gatheredBlocks[field] = gathering.Blocks;
+            _gatheredRows[field] = rows;
+            gathering.Nodes.Clear();
+            gathering.Rows = 0;
+            gathering.Bytes = 0;
+            gathering.Blocks = 0;
+            try
+            {
+                _nodes[field] = node;
+                _stats[field] = writer.ChunkStatsOf(field, context.Canonical, node, rows, _gatheredFirst[field], _gatheredBlocks[field]);
+                Compress(field, context.Canonical);
+            }
+            finally
+            {
+                context.Canonical.Reset();
             }
         }
 

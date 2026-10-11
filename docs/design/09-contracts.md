@@ -49,8 +49,9 @@ fanning out. So:
   every group once, in sub-tables of 256 parts. Its answers are the same bits at every degree, float
   sums included, and stay so at every cache capacity and every merge order.
 - A dataset opens its objects ahead of the one being read, and reads them side by side.
-- A writer summarizes its columns and compresses a column's zstd frames on its threads, and chooses
-  and writes the encodings on the calling one. The file is the same bytes at any degree.
+- A writer summarizes its columns, chooses and compresses a chunk's columns and compresses a
+  column's zstd frames on its threads, and writes the blobs in column order on the calling one. The
+  file is the same bytes at any degree.
 - I/O concurrency is separate and always on. The batch read of the I/O interface issues overlapping
   reads whatever the degree, because hiding latency is the point on an object store. It is bounded
   per session by `MaxConcurrentReads`, 16 by default, across every scan of every file. A mapped file

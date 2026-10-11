@@ -237,9 +237,12 @@ scratch buffers ([allocations](05-benchmarks.md#5-allocations)).
 At a degree above one (`VortexWriteOptions.DegreeOfParallelism`, or the session's), a batch of a
 block or more is summarized column by column, side by side: each column's statistics, and separately
 a text column's bounds and the distinct values a dictionary is priced from, each into its own state.
-A column's zstd frames are compressed side by side too. Choosing and writing the encodings stays on
-the calling thread, and the file is the same bytes at any degree. A write that builds indexes
-summarizes on one thread.
+A chunk's columns are then chosen and compressed side by side, each against a copy of the file's
+encoding ids, and written in column order, each column's new ids made the file's in the order it met
+them, so the file is the same bytes at any degree. A column with a chunk target of its own gathers
+its rows and compresses its chunks on its thread as well, and its chunks go out where a write on one
+thread puts them. A column's zstd frames are compressed side by side too. A write that builds
+indexes summarizes on one thread.
 
 ### 3.8 Appending to a file
 
@@ -418,7 +421,6 @@ its determinism, so it is not done.
 | `fastlanes.rle` | its per-row indices need `fastlanes.delta`, which no edition carries, to come under run-end's ends. Without it, run-end is smaller at every run length |
 | a sparse fill other than null | a dominant value that is the chunk's minimum is already a bit-packing of width zero with patches, and one that is not makes runs. Finding it would take a frequency count on every chunk |
 | emitting a chunk at every batch | a chunk edge inside a block saves no I/O on a pruned zone. A caller who wants no buffering writes in multiples of `BlockRows` |
-| choosing and writing encodings on several threads | the summaries and zstd frames are parallel, and the choice and emission stay ordered on one thread, which keeps the bytes independent of the degree |
 | rewriting without decoding, passing encoded arrays through | a separate feature, worth an order of magnitude on rewrites and compactions and nothing on first writes |
 | buffering a column for global decisions, or a global sorted index | it breaks streaming and bounds memory by the file. Sorted runs per chunk, merged, give the same answers (see [sorted runs](10-indexes.md#52-vorticitysortedrunsv1-value-to-rows-exact)) |
 | one FSST symbol table shared across chunks | measured at 4.3 % more bytes |

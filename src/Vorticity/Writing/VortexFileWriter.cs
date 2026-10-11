@@ -1480,7 +1480,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         int blocks = ChunkBlocks(rows, _blockRows);
 
-        if (CompressesAcross)
+        // A column that would gather past int.MaxValue rows writes what it holds first, as the loop
+        // below does it: a chunk that would make one do so is written on this thread.
+        if (CompressesAcross && !GatheringOverflows(rows))
         {
             await EmitColumnsAcrossAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
         }
@@ -1618,6 +1620,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _columns[field].ReleaseChunk(firstBlock, blocks);
     }
 
+    /// <summary>Whether a column that gathers would hold more than <see cref="int.MaxValue"/> rows with <paramref name="rows"/> more.</summary>
+    private bool GatheringOverflows(long rows)
+    {
+        if (_gathering is not { } gathering)
+        {
+            return false;
+        }
+
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is { } column && column.Rows + rows > int.MaxValue)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>Copies a column's share of one of the file's chunks in with the rows it gathers.</summary>
     private void Gather(Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
     {
@@ -1666,6 +1687,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         if (_gathering is not { } gathering)
         {
+            return;
+        }
+
+        if (CompressesAcross && Fan is { } fan)
+        {
+            await EmitGatheredAcrossAsync(gathering, fan, cancellationToken).ConfigureAwait(false);
             return;
         }
 
