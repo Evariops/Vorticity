@@ -169,7 +169,10 @@ jobs:
           # The third runs the tests that measure what anything beside them would move (allocations,
           # peaks, finalizers, a shared pool): the classes of the collections that disable
           # parallelization, which carry the trait Category=RunsAlone (RunsAloneTests holds them to it).
+          # They need a process to themselves, not a machine, so tests/runs-alone.sh runs them in three
+          # processes side by side. Each entry's key names the report of its tests' times.
           - name: Vorticity, the query engine and the datasets
+            key: engine
             projects: tests/Vorticity.Tests
             filters: >-
               --filter-not-trait Category=RunsAlone
@@ -180,6 +183,7 @@ jobs:
               --filter-namespace Vorticity.Tests.ObjectStorage*
               --filter-namespace Vorticity.Tests.Sealing*
           - name: Vorticity, every other namespace
+            key: others
             projects: tests/Vorticity.Tests
             filters: >-
               --filter-not-trait Category=RunsAlone
@@ -190,9 +194,11 @@ jobs:
               --filter-not-namespace Vorticity.Tests.ObjectStorage*
               --filter-not-namespace Vorticity.Tests.Sealing*
           - name: Vorticity, the tests that run alone
+            key: alone
             projects: tests/Vorticity.Tests
-            filters: --filter-trait Category=RunsAlone
+            runs-alone: true
           - name: Vorticity.Zstd and the conformance corpus
+            key: zstd
             projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
           # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is
@@ -201,6 +207,7 @@ jobs:
           # intrinsics disabled. Vorticity.Zstd's suite runs whole: an x64 runner takes its x64
           # paths, and with intrinsics disabled the portable ones, Arm64's shape without its vectors.
           - name: Vorticity's fallbacks, Vorticity.Zstd and the conformance corpus, intrinsics disabled
+            key: scalar
             projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
             scalar-pass: true
@@ -231,9 +238,10 @@ jobs:
         if: matrix.zstd-data
         run: bash tools/native-ref/testdata.sh
 
-      # The filters are words, their wildcards xunit's own: the shell expands no file name.
+      # The filters are words, their wildcards xunit's own: the shell expands no file name. Every
+      # step below writes an xunit report of each test's time, which the last one keeps.
       - name: Test
-        if: ${{ !matrix.scalar-pass }}
+        if: ${{ !matrix.scalar-pass && !matrix.runs-alone }}
         env:
           PROJECTS: ${{ matrix.projects }}
           FILTERS: ${{ matrix.filters }}
@@ -242,13 +250,29 @@ jobs:
           status=0
           for project in $PROJECTS; do
             # shellcheck disable=SC2086
-            dotnet test --project "$project" --no-build -c Release $FILTERS || status=1
+            dotnet test --project "$project" --no-build -c Release $FILTERS \
+              --report-xunit-xml --report-xunit-xml-filename "$(basename "$project").xunit.xml" \
+              --results-directory "$RUNNER_TEMP/reports" || status=1
           done
           exit $status
 
+      - name: Test the classes that run alone
+        if: ${{ matrix.runs-alone }}
+        run: bash tests/runs-alone.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
+
       - name: Test the scalar fallbacks
         if: ${{ matrix.scalar-pass }}
-        run: bash tests/scalar-pass.sh --no-build
+        run: bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
+
+      # Where the time goes, test by test, kept a fortnight: what the next split of the runners is
+      # decided on.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: test-times-${{ matrix.key }}
+          path: ${{ runner.temp }}/reports
+          if-no-files-found: ignore
+          retention-days: 14
 
   package:
     name: pack, publish vxdump as Native AOT, fuzz the parser

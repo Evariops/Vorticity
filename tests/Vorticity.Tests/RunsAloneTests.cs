@@ -9,7 +9,8 @@ namespace Vorticity.Tests;
 /// <summary>
 /// The tests of a collection that disables parallelization measure what anything beside them would
 /// move: allocations, peaks, finalizers, a shared pool. CI gives them a runner of their own, selected by
-/// the trait <c>Category=RunsAlone</c>, and runs the rest of the suite on others without them. A class
+/// the trait <c>Category=RunsAlone</c>, where tests/runs-alone.sh runs them in processes side by side,
+/// and runs the rest of the suite on others without them. A class
 /// that joins such a collection without the trait would still run alone, but at the end of a shard, and
 /// a class that carries the trait outside one would leave its shard for the runner that measures.
 /// </summary>
