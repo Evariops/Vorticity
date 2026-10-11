@@ -34,6 +34,21 @@ internal sealed class FsstSymbols
     /// <summary>The generations, as fractions of 128 of the sample.</summary>
     private static readonly int[] Generations = [8, 38, 68, 98, 128];
 
+    /// <summary>
+    /// Per generation, the share of its sample estimate a column's code stream is held to come to at
+    /// least, by the end of the training, when a bound is given: 0 where nothing is checked.
+    /// </summary>
+    /// <remarks>
+    /// A generation counts its fraction of the sample with the table the one before built, which
+    /// is the bytes the codes of those lines would take: scaled to the column, an estimate of its
+    /// code stream. The table improves with each generation, so a share below one leaves it room:
+    /// over the 808 FSST trials of ClickBench's hits, the stream came to 0.69 of the second
+    /// generation's estimate at the least, 0.86 of the third's and 0.97 of the fourth's, and the
+    /// shares are set below those. A column whose estimate is past the bound by that much is given
+    /// up before the last generations and the pass over every row, which cost most of a training.
+    /// </remarks>
+    private static readonly double[] EstimateShares = [0, 0.6, 0.75, 0.85, 0];
+
     /// <summary><see cref="ulong"/>s per <c>count2</c> row: 512 bits of pair presence.</summary>
     private const int PairWordsPerRow = (CodeMask + 1) / 64;
 
@@ -196,10 +211,20 @@ internal sealed class FsstSymbols
 
     /// <summary>
     /// Trains a table on rows held as slices of one contiguous heap; null when there is nothing to
-    /// train on. A row is two ints rather than a memory, so a wide column costs no per-row object.
+    /// train on, or when the column's code stream would come past <paramref name="bound"/>. A row
+    /// is two ints rather than a memory, so a wide column costs no per-row object.
     /// </summary>
+    /// <param name="heap">The rows' bytes.</param>
+    /// <param name="starts">Each row's first byte in <paramref name="heap"/>.</param>
+    /// <param name="lengths">Each row's length.</param>
+    /// <param name="plain">The bytes of every row together, against which the sample's estimates are scaled.</param>
+    /// <param name="bound">
+    /// The code stream past which the table would decide nothing, the caller's ceiling; a training
+    /// whose estimate passes it by <see cref="EstimateShares"/> is given up. None when the caller keeps any table.
+    /// </param>
     internal static FsstSymbols? Train(
-        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths)
+        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, long plain = 0,
+        long bound = long.MaxValue)
     {
         FsstSymbols table = Fresh();
 
@@ -208,7 +233,7 @@ internal sealed class FsstSymbols
         {
             Span<Line> sample = tables.Sample;
             MakeSample(starts, lengths, sample, out int drawn, out bool sampled);
-            FsstSymbols? trained = drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables);
+            FsstSymbols? trained = drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables, plain, bound);
             if (trained is null)
             {
                 table.Recycle();
@@ -238,16 +263,19 @@ internal sealed class FsstSymbols
 
     private static FsstSymbols? TrainCore(
         FsstSymbols table, ReadOnlySpan<byte> heap, ReadOnlySpan<Line> sample, bool sampled,
-        TrainingTables tables)
+        TrainingTables tables, long plain, long bound)
     {
         int[] count1 = tables.Count1;
         int[] count2 = tables.Count2;
         ulong[] pairBits = tables.PairBits;
 
-        foreach (int generation in Generations)
+        for (int step = 0; step < Generations.Length; step++)
         {
+            int generation = Generations[step];
             Array.Clear(count1);
             ClearPairCounts(count2, pairBits);
+            long input = 0;
+            long coded = 0;
 
             for (int i = 0; i < sample.Length; i++)
             {
@@ -259,7 +287,16 @@ internal sealed class FsstSymbols
                 }
 
                 Line line = sample[i];
-                table.CountLine(heap.Slice(line.Start, line.Length), count1, count2, pairBits);
+                coded += table.CountLine(heap.Slice(line.Start, line.Length), count1, count2, pairBits);
+                input += line.Length;
+            }
+
+            // The lines counted, coded with the table the generation before built: scaled to the
+            // column, what its code stream is estimated at, which the table still to come improves
+            // on by no more than the generation's share leaves room for.
+            if (input > 0 && EstimateShares[step] * coded / input * plain > bound)
+            {
+                return null;
             }
 
             table.Optimize(tables, count1, count2, pairBits, generation, prune: generation >= 128 && !sampled);
@@ -570,18 +607,23 @@ internal sealed class FsstSymbols
     private static ulong Hash(ulong value) => (value * 2971215073UL) ^ (value >> 15);
 
     /// <summary>
-    /// Compresses one sample line with the current table, counting codes and adjacent code pairs.
+    /// Compresses one sample line with the current table, counting codes and adjacent code pairs,
+    /// and returns the bytes its codes take.
     /// A merged symbol's gain is how often its two halves occur next to each other, which is what
     /// the next generation proposes as a candidate; the extra single-byte count keeps the option of
     /// a shorter symbol alive.
     /// </summary>
-    private void CountLine(ReadOnlySpan<byte> line, int[] count1, int[] count2, ulong[] pairBits)
+    private int CountLine(ReadOnlySpan<byte> line, int[] count1, int[] count2, ulong[] pairBits)
     {
         int read = 0;
         int previous = CodeMask;
+        int coded = 0;
         while (read < line.Length)
         {
             int code = FindLongest(Word(line, read), line.Length - read, out int length);
+
+            // A symbol's code is a byte, an escaped byte two.
+            coded += code >= CodeBase ? 1 : 2;
             count1[code]++;
             CountPair(count2, pairBits, previous, code);
 
@@ -595,6 +637,8 @@ internal sealed class FsstSymbols
             read += length;
             previous = code;
         }
+
+        return coded;
     }
 
     /// <summary>

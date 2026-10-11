@@ -148,8 +148,10 @@ internal sealed class FsstPlan
             int at = (int)plain;
             ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, starts.AsSpan(0, rows));
 
+            // The training is handed the ceiling too: a column its sample says is past it by far is
+            // given up before the training ends, as the compression gives up past it below.
             table = FsstSymbols.Train(
-                heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows));
+                heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows), plain, sizeCeiling);
             if (table is null)
             {
                 return null;
