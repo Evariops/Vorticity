@@ -32,6 +32,9 @@ internal static class FormatCost
     /// <summary>The batches a scan decodes ahead, when <c>--prefetch</c> sets it; the scan's default otherwise.</summary>
     private static int? Prefetch;
 
+    /// <summary>The most rows a scan's batch holds, when <c>--batch-rows</c> sets it; the scan's default otherwise.</summary>
+    private static int BatchRows;
+
     /// <summary>The column a projection keeps: the report's monotone one, or a given file's first.</summary>
     private static string Projected = Set.Field;
 
@@ -54,6 +57,7 @@ internal static class FormatCost
 
         int prefetchAt = Array.IndexOf(args, "--prefetch");
         Prefetch = prefetchAt >= 0 && prefetchAt + 1 < args.Length && int.TryParse(args[prefetchAt + 1], CultureInfo.InvariantCulture, out int ahead) ? ahead : null;
+        BatchRows = Count(args, "--batch-rows", 0);
         string directory = Path.Combine(Path.GetTempPath(), $"vx-format-cost-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         try
@@ -65,7 +69,11 @@ internal static class FormatCost
             // The report's table, written as Vortex then rewritten as Parquet; or, with --file, a
             // Parquet file of another writer as it is, rewritten as Vortex by ours.
             int fileAt = Array.IndexOf(args, "--file");
-            string vortex = Path.Combine(directory, "table.vortex");
+            // --vortex <path> keeps the Vortex rewrite of a given Parquet file there, and reads it again
+            // rather than writing it when it already exists, so that a loop does not pay the rewrite.
+            int vortexAt = Array.IndexOf(args, "--vortex");
+            string? kept = fileAt >= 0 && vortexAt >= 0 && vortexAt + 1 < args.Length ? Path.GetFullPath(args[vortexAt + 1]) : null;
+            string vortex = kept ?? Path.Combine(directory, "table.vortex");
             string parquet = fileAt >= 0 && fileAt + 1 < args.Length ? Path.GetFullPath(args[fileAt + 1]) : Path.Combine(directory, "table.parquet");
             string[] actions = Actions;
             if (fileAt >= 0)
@@ -74,7 +82,9 @@ internal static class FormatCost
                 int looping = Array.IndexOf(args, "--loop");
                 bool parquetAlone = looping >= 0 && looping + 1 < args.Length && string.Equals(args[looping + 1], "parquet", StringComparison.OrdinalIgnoreCase);
                 await using ParquetFile given = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
-                rows = parquetAlone ? checked((int)given.RowCount) : await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
+                rows = parquetAlone || (kept is not null && System.IO.File.Exists(kept))
+                    ? checked((int)given.RowCount)
+                    : await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
                 Projected = given.Schema[0].Name;
                 actions = given.Schema.Any(f => f.Name == Set.Field) ? Actions : [.. Actions.Where(a => !a.StartsWith("filter", StringComparison.Ordinal))];
             }
@@ -247,7 +257,9 @@ internal static class FormatCost
     /// <summary>One call of <paramref name="action"/> on the format's file, from its open to its last row.</summary>
     private static async Task<long> RunAsync(Format format, string action, int rows, int degree)
     {
-        ScanOptions options = Prefetch is { } prefetch ? new() { DegreeOfParallelism = degree, Prefetch = prefetch } : new() { DegreeOfParallelism = degree };
+        ScanOptions options = Prefetch is { } prefetch
+            ? new() { DegreeOfParallelism = degree, Prefetch = prefetch, BatchRows = BatchRows }
+            : new() { DegreeOfParallelism = degree, BatchRows = BatchRows };
         await using Side file = await format.OpenAsync(format.Path).ConfigureAwait(false);
         return action switch
         {
