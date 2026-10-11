@@ -15,7 +15,7 @@ public sealed class AlignedBufferPoolTests
     /// The block's base address. Pointer identity is the only honest proof that the pool reused a
     /// block rather than quietly allocating a fresh one that happens to look the same.
     /// </summary>
-    private static unsafe nint AddressOf(NativeSegmentOwner owner)
+    internal static unsafe nint AddressOf(NativeSegmentOwner owner)
     {
         fixed (byte* pointer = owner.Buffer.Span)
         {
@@ -601,40 +601,6 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
-    public void The_shared_pool_rents_and_recycles()
-    {
-        NativeSegmentOwner first = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
-        nint address = AddressOf(first);
-        AlignedBufferPool.Shared.Return(first);
-
-        NativeSegmentOwner second = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
-        Assert.Equal(address, AddressOf(second));
-        AlignedBufferPool.Shared.Return(second);
-    }
-
-    [Fact]
-    public void The_shared_pool_parks_a_chunk_sized_block_and_keeps_sixty_four_mebibytes_of_them_at_most()
-    {
-        const int large = 32 * 1024 * 1024;
-        Assert.True(AlignedBufferPool.Shared.MaxPooledLength >= large);
-
-        NativeSegmentOwner[] rented = new NativeSegmentOwner[3];
-        for (int i = 0; i < rented.Length; i++)
-        {
-            rented[i] = AlignedBufferPool.Shared.Rent(large, 64);
-        }
-
-        int before = AlignedBufferPool.Shared.ParkedCount(large);
-        foreach (NativeSegmentOwner owner in rented)
-        {
-            AlignedBufferPool.Shared.Return(owner);
-        }
-
-        // Two blocks of 32 MiB is the budget; the third return is freed rather than parked.
-        Assert.Equal(Math.Min(2, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
-    }
-
-    [Fact]
     public void Concurrent_renters_never_receive_the_same_block()
     {
         AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
@@ -763,5 +729,57 @@ public sealed class AlignedBufferPoolTests
         {
             pool.Return(owner);
         }
+    }
+}
+
+/// <summary>
+/// The tests that rent from <see cref="AlignedBufferPool.Shared"/> and read back what it parks.
+/// </summary>
+/// <remarks>
+/// The pool is the process's, and every test runs beside the others: a neighbour that rents or gives
+/// back a block of the same class between a return and the rent after it hands this test another
+/// block, and a parked count read around it moves by the neighbour's blocks. The tests hold only
+/// while nothing else rents from the pool, so they run alone.
+/// </remarks>
+[CollectionDefinition(nameof(SharedPoolCollection), DisableParallelization = true)]
+public sealed class SharedPoolCollection
+{
+}
+
+[Collection(nameof(SharedPoolCollection))]
+public sealed class SharedPoolTests
+{
+    [Fact]
+    public void The_shared_pool_rents_and_recycles()
+    {
+        NativeSegmentOwner first = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
+        nint address = AlignedBufferPoolTests.AddressOf(first);
+        AlignedBufferPool.Shared.Return(first);
+
+        NativeSegmentOwner second = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
+        Assert.Equal(address, AlignedBufferPoolTests.AddressOf(second));
+        AlignedBufferPool.Shared.Return(second);
+    }
+
+    [Fact]
+    public void The_shared_pool_parks_a_chunk_sized_block_and_keeps_sixty_four_mebibytes_of_them_at_most()
+    {
+        const int large = 32 * 1024 * 1024;
+        Assert.True(AlignedBufferPool.Shared.MaxPooledLength >= large);
+
+        NativeSegmentOwner[] rented = new NativeSegmentOwner[3];
+        for (int i = 0; i < rented.Length; i++)
+        {
+            rented[i] = AlignedBufferPool.Shared.Rent(large, 64);
+        }
+
+        int before = AlignedBufferPool.Shared.ParkedCount(large);
+        foreach (NativeSegmentOwner owner in rented)
+        {
+            AlignedBufferPool.Shared.Return(owner);
+        }
+
+        // Two blocks of 32 MiB is the budget; the third return is freed rather than parked.
+        Assert.Equal(Math.Min(2, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
     }
 }
