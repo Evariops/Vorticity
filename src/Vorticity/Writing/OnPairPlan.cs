@@ -234,14 +234,6 @@ internal sealed class OnPairPlan
         /// <summary>Slots of the pair table: the reference's cap of eight pairs a token, at half load.</summary>
         private const int PairSlots = Capacity * 16;
 
-        /// <summary>A trainer no plan uses any more, kept for the next column; null while none is.</summary>
-        /// <remarks>
-        /// Its tables are most of a megabyte, and pricing OnPair trains once per text chunk FSST
-        /// could take, whether OnPair wins or not. One is kept, taken with an exchange that leaves
-        /// null behind, as FSST keeps its table: a second writer builds its own.
-        /// </remarks>
-        private static Trainer? Spare;
-
         // The token table: each token's bytes as two little-endian words masked to its length, the
         // length (zero for an empty slot) and the code.
         private readonly ulong[] _low = new ulong[TokenSlots];
@@ -277,12 +269,18 @@ internal sealed class OnPairPlan
 
         internal static Trainer Rent()
         {
-            Trainer trainer = Interlocked.Exchange(ref Spare, null) ?? new Trainer();
+            Trainer trainer = SpareSlots<Trainer>.Take() ?? new Trainer();
             trainer.Reset();
             return trainer;
         }
 
-        internal void Recycle() => Volatile.Write(ref Spare, this);
+        /// <summary>Keeps the trainer for the next column on any thread.</summary>
+        /// <remarks>
+        /// Its tables are most of a megabyte, and pricing OnPair trains once per text chunk FSST could
+        /// take, whether OnPair wins or not: trainers are kept for the columns a chunk writes at once,
+        /// as FSST keeps its tables.
+        /// </remarks>
+        internal void Recycle() => SpareSlots<Trainer>.Give(this);
 
         private void Reset()
         {

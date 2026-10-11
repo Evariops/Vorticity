@@ -39,25 +39,21 @@ internal sealed class FsstSymbols
 
     /// <summary>
     /// The trainer's working tables, a megabyte of counters reused across column-chunks. Ownership
-    /// is explicit rather than thread-static, since a continuation may resume on another thread:
-    /// one cached set is taken with an exchange that leaves null behind, and a second trainer
-    /// allocates its own rather than sharing. Every table is cleared at the top of a generation, so
-    /// reuse cannot change a symbol.
+    /// is explicit rather than thread-static, since a continuation may resume on another thread: the
+    /// sets are kept in <see cref="SpareSlots{T}"/>, each taken whole by one trainer, and a trainer
+    /// that finds none allocates its own rather than sharing. Every table is cleared at the top of a
+    /// generation, so reuse cannot change a symbol.
     /// </summary>
     internal sealed class TrainingTables
     {
-        /// <summary>The one cached set; null while somebody holds it.</summary>
-        private static TrainingTables? Cached;
-
         /// <summary>
-        /// Takes the cached set, or a fresh one when another trainer holds it; the caller owns it
-        /// outright until it calls <see cref="Give"/>.
+        /// A kept set, or a fresh one when every kept set is held; the caller owns it outright until
+        /// it calls <see cref="Give"/>.
         /// </summary>
-        internal static TrainingTables Take() =>
-            Interlocked.Exchange(ref Cached, null) ?? new TrainingTables();
+        internal static TrainingTables Take() => SpareSlots<TrainingTables>.Take() ?? new TrainingTables();
 
-        /// <summary>Gives a set back. Losing the race simply drops one set to the collector.</summary>
-        internal static void Give(TrainingTables tables) => Volatile.Write(ref Cached, tables);
+        /// <summary>Gives a set back, for the next trainer on any thread.</summary>
+        internal static void Give(TrainingTables tables) => SpareSlots<TrainingTables>.Give(tables);
 
         private int[]? _count1;
         private int[]? _count2;
@@ -125,26 +121,23 @@ internal sealed class FsstSymbols
 
     private int _count;
 
-    /// <summary>A table no plan reads any more, kept for the next training; null while none is.</summary>
-    /// <remarks>
-    /// A table's lookup of two-byte symbols alone is 128 KiB, an allocation of the large-object
-    /// heap, and pricing FSST trains one per column-chunk whether FSST wins or not. One is kept,
-    /// taken with an exchange that leaves null behind: a second trainer builds its own.
-    /// </remarks>
-    private static FsstSymbols? Spare;
-
     private FsstSymbols()
     {
         Clear();
     }
 
     /// <summary>Gives the table back for a later training, once nothing reads it.</summary>
-    internal void Recycle() => Volatile.Write(ref Spare, this);
+    /// <remarks>
+    /// A table's lookup of two-byte symbols alone is 128 KiB, an allocation of the large-object
+    /// heap, and pricing FSST trains one per column-chunk whether FSST wins or not: tables are kept
+    /// for the trainers of the columns a chunk writes at once.
+    /// </remarks>
+    internal void Recycle() => SpareSlots<FsstSymbols>.Give(this);
 
     /// <summary>A cleared table: the spare one, or a new one when there is none.</summary>
     private static FsstSymbols Fresh()
     {
-        FsstSymbols? spare = Interlocked.Exchange(ref Spare, null);
+        FsstSymbols? spare = SpareSlots<FsstSymbols>.Take();
         if (spare is null)
         {
             return new FsstSymbols();

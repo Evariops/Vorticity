@@ -1449,37 +1449,44 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         int blocks = ChunkBlocks(rows, _blockRows);
 
-        for (int field = 0; field < _fieldCount; field++)
+        if (CompressesAcross)
         {
-            int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
-
-            // A chunk cut from a batch shares that batch's list elements whole, and what the blob
-            // writer is handed is what lands in the file: the calls below must see the narrowed
-            // node, or the zone map would summarise rows the segment has dropped.
-            if (_mayShareChildren)
+            await EmitColumnsAcrossAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            for (int field = 0; field < _fieldCount; field++)
             {
-                node = ChunkCompactor.Compact(arena, node);
-            }
+                int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
 
-            if (_gathering?[field] is { } gathering)
-            {
-                // Its per-block summaries and its distinct table stay until its own chunk goes out:
-                // they are that chunk's, and the table runs over all of its rows.
-                if (gathering.Rows + rows > int.MaxValue)
+                // A chunk cut from a batch shares that batch's list elements whole, and what the blob
+                // writer is handed is what lands in the file: the calls below must see the narrowed
+                // node, or the zone map would summarise rows the segment has dropped.
+                if (_mayShareChildren)
                 {
-                    await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
+                    node = ChunkCompactor.Compact(arena, node);
                 }
 
-                Gather(gathering, arena, node, rows, blocks);
-                if (gathering.Bytes >= gathering.Target)
+                if (_gathering?[field] is { } gathering)
                 {
-                    await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
+                    // Its per-block summaries and its distinct table stay until its own chunk goes out:
+                    // they are that chunk's, and the table runs over all of its rows.
+                    if (gathering.Rows + rows > int.MaxValue)
+                    {
+                        await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    Gather(gathering, arena, node, rows, blocks);
+                    if (gathering.Bytes >= gathering.Target)
+                    {
+                        await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    continue;
                 }
 
-                continue;
+                await EmitColumnChunkAsync(field, arena, node, rows, _emittedBlocks, blocks, cancellationToken).ConfigureAwait(false);
             }
-
-            await EmitColumnChunkAsync(field, arena, node, rows, _emittedBlocks, blocks, cancellationToken).ConfigureAwait(false);
         }
 
         // The chunk's locating runs close with it and go out right behind it, and the builders are
@@ -1504,6 +1511,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask EmitColumnChunkAsync(
         int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken)
     {
+        ChunkStats stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+        ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
+        await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
+    /// writer's ledger: whether they cover the chunk's rows, and whether its distinct table serves.
+    /// </summary>
+    private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks)
+    {
         // The chunk's statistics, computed at ingest over exactly these rows. The chooser checks the
         // row count against the node it is given and measures the column again when they disagree,
         // so a mismatch costs a pass and never a wrong plan.
@@ -1527,12 +1545,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
         }
 
-        using ArrayBlobWriter.BlobLease blob =
-            ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
-        _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
-        int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
-        _columnSegments[field].Add(segment);
-        _indexes?.AddColumnBytes(field, _segments[segment].Length);
+        return stats;
+    }
+
+    /// <summary>
+    /// Writes a column chunk's blob as the column's next segment, then lets go of the blob and of
+    /// what the column kept for the chunk.
+    /// </summary>
+    private async ValueTask WriteColumnBlobAsync(
+        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken)
+    {
+        using (blob)
+        {
+            _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+            int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+            _columnSegments[field].Add(segment);
+            _indexes?.AddColumnBytes(field, _segments[segment].Length);
+        }
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized
         // buffers go back to the pool.

@@ -60,6 +60,56 @@ public sealed class WriteDegreeTests
         }
     }
 
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task EncodingsAFileMeetsInALaterChunkKeepTheBytesOfOneThread(int degree)
+    {
+        // Every column is one value over the first chunk, which the writer compresses on one thread,
+        // and varies after it, so the chunks compressed side by side meet ids the file does not hold
+        // yet, in several columns at once, and renumber their blobs onto the file's.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        Table table = Build(late: true);
+        string onePath = Temp();
+        string manyPath = Temp();
+        try
+        {
+            (_, _, int oneAcross, _) = await WriteColumnsAsync(table, onePath, 1, ct);
+            (_, _, int manyAcross, int renumbered) = await WriteColumnsAsync(table, manyPath, degree, ct);
+            Assert.Equal(0, oneAcross);
+            Assert.True(manyAcross > 0, "the chunks after the first must be compressed side by side");
+            Assert.True(renumbered > 0, "a column must meet an id the file did not hold");
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, ct), await System.IO.File.ReadAllBytesAsync(manyPath, ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(manyPath);
+        }
+    }
+
+    /// <summary>
+    /// Writes the table in batches and returns what <see cref="WriteAsync"/> does, with the column
+    /// chunks compressed side by side and those renumbered.
+    /// </summary>
+    private static async Task<(int Across, long FromTable, int ColumnsAcross, int Renumbered)> WriteColumnsAsync(
+        Table table, string path, int degree, CancellationToken ct)
+    {
+        await using VortexFileWriter writer = VortexFileWriter.Create(
+            path, table.Schema, new VortexWriteOptions { Identity = Pinned, DegreeOfParallelism = degree });
+        for (int start = 0; start < Rows; start += BatchRows)
+        {
+            int count = Math.Min(BatchRows, Rows - start);
+            int slice = CanonicalSlice.SliceAcross(table.Arena, table.Arena, table.Root, start, count);
+            using RecordBatch batch = new RecordBatch(table.Arena, slice, start);
+            await writer.WriteAsync(batch, ct);
+        }
+
+        await writer.CompleteAsync(ct);
+        return (writer.BatchesIngestedAcross, writer.ChunksFromTable, writer.ColumnChunksAcross, writer.ColumnChunksRenumbered);
+    }
+
     /// <summary>
     /// Writes the table in batches and returns how many were ingested across threads, and the
     /// column chunks a distinct table served.
@@ -85,8 +135,11 @@ public sealed class WriteDegreeTests
     /// nullable floats, a struct of an integer and a short text, a list of integers and nullable
     /// booleans: bounds, tables, widths and nested columns, every accumulator of the ingest.
     /// </summary>
-    private static Table Build()
+    /// <param name="late">Whether every column holds one value over the first chunk and varies only after it.</param>
+    private static Table Build(bool late = false)
     {
+        // Over the first chunk, with <paramref name="late"/>, a row reads as row 0 does.
+        Func<int, int> at = late ? row => row < 65_536 ? 0 : row : row => row;
         DTypeArena types = new DTypeArena();
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         DType i32 = types.Primitive(PType.I32, Nullability.NonNullable);
@@ -103,12 +156,12 @@ public sealed class WriteDegreeTests
             Nullability.NonNullable);
         CanonicalArena arena = new CanonicalArena();
 
-        int id = Longs(arena, i64, row => (row * 3L) + (row % 5));
-        int city = Strings(arena, bits, text, row => row % 11 == 4 ? null : Cities[(row * 7) % Cities.Length]);
-        int name = Strings(arena, bits, plainText, row => "name-" + ((row * 7_919L) % 100_003).ToString(System.Globalization.CultureInfo.InvariantCulture));
-        int score = Doubles(arena, bits, f64, row => row % 13 == 6 ? null : (row % 1_000) / 8.0);
-        int x = Ints(arena, i32, row => row % 97);
-        int y = Strings(arena, bits, plainText, row => Cities[row % 3]);
+        int id = Longs(arena, i64, row => (at(row) * 3L) + (at(row) % 5));
+        int city = Strings(arena, bits, text, row => at(row) % 11 == 4 ? null : Cities[(at(row) * 7) % Cities.Length]);
+        int name = Strings(arena, bits, plainText, row => "name-" + ((at(row) * 7_919L) % 100_003).ToString(System.Globalization.CultureInfo.InvariantCulture));
+        int score = Doubles(arena, bits, f64, row => at(row) % 13 == 6 ? null : (at(row) % 1_000) / 8.0);
+        int x = Ints(arena, i32, row => at(row) % 97);
+        int y = Strings(arena, bits, plainText, row => Cities[at(row) % 3]);
         int pointNode = arena.AddStruct(point, Rows, Validity.NonNullable, [x, y]);
         int tagsNode = Lists(arena, tags, i64);
         int flagNode = Flags(arena, bits, flag);
