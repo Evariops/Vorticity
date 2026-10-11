@@ -122,7 +122,8 @@ internal sealed class FsstPlan
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
         int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
-        if (plain > int.MaxValue - ViewHeap.Slack)
+
+        if (plain > int.MaxValue - ViewHeap.Slack || CodedFloor(lengths.AsSpan(0, rows), plain) > sizeCeiling)
         {
             ArrayPool<int>.Shared.Return(lengths);
             return null;
@@ -226,6 +227,20 @@ internal sealed class FsstPlan
         }
 
         return maximum;
+    }
+
+    /// <summary>
+    /// The fewest bytes the encoding of rows of <paramref name="lengths"/>, <paramref name="plain"/>
+    /// bytes in all, can take, known before any training: a code stands for eight bytes at most, so
+    /// the code stream holds an eighth of the column at least, and the two row tables are priced
+    /// on it as <see cref="TryBuild"/> prices them. A column a zstd frame shrinks past what FSST
+    /// could at its best is turned down on it, rather than after a training run and part of a
+    /// compression; a floor, so no winner is dropped.
+    /// </summary>
+    private static long CodedFloor(ReadOnlySpan<int> lengths, long plain)
+    {
+        long codes = (plain + FsstSymbols.MaxSymbolLength - 1) / FsstSymbols.MaxSymbolLength;
+        return codes + RowTableBytes(lengths.Length, MaxOf(lengths)) + RowTableBytes(lengths.Length + 1, codes);
     }
 
     /// <summary>
