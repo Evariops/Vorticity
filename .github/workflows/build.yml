@@ -98,7 +98,7 @@ jobs:
               # The reference's crates, and the upstream schemas the drift report compares.
               tools/conformance-gen/* | spec/*) crosscheck=true ;;
               # In the solution the package job builds, and referenced by no test project.
-              bench/* | samples/* | tools/vxdump/* | tools/testimpact/*) package=true ;;
+              bench/* | samples/* | tools/vxdump/* | tools/pqdump/* | tools/testimpact/*) package=true ;;
               # The script that writes Vorticity.Zstd's test data.
               tools/native-ref/*) test=true ;;
               # The tests, the build's configuration, this workflow, and any path added later.
@@ -129,13 +129,16 @@ jobs:
           - name: Vorticity.Zstd and the conformance corpus
             projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
+          - name: Vorticity.Parquet
+            projects: tests/Vorticity.Parquet.Tests
           # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is
           # exercised: the classes tests/scalar-pass.txt names, which reach every fallback the
           # whole suite does, and the conformance corpus run again with intrinsics disabled.
-          # Vorticity.Zstd's suite runs whole: an x64 runner takes its x64 paths, and with
-          # intrinsics disabled the portable ones, Arm64's shape without its vectors.
-          - name: Vorticity's fallbacks, Vorticity.Zstd and the conformance corpus, intrinsics disabled
-            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
+          # Vorticity.Zstd's and Vorticity.Parquet's suites run whole: an x64 runner takes their
+          # x64 paths, and with intrinsics disabled the portable ones, Arm64's shape without its
+          # vectors.
+          - name: Vorticity's fallbacks, Vorticity.Zstd, Vorticity.Parquet and the conformance corpus, intrinsics disabled
+            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Parquet.Tests tests/Vorticity.Conformance
             zstd-data: true
             scalar-pass: true
     steps:
@@ -329,6 +332,62 @@ jobs:
           echo "AOT scan: $scanned scanned, $refused refused, $crashed crashed"
           test "$crashed" = 0
           test "$scanned" -ge 800
+
+      # The same promise of Vorticity.Parquet, over the standard's own test files, pinned: pqdump
+      # reads what the footer says, scans every batch and holds the footer to the rows, from the
+      # public surface alone.
+      - name: Fetch the Parquet test files
+        run: |
+          git clone --quiet https://github.com/apache/parquet-testing.git "$RUNNER_TEMP/parquet-testing"
+          git -C "$RUNNER_TEMP/parquet-testing" checkout --quiet 56653c437c8092f704a092d0d1d4e600124cd49f
+
+      # The Parquet reader's half of the parser's promise: structure-aware mutations of the suite's
+      # files, their Thrift varints rewritten in place to edges, each read mapped and by positional
+      # reads and verified, with a fixed seed so that a finding is reproducible from the log alone.
+      - name: Fuzz the Parquet reader
+        run: |
+          dotnet run --project tests/Vorticity.Fuzz -c Release --no-build -- \
+            --parquet "$RUNNER_TEMP/parquet-testing/data" 50000 20261010
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: parquet-fuzz-findings
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      - name: Publish pqdump as Native AOT
+        run: dotnet publish tools/pqdump -c Release -r linux-x64
+
+      # Exit 3 (unsupported) and 4 (malformed) are expected answers for eighteen of these files: six
+      # use what this build does not read, the deprecated LZ4 among them and two variants shredded to
+      # types the standard does not shred to, and twelve are malformed on purpose, four of them
+      # variants the suite says are errors. A verify that finds something exits 1, which four files, the
+      # suite's checksum cases, do by design.
+      - name: Scan and verify every Parquet test file with the AOT pqdump
+        run: |
+          BIN=tools/pqdump/bin/Release/net11.0/linux-x64/publish/pqdump
+          scanned=0
+          refused=0
+          crashed=0
+          clean=0
+          found=0
+          while IFS= read -r f; do
+            if "$BIN" "$f" --all --scan > /dev/null 2>&1; then code=0; else code=$?; fi
+            if [ "$code" = 0 ]; then
+              scanned=$((scanned + 1))
+              if "$BIN" "$f" --verify > /dev/null 2>&1; then clean=$((clean + 1)); else found=$((found + 1)); fi
+            elif [ "$code" = 3 ] || [ "$code" = 4 ]; then
+              refused=$((refused + 1))
+            else
+              echo "pqdump exited $code on $f"
+              crashed=$((crashed + 1))
+            fi
+          done < <(find "$RUNNER_TEMP/parquet-testing" -name '*.parquet')
+          echo "AOT pqdump: $scanned scanned ($clean true to their footers, $found not), $refused refused, $crashed crashed"
+          test "$crashed" = 0
+          test "$refused" -le 18
+          test "$scanned" -ge 222
 
   crosscheck:
     name: cross-check with the reference

@@ -1,0 +1,195 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Expressions;
+using Xunit;
+
+namespace Vorticity.Parquet.Tests;
+
+/// <summary>
+/// A scan given lanes decompresses each column's next pages on them while it reads the pages before:
+/// the rows are the ones a scan on one lane reads, under every codec that compresses and both page
+/// versions, with nulls, dictionaries and text, the plain text cut into views by the lane that
+/// decompressed it; a scan that stops early leaves no page decompressing behind it, and a skip over
+/// pages decompressed ahead drops them.
+/// </summary>
+public sealed class PageAheadTests : IDisposable
+{
+    private const int Rows = 81_920;
+
+    private readonly string _path = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.parquet");
+
+    private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    private static VortexSchema Schema =>
+    [
+        ("id", VortexType.Int64),
+        ("price", VortexType.Float64.Nullable),
+        ("label", VortexType.Utf8.Nullable),
+        ("flag", VortexType.Bool.Nullable),
+        ("payload", VortexType.Utf8),
+        ("note", VortexType.Utf8.Nullable),
+        ("line", VortexType.Utf8),
+    ];
+
+    public void Dispose() => System.IO.File.Delete(_path);
+
+    [Theory]
+    [InlineData(ParquetCompression.Gzip, DataPageVersion.V1)]
+    [InlineData(ParquetCompression.Gzip, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Zstd, DataPageVersion.V1)]
+    [InlineData(ParquetCompression.Zstd, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Snappy, DataPageVersion.V2)]
+    [InlineData(ParquetCompression.Lz4Raw, DataPageVersion.V1)]
+    public async Task ReadsOnLanesTheRowsOneLaneReads(ParquetCompression compression, DataPageVersion version)
+    {
+        await WriteAsync(compression, version);
+        (List<string> one, long aheadOnOne, long cutOnOne) = await CountedRowsAsync(1);
+        (List<string> four, long aheadOnFour, long cutOnFour) = await CountedRowsAsync(4);
+        Assert.Equal(Rows, one.Count);
+        Assert.Equal(one, four);
+
+        // On one lane no page is taken ahead; on four, pages are, and the plain text of the notes and
+        // the lines, nullable and required, is cut into views where it is decompressed.
+        Assert.Equal(0, aheadOnOne);
+        Assert.Equal(0, cutOnOne);
+        Assert.True(aheadOnFour > 0, "No page was taken ahead on four lanes.");
+        Assert.True(cutOnFour > 0, "No page's text was cut into views ahead on four lanes.");
+
+        // A filter and a take step over pages a lane may have decompressed ahead.
+        VortexExpr band = Expr.And(Expr.Ge(Expr.Field("id"), Expr.Literal(FilterLiteral.From(12_000L))), Expr.Lt(Expr.Field("id"), Expr.Literal(FilterLiteral.From(13_500L))));
+        Assert.Equal(await RowsAsync(1, scan => scan.Where(band)), await RowsAsync(4, scan => scan.Where(band)));
+        long[] spread = [.. Enumerable.Range(0, 40).Select(i => (long)i * 997)];
+        Assert.Equal(await RowsAsync(1, scan => scan.Rows(spread)), await RowsAsync(4, scan => scan.Rows(spread)));
+    }
+
+    [Fact]
+    public async Task AScanStoppedEarlyLeavesNoPageBehind()
+    {
+        await WriteAsync(ParquetCompression.Gzip, DataPageVersion.V2);
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+        for (int stop = 1; stop <= 3; stop++)
+        {
+            await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
+            int seen = 0;
+            await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
+            {
+                using (batch)
+                {
+                    if (++seen == stop)
+                    {
+                        break;
+                    }
+                }
+            }
+
+            Assert.Equal(stop, seen);
+        }
+
+        // The pages a stopped scan decompressed ahead went back: the file reads whole after it.
+        Assert.Equal(await RowsAsync(1, scan => scan), await RowsAsync(4, scan => scan));
+    }
+
+    /// <summary>Every row of the file on <paramref name="degree"/> lanes, the pages its columns took ahead, and those whose views a lane cut.</summary>
+    private async Task<(List<string> Rows, long Ahead, long ViewsAhead)> CountedRowsAsync(int degree)
+    {
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+        await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
+        List<string> rows = await RowsAsync(file.Scan().ToBatchesAsync(Ct));
+        return (rows, file.Counters.Ahead, file.Counters.ViewsAhead);
+    }
+
+    /// <summary>Every row the scan <paramref name="shape"/> makes of the file, on <paramref name="degree"/> lanes, each value rendered.</summary>
+    private async Task<List<string>> RowsAsync(int degree, Func<Scan, Scan> shape)
+    {
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+        await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
+        return await RowsAsync(shape(file.Scan()).ToBatchesAsync(Ct));
+    }
+
+    /// <summary>Every row of the batches, each value rendered.</summary>
+    private static async Task<List<string>> RowsAsync(IAsyncEnumerable<RecordBatch> batches)
+    {
+        List<string> rows = [];
+        await foreach (RecordBatch batch in batches)
+        {
+            using (batch)
+            {
+                for (int r = 0; r < batch.RowCount; r++)
+                {
+                    rows.Add(string.Join(" | ", Enumerable.Range(0, batch.Schema.Count).Select(c => Render.Row(batch, c, r))));
+                }
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The rows, pages of 16 384 of them in a row group of them all: five pages a column, those of the
+    /// payloads, the notes and the lines, text that seldom repeats, large enough to be worth a lane
+    /// under every codec, the notes and the lines PLAIN.
+    /// </summary>
+    private async Task WriteAsync(ParquetCompression compression, DataPageVersion version)
+    {
+        ParquetWriteOptions options = new()
+        {
+            Compression = compression,
+            DataPageVersion = version,
+            BlockRows = 16_384,
+            RowGroupRows = Rows,
+            Hints = new Dictionary<string, ParquetEncodingHint> { ["note"] = ParquetEncodingHint.Plain, ["line"] = ParquetEncodingHint.Plain },
+        };
+        await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(_path, Schema, options);
+        ColumnsBuilder builder = writer.Builder();
+        for (int row = 0; row < Rows; row++)
+        {
+            builder.Column<long>(0).Append(row);
+            if (row % 7 == 0)
+            {
+                builder.Column<double?>(1).AppendNull();
+            }
+            else
+            {
+                builder.Column<double?>(1).Append((row * 7919 % 10_007) / 4.0);
+            }
+
+            if (row % 11 == 0)
+            {
+                builder.Column<string?>(2).AppendNull();
+            }
+            else
+            {
+                builder.Column<string?>(2).Append(string.Create(CultureInfo.InvariantCulture, $"label-{row % 37}"));
+            }
+
+            if (row % 5 == 0)
+            {
+                builder.Column<bool?>(3).AppendNull();
+            }
+            else
+            {
+                builder.Column<bool?>(3).Append(row % 3 == 0);
+            }
+
+            builder.Column<string>(4).Append(string.Create(CultureInfo.InvariantCulture, $"payload {row * 2_654_435_761L % 1_000_003:D7} of the row, long enough to fill a page"));
+            if (row % 13 == 0)
+            {
+                builder.Column<string?>(5).AppendNull();
+            }
+            else
+            {
+                builder.Column<string?>(5).Append(string.Create(CultureInfo.InvariantCulture, $"note {row * 40_503L % 1_000_033:D7}, {(row % 3 == 0 ? "short" : "a little longer than twelve bytes")}"));
+            }
+
+            builder.Column<string>(6).Append(row % 4 == 0 ? "tiny" : string.Create(CultureInfo.InvariantCulture, $"line {row * 69_069L % 999_983:D6} of the file, on its own"));
+        }
+
+        await writer.WriteAsync(builder, Ct);
+        await writer.CompleteAsync(Ct);
+    }
+}

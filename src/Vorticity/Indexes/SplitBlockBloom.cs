@@ -23,6 +23,13 @@ internal static class SplitBlockBloom
     /// <summary>Bytes per block: eight 32-bit words, 256 bits.</summary>
     internal const int BytesPerBlock = WordsPerBlock * sizeof(uint);
 
+    // xxHash64's primes.
+    private const ulong Prime1 = 0x9E3779B185EBCA87;
+    private const ulong Prime2 = 0xC2B2AE3D27D4EB4F;
+    private const ulong Prime3 = 0x165667B19E3779F9;
+    private const ulong Prime4 = 0x85EBCA77C2B2AE63;
+    private const ulong Prime5 = 0x27D4EB2F165667C5;
+
     private static ReadOnlySpan<uint> Salts =>
     [
         0x47b6137b, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31,
@@ -134,6 +141,83 @@ internal static class SplitBlockBloom
     /// <returns>The words.</returns>
     internal static ReadOnlySpan<uint> Words(ReadOnlySpan<byte> bytes) =>
         MemoryMarshal.Cast<byte, uint>(bytes[..(bytes.Length / BytesPerBlock * BytesPerBlock)]);
+
+    /// <summary>
+    /// xxHash64, seed 0, of a 4-byte little-endian value: <see cref="Hash"/> of its bytes with
+    /// <see cref="BloomHash.XxHash64"/>, as the specification's short-input path computes it, without
+    /// the span and the length dispatch, which cost more than the hash on a column of them.
+    /// </summary>
+    /// <param name="value">The value's bits.</param>
+    /// <returns>The 64-bit hash.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong XxHash64Of(uint value)
+    {
+        ulong hash = Prime5 + sizeof(uint);
+        hash ^= value * Prime1;
+        hash = (BitOperations.RotateLeft(hash, 23) * Prime2) + Prime3;
+        return Avalanche(hash);
+    }
+
+    /// <summary>xxHash64, seed 0, of an 8-byte little-endian value; see <see cref="XxHash64Of(uint)"/>.</summary>
+    /// <param name="value">The value's bits.</param>
+    /// <returns>The 64-bit hash.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong XxHash64Of(ulong value)
+    {
+        ulong hash = Prime5 + sizeof(ulong);
+        hash ^= BitOperations.RotateLeft(value * Prime2, 31) * Prime1;
+        hash = (BitOperations.RotateLeft(hash, 27) * Prime1) + Prime4;
+        return Avalanche(hash);
+    }
+
+    /// <summary>
+    /// Folds a filter of <paramref name="from"/> blocks into its first <paramref name="to"/>, both
+    /// powers of two: each block of the smaller filter the OR of the run of blocks it stands for.
+    /// </summary>
+    /// <remarks>
+    /// A value's block is the top bits of its hash's high half, and its bits in the block depend on
+    /// the low half alone, so a value in block <c>b</c> of <c>n</c> blocks is in block
+    /// <c>b / (n / m)</c> of <c>m</c>, with the same bits: the fold is, bit for bit, the filter
+    /// built at the smaller size from the same values.
+    /// </remarks>
+    /// <param name="words">The filter, <paramref name="from"/> blocks.</param>
+    /// <param name="from">Its blocks.</param>
+    /// <param name="to">The blocks it folds to, at most <paramref name="from"/>.</param>
+    internal static void Fold(Span<uint> words, int from, int to)
+    {
+        if (to >= from)
+        {
+            return;
+        }
+
+        ArgumentOutOfRangeException.ThrowIfLessThan(words.Length, from * WordsPerBlock, nameof(words));
+        int run = from / to;
+        ref uint start = ref MemoryMarshal.GetReference(words);
+        for (int block = 0; block < to; block++)
+        {
+            // The run of block b begins at block b * run, at or past b: past every block written.
+            nuint source = (nuint)(block * run * WordsPerBlock);
+            Vector256<uint> bits = Vector256.LoadUnsafe(ref start, source);
+            for (int i = 1; i < run; i++)
+            {
+                bits |= Vector256.LoadUnsafe(ref start, source + (nuint)(i * WordsPerBlock));
+            }
+
+            bits.StoreUnsafe(ref start, (nuint)(block * WordsPerBlock));
+        }
+    }
+
+    /// <summary>xxHash64's final mix.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Avalanche(ulong hash)
+    {
+        hash ^= hash >> 33;
+        hash *= Prime2;
+        hash ^= hash >> 29;
+        hash *= Prime3;
+        hash ^= hash >> 32;
+        return hash;
+    }
 
     /// <summary>
     /// The bit <paramref name="key"/> sets in each word of a block, all eight at once: the key times

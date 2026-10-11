@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
+using Vorticity.Compute;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
@@ -174,70 +175,7 @@ internal sealed class SequenceDecoder : ArrayDecoder
         // A range starts where its first row falls in the progression; the multiply wraps exactly
         // as accumulating up to it would.
         start = unchecked(start + (T.CreateTruncating((uint)first) * step));
-
-        // The accumulator is a loop-carried dependency one add deep, so the serial loop runs at the
-        // latency of an add per value however wide the machine is. `base + i * step` is the same
-        // sequence with no dependency at all: seed one vector with the first `lanes` values and
-        // advance it by `lanes * step`, which wraps exactly as the running sum does because
-        // two's-complement addition is associative.
-        int index = 0;
-        T accumulator = start;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<T>.Count)
-        {
-            int lanes = Vector<T>.Count;
-            Span<T> seed = stackalloc T[lanes];
-            T value = start;
-            for (int k = 0; k < lanes; k++)
-            {
-                seed[k] = value;
-                value = unchecked(value + step);
-            }
-
-            T laneStep = unchecked(value - start);
-            Vector<T> bump = new Vector<T>(laneStep);
-
-            // Four accumulators rather than one, and no bounds check in the loop. A single vector
-            // still leaves a loop-carried add between consecutive stores, so the loop runs at the
-            // latency of that add where the store units should be the only bound; four independent
-            // chains let the machine retire four stores in the time one dependency step takes. The
-            // base reference is taken once, so the stores address the span without re-checking it
-            // per iteration.
-            ref T destinationRef = ref MemoryMarshal.GetReference(values);
-            Vector<T> v0 = new Vector<T>(seed);
-            Vector<T> v1 = unchecked(v0 + bump);
-            Vector<T> v2 = unchecked(v1 + bump);
-            Vector<T> v3 = unchecked(v2 + bump);
-            Vector<T> quadBump = new Vector<T>(
-                unchecked(laneStep + laneStep + laneStep + laneStep));
-
-            int quad = lanes * 4;
-            for (; index <= values.Length - quad; index += quad)
-            {
-                v0.StoreUnsafe(ref destinationRef, (nuint)index);
-                v1.StoreUnsafe(ref destinationRef, (nuint)(index + lanes));
-                v2.StoreUnsafe(ref destinationRef, (nuint)(index + (2 * lanes)));
-                v3.StoreUnsafe(ref destinationRef, (nuint)(index + (3 * lanes)));
-                v0 = unchecked(v0 + quadBump);
-                v1 = unchecked(v1 + quadBump);
-                v2 = unchecked(v2 + quadBump);
-                v3 = unchecked(v3 + quadBump);
-            }
-
-            // v0 is still the vector for `index`, because all four advanced together.
-            for (; index <= values.Length - lanes; index += lanes)
-            {
-                v0.StoreUnsafe(ref destinationRef, (nuint)index);
-                v0 = unchecked(v0 + bump);
-            }
-
-            accumulator = v0[0];
-        }
-
-        for (; index < values.Length; index++)
-        {
-            values[index] = accumulator;
-            accumulator = unchecked(accumulator + step);
-        }
+        Progression.Fill(values, start, step);
     }
 
     private static ulong ReadBaseBits(TypedScalar baseScalar, PType ptype)

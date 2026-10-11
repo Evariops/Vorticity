@@ -5,10 +5,13 @@
     <RootNamespace>Vorticity.Fuzz</RootNamespace>
     <AssemblyName>Vorticity.Fuzz</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- The Parquet target reads through Vorticity.Parquet's evaluation surface. -->
+    <NoWarn>$(NoWarn);VX0003</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Parquet/Vorticity.Parquet.csproj" />
   </ItemGroup>
 
 </Project>

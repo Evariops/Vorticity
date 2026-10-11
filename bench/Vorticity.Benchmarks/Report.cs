@@ -716,7 +716,7 @@ internal static class Report
     /// million, and the conformance corpus holds neither; the reference's writer then writes the
     /// same rows as the other file.
     /// </summary>
-    private static async Task WriteFixtureAsync(string path, int rows)
+    internal static async Task WriteFixtureAsync(string path, int rows)
     {
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(

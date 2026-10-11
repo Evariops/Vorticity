@@ -671,7 +671,7 @@ internal static class BlockStatsPass
     /// too, and two values of that range that agree modulo 2^w are the same value. A range whose
     /// endpoint leaves the type's range is no progression, and says so before a lane is loaded.
     /// <para>
-    /// Four lanes or more, as <see cref="OrderLanes"/>: the 64-bit columns keep their scalar walk.
+    /// Four lanes or more, as <see cref="PairOrder.Cleared{T, TOrder}"/>: the 64-bit columns keep their scalar walk.
     /// The tail is the scalar twin, and so is the caller's loop under
     /// <c>DOTNET_EnableHWIntrinsic=0</c>. <paramref name="from"/> is at least one past the span's
     /// first row, so the first window's previous row is in the span.
@@ -2161,22 +2161,11 @@ internal static class BlockStatsPass
             return;
         }
 
-        int i = 1;
-        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported)
-        {
-            // Eight lanes or more at every width, 64-bit values included.
-            i = OrderLanes512(values, ref repeats);
-            last = values[i - 1];
-        }
-        else if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
-)
-        {
-            // The lanes clear every window in which nothing happens; the scalar loop takes over at
-            // the first one where something might -- a descent, a NaN -- and decides it row by row,
-            // in the order the scalar pass would have met it.
-            i = OrderLanes(values, ref repeats);
-            last = values[i - 1];
-        }
+        // The lanes clear every window in which nothing happens; the scalar loop takes over at the
+        // first one where something might -- a descent, a NaN -- and decides it row by row, in the
+        // order the scalar pass would have met it.
+        int i = PairOrder.Cleared<T, PairOrder.Rising>(values, ref repeats);
+        last = values[i - 1];
 
         for (; i < values.Length; i++)
         {
@@ -2202,68 +2191,6 @@ internal static class BlockStatsPass
         }
 
         stats.Repeats |= repeats;
-    }
-
-    /// <summary>
-    /// The pairs of an all-valid range, a register at a time: each element against the one before
-    /// it, by a second load one element behind, so no lane crosses from one iteration to the next.
-    /// </summary>
-    /// <returns>
-    /// Where the scalar loop resumes: the end of the last whole window, or the start of the first
-    /// window where a lane fell or a NaN showed -- the scalar loop meets it there in row order.
-    /// </returns>
-    /// <remarks>
-    /// Four lanes or more only. Two-lane registers -- 64-bit values -- are slower than the
-    /// perfectly predicted scalar loop, and are left to it.
-    /// </remarks>
-    private static int OrderLanes<T>(ReadOnlySpan<T> values, ref bool repeats)
-        where T : unmanaged, INumber<T>
-    {
-        int lanes = Vector128<T>.Count;
-        ref T head = ref MemoryMarshal.GetReference(values);
-        Vector128<T> equal = Vector128<T>.Zero;
-        int i = 1;
-        for (; i + lanes <= values.Length; i += lanes)
-        {
-            Vector128<T> current = Vector128.LoadUnsafe(ref head, (nuint)i);
-            Vector128<T> previous = Vector128.LoadUnsafe(ref head, (nuint)(i - 1));
-
-            // A NaN is unequal to itself; a descent is a lane below its predecessor. Either sends
-            // the window back to the scalar loop.
-            if (Vector128.LessThanAny(current, previous) || !Vector128.EqualsAll(current, current))
-            {
-                break;
-            }
-
-            equal |= Vector128.Equals(current, previous);
-        }
-
-        repeats |= equal != Vector128<T>.Zero;
-        return i;
-    }
-
-    /// <summary><see cref="OrderLanes{T}"/> on 512-bit vectors, which hold eight 64-bit lanes.</summary>
-    private static int OrderLanes512<T>(ReadOnlySpan<T> values, ref bool repeats)
-        where T : unmanaged, INumber<T>
-    {
-        int lanes = Vector512<T>.Count;
-        ref T head = ref MemoryMarshal.GetReference(values);
-        Vector512<T> equal = Vector512<T>.Zero;
-        int i = 1;
-        for (; i + lanes <= values.Length; i += lanes)
-        {
-            Vector512<T> current = Vector512.LoadUnsafe(ref head, (nuint)i);
-            Vector512<T> previous = Vector512.LoadUnsafe(ref head, (nuint)(i - 1));
-            if (Vector512.LessThanAny(current, previous) || !Vector512.EqualsAll(current, current))
-            {
-                break;
-            }
-
-            equal |= Vector512.Equals(current, previous);
-        }
-
-        repeats |= equal != Vector512<T>.Zero;
-        return i;
     }
 
     /// <summary>

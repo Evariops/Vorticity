@@ -193,6 +193,12 @@ internal static class Program
                 .. args.Where((a, i) =>
                     i >= 3 && i != afterFlag + 1 && !a.StartsWith("--", StringComparison.Ordinal))
             ];
+            // Both sides open alike. A side loaded from a worktree opens through its library's
+            // default session, which keeps a file's mapping for the next open; this build's side
+            // was given the cold session above, and so paid for a mapping every round the other
+            // took over: a scan of a million plain integers read 4.8 times slower on it, the same
+            // library on both sides.
+            Vorticity.Bench.Scenarios.ScenarioSet.Session = null;
             return await AbCheck.RunAsync(args[1], after, args[2], scenarios).ConfigureAwait(false);
         }
 
@@ -277,6 +283,21 @@ internal static class Program
                 .Select(a => int.TryParse(a, CultureInfo.InvariantCulture, out int size) ? size : 0)
                 .Where(size => size > 0)];
             return await TreeBench.RunAsync(sizes).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "--format-cost")
+        {
+            return await FormatCost.RunAsync(args).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "--page-codecs")
+        {
+            return await PageCodecCost.RunAsync(args).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "--nested-file")
+        {
+            return await NestedFile.RunAsync(args).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--probe")
@@ -475,6 +496,7 @@ internal static class Program
                 typeof(Program).Assembly,
                 typeof(VortexFile).Assembly,
                 typeof(Vorticity.RowEncoding.RowSortField).Assembly,
+                typeof(Vorticity.Parquet.ParquetFileWriter).Assembly,
             }
             .DistinctBy(a => a.GetName().Name, StringComparer.Ordinal)
             .Where(a => a.GetCustomAttribute<DebuggableAttribute>() is { IsJITOptimizerDisabled: true })
@@ -583,6 +605,32 @@ internal static class Program
                                    one scenario in this process, printing the rows it rendered and
                                      what the process cost. What --report spawns; not a benchmark
                                      on its own
+          --format-cost            the format's cost in one engine: the report's table written
+                                     as Vortex and as Parquet by our writers, the report's
+                                     actions on both through the same scan, in this process,
+                                     warm, on one core and on all; time, ratio, allocations
+                                     --rows N          rows of the table, default 2^20
+                                     --runs N          timed calls an action, default 5
+                                     --file <x.parquet> a Parquet file of another writer
+                                                       instead, against its rewrite as Vortex
+                                     --keep            leave both files, and say where
+                                     --columns         each column alone too, on one core
+                                     --degrees <n,…>   the degrees timed, default 1 and every
+                                                       processor
+                                     --actions <a,…>   the actions timed, default all of them
+                                     --loop <format> <action> [secs]
+                                                       one action in a bare loop, for a trace
+                                     --degree N        the loop's lanes, default 1
+                                     --warm-maps       keep a file's mapping from one open to
+                                                       the next, its pages faulted in once
+          --page-codecs <x.parquet>
+                                   a Parquet file's pages decompressed by the package's codecs,
+                                     and GZIP's by the base class library's too, the outputs
+                                     compared: GB/s for the file and its largest columns
+                                     --runs N          timed passes, default 9
+          --nested-file <path>     write the Parquet benchmark page's nested file: events of
+                                     22 fields, six lists, under SNAPPY
+                                     --rows N          its rows, default 2,000,000
           --probe [name…]          the write, decomposed: scan, serialize, transit, compress,
                                      five configurations a file, median of five
           --tree [count…]          the dataset tree's shape under both boundary rules: fan-out,

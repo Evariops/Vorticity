@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Experimental, like the dataset and the row encoding, until its surface settles. A Parquet file
+       is one more source of the core's scans: the package reaches into the engine (arenas, the scan
+       source, the writer's builders), so the core grants it its internals, and the core knows
+       nothing of it. -->
+  <PropertyGroup>
+    <RootNamespace>Vorticity.Parquet</RootNamespace>
+    <AssemblyName>Vorticity.Parquet</AssemblyName>
+    <PackageId>Vorticity.Parquet</PackageId>
+    <IsPackable>true</IsPackable>
+    <PackageTags>$(PackageTags);parquet</PackageTags>
+    <Description>Apache Parquet read and written by Vorticity's engine, with no third-party dependency: pages decoded in place into the arena a Vortex block decodes into, so every scan, query and writer of the core runs over a Parquet file.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Parquet.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks.Runner" />
+  </ItemGroup>
+
+  <!-- Build-time only, as in the core: the package stays dependency-free at runtime. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="../../BannedSymbols.txt" />
+  </ItemGroup>
+
+</Project>

@@ -21,14 +21,23 @@
 // Deterministic by seed, so a finding is reproducible from its line of output alone:
 //
 //     dotnet run --project tests/Vorticity.Fuzz -c Release -- <corpus-dir> [iterations] [seed]
+//
+// and over Parquet files, whose only clean failures are ParquetFormatException and
+// ParquetUnsupportedException, each mutation read mapped on four lanes, which decompress pages
+// ahead, and by positional reads, and verified:
+//
+//     dotnet run --project tests/Vorticity.Fuzz -c Release -- --parquet <corpus-dir> [iterations] [seed]
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Numerics;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.IO;
+using Vorticity.Parquet;
 
 namespace Vorticity.Fuzz;
 
@@ -45,6 +54,11 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--parquet")
+        {
+            return await ParquetCampaign(args[1..]).ConfigureAwait(false);
+        }
+
         string corpus = args.Length > 0
             ? args[0]
             : Path.Combine("tests", "Vorticity.Conformance", "corpus");
@@ -128,6 +142,232 @@ internal static class Program
         }
 
         return totals.Findings == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// The Parquet campaign: mutations of the corpus's Parquet files, structure-aware over their
+    /// Thrift, each read mapped on four lanes, which decompress pages ahead of their read, and by
+    /// positional reads, which cut and read ahead otherwise, and verified against itself.
+    /// </summary>
+    private static async Task<int> ParquetCampaign(string[] args)
+    {
+        string corpus = args.Length > 0 ? args[0] : Path.Combine("E:", "parquet-data", "parquet-testing", "data");
+        int iterations = args.Length > 1 ? int.Parse(args[1], CultureInfo.InvariantCulture) : 20_000;
+        int seed = args.Length > 2 ? int.Parse(args[2], CultureInfo.InvariantCulture) : Environment.TickCount;
+        if (!Directory.Exists(corpus))
+        {
+            Console.Error.WriteLine($"no corpus at {corpus}");
+            return 2;
+        }
+
+        // Small seeds: a mutation read twice and verified costs a few of their reads.
+        string[] seeds = Array.FindAll(
+            Directory.GetFiles(corpus, "*.parquet*", SearchOption.AllDirectories),
+            path => (path.EndsWith(".parquet", StringComparison.Ordinal) || path.EndsWith(".parquet.encrypted", StringComparison.Ordinal))
+                && new FileInfo(path).Length is > 64 and < (2 << 20));
+        Array.Sort(seeds, StringComparer.Ordinal);
+        if (seeds.Length == 0)
+        {
+            Console.Error.WriteLine($"no .parquet files under {corpus}");
+            return 2;
+        }
+
+        Console.Out.WriteLine($"fuzzing {iterations} Parquet mutations of {seeds.Length} seed files, seed {seed}");
+        string directory = Path.Combine(Path.GetTempPath(), $"vorticity-fuzz-{Environment.ProcessId}");
+        Directory.CreateDirectory(directory);
+        Random random = new Random(seed);
+        Outcome totals = default;
+        await using VortexSession positional = VortexSession.Create(options => options.MapFiles = false);
+        try
+        {
+            for (int i = 0; i < iterations; i++)
+            {
+                string source = seeds[random.Next(seeds.Length)];
+                byte[] original = System.IO.File.ReadAllBytes(source);
+                (byte[] mutated, string what) = ParquetMutator.Apply(original, random, random.Next(ParquetMutator.Kinds));
+                string path = Path.Combine(directory, $"m{i}.parquet");
+                System.IO.File.WriteAllBytes(path, mutated);
+                (Finding? finding, Reach reach) = await RunParquet(path, positional, SuiteKeys.For(source)).ConfigureAwait(false);
+                TryDelete(path);
+                switch (reach)
+                {
+                    case Reach.RejectedAtOpen: totals.RejectedAtOpen++; break;
+                    case Reach.RejectedWhileDecoding: totals.RejectedWhileDecoding++; break;
+                    default: totals.Read++; break;
+                }
+
+                if (finding is not null)
+                {
+                    Console.Error.WriteLine(
+                        $"FINDING seed={seed} iteration={i} file={Path.GetFileName(source)} " +
+                        $"mutation=\"{what}\": {finding.Value.Kind} - {finding.Value.Detail}");
+                    Directory.CreateDirectory(Path.Combine("fuzz", "artifacts"));
+                    System.IO.File.WriteAllBytes(Path.Combine("fuzz", "artifacts", $"crash-{seed}-{i}.parquet"), mutated);
+                    totals.Findings++;
+                    if (totals.Findings >= 20)
+                    {
+                        Console.Error.WriteLine("stopping after 20 findings");
+                        break;
+                    }
+                }
+                else
+                {
+                    totals.Clean++;
+                }
+            }
+        }
+        finally
+        {
+            TryDelete(directory, recursive: true);
+        }
+
+        Console.Out.WriteLine($"{totals.Clean} mutations failed cleanly or read successfully, {totals.Findings} findings");
+        Console.Out.WriteLine(
+            $"  reach: {totals.RejectedAtOpen} refused at open, {totals.RejectedWhileDecoding} refused while decoding, {totals.Read} read to the end");
+        int deep = totals.RejectedWhileDecoding + totals.Read;
+        if (deep * 10 < iterations)
+        {
+            Console.Error.WriteLine($"WARNING: only {deep} of {iterations} mutations got past the open path; this campaign says little about the decoders.");
+        }
+
+        return totals.Findings == 0 ? 0 : 1;
+    }
+
+    /// <summary>
+    /// Opens, scans and verifies the Parquet file at <paramref name="path"/>, mapped in a session of
+    /// its own on four lanes, which lets the file go when it is disposed, then by positional reads.
+    /// </summary>
+    private static async Task<(Finding?, Reach)> RunParquet(string path, VortexSession positional, ParquetOpenOptions? options)
+    {
+        Stopwatch clock = Stopwatch.StartNew();
+        Reach reach = Reach.RejectedAtOpen;
+        try
+        {
+            await using (VortexSession mapped = VortexSession.Create(options => { options.MapFiles = true; options.MaxDegreeOfParallelism = 4; }))
+            {
+                await using ParquetFile file = await mapped.OpenParquetAsync(path, options, CancellationToken.None).ConfigureAwait(false);
+                reach = Reach.RejectedWhileDecoding;
+                await foreach (BatchView batch in file.Scan())
+                {
+                    if (Touch(batch) is { } wrong)
+                    {
+                        return (new Finding("WrongValue", wrong), reach);
+                    }
+                }
+            }
+
+            await using (ParquetFile file = await positional.OpenParquetAsync(path, options, CancellationToken.None).ConfigureAwait(false))
+            {
+                await foreach (BatchView batch in file.Scan())
+                {
+                    if (Touch(batch) is { } wrong)
+                    {
+                        return (new Finding("WrongValue", wrong), reach);
+                    }
+                }
+
+                _ = await file.VerifyAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+
+            reach = Reach.Read;
+        }
+        catch (ParquetFormatException)
+        {
+            // The expected answer for a mutated file.
+        }
+        catch (ParquetUnsupportedException)
+        {
+            // Also expected: a mutation can name a codec or an encoding the reader does not take.
+        }
+        catch (ArgumentException error)
+        {
+            return (new Finding("ArgumentException", $"a file-driven path reported a caller error: {error.Message}"), reach);
+        }
+        catch (Exception error)
+        {
+            return (new Finding(error.GetType().Name, error.Message), reach);
+        }
+        finally
+        {
+            clock.Stop();
+        }
+
+        return (
+            clock.Elapsed > Budget
+                ? new Finding("Timeout", $"took {clock.Elapsed.TotalSeconds:F1}s, budget {Budget.TotalSeconds}s")
+                : null,
+            reach);
+    }
+
+    /// <summary>
+    /// The keys the standard's suite encrypted its files with, which its README publishes: a seed
+    /// of the suite read with them is decrypted, so that its mutations reach the modules' checks and
+    /// the pages that counter mode leaves unauthenticated.
+    /// </summary>
+    private static class SuiteKeys
+    {
+        private static readonly Dictionary<string, byte[]> Keys128 = new()
+        {
+            ["kf"] = System.Text.Encoding.ASCII.GetBytes("0123456789012345"),
+            ["kc1"] = System.Text.Encoding.ASCII.GetBytes("1234567890123450"),
+            ["kc2"] = System.Text.Encoding.ASCII.GetBytes("1234567890123451"),
+        };
+
+        private static readonly Dictionary<string, byte[]> Keys256 = new()
+        {
+            ["kf"] = System.Text.Encoding.ASCII.GetBytes("01234567890123456789012345678901"),
+            ["kc1"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789012"),
+            ["kc2"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789013"),
+            ["kc3"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789014"),
+            ["kc4"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789015"),
+            ["kc5"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789016"),
+            ["kc6"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789017"),
+            ["kc7"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789018"),
+            ["kc8"] = System.Text.Encoding.ASCII.GetBytes("12345678901234567890123456789019"),
+        };
+
+        /// <summary>The options a seed opens with: the suite's keys and AAD prefix for an encrypted one, none for another.</summary>
+        internal static ParquetOpenOptions? For(string seed)
+        {
+            if (!seed.EndsWith(".encrypted", StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            Dictionary<string, byte[]> keys = seed.Contains("aes256", StringComparison.Ordinal) ? Keys256 : Keys128;
+            string prefix = Path.GetFileName(seed).Contains("aad", StringComparison.Ordinal) ? "tester" : "";
+            return new ParquetOpenOptions
+            {
+                Decryption = new ParquetDecryption
+                {
+                    KeyResolver = request => keys.TryGetValue(System.Text.Encoding.UTF8.GetString(request.KeyMetadata.Span), out byte[]? key) ? key : ReadOnlyMemory<byte>.Empty,
+                    AadPrefix = System.Text.Encoding.UTF8.GetBytes(prefix),
+                },
+            };
+        }
+    }
+
+    private static void TryDelete(string path, bool recursive = false)
+    {
+        try
+        {
+            if (recursive)
+            {
+                Directory.Delete(path, recursive: true);
+            }
+            else
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+        catch (IOException)
+        {
+            // A file a mapping still holds goes with the directory, or with the system's next clean-up.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // As above.
+        }
     }
 
     /// <summary>Opens and fully scans <paramref name="bytes"/>, classifying whatever happens.</summary>

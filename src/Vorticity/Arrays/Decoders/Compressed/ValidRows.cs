@@ -38,6 +38,25 @@ internal static class ValidRows
         return BitmapKernels.CountSet(mask.Bits, mask.BitOffset, length);
     }
 
+    /// <summary>Whether the rows a spread writes into hold zeros before it, as a null row's bytes must.</summary>
+    internal interface IRows
+    {
+        /// <summary>Whether the rows are zeroed, so that a null row is left as it is rather than written.</summary>
+        static abstract bool Zeroed { get; }
+    }
+
+    /// <summary>Rows their caller zeroed.</summary>
+    internal readonly struct ZeroedRows : IRows
+    {
+        public static bool Zeroed => true;
+    }
+
+    /// <summary>Rows of any bytes: a null row's are written zero with the rest.</summary>
+    internal readonly struct UnzeroedRows : IRows
+    {
+        public static bool Zeroed => false;
+    }
+
     /// <summary>
     /// Spreads <paramref name="source"/>'s values of <paramref name="byteWidth"/> bytes over the
     /// mask's valid rows of <paramref name="destination"/>, which is zeroed.
@@ -49,43 +68,70 @@ internal static class ValidRows
     /// <param name="byteWidth">Bytes per value.</param>
     /// <param name="encodingId">The encoding, for the error a short source raises.</param>
     internal static void Spread(
+        ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length, int byteWidth, string encodingId) =>
+        Spread<ZeroedRows>(source, destination, in mask, length, byteWidth, encodingId);
+
+    /// <summary>
+    /// Spreads <paramref name="source"/>'s values over the mask's valid rows of
+    /// <paramref name="destination"/>, whatever it holds: a null row's bytes are written zero, so
+    /// that no pass clears the rows before and none of them is written twice.
+    /// </summary>
+    /// <param name="source">The dense values, at least one per valid row.</param>
+    /// <param name="destination">The rows, of any bytes.</param>
+    /// <param name="mask">Which rows hold a value.</param>
+    /// <param name="length">Rows.</param>
+    /// <param name="byteWidth">Bytes per value.</param>
+    /// <param name="encodingId">The encoding, for the error a short source raises.</param>
+    internal static void SpreadOver(
+        ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length, int byteWidth, string encodingId) =>
+        Spread<UnzeroedRows>(source, destination, in mask, length, byteWidth, encodingId);
+
+    private static void Spread<TRows>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length, int byteWidth, string encodingId)
+        where TRows : struct, IRows
     {
         // The width is resolved once here and not per row: a copy whose length is only known at
         // run time costs a call per valid row to move four or eight bytes, which dominates the
-        // scatter on a nullable column.
+        // scatter on a nullable column. Sixteen bytes are a view, a decimal of up to 38 digits or
+        // a UUID, which a Parquet column of strings, decimals or UUIDs spreads.
         switch (byteWidth)
         {
             case 1:
-                Expand<byte>(source, destination, in mask, length, encodingId);
+                Expand<byte, TRows>(source, destination, in mask, length, encodingId);
                 break;
             case 2:
-                Expand<ushort>(source, destination, in mask, length, encodingId);
+                Expand<ushort, TRows>(source, destination, in mask, length, encodingId);
                 break;
             case 4:
-                Expand<uint>(source, destination, in mask, length, encodingId);
+                Expand<uint, TRows>(source, destination, in mask, length, encodingId);
                 break;
             case 8:
-                Expand<ulong>(source, destination, in mask, length, encodingId);
+                Expand<ulong, TRows>(source, destination, in mask, length, encodingId);
+                break;
+            case 16:
+                Expand<UInt128, TRows>(source, destination, in mask, length, encodingId);
                 break;
             default:
-                ExpandWide(source, destination, in mask, length, byteWidth);
+                ExpandWide<TRows>(source, destination, in mask, length, byteWidth);
                 break;
         }
     }
 
     /// <summary>Spreads a dense run of <typeparamref name="T"/> over the mask's valid rows.</summary>
     /// <typeparam name="T">The value type, chosen from the byte width by the caller.</typeparam>
+    /// <typeparam name="TRows">Whether the rows are zeroed before.</typeparam>
     /// <remarks>
     /// Sixty-four rows at a time: a word of valid rows is one copy of its values, a word of nulls is
-    /// nothing, since the destination is zeroed, and a mixed word of many values writes every one of
-    /// its rows, the next value or zero as its bit says, the next value moving on by the bit.
-    /// Walking the set bits instead chains each value's row to the bit before it, which pays only
-    /// for a word of few values, <see cref="SparseScatter"/> or fewer.
+    /// nothing where the destination is zeroed and its zeros otherwise, and a mixed word of many
+    /// values writes every one of its rows, the next value or zero as its bit says, the next value
+    /// moving on by the bit. Walking the set bits instead chains each value's row to the bit before
+    /// it, which pays only for a word of few values, <see cref="SparseScatter"/> or fewer, and is
+    /// cleared first where the destination is not.
     /// </remarks>
-    internal static void Expand<T>(
+    private static void Expand<T, TRows>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length, string encodingId)
         where T : unmanaged, IBinaryInteger<T>
+        where TRows : struct, IRows
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(source);
         Span<T> rows = MemoryMarshal.Cast<byte, T>(destination)[..length];
@@ -108,6 +154,11 @@ internal static class ValidRows
 
             if (word == 0)
             {
+                if (!TRows.Zeroed)
+                {
+                    rows.Slice(row, span).Clear();
+                }
+
                 continue;
             }
 
@@ -124,15 +175,25 @@ internal static class ValidRows
                 continue;
             }
 
-            next = count > SparseScatter
-                ? Scatter(values, ref MemoryMarshal.GetReference(rows[row..]), span, word, next)
-                : Walk(values, ref MemoryMarshal.GetReference(rows[row..]), word, next);
+            if (count > SparseScatter)
+            {
+                next = Scatter(values, ref MemoryMarshal.GetReference(rows[row..]), span, word, next);
+                continue;
+            }
+
+            if (!TRows.Zeroed)
+            {
+                rows.Slice(row, span).Clear();
+            }
+
+            next = Walk(values, ref MemoryMarshal.GetReference(rows[row..]), word, next);
         }
     }
 
-    /// <summary>Whether <typeparamref name="T"/>'s lanes expand in registers on this machine.</summary>
+    /// <summary>Whether <typeparamref name="T"/>'s lanes expand in registers on this machine: a primitive's, of up to eight bytes.</summary>
     private static bool Expands<T>() =>
-        Compute.WordBytes.IsAccelerated && (Unsafe.SizeOf<T>() >= 4 ? Avx512F.IsSupported : Avx512Vbmi2.IsSupported);
+        Compute.WordBytes.IsAccelerated && Unsafe.SizeOf<T>() <= sizeof(ulong)
+            && (Unsafe.SizeOf<T>() >= 4 ? Avx512F.IsSupported : Avx512Vbmi2.IsSupported);
 
     /// <summary>
     /// One mixed word's rows by <c>vpexpand</c>: for each vector of rows, the next values loaded
@@ -217,14 +278,14 @@ internal static class ValidRows
         return next;
     }
 
-    /// <summary>The same, for a width no primitive type has. Kept so the switch is total.</summary>
+    /// <summary>The same, for a width no primitive type has, a row at a time.</summary>
     /// <remarks>
-    /// No <c>PType</c> is 3, 5, 6 or 7 bytes wide, so nothing reaches this. It exists because a
-    /// <c>default</c> that threw would turn another width into a crash on a file, and one that did
-    /// nothing would turn it into silent zeros.
+    /// No <c>PType</c> is 3, 5, 6 or 7 bytes wide, but a Parquet column of fixed-length byte arrays
+    /// is any width: an INTERVAL's twelve bytes, a hash's twenty.
     /// </remarks>
-    private static void ExpandWide(
+    private static void ExpandWide<TRows>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length, int width)
+        where TRows : struct, IRows
     {
         int next = 0;
         for (int row = 0; row < length; row++)
@@ -233,6 +294,10 @@ internal static class ValidRows
             {
                 source.Slice(next * width, width).CopyTo(destination.Slice(row * width, width));
                 next++;
+            }
+            else if (!TRows.Zeroed)
+            {
+                destination.Slice(row * width, width).Clear();
             }
         }
     }

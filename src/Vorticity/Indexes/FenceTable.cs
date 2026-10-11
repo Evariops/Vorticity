@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.IO;
+using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Serialization.Schemas;
 
@@ -75,7 +76,7 @@ internal sealed class FencePage
     /// <param name="level">The page's level.</param>
     internal static int FenceBytes(KeySegment bounds, IndexSegment[] regions, long segments, int level)
     {
-        int body = 1 + ProtoWire.VarintSize(bounds.Entries) + Field(bounds.Min.Length) + Field(bounds.Max.Length);
+        int body = 1 + Varint.Size(bounds.Entries) + Field(bounds.Min.Length) + Field(bounds.Max.Length);
         foreach (IndexSegment region in regions)
         {
             body += IndexDirectory.SegmentBytes(region);
@@ -83,17 +84,17 @@ internal sealed class FencePage
 
         if (level > 0)
         {
-            body += 1 + ProtoWire.VarintSize((ulong)segments);
+            body += 1 + Varint.Size((ulong)segments);
         }
 
         return Field(body);
 
-        static int Field(int length) => 1 + ProtoWire.VarintSize((ulong)length) + length;
+        static int Field(int length) => 1 + Varint.Size((ulong)length) + length;
     }
 
     /// <summary>The bytes a page of <paramref name="level"/> takes besides its fences.</summary>
     /// <param name="level">The page's level.</param>
-    internal static int HeaderBytes(int level) => level == 0 ? 0 : 1 + ProtoWire.VarintSize((ulong)level);
+    internal static int HeaderBytes(int level) => level == 0 ? 0 : 1 + Varint.Size((ulong)level);
 
     /// <summary>A page over <paramref name="bounds"/>.</summary>
     internal static FencePage Of(int level, KeySegment[] bounds, IndexSegment[][] regions, long[] segments)

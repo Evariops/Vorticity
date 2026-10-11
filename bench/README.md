@@ -40,6 +40,8 @@ there. Publish the Native AOT runner first, since the report times the one it fi
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference on a Tokio runtime of n workers, with threads pinned on both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate, and `--full` adds the utf8 and f64 columns |
 | the writer, per encoding | `-- --throughput --write --check` | ~2 min | each file read back out to a discarding sink on both sides, against Rust, both writers given the rows as our reader delivers them, and the page prints each writer's bytes next to its time. It is a gate. Three files are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`), so run again before believing a red. Only `parquet_variant` produces no ratio, because the reference refuses to write it |
+| a Parquet read or write | `-- --format-cost [--file <x.parquet>]` | 1 to 4 min | the report's actions on the same rows as Parquet and as Vortex, through the same scan, on one thread and on all of them, or at the degrees `--degrees` lists, with `--actions` to narrow them: time, ratio and allocations |
+| a Parquet codec | `-- --page-codecs <x.parquet>` | 10 s | every compressed page of a file decompressed by the package, and by .NET's `GZipStream` where the file is GZIP's, the outputs compared: GB/s for the file and its largest columns |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows. Needs cargo, and `gate.sh --crosscheck` folds it in |
 | anything, before you push | `bench/gate.sh` | 68 s | the ten ratchets, `--ffi-check` and `--ratio-check`, exiting 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, with a ratio per round |
@@ -344,4 +346,6 @@ regression, and anything else is noise.
 ## Where the figures live
 
 The figures are on [the benchmark page](../docs/guide/benchmarks.md), each section dated and signed
-with the machine and the commit it was measured on.
+with the machine and the commit it was measured on. Parquet's are on [their own
+page](../docs/guide/benchmarks-parquet-x64.md), from `--format-cost` and `--page-codecs`, which
+write no page: the page says which arguments gave each table.

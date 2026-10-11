@@ -1351,6 +1351,21 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// Readies a detached context a scan gave back for the next scan, under <paramref name="options"/>:
+    /// a context made over an explicit encoding table, which a reader of another format decodes into.
+    /// </summary>
+    /// <param name="options">The read options the next scan decodes under.</param>
+    internal void RebindDetached(VortexReadOptions options)
+    {
+        Options = options;
+        if (_types is { NodeCount: not 0 } types)
+        {
+            _typesShape = types.Shape;
+            _types = null;
+        }
+    }
+
+    /// <summary>
     /// Undoes everything a scan set on this context, so that a later scan of any file may take it:
     /// the batch, the blocks its batches kept, the retained chunks it owns, the blobs and node
     /// checks it remembered -- facts about one file's bytes -- and every switch the scan set once.

@@ -215,7 +215,9 @@ public sealed class RecordBatch : IDisposable
     internal static RecordBatch Own(
         CanonicalArena source, int node, long startRow, VortexSchema? schema, VortexSession? session, ReadOnlySpan<ulong> selection, int selected)
     {
-        CanonicalArena owned = new CanonicalArena(64, (session ?? VortexSession.Default).Options.EnginePool);
+        // As many records as the source holds, which a batch's copy takes about, up to the 64 a wide
+        // batch would grow to anyway: a narrow batch of many, a scan's, then costs a few hundred bytes.
+        CanonicalArena owned = new CanonicalArena(Math.Clamp(source.NodeCount, 8, 64), (session ?? VortexSession.Default).Options.EnginePool);
         try
         {
             int root = owned.CopyFrom(source, node);

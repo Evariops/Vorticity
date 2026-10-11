@@ -65,6 +65,14 @@ internal readonly ref struct ValidityMask
     /// <summary>The mask of a column without nulls.</summary>
     internal static ValidityMask NonNullable => new(ValidityKind.NonNullable, default, 0);
 
+    /// <summary>
+    /// The mask of a bitmap held outside an arena: a Parquet page's validity, decoded from its
+    /// levels before the node it will belong to exists.
+    /// </summary>
+    /// <param name="bits">The bitmap, least significant bit first.</param>
+    /// <param name="bitOffset">The bit row 0 sits at.</param>
+    internal static ValidityMask Bitmap(ReadOnlySpan<byte> bits, int bitOffset) => new(ValidityKind.Bitmap, bits, bitOffset);
+
     /// <summary><see langword="true"/> when no row is null; callers can then skip the per-row test.</summary>
     internal bool AllValid => _kind is ValidityKind.NonNullable or ValidityKind.AllValid;
 

@@ -1,0 +1,113 @@
+// The Parquet decoders' kernels, each against a copy of its output: what decoding a page costs
+// beyond moving its values, and what splitting one into its byte streams costs the writer. A million values of each shape a column takes: a key that climbs by one
+// (every miniblock 0 bits wide), small and medium deltas, and noise (the full width).
+using System;
+
+using BenchmarkDotNet.Attributes;
+
+using Vorticity.Parquet.Encodings;
+
+namespace Vorticity.Benchmarks;
+
+/// <summary>DELTA_BINARY_PACKED and BYTE_STREAM_SPLIT decoded, against a copy of their output.</summary>
+[Config(typeof(BenchmarkConfig))]
+[BenchmarkCategory(BenchmarkConfig.Kernel)]
+public class ParquetKernelBenchmarks
+{
+    private const int Count = 1 << 20;
+
+    private readonly long[] _longs = new long[Count];
+    private readonly int[] _ints = new int[Count];
+    private readonly long[] _decodedLongs = new long[Count];
+    private readonly int[] _decodedInts = new int[Count];
+    private byte[] _deltas64 = [];
+    private byte[] _deltas32 = [];
+    private readonly byte[] _split = new byte[Count * sizeof(double)];
+    private readonly byte[] _gathered = new byte[Count * sizeof(double)];
+    private readonly byte[] _splitLongs = new byte[Count * sizeof(long)];
+    private readonly byte[] _splitInts = new byte[Count * sizeof(int)];
+    private byte[] _written64 = [];
+    private byte[] _written32 = [];
+
+    /// <summary>The values' shape: climbing by one, small or medium deltas, or noise.</summary>
+    [Params("climbing", "small", "medium", "noise")]
+    public string Shape { get; set; } = "climbing";
+
+    [GlobalSetup]
+    public void Setup()
+    {
+        Random random = new(11);
+        long last = 1_000_000;
+        for (int i = 0; i < Count; i++)
+        {
+            last += Shape switch
+            {
+                "climbing" => 1,
+                "small" => random.Next(0, 16),
+                "medium" => random.Next(-2_000, 2_000),
+                _ => random.NextInt64(),
+            };
+            _longs[i] = last;
+            _ints[i] = (int)last;
+        }
+
+        _deltas64 = new byte[DeltaBinaryPacked.Size64(_longs)];
+        DeltaBinaryPacked.Encode64(_longs, _deltas64);
+        _deltas32 = new byte[DeltaBinaryPacked.Size32(_ints)];
+        DeltaBinaryPacked.Encode32(_ints, _deltas32);
+        _written64 = new byte[_deltas64.Length];
+        _written32 = new byte[_deltas32.Length];
+        ByteStreamSplit.Encode(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_longs.AsSpan()), sizeof(double), _split);
+    }
+
+    [Benchmark(Baseline = true, Description = "copy 8 MB")]
+    public long Copy()
+    {
+        _longs.AsSpan().CopyTo(_decodedLongs);
+        return _decodedLongs[^1];
+    }
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED, INT64")]
+    public long Delta64()
+    {
+        DeltaBinaryPacked.Decode64(_deltas64, _decodedLongs);
+        return _decodedLongs[^1];
+    }
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED, INT32")]
+    public int Delta32()
+    {
+        DeltaBinaryPacked.Decode32(_deltas32, _decodedInts);
+        return _decodedInts[^1];
+    }
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED written, INT64")]
+    public int Written64() => DeltaBinaryPacked.Encode64(_longs, _written64);
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED written, INT32")]
+    public int Written32() => DeltaBinaryPacked.Encode32(_ints, _written32);
+
+    [Benchmark(Description = "DELTA_BINARY_PACKED priced, INT32")]
+    public int Priced32() => DeltaBinaryPacked.Size32(_ints);
+
+    [Benchmark(Description = "BYTE_STREAM_SPLIT, 8 bytes")]
+    public byte Split()
+    {
+        ByteStreamSplit.Decode(_split, sizeof(double), _gathered);
+        return _gathered[^1];
+    }
+
+    [Benchmark(Description = "BYTE_STREAM_SPLIT written, 8 bytes")]
+    public byte SplitLongs()
+    {
+        ByteStreamSplit.Encode(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_longs.AsSpan()), sizeof(long), _splitLongs);
+        return _splitLongs[^1];
+    }
+
+    [Benchmark(Description = "BYTE_STREAM_SPLIT written, 4 bytes")]
+    public byte SplitInts()
+    {
+        ByteStreamSplit.Encode(System.Runtime.InteropServices.MemoryMarshal.AsBytes(_ints.AsSpan()), sizeof(int), _splitInts);
+        return _splitInts[^1];
+    }
+}

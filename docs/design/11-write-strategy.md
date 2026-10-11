@@ -94,6 +94,11 @@ never on the hash alone, and the table owns its keys. A block straddles batches,
 batch's memory is recycled the moment the next one is decoded, so a string is copied once, the first
 time it is seen, into a heap that is, in code order, the dictionary's values child.
 
+While a table of four- or eight-byte values holds 32 values at most, it codes eight rows at a time
+by comparing them with each of its values at once, a row equal to none going through the table: a
+column drawing few values in no order would otherwise miss the branch on its slot's compare most
+rows, 6.5 ns a row for two values of eight bytes against 0.25 this way.
+
 Probing every row of a column whose values are all distinct costs a few nanoseconds per row for
 nothing, so the table only runs on a chunk whose remembered plan is a dictionary that held. A
 column's first chunk, and a chunk whose plan memory sends it back to full pricing, count their

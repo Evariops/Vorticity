@@ -41,6 +41,25 @@ internal sealed class PipeSegmentSink : ISegmentSink
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>Lends <paramref name="data"/> to a pipe over a file, which writes it where it lies; copies it into any other.</summary>
+    public ValueTask LendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        if (_pipe is not FilePipeWriter file)
+        {
+            return WriteAsync(data, cancellationToken);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!data.IsEmpty)
+        {
+            file.Lend(data);
+            _position += data.Length;
+            _unflushed += data.Length;
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
     public async ValueTask FlushAsync(CancellationToken cancellationToken)
     {
         FlushResult result = await _pipe.FlushAsync(cancellationToken).ConfigureAwait(false);

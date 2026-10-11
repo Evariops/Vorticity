@@ -8,6 +8,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
 
+using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Benchmarks.Complexity;
@@ -114,7 +115,7 @@ internal struct ProtoWriterBefore : IDisposable
     public void WriteVarint(ulong value)
     {
         // One capacity check covers the whole varint, so the emit loop is branch-light.
-        EnsureCapacity(ProtoWire.MaxVarintLength);
+        EnsureCapacity(Varint.MaxLength64);
         byte[] buffer = _buffer!;
         int pos = _position;
         while (value >= 0x80)
@@ -321,14 +322,14 @@ internal struct ProtoWriterBefore : IDisposable
     public void WriteSInt32Always(int fieldNumber, int value)
     {
         WriteTag(fieldNumber, ProtoWireType.Varint);
-        WriteVarint(ProtoWire.ZigZagEncode32(value));
+        WriteVarint(Varint.ZigZagEncode32(value));
     }
 
     /// <summary>Writes a ZigZag <c>sint64</c> field even when 0.</summary>
     public void WriteSInt64Always(int fieldNumber, long value)
     {
         WriteTag(fieldNumber, ProtoWireType.Varint);
-        WriteVarint(ProtoWire.ZigZagEncode64(value));
+        WriteVarint(Varint.ZigZagEncode64(value));
     }
 
     /// <summary>Writes a <c>float</c> field even when 0, preserving negative zero and NaN payloads.</summary>
@@ -471,7 +472,7 @@ internal struct ProtoWriterBefore : IDisposable
             ThrowTooLarge(length);
         }
 
-        int extra = ProtoWire.VarintSize((ulong)length) - 1;
+        int extra = Varint.Size((ulong)length) - 1;
         if (_widened is null || _widened.Length == _widenedCount)
         {
             GrowWidened();
