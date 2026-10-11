@@ -141,43 +141,13 @@ public sealed partial class S3ObjectStore
         if (length < 0)
         {
             // Unknown: read a part at a time up to the threshold, and sent whole if it ends there.
-            int partSize = PartSizeFor(-1);
-            try
+            (ChunkedBuffer? ended, carried) = await PartPump.HeadAsync(content, PartSizeFor(-1), threshold, cancellationToken).ConfigureAwait(false);
+            if (ended is not null)
             {
-                long held = 0;
-                while (true)
+                using (ended)
                 {
-                    (ChunkedBuffer part, bool ended) = await ChunkedBuffer.FillAsync(content, partSize, cancellationToken).ConfigureAwait(false);
-                    held += part.Length;
-                    carried.Enqueue(part);
-                    if (ended && held <= threshold)
-                    {
-                        ChunkedBuffer all = carried.Dequeue();
-                        while (carried.TryDequeue(out ChunkedBuffer? next))
-                        {
-                            all.Absorb(next);
-                        }
-
-                        using (all)
-                        {
-                            return await SendWholeAsync(key, all, condition, cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-
-                    if (ended || held + partSize > threshold)
-                    {
-                        break;
-                    }
+                    return await SendWholeAsync(key, ended, condition, cancellationToken).ConfigureAwait(false);
                 }
-            }
-            catch
-            {
-                while (carried.TryDequeue(out ChunkedBuffer? part))
-                {
-                    part.Dispose();
-                }
-
-                throw;
             }
         }
 
@@ -240,87 +210,40 @@ public sealed partial class S3ObjectStore
         }
         catch
         {
-            Release(carried);
+            PartPump.Release(carried);
             throw;
         }
 
         List<Part> parts = [];
-        List<Task> inFlight = [];
-        using SemaphoreSlim slots = new SemaphoreSlim(Math.Max(1, _options.PartsInFlight));
-        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        long total = 0;
         try
         {
-            bool ended = false;
-            while (true)
-            {
-                // The parts read before the upload began first, then the content a part at a time.
-                if (!carried.TryDequeue(out ChunkedBuffer? part))
+            await PartPump.SendAsync(
+                key,
+                content,
+                length,
+                partSize,
+                maxParts,
+                _options.PartsInFlight,
+                carried,
+                (number, body, ct) =>
                 {
-                    if (ended)
+                    Part part = new Part(number, body.Length);
+                    lock (parts)
                     {
-                        break;
+                        parts.Add(part);
                     }
 
-                    (part, ended) = await ChunkedBuffer.FillAsync(content, partSize, failed.Token).ConfigureAwait(false);
-                    if (part.Length == 0)
-                    {
-                        part.Dispose();
-                        break;
-                    }
-                }
-
-                if (parts.Count == maxParts)
-                {
-                    part.Dispose();
-                    throw new ObjectStoreException($"'{key}' needs more than the {maxParts} parts {_profile} takes at {partSize} bytes a part: give its length.");
-                }
-
-                total += part.Length;
-                if (length >= 0 && total > length)
-                {
-                    part.Dispose();
-                    throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content runs past them.");
-                }
-
-                Part slot = new Part(parts.Count + 1, part.Length);
-                parts.Add(slot);
-                try
-                {
-                    await slots.WaitAsync(failed.Token).ConfigureAwait(false);
-                }
-                catch
-                {
-                    part.Dispose();
-                    throw;
-                }
-
-                inFlight.Add(UploadPartAsync(key, uploadId, slot, part, crc, slots, failed));
-                inFlight.RemoveAll(task => task.IsCompletedSuccessfully);
-            }
-
-            await Task.WhenAll(inFlight).ConfigureAwait(false);
-            if (length >= 0 && total != length)
-            {
-                throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {total}.");
-            }
+                    return UploadPartAsync(key, uploadId, part, body, crc, ct);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception caught)
+        catch
         {
-            await failed.CancelAsync().ConfigureAwait(false);
-            Exception? partFailed = await SettleAsync(inFlight).ConfigureAwait(false);
-            Release(carried);
             await AbortAsync(key, uploadId).ConfigureAwait(false);
-
-            // A part that failed cancels the reading of the next: its own failure is the one to say.
-            if (caught is OperationCanceledException && !cancellationToken.IsCancellationRequested && partFailed is not null)
-            {
-                ExceptionDispatchInfo.Throw(partFailed);
-            }
-
             throw;
         }
 
+        parts.Sort(static (a, b) => a.Number.CompareTo(b.Number));
         PutOutcome outcome;
         try
         {
@@ -339,50 +262,29 @@ public sealed partial class S3ObjectStore
         }
 
         return outcome;
-
-        static void Release(Queue<ChunkedBuffer> buffers)
-        {
-            while (buffers.TryDequeue(out ChunkedBuffer? buffer))
-            {
-                buffer.Dispose();
-            }
-        }
     }
 
-    private async Task UploadPartAsync(string key, string uploadId, Part part, ChunkedBuffer body, bool crc, SemaphoreSlim slots, CancellationTokenSource failed)
+    private async Task UploadPartAsync(string key, string uploadId, Part part, ChunkedBuffer body, bool crc, CancellationToken cancellationToken)
     {
-        try
+        ulong checksum = crc ? body.Crc64() : 0;
+        List<(string, string)> extra = [];
+        if (crc)
         {
-            ulong checksum = crc ? body.Crc64() : 0;
-            List<(string, string)> extra = [];
-            if (crc)
-            {
-                extra.Add(("x-amz-checksum-crc64nvme", Base64(checksum)));
-            }
-            else if (ChecksumOf() == S3Checksum.ContentMd5)
-            {
-                extra.Add(("content-md5", Convert.ToBase64String(body.Md5())));
-            }
+            extra.Add(("x-amz-checksum-crc64nvme", Base64(checksum)));
+        }
+        else if (ChecksumOf() == S3Checksum.ContentMd5)
+        {
+            extra.Add(("content-md5", Convert.ToBase64String(body.Md5())));
+        }
 
-            part.Etag = await _transport.SendAsync(
-                "UploadPart",
-                new PartRequest(this, key, uploadId, part.Number, body.Sequence(), [.. extra]),
-                static (s, ct) => s.Store.BuildPartAsync(s, ct),
-                static (response, s, ct) => s.Store.ConsumePartAsync(response, s.Key, ct),
-                idempotent: true,
-                failed.Token).ConfigureAwait(false);
-            part.Crc = checksum;
-        }
-        catch
-        {
-            await failed.CancelAsync().ConfigureAwait(false);
-            throw;
-        }
-        finally
-        {
-            body.Dispose();
-            slots.Release();
-        }
+        part.Etag = await _transport.SendAsync(
+            "UploadPart",
+            new PartRequest(this, key, uploadId, part.Number, body.Sequence(), [.. extra]),
+            static (s, ct) => s.Store.BuildPartAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumePartAsync(response, s.Key, ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false);
+        part.Crc = checksum;
     }
 
     /// <summary>Completes an upload with its condition, learning its outcome from the head when the answer is lost.</summary>
@@ -501,28 +403,6 @@ public sealed partial class S3ObjectStore
             // An upload left behind holds no key and is cleaned by the bucket's lifecycle rule: the
             // failure that is on its way out says more.
         }
-    }
-
-    /// <summary>Awaits every task, and returns the first failure that is not a cancellation, the one that started the others'.</summary>
-    private static async Task<Exception?> SettleAsync(List<Task> tasks)
-    {
-        Exception? first = null;
-        foreach (Task task in tasks)
-        {
-            try
-            {
-                await task.ConfigureAwait(false);
-            }
-            catch (Exception failure) when (failure is not OperationCanceledException)
-            {
-                first ??= failure;
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        }
-
-        return first;
     }
 
     private async ValueTask<HttpRequestMessage> BuildPutAsync(PutRequest s, CancellationToken cancellationToken)

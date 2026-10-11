@@ -125,38 +125,13 @@ public sealed partial class AzureBlobObjectStore
         int blockSize = BlockSizeFor(length);
         if (length < 0)
         {
-            try
+            (ChunkedBuffer? whole, carried) = await PartPump.HeadAsync(content, blockSize, threshold, cancellationToken).ConfigureAwait(false);
+            if (whole is not null)
             {
-                long held = 0;
-                while (true)
+                using (whole)
                 {
-                    (ChunkedBuffer block, bool ended) = await ChunkedBuffer.FillAsync(content, blockSize, cancellationToken).ConfigureAwait(false);
-                    held += block.Length;
-                    carried.Enqueue(block);
-                    if (ended && held <= threshold)
-                    {
-                        ChunkedBuffer all = carried.Dequeue();
-                        while (carried.TryDequeue(out ChunkedBuffer? next))
-                        {
-                            all.Absorb(next);
-                        }
-
-                        using (all)
-                        {
-                            return await PutBlobAsync(key, all, condition, cancellationToken).ConfigureAwait(false);
-                        }
-                    }
-
-                    if (ended || held + blockSize > threshold)
-                    {
-                        break;
-                    }
+                    return await PutBlobAsync(key, whole, condition, cancellationToken).ConfigureAwait(false);
                 }
-            }
-            catch
-            {
-                Release(carried);
-                throw;
             }
         }
 
@@ -195,85 +170,23 @@ public sealed partial class AzureBlobObjectStore
     private async ValueTask<PutOutcome> PutBlocksAsync(
         string key, PipeReader content, long length, PutCondition condition, int blockSize, Queue<ChunkedBuffer> carried, CancellationToken cancellationToken)
     {
-        List<string> ids = [];
-        List<Task> inFlight = [];
-        using SemaphoreSlim slots = new SemaphoreSlim(Math.Max(1, _options.BlocksInFlight));
-        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // Every id of a blob's blocks is of one length: an upload's random part, then the block's number.
         string upload = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(6));
-        long total = 0;
-        try
-        {
-            bool ended = false;
-            while (true)
-            {
-                if (!carried.TryDequeue(out ChunkedBuffer? block))
-                {
-                    if (ended)
-                    {
-                        break;
-                    }
-
-                    (block, ended) = await ChunkedBuffer.FillAsync(content, blockSize, failed.Token).ConfigureAwait(false);
-                    if (block.Length == 0)
-                    {
-                        block.Dispose();
-                        break;
-                    }
-                }
-
-                if (ids.Count == MaxBlocks)
-                {
-                    block.Dispose();
-                    throw new ObjectStoreException($"'{key}' needs more than the {MaxBlocks} blocks Azure takes at {blockSize} bytes a block: give its length.");
-                }
-
-                total += block.Length;
-                if (length >= 0 && total > length)
-                {
-                    block.Dispose();
-                    throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content runs past them.");
-                }
-
-                // Every id of a blob's blocks is of one length: an upload's random part, then the block's number.
-                string id = Convert.ToBase64String(Encoding.ASCII.GetBytes(string.Create(CultureInfo.InvariantCulture, $"{upload}{ids.Count:D6}")));
-                ids.Add(id);
-                try
-                {
-                    await slots.WaitAsync(failed.Token).ConfigureAwait(false);
-                }
-                catch
-                {
-                    block.Dispose();
-                    throw;
-                }
-
-                inFlight.Add(PutBlockAsync(key, id, block, slots, failed));
-                inFlight.RemoveAll(task => task.IsCompletedSuccessfully);
-            }
-
-            await Task.WhenAll(inFlight).ConfigureAwait(false);
-            if (length >= 0 && total != length)
-            {
-                throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {total}.");
-            }
-        }
-        catch (Exception caught)
-        {
-            await failed.CancelAsync().ConfigureAwait(false);
-            Exception? blockFailed = await SettleAsync(inFlight).ConfigureAwait(false);
-            Release(carried);
-            if (caught is OperationCanceledException && !cancellationToken.IsCancellationRequested && blockFailed is not null)
-            {
-                ExceptionDispatchInfo.Throw(blockFailed);
-            }
-
-            throw;
-        }
+        List<long> blocks = await PartPump.SendAsync(
+            key,
+            content,
+            length,
+            blockSize,
+            MaxBlocks,
+            _options.BlocksInFlight,
+            carried,
+            (number, block, ct) => PutBlockAsync(key, BlockId(upload, number), block, ct),
+            cancellationToken).ConfigureAwait(false);
 
         StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
-        foreach (string id in ids)
+        for (int number = 1; number <= blocks.Count; number++)
         {
-            xml.Append("<Latest>").Append(id).Append("</Latest>");
+            xml.Append("<Latest>").Append(BlockId(upload, number)).Append("</Latest>");
         }
 
         byte[] list = Encoding.UTF8.GetBytes(xml.Append("</BlockList>").ToString());
@@ -294,30 +207,21 @@ public sealed partial class AzureBlobObjectStore
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task PutBlockAsync(string key, string id, ChunkedBuffer block, SemaphoreSlim slots, CancellationTokenSource failed)
+    private async Task PutBlockAsync(string key, string id, ChunkedBuffer block, CancellationToken cancellationToken)
     {
-        try
-        {
-            (string, string)[] headers = _options.SendChecksums ? [("x-ms-content-crc64", Crc64Header(block.Crc64()))] : [];
-            await _transport.SendAsync(
-                "PutBlock",
-                new WriteRequest(this, key, "comp=block&blockid=" + UriEncoding.Query(id), block.Sequence(), headers, PutCondition.None),
-                static (s, ct) => s.Store.BuildWriteAsync(s, ct),
-                static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, "PutBlock", ct),
-                idempotent: true,
-                failed.Token).ConfigureAwait(false);
-        }
-        catch
-        {
-            await failed.CancelAsync().ConfigureAwait(false);
-            throw;
-        }
-        finally
-        {
-            block.Dispose();
-            slots.Release();
-        }
+        (string, string)[] headers = _options.SendChecksums ? [("x-ms-content-crc64", Crc64Header(block.Crc64()))] : [];
+        await _transport.SendAsync(
+            "PutBlock",
+            new WriteRequest(this, key, "comp=block&blockid=" + UriEncoding.Query(id), block.Sequence(), headers, PutCondition.None),
+            static (s, ct) => s.Store.BuildWriteAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, "PutBlock", ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The id of block <paramref name="number"/> of an upload, all of one length as Azure asks.</summary>
+    private static string BlockId(string upload, int number) =>
+        Convert.ToBase64String(Encoding.ASCII.GetBytes(string.Create(CultureInfo.InvariantCulture, $"{upload}{number - 1:D6}")));
 
     /// <summary>A write that carries a condition: sent again only when its lost answer proves it did not land.</summary>
     private async ValueTask<PutOutcome> SendConditionalAsync(string key, string? putId, PutCondition condition, string operation, WriteRequest request, CancellationToken cancellationToken)
@@ -531,35 +435,6 @@ public sealed partial class AzureBlobObjectStore
     }
 
     private static string NewPutId() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-
-    private static void Release(Queue<ChunkedBuffer> buffers)
-    {
-        while (buffers.TryDequeue(out ChunkedBuffer? buffer))
-        {
-            buffer.Dispose();
-        }
-    }
-
-    private static async Task<Exception?> SettleAsync(List<Task> tasks)
-    {
-        Exception? first = null;
-        foreach (Task task in tasks)
-        {
-            try
-            {
-                await task.ConfigureAwait(false);
-            }
-            catch (Exception failure) when (failure is not OperationCanceledException)
-            {
-                first ??= failure;
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        }
-
-        return first;
-    }
 
     private readonly record struct WriteRequest(AzureBlobObjectStore Store, string Key, string Query, ReadOnlySequence<byte> Body, (string, string)[] Headers, PutCondition Condition);
 
