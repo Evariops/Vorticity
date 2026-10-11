@@ -15,6 +15,7 @@ namespace Vorticity.Tests.Aggregation;
 /// it once it has met every row.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class LaneSpillTests
 {
     private const int Rows = 2_000_000;

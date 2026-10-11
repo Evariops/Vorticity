@@ -18,13 +18,12 @@
     <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
     <UseLdClassicXCodeLinker>false</UseLdClassicXCodeLinker>
 
-    <!-- The package's own tool: it follows the experimental API as it changes, release with release. -->
+    <!-- Parquet's own tool: it follows the experimental Parquet API as it changes, release with release. -->
     <NoWarn>$(NoWarn);VX0003</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
-    <ProjectReference Include="../../src/Vorticity.Parquet/Vorticity.Parquet.csproj" />
   </ItemGroup>
 
 </Project>

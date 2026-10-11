@@ -105,7 +105,7 @@ the generator pinned to the new version (see [read forever](04-conformance.md#8-
 
 ## Parquet
 
-`Vorticity.Parquet` rests on the Apache Parquet format at release 2.14.0 and the Thrift compact
+Vorticity's Parquet reader and writer rest on the Apache Parquet format at release 2.14.0 and the Thrift compact
 protocol of Thrift 0.25.0, referenced at pinned commits and not vendored. Every source with its pin,
 and the decisions taken where the standard is silent, are listed in
 [the section on the standard](17-parquet.md#3-the-standard).

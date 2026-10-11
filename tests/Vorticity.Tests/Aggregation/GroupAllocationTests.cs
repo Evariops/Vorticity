@@ -30,6 +30,7 @@ using Xunit;
 namespace Vorticity.Tests.Aggregation;
 
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class GroupAllocationTests
 {
     /// <summary>The rows of the file: enough for four lanes to judge their first rows (<see cref="AggregationPartition.LaneRows"/>).</summary>

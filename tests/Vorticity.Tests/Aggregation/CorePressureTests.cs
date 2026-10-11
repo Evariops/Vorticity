@@ -24,6 +24,7 @@ public sealed class CorePressureCollection
 /// once, and ends exact under that budget, giving everything back.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class CorePressureTests
 {
     [Theory]

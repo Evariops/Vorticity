@@ -38,6 +38,7 @@ namespace Vorticity.Tests.Scan;
 
 /// <summary>How many values a scan materializes, on a file whose chunk exceeds one batch.</summary>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class FlatLayoutDecodeCountTests
 {
     /// <summary>Rows in the single chunk. Comfortably more than the zone the scan's batches are capped at.</summary>

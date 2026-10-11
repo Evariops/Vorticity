@@ -35,20 +35,29 @@ short and CPU-bound. The granularity is the batch.
 
 ## 2. Where things are
 
+The folders of `src/Vorticity/` tell three zones apart. `Vortex/` holds what exists to read and write
+the Vortex format, `Parquet/` what exists for Parquet, and the folders at the root hold the engine
+both formats feed. Namespaces do not follow the folders: a type keeps its namespace wherever it lives.
+
 | `src/Vorticity/` | |
 |---|---|
-| `Buffers`, `Serialization` | aligned buffers and leases, the FlatBuffers and Protobuf runtimes and the schema views |
-| `Types`, `Schema`, `Editions` | the dtype model and its two serializations, the public schema, the edition registry |
-| `File`, `IO`, `Layouts` | the open path, the footer and the file's statistics, the segment interface and its sources, the layout readers |
-| `Arrays`, `Compute`, `Expressions` | the canonical arena and one decoder per encoding, kernels, masks and pruning, the filter expressions |
+| `Vortex/File`, `Vortex/Layouts` | the open path, the footer and the file's statistics, repair, the layout tree and its readers |
+| `Vortex/Serialization`, `Vortex/Types` | the FlatBuffers and Protobuf runtimes, the schema views, the dtype's two serializations |
+| `Vortex/Arrays` | one decoder per encoding and the encodings' metadata |
+| `Vortex/Writing`, `Vortex/Indexes`, `Vortex/Advice` | the writer, its chooser and encoders, the index builders, the index directory, pruners and policies, the encoding advisor |
+| `Vortex/Editions`, `Vortex/Sealing` | the edition registry, the sealed format |
+| `Parquet/` | Apache Parquet: the footer and schema, the page readers and writers, the encodings and codecs, modular encryption, the verifier |
+| `Buffers`, `IO` | aligned buffers and leases, the segment interface and its sources, object stores |
+| `Types`, `Schema` | the dtype model, the public schema |
+| `Arrays`, `Compute`, `Expressions` | the canonical arena and its kernels, masks and pruning, the filter expressions |
 | `Scan`, `Columns`, `Symbolic`, `Records` | the scan and its plan, the borrowed and owned batches, the typed filter algebra, record binding |
-| `Aggregation`, `Keys`, `Indexes` | aggregates and group by on encoded forms, the key cursor and its sources, the index directory, pruners and policies |
-| `Writing`, `Advice` | the writer, its builders and chooser, the index builders, the encoding advisor |
+| `Aggregation`, `Keys` | aggregates and group by on encoded forms, the key cursor and its sources |
+| `Writing`, `Indexes` | what both writers share: the column builders, block statistics, segment sinks, the split-block Bloom filter |
 | `Session`, `Diagnostics` | the session, its pool and cache, the exceptions, limits, meter, activity source and event source |
 
-Alongside it sit `src/Vorticity.Generators`, `.Dataset`, `.RowEncoding` and `.Zstd`, then `tests/`
+Alongside it sit `src/Vorticity.Generators`, `.Dataset`, `.ObjectStorage`, `.RowEncoding` and `.Zstd`, then `tests/`
 (unit and property tests, the conformance corpus, the fuzzer, and code that must not compile),
-`bench/` ([bench/README.md](../../bench/README.md)), `tools/` (`vxdump`, the Rust corpus generator,
+`bench/` ([bench/README.md](../../bench/README.md)), `tools/` (`vxdump`, `pqdump`, the Rust corpus generator,
 the Rust benchmark shim, the row-encoding vectors, the test-impact selector), and `samples/`, the
 programs the guide's pages run.
 

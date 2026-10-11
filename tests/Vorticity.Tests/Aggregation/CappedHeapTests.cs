@@ -17,6 +17,7 @@ namespace Vorticity.Tests.Aggregation;
 /// <see cref="OutOfMemoryException"/>.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class CappedHeapTests
 {
     /// <summary>The variable that tells the process it is the child, and the degree it runs at.</summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -18,9 +19,13 @@ namespace Vorticity.Tests.Aggregation;
 /// has met every row.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class GroupSpillTests
 {
     private const int Rows = 1_200_000;
+
+    /// <summary>What the rows of the theories share: see <see cref="SharedAsync"/>.</summary>
+    private static readonly ConcurrentDictionary<string, Lazy<Task<object>>> s_shared = new(StringComparer.Ordinal);
 
     public static TheoryData<int, int> Budgets => new TheoryData<int, int>
     {
@@ -37,21 +42,23 @@ public sealed partial class GroupSpillTests
     [MemberData(nameof(Budgets))]
     public async Task ATextKeySpillsAndEndsExact(int degree, int percent)
     {
-        (_, Row[] rows) = await Fixture.Async;
-        Dictionary<string, NameTotal> expected = rows.GroupBy(r => r.Name).ToDictionary(g => g.Key, g => new NameTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
-        await ExactAsync(degree, percent, Names, (NameTotal total) => total.Name, expected);
+        await ExactAsync(degree, percent, "names", Names, (NameTotal total) => total.Name, await NameTotalsAsync());
     }
 
     [Theory]
     [MemberData(nameof(Budgets))]
     public async Task ATextAndAnIntegerSpillAndEndExact(int degree, int percent)
     {
-        (_, Row[] rows) = await Fixture.Async;
-        Dictionary<(string, int), PairTotal> expected = rows.GroupBy(r => (r.Name, r.Small))
-            .ToDictionary(g => g.Key, g => new PairTotal(g.Key.Name, g.Key.Small, g.Count(), g.Sum(r => r.Value)));
+        Dictionary<(string, int), PairTotal> expected = await SharedAsync("names and smalls", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => (r.Name, r.Small))
+                .ToDictionary(g => g.Key, g => new PairTotal(g.Key.Name, g.Key.Small, g.Count(), g.Sum(r => r.Value)));
+        });
         await ExactAsync(
             degree,
             percent,
+            "names and smalls",
             file => file.Scan<Row>().GroupBy(r => (r.Name, r.Small)).Select(g => (g.Key.Name, g.Key.Small, g.Count(), g.Sum(x => x.Value))),
             (PairTotal total) => (total.Name, total.Small),
             expected);
@@ -65,10 +72,10 @@ public sealed partial class GroupSpillTests
     {
         // Two texts and four integers, their numbers in a word of 256 bits: each part's values written
         // by its index, the words packed again as the runs are read back.
-        (_, Row[] rows) = await Fixture.Async;
         await ExactAsync(
             degree,
             percent,
+            "six columns as parts",
             file =>
             {
                 Vorticity.Aggregation grouped = SixColumns(file);
@@ -76,7 +83,7 @@ public sealed partial class GroupSpillTests
                 return grouped;
             },
             (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value),
-            SixCounts(rows));
+            await SixCountsAsync());
     }
 
     [Theory]
@@ -88,8 +95,13 @@ public sealed partial class GroupSpillTests
     {
         // The same six columns as the tuple of their values, a key of 64 bytes the core takes: the governor
         // turns to the core, whose parts go to the scratch and come back.
-        (_, Row[] rows) = await Fixture.Async;
-        AggregationRun run = await ExactAsync(degree, percent, SixColumns, (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value), SixCounts(rows));
+        AggregationRun run = await ExactAsync(
+            degree,
+            percent,
+            "six columns",
+            SixColumns,
+            (SixCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.Value),
+            await SixCountsAsync());
         if (percent <= 50)
         {
             Assert.NotNull(run.Core);
@@ -100,21 +112,29 @@ public sealed partial class GroupSpillTests
     private static Vorticity.Aggregation SixColumns(VortexFile file) =>
         file.Scan<Row>().GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value)).Select(g => (g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
 
-    private static Dictionary<(string, int, int, string, int, long), SixCount> SixCounts(Row[] rows) =>
-        rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value))
+    /// <summary>The counts by the six columns, from the rows, worked out once for the class.</summary>
+    private static Task<Dictionary<(string, int, int, string, int, long), SixCount>> SixCountsAsync() => SharedAsync("six columns", async () =>
+    {
+        (_, Row[] rows) = await Fixture.Async;
+        return rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Text, r.Wide, r.Value))
             .ToDictionary(g => g.Key, g => new SixCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
+    });
 
     [Theory]
     [MemberData(nameof(Budgets))]
     public async Task ATextsExtremesByAnIntegerSpillAndEndExact(int degree, int percent)
     {
-        (_, Row[] rows) = await Fixture.Async;
-        Dictionary<int, KeyTexts> expected = rows.GroupBy(r => r.Key).ToDictionary(
-            g => g.Key,
-            g => new KeyTexts(g.Key, g.Select(r => r.Text).Min(StringComparer.Ordinal), g.Select(r => r.Text).Max(StringComparer.Ordinal)));
+        Dictionary<int, KeyTexts> expected = await SharedAsync("texts' extremes by key", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.Key).ToDictionary(
+                g => g.Key,
+                g => new KeyTexts(g.Key, g.Select(r => r.Text).Min(StringComparer.Ordinal), g.Select(r => r.Text).Max(StringComparer.Ordinal)));
+        });
         await ExactAsync(
             degree,
             percent,
+            "texts' extremes by key",
             file => file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.Min(x => x.Text), g.Max(x => x.Text))),
             (KeyTexts texts) => texts.Key,
             expected);
@@ -124,11 +144,15 @@ public sealed partial class GroupSpillTests
     [MemberData(nameof(Budgets))]
     public async Task ADistinctCountByAnIntegerSpillsAndEndsExact(int degree, int percent)
     {
-        (_, Row[] rows) = await Fixture.Async;
-        Dictionary<int, KeyCount> expected = rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Value).Distinct().LongCount()));
+        Dictionary<int, KeyCount> expected = await SharedAsync("distinct values by key", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Value).Distinct().LongCount()));
+        });
         await ExactAsync(
             degree,
             percent,
+            "distinct values by key",
             file => file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.CountDistinct(x => x.Value))),
             (KeyCount count) => count.Key,
             expected);
@@ -142,11 +166,15 @@ public sealed partial class GroupSpillTests
         // A key of 10⁶ values numbered by value: a lane's first batch meets nearly every page of its span,
         // 4 MB a lane, past what the budget leaves each. Lanes that asked for their arrays' doubling until
         // they first turned held twice their budget before the first wrote its table.
-        (_, Row[] rows) = await Fixture.Async;
-        Dictionary<int, KeyCount> expected = rows.GroupBy(r => r.Wide).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Value).Distinct().LongCount()));
+        Dictionary<int, KeyCount> expected = await SharedAsync("distinct values by wide", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.Wide).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Value).Distinct().LongCount()));
+        });
         await ExactAsync(
             degree,
             percent,
+            "distinct values by wide",
             file => file.Scan<Row>().GroupBy(r => r.Wide).Select(g => (g.Key, g.CountDistinct(x => x.Value))),
             (KeyCount count) => count.Key,
             expected);
@@ -157,11 +185,15 @@ public sealed partial class GroupSpillTests
     [InlineData(4, 10)]
     public async Task ATextsDistinctCountByAnIntegerSpillsAndEndsExact(int degree, int percent)
     {
-        (_, Row[] rows) = await Fixture.Async;
-        Dictionary<int, KeyCount> expected = rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Text).Distinct().LongCount()));
+        Dictionary<int, KeyCount> expected = await SharedAsync("distinct texts by key", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyCount(g.Key, g.Select(r => r.Text).Distinct().LongCount()));
+        });
         await ExactAsync(
             degree,
             percent,
+            "distinct texts by key",
             file => file.Scan<Row>().GroupBy(r => r.Key).Select(g => (g.Key, g.CountDistinct(x => x.Text))),
             (KeyCount count) => count.Key,
             expected);
@@ -267,7 +299,7 @@ public sealed partial class GroupSpillTests
         // goes to the scratch and comes back.
         (string path, _) = await Fixture.Async;
         Dictionary<string, string> expected = await AnswersAsync(path, aggregate, 1, new QueryMemoryBudget(1L << 30), Path.GetTempPath());
-        long result = await PeakAsync<NameAnswer>(path, file => Of(file, "count"));
+        long result = await CountPeakAsync(path);
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
@@ -288,7 +320,7 @@ public sealed partial class GroupSpillTests
         // A caller's aggregator whose state holds a reference: no byte holds it, and the lanes cannot
         // spill it; past the budget, the typed refusal, nothing left.
         (string path, _) = await Fixture.Async;
-        long result = await PeakAsync<NameAnswer>(path, file => Of(file, "count"));
+        long result = await CountPeakAsync(path);
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
@@ -310,6 +342,10 @@ public sealed partial class GroupSpillTests
             Directory.Delete(scratch, recursive: true);
         }
     }
+
+    /// <summary>The peak of the count by the names at one lane, which sets the catalogue's budgets, measured once for the class.</summary>
+    private static Task<long> CountPeakAsync(string path) =>
+        SharedAsync("peak of the count by name", () => PeakAsync<NameAnswer>(path, file => Of(file, "count")));
 
     /// <summary>The query of one aggregate of the catalogue by the names, its answer as the second column.</summary>
     private static Vorticity.Aggregation Of(VortexFile file, string aggregate)
@@ -415,8 +451,8 @@ public sealed partial class GroupSpillTests
         // come together in another order than the lanes' merge, the same bits.
         (string path, _) = await Fixture.Async;
         Func<VortexFile, Vorticity.Aggregation> query = file => file.Scan<Row>().GroupBy(r => r.Name).Select(g => (g.Key, g.Sum(x => x.Price), g.Average(x => x.Price)));
-        Dictionary<string, (long, long)> expected = await BitsAsync(path, query, 1, new QueryMemoryBudget(1L << 30));
-        long result = await PeakAsync<NamePrice>(path, query);
+        Dictionary<string, (long, long)> expected = await SharedAsync("price sums by name", () => BitsAsync(path, query, 1, new QueryMemoryBudget(1L << 30)));
+        long result = await SharedAsync("peak of price sums by name", () => PeakAsync<NamePrice>(path, query));
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
@@ -451,13 +487,13 @@ public sealed partial class GroupSpillTests
     public async Task AnOrderAndAWindowOnSpilledGroupsHoldTheirAnswers(int degree)
     {
         // The spilled parts sorted in runs by the reader, then the window's first groups.
-        (string path, Row[] rows) = await Fixture.Async;
-        NameTotal[] expected = [.. rows.GroupBy(r => r.Name).Select(g => new NameTotal(g.Key, g.Count(), g.Sum(r => r.Value)))
+        (string path, _) = await Fixture.Async;
+        NameTotal[] expected = [.. (await NameTotalsAsync()).Values
             .OrderByDescending(t => t.Total).ThenBy(t => t.Name, StringComparer.Ordinal).Take(1_000)];
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
-            long result = await PeakAsync<NameTotal>(path, Names);
+            long result = await NamesPeakAsync(path);
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
             await using VortexSession session = Session(degree, budget, scratch);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
@@ -490,7 +526,7 @@ public sealed partial class GroupSpillTests
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
-            long result = await PeakAsync<NameTotal>(path, Names);
+            long result = await NamesPeakAsync(path);
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
             await using VortexSession session = Session(degree, budget, scratch);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
@@ -517,7 +553,7 @@ public sealed partial class GroupSpillTests
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
-            long result = await PeakAsync<NameTotal>(path, Names);
+            long result = await NamesPeakAsync(path);
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
             await using VortexSession session = Session(4, budget, scratch);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
@@ -548,12 +584,12 @@ public sealed partial class GroupSpillTests
     [Fact]
     public async Task TwoQueriesSpillAtOnceAndBothEndExact()
     {
-        (string path, Row[] rows) = await Fixture.Async;
-        Dictionary<string, NameTotal> expected = rows.GroupBy(r => r.Name).ToDictionary(g => g.Key, g => new NameTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+        (string path, _) = await Fixture.Async;
+        Dictionary<string, NameTotal> expected = await NameTotalsAsync();
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
-            long result = await PeakAsync<NameTotal>(path, Names);
+            long result = await NamesPeakAsync(path);
             QueryMemoryBudget first = new QueryMemoryBudget(result / 5);
             QueryMemoryBudget second = new QueryMemoryBudget(result / 5);
             await Task.WhenAll(ReadAsync(first), ReadAsync(second));
@@ -586,7 +622,7 @@ public sealed partial class GroupSpillTests
     public async Task AScratchThatCannotBeWrittenFailsTheQueryCleanly()
     {
         (string path, _) = await Fixture.Async;
-        long result = await PeakAsync<NameTotal>(path, Names);
+        long result = await NamesPeakAsync(path);
         QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
         await using VortexSession session = Session(4, budget, Path.Combine(Path.GetTempPath(), $"vorticity-absent-{Guid.NewGuid():N}", "scratch"));
         await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
@@ -606,7 +642,7 @@ public sealed partial class GroupSpillTests
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
-            long result = await PeakAsync<NameTotal>(path, Names);
+            long result = await NamesPeakAsync(path);
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 10);
             ScratchBudget room = new ScratchBudget(64 * 1024);
             await using VortexSession session = VortexSession.Create(options =>
@@ -638,14 +674,25 @@ public sealed partial class GroupSpillTests
     /// <summary>A count and a sum by the names, a text key.</summary>
     private static Vorticity.Aggregation Names(VortexFile file) => file.Scan<Row>().GroupBy(r => r.Name).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
 
+    /// <summary>What <see cref="Names"/> answers, from the rows, worked out once for the class.</summary>
+    private static Task<Dictionary<string, NameTotal>> NameTotalsAsync() => SharedAsync("names", async () =>
+    {
+        (_, Row[] rows) = await Fixture.Async;
+        return rows.GroupBy(r => r.Name).ToDictionary(g => g.Key, g => new NameTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+    });
+
+    /// <summary>The peak of <see cref="Names"/> at one lane, measured once for the class.</summary>
+    private static Task<long> NamesPeakAsync(string path) => SharedAsync("peak of names", () => PeakAsync<NameTotal>(path, Names));
+
     /// <summary>
     /// The query under a budget of <paramref name="percent"/> of its result, at <paramref name="degree"/>:
     /// every group's answer, written to the scratch under half and a tenth of it, nothing at one lane under
     /// twice it; the peak of the lanes' tables within 6 % of the ceiling, nothing reserved and no file left
-    /// after. The run, for what the test checks more.
+    /// after. The run, for what the test checks more. <paramref name="name"/> names the query, whose peak
+    /// the rows of a theory share.
     /// </summary>
     private static async Task<AggregationRun> ExactAsync<TResult, TKey>(
-        int degree, int percent, Func<VortexFile, Vorticity.Aggregation> query, Func<TResult, TKey> keyOf, Dictionary<TKey, TResult> expected)
+        int degree, int percent, string name, Func<VortexFile, Vorticity.Aggregation> query, Func<TResult, TKey> keyOf, Dictionary<TKey, TResult> expected)
         where TResult : IVortexRecord<TResult>
         where TKey : notnull
     {
@@ -653,7 +700,7 @@ public sealed partial class GroupSpillTests
         string scratch = Directory.CreateTempSubdirectory("vorticity-group-spill-").FullName;
         try
         {
-            long result = await PeakAsync<TResult>(path, query);
+            long result = await SharedAsync($"peak of {name}", () => PeakAsync<TResult>(path, query));
             QueryMemoryBudget budget = new QueryMemoryBudget(result / 100 * percent);
             await using VortexSession session = Session(degree, budget, scratch);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
@@ -724,6 +771,15 @@ public sealed partial class GroupSpillTests
 
         return large.PeakBytes;
     }
+
+    /// <summary>
+    /// What the rows of a theory share, worked out once for the class under <paramref name="name"/>: an
+    /// answer from the rows, or a query's peak at one lane, neither of which depends on the budget or the
+    /// degree a row runs at.
+    /// </summary>
+    private static async Task<T> SharedAsync<T>(string name, Func<Task<T>> make)
+        where T : notnull =>
+        (T)await s_shared.GetOrAdd(name, _ => new Lazy<Task<object>>(async () => await make())).Value;
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 

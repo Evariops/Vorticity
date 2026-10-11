@@ -17,6 +17,7 @@ namespace Vorticity.Tests.Scan;
 /// the record of <c>As</c> as through the values of a selection of one, the batch included.
 /// </summary>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class ResultAllocationTests
 {
     private const int Groups = 20_000;

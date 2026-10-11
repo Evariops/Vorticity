@@ -56,7 +56,7 @@ The carriers not used:
 ## 3. The directory and the runs
 
 The directory is a Protobuf message of this library's own, preceded by a version byte the way
-`vortex.zoned`'s metadata is, and followed by an XXH3-64 of both (`Indexes/IndexDirectory.cs`). It
+`vortex.zoned`'s metadata is, and followed by an XXH3-64 of both (`Vortex/Indexes/IndexDirectory.cs`). It
 holds the file's row count when it was written, the write policy (so an append needs no options),
 the index budget, and one entry per index: its kind, column path, block length, kind-defined options
 and runs. A run names its first block and block count, its payload regions (each with its offset,
@@ -94,13 +94,13 @@ Long runs are paged. A locating run of at most 64 segments of 65 536 entries lis
 inline. A longer one writes its segment table as fence pages of at most 64 KiB, forming a tree whose
 root is inline in the run's options and whose pages carry their children's checksums. Two levels
 cover more than 10¹² entries, so a lookup reads at most two fence pages before its payload
-(`Indexes/FenceTable.cs`).
+(`Vortex/Indexes/FenceTable.cs`).
 
 Bloom filters form a tree. A run's filters are laid out with a fan-out of 16: the leaves are the
 per-block filters, an internal node filters the union of its 16 children and lists their sizes, and
 the children of a node sit contiguously behind it. A probe reads the root and then one region per
 node that still says "maybe", level by level, in one coalesced read per level
-(`Indexes/BloomTree.cs`). A node whose union exceeds what `max_blocks` can hold at the target rate is
+(`Vortex/Indexes/BloomTree.cs`). A node whose union exceeds what `max_blocks` can hold at the target rate is
 built without a filter, and the descent starts below it.
 
 ## 4. Skipping indexes
@@ -232,7 +232,7 @@ lists its key columns in its options together with the name of the encoding its 
 `VortexWriteOptions.Indexes` is an `IndexPolicy`, `None` by default, so a file written with the
 defaults carries no index. A caller names indexes by column path, nested paths included
 (`IndexPolicy.None.Bloom("id").SortedRuns("ts")`), or starts from `IndexPolicy.Auto`
-(`Indexes/IndexPolicy.cs`, [indexes.md](../guide/indexes.md)).
+(`Vortex/Indexes/IndexPolicy.cs`, [indexes.md](../guide/indexes.md)).
 
 `Auto` records the dictionary probe wherever it applies, since it is free, and starts a Bloom filter
 on every top-level column. It gives a filter up, whole and with its reason, at the earliest fact that

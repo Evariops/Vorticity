@@ -63,7 +63,7 @@ namespace Vorticity.Tests.Scan;
 /// `take 64 rows from 64 splits` gains 576 B.
 ///
 /// The ones that move are the ones that decode the most, and the decode path takes its transients
-/// from <c>ArrayPool&lt;T&gt;.Shared</c> (see <c>Arrays/Decoders/Canonical/Scratch.cs</c>). That pool
+/// from <c>ArrayPool&lt;T&gt;.Shared</c> (see <c>Arrays/Kernels/Scratch.cs</c>). That pool
 /// is process-global: when neighbouring test classes have drained its per-core stacks, a Rent that
 /// would have been free allocates a fresh array instead, and the bytes are charged to whoever
 /// rented. Nothing regressed and nothing is non-deterministic about the library - the process is
@@ -118,6 +118,7 @@ internal static class ReleaseOnlyCeilings
 
 /// <summary>Whole-path allocation ceilings, on the <see cref="WrittenSizeTests"/> ratchet model.</summary>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class PathAllocationTests
 {
     /// <summary>

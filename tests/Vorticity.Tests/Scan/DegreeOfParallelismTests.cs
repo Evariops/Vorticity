@@ -34,6 +34,7 @@ namespace Vorticity.Tests.Scan;
 /// </para>
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class DegreeOfParallelismTests
 {
     // Sixty-four chunks of 1 024 rows, and a batch per chunk.

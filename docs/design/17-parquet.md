@@ -1,9 +1,9 @@
 # Parquet
 
-`Vorticity.Parquet` reads and writes Apache Parquet files. This page does not restate the format:
+Vorticity reads and writes Apache Parquet files with the engine that reads Vortex. This page does not restate the format:
 the standard is the [Apache Parquet format][pf] at release 2.14.0, its metadata serialized with the
 [Thrift compact protocol][compact], and the rules below that rest on them link to the text they
-rest on. What this page holds is what the standard leaves to an implementation: where the package sits,
+rest on. What this page holds is what the standard leaves to an implementation: where the code sits,
 how it reads and writes without copying, the kernels it is built on, what it decides where the
 standard is silent or inconsistent, and the tests that hold each promise.
 
@@ -44,7 +44,7 @@ written; interoperability with other readers is not measured.
 
 | question | decision | § |
 |---|---|---|
-| where it sits | a satellite of the core, as `Vorticity.Dataset` is: a Parquet file is one more `ScanSource`, so `Scan<TRecord>`, every query and every sink run over it unchanged | 2 |
+| where it sits | in the core, beside the Vortex format and on the engine both share: a Parquet file is one more `ScanSource`, so `Scan<TRecord>`, every query and every sink run over it unchanged | 2 |
 | what a page decodes into | the core's canonical arena, the nodes a Vortex block decodes into | 5.5 |
 | the pages it writes | data pages v2, on a grid of 8 192 rows shared by every column | 6.1 |
 | the encodings it writes | chosen per page by exact formulas from one statistics pass, as the core's writer chooses | 6.2 |
@@ -53,9 +53,11 @@ written; interoperability with other readers is not measured.
 
 ## 2. Where it sits
 
-`src/Vorticity.Parquet` is a satellite of the core, as `Vorticity.Dataset` is: it references
-`Vorticity`, which grants it its internals, and through it `Vorticity.Zstd` and `System.IO.Hashing`;
-nothing else. It targets `net11.0`, is compatible with trimming and Native AOT, and is marked
+The code lives in `src/Vorticity/Parquet`, one of the core's three zones: what exists for the Vortex
+format lives in `src/Vorticity/Vortex`, what exists for Parquet here, and the engine both formats
+feed in the folders at the root of `src/Vorticity`. It ships in the `Vorticity` package and depends
+on nothing the core does not, `Vorticity.Zstd` and `System.IO.Hashing`. It targets `net11.0`, is
+compatible with trimming and Native AOT, and each of its public types is marked
 `[Experimental("VX0003")]` until its surface settles, as the dataset and the row encoding are.
 
 The core already reads from more than one kind of source. A scan compiles to a `ScanSpec` and asks a

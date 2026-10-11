@@ -15,6 +15,7 @@ namespace Vorticity.Tests.Aggregation;
 /// which every query of the process shares: they run alone.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class SharedBudgetTests
 {
     [Fact]

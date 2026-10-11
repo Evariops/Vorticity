@@ -163,21 +163,52 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Vorticity
+          # Vorticity.Tests runs on three runners, the work of the two first about even: the query
+          # engine's and the datasets' namespaces on one, every other namespace on the next, which
+          # takes what the first does not name so that a namespace added later is never left out.
+          # The third runs the tests that measure what anything beside them would move (allocations,
+          # peaks, finalizers, a shared pool): the classes of the collections that disable
+          # parallelization, which carry the trait Category=RunsAlone (RunsAloneTests holds them to it).
+          # They need a process to themselves, not a machine, so tests/runs-alone.sh runs them in three
+          # processes side by side. Each entry's key names the report of its tests' times.
+          - name: Vorticity, the query engine and the datasets
+            key: engine
             projects: tests/Vorticity.Tests
+            filters: >-
+              --filter-not-trait Category=RunsAlone
+              --filter-namespace Vorticity.Tests.Aggregation*
+              --filter-namespace Vorticity.Tests.Dataset*
+              --filter-namespace Vorticity.Tests.Indexes*
+              --filter-namespace Vorticity.Tests.Keys*
+              --filter-namespace Vorticity.Tests.ObjectStorage*
+              --filter-namespace Vorticity.Tests.Sealing*
+          - name: Vorticity, every other namespace
+            key: others
+            projects: tests/Vorticity.Tests
+            filters: >-
+              --filter-not-trait Category=RunsAlone
+              --filter-not-namespace Vorticity.Tests.Aggregation*
+              --filter-not-namespace Vorticity.Tests.Dataset*
+              --filter-not-namespace Vorticity.Tests.Indexes*
+              --filter-not-namespace Vorticity.Tests.Keys*
+              --filter-not-namespace Vorticity.Tests.ObjectStorage*
+              --filter-not-namespace Vorticity.Tests.Sealing*
+          - name: Vorticity, the tests that run alone
+            key: alone
+            projects: tests/Vorticity.Tests
+            runs-alone: true
           - name: Vorticity.Zstd and the conformance corpus
+            key: zstd
             projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
-          - name: Vorticity.Parquet
-            projects: tests/Vorticity.Parquet.Tests
           # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is
           # exercised: the classes tests/scalar-pass.txt names, which reach every fallback the
-          # whole suite does, and the conformance corpus run again with intrinsics disabled.
-          # Vorticity.Zstd's and Vorticity.Parquet's suites run whole: an x64 runner takes their
-          # x64 paths, and with intrinsics disabled the portable ones, Arm64's shape without its
-          # vectors.
-          - name: Vorticity's fallbacks, Vorticity.Zstd, Vorticity.Parquet and the conformance corpus, intrinsics disabled
-            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Parquet.Tests tests/Vorticity.Conformance
+          # whole suite does, Parquet's tests among them, and the conformance corpus run again with
+          # intrinsics disabled. Vorticity.Zstd's suite runs whole: an x64 runner takes its x64
+          # paths, and with intrinsics disabled the portable ones, Arm64's shape without its vectors.
+          - name: Vorticity's fallbacks, Vorticity.Zstd and the conformance corpus, intrinsics disabled
+            key: scalar
+            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
             scalar-pass: true
     steps:
@@ -190,12 +221,14 @@ jobs:
         with:
           global-json-file: global.json
 
+      # Without the analyzers, which the package job runs over the whole solution: they hold the code
+      # to its rules, and the tests need only the assemblies. The source generators still run.
       - name: Build
         env:
           PROJECTS: ${{ matrix.projects }}
         run: |
           for project in $PROJECTS; do
-            dotnet build "$project" -c Release
+            dotnet build "$project" -c Release -p:RunAnalyzers=false
           done
 
       # Vorticity.Zstd's tests read zstd's golden files and a corpus of frames from zstd's
@@ -205,20 +238,41 @@ jobs:
         if: matrix.zstd-data
         run: bash tools/native-ref/testdata.sh
 
+      # The filters are words, their wildcards xunit's own: the shell expands no file name. Every
+      # step below writes an xunit report of each test's time, which the last one keeps.
       - name: Test
-        if: ${{ !matrix.scalar-pass }}
+        if: ${{ !matrix.scalar-pass && !matrix.runs-alone }}
         env:
           PROJECTS: ${{ matrix.projects }}
+          FILTERS: ${{ matrix.filters }}
         run: |
+          set -f
           status=0
           for project in $PROJECTS; do
-            dotnet test --project "$project" --no-build -c Release || status=1
+            # shellcheck disable=SC2086
+            dotnet test --project "$project" --no-build -c Release $FILTERS \
+              --report-xunit-xml --report-xunit-xml-filename "$(basename "$project").xunit.xml" \
+              --results-directory "$RUNNER_TEMP/reports" || status=1
           done
           exit $status
 
+      - name: Test the classes that run alone
+        if: ${{ matrix.runs-alone }}
+        run: bash tests/runs-alone.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
+
       - name: Test the scalar fallbacks
         if: ${{ matrix.scalar-pass }}
-        run: bash tests/scalar-pass.sh --no-build
+        run: bash tests/scalar-pass.sh --no-build --report-xunit-xml --results-directory "$RUNNER_TEMP/reports"
+
+      # Where the time goes, test by test, kept a fortnight: what the next split of the runners is
+      # decided on.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: test-times-${{ matrix.key }}
+          path: ${{ runner.temp }}/reports
+          if-no-files-found: ignore
+          retention-days: 14
 
   package:
     name: pack, publish vxdump as Native AOT, fuzz the parser
@@ -256,7 +310,7 @@ jobs:
       - name: Build
         run: dotnet build Vorticity.slnx --no-restore -c Release ${VERSION_PROPERTY:+"$VERSION_PROPERTY"}
 
-      # The five packages are what a consumer gets, and nothing else here builds them. Most of
+      # The packages are what a consumer gets, and nothing else here builds them. Most of
       # what can go wrong is visible at pack time and nowhere else: a readme or a NOTICE that stops
       # being found, a license expression that stops parsing, a project that becomes packable by
       # accident. Warnings are errors, so a pack warning fails the job.
@@ -372,7 +426,7 @@ jobs:
           test "$crashed" = 0
           test "$scanned" -ge 800
 
-      # The same promise of Vorticity.Parquet, over the standard's own test files, pinned: pqdump
+      # The same promise of the Parquet reader, over the standard's own test files, pinned: pqdump
       # reads what the footer says, scans every batch and holds the footer to the rows, from the
       # public surface alone.
       - name: Fetch the Parquet test files
@@ -443,8 +497,9 @@ jobs:
         with:
           global-json-file: global.json
 
+      # Without the analyzers, as the tests build: the package job runs them.
       - name: Build
-        run: dotnet build tests/Vorticity.Tests -c Release
+        run: dotnet build tests/Vorticity.Tests -c Release -p:RunAnalyzers=false
 
       # The one test that writes the corpus out for the reference, which skips unless the variable
       # names a directory.
