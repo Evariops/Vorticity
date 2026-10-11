@@ -7,12 +7,14 @@ namespace Vorticity.ObjectStorage;
 public static class ObjectStoreRegistryExtensions
 {
     /// <summary>
-    /// Serves every <c>s3://</c> bucket and every <c>az://</c> container with a store configured from the
-    /// environment, built on its first use and kept for the session's life. An <c>s3://</c> bucket takes
-    /// the AWS keys and region, and the endpoint of <c>AWS_ENDPOINT_URL_S3</c> or <c>AWS_ENDPOINT_URL</c>,
-    /// which is how a host points at R2, OVHcloud or Scaleway (<see cref="S3ObjectStore.FromEnvironment"/>).
-    /// An <c>az://</c> container takes the account and credentials of Azure's environment
-    /// (<see cref="AzureBlobObjectStore.FromEnvironment"/>).
+    /// Serves every <c>s3://</c> and <c>gs://</c> bucket and every <c>az://</c> container with a store
+    /// configured from the environment, built on its first use and kept for the session's life. An
+    /// <c>s3://</c> bucket takes the AWS credential chain and region, and the endpoint of
+    /// <c>AWS_ENDPOINT_URL_S3</c> or <c>AWS_ENDPOINT_URL</c>, which is how a host points at R2, OVHcloud or
+    /// Scaleway (<see cref="S3ObjectStore.FromEnvironment"/>). An <c>az://</c> container takes the account
+    /// and the credentials of Azure's environment (<see cref="AzureBlobObjectStore.FromEnvironment"/>). A
+    /// <c>gs://</c> bucket takes Google's application default credentials
+    /// (<see cref="GoogleCloudStorageObjectStore.FromEnvironment"/>).
     /// </summary>
     /// <param name="registry">The session's registry.</param>
     /// <returns>The registry, for chaining.</returns>
@@ -22,6 +24,7 @@ public static class ObjectStoreRegistryExtensions
         ArgumentNullException.ThrowIfNull(registry);
         registry.AddScheme("s3", S3ObjectStore.FromEnvironment);
         registry.AddScheme("az", AzureBlobObjectStore.FromEnvironment);
+        registry.AddScheme("gs", GoogleCloudStorageObjectStore.FromEnvironment);
         return registry;
     }
 }

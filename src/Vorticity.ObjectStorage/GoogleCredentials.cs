@@ -28,6 +28,16 @@ public abstract class GoogleCredentials : IDisposable
     /// <returns>The credentials.</returns>
     public static GoogleCredentials Anonymous() => new AnonymousCredentials();
 
+    /// <summary>
+    /// Google's application default credentials, resolved at the first request, in their order: the file
+    /// <c>GOOGLE_APPLICATION_CREDENTIALS</c> names (a service account's key, whose tokens are asked for
+    /// with a JWT signed by its RSA key; a user's refresh token; or an external account's configuration
+    /// for workload identity federation), the file <c>gcloud auth application-default login</c> writes,
+    /// then the metadata server of Compute Engine, GKE and Cloud Run.
+    /// </summary>
+    /// <returns>The credentials.</returns>
+    public static GoogleCredentials FromEnvironment() => new GoogleChain(CredentialHost.Real);
+
     /// <summary>The token to authorize the next request with, or null for none.</summary>
     internal abstract ValueTask<string?> GetAsync(CancellationToken cancellationToken);
 
@@ -35,6 +45,9 @@ public abstract class GoogleCredentials : IDisposable
     internal virtual void Expired()
     {
     }
+
+    /// <summary>Whether requests carry bearer tokens, which a refusal renews.</summary>
+    internal virtual bool UsesTokens => false;
 
     /// <summary>Wipes the secrets held.</summary>
     public void Dispose()
@@ -56,6 +69,8 @@ public abstract class GoogleCredentials : IDisposable
             await tokens.GetAsync(cancellationToken).ConfigureAwait(false);
 
         internal override void Expired() => tokens.Expired();
+
+        internal override bool UsesTokens => true;
 
         protected override void Dispose(bool disposing) => tokens.Dispose();
 

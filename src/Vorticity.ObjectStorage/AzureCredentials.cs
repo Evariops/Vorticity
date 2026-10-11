@@ -64,32 +64,15 @@ public abstract class AzureCredentials : IDisposable
     }
 
     /// <summary>
-    /// The credentials of the environment, as Azure's tools read them: <c>AZURE_STORAGE_CONNECTION_STRING</c>,
-    /// or <c>AZURE_STORAGE_KEY</c> with <c>AZURE_STORAGE_ACCOUNT</c>, or <c>AZURE_STORAGE_SAS_TOKEN</c>.
+    /// The credentials of the environment, resolved at the first request: a client secret
+    /// (<c>AZURE_CLIENT_ID</c>, <c>AZURE_TENANT_ID</c>, <c>AZURE_CLIENT_SECRET</c>); a workload identity
+    /// (<c>AZURE_FEDERATED_TOKEN_FILE</c>, its file read again at each exchange); the storage credentials
+    /// Azure's tools read (<c>AZURE_STORAGE_CONNECTION_STRING</c>, or <c>AZURE_STORAGE_KEY</c> with
+    /// <c>AZURE_STORAGE_ACCOUNT</c>, or <c>AZURE_STORAGE_SAS_TOKEN</c>); then a managed identity, through
+    /// App Service's <c>IDENTITY_ENDPOINT</c> or the instance metadata service.
     /// </summary>
     /// <returns>The credentials.</returns>
-    /// <exception cref="ObjectStoreException">The environment holds none.</exception>
-    public static AzureCredentials FromEnvironment()
-    {
-        if (Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING") is { Length: > 0 } connection)
-        {
-            return FromConnectionString(connection);
-        }
-
-        if (Environment.GetEnvironmentVariable("AZURE_STORAGE_KEY") is { Length: > 0 } key
-            && Environment.GetEnvironmentVariable("AZURE_STORAGE_ACCOUNT") is { Length: > 0 } account)
-        {
-            return SharedKey(account, key);
-        }
-
-        if (Environment.GetEnvironmentVariable("AZURE_STORAGE_SAS_TOKEN") is { Length: > 0 } sas)
-        {
-            return SharedAccessSignature(sas);
-        }
-
-        throw new ObjectStoreException(
-            "No Azure credentials in the environment: set AZURE_STORAGE_CONNECTION_STRING, AZURE_STORAGE_ACCOUNT and AZURE_STORAGE_KEY, or AZURE_STORAGE_SAS_TOKEN, or give them in code with AzureCredentials.");
-    }
+    public static AzureCredentials FromEnvironment() => new AzureChain(CredentialHost.Real);
 
     /// <summary>What to authorize the next request with.</summary>
     internal abstract ValueTask<AzureAuthorization> GetAsync(CancellationToken cancellationToken);
@@ -98,6 +81,9 @@ public abstract class AzureCredentials : IDisposable
     internal virtual void Expired()
     {
     }
+
+    /// <summary>Whether requests carry bearer tokens, which a refusal renews.</summary>
+    internal virtual bool UsesTokens => false;
 
     /// <summary>Wipes the secrets held.</summary>
     public void Dispose()
@@ -162,6 +148,8 @@ public abstract class AzureCredentials : IDisposable
             new AzureAuthorization(null, null, null, await tokens.GetAsync(cancellationToken).ConfigureAwait(false));
 
         internal override void Expired() => tokens.Expired();
+
+        internal override bool UsesTokens => true;
 
         protected override void Dispose(bool disposing) => tokens.Dispose();
 

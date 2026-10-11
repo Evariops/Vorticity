@@ -75,6 +75,32 @@ public sealed class GoogleCloudStorageObjectStore : IObjectStore
         _transport = new HttpTransport(options.Transport, "gcs", ReadErrorAsync, options.Handler);
     }
 
+    /// <summary>
+    /// A store over <paramref name="bucket"/> configured from the environment: Google's application
+    /// default credentials (<see cref="GoogleCredentials.FromEnvironment"/>), or, when
+    /// <c>STORAGE_EMULATOR_HOST</c> names an emulator, that emulator without credentials.
+    /// </summary>
+    /// <param name="bucket">The bucket.</param>
+    /// <returns>The store; the caller, or the session it is given to, disposes it.</returns>
+    public static GoogleCloudStorageObjectStore FromEnvironment(string bucket)
+    {
+        if (Environment.GetEnvironmentVariable("STORAGE_EMULATOR_HOST") is { Length: > 0 } emulator)
+        {
+            return new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
+            {
+                Bucket = bucket,
+                Endpoint = new Uri(emulator.Contains("://", StringComparison.Ordinal) ? emulator : "http://" + emulator),
+                Credentials = GoogleCredentials.Anonymous(),
+            });
+        }
+
+        return new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
+        {
+            Bucket = bucket,
+            Credentials = GoogleCredentials.FromEnvironment(),
+        });
+    }
+
     /// <summary>The bucket.</summary>
     public string Bucket => _options.Bucket;
 
@@ -821,7 +847,7 @@ public sealed class GoogleCloudStorageObjectStore : IObjectStore
 
     private Exception MapFailure(HttpResponseMessage response, ServiceError error, string operation, string key)
     {
-        if (response.StatusCode == HttpStatusCode.Unauthorized && _options.Credentials is GoogleCredentials.TokenCredentials)
+        if (response.StatusCode == HttpStatusCode.Unauthorized && _options.Credentials.UsesTokens)
         {
             _options.Credentials.Expired();
             throw new StoreRetryException($"{operation} was refused for an expired token: {error}", cost: 0);

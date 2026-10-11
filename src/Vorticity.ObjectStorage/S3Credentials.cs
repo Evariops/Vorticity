@@ -30,10 +30,21 @@ public abstract class S3Credentials : IDisposable
 
     /// <summary>
     /// The keys of the environment, read at the first request: <c>AWS_ACCESS_KEY_ID</c>,
-    /// <c>AWS_SECRET_ACCESS_KEY</c> and <c>AWS_SESSION_TOKEN</c>.
+    /// <c>AWS_SECRET_ACCESS_KEY</c> and <c>AWS_SESSION_TOKEN</c>. R2, OVHcloud and Scaleway keys come so.
     /// </summary>
     /// <returns>The credentials.</returns>
     public static S3Credentials FromEnvironment() => new EnvironmentCredentials();
+
+    /// <summary>
+    /// The AWS credential chain, resolved at the first request, in the order of the SDK for Java's
+    /// default chain: the environment's keys; a web identity (<c>AWS_WEB_IDENTITY_TOKEN_FILE</c> and
+    /// <c>AWS_ROLE_ARN</c>, exchanged with STS), as a Kubernetes service account reaches a role on EKS; a
+    /// profile of <c>~/.aws/credentials</c> and <c>~/.aws/config</c> (<c>AWS_PROFILE</c>); the container
+    /// endpoint of ECS and EKS Pod Identity; and the instance metadata service, version 2 only. Keys that
+    /// expire are renewed five minutes before they do.
+    /// </summary>
+    /// <returns>The credentials.</returns>
+    public static S3Credentials Default() => new Credentials.AwsChain(Credentials.CredentialHost.Real);
 
     /// <summary>The keys to sign the next request with.</summary>
     /// <exception cref="ObjectStoreException">No keys can be had.</exception>

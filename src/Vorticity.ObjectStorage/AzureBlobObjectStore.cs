@@ -405,7 +405,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
             }
 
             if (response.StatusCode == HttpStatusCode.Unauthorized && error.Code is "InvalidAuthenticationInfo" or "ExpiredToken"
-                && _options.Credentials is AzureCredentials.TokenCredentials)
+                && _options.Credentials.UsesTokens)
             {
                 _options.Credentials.Expired();
                 throw new StoreRetryException($"{operation} was refused for an expired token: {error}", cost: 0);

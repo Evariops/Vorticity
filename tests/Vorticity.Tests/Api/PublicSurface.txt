@@ -2593,6 +2593,7 @@ Vorticity.ObjectStorage:     method void Dispose()
 Vorticity.ObjectStorage:     method void Dispose(bool)
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.GoogleCloudStorageObjectStore : IObjectStore
 Vorticity.ObjectStorage:     ctor GoogleCloudStorageObjectStore(GoogleCloudStorageOptions)
+Vorticity.ObjectStorage:     method GoogleCloudStorageObjectStore FromEnvironment(string)
 Vorticity.ObjectStorage:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DisposeAsync()
@@ -2615,6 +2616,7 @@ Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
 Vorticity.ObjectStorage:     property string Bucket { get; init; }
 Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.GoogleCredentials : IDisposable
 Vorticity.ObjectStorage:     method GoogleCredentials Anonymous()
+Vorticity.ObjectStorage:     method GoogleCredentials FromEnvironment()
 Vorticity.ObjectStorage:     method GoogleCredentials Token(Func<CancellationToken, ValueTask<AccessToken>>)
 Vorticity.ObjectStorage:     method void Dispose()
 Vorticity.ObjectStorage:     method void Dispose(bool)
@@ -2627,6 +2629,7 @@ Vorticity.ObjectStorage:     const S3Checksum Default = 0
 Vorticity.ObjectStorage:     const S3Checksum None = 1
 Vorticity.ObjectStorage:     field int value__
 Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.S3Credentials : IDisposable
+Vorticity.ObjectStorage:     method S3Credentials Default()
 Vorticity.ObjectStorage:     method S3Credentials FromEnvironment()
 Vorticity.ObjectStorage:     method S3Credentials Static(string, string, string = default)
 Vorticity.ObjectStorage:     method void Dispose()

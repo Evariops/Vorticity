@@ -53,12 +53,21 @@ on each one's first use:
 await using VortexSession session = VortexSession.Create(o => o.ObjectStores.UseEnvironment());
 ```
 
-An `s3://` bucket takes the environment the AWS SDKs read: `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_ENDPOINT_URL_S3` or
-`AWS_ENDPOINT_URL`. The endpoint is how a host points at R2, OVHcloud, Scaleway or another service, and
-the store takes its profile from the endpoint's host. An `az://` container takes the environment Azure's
-tools read: `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_ACCOUNT` with `AZURE_STORAGE_KEY` or
-`AZURE_STORAGE_SAS_TOKEN`.
+An `s3://` bucket takes the region of `AWS_REGION`, the endpoint of `AWS_ENDPOINT_URL_S3` or
+`AWS_ENDPOINT_URL`, and the AWS credential chain. The endpoint is how a host points at R2, OVHcloud,
+Scaleway or another service, and the store takes its profile from the endpoint's host. An `az://` container takes
+the account of `AZURE_STORAGE_ACCOUNT` or of a connection string, and Azure's chain. A `gs://` bucket
+takes Google's application default credentials, or the emulator `STORAGE_EMULATOR_HOST` names.
+
+| chain | its sources, in order |
+|---|---|
+| AWS (`S3Credentials.Default()`) | `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; a web identity, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` exchanged with STS, as a Kubernetes service account reaches a role on EKS; a profile of `~/.aws/credentials` and `~/.aws/config`; the container endpoint of ECS and EKS Pod Identity; the instance metadata service, version 2 only |
+| Azure (`AzureCredentials.FromEnvironment()`) | a client secret, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_CLIENT_SECRET`; a workload identity, `AZURE_FEDERATED_TOKEN_FILE`; the storage credentials Azure's tools read, `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_KEY` or `AZURE_STORAGE_SAS_TOKEN`; a managed identity, App Service's or the instance's |
+| Google (`GoogleCredentials.FromEnvironment()`) | the file `GOOGLE_APPLICATION_CREDENTIALS` names: a service account's key, a user's refresh token, or an external account's configuration for workload identity federation; the file `gcloud auth application-default login` writes; the metadata server of Compute Engine, GKE and Cloud Run |
+
+The first source that answers is kept. Credentials that expire are renewed five minutes before they
+do, by one request while the others go on with the current ones, and a token file that Kubernetes
+rotates is read again at each renewal.
 
 The session disposes the stores it holds, closing their connections and wiping their keys. Dispose
 every file opened through the session before the session itself.

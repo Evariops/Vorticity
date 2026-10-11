@@ -83,7 +83,8 @@ public sealed partial class S3ObjectStore : IObjectStore
     /// A store over <paramref name="bucket"/> configured from the environment, as the AWS SDKs read it:
     /// the region from <c>AWS_REGION</c> or <c>AWS_DEFAULT_REGION</c>, the endpoint from
     /// <c>AWS_ENDPOINT_URL_S3</c> or <c>AWS_ENDPOINT_URL</c>, its profile from the endpoint's host, and
-    /// the keys from <c>AWS_ACCESS_KEY_ID</c>, <c>AWS_SECRET_ACCESS_KEY</c> and <c>AWS_SESSION_TOKEN</c>.
+    /// the keys from the AWS credential chain (<see cref="S3Credentials.Default"/>), the environment's
+    /// first.
     /// </summary>
     /// <param name="bucket">The bucket.</param>
     /// <returns>The store; the caller, or the session it is given to, disposes it.</returns>
@@ -100,7 +101,7 @@ public sealed partial class S3ObjectStore : IObjectStore
             Bucket = bucket,
             Region = string.IsNullOrEmpty(region) ? null : region,
             Endpoint = string.IsNullOrEmpty(endpoint) ? null : new Uri(endpoint, UriKind.Absolute),
-            Credentials = S3Credentials.FromEnvironment(),
+            Credentials = S3Credentials.Default(),
         });
     }
 
