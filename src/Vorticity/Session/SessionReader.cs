@@ -13,19 +13,27 @@ namespace Vorticity;
 /// A file's reader as its session sees it: every request waits on the session's bound on reads in
 /// flight, and every segment passes through the session's cache.
 /// </summary>
-/// <remarks>Only a reader that does I/O is wrapped: memory and a mapping have nothing to bound or to cache.</remarks>
+/// <remarks>
+/// Only a reader that does I/O is wrapped: memory and a mapping have nothing to bound or to cache. A
+/// reader that bounds its own requests, one place per request in a window over its store, skips the
+/// session's bound, which would count a batch of requests as one.
+/// </remarks>
 internal sealed class SessionReader : ISegmentReader
 {
     private readonly ISegmentReader _inner;
-    private readonly SemaphoreSlim _gate;
+    private readonly SemaphoreSlim? _gate;
     private readonly SegmentCache? _cache;
 
     private SessionReader(ISegmentReader inner, SemaphoreSlim gate, SegmentCache? cache)
     {
         _inner = inner;
-        _gate = gate;
+        _gate = inner.CountsItsReads ? null : gate;
         _cache = cache;
     }
+
+    public bool ReadsOverNetwork => _inner.ReadsOverNetwork;
+
+    public bool CountsItsReads => true;
 
     internal ISegmentReader Inner => _inner;
 
@@ -46,7 +54,11 @@ internal sealed class SessionReader : ISegmentReader
             return Slice(cached, view);
         }
 
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (_gate is not null)
+        {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         SegmentOwner owner;
         try
         {
@@ -54,7 +66,7 @@ internal sealed class SessionReader : ISegmentReader
         }
         finally
         {
-            _gate.Release();
+            _gate?.Release();
         }
 
         _cache?.Add(_inner, (long)spec.Offset, owner, owner.Buffer);
@@ -104,14 +116,18 @@ internal sealed class SessionReader : ISegmentReader
                 }
             }
 
-            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (_gate is not null)
+            {
+                await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             try
             {
                 await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
-                _gate.Release();
+                _gate?.Release();
             }
 
             if (_cache is not null)
@@ -145,14 +161,18 @@ internal sealed class SessionReader : ISegmentReader
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<SegmentOwner> ReadRangeAsync(long offset, int length, int alignment, CancellationToken cancellationToken)
     {
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (_gate is not null)
+        {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         try
         {
             return await _inner.ReadRangeAsync(offset, length, alignment, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            _gate.Release();
+            _gate?.Release();
         }
     }
 

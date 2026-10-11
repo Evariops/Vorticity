@@ -563,10 +563,10 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         if (_store is SealedObjectStore { Seals: true } sealedStore)
         {
-            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, length, cancellationToken).ConfigureAwait(false);
+            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, length, Session, cancellationToken).ConfigureAwait(false);
         }
 
-        ObjectStoreSource plain = new ObjectStoreSource(_store, objectKey, length);
+        ObjectStoreSource plain = new ObjectStoreSource(_store, objectKey, length, window: Session.WindowFor(_store));
         if (_store is SealedObjectStore && await Sealing.SealedFiles.EndsSealedAsync(plain, cancellationToken).ConfigureAwait(false))
         {
             await plain.DisposeAsync().ConfigureAwait(false);

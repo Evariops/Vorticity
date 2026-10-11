@@ -1019,7 +1019,7 @@ Vorticity:     property int RowCount { get; }
 Vorticity: interface Vorticity.IKeyEncoder
 Vorticity:     method IEncodedKeys Encode(BatchView)
 Vorticity:     property string Format { get; }
-Vorticity: sealed class Vorticity.IO.FileSegmentSource : ISegmentReader, ISegmentSource
+Vorticity: sealed class Vorticity.IO.FileSegmentSource : ISegmentSource
 Vorticity:     ctor FileSegmentSource(SafeFileHandle, bool = default)
 Vorticity:     ctor FileSegmentSource(string)
 Vorticity:     method ValueTask DisposeAsync()
@@ -1038,13 +1038,13 @@ Vorticity: interface Vorticity.IO.ISegmentSource : IAsyncDisposable
 Vorticity:     method ValueTask ReadAsync(ReadOnlyMemory<SegmentRange>, Memory<SegmentLease>, CancellationToken)
 Vorticity:     method ValueTask<SegmentLease> ReadAsync(SegmentRange, CancellationToken)
 Vorticity:     property long Length { get; }
-Vorticity: sealed class Vorticity.IO.MemoryMappedSegmentSource : ISegmentReader, ISegmentSource
+Vorticity: sealed class Vorticity.IO.MemoryMappedSegmentSource : ISegmentSource
 Vorticity:     ctor MemoryMappedSegmentSource(string)
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask ReadAsync(ReadOnlyMemory<SegmentRange>, Memory<SegmentLease>, CancellationToken)
 Vorticity:     method ValueTask<SegmentLease> ReadAsync(SegmentRange, CancellationToken)
 Vorticity:     property long Length { get; }
-Vorticity: sealed class Vorticity.IO.MemorySegmentSource : ISegmentReader, ISegmentSource
+Vorticity: sealed class Vorticity.IO.MemorySegmentSource : ISegmentSource
 Vorticity:     ctor MemorySegmentSource(ReadOnlyMemory<byte>)
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask ReadAsync(ReadOnlyMemory<SegmentRange>, Memory<SegmentLease>, CancellationToken)
@@ -1560,7 +1560,7 @@ Vorticity:     property int Count { get; }
 Vorticity: ref struct Vorticity.Selection.Enumerator
 Vorticity:     method bool MoveNext()
 Vorticity:     property int Current { get; }
-Vorticity: struct Vorticity.Sym<T> : ISymbol
+Vorticity: struct Vorticity.Sym<T>
 Vorticity:     method Predicate Between(T, T)
 Vorticity:     method Predicate In(ReadOnlySpan<T>)
 Vorticity:     method Predicate op_Equality(Sym<T>, Sym<T>)
@@ -1804,7 +1804,7 @@ Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out string, out VortexType)
 Vorticity:     property VortexType Type { get; init; }
 Vorticity:     property string Name { get; init; }
-Vorticity: sealed class Vorticity.VortexFile : ISegmentReader
+Vorticity: sealed class Vorticity.VortexFile : IAsyncDisposable
 Vorticity:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity:     method Scan<TRecord> Scan<TRecord>()
 Vorticity:     method ValueTask DisposeAsync()
@@ -1835,7 +1835,7 @@ Vorticity:     method ValueTask<long> GetValidLengthAsync(string, CancellationTo
 Vorticity: sealed class Vorticity.VortexFileStatistics
 Vorticity:     property FieldStatistics Item[int] { get; }
 Vorticity:     property int Count { get; }
-Vorticity: sealed class Vorticity.VortexFileWriter : IAsyncDisposable, IChunkLedger, IFanWork
+Vorticity: sealed class Vorticity.VortexFileWriter : IAsyncDisposable
 Vorticity:     method ColumnsBuilder Builder()
 Vorticity:     method ColumnsBuilder<TRecord> Builder<TRecord>()
 Vorticity:     method ValueTask DisposeAsync()
@@ -2044,6 +2044,7 @@ Vorticity:     property int MappedFileCacheCount { get; set; }
 Vorticity:     property int MaxConcurrentReads { get; set; }
 Vorticity:     property int MaxDegreeOfParallelism { get; set; }
 Vorticity:     property long IndexCacheBytes { get; set; }
+Vorticity:     property long ReadWindowBytes { get; set; }
 Vorticity:     property string ScratchDirectory { get; set; }
 Vorticity: sealed class Vorticity.VortexTornTail : IEquatable<VortexTornTail>
 Vorticity:     ctor VortexTornTail(long, long, string)
@@ -2676,7 +2677,9 @@ Vorticity.ObjectStorage:     property string Region { get; init; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions
 Vorticity.ObjectStorage:     ctor StoreTransportOptions()
 Vorticity.ObjectStorage:     property IWebProxy Proxy { get; init; }
+Vorticity.ObjectStorage:     property Nullable<double> HedgeAfterPercentile { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan FirstByteTimeout { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan StallTimeout { get; init; }
+Vorticity.ObjectStorage:     property double HedgeBudgetPercent { get; init; }
 Vorticity.ObjectStorage:     property int MaxAttempts { get; init; }
 Vorticity.ObjectStorage:     property int MaxConnections { get; init; }

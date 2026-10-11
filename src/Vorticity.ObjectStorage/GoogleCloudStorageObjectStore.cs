@@ -34,7 +34,7 @@ namespace Vorticity.ObjectStorage;
 /// without one, a dataset's data object, goes up in parts past the threshold.
 /// </para>
 /// </remarks>
-public sealed class GoogleCloudStorageObjectStore : IObjectStore
+public sealed class GoogleCloudStorageObjectStore : IObjectStore, IMeasuredObjectStore
 {
     /// <summary>The metadata a put carries its id in, read back as <c>metadata.vxput</c>.</summary>
     internal const string PutIdHeader = "x-goog-meta-vxput";
@@ -114,6 +114,12 @@ public sealed class GoogleCloudStorageObjectStore : IObjectStore
     internal HttpTransport Transport => _transport;
 
     /// <inheritdoc/>
+    int IMeasuredObjectStore.Connections => _transport.Options.MaxConnections;
+
+    /// <inheritdoc/>
+    long IMeasuredObjectStore.BandwidthDelayBytes => _transport.Link.BandwidthDelayBytes;
+
+    /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
         CheckKey(key);
@@ -130,7 +136,8 @@ public sealed class GoogleCloudStorageObjectStore : IObjectStore
             static (s, ct) => s.Store.BuildReadAsync(s, ct),
             static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
             idempotent: true,
-            cancellationToken);
+            cancellationToken,
+            hedgeable: true);
     }
 
     /// <inheritdoc/>
@@ -146,7 +153,8 @@ public sealed class GoogleCloudStorageObjectStore : IObjectStore
                 static (s, ct) => s.Store.BuildReadAsync(s, ct),
                 static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
                 idempotent: true,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                hedgeable: true).ConfigureAwait(false);
         }
 
         ObjectHead head = await HeadAsync(key, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);

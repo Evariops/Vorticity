@@ -39,7 +39,11 @@ internal sealed class HttpTransport : IDisposable
     private readonly string _provider;
     private readonly Func<HttpResponseMessage, CancellationToken, ValueTask<ServiceError>> _readError;
     private readonly RetryBudget _budget = new RetryBudget();
+    private readonly LinkStatistics _link;
+    private readonly ConcurrencyLimit _limit;
     private int _nextAddress;
+    private long _hedgeable;
+    private long _hedged;
 
     /// <summary>A transport for one store.</summary>
     /// <param name="options">Its connections, deadlines and retries.</param>
@@ -63,6 +67,8 @@ internal sealed class HttpTransport : IDisposable
         _client.Timeout = Timeout.InfiniteTimeSpan;
         _client.DefaultRequestVersion = HttpVersion.Version11;
         _client.DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+        _limit = new ConcurrencyLimit(options.MaxConnections, options.TimeProvider);
+        _link = new LinkStatistics(options.TimeProvider);
     }
 
     /// <summary>The store's options.</summary>
@@ -70,6 +76,15 @@ internal sealed class HttpTransport : IDisposable
 
     /// <summary>The budget's tokens left, for tests.</summary>
     internal int BudgetLeft => _budget.Tokens;
+
+    /// <summary>What the store has measured of its link.</summary>
+    internal LinkStatistics Link => _link;
+
+    /// <summary>The requests in flight the store allows now, halved by a throttle.</summary>
+    internal int ConcurrencyLimit => _limit.Limit;
+
+    /// <summary>The reads hedged so far.</summary>
+    internal long Hedged => Interlocked.Read(ref _hedged);
 
     /// <summary>
     /// Sends a request built by <paramref name="build"/> and hands its answer to
@@ -86,6 +101,7 @@ internal sealed class HttpTransport : IDisposable
     /// </param>
     /// <param name="idempotent">Whether the request may be sent again after it may have reached the service.</param>
     /// <param name="cancellationToken">Cancels the request and its retries.</param>
+    /// <param name="hedgeable">Whether a second request may be sent when the first is slow to answer: a read's.</param>
     /// <returns>What <paramref name="consume"/> returned.</returns>
     /// <exception cref="ObjectStoreException">The service failed, or the connection did, past the attempts or the budget.</exception>
     internal async ValueTask<TResult> SendAsync<TState, TResult>(
@@ -94,7 +110,8 @@ internal sealed class HttpTransport : IDisposable
         Func<TState, CancellationToken, ValueTask<HttpRequestMessage>> build,
         Func<HttpResponseMessage, TState, CancellationToken, ValueTask<TResult>> consume,
         bool idempotent,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool hedgeable = false)
     {
         for (int attempt = 1; ; attempt++)
         {
@@ -104,23 +121,22 @@ internal sealed class HttpTransport : IDisposable
             Exception? cause = null;
             ServiceError? refused = null;
             HttpResponseMessage? response = null;
+            bool sendAgain = false;
+            await _limit.EnterAsync(cancellationToken).ConfigureAwait(false);
             long started = Stopwatch.GetTimestamp();
             try
             {
-                using (HttpRequestMessage request = await build(state, cancellationToken).ConfigureAwait(false))
-                {
-                    using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                    deadline.CancelAfter(_options.FirstByteTimeout);
-                    response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
-                }
-
-                StoreTelemetry.FirstByteAfter(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                response = await FirstByteAsync(state, build, hedgeable, cancellationToken).ConfigureAwait(false);
+                TimeSpan firstByte = Stopwatch.GetElapsedTime(started);
+                _link.FirstByte(firstByte);
+                StoreTelemetry.FirstByteAfter(firstByte.TotalMilliseconds);
                 int status = (int)response.StatusCode;
                 StoreTelemetry.Request(operation, _provider, status);
                 if (!ServiceError.IsRetryable(status))
                 {
                     TResult result = await consume(response, state, cancellationToken).ConfigureAwait(false);
                     _budget.Succeeded();
+                    _limit.Succeeded();
                     return result;
                 }
 
@@ -129,6 +145,7 @@ internal sealed class HttpTransport : IDisposable
                 if (error.IsThrottle)
                 {
                     StoreTelemetry.Throttled();
+                    _limit.Throttled();
                 }
 
                 failure = error.ToString();
@@ -147,9 +164,7 @@ internal sealed class HttpTransport : IDisposable
                         throw new ObjectStoreException($"{operation} failed after {attempt} attempts: {failure}", cause);
                     }
 
-                    StoreTelemetry.Retried();
-                    await DelayAsync(cost == 0 ? 0 : attempt, null, cancellationToken).ConfigureAwait(false);
-                    continue;
+                    sendAgain = true;
                 }
             }
             catch (OperationCanceledException timeout) when (!cancellationToken.IsCancellationRequested)
@@ -169,6 +184,14 @@ internal sealed class HttpTransport : IDisposable
             finally
             {
                 response?.Dispose();
+                _limit.Exit();
+            }
+
+            if (sendAgain)
+            {
+                StoreTelemetry.Retried();
+                await DelayAsync(cost == 0 ? 0 : attempt, null, cancellationToken).ConfigureAwait(false);
+                continue;
             }
 
             if (!idempotent)
@@ -185,6 +208,120 @@ internal sealed class HttpTransport : IDisposable
 
             StoreTelemetry.Retried();
             await DelayAsync(cost == 0 ? 0 : attempt, refused, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Sends one attempt's request and waits for its answer's headers, under the first-byte deadline. A
+    /// read that has not seen its first byte past the percentile the options name is sent a second time,
+    /// while the budget of hedges allows: the first answer is kept, and the other request cancelled, its
+    /// connection closed rather than drained.
+    /// </summary>
+    private async ValueTask<HttpResponseMessage> FirstByteAsync<TState>(
+        TState state, Func<TState, CancellationToken, ValueTask<HttpRequestMessage>> build, bool hedgeable, CancellationToken cancellationToken)
+    {
+        HttpRequestMessage request = await build(state, cancellationToken).ConfigureAwait(false);
+        CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(_options.FirstByteTimeout);
+        TimeSpan? after = hedgeable && _options.HedgeAfterPercentile is { } percentile ? _link.Percentile(percentile) : null;
+        if (after is null)
+        {
+            try
+            {
+                return await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                deadline.Dispose();
+                request.Dispose();
+            }
+        }
+
+        Interlocked.Increment(ref _hedgeable);
+        Task<HttpResponseMessage> first = _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+        using (CancellationTokenSource waiting = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            Task delay = Task.Delay(after.Value, _options.TimeProvider, waiting.Token);
+            bool slow = await Task.WhenAny(first, delay).ConfigureAwait(false) != first;
+            await waiting.CancelAsync().ConfigureAwait(false);
+            if (!slow || !TrySpendHedge())
+            {
+                return await SettledAsync(first, deadline, request).ConfigureAwait(false);
+            }
+        }
+
+        StoreTelemetry.Hedged();
+        HttpRequestMessage second = await build(state, cancellationToken).ConfigureAwait(false);
+        CancellationTokenSource secondDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        secondDeadline.CancelAfter(_options.FirstByteTimeout);
+        Task<HttpResponseMessage> hedge = _client.SendAsync(second, HttpCompletionOption.ResponseHeadersRead, secondDeadline.Token);
+        Task<HttpResponseMessage> done = await Task.WhenAny(first, hedge).ConfigureAwait(false);
+        bool firstWon = done == first;
+        if (!done.IsCompletedSuccessfully)
+        {
+            // The first to finish failed: the other may still answer.
+            _ = AbandonAsync(done, firstWon ? deadline : secondDeadline, firstWon ? request : second);
+            return await SettledAsync(firstWon ? hedge : first, firstWon ? secondDeadline : deadline, firstWon ? second : request).ConfigureAwait(false);
+        }
+
+        _ = AbandonAsync(firstWon ? hedge : first, firstWon ? secondDeadline : deadline, firstWon ? second : request);
+        return await SettledAsync(done, firstWon ? deadline : secondDeadline, firstWon ? request : second).ConfigureAwait(false);
+
+        static async Task<HttpResponseMessage> SettledAsync(Task<HttpResponseMessage> answer, CancellationTokenSource deadline, HttpRequestMessage request)
+        {
+            try
+            {
+                // A hedge races two requests started above: awaiting the one kept is the point.
+#pragma warning disable VSTHRD003
+                return await answer.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+            }
+            finally
+            {
+                deadline.Dispose();
+                request.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Whether one more hedge fits the budget, as a share of the reads that could have been hedged; takes it if so.</summary>
+    private bool TrySpendHedge()
+    {
+        if (_options.HedgeBudgetPercent <= 0)
+        {
+            return false;
+        }
+
+        // The first hedge is allowed as soon as the percentile is known, whatever the share it makes.
+        long allowed = (long)(Interlocked.Read(ref _hedgeable) * _options.HedgeBudgetPercent / 100);
+        long spent = Interlocked.Increment(ref _hedged);
+        if (spent <= Math.Max(allowed, 1))
+        {
+            return true;
+        }
+
+        Interlocked.Decrement(ref _hedged);
+        return false;
+    }
+
+    /// <summary>Cancels the request a hedge did not need, and disposes its answer if one comes anyway.</summary>
+    private static async Task AbandonAsync(Task<HttpResponseMessage> request, CancellationTokenSource deadline, HttpRequestMessage message)
+    {
+        try
+        {
+            await deadline.CancelAsync().ConfigureAwait(false);
+#pragma warning disable VSTHRD003 // The request abandoned was started by the hedge, and is awaited only to dispose its answer.
+            using HttpResponseMessage _ = await request.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        }
+        catch (Exception)
+        {
+            // Cancelled, or failed: either way nobody waits for it.
+        }
+        finally
+        {
+            deadline.Dispose();
+            message.Dispose();
         }
     }
 
@@ -236,6 +373,7 @@ internal sealed class HttpTransport : IDisposable
                 }
 
                 total += read;
+                _link.Delivered(read);
                 stall.CancelAfter(_options.StallTimeout);
             }
         }

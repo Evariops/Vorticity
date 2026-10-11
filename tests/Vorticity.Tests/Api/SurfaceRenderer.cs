@@ -253,7 +253,8 @@ internal static class SurfaceRenderer
 
     // The base type and the interfaces are part of the promise: dropping one breaks a caller that
     // assigned through it. Interfaces an interface already implies are left out, so adding a base
-    // interface to an interface shows up once rather than on every implementor.
+    // interface to an interface shows up once rather than on every implementor, and so are the
+    // interfaces no caller can name, which promise nothing.
     [RequiresUnreferencedCode(NotTrimmable)]
     private static IEnumerable<string> Bases(Type type)
     {
@@ -263,7 +264,7 @@ internal static class SurfaceRenderer
             yield return TypeName(baseType);
         }
 
-        Type[] direct = type.GetInterfaces();
+        Type[] direct = [.. type.GetInterfaces().Where(contract => contract.IsVisible)];
         foreach (Type contract in direct)
         {
             if (!direct.Any(other => other != contract && other.GetInterfaces().Contains(contract)) &&

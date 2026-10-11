@@ -31,6 +31,16 @@ public sealed class StoreTransportOptions
     /// <summary>The proxy, or null for the environment's (<c>HTTPS_PROXY</c>, <c>NO_PROXY</c>), as the platform reads it.</summary>
     public IWebProxy? Proxy { get; init; }
 
+    /// <summary>
+    /// The percentile of the store's recent first-byte latencies past which a read that has not seen its
+    /// first byte is sent a second time, the first answer kept and the other's connection closed; null,
+    /// the default, sends no hedge. 99 is the usual choice. A hedge is a request, and requests cost money.
+    /// </summary>
+    public double? HedgeAfterPercentile { get; init; }
+
+    /// <summary>The most reads hedged, as a share of the reads sent, 2 % by default.</summary>
+    public double HedgeBudgetPercent { get; init; } = 2;
+
     /// <summary>The first delay of the exponential backoff, before its jitter.</summary>
     internal TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromMilliseconds(50);
 
@@ -46,5 +56,11 @@ public sealed class StoreTransportOptions
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxAttempts, nameof(MaxAttempts));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(FirstByteTimeout, TimeSpan.Zero, nameof(FirstByteTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(StallTimeout, TimeSpan.Zero, nameof(StallTimeout));
+        if (HedgeAfterPercentile is { } percentile && percentile is <= 0 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(HedgeAfterPercentile), percentile, "A percentile in (0, 100] was expected.");
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(HedgeBudgetPercent, nameof(HedgeBudgetPercent));
     }
 }

@@ -35,7 +35,7 @@ namespace Vorticity.Dataset;
 /// <para>
 /// What it opens: the commit objects only, by their head, in the one request a plain one costs when the
 /// store gives the object's length with its answer. A data object is opened by the dataset's object
-/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken)"/>),
+/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, VortexSession, CancellationToken)"/>),
 /// which serves the Vortex open from the read that brought the trailer. A head says what the store
 /// holds: the sealed length.
 /// </para>
@@ -693,9 +693,9 @@ internal sealed class SealedObjectStore : IObjectStore
     /// object as it lies otherwise.
     /// </summary>
     /// <exception cref="VortexEncryptionException">The object is plain in an encrypted dataset, or not the one its entry names.</exception>
-    internal async ValueTask<ISegmentReader> OpenDataAsync(string key, UInt128 uid, long length, CancellationToken cancellationToken)
+    internal async ValueTask<ISegmentReader> OpenDataAsync(string key, UInt128 uid, long length, VortexSession? session, CancellationToken cancellationToken)
     {
-        ObjectStoreSource source = new ObjectStoreSource(_inner, key, length);
+        ObjectStoreSource source = new ObjectStoreSource(_inner, key, length, window: session?.WindowFor(_inner));
         if (!Seals)
         {
             return source;
@@ -738,12 +738,15 @@ internal sealed class SealedObjectStore : IObjectStore
 
     /// <summary>
     /// The reader over a data object of the dataset behind <paramref name="store"/>, sealed or plain as
-    /// the dataset is, told the object's length when its entry records it, which spares a request.
+    /// the dataset is, told the object's length when its entry records it, which spares a request. Its
+    /// reads take their places in the session's window over the store, when there is a session and the
+    /// store measures its link.
     /// </summary>
-    internal static ValueTask<ISegmentReader> OpenDataAsync(IObjectStore store, string key, UInt128 uid, long length, CancellationToken cancellationToken) =>
+    internal static ValueTask<ISegmentReader> OpenDataAsync(
+        IObjectStore store, string key, UInt128 uid, long length, VortexSession? session, CancellationToken cancellationToken) =>
         store is SealedObjectStore sealedStore
-            ? sealedStore.OpenDataAsync(key, uid, length, cancellationToken)
-            : new ValueTask<ISegmentReader>(new ObjectStoreSource(store, key, length));
+            ? sealedStore.OpenDataAsync(key, uid, length, session, cancellationToken)
+            : new ValueTask<ISegmentReader>(new ObjectStoreSource(store, key, length, window: session?.WindowFor(store)));
 
     /// <summary>
     /// What verification finds wrong with a sealed object's envelope beyond its frames: two copies of

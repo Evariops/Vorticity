@@ -33,7 +33,7 @@ namespace Vorticity.ObjectStorage;
 /// other. A session that holds it disposes it with itself.
 /// </para>
 /// </remarks>
-public sealed partial class S3ObjectStore : IObjectStore
+public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore
 {
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
@@ -171,6 +171,12 @@ public sealed partial class S3ObjectStore : IObjectStore
     internal HttpTransport Transport => _transport;
 
     /// <inheritdoc/>
+    int IMeasuredObjectStore.Connections => _transport.Options.MaxConnections;
+
+    /// <inheritdoc/>
+    long IMeasuredObjectStore.BandwidthDelayBytes => _transport.Link.BandwidthDelayBytes;
+
+    /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
         CheckKey(key);
@@ -254,7 +260,8 @@ public sealed partial class S3ObjectStore : IObjectStore
             static (s, ct) => s.Store.BuildAsync(HttpMethod.Get, s.Key, s, ct),
             static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
             idempotent: true,
-            cancellationToken);
+            cancellationToken,
+            hedgeable: true);
     }
 
     /// <summary>A read into no memory: a head, which says the length and the token a read would.</summary>
@@ -287,7 +294,8 @@ public sealed partial class S3ObjectStore : IObjectStore
             static (s, ct) => s.Store.BuildAsync(HttpMethod.Get, s.Key, s, ct),
             static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
             idempotent: true,
-            cancellationToken);
+            cancellationToken,
+            hedgeable: true);
     }
 
     /// <summary>The tail on a service whose suffix reads are not proven: a head for the length, then a range bound to its token.</summary>

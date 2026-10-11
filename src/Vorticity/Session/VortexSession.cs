@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Advice;
@@ -19,6 +20,7 @@ public sealed class VortexSessionOptions
     private MemoryPool<byte> _memoryPool = AlignedMemoryPool.Shared;
     private SegmentCache? _segmentCache;
     private int _maxConcurrentReads = 16;
+    private long _readWindowBytes = 64L << 20;
     private int _maxDegreeOfParallelism = 1;
     private long _indexCacheBytes = 64L * 1024 * 1024;
     private int _mappedFileCacheCount = 64;
@@ -81,6 +83,27 @@ public sealed class VortexSessionOptions
         {
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
             _maxConcurrentReads = Set(value);
+        }
+    }
+
+    /// <summary>
+    /// The most bytes the session's reads of one object store of the package Vorticity.ObjectStorage
+    /// have in flight at once, 64 MiB by default: the ceiling of a window sized to the store's link.
+    /// </summary>
+    /// <remarks>
+    /// Reads over such a store are bounded per request rather than by <see cref="MaxConcurrentReads"/>:
+    /// at most the store's connections, and at most twice what its link holds in flight, its measured
+    /// bandwidth times its latency, between 8 MiB and this ceiling. A range larger than the window is
+    /// read alone. Every scan of the session that reads the store shares its window.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public long ReadWindowBytes
+    {
+        get => _readWindowBytes;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _readWindowBytes = Set(value);
         }
     }
 
@@ -301,6 +324,8 @@ public sealed class VortexSessionOptions
 public sealed class VortexSession : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<VortexFile, string> _open = new();
+    // Held weakly: a store a dataset was handed and then dropped leaves with its window.
+    private readonly ConditionalWeakTable<IObjectStore, ReadWindow> _windows = new();
     private int _disposed;
 
     private VortexSession(VortexSessionOptions options)
@@ -324,6 +349,19 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>The bound on reads in flight across the session.</summary>
     internal SemaphoreSlim ReadGate { get; }
+
+    /// <summary>
+    /// The window of reads in flight over the store under <paramref name="store"/>, shared by every scan
+    /// of the session that reads it; null for a store that does not measure its link, whose reads the
+    /// session bounds per batch.
+    /// </summary>
+    internal ReadWindow? WindowFor(IObjectStore store) =>
+        ObjectStoreSource.Root(store) is IMeasuredObjectStore measured
+            ? _windows.GetOrAdd(
+                (IObjectStore)measured,
+                static (_, state) => new ReadWindow(state.Measured.Connections, state.Ceiling, state.Measured),
+                (Measured: measured, Ceiling: Options.ReadWindowBytes))
+            : null;
 
     /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
     internal MappedFileCache? Mappings { get; }
@@ -369,7 +407,8 @@ public sealed class VortexSession : IAsyncDisposable
         if (ObjectStoreRegistry.IsLocation(path))
         {
             (IObjectStore store, string key) = Options.ObjectStores.Locate(path);
-            return await OpenReaderAsync(new ObjectStoreSource(store, key), path, options, cancellationToken, ownedHere: true).ConfigureAwait(false);
+            ObjectStoreSource source = new ObjectStoreSource(store, key, window: WindowFor(store));
+            return await OpenReaderAsync(source, path, options, cancellationToken, ownedHere: true).ConfigureAwait(false);
         }
 
         VortexFile file = await VortexFile.OpenAsync(path, Effective(options), this, cancellationToken).ConfigureAwait(false);

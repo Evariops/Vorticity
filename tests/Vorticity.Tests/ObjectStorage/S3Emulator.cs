@@ -49,6 +49,9 @@ internal sealed class S3Emulator : HttpMessageHandler
     /// <summary>Runs before each request is served: returns an answer to send instead, or throws to fail the connection.</summary>
     internal Func<HttpRequestMessage, int, HttpResponseMessage?>? Intercept { get; set; }
 
+    /// <summary>Awaited before each request is served, once it is logged: a slow path, or a request parked until a test lets it go.</summary>
+    internal Func<HttpRequestMessage, int, CancellationToken, Task>? Hold { get; set; }
+
     /// <summary>Runs after a write is applied: true loses its answer, the connection failing as the object lands.</summary>
     internal Func<HttpRequestMessage, bool>? LoseAnswer { get; set; }
 
@@ -122,6 +125,11 @@ internal sealed class S3Emulator : HttpMessageHandler
         Uri uri = request.RequestUri!;
         Hosts.Enqueue(request.Headers.Host ?? uri.Authority);
         Log.Enqueue($"{request.Method} {uri.AbsolutePath}{uri.Query}{(request.Headers.TryGetValues("Range", out IEnumerable<string>? range) ? " " + range.First() : string.Empty)}");
+        if (Hold is { } hold)
+        {
+            await hold(request, index, cancellationToken);
+        }
+
         if (Intercept?.Invoke(request, index) is { } intercepted)
         {
             intercepted.RequestMessage = request;

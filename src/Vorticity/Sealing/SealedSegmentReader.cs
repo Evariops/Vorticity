@@ -190,6 +190,12 @@ internal sealed class SealedSegmentReader : ISegmentReader
     public int TailReadSize => _tailReadSize;
 
     /// <inheritdoc/>
+    public bool ReadsOverNetwork => _inner.ReadsOverNetwork;
+
+    /// <inheritdoc/>
+    public bool CountsItsReads => _inner.CountsItsReads;
+
+    /// <inheritdoc/>
     public ValueTask<SegmentOwner> ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

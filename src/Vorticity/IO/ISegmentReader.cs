@@ -114,6 +114,18 @@ internal interface ISegmentReader : IAsyncDisposable
     bool ReadsInPlace => false;
 
     /// <summary>
+    /// Whether a read is a request over a network, tens of milliseconds whatever its size: a scan then
+    /// starts its first batch on two lanes, and widens to its degree once the consumer asks for the next.
+    /// </summary>
+    bool ReadsOverNetwork => false;
+
+    /// <summary>
+    /// Whether the reader bounds its own reads in flight, one place per request: the session then
+    /// counts none of its batches, which would count a batch's requests as one.
+    /// </summary>
+    bool CountsItsReads => false;
+
+    /// <summary>
     /// The bytes an open reads first from the tail of a file longer than the format's tail window,
     /// when its caller did not raise the window: by default the window itself, which holds any
     /// postscript and so keeps an open to one or two round trips.
