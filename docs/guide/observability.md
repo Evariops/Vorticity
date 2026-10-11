@@ -79,9 +79,9 @@ a bucket or a token.
 |---|---|
 | `vortex.store.requests` | the requests sent, by operation as the service's API names it (`GetObject`, `PutObject`, `ListObjectsV2` on S3), provider and status class |
 | `vortex.store.bytes_read`, `vortex.store.bytes_written` | the bytes that crossed the network |
-| `vortex.store.retries`, `vortex.store.throttles`, `vortex.store.hedges` | how much the retries, the services' throttling and the second requests of slow reads cost |
+| `vortex.store.retries`, `vortex.store.throttles` | how much the retries and the services' throttling cost |
 | `vortex.store.connections_opened` | the connections opened, which the stores keep and reuse |
-| `vortex.store.first_byte`, a histogram in milliseconds | the latency the window of reads and the hedges are sized from |
+| `vortex.store.first_byte`, a histogram in milliseconds | the latency of the services' first byte, by which the deadlines are set |
 
 ## The activities
 

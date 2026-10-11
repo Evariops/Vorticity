@@ -26,7 +26,7 @@ namespace Vorticity.ObjectStorage;
 /// The store owns its credentials and its connections; disposing it wipes the one and closes the other.
 /// </para>
 /// </remarks>
-public sealed partial class AzureBlobObjectStore : IObjectStore, IMeasuredObjectStore
+public sealed partial class AzureBlobObjectStore : IObjectStore
 {
     /// <summary>The service version every request carries: the structured body needs 2025-01-05.</summary>
     internal const string Version = "2025-01-05";
@@ -111,12 +111,6 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IMeasuredObject
     internal HttpTransport Transport => _transport;
 
     /// <inheritdoc/>
-    int IMeasuredObjectStore.Connections => _transport.Options.MaxConnections;
-
-    /// <inheritdoc/>
-    long IMeasuredObjectStore.BandwidthDelayBytes => _transport.Link.BandwidthDelayBytes;
-
-    /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
         CheckKey(key);
@@ -133,8 +127,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IMeasuredObject
             static (s, ct) => s.Store.BuildReadAsync(s, ct),
             static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
             idempotent: true,
-            cancellationToken,
-            hedgeable: true);
+            cancellationToken);
     }
 
     /// <inheritdoc/>

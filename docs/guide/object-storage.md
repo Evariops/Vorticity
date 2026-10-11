@@ -77,8 +77,7 @@ every file opened through the session before the session itself.
 | operation | requests |
 |---|---|
 | open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until the contract tests prove that the service answers one: the object's metadata, then the tail |
-| a batch of a scan | the batch's segments coalesced into ranges, issued together within the session's window |
-| the first batch of a scan | the reads of two splits, whatever the scan's degree, which widens to it at the next batch |
+| a batch of a scan | the batch's segments coalesced into ranges of up to 16 MiB, issued together |
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
@@ -97,30 +96,16 @@ A file at a location is not appended to: an object cannot grow, so `session.Open
 throws a `NotSupportedException`. Write the file again, or keep rows that keep coming in a dataset,
 which is made for them.
 
-## Reading at the speed of the link
+## Reads in flight
 
-The reads of a session over one store share a window, which every scan of every file there takes its
-places in, one per request. It holds at most the store's connections, 64 by default, and at most
-twice what the link holds in flight: the rate the store's answers arrive at, times the median latency
-of their first byte, both measured by the store as it reads. The window stays between 8 MiB and
-`VortexSessionOptions.ReadWindowBytes`, 64 MiB by default, and before the store has measured anything
-it is that ceiling. A range larger than the window is read alone. The session's `MaxConcurrentReads`
-bounds the other files of the session, those on disk or behind a source of yours, and not these.
-
-A scan over a store starts two splits before its first batch, whatever its degree of parallelism, so
-the first batch shares the link with one other read rather than with every lane, and a caller that
-stops after one batch has not paid for more. The scan widens to its degree once the caller asks for
-the next batch.
+A file at a location is read as a file on disk is: the session's `MaxConcurrentReads` bounds the
+batches in flight, 16 by default, which also bounds the memory their reads hold, and each batch issues
+its coalesced ranges together. The store sends at most `StoreTransportOptions.MaxConnections` requests
+at once, 64 by default, and a request past them waits for a connection.
 
 A service that throttles, `SlowDown` on S3, `ServerBusy` on Azure, a 429 elsewhere, halves the
 requests the store sends at once. Once the service has been calm for 10 seconds, each success gives
 one back, up to `StoreTransportOptions.MaxConnections`.
-
-A read whose first byte is late can be sent a second time, on another connection, the first answer
-kept and the other request cancelled, its connection closed. `StoreTransportOptions.HedgeAfterPercentile`
-turns that on: 99 sends the second request once the first has waited longer than 99 % of the store's
-recent reads, after 64 of them. At most `HedgeBudgetPercent` of the reads, 2 % by default, are sent
-twice. A second request is billed as a request, so hedging is off by default.
 
 ## The stores
 

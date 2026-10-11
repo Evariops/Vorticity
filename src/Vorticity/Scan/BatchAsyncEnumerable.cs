@@ -279,7 +279,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly ScanSegments _segments;
     private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
-    private readonly bool _overNetwork;
 
     private SplitCursor _cursor;
     private BlockTally _decodedBlocks;
@@ -365,7 +364,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // may be the one the open read whole, which is asked of its source.
         _ahead = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace ? new AheadReads(readAhead) : null;
         _segments = new ScanSegments(_ahead is { } ahead ? ahead.Lanes.Length : degree);
-        _overNetwork = file.Source.ReadsOverNetwork;
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses
         // how to read it.
@@ -1589,21 +1587,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         return true;
     }
 
-    /// <summary>
-    /// The splits a scan over a network starts before its consumer has its first batch: two, so that the
-    /// first split shares the link with one other rather than with every lane, and a consumer that stops
-    /// after one batch has not paid for the reads of the others.
-    /// </summary>
-    internal const int FirstSplitsOverNetwork = 2;
-
     private void Pump()
     {
         int window = _lanes.Length;
-        int ahead = _overNetwork && _delivered == 0 ? Math.Min(window, FirstSplitsOverNetwork) : window;
         long assigned = _started;
         try
         {
-            while (assigned - _delivered < ahead)
+            while (assigned - _delivered < window)
             {
                 if (_drained || !TryNextSplit(out RowRange split))
                 {

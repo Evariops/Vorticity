@@ -33,7 +33,7 @@ namespace Vorticity.ObjectStorage;
 /// other. A session that holds it disposes it with itself.
 /// </para>
 /// </remarks>
-public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, IWholeConditionalPuts
+public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
 {
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
@@ -178,12 +178,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     internal HttpTransport Transport => _transport;
 
     /// <inheritdoc/>
-    int IMeasuredObjectStore.Connections => _transport.Options.MaxConnections;
-
-    /// <inheritdoc/>
-    long IMeasuredObjectStore.BandwidthDelayBytes => _transport.Link.BandwidthDelayBytes;
-
-    /// <inheritdoc/>
     bool IWholeConditionalPuts.HoldsConditionalPutsWhole => HoldsConditionalPutsWhole;
 
     /// <summary>Whether a conditional put goes whole: on R2, which takes no condition on the parts of an upload.</summary>
@@ -273,8 +267,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
             static (s, ct) => s.Store.BuildAsync(HttpMethod.Get, s.Key, s, ct),
             static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
             idempotent: true,
-            cancellationToken,
-            hedgeable: true);
+            cancellationToken);
     }
 
     /// <summary>A read into no memory: a head, which says the length and the token a read would.</summary>
@@ -307,8 +300,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
             static (s, ct) => s.Store.BuildAsync(HttpMethod.Get, s.Key, s, ct),
             static (response, s, ct) => s.Store.ConsumeReadAsync(response, s, ct),
             idempotent: true,
-            cancellationToken,
-            hedgeable: true);
+            cancellationToken);
     }
 
     /// <summary>The tail on a service whose suffix reads are not proven: a head for the length, then a range bound to its token.</summary>

@@ -2044,7 +2044,6 @@ Vorticity:     property int MappedFileCacheCount { get; set; }
 Vorticity:     property int MaxConcurrentReads { get; set; }
 Vorticity:     property int MaxDegreeOfParallelism { get; set; }
 Vorticity:     property long IndexCacheBytes { get; set; }
-Vorticity:     property long ReadWindowBytes { get; set; }
 Vorticity:     property string ScratchDirectory { get; set; }
 Vorticity: sealed class Vorticity.VortexTornTail : IEquatable<VortexTornTail>
 Vorticity:     ctor VortexTornTail(long, long, string)
@@ -2677,9 +2676,7 @@ Vorticity.ObjectStorage:     property string Region { get; init; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions
 Vorticity.ObjectStorage:     ctor StoreTransportOptions()
 Vorticity.ObjectStorage:     property IWebProxy Proxy { get; init; }
-Vorticity.ObjectStorage:     property Nullable<double> HedgeAfterPercentile { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan FirstByteTimeout { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan StallTimeout { get; init; }
-Vorticity.ObjectStorage:     property double HedgeBudgetPercent { get; init; }
 Vorticity.ObjectStorage:     property int MaxAttempts { get; init; }
 Vorticity.ObjectStorage:     property int MaxConnections { get; init; }

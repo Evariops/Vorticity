@@ -36,7 +36,6 @@ internal sealed class ObjectStoreSource : ISegmentReader
     private readonly string _key;
     private readonly SegmentReadOptions _options;
     private readonly bool _ownsStore;
-    private readonly ReadWindow? _window;
     private long _length;
     private string? _token;
     private SegmentOwner? _tail;
@@ -50,11 +49,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// <param name="length">The object's length when the caller knows it, which spares its request; -1 otherwise.</param>
     /// <param name="options">The coalescing budgets, the defaults when null.</param>
     /// <param name="ownsStore">Whether disposing the source disposes the store.</param>
-    /// <param name="window">
-    /// The reads in flight over the store, one place per request, which the session shares between the
-    /// sources over it; null bounds nothing, and the session counts a batch as one read.
-    /// </param>
-    internal ObjectStoreSource(IObjectStore store, string key, long length = -1, SegmentReadOptions? options = null, bool ownsStore = false, ReadWindow? window = null)
+    internal ObjectStoreSource(IObjectStore store, string key, long length = -1, SegmentReadOptions? options = null, bool ownsStore = false)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentException.ThrowIfNullOrEmpty(key);
@@ -64,17 +59,10 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _length = length;
         _options = options ?? SegmentReadOptions.Default;
         _ownsStore = ownsStore;
-        _window = window;
     }
 
     /// <summary>The store under a view, which says what the store is.</summary>
     internal static IObjectStore Root(IObjectStore store) => store is PrefixedObjectStore view ? Root(view.Inner) : store;
-
-    /// <inheritdoc/>
-    public bool ReadsOverNetwork => Root(_store) is IMeasuredObjectStore;
-
-    /// <inheritdoc/>
-    public bool CountsItsReads => _window is not null;
 
     /// <summary>The object's key.</summary>
     internal string Key => _key;
@@ -250,8 +238,8 @@ internal sealed class ObjectStoreSource : ISegmentReader
                 NativeSegmentOwner block = Rent(pad + length);
                 blocks[started] = block;
 
-                // Kept to be awaited below, each exactly once: the runs are in flight together, each
-                // entering the window as a request of its own.
+                // Kept to be awaited below, each exactly once: the runs are in flight together, the
+                // session's bound counting the batch, the store's connections the requests.
 #pragma warning disable CA2012
                 reads[started] = RangeAsync(run.Start, block.WritableMemory(pad, length), token, cancellationToken);
 #pragma warning restore CA2012
@@ -387,35 +375,13 @@ internal sealed class ObjectStoreSource : ISegmentReader
         }
     }
 
-    /// <summary>One request for a range, in the window when there is one, its place given back once it is answered.</summary>
+    /// <summary>One request for a range, bound to the object's token once it is known.</summary>
     private ValueTask<ObjectRead> RangeAsync(long offset, Memory<byte> destination, string? token, CancellationToken cancellationToken) =>
-        _window is null
-            ? _store.ReadAsync(_key, offset, destination, token, cancellationToken)
-            : WindowedAsync(this, offset, destination, token, tail: false, cancellationToken);
+        _store.ReadAsync(_key, offset, destination, token, cancellationToken);
 
-    /// <summary>The request for the tail, in the window when there is one.</summary>
+    /// <summary>The request for the tail, which says the object's length with it.</summary>
     private ValueTask<ObjectRead> TailAsync(Memory<byte> destination, CancellationToken cancellationToken) =>
-        _window is null
-            ? _store.ReadTailAsync(_key, destination, cancellationToken)
-            : WindowedAsync(this, 0, destination, null, tail: true, cancellationToken);
-
-    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
-    private static async ValueTask<ObjectRead> WindowedAsync(
-        ObjectStoreSource source, long offset, Memory<byte> destination, string? token, bool tail, CancellationToken cancellationToken)
-    {
-        ReadWindow window = source._window!;
-        await window.EnterAsync(destination.Length, cancellationToken).ConfigureAwait(false);
-        try
-        {
-            return tail
-                ? await source._store.ReadTailAsync(source._key, destination, cancellationToken).ConfigureAwait(false)
-                : await source._store.ReadAsync(source._key, offset, destination, token, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            window.Exit(destination.Length);
-        }
-    }
+        _store.ReadTailAsync(_key, destination, cancellationToken);
 
     /// <summary>A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class.</summary>
     private NativeSegmentOwner Rent(int length) =>
