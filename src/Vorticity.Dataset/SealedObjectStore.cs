@@ -172,6 +172,13 @@ internal sealed class SealedObjectStore : IObjectStore
         return outcome;
     }
 
+    /// <inheritdoc/>
+    public async ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        (PutOutcome outcome, _) = await PutSealedAsync(key, content, condition, cancellationToken).ConfigureAwait(false);
+        return outcome;
+    }
+
     /// <summary>A commit object's bytes from <paramref name="offset"/>, its plaintext when it is sealed, copied into <paramref name="destination"/>.</summary>
     private async ValueTask<ObjectRead> ReadCommitIntoAsync(string key, ulong version, long offset, Memory<byte> destination, CancellationToken cancellationToken)
     {
@@ -233,6 +240,29 @@ internal sealed class SealedObjectStore : IObjectStore
     // ---- puts ------------------------------------------------------------------------------
 
     /// <summary>
+    /// Creates an object from bytes in memory: handed to the store under this one where they lie when
+    /// they go plain, sealed on their way, as a stream's are, when they are one of an encrypted
+    /// dataset's commit or data objects.
+    /// </summary>
+    internal async ValueTask<(PutOutcome Outcome, long StoredLength)> PutSealedAsync(
+        string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        bool commit = CommitKey.TryParse(key, out _);
+        if (commit)
+        {
+            // The first commit of a dataset created plain in a session that holds a keyring.
+            Interlocked.CompareExchange(ref _kind, Plain, Unknown);
+        }
+
+        if (!Seals || (!commit && !TryUid(key, out _)))
+        {
+            return (await _inner.PutAsync(key, content, condition, cancellationToken).ConfigureAwait(false), content.Length);
+        }
+
+        return await PutSealedAsync(key, PipeReader.Create(content), content.Length, condition, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Creates an object, sealed when it is one of an encrypted dataset's commit or data objects and as
     /// given otherwise, and answers what the store answered and the bytes it now holds.
     /// </summary>
@@ -274,8 +304,8 @@ internal sealed class SealedObjectStore : IObjectStore
         SealParameters parameters = new SealParameters(FrameLog2, objectId, Binding(id, commit ? version : null), id, ReadOnlyMemory<byte>.Empty);
         int descriptorLength = SealDescriptor.LengthOf(name.KeyId, id.Length, name.Wrapped.Length);
 
-        // A content of unknown length, a data object streamed as it is written, is put as unknown,
-        // its sealed length following from the plaintext's once it has ended.
+        // A content of unknown length is put as unknown, its sealed length following from the
+        // plaintext's once it has ended.
         long sealedLength = length < 0 ? -1 : SealedFormat.SealedLength(descriptorLength, length, 1 << FrameLog2);
         DataKey dataKey = await _keys.UnwrapAsync(name.KeyId, name.Wrapped, id, cancellationToken).ConfigureAwait(false);
 

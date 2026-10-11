@@ -405,8 +405,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
-        ObjectSegmentSink sink = new ObjectSegmentSink(
-            _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamObjectsFromBytes);
+        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
         VortexWriteOptions write = _options.Write.WithIdentity(identity);
         if (_store is SealedObjectStore { Seals: true })
         {
@@ -1174,7 +1173,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         if (rows == 0)
         {
-            await draft.Sink.DiscardAsync().ConfigureAwait(false);
+            draft.Sink.Discard();
             return null;
         }
 
@@ -1309,7 +1308,7 @@ public sealed class VortexDataset : IAsyncDisposable
         draft.Take();
         if (draft.Writer.IsAbandoned)
         {
-            await draft.Sink.DiscardAsync().ConfigureAwait(false);
+            draft.Sink.Discard();
             throw new InvalidOperationException(
                 $"The writer of '{draft.Key}' did not complete a file, having been abandoned; nothing was put.");
         }
@@ -1328,7 +1327,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
         catch
         {
-            await draft.Sink.DiscardAsync().ConfigureAwait(false);
+            draft.Sink.Discard();
             throw;
         }
     }

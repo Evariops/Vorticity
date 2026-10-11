@@ -37,7 +37,7 @@ namespace Vorticity.ObjectStorage;
 /// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
-public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWholeConditionalPuts, IUploadService
+public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploadService
 {
     /// <summary>The metadata a put carries its id in, read back as <c>metadata.vxput</c>.</summary>
     internal const string PutIdHeader = "x-goog-meta-vxput";
@@ -126,10 +126,6 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
 
     /// <summary>The transport, for tests.</summary>
     internal HttpTransport Transport => _transport;
-
-    /// <inheritdoc/>
-    /// <remarks>The service takes no precondition on an upload in parts.</remarks>
-    bool IWholeConditionalPuts.HoldsConditionalPutsWhole => true;
 
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

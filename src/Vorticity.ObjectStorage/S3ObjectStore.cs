@@ -34,7 +34,7 @@ namespace Vorticity.ObjectStorage;
 /// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
-public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts, IUploadService
+public sealed partial class S3ObjectStore : IObjectStore, IUploadService
 {
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
@@ -193,12 +193,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts,
 
     /// <summary>The credentials, for tests.</summary>
     internal StoreCredentials Credentials => _options.Credentials;
-
-    /// <inheritdoc/>
-    bool IWholeConditionalPuts.HoldsConditionalPutsWhole => HoldsConditionalPutsWhole;
-
-    /// <summary>Whether a conditional put goes whole: on R2, which takes no condition on the parts of an upload.</summary>
-    private bool HoldsConditionalPutsWhole => _profile == S3Profile.R2;
 
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

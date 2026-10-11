@@ -677,12 +677,17 @@ for a stream sent as it was read, its message pointing at the spool.
 ### 11.2 The objects of a dataset
 
 A dataset buffers each object it writes, since it reads the object's statistics and first key from
-memory before the put, which costs no request (`VortexDataset.cs`, `SealAsync`). The buffer stays,
-and the upload changes: once the buffer passes the part threshold, its full parts are uploaded while
-the writer goes on, and kept until the commit, so the put at the end waits only for the last part and
-the completion. Puts stay conditional where the service allows it at no cost, as S3 does. A data
-object's key ends with a fresh uid and is never taken, so where a service takes no condition on parts,
-on R2 and Cloud Storage, its large put goes up without one.
+memory before the put, which costs no request (`VortexDataset.cs`, `SealAsync`). The put goes at the
+commit, from that buffer where it lies: whole up to the part threshold, in parts past it, each part a
+slice of the buffer, and any retry sent from the same bytes, so nothing is copied on its way. A data
+object's key ends with a fresh uid and is never taken, so its put carries no condition, whole or in
+parts, on every service, and a lost answer needs no head: sent again, it writes the same bytes. A
+commit object keeps its condition everywhere.
+
+The upload could start while the writer goes on, once the buffer passes the threshold. It did for a
+while, and gained a few tens of milliseconds on a 48 MB object against an emulator, for a reader of
+the buffer written by hand and a task in the background of every large object. The gain waits for a
+measurement against a service.
 
 ### 11.3 Checksums
 
@@ -990,6 +995,7 @@ it, and an option turns it on once it does.
 | `x-ms-content-crc64` as Azure's reference shows it | low byte first, as Azure's SDK sends it | to check against the service |
 | the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks` | a dataset under Object Lock refuses R2 and an OVHcloud Local Zone without knowing the package |
 | the parts and the window reserved through the memory governor | the parts bounded by `PartsInFlight`, the window allocating nothing | the reads a window admits land in the blocks a scan reads into, which an aggregation's admission counts already |
+| a dataset sends its data object's parts as it writes | the object goes up at the commit, from the dataset's buffer | the dataset holds the object until then anyway, and the gain of an early start is to measure against a service |
 | a completion answered 409 starts a new upload | it does when the content can be sent again, held in memory or spooled, and throws for a stream sent as it was read | a stream is read once |
 | Cloud Storage takes a conditional put up to 5 TiB | from bytes in memory or spooled on disk, and from a stream held in memory up to `MaxHeldBytes` | the service takes no precondition on the parts of an upload |
 | `https://account.blob.core.windows.net/container/key` locations | `az://` locations | a registered prefix serves the same need |

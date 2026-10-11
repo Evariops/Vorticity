@@ -117,7 +117,7 @@ Dispose every file opened through the session before the session itself.
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
-| commit a dataset's object | up to 32 MiB, 1 put at the commit. Past it, an upload whose parts go while the rows are written, so that the commit waits for the last part and the completion only |
+| commit a dataset's object | at the commit, from the dataset's buffer where it lies: 1 put up to 32 MiB, past it 1 request to start an upload, its parts in parallel and 1 to complete it. A data object carries no condition, which its fresh uid makes needless |
 | a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's and Cloud Storage's listings say the locks), a request per 1 000 deletes on S3, per 256 on Azure and per 100 on Cloud Storage, where each delete is billed as a request |
 
 A read lands in the block the scan decodes from, with no copy but the one TLS makes, and allocates a
