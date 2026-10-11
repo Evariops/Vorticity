@@ -1,9 +1,9 @@
-# Files and datasets on S3 and Azure
+# Files and datasets on S3, Azure and Cloud Storage
 
 Open, write and scan files and datasets in a bucket of Amazon S3, Cloudflare R2, OVHcloud, Scaleway or
-another service that speaks the S3 API, or in a container of Azure Blob Storage, with the calls you use
-on a local path. The stores live in the `Vorticity.ObjectStorage` package, written over the platform's
-HTTP client, with no cloud SDK.
+another service that speaks the S3 API, in a container of Azure Blob Storage, or in a bucket of Google
+Cloud Storage, with the calls you use on a local path. The stores live in the `Vorticity.ObjectStorage`
+package, written over the platform's HTTP client, with no cloud SDK.
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>
@@ -15,6 +15,11 @@ await using VortexSession session = VortexSession.Create(o =>
         Account = "contosoarchive",
         Container = "archive",
         Credentials = AzureCredentials.FromEnvironment(),
+    }));
+    o.ObjectStores.Add("gs://warehouse", new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
+    {
+        Bucket = "warehouse",
+        Credentials = GoogleCredentials.Token(tokenSource),
     }));
 });
 
@@ -62,12 +67,12 @@ every file opened through the session before the session itself.
 
 | operation | requests |
 |---|---|
-| open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until the contract tests prove that the service answers one: a head, then the tail |
+| open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until the contract tests prove that the service answers one: the object's metadata, then the tail |
 | a batch of a scan | the batch's segments coalesced into ranges, issued together |
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
-| a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's listing says the locks), a request per 1 000 deletes on S3 and per 256 on Azure |
+| a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's and Cloud Storage's listings say the locks), a request per 1 000 deletes on S3, per 256 on Azure and per 100 on Cloud Storage, where each delete is billed as a request |
 
 A read lands in the block the scan decodes from, with no copy but the one TLS makes, and allocates a
 constant, about 3 KB, whatever its size. A file opened at a location keeps the ETag of its first answer
@@ -123,6 +128,16 @@ renews five minutes before it expires. `AzureCredentials.SharedAccessSignature` 
 CRC-64 of its body, which the service checks, and a larger put goes up in blocks of 16 MiB sent in
 parallel, committed by their list. `VerifyReads` asks the service to follow every 4 MiB of a read with
 its CRC-64, checked as the bytes arrive, once the contract tests have proven it against the service.
+
+`GoogleCloudStorageObjectStore` speaks Cloud Storage's own APIs rather than its S3 interoperability,
+since what a dataset relies on lies there. An object's token is its generation: a read is bound to it,
+and a put is conditioned on it, a generation of 0 meaning that no object may have the name. Every put
+carries the CRC-32C the service checks. The service takes no precondition on an upload in parts, so a
+conditional put goes in one request, held in memory up to 5 GiB, and a dataset's data objects, which
+carry no condition, go up in parts. A listing says each object's retention and holds. A deleted object
+stays billed for the bucket's soft-delete period, 7 days by default, so vacuum frees storage a week
+later there unless the bucket's period is 0. `GoogleCredentials.Token` takes OAuth 2.0 tokens from a
+source of yours, and `GoogleCredentials.Anonymous` sends none, for an emulator.
 
 ## When the network fails
 

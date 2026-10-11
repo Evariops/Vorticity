@@ -7,10 +7,10 @@ using Vorticity.ObjectStorage.Credentials;
 
 namespace Vorticity.ObjectStorage;
 
-/// <summary>A bearer token from Microsoft Entra ID, and when it expires.</summary>
+/// <summary>A bearer token, from Microsoft Entra ID or Google's OAuth 2.0, and when it expires.</summary>
 /// <param name="Value">The token.</param>
 /// <param name="ExpiresOn">When it expires; the store asks for another five minutes before.</param>
-public readonly record struct AzureToken(string Value, DateTimeOffset ExpiresOn)
+public readonly record struct AccessToken(string Value, DateTimeOffset ExpiresOn)
 {
     /// <summary>The token as a message may name it: its expiry, never its value.</summary>
     public override string ToString() => $"a token expiring {ExpiresOn:O}";
@@ -45,10 +45,10 @@ public abstract class AzureCredentials : IDisposable
     /// <summary>Bearer tokens from a source of the caller's, asked again five minutes before the last expires.</summary>
     /// <param name="source">Gives a token for the scope <c>https://storage.azure.com/.default</c>.</param>
     /// <returns>The credentials.</returns>
-    public static AzureCredentials Token(Func<CancellationToken, ValueTask<AzureToken>> source)
+    public static AzureCredentials Token(Func<CancellationToken, ValueTask<AccessToken>> source)
     {
         ArgumentNullException.ThrowIfNull(source);
-        return new TokenCredentials(source);
+        return new TokenCredentials(new RenewingToken(source, TimeProvider.System));
     }
 
     /// <summary>The account key or the shared access signature a connection string holds.</summary>
@@ -155,65 +155,17 @@ public abstract class AzureCredentials : IDisposable
         public override string ToString() => "a shared access signature";
     }
 
-    /// <summary>
-    /// Tokens from a source, the current one kept until five minutes before it expires; one caller
-    /// renews it while the others keep using it until it actually expires.
-    /// </summary>
-    internal sealed class TokenCredentials(Func<CancellationToken, ValueTask<AzureToken>> source) : AzureCredentials
+    /// <summary>Bearer tokens, renewed before they expire.</summary>
+    internal sealed class TokenCredentials(RenewingToken tokens) : AzureCredentials
     {
-        private static readonly TimeSpan Margin = TimeSpan.FromMinutes(5);
-        private readonly SemaphoreSlim _renewing = new SemaphoreSlim(1, 1);
-        private AzureToken? _token;
+        internal override async ValueTask<AzureAuthorization> GetAsync(CancellationToken cancellationToken) =>
+            new AzureAuthorization(null, null, null, await tokens.GetAsync(cancellationToken).ConfigureAwait(false));
 
-        internal TimeProvider Time { get; init; } = TimeProvider.System;
+        internal override void Expired() => tokens.Expired();
 
-        internal override async ValueTask<AzureAuthorization> GetAsync(CancellationToken cancellationToken)
-        {
-            DateTimeOffset now = Time.GetUtcNow();
-            if (_token is { } current && current.ExpiresOn - Margin > now)
-            {
-                return new AzureAuthorization(null, null, null, current.Value);
-            }
+        protected override void Dispose(bool disposing) => tokens.Dispose();
 
-            // Expired: every caller waits for the renewal. Within the margin: one renews, the others go on.
-            bool expired = _token is not { } held || held.ExpiresOn <= now;
-            if (!expired && !await _renewing.WaitAsync(0, cancellationToken).ConfigureAwait(false))
-            {
-                return new AzureAuthorization(null, null, null, _token!.Value.Value);
-            }
-
-            if (expired)
-            {
-                await _renewing.WaitAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            try
-            {
-                if (_token is { } renewed && renewed.ExpiresOn - Margin > Time.GetUtcNow())
-                {
-                    return new AzureAuthorization(null, null, null, renewed.Value);
-                }
-
-                AzureToken token = await source(cancellationToken).ConfigureAwait(false);
-                _token = token;
-                return new AzureAuthorization(null, null, null, token.Value);
-            }
-            catch (Exception failed) when (failed is not OperationCanceledException && !expired && _token is { } stillValid)
-            {
-                // A renewal that fails is tried again by a later request until the token actually expires.
-                return new AzureAuthorization(null, null, null, stillValid.Value);
-            }
-            finally
-            {
-                _renewing.Release();
-            }
-        }
-
-        internal override void Expired() => _token = null;
-
-        protected override void Dispose(bool disposing) => _renewing.Dispose();
-
-        public override string ToString() => _token is { } token ? $"Entra ID tokens ({token})" : "Entra ID tokens";
+        public override string ToString() => tokens.ExpiresOn is { } expires ? $"Entra ID tokens (one expiring {expires:O})" : "Entra ID tokens";
     }
 }
 

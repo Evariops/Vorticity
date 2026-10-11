@@ -216,7 +216,7 @@ public sealed class AzureTests
         emulator.Seed(Lake, "a", [1]);
         int asked = 0;
         AzureCredentials tokens = AzureCredentials.Token(_ =>
-            new ValueTask<AzureToken>(new AzureToken(Interlocked.Increment(ref asked) == 1 ? "first" : "second", DateTimeOffset.UtcNow.AddHours(1))));
+            new ValueTask<AccessToken>(new AccessToken(Interlocked.Increment(ref asked) == 1 ? "first" : "second", DateTimeOffset.UtcNow.AddHours(1))));
         await using AzureBlobObjectStore store = Store(emulator, tokens);
         Assert.NotNull(await store.HeadAsync("a", ct));
         Assert.NotNull(await store.HeadAsync("a", ct));
