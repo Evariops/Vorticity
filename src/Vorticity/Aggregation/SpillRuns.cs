@@ -334,9 +334,10 @@ internal sealed class LaneRetirement
                 int grows = (int)Math.Min(count, (1.1 * lacks) + 1_024);
 
                 // A shared table the budget cannot double fills tighter first: it holds every key past its
-                // growth point, where a spill would write it whole.
-                if (lane.Memory is { } memory && !memory.CanGrow(retired.GrowthFor(lane, grows))
-                    && !(retired.Keys!.Squeeze(grows) && memory.CanGrow(retired.GrowthFor(lane, grows))))
+                // growth point, where a spill would write it whole. What the merge grows it by is reserved
+                // before it starts, not only checked: the other lanes go on folding meanwhile.
+                if (lane.Memory is not null && !retired.ReserveAhead(retired.GrowthFor(lane, grows))
+                    && !(retired.Keys!.Squeeze(grows) && retired.ReserveAhead(retired.GrowthFor(lane, grows))))
                 {
                     if (retired.Keys!.Count <= count)
                     {
@@ -352,6 +353,7 @@ internal sealed class LaneRetirement
                     int before = retired.Keys!.Count;
                     int[]? numbers = null;
                     retired.MergeFrom(lane, ref numbers);
+                    retired.GiveBackAhead();
                     retired.Recount();
                     _sketch.Merge(sketch);
                     _merged += count;

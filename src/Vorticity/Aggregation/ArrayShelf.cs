@@ -77,10 +77,12 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     private PileOrder _small;
 
     // A shelf under a query's memory; for a lane's, the bytes of the arrays it handed out that its
-    // tables hold, and what it reserved ahead of the next ones.
+    // tables hold, what it reserved ahead of the next ones, and whether it keeps all of that until
+    // GiveBackAhead, reserved for a merge (ReserveAhead).
     private readonly QueryMemory? _memory;
     private long _out;
     private long _credit;
+    private bool _keepsAhead;
     private bool _forgotten;
 
     /// <summary>A query's shelf, which takes from the process's when it holds nothing of a length, and hands it what it holds at the end.</summary>
@@ -332,11 +334,32 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     /// <summary>What a lane's shelf reserved ahead of the arrays to come given back: its tables grow no more, but by a merge, which reserves again.</summary>
     internal void GiveBackAhead()
     {
+        _keepsAhead = false;
         if (_memory is { } memory && _credit > 0)
         {
             memory.Shrink(_credit);
             _credit = 0;
         }
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> ahead of a merge into the shelf's tables, what the merge is
+    /// expected to grow them by, and keeps it with what they give back meanwhile until
+    /// <see cref="GiveBackAhead"/>: the merge's arrays come out of it. A merge that only checked the room
+    /// left it to the lanes that kept folding while it ran, and its doubling then went past the budget,
+    /// 8 % past it at 4 lanes under a tenth of what one lane holds alone. False, and nothing reserved,
+    /// when the budget would not grant them now.
+    /// </summary>
+    internal bool ReserveAhead(long bytes)
+    {
+        if (_memory is not { } memory || !memory.CanGrow(bytes) || !memory.TryGrow(bytes))
+        {
+            return false;
+        }
+
+        _credit += bytes;
+        _keepsAhead = true;
+        return true;
     }
 
     /// <summary>
@@ -623,6 +646,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
             memory.Measure(-_out);
             _out = 0;
             _credit = 0;
+            _keepsAhead = false;
         }
     }
 
@@ -634,6 +658,7 @@ internal sealed class ArrayShelf : ISweptAfterCollections
     {
         _out = 0;
         _credit = 0;
+        _keepsAhead = false;
         _forgotten = true;
     }
 
@@ -668,14 +693,18 @@ internal sealed class ArrayShelf : ISweptAfterCollections
         memory.Measure(bytes);
     }
 
-    /// <summary>The bytes of an array a lane's table let go: kept ahead up to twice <see cref="Ahead"/>, the rest given back; the array, left to the next collection.</summary>
+    /// <summary>
+    /// The bytes of an array a lane's table let go: kept ahead up to twice <see cref="Ahead"/>, the rest
+    /// given back, all of them while a merge runs on what it reserved (<see cref="ReserveAhead"/>); the
+    /// array, left to the next collection.
+    /// </summary>
     private void Unreserve(QueryMemory memory, long bytes)
     {
         _out -= bytes;
         _credit += bytes;
         memory.Measure(-bytes);
         long kept = Exact ? 0 : Ahead;
-        if (_credit > 2 * kept)
+        if (!_keepsAhead && _credit > 2 * kept)
         {
             memory.Shrink(_credit - kept);
             _credit = kept;

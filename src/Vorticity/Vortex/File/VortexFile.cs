@@ -1151,16 +1151,17 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// Tells the file's reader, before a scan reads any data segment, that its plan will read some:
-    /// a reader that chooses how to read from it is told, and no other.
+    /// Tells the file's reader, before a scan reads any data segment, that its plan will read some,
+    /// and about how many of what size: a reader that chooses how to read from it is told, and no
+    /// other.
     /// </summary>
     /// <param name="share">The share of the file's rows the plan reads, from 0 to 1.</param>
     internal void AnticipateReads(double share)
     {
         // A file the open read whole serves every segment from that read: nothing is left to map.
-        if (share > 0 && !_servesTail && _source is IReadAnticipation reader)
+        if (share > 0 && _tailOffset != 0 && _source is IReadAnticipation reader)
         {
-            reader.AnticipateData();
+            reader.AnticipateData((long)(share * _segmentSpecCount), (long)(share * FileLength));
         }
     }
 

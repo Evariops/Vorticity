@@ -838,7 +838,16 @@ internal static class RatioCheck
             $"both, and its speedup is Rust's time over Vorticity's: at least {MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up,"));
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
             $"until the 95 % interval of their median is within {Precision:P0} of it. Our side runs on the JIT, warmed. Each"));
-        text.AppendLine("call opens its file and maps it anew, on both sides, and asks both the same question. Each axis is");
+        if (ResultsPage.ReadsPositionally)
+        {
+            text.AppendLine("call opens its file anew, Rust mapping it and Vorticity reading it as a session that keeps no");
+            text.AppendLine("mapping does on Windows, and asks both the same question. Each axis is");
+        }
+        else
+        {
+            text.AppendLine("call opens its file and maps it anew, on both sides, and asks both the same question. Each axis is");
+        }
+
         text.AppendLine("one the `--ratio-check` gate holds to a ceiling; what each one reads and asks is in");
         text.AppendLine("[05-benchmarks.md](../design/05-benchmarks.md) §3.");
         text.AppendLine();

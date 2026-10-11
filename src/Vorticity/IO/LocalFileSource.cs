@@ -14,12 +14,18 @@ internal interface IReadAnticipation
 {
     /// <summary>A scan is about to read data segments.</summary>
     void AnticipateData();
+
+    /// <summary>A scan is about to read some <paramref name="segments"/> data segments, of <paramref name="bytes"/> bytes in all.</summary>
+    /// <param name="segments">The segments the plan reads, estimated from the share of the file it reads.</param>
+    /// <param name="bytes">Their bytes, estimated the same way.</param>
+    void AnticipateData(long segments, long bytes);
 }
 
 /// <summary>
 /// The reader of a file opened from a path: positional reads until a scan's plan announces data
 /// to read, and a mapping of the whole file from then on; or, on Windows when the session keeps
-/// no mapping, positional reads throughout.
+/// no mapping, positional reads throughout, but for a file of segments smaller than a page and for
+/// large segments a read touches little of.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -43,6 +49,17 @@ internal interface IReadAnticipation
 /// page per segment. There a scan reads positionally: the segments of a batch in runs coalesced
 /// over gaps a read costs less than, each run one read on the lane's thread into a pooled block
 /// its segments are views of, a copy from the system cache with no fault and nothing to unmap.
+/// </para>
+/// <para>
+/// A copy costs every byte of a segment, and a mapping only the pages a decode touches. A file
+/// whose segments average less than a page, a zone map's few rows each, makes a read per run of
+/// them where a mapping faults each page once for several: a scan of 64 of them or more maps such
+/// a file, a cold scan of one of 0.7 MB in 325 segments a fifth faster on 32 lanes than read, and
+/// a narrow filter that reads a few still reads them. And a segment of 256 KiB or more of which a
+/// decode touches less than a quarter, a take's few rows or one field of a struct stored whole, is
+/// served from a mapping made for those alone, its other segments still read: a take of 1,000
+/// rows from a file Vortex Rust wrote, in segments of 1 MB, took 4.4 ms rather than 11.4 on 32
+/// lanes. Segments this library writes stay under 256 KiB, and its scans are read.
 /// </para>
 /// <para>
 /// A positional read is a <c>pread</c> on the caller's thread into a pooled buffer, completed
@@ -78,15 +95,33 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         MaxCoalescedReadBytes = 4 << 20,
     };
 
+    /// <summary>
+    /// The size of a segment a positional reader serves from a mapping when a decode touches less
+    /// than a quarter of it: a copy of anything smaller costs less than the mapping's own 33 µs.
+    /// </summary>
+    private const int SparseSegmentBytes = 256 * 1024;
+
+    /// <summary>The page a mapping faults in and unmaps at once.</summary>
+    private const int PageBytes = 4096;
+
+    /// <summary>The segments smaller than a page a positional reader maps the file for, rather than read.</summary>
+    private const long MappedSegmentsAtLeast = 64;
+
     // Null when the open took over a kept mapping without opening the file.
     private readonly SafeFileHandle? _handle;
     private readonly string _path;
     private readonly MappedFileCache? _mappings;
+
+    // The mapping a scan reads, or where scans read positionally, the one the large segments a
+    // decode touches little of are served from.
     private MappedFileOwner? _mapping;
     private int _disposed;
 
-    /// <summary>Whether scans read positionally rather than through a mapping: on Windows, when the session keeps none.</summary>
-    private readonly bool _positional;
+    /// <summary>
+    /// Whether scans read positionally rather than through a mapping: on Windows, when the session
+    /// keeps none, until a scan of many segments smaller than a page has the file mapped.
+    /// </summary>
+    private bool _positional;
 
     private LocalFileSource(SafeFileHandle handle, string path, MappedFileCache? mappings, long length)
     {
@@ -129,35 +164,56 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     /// <summary>The file length in bytes, read once at open.</summary>
     internal long Length { get; }
 
-    /// <summary>Whether a scan has had the file mapped.</summary>
+    /// <summary>Whether the file is mapped: for a scan, or where scans read positionally, for a large segment a decode touches little of.</summary>
     internal bool IsMapped => Volatile.Read(ref _mapping) is not null;
 
     /// <summary>The mapping this reader reads, once a scan had the file mapped.</summary>
     internal MappedFileOwner? Mapping => Volatile.Read(ref _mapping);
 
+    /// <summary>Whether a positional read served a large segment it touched little of from a mapping.</summary>
+    internal bool MapsSparseSegments => _positional && IsMapped;
+
     /// <inheritdoc/>
-    public void AnticipateData()
+    public void AnticipateData() => AnticipateData(0, 0);
+
+    /// <inheritdoc/>
+    public void AnticipateData(long segments, long bytes)
     {
         // A reader without a handle took its mapping over at the open, and has it until disposed.
-        if (_positional || Length == 0 || Volatile.Read(ref _mapping) is not null || Volatile.Read(ref _disposed) != 0 || _handle is null)
+        if (Length == 0 || Volatile.Read(ref _disposed) != 0 || _handle is null)
         {
             return;
         }
 
-        // This reader holds one reference on the mapping either way, and releases it the same way.
-        MappedFileOwner mapped = _mappings is not null && FileInode.TryGet(_handle, Length, out FileInode identity)
-            ? _mappings.Acquire(identity, _path, _handle, Length)
-            : MappedFileOwner.Map(_handle, Length, ownsHandle: false);
-        if (Interlocked.CompareExchange(ref _mapping, mapped, null) is not null)
+        // Where scans read positionally, a scan of many segments smaller than a page maps the file:
+        // a read per run of them costs more than the pages they share, by about a microsecond a
+        // segment, and some 64 repay the 45 µs a mapping costs to make and to drop.
+        if (_positional && (segments < MappedSegmentsAtLeast || bytes >= segments * PageBytes))
         {
-            // Another scan published its mapping first.
-            mapped.Release();
+            return;
         }
-        else if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref _mapping, null) is { } late)
+
+        if (Volatile.Read(ref _mapping) is null)
         {
-            // A dispose ran between the check and the publication and found nothing to drop.
-            late.Release();
+            // This reader holds one reference on the mapping either way, and releases it the same way.
+            MappedFileOwner mapped = _mappings is not null && FileInode.TryGet(_handle, Length, out FileInode identity)
+                ? _mappings.Acquire(identity, _path, _handle, Length)
+                : MappedFileOwner.Map(_handle, Length, ownsHandle: false);
+            if (Interlocked.CompareExchange(ref _mapping, mapped, null) is not null)
+            {
+                // Another scan published its mapping first, or a read its mapping of the file.
+                mapped.Release();
+            }
+            else if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref _mapping, null) is { } late)
+            {
+                // A dispose ran between the check and the publication and found nothing to drop.
+                late.Release();
+                return;
+            }
         }
+
+        // From here every read is served by the mapping, a read already under way finishing as it began.
+        _positional = false;
     }
 
     ValueTask<long> ISegmentReader.GetLengthAsync(CancellationToken cancellationToken)
@@ -198,7 +254,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             return ValueTask.CompletedTask;
         }
 
-        MappedFileOwner? mapping = Borrow();
+        // Where scans read positionally, a mapping serves only the segments a decode touches little of.
+        MappedFileOwner? mapping = _positional ? null : Borrow();
         if (mapping is null && !_positional && Pending(requests) >= ParallelBatch)
         {
             return ReadManyInParallelAsync(requests, cancellationToken);
@@ -212,6 +269,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             }
             else if (_positional)
             {
+                ServeSparse(requests);
                 CoalescedReads.ReadMany(requests, _handle!, Length, Runs);
             }
             else
@@ -276,6 +334,65 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         Interlocked.Exchange(ref _mapping, null)?.Release();
         _handle?.Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Fills, from a mapping of the file, every slot not yet filled whose segment is at least
+    /// <see cref="SparseSegmentBytes"/> long and of which the decode touches less than a quarter:
+    /// the mapping faults in the pages touched, where a read would copy them all. The caller reads
+    /// the others.
+    /// </summary>
+    private void ServeSparse(SegmentRequestSet requests)
+    {
+        MappedFileOwner? mapping = null;
+        try
+        {
+            for (int slot = 0; slot < requests.Count; slot++)
+            {
+                if (requests.IsFilled(slot))
+                {
+                    continue;
+                }
+
+                SegmentSpec spec = requests.GetSpec(slot);
+                if (spec.Length < SparseSegmentBytes || !requests.TouchesLittle(slot))
+                {
+                    continue;
+                }
+
+                mapping ??= BorrowSparse();
+                requests.SetResult(slot, mapping.Read(in spec, Length));
+            }
+        }
+        finally
+        {
+            mapping?.Release();
+        }
+    }
+
+    /// <summary>
+    /// The mapping <see cref="ServeSparse"/> reads, made by the first read that needs it, with a
+    /// reference held for one operation as <see cref="Borrow"/> holds one.
+    /// </summary>
+    private MappedFileOwner BorrowSparse()
+    {
+        if (Volatile.Read(ref _mapping) is null)
+        {
+            MappedFileOwner made = MappedFileOwner.Map(_handle!, Length, ownsHandle: false);
+            if (Interlocked.CompareExchange(ref _mapping, made, null) is not null)
+            {
+                // Another lane published its mapping first.
+                made.Release();
+            }
+            else if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref _mapping, null) is { } late)
+            {
+                // A dispose ran between the read's check and the publication and found nothing to drop.
+                late.Release();
+                throw new ObjectDisposedException(nameof(LocalFileSource));
+            }
+        }
+
+        return (MappedFileOwner)(Volatile.Read(ref _mapping) ?? throw new ObjectDisposedException(nameof(LocalFileSource))).Retain();
     }
 
     /// <summary>

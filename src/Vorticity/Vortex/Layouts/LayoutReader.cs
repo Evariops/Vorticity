@@ -112,6 +112,24 @@ internal abstract class LayoutReader
         return segments.Add(SpecOf(in node, which));
     }
 
+    /// <summary>
+    /// Registers segment <paramref name="which"/> of <paramref name="node"/>, of which the decode is
+    /// expected to touch <paramref name="share"/> of the bytes, and no more than
+    /// <paramref name="cap"/> of them.
+    /// </summary>
+    /// <param name="node">The node owning the segment id.</param>
+    /// <param name="which">Index into <see cref="LayoutNode.Segments"/>.</param>
+    /// <param name="segments">The request set.</param>
+    /// <param name="share">The share of the segment's bytes touched, from 0 to 1.</param>
+    /// <param name="cap">The most bytes touched, whatever the segment's length.</param>
+    /// <returns>The slot the set assigned.</returns>
+    protected static int RegisterSegment(in LayoutNode node, int which, SegmentRequestSet segments, double share, long cap)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        SegmentSpec spec = SpecOf(in node, which);
+        return segments.AddTouched(in spec, Math.Min((long)(spec.Length * share), cap));
+    }
+
     /// <summary>The bytes of segment <paramref name="which"/>, from an already-populated set.</summary>
     /// <param name="node">The node owning the segment id.</param>
     /// <param name="which">Index into <see cref="LayoutNode.Segments"/>.</param>

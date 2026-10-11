@@ -137,6 +137,41 @@ public sealed partial class QueryMemoryTests
     }
 
     [Fact]
+    public void AMergeKeepsTheRoomItReservedUntilItEnds()
+    {
+        // The table the retired lanes share reserves what a merge grows it by before the merge starts:
+        // the merge's arrays come out of it, and what its tables give back meanwhile stays with it, so
+        // the other lanes, which go on folding, cannot take that room. Checked and not reserved, the room
+        // went to them, and the merge's doubling went past the budget: 8 % past it on CI, a distinct count
+        // at four lanes under a tenth of what one lane holds alone.
+        const long MiB = 1 << 20;
+        QueryMemoryBudget budget = new QueryMemoryBudget(8 * MiB);
+        using (QueryMemory memory = new QueryMemory(budget))
+        {
+            ArrayShelf shared = new ArrayShelf(memory);
+            Assert.False(shared.ReserveAhead(9 * MiB));
+            Assert.Equal(0, memory.Held);
+            Assert.True(shared.ReserveAhead(6 * MiB));
+
+            // A table of the merge doubles: its new array from the reservation, its old one back to it.
+            long[] table = shared.Take<long>(64 * 1024, zeroed: false);
+            ArrayShelf.Resize(shared, ref table, 128 * 1024);
+            Assert.Equal(6 * MiB, memory.Held);
+            Assert.False(memory.TryGrow(3 * MiB));
+
+            // The merge over, what it did not use is given back, and what its table holds stays.
+            shared.GiveBackAhead();
+            Assert.Equal(1 * MiB, memory.Held);
+            Assert.True(memory.TryGrow(3 * MiB));
+            memory.Shrink(3 * MiB);
+            shared.LetGo();
+        }
+
+        Assert.Equal(0, budget.ReservedBytes);
+        Assert.Equal(6 * MiB, budget.PeakBytes);
+    }
+
+    [Fact]
     public async Task AThousandQueriesLeaveTheirBudgetsAtZero()
     {
         const int rows = 20_000;

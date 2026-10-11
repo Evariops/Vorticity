@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using Vorticity.Arrays;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Layouts;
 
 namespace Vorticity.Scanning;
@@ -54,10 +55,23 @@ internal static class SplitExecution
     /// <param name="tree">The file's layout tree.</param>
     /// <param name="mask">The columns read.</param>
     /// <param name="split">The split, in file row coordinates.</param>
-    internal static void Register(ScanContext context, LayoutTree tree, in FieldMask mask, RowRange split)
+    /// <param name="take">
+    /// The scan's row selection, or null for every row: the readers are told the share of the
+    /// split's rows it wants, the bytes of their segments the decode touches depending on it.
+    /// </param>
+    internal static void Register(ScanContext context, LayoutTree tree, in FieldMask mask, RowRange split, RowSelection? take = null)
     {
         LayoutNode root = tree.Root;
-        LayoutReaderTable.Require(in root).RegisterSegments(in root, split, in mask, context.Segments);
+        SegmentRequestSet segments = context.Segments;
+        segments.WantedShare = take is null ? Half.One : (Half)Math.Min(1.0, (double)take.CountIn(split) / Math.Max(split.Length, 1));
+        try
+        {
+            LayoutReaderTable.Require(in root).RegisterSegments(in root, split, in mask, segments);
+        }
+        finally
+        {
+            segments.WantedShare = Half.One;
+        }
     }
 
     /// <summary>
