@@ -10,19 +10,33 @@
 # The namespaces of the kernels' own tests run whole, so that a test added there joins the pass. A
 # kernel tested from anywhere else, or a method that branches on the hardware and that only a class
 # elsewhere reaches, joins it here, by the class's name. Parquet's tests run whole, through the
-# portable paths of its own kernels.
+# portable paths of its own kernels. The query engine's namespace does not: its kernels are the sums,
+# the extremes, the keys numbered whole and the indexed float sums, which the classes below and the
+# kernels' namespaces reach, and the rest of it, the spill and the budgets among them, only feeds
+# them rows. Measured on
+# 2026-10-11 with the coverage of the methods that branch on the hardware, intrinsics disabled: the
+# whole namespace and these classes cover the same lines of their fallbacks, in 4 minutes rather
+# than 13 and a half.
 Vorticity.Tests.Arrays.*
 Vorticity.Tests.Compute.*
-Vorticity.Tests.Aggregation.*
 Vorticity.Tests.RowEncoding.*
 Vorticity.Tests.Parquet.*
+Vorticity.Tests.Aggregation.DirectGroupKeysTests
+Vorticity.Tests.Aggregation.IndexedSumTests
+Vorticity.Tests.Aggregation.MaskedAccumulateTests
+Vorticity.Tests.Aggregation.SumKernelsTests
+Vorticity.Tests.Aggregation.WidenedSumTests
 Vorticity.Tests.Api.SinkContractTests
+Vorticity.Tests.Columns.ColumnKernelsTests
 Vorticity.Tests.Dataset.DatasetLockedStoreTests
 Vorticity.Tests.Indexes.BloomKernelTests
 Vorticity.Tests.Layouts.WindowedChunkTests
 Vorticity.Tests.Scan.BlockPruningDecodeTests
 Vorticity.Tests.Writing.AlpEncoderTests
+Vorticity.Tests.Writing.AlpRdEncoderTests
+Vorticity.Tests.Writing.BlockStatsTests
 Vorticity.Tests.Writing.DateTimePartsPlanTests
 Vorticity.Tests.Writing.DistinctTableTests
+Vorticity.Tests.Writing.InlineViewTests
 Vorticity.Tests.Writing.PlanSeedTests
 Vorticity.Tests.Writing.ZstdFramesTests
