@@ -80,8 +80,11 @@ a bucket or a token.
 | `vortex.store.requests` | the requests sent, by operation as the service's API names it (`GetObject`, `PutObject`, `ListObjectsV2` on S3), provider and status class |
 | `vortex.store.bytes_read`, `vortex.store.bytes_written` | the bytes that crossed the network |
 | `vortex.store.retries`, `vortex.store.throttles` | how much the retries and the services' throttling cost |
-| `vortex.store.connections_opened` | the connections opened, which the stores keep and reuse |
 | `vortex.store.first_byte`, a histogram in milliseconds | the latency of the services' first byte, by which the deadlines are set |
+
+The connections themselves are the platform's: `System.Net.Http` reports the connections open and
+their durations, and the requests and their durations, which OpenTelemetry collects as it does for
+any other client.
 
 ## The activities
 

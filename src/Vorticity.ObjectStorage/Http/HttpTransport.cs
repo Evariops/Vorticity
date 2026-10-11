@@ -28,8 +28,9 @@ namespace Vorticity.ObjectStorage.Http;
 /// budget allows.
 /// </para>
 /// <para>
-/// The handler opens each new connection to the next of the endpoint's addresses, closes rather than
-/// drains a body abandoned before its end, follows no redirect and keeps no cookie.
+/// The handler is the platform's: it opens connections as it does for any client, under a deadline of
+/// their own, closes rather than drains a body abandoned before its end, follows no redirect and keeps
+/// no cookie.
 /// </para>
 /// </remarks>
 internal sealed class HttpTransport : IDisposable
@@ -40,7 +41,6 @@ internal sealed class HttpTransport : IDisposable
     private readonly Func<HttpResponseMessage, CancellationToken, ValueTask<ServiceError>> _readError;
     private readonly RetryBudget _budget = new RetryBudget();
     private readonly ConcurrencyLimit _limit;
-    private int _nextAddress;
 
     /// <summary>A transport for one store.</summary>
     /// <param name="options">Its connections, deadlines and retries.</param>
@@ -335,9 +335,15 @@ internal sealed class HttpTransport : IDisposable
         return delay;
     }
 
-    private SocketsHttpHandler CreateHandler(StoreTransportOptions options) => new SocketsHttpHandler
+    /// <summary>
+    /// The platform's handler, set for object stores: its pool follows the service's name resolution,
+    /// a connection that takes too long to open is given up, and a body abandoned is closed rather than
+    /// drained. Which address a new connection takes is the platform's choice.
+    /// </summary>
+    private static SocketsHttpHandler CreateHandler(StoreTransportOptions options) => new SocketsHttpHandler
     {
         MaxConnectionsPerServer = options.MaxConnections,
+        ConnectTimeout = options.ConnectTimeout,
         PooledConnectionIdleTimeout = TimeSpan.FromSeconds(20),
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         UseCookies = false,
@@ -352,43 +358,5 @@ internal sealed class HttpTransport : IDisposable
         {
             EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
         },
-        ConnectCallback = ConnectAsync,
     };
-
-    /// <summary>Opens a connection to the next of the endpoint's addresses, so that a pool spreads over a service's front ends.</summary>
-    private async ValueTask<Stream> ConnectAsync(SocketsHttpConnectionContext context, CancellationToken cancellationToken)
-    {
-        DnsEndPoint endpoint = context.DnsEndPoint;
-        IPAddress[] addresses = await Dns.GetHostAddressesAsync(endpoint.Host, cancellationToken).ConfigureAwait(false);
-        if (addresses.Length == 0)
-        {
-            throw new SocketException((int)SocketError.HostNotFound);
-        }
-
-        int first = (int)((uint)Interlocked.Increment(ref _nextAddress) % (uint)addresses.Length);
-        Exception? last = null;
-        for (int i = 0; i < addresses.Length; i++)
-        {
-            IPAddress address = addresses[(first + i) % addresses.Length];
-            Socket socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
-            try
-            {
-                await socket.ConnectAsync(new IPEndPoint(address, endpoint.Port), cancellationToken).ConfigureAwait(false);
-                StoreTelemetry.ConnectionOpened();
-                return new NetworkStream(socket, ownsSocket: true);
-            }
-            catch (SocketException refused)
-            {
-                socket.Dispose();
-                last = refused;
-            }
-            catch
-            {
-                socket.Dispose();
-                throw;
-            }
-        }
-
-        throw last!;
-    }
 }

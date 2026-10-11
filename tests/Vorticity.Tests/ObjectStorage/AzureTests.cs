@@ -23,7 +23,7 @@ public sealed class AzureTests
     private const string Lake = "lake";
 
     internal static AzureBlobObjectStore Store(
-        AzureEmulator emulator, AzureCredentials? credentials = null, bool verifyReads = false, long threshold = 32L << 20, int block = 16 << 20, int attempts = 5) =>
+        AzureEmulator emulator, AzureCredentials? credentials = null, long threshold = 32L << 20, int block = 16 << 20, int attempts = 5) =>
         new AzureBlobObjectStore(new AzureBlobStoreOptions
         {
             Account = AzureEmulator.Account,
@@ -31,7 +31,6 @@ public sealed class AzureTests
             Credentials = credentials ?? AzureCredentials.SharedKey(AzureEmulator.Account, AzureEmulator.Key),
             Endpoint = emulator.BasePath.Length > 0 ? new Uri("http://127.0.0.1:8080" + emulator.BasePath) : null,
             Handler = emulator,
-            VerifyReads = verifyReads,
             PartThreshold = threshold,
             BlockSize = block,
             Transport = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, MaxAttempts = attempts },
@@ -76,27 +75,6 @@ public sealed class AzureTests
 
         emulator.Seed(Lake, "data/one.vortex", new byte[10]);
         await Assert.ThrowsAsync<VortexFormatException>(async () => await store.ReadAsync("data/one.vortex", 0, four, etag, ct));
-    }
-
-    [Fact]
-    public async Task AStructuredBodyIsCheckedAsItArrivesAndADamagedOneReadAgain()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        using AzureEmulator emulator = new AzureEmulator();
-        byte[] content = new byte[10_000];
-        new Random(5).NextBytes(content);
-        emulator.Seed(Lake, "f", content);
-        await using AzureBlobObjectStore store = Store(emulator, verifyReads: true);
-
-        byte[] destination = new byte[10_000];
-        Assert.Equal(10_000, (await store.ReadAsync("f", 0, destination, null, ct)).BytesRead);
-        Assert.Equal(content, destination);
-
-        emulator.DamageNextStructuredBody = true;
-        Array.Clear(destination);
-        Assert.Equal(10_000, (await store.ReadAsync("f", 0, destination, null, ct)).BytesRead);
-        Assert.Equal(content, destination);
-        Assert.Equal(3, emulator.Requests);
     }
 
     [Fact]

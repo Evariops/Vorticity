@@ -14,6 +14,12 @@ public sealed class StoreTransportOptions
     public int MaxConnections { get; init; } = 64;
 
     /// <summary>
+    /// How long a new connection may take to open, TLS included, 10 seconds by default, before the
+    /// attempt is given up and, when the request may be sent again, retried.
+    /// </summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
     /// How long an attempt waits for the first byte of its answer, 15 seconds by default, before it is
     /// abandoned and, when the request may be sent again, retried.
     /// </summary>
@@ -44,6 +50,7 @@ public sealed class StoreTransportOptions
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxConnections, nameof(MaxConnections));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxAttempts, nameof(MaxAttempts));
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(ConnectTimeout, TimeSpan.Zero, nameof(ConnectTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(FirstByteTimeout, TimeSpan.Zero, nameof(FirstByteTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(StallTimeout, TimeSpan.Zero, nameof(StallTimeout));
     }

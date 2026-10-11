@@ -214,13 +214,9 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
     private ValueTask<HttpRequestMessage> BuildReadAsync(ReadRequest s, CancellationToken cancellationToken)
     {
         string range = string.Create(CultureInfo.InvariantCulture, $"bytes={s.Offset}-{s.Offset + s.Destination.Length - 1}");
-        (string, string)[] headers = (_options.VerifyReads, s.IfToken) switch
-        {
-            (true, { } token) => [("x-ms-range", range), ("If-Match", token), ("x-ms-structured-body", StructuredBody.Header)],
-            (true, null) => [("x-ms-range", range), ("x-ms-structured-body", StructuredBody.Header)],
-            (false, { } token) => [("x-ms-range", range), ("If-Match", token)],
-            _ => [("x-ms-range", range)],
-        };
+        (string, string)[] headers = s.IfToken is { } token
+            ? [("x-ms-range", range), ("If-Match", token)]
+            : [("x-ms-range", range)];
         return BuildAsync(HttpMethod.Get, s.Key, string.Empty, null, headers, cancellationToken);
     }
 
@@ -255,16 +251,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
         }
 
         int wanted = (int)Math.Min(total - first, s.Destination.Length);
-        int read;
-        if (S3Answers.Header(response, "x-ms-structured-body") is not null)
-        {
-            read = await StructuredBody.ReadAsync(_transport, response, s.Destination[..wanted], cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            read = await _transport.ReadBodyAsync(response, s.Destination[..wanted], cancellationToken).ConfigureAwait(false);
-        }
-
+        int read = await _transport.ReadBodyAsync(response, s.Destination[..wanted], cancellationToken).ConfigureAwait(false);
         if (read < wanted)
         {
             throw new StoreRetryException($"the body of GetBlob on '{s.Key}' ended after {read} of {wanted} bytes", RetryBudget.RetryCost);

@@ -23,7 +23,7 @@ namespace Vorticity.ObjectStorage;
 /// <remarks>
 /// <para>
 /// Every request is signed with Signature Version 4 and sent over the platform's HTTP client, its
-/// connections kept by the store and spread over the endpoint's addresses. A read asks for one range
+/// connections kept by the store. A read asks for one range
 /// and lands in the caller's memory, bound to the object's ETag once known, so that an object replaced
 /// under its reader is refused by the service rather than downloaded. A suffix range reads a file's
 /// tail and its length in one request where the service is known to answer one.

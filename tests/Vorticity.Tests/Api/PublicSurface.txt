@@ -2577,7 +2577,6 @@ Vorticity.ObjectStorage:     property AzureCredentials Credentials { get; init; 
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
 Vorticity.ObjectStorage:     property bool SendChecksums { get; init; }
-Vorticity.ObjectStorage:     property bool VerifyReads { get; init; }
 Vorticity.ObjectStorage:     property int BlockSize { get; init; }
 Vorticity.ObjectStorage:     property int BlocksInFlight { get; init; }
 Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
@@ -2676,6 +2675,7 @@ Vorticity.ObjectStorage:     property string Region { get; init; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions
 Vorticity.ObjectStorage:     ctor StoreTransportOptions()
 Vorticity.ObjectStorage:     property IWebProxy Proxy { get; init; }
+Vorticity.ObjectStorage:     property TimeSpan ConnectTimeout { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan FirstByteTimeout { get; init; }
 Vorticity.ObjectStorage:     property TimeSpan StallTimeout { get; init; }
 Vorticity.ObjectStorage:     property int MaxAttempts { get; init; }

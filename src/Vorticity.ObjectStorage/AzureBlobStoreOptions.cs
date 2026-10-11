@@ -40,13 +40,6 @@ public sealed class AzureBlobStoreOptions
     /// </summary>
     public bool SendChecksums { get; init; } = true;
 
-    /// <summary>
-    /// Whether a read asks for the structured body, in which the service follows every 4 MiB with its
-    /// CRC-64, checked as the bytes arrive. False until the contract tests against the service prove it,
-    /// a read then relying on TLS and the format's own checks, as on S3.
-    /// </summary>
-    public bool VerifyReads { get; init; }
-
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }
 }

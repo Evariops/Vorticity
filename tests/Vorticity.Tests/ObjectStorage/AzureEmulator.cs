@@ -53,9 +53,6 @@ internal sealed class AzureEmulator : HttpMessageHandler
     /// <summary>Runs after a write is applied: true loses its answer.</summary>
     internal Func<HttpRequestMessage, bool>? LoseAnswer { get; set; }
 
-    /// <summary>Whether a read asking for the structured body has its first segment's CRC damaged, once.</summary>
-    internal bool DamageNextStructuredBody { get; set; }
-
     internal ConcurrentQueue<string> Log { get; } = new ConcurrentQueue<string>();
 
     internal int Requests => Log.Count;
@@ -276,25 +273,7 @@ internal sealed class AzureEmulator : HttpMessageHandler
         }
 
         byte[] content = b.Bytes.AsSpan((int)first, (int)(last - first + 1)).ToArray();
-        HttpResponseMessage response;
-        if (Header(request, "x-ms-structured-body") is not null)
-        {
-            byte[] message = StructuredBody.Encode(content, 4 << 10);
-            if (DamageNextStructuredBody)
-            {
-                DamageNextStructuredBody = false;
-                message[13 + 10 + Math.Min(content.Length, 4 << 10)] ^= 0xFF;
-            }
-
-            response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(message) };
-            response.Headers.TryAddWithoutValidation("x-ms-structured-body", StructuredBody.Header);
-            response.Headers.TryAddWithoutValidation("x-ms-structured-content-length", content.Length.ToString(CultureInfo.InvariantCulture));
-        }
-        else
-        {
-            response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(content) };
-        }
-
+        HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(content) };
         response.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes {first}-{last}/{b.Bytes.Length}");
         response.Headers.TryAddWithoutValidation("ETag", b.ETag);
         return response;

@@ -151,8 +151,7 @@ renews five minutes before it expires. `AzureCredentials.SharedAccessSignature` 
 `AzureCredentials.SharedKey`, the account key, serve the accounts that use them and the emulators, and
 `AzureCredentials.FromConnectionString` reads either from a connection string. Every put carries the
 CRC-64 of its body, which the service checks, and a larger put goes up in blocks of 16 MiB sent in
-parallel, committed by their list. `VerifyReads` asks the service to follow every 4 MiB of a read with
-its CRC-64, checked as the bytes arrive, once the contract tests have proven it against the service.
+parallel, committed by their list. A read relies on TLS and on the format's own checks, as on S3.
 
 A directory bucket of S3 Express One Zone, whose name ends in `--x-s3`, is refused: it lists in no
 order, signs with sessions of its own, and serves no dataset.

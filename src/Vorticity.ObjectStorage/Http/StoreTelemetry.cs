@@ -17,7 +17,6 @@ internal static class StoreTelemetry
     private static readonly Counter<long> BytesWritten = Meter.CreateCounter<long>("vortex.store.bytes_written", "By", "Bytes sent to object stores.");
     private static readonly Counter<long> Retries = Meter.CreateCounter<long>("vortex.store.retries", "{request}", "Requests sent again after a failure.");
     private static readonly Counter<long> Throttles = Meter.CreateCounter<long>("vortex.store.throttles", "{request}", "Answers by which a service asked to slow down.");
-    private static readonly Counter<long> Connections = Meter.CreateCounter<long>("vortex.store.connections_opened", "{connection}", "Connections opened to object stores.");
     private static readonly Histogram<double> FirstByte = Meter.CreateHistogram<double>("vortex.store.first_byte", "ms", "Time to the first byte of an answer.");
 
     internal static void Request(string operation, string provider, int status)
@@ -39,8 +38,6 @@ internal static class StoreTelemetry
     internal static void Retried() => Retries.Add(1);
 
     internal static void Throttled() => Throttles.Add(1);
-
-    internal static void ConnectionOpened() => Connections.Add(1);
 
     internal static void FirstByteAfter(double milliseconds) => FirstByte.Record(milliseconds);
 
