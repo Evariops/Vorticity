@@ -21,6 +21,7 @@ namespace Vorticity.Tests.Parquet;
 /// chunk would leave 22 500 chunks over, kilobytes at a few bytes a chunk.
 /// </remarks>
 [Collection(nameof(ParquetAllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class OpenAllocationTests : IDisposable
 {
     private readonly List<string> _paths = [];

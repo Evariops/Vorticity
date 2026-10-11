@@ -30,6 +30,7 @@ public sealed class ParquetAllocationCollection
 /// a rent that hits in one run and misses in the other, as the core's gates allow.
 /// </remarks>
 [Collection(nameof(ParquetAllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class ScanAllocationTests : IDisposable
 {
     private const int BatchRows = 8_192;

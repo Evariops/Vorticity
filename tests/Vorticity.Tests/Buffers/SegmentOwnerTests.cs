@@ -24,6 +24,7 @@ public sealed class FinalizerCollection
 }
 
 [Collection(nameof(FinalizerCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class SegmentOwnerTests
 {
     /// <summary>A no-memory owner that observes exactly when <c>FreeCore</c> runs.</summary>

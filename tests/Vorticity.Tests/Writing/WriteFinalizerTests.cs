@@ -39,6 +39,7 @@ namespace Vorticity.Tests.Writing;
 /// process-wide, so a neighbouring class dropping owners of its own would be charged here.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class WriteFinalizerTests
 {
     /// <summary>

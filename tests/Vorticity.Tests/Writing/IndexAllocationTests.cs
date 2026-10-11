@@ -38,6 +38,7 @@ namespace Vorticity.Tests.Writing;
 /// them charges a rent here -- the three kinds that failed in a full run passed alone.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class IndexAllocationTests
 {
     private const int Rows = 8 * 8_192;

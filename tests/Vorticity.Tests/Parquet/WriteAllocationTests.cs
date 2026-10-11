@@ -27,6 +27,7 @@ namespace Vorticity.Tests.Parquet;
 /// allocated again for what the process did before.
 /// </remarks>
 [Collection(nameof(ParquetAllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class WriteAllocationTests : IDisposable
 {
     private const int BatchRows = 8_192;

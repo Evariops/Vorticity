@@ -15,6 +15,7 @@ namespace Vorticity.Tests.Aggregation;
 /// it held, exact, every reservation and every file given back.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class SpillTests
 {
     private const int Keys = 200_000;

@@ -19,6 +19,7 @@ namespace Vorticity.Tests.Layouts;
 /// In the collection that runs alone, because the count it reads is the process's.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class SharedChildTests
 {
     private const int Rows = 300_000;

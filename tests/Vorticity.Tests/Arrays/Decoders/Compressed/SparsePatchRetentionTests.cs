@@ -17,6 +17,7 @@ namespace Vorticity.Tests.Arrays.Decoders.Compressed;
 /// In the collection that runs alone, because the count it reads is the process's.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class SparsePatchRetentionTests
 {
     /// <summary>The node's rows, a patch every stride rows at the middle of each stretch, and the shared decodes four batches make.</summary>

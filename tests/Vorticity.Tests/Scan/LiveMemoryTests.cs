@@ -34,6 +34,7 @@ namespace Vorticity.Tests.Scan;
 /// one's feet.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class LiveMemoryTests
 {
     private const string Entry = "containers/zoned_many_zones_nulls";

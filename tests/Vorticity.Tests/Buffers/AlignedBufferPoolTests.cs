@@ -747,6 +747,7 @@ public sealed class SharedPoolCollection
 }
 
 [Collection(nameof(SharedPoolCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class SharedPoolTests
 {
     [Fact]

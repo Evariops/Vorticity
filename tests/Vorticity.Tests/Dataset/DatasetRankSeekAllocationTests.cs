@@ -14,6 +14,7 @@ namespace Vorticity.Tests.Dataset;
 /// decode into buffers of the process-wide pool its neighbours drain.
 /// </summary>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class DatasetRankSeekAllocationTests
 {
     [Theory]

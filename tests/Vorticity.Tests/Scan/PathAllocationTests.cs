@@ -118,6 +118,7 @@ internal static class ReleaseOnlyCeilings
 
 /// <summary>Whole-path allocation ceilings, on the <see cref="WrittenSizeTests"/> ratchet model.</summary>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class PathAllocationTests
 {
     /// <summary>

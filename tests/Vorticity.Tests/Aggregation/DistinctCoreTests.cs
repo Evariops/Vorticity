@@ -16,6 +16,7 @@ namespace Vorticity.Tests.Aggregation;
 /// back, against the runs it wrote; every reservation and every file given back, read to its end or not.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class DistinctCoreTests
 {
     private const int Values = 150_000;

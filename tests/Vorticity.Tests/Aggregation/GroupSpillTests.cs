@@ -19,6 +19,7 @@ namespace Vorticity.Tests.Aggregation;
 /// has met every row.
 /// </summary>
 [Collection(nameof(CorePressureCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed partial class GroupSpillTests
 {
     private const int Rows = 1_200_000;

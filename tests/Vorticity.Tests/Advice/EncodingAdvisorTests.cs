@@ -34,6 +34,7 @@ public sealed class AdviceCollection
 /// asserts a time.
 /// </summary>
 [Collection(nameof(AdviceCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class EncodingAdvisorTests
 {
     private const int Batch = 65_536;

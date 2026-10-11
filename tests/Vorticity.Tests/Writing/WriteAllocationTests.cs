@@ -43,6 +43,7 @@ namespace Vorticity.Tests.Writing;
 /// draining it turns a rent that would have been free into an allocation charged here.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class WriteAllocationTests
 {
     /// <summary>

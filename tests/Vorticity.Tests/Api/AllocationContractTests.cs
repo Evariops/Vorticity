@@ -17,6 +17,7 @@ namespace Vorticity.Tests.Api;
 /// </remarks>
 [Trait("Category", "ApiContract")]
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class AllocationContractTests
 {
     /// <summary>Full scans before any measurement: the JIT, its tiers and every lazy static settle.</summary>

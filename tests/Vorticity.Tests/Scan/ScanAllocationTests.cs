@@ -29,6 +29,7 @@ namespace Vorticity.Tests.Scan;
 /// proportional to rows, columns or segments moves it.
 /// </remarks>
 [Collection(nameof(AllocationCollection))]
+[Trait("Category", "RunsAlone")]
 public sealed class ScanAllocationTests
 {
     private const string Multi = "distributions/high_cardinality_i64_r8193";
