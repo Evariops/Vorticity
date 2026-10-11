@@ -3,7 +3,7 @@
 // listing). Each was recomputed by an implementation written apart, in Python's hmac and hashlib, which
 // agreed with the published value before it was written here.
 using System;
-using System.Globalization;
+using Vorticity.ObjectStorage;
 using Vorticity.ObjectStorage.Credentials;
 using Vorticity.ObjectStorage.Http;
 using Xunit;
@@ -19,7 +19,7 @@ public sealed class SigV4Tests
     [Fact]
     public void TheTestSuitesVanillaGetSigns()
     {
-        using AwsKeys keys = new AwsKeys("AKIDEXAMPLE", SuiteSecret, null);
+        AwsKeys keys = new AwsKeys("AKIDEXAMPLE", SuiteSecret, null);
         string authorization = new SigV4Signer("us-east-1", "service").Authorization(
             keys, "20150830T123600Z", "GET", "/", string.Empty,
             [("host", "example.amazonaws.com"), ("x-amz-date", "20150830T123600Z")], Empty);
@@ -32,7 +32,7 @@ public sealed class SigV4Tests
     [Fact]
     public void TheTestSuitesQueryIsSignedInTheOrderItsNamesSort()
     {
-        using AwsKeys keys = new AwsKeys("AKIDEXAMPLE", SuiteSecret, null);
+        AwsKeys keys = new AwsKeys("AKIDEXAMPLE", SuiteSecret, null);
         string authorization = new SigV4Signer("us-east-1", "service").Authorization(
             keys, "20150830T123600Z", "GET", "/", "Param1=value1&Param2=value2",
             [("x-amz-date", "20150830T123600Z"), ("host", "example.amazonaws.com")], Empty);
@@ -42,7 +42,7 @@ public sealed class SigV4Tests
     [Fact]
     public void TheS3ReferenceRangedGetSigns()
     {
-        using AwsKeys keys = new AwsKeys("AKIAIOSFODNN7EXAMPLE", S3Secret, null);
+        AwsKeys keys = new AwsKeys("AKIAIOSFODNN7EXAMPLE", S3Secret, null);
         string authorization = new SigV4Signer("us-east-1").Authorization(
             keys, "20130524T000000Z", "GET", "/test.txt", string.Empty,
             [("host", "examplebucket.s3.amazonaws.com"), ("range", "bytes=0-9"), ("x-amz-content-sha256", Empty), ("x-amz-date", "20130524T000000Z")],
@@ -57,7 +57,7 @@ public sealed class SigV4Tests
     public void TheS3ReferencePutSigns()
     {
         const string payload = "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072";
-        using AwsKeys keys = new AwsKeys("AKIAIOSFODNN7EXAMPLE", S3Secret, null);
+        AwsKeys keys = new AwsKeys("AKIAIOSFODNN7EXAMPLE", S3Secret, null);
         string authorization = new SigV4Signer("us-east-1").Authorization(
             keys, "20130524T000000Z", "PUT", UriEncoding.Path("/test$file.text"), string.Empty,
             [
@@ -73,7 +73,7 @@ public sealed class SigV4Tests
     [InlineData("max-keys=2&prefix=J", "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7")]
     public void TheS3ReferenceBucketRequestsSign(string query, string signature)
     {
-        using AwsKeys keys = new AwsKeys("AKIAIOSFODNN7EXAMPLE", S3Secret, null);
+        AwsKeys keys = new AwsKeys("AKIAIOSFODNN7EXAMPLE", S3Secret, null);
         string authorization = new SigV4Signer("us-east-1").Authorization(
             keys, "20130524T000000Z", "GET", "/", query,
             [("host", "examplebucket.s3.amazonaws.com"), ("x-amz-content-sha256", Empty), ("x-amz-date", "20130524T000000Z")],
@@ -84,7 +84,7 @@ public sealed class SigV4Tests
     [Fact]
     public void AHeaderValueIsTrimmedAndItsSpacesCollapsed()
     {
-        using AwsKeys keys = new AwsKeys("AKIDEXAMPLE", SuiteSecret, null);
+        AwsKeys keys = new AwsKeys("AKIDEXAMPLE", SuiteSecret, null);
         SigV4Signer signer = new SigV4Signer("us-east-1", "service");
         string loose = signer.Authorization(keys, "20150830T123600Z", "GET", "/", string.Empty,
             [("host", "example.amazonaws.com"), ("my-header1", "  value1   with   spaces "), ("x-amz-date", "20150830T123600Z")], Empty);
@@ -119,11 +119,14 @@ public sealed class SigV4Tests
     [Fact]
     public void KeysNameTheirIdentityAndNeverTheirSecret()
     {
-        using AwsKeys keys = new AwsKeys("AKIDVISIBLE", "very-secret", "token");
+        AwsKeys keys = new AwsKeys("AKIDVISIBLE", "very-secret", "token");
         Assert.DoesNotContain("very-secret", keys.ToString(), StringComparison.Ordinal);
         Assert.Contains("AKIDVISIBLE", keys.ToString(), StringComparison.Ordinal);
-        Assert.Equal("AWS4very-secret", System.Text.Encoding.ASCII.GetString(keys.SigningSecret.Span));
-        keys.Dispose();
-        Assert.Throws<ObjectDisposedException>(() => keys.SigningSecret.Span.Length.ToString(CultureInfo.InvariantCulture));
+        Assert.Equal("AWS4very-secret", System.Text.Encoding.ASCII.GetString(keys.SigningSecret));
+
+        // The same holds of the keys and the credentials a caller hands over.
+        AccessKey given = new AccessKey("AKIDVISIBLE", "very-secret", "token");
+        Assert.DoesNotContain("very-secret", given.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("very-secret", StoreCredentials.AccessKey("AKIDVISIBLE", "very-secret").ToString(), StringComparison.Ordinal);
     }
 }

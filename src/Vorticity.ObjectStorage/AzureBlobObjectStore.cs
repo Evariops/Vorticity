@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.Azure;
+using Vorticity.ObjectStorage.Credentials;
 using Vorticity.ObjectStorage.Http;
 using Vorticity.ObjectStorage.Xml;
 
@@ -23,17 +24,19 @@ namespace Vorticity.ObjectStorage;
 /// tail. A listing carries each blob's immutability policy and legal hold, so vacuum asks no head.
 /// </para>
 /// <para>
-/// The store owns its credentials and its connections; disposing it wipes the one and closes the other.
+/// The store owns its connections, which disposing it closes. Its credentials are the caller's, never
+/// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
 public sealed partial class AzureBlobObjectStore : IObjectStore
 {
-    /// <summary>The service version every request carries: the structured body needs 2025-01-05.</summary>
+    /// <summary>The service version every request carries, which fixes the shape of the answers.</summary>
     internal const string Version = "2025-01-05";
 
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
     private readonly AzureBlobStoreOptions _options;
+    private readonly AzureAuthorizer _authorizer;
     private readonly HttpTransport _transport;
     private readonly TimeProvider _time;
     private readonly string _base;
@@ -43,7 +46,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
 
     /// <summary>A store over <see cref="AzureBlobStoreOptions.Container"/>.</summary>
     /// <param name="options">The account, the container, the credentials and the connections.</param>
-    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback.</exception>
+    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback, or the credentials cannot authorize Azure requests.</exception>
     public AzureBlobObjectStore(AzureBlobStoreOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -56,6 +59,9 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
             throw new ArgumentException($"An endpoint is reached over HTTPS, or plain HTTP on the loopback for an emulator: '{endpoint}'.", nameof(options));
         }
 
+        _authorizer = options.Credentials.ForAzure ?? throw new ArgumentException(
+            $"An Azure store authorizes its requests with tokens, a shared access signature, an account key, the environment's credentials or none, not {options.Credentials}.",
+            nameof(options));
         _options = options;
         _time = options.Transport.TimeProvider;
         _base = endpoint.GetLeftPart(UriPartial.Authority);
@@ -64,35 +70,62 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
     }
 
     /// <summary>
-    /// A store over <paramref name="container"/> configured from the environment: the account, its
-    /// endpoint and its credentials from <c>AZURE_STORAGE_CONNECTION_STRING</c>, or the account from
-    /// <c>AZURE_STORAGE_ACCOUNT</c> with the credentials <see cref="AzureCredentials.FromEnvironment"/> reads.
+    /// A store over <paramref name="container"/> configured from the environment: the account and its
+    /// endpoint from <c>AZURE_STORAGE_CONNECTION_STRING</c>, or the account from
+    /// <c>AZURE_STORAGE_ACCOUNT</c>, and the credentials of Azure's chain,
+    /// <see cref="StoreCredentials.FromEnvironment"/>, which reads the connection string's key or
+    /// signature when the environment holds no client secret or workload identity.
     /// </summary>
     /// <param name="container">The container.</param>
-    /// <returns>The store; the caller, or the session it is given to, disposes it.</returns>
-    /// <exception cref="ObjectStoreException">The environment names no account or holds no credentials.</exception>
-    public static AzureBlobObjectStore FromEnvironment(string container)
+    /// <param name="credentials">
+    /// The credentials, the environment's when null: credentials shared by several stores renew their
+    /// tokens once for all of them.
+    /// </param>
+    /// <returns>The store, which the caller disposes.</returns>
+    /// <exception cref="ObjectStoreException">The environment names no account.</exception>
+    public static AzureBlobObjectStore FromEnvironment(string container, StoreCredentials? credentials = null)
     {
+        string account;
+        Uri? endpoint = null;
         if (Environment.GetEnvironmentVariable("AZURE_STORAGE_CONNECTION_STRING") is { Length: > 0 } text)
         {
             AzureConnection connection = AzureConnection.Parse(text);
-            return new AzureBlobObjectStore(new AzureBlobStoreOptions
-            {
-                Account = connection.Account,
-                Container = container,
-                Endpoint = connection.BlobEndpoint,
-                Credentials = AzureCredentials.FromConnectionString(text),
-            });
+            (account, endpoint) = (connection.Account, connection.BlobEndpoint);
+        }
+        else
+        {
+            account = Environment.GetEnvironmentVariable("AZURE_STORAGE_ACCOUNT") is { Length: > 0 } named
+                ? named
+                : throw new ObjectStoreException("No Azure account in the environment: set AZURE_STORAGE_ACCOUNT or AZURE_STORAGE_CONNECTION_STRING.");
         }
 
-        string account = Environment.GetEnvironmentVariable("AZURE_STORAGE_ACCOUNT") is { Length: > 0 } named
-            ? named
-            : throw new ObjectStoreException("No Azure account in the environment: set AZURE_STORAGE_ACCOUNT or AZURE_STORAGE_CONNECTION_STRING.");
         return new AzureBlobObjectStore(new AzureBlobStoreOptions
         {
             Account = account,
             Container = container,
-            Credentials = AzureCredentials.FromEnvironment(),
+            Endpoint = endpoint,
+            Credentials = credentials ?? StoreCredentials.FromEnvironment(),
+        });
+    }
+
+    /// <summary>
+    /// A store over <paramref name="container"/> configured by a connection string: its account, its
+    /// endpoint, and its account key or shared access signature.
+    /// </summary>
+    /// <param name="connectionString">The connection string, as the portal shows it.</param>
+    /// <param name="container">The container.</param>
+    /// <returns>The store, which the caller disposes.</returns>
+    /// <exception cref="ArgumentException">The connection string names no account, or holds neither a key nor a signature.</exception>
+    public static AzureBlobObjectStore FromConnectionString(string connectionString, string container)
+    {
+        AzureConnection connection = AzureConnection.Parse(connectionString);
+        return new AzureBlobObjectStore(new AzureBlobStoreOptions
+        {
+            Account = connection.Account,
+            Container = container,
+            Endpoint = connection.BlobEndpoint,
+            Credentials = connection.Credentials()
+                ?? throw new ArgumentException("The connection string holds neither an account key nor a shared access signature.", nameof(connectionString)),
         });
     }
 
@@ -182,14 +215,13 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
         while (marker is not null);
     }
 
-    /// <summary>Closes the connections and wipes the credentials.</summary>
+    /// <summary>Closes the connections. The credentials are left to the caller, and to the other stores that share them.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             _transport.Dispose();
-            _options.Credentials.Dispose();
         }
 
         return ValueTask.CompletedTask;
@@ -320,7 +352,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
     private async ValueTask<HttpRequestMessage> BuildAsync(
         HttpMethod method, string? key, string query, HttpContent? content, (string Name, string Value)[] headers, CancellationToken cancellationToken)
     {
-        AzureAuthorization authorization = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
+        AzureAuthorization authorization = await _authorizer.GetAsync(cancellationToken).ConfigureAwait(false);
         string path = key is null ? _containerPath : _containerPath + "/" + UriEncoding.Path(key);
         if (authorization.Sas is { } sas)
         {
@@ -391,10 +423,11 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
                 throw new StoreRetryException($"{operation} was refused for a skewed clock: {error}", cost: 0);
             }
 
+            // The token of the refused request, read back from it: a request sent since with a renewed one keeps it.
             if (response.StatusCode == HttpStatusCode.Unauthorized && error.Code is "InvalidAuthenticationInfo" or "ExpiredToken"
-                && _options.Credentials.UsesTokens)
+                && HttpAnswers.BearerOf(response) is { } refused)
             {
-                _options.Credentials.Expired();
+                _authorizer.Expired(refused);
                 throw new StoreRetryException($"{operation} was refused for an expired token: {error}", cost: 0);
             }
         }
@@ -404,7 +437,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
             throw new StoreRetryException($"{operation} was too slow for the service: {error}", RetryBudget.RetryCost);
         }
 
-        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_options.Credentials}: {error}");
+        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_authorizer}: {error}");
     }
 
     /// <summary>Learns the service's clock from <c>Date</c> when it is off ours by more than five minutes, and says whether it was.</summary>

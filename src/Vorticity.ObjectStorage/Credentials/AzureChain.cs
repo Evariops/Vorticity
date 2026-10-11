@@ -4,50 +4,69 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
+using Vorticity.ObjectStorage.Azure;
 
 namespace Vorticity.ObjectStorage.Credentials;
 
 /// <summary>
 /// Azure's chain: a client secret in the environment, a workload identity, the storage credentials
 /// the environment names (a connection string, an account key, a shared access signature), then a
-/// managed identity, App Service's endpoint or the instance metadata service. The first source that
-/// answers is kept, and its tokens renewed five minutes before they expire.
+/// managed identity, App Service's endpoint or the instance metadata service. The first source whose
+/// configuration the host holds is kept, and its tokens renewed five minutes before they expire.
 /// </summary>
 /// <remarks>
 /// The storage credentials the environment names come before the managed identity, so that a host that
 /// sets them never waits for a metadata service it does not have.
 /// </remarks>
-internal sealed class AzureChain : AzureCredentials
+internal sealed class AzureChain : AzureAuthorizer
 {
     private const string Scope = "https://storage.azure.com/.default";
     private const string Resource = "https://storage.azure.com/";
 
     private readonly CredentialHost _host;
     private readonly object _gate = new object();
-    private AzureCredentials? _resolved;
+    private AzureAuthorizer? _resolved;
     private string _named = "the Azure credential chain";
 
     internal AzureChain(CredentialHost host) => _host = host;
 
     internal override ValueTask<AzureAuthorization> GetAsync(CancellationToken cancellationToken) => Resolved().GetAsync(cancellationToken);
 
-    internal override void Expired() => _resolved?.Expired();
+    internal override void Expired(string token) => Volatile.Read(ref _resolved)?.Expired(token);
 
-    internal override bool UsesTokens => _resolved?.UsesTokens == true;
+    public override string ToString() => Volatile.Read(ref _resolved) is { } resolved ? $"{_named}: {resolved}" : _named;
 
-    protected override void Dispose(bool disposing) => _resolved?.Dispose();
-
-    public override string ToString() => _resolved is { } resolved ? $"{_named}: {resolved}" : _named;
-
-    private AzureCredentials Resolved()
+    private AzureAuthorizer Resolved()
     {
+        if (Volatile.Read(ref _resolved) is { } resolved)
+        {
+            return resolved;
+        }
+
         lock (_gate)
         {
-            return _resolved ??= Resolve();
+            if (_resolved is { } raced)
+            {
+                return raced;
+            }
+
+            AzureAuthorizer first;
+            try
+            {
+                first = Resolve();
+            }
+            catch (ArgumentException invalid)
+            {
+                // A connection string or an account key of the environment's, which a request reads.
+                throw new ObjectStoreException($"{_named} could not be read: {invalid.Message}", invalid);
+            }
+
+            Volatile.Write(ref _resolved, first);
+            return first;
         }
     }
 
-    private AzureCredentials Resolve()
+    private AzureAuthorizer Resolve()
     {
         string authority = (_host.Set("AZURE_AUTHORITY_HOST") ?? "https://login.microsoftonline.com/").TrimEnd('/') + "/";
         if (_host.Set("AZURE_CLIENT_ID") is { } client && _host.Set("AZURE_TENANT_ID") is { } tenant)
@@ -74,10 +93,13 @@ internal sealed class AzureChain : AzureCredentials
             }
         }
 
-        if (_host.Set("AZURE_STORAGE_CONNECTION_STRING") is { } connection)
+        if (_host.Set("AZURE_STORAGE_CONNECTION_STRING") is { } text)
         {
             _named = "the environment's connection string";
-            return FromConnectionString(connection);
+            AzureConnection connection = AzureConnection.Parse(text);
+            return connection.AccountKey is { } connectionKey ? SharedKey(connection.Account, connectionKey)
+                : connection.Sas is { } connectionSas ? SharedAccessSignature(connectionSas)
+                : throw new ArgumentException("It holds neither an account key nor a shared access signature.");
         }
 
         if (_host.Set("AZURE_STORAGE_KEY") is { } key && _host.Set("AZURE_STORAGE_ACCOUNT") is { } account)
@@ -102,8 +124,8 @@ internal sealed class AzureChain : AzureCredentials
         return Tokens(InstanceAsync);
     }
 
-    private TokenCredentials Tokens(Func<CancellationToken, ValueTask<AccessToken>> source) =>
-        new TokenCredentials(new RenewingToken(source, _host.Time));
+    private AzureAuthorizer Tokens(Func<CancellationToken, ValueTask<AccessToken>> source) =>
+        Bearer(new RenewingToken(source, "Entra ID tokens", _host.Time));
 
     /// <summary>A client credentials exchange at the version 2 token endpoint, for the storage scope.</summary>
     private async ValueTask<AccessToken> ExchangeAsync(string authority, string tenant, List<KeyValuePair<string, string>> fields, CancellationToken cancellationToken)

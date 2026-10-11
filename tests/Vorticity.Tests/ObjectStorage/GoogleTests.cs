@@ -21,11 +21,11 @@ public sealed class GoogleTests
     private const string Bucket = "warehouse";
 
     internal static GoogleCloudStorageObjectStore Store(
-        GoogleEmulator emulator, GoogleCredentials? credentials = null, bool readsSuffix = false, long threshold = 32L << 20, int part = 16 << 20) =>
+        GoogleEmulator emulator, StoreCredentials? credentials = null, bool readsSuffix = false, long threshold = 32L << 20, int part = 16 << 20) =>
         new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
         {
             Bucket = Bucket,
-            Credentials = credentials ?? GoogleCredentials.Anonymous(),
+            Credentials = credentials ?? StoreCredentials.Anonymous(),
             Handler = emulator,
             ReadsSuffix = readsSuffix,
             PartThreshold = threshold,
@@ -169,7 +169,7 @@ public sealed class GoogleTests
         using GoogleEmulator emulator = new GoogleEmulator { Token = "second" };
         emulator.Seed(Bucket, "a", [1]);
         int asked = 0;
-        await using GoogleCloudStorageObjectStore store = Store(emulator, GoogleCredentials.Token(_ =>
+        await using GoogleCloudStorageObjectStore store = Store(emulator, StoreCredentials.Token(_ =>
             new ValueTask<AccessToken>(new AccessToken(Interlocked.Increment(ref asked) == 1 ? "first" : "second", DateTimeOffset.UtcNow.AddHours(1)))));
         Assert.NotNull(await store.HeadAsync("a", ct));
         Assert.Equal(2, asked);
@@ -182,7 +182,8 @@ public sealed class GoogleTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         using GoogleEmulator emulator = new GoogleEmulator();
-        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("gs://warehouse", Store(emulator, threshold: 256 << 10, part: 64 << 10)));
+        await using GoogleCloudStorageObjectStore warehouse = Store(emulator, threshold: 256 << 10, part: 64 << 10);
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("gs://warehouse", warehouse));
         DatasetOptions options = new DatasetOptions { Session = session, ClusteringKey = ["Day"] };
         await using (VortexDataset dataset = await VortexDataset.CreateAsync("gs://warehouse/tables/readings", LocationTests.Reading.Schema, options, ct))
         {

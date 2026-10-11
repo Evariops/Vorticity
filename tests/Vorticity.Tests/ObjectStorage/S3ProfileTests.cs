@@ -21,7 +21,7 @@ public sealed class S3ProfileTests
     [Fact]
     public async Task EachFactoryTakesItsServicesEndpointRegionAndPrudentCapabilities()
     {
-        S3Credentials Keys() => S3Credentials.Static("id", "secret");
+        StoreCredentials Keys() => StoreCredentials.AccessKey("id", "secret");
         await using S3ObjectStore r2 = S3ObjectStore.ForR2("account", "media", Keys());
         await using S3ObjectStore ovh = S3ObjectStore.ForOvhcloud("gra", "archive", Keys());
         await using S3ObjectStore scaleway = S3ObjectStore.ForScaleway("fr-par", "exports", Keys());
@@ -52,7 +52,7 @@ public sealed class S3ProfileTests
             Bucket = "lake",
             Endpoint = new Uri(endpoint),
             Region = endpoint.Contains("amazonaws", StringComparison.Ordinal) ? region : null,
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
         });
         Assert.NotNull(await store.HeadAsync("k", ct));
@@ -84,7 +84,7 @@ public sealed class S3ProfileTests
         {
             Bucket = "lake",
             Endpoint = new Uri("https://account.r2.cloudflarestorage.com"),
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
         });
         NotSupportedException refused = await Assert.ThrowsAsync<NotSupportedException>(
@@ -106,7 +106,7 @@ public sealed class S3ProfileTests
         {
             Bucket = "lake",
             Endpoint = new Uri("https://s3.fr-par.scw.cloud"),
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
         });
         Assert.Equal(PutOutcome.Created, await PutAsync(store, "first", 100, ct));
@@ -118,8 +118,8 @@ public sealed class S3ProfileTests
     [Fact]
     public async Task APartIsSizedToFitTheCountOfPartsTheServiceTakes()
     {
-        await using S3ObjectStore scaleway = S3ObjectStore.ForScaleway("fr-par", "b", S3Credentials.Static("id", "secret"));
-        await using S3ObjectStore amazon = new S3ObjectStore(new S3StoreOptions { Bucket = "b", Region = "eu-west-3", Credentials = S3Credentials.Static("id", "secret") });
+        await using S3ObjectStore scaleway = S3ObjectStore.ForScaleway("fr-par", "b", StoreCredentials.AccessKey("id", "secret"));
+        await using S3ObjectStore amazon = new S3ObjectStore(new S3StoreOptions { Bucket = "b", Region = "eu-west-3", Credentials = StoreCredentials.AccessKey("id", "secret") });
 
         // 20 GiB: 16 MiB parts are 1 280, past Scaleway's 1 000 and under S3's 10 000.
         Assert.Equal(21 << 20, scaleway.PartSizeFor(20L << 30));
@@ -134,7 +134,7 @@ public sealed class S3ProfileTests
     {
         Bucket = "lake",
         Endpoint = new Uri("https://s3.gra.io.cloud.ovh.net"),
-        Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+        Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
         Handler = emulator,
         ListsInOrder = listsInOrder,
     });

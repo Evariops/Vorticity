@@ -28,7 +28,7 @@ public sealed class S3WriteTests
             Region = "eu-west-3",
             Profile = profile,
             Endpoint = profile is null ? null : new Uri("https://storage.example.com"),
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
             Checksum = checksum,
             PartThreshold = 256 << 10,
@@ -272,7 +272,8 @@ public sealed class S3WriteTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator();
-        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", Small(emulator)));
+        await using S3ObjectStore lake = Small(emulator);
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", lake));
         LocationTests.Reading[] rows = [.. Enumerable.Range(0, 50_000).Select(i => new LocationTests.Reading(i / 100, i * 0.5))];
         await using (VortexFileWriter writer = session.CreateWriter<LocationTests.Reading>("s3://lake/out/readings.vortex"))
         {
@@ -303,7 +304,8 @@ public sealed class S3WriteTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator();
-        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", Small(emulator)));
+        await using S3ObjectStore lake = Small(emulator);
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", lake));
         Vorticity.Dataset.DatasetOptions options = new Vorticity.Dataset.DatasetOptions { Session = session, ClusteringKey = ["Day"] };
         await using (Vorticity.Dataset.VortexDataset dataset = await Vorticity.Dataset.VortexDataset.CreateAsync("s3://lake/tables/readings", LocationTests.Reading.Schema, options, ct))
         {
@@ -341,11 +343,12 @@ public sealed class S3WriteTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator();
         using VortexKeyring keyring = Vorticity.Tests.Sealing.SealedObjects.Keyring();
+        await using S3ObjectStore lake = Small(emulator);
         await using VortexSession session = VortexSession.Create(o =>
         {
             o.Keyring = keyring;
             o.EncryptFiles = true;
-            o.ObjectStores.Add("s3://lake", Small(emulator));
+            o.ObjectStores.Add("s3://lake", lake);
         });
         Vorticity.Dataset.DatasetOptions options = new Vorticity.Dataset.DatasetOptions { Session = session, Encrypted = true };
         await using (Vorticity.Dataset.VortexDataset dataset = await Vorticity.Dataset.VortexDataset.CreateAsync("s3://lake/secret", LocationTests.Reading.Schema, options, ct))

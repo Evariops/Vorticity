@@ -13,9 +13,9 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
+using Vorticity.ObjectStorage.Credentials;
 using Vorticity.ObjectStorage.Google;
 using Vorticity.ObjectStorage.Http;
-using Vorticity.ObjectStorage.S3;
 using Vorticity.ObjectStorage.Xml;
 
 namespace Vorticity.ObjectStorage;
@@ -32,6 +32,10 @@ namespace Vorticity.ObjectStorage;
 /// The service takes no precondition on an upload in parts, so a conditional put goes whole; a put
 /// without one, a dataset's data object, goes up in parts past the threshold.
 /// </para>
+/// <para>
+/// The store owns its connections, which disposing it closes. Its credentials are the caller's, never
+/// disposed, and other stores may share them.
+/// </para>
 /// </remarks>
 public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWholeConditionalPuts
 {
@@ -47,6 +51,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
     private readonly GoogleCloudStorageOptions _options;
+    private readonly TokenSource _tokens;
     private readonly HttpTransport _transport;
     private readonly string _base;
     private readonly string _bucketPath;
@@ -55,7 +60,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
 
     /// <summary>A store over <see cref="GoogleCloudStorageOptions.Bucket"/>.</summary>
     /// <param name="options">The bucket, the credentials and the connections.</param>
-    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback.</exception>
+    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback, or the credentials cannot authorize Cloud Storage requests.</exception>
     public GoogleCloudStorageObjectStore(GoogleCloudStorageOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -67,6 +72,9 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             throw new ArgumentException($"An endpoint is reached over HTTPS, or plain HTTP on the loopback for an emulator: '{endpoint}'.", nameof(options));
         }
 
+        _tokens = options.Credentials.ForGoogle ?? throw new ArgumentException(
+            $"A Cloud Storage store authorizes its requests with tokens, the environment's credentials or none, not {options.Credentials}.",
+            nameof(options));
         _options = options;
         _base = endpoint.GetLeftPart(UriPartial.Authority);
         _bucketPath = "/" + UriEncoding.Path(options.Bucket);
@@ -76,12 +84,17 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
 
     /// <summary>
     /// A store over <paramref name="bucket"/> configured from the environment: Google's application
-    /// default credentials (<see cref="GoogleCredentials.FromEnvironment"/>), or, when
-    /// <c>STORAGE_EMULATOR_HOST</c> names an emulator, that emulator without credentials.
+    /// default credentials, <see cref="StoreCredentials.FromEnvironment"/>, or, when
+    /// <c>STORAGE_EMULATOR_HOST</c> names an emulator, that emulator without credentials, as Google's
+    /// own clients do.
     /// </summary>
     /// <param name="bucket">The bucket.</param>
-    /// <returns>The store; the caller, or the session it is given to, disposes it.</returns>
-    public static GoogleCloudStorageObjectStore FromEnvironment(string bucket)
+    /// <param name="credentials">
+    /// The credentials, the environment's when null: credentials shared by several stores renew their
+    /// tokens once for all of them. An emulator takes none.
+    /// </param>
+    /// <returns>The store, which the caller disposes.</returns>
+    public static GoogleCloudStorageObjectStore FromEnvironment(string bucket, StoreCredentials? credentials = null)
     {
         if (Environment.GetEnvironmentVariable("STORAGE_EMULATOR_HOST") is { Length: > 0 } emulator)
         {
@@ -89,14 +102,14 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             {
                 Bucket = bucket,
                 Endpoint = new Uri(emulator.Contains("://", StringComparison.Ordinal) ? emulator : "http://" + emulator),
-                Credentials = GoogleCredentials.Anonymous(),
+                Credentials = StoreCredentials.Anonymous(),
             });
         }
 
         return new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
         {
             Bucket = bucket,
-            Credentials = GoogleCredentials.FromEnvironment(),
+            Credentials = credentials ?? StoreCredentials.FromEnvironment(),
         });
     }
 
@@ -247,14 +260,13 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         }
     }
 
-    /// <summary>Closes the connections and drops the credentials.</summary>
+    /// <summary>Closes the connections. The credentials are left to the caller, and to the other stores that share them.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             _transport.Dispose();
-            _options.Credentials.Dispose();
         }
 
         return ValueTask.CompletedTask;
@@ -709,7 +721,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     /// <summary>A JSON batch of up to 100 deletes, each a sub-request of the multipart body.</summary>
     private async ValueTask<HttpRequestMessage> BuildBatchAsync(BatchRequest s, CancellationToken cancellationToken)
     {
-        string? token = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
+        string? token = await _tokens.GetAsync(cancellationToken).ConfigureAwait(false);
         StringBuilder body = new StringBuilder();
         for (int i = 0; i < s.Keys.Length; i++)
         {
@@ -809,7 +821,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     private async ValueTask<HttpRequestMessage> BuildAsync(
         HttpMethod method, string target, HttpContent? content, (string Name, string Value)[] headers, CancellationToken cancellationToken)
     {
-        string? token = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
+        string? token = await _tokens.GetAsync(cancellationToken).ConfigureAwait(false);
         HttpRequestMessage request = new HttpRequestMessage(method, new Uri(_base + target, in Verbatim)) { Content = content };
         foreach ((string name, string value) in headers)
         {
@@ -856,13 +868,14 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
 
     private Exception MapFailure(HttpResponseMessage response, ServiceError error, string operation, string key)
     {
-        if (response.StatusCode == HttpStatusCode.Unauthorized && _options.Credentials.UsesTokens)
+        // The token of the refused request, read back from it: a request sent since with a renewed one keeps it.
+        if (response.StatusCode == HttpStatusCode.Unauthorized && HttpAnswers.BearerOf(response) is { } refused)
         {
-            _options.Credentials.Expired();
+            _tokens.Expired(refused);
             throw new StoreRetryException($"{operation} was refused for an expired token: {error}", cost: 0);
         }
 
-        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_options.Credentials}: {error}");
+        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_tokens}: {error}");
     }
 
     /// <summary>The service's error, from the XML API's body or the JSON API's.</summary>

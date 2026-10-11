@@ -47,8 +47,11 @@ public sealed class S3StoreOptions
     /// <summary>The bucket.</summary>
     public required string Bucket { get; init; }
 
-    /// <summary>The keys, which the store owns from then on and wipes when it is disposed.</summary>
-    public required S3Credentials Credentials { get; init; }
+    /// <summary>
+    /// What signs the requests: an access key, keys from a source, the environment's credentials, or
+    /// none for a bucket anyone may read. Other stores may share them, and the store never disposes them.
+    /// </summary>
+    public required StoreCredentials Credentials { get; init; }
 
     /// <summary>
     /// The region requests are signed for. Null takes it, on Amazon S3, from the bucket's own answer

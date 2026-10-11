@@ -70,7 +70,7 @@ public sealed partial class LocationTests
     }
 
     [Fact]
-    public async Task ASchemeBuildsAStorePerBucketOnFirstUseAndTheSessionDisposesEveryStore()
+    public async Task ASchemeBuildsAStorePerBucketOnFirstUseWhichTheSessionDisposesAndARegisteredStoreStaysTheCallers()
     {
         List<TrackedStore> built = [];
         TrackedStore registered = new TrackedStore("registered");
@@ -93,8 +93,9 @@ public sealed partial class LocationTests
 
         await session.DisposeAsync();
         Assert.All(built, store => Assert.Equal(1, store.Disposed));
-        Assert.Equal(1, registered.Disposed);
+        Assert.Equal(0, registered.Disposed);
         Assert.Throws<ObjectDisposedException>(() => session.Options.ObjectStores.Locate("mem://one/a"));
+        await registered.DisposeAsync();
     }
 
     [Fact]
@@ -200,13 +201,16 @@ public sealed partial class LocationTests
     }
 
     [Fact]
-    public async Task TheEnvironmentServesEveryS3BucketWithAStoreOfItsOwn()
+    public async Task TheEnvironmentServesEveryS3BucketWithAStoreOfItsOwnAndOneSetOfCredentials()
     {
         VortexSession session = VortexSession.Create(o => o.ObjectStores.UseEnvironment());
         S3ObjectStore lake = Assert.IsType<S3ObjectStore>(session.Options.ObjectStores.Locate("s3://lake/a.vortex").Store);
         S3ObjectStore other = Assert.IsType<S3ObjectStore>(session.Options.ObjectStores.Locate("s3://other/b.vortex").Store);
         Assert.Equal(("lake", "other"), (lake.Bucket, other.Bucket));
         Assert.Same(lake, session.Options.ObjectStores.Locate("s3://lake/c.vortex").Store);
+
+        // One chain for every bucket: its keys are asked for once, not once per store.
+        Assert.Same(lake.Credentials, other.Credentials);
         await session.DisposeAsync();
     }
 

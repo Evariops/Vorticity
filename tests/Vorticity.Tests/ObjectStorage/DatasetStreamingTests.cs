@@ -147,7 +147,7 @@ public sealed class DatasetStreamingTests
             Bucket = "lake",
             Region = endpoint is null ? "eu-west-3" : null,
             Endpoint = endpoint is null ? null : new Uri(endpoint),
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
             MinimumPartSize = Part,
             PartSize = Part,

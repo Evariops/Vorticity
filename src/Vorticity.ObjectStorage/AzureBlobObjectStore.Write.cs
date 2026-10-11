@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.Azure;
+using Vorticity.ObjectStorage.Credentials;
 using Vorticity.ObjectStorage.Http;
 using Vorticity.ObjectStorage.Xml;
 
@@ -351,7 +352,7 @@ public sealed partial class AzureBlobObjectStore
     /// </summary>
     private async ValueTask<HttpRequestMessage> BuildBatchAsync(BatchRequest s, CancellationToken cancellationToken)
     {
-        AzureAuthorization authorization = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
+        AzureAuthorization authorization = await _authorizer.GetAsync(cancellationToken).ConfigureAwait(false);
         string date = Now().ToString("r", CultureInfo.InvariantCulture);
         StringBuilder body = new StringBuilder();
         for (int i = 0; i < s.Keys.Length; i++)

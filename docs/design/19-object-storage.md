@@ -102,25 +102,32 @@ A location is a string that names an object, and a session knows which store ser
 | `https://account.blob.core.windows.net/container/key` | the Azure store registered for that account and container |
 | anything else | a local path, as today |
 
-A session holds its stores, as it holds its pool and its cache, because a store owns connections
-and credentials, and those are a host's decisions. The longest registered prefix wins, so a bucket
-can be served by one store and one of its prefixes by another, with other credentials. A
-registration's prefix is a name and not a protocol, and a bucket's name is unique within a provider
-but not across providers, so a scheme of the caller's choosing keeps two of them apart: `r2://lake`
-beside `s3://lake`.
+A session resolves locations with the stores its options hold, since connections and credentials are
+a host's decisions. A store registered there stays the caller's, who may give it to several sessions
+and disposes it after them, and a store the session builds for a scheme is the session's. The longest
+registered prefix wins, so a bucket can be served by one store and one of its prefixes by another,
+with other credentials. A registration's prefix is a name and not a protocol, and a bucket's name is
+unique within a provider but not across providers, so a scheme of the caller's choosing keeps two of
+them apart: `r2://lake` beside `s3://lake`.
 
 ```csharp
+StoreCredentials environment = StoreCredentials.FromEnvironment();
+await using S3ObjectStore lake = S3ObjectStore.FromEnvironment("lake", environment);
+await using S3ObjectStore media = S3ObjectStore.ForR2(accountId, "media", StoreCredentials.AccessKey(r2KeyId, r2Secret));
+await using GoogleCloudStorageObjectStore warehouse = GoogleCloudStorageObjectStore.FromEnvironment("warehouse", environment);
+await using AzureBlobObjectStore archive = new AzureBlobObjectStore(new AzureBlobStoreOptions
+{
+    Account = "contosoarchive",
+    Container = "archive",
+    Credentials = environment,
+});
+
 await using VortexSession session = VortexSession.Create(o =>
 {
-    o.ObjectStores.Add("s3://lake", S3ObjectStore.FromEnvironment("lake"));
-    o.ObjectStores.Add("r2://media", S3ObjectStore.ForR2(accountId, "media", S3Credentials.FromEnvironment()));
-    o.ObjectStores.Add("gs://warehouse", GoogleCloudStorageObjectStore.FromEnvironment("warehouse"));
-    o.ObjectStores.Add("az://archive", new AzureBlobObjectStore(new AzureBlobStoreOptions
-    {
-        Account = "contosoarchive",
-        Container = "archive",
-        Credentials = AzureCredentials.FromEnvironment(),
-    }));
+    o.ObjectStores.Add("s3://lake", lake);
+    o.ObjectStores.Add("r2://media", media);
+    o.ObjectStores.Add("gs://warehouse", warehouse);
+    o.ObjectStores.Add("az://archive", archive);
 });
 ```
 
@@ -134,12 +141,15 @@ to, which is the reasoning that keeps the default session single-threaded
 await using VortexSession session = VortexSession.Create(o => o.ObjectStores.UseEnvironment());
 ```
 
-`UseEnvironment` builds a store on the first use of each bucket or container and keeps it for the
-session's life (see [credentials](#12-credentials)). An `s3://` location takes the AWS environment,
-and its endpoint from `AWS_ENDPOINT_URL_S3` or `AWS_ENDPOINT_URL` when one is set, the variables the
-AWS SDKs read, which is how a host points at R2, OVHcloud or Scaleway, the profile following the
-endpoint's host. A `gs://` location takes Google's application default credentials, and an `az://`
-one Azure's environment. This choice is one of the [decisions to take](#17-decisions-to-take).
+`UseEnvironment` builds a store on the first use of each bucket or container, keeps it for the
+session's life and disposes it with the session. An `s3://` location takes the AWS environment, and
+its endpoint from `AWS_ENDPOINT_URL_S3` or `AWS_ENDPOINT_URL` when one is set, the variables the AWS
+SDKs read, which is how a host points at R2, OVHcloud or Scaleway, the profile following the
+endpoint's host. A `gs://` location takes Google's endpoint or the emulator the environment names,
+and an `az://` one Azure's account. Every store it builds shares one set of the environment's
+credentials (see [credentials](#12-credentials)), so that each service's keys or tokens are asked
+for once, however many buckets the session reads. This choice is one of the
+[decisions to take](#17-decisions-to-take).
 
 ### 3.3 What a caller writes
 
@@ -413,9 +423,9 @@ so the endpoint variable of [locations](#32-locations) is enough to point `UseEn
 them.
 
 ```csharp
-o.ObjectStores.Add("r2://media", S3ObjectStore.ForR2(accountId, "media", S3Credentials.FromEnvironment()));
-o.ObjectStores.Add("ovh://archive", S3ObjectStore.ForOvhcloud("gra", "archive", S3Credentials.FromEnvironment()));
-o.ObjectStores.Add("scw://exports", S3ObjectStore.ForScaleway("fr-par", "exports", S3Credentials.FromEnvironment()));
+await using S3ObjectStore media = S3ObjectStore.ForR2(accountId, "media", StoreCredentials.AccessKey(r2KeyId, r2Secret));
+await using S3ObjectStore archive = S3ObjectStore.ForOvhcloud("gra", "archive", StoreCredentials.AccessKey(ovhKeyId, ovhSecret));
+await using S3ObjectStore exports = S3ObjectStore.ForScaleway("fr-par", "exports", StoreCredentials.AccessKey(scwKeyId, scwSecret));
 ```
 
 | | Amazon S3 | Cloudflare R2 | OVHcloud | Scaleway |
@@ -672,26 +682,52 @@ Appends to stored files are the last phase of the work.
 
 ## 12. Credentials
 
+One public type, `StoreCredentials`, says how a store authorizes its requests, whichever service it
+speaks to. Its factories cover what a host meets: keys or an account key given in code, keys and
+tokens from a source of the host's, a shared access signature, none, and the environment's
+credentials, which resolve for each service the chain its own SDKs follow. A store takes the part its
+service understands and refuses, when it is built, credentials it cannot use, so that a token given to
+an S3 store fails at once rather than at the first request.
+
+| factory | S3 | Azure | Cloud Storage |
+|---|---|---|---|
+| `FromEnvironment()`, the chains below | yes | yes | yes |
+| `AccessKey(accessKeyId, secretAccessKey, sessionToken)` | yes | | |
+| `AccessKey(source)`, keys from a source, renewed before their expiry | yes | | |
+| `SharedKey(account, accountKey)` | | yes | |
+| `SharedAccessSignature(signature)` | | yes | |
+| `Token(source)`, bearer tokens from a source, renewed before their expiry | | yes | yes |
+| `Anonymous()`, an emulator, or a bucket or container anyone may read | yes | yes | yes |
+
+A source is how a host plugs in what this package does not resolve: the AWS SDK's own credentials for
+single sign-on or a credential process, `Azure.Identity` or Google's libraries for the identities
+their chains know and these do not.
+
 ### 12.1 AWS, and the clouds that speak S3
 
 The AWS SDKs standardize the sources of credentials, though each orders them its own way. The chain
-takes them in the order of the SDK for Java's default chain, and stops at the first source that
-answers:
+takes them in the order of the SDK for Java's default chain, and keeps the first source the
+environment configures:
 
-1. Credentials given in code.
-2. The environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
-3. A web identity: `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, exchanged with STS by
+1. The environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`.
+2. A web identity: `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, exchanged with STS by
    `AssumeRoleWithWebIdentity`, the file read again at each refresh. This is how a Kubernetes service
-   account reaches a role on EKS.
-4. A profile of the shared configuration and credentials files, with static keys or a role to
+   account reaches a role on EKS. STS is asked in its region's partition, `amazonaws.com.cn` in China.
+3. A profile of the shared configuration and credentials files, with static keys or a role to
    assume by web identity.
-5. The container endpoint: `AWS_CONTAINER_CREDENTIALS_FULL_URI` or `_RELATIVE_URI`, with the
-   authorization token or its file, which serves ECS tasks and EKS Pod Identity.
-6. The instance metadata service, version 2 only: a session token first, then the role's
+4. The container endpoint: `AWS_CONTAINER_CREDENTIALS_FULL_URI` or `_RELATIVE_URI`, with the
+   authorization token or its file, which serves ECS tasks and EKS Pod Identity. A full URI is taken
+   over HTTPS, or over HTTP on the loopback and the container hosts of ECS and EKS, `169.254.170.2`,
+   `169.254.170.23` and `fd00:ec2::23`, as the SDKs restrict it, so that the token never leaves the
+   host.
+5. The instance metadata service, version 2 only: a session token first, then the role's
    credentials.
 
-Single sign-on and `credential_process` come later. A process run to fetch credentials is a host's
-decision, and single sign-on needs a browser.
+A profile that takes its keys from IAM Identity Center, from a credential process, or from a role
+assumed with another profile's or the host's credentials is refused with a message that names what it
+asks, rather than passed over for the metadata service. A process run to fetch credentials is a host's
+decision, and single sign-on needs a browser: the AWS SDK's credentials serve both through
+`AccessKey(source)`.
 
 R2, OVHcloud and Scaleway issue S3 key pairs, an access key and a secret, which come from code or
 from the same environment variables, the endpoint from `AWS_ENDPOINT_URL_S3`. None of them offers an
@@ -699,32 +735,30 @@ identity that the later steps of the chain would find.
 
 ### 12.2 Azure
 
-1. Credentials given in code: a token source, a client secret, a shared access signature, or an
-   account key.
-2. A client secret in the environment: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+1. A client secret in the environment: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
    `AZURE_CLIENT_SECRET`.
-3. A workload identity: `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+2. A workload identity: `AZURE_FEDERATED_TOKEN_FILE`, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
    `AZURE_AUTHORITY_HOST`, the file's token exchanged as a client assertion at the version 2 token
    endpoint for the scope `https://storage.azure.com/.default`. The file is read again at each
    exchange, as Microsoft's documentation asks, since Kubernetes rotates it in place.
-4. A managed identity, through the instance metadata endpoint, or the `IDENTITY_ENDPOINT` and
-   `IDENTITY_HEADER` of App Service and Functions.
-5. A connection string in `AZURE_STORAGE_CONNECTION_STRING`, with an account key or a shared access
-   signature.
+3. The storage credentials Azure's tools read: a connection string in
+   `AZURE_STORAGE_CONNECTION_STRING`, with an account key or a shared access signature, or
+   `AZURE_STORAGE_KEY` with `AZURE_STORAGE_ACCOUNT`, or `AZURE_STORAGE_SAS_TOKEN`.
+4. A managed identity, through the `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` of App Service and
+   Functions, or the instance metadata endpoint.
 
 ### 12.3 Google Cloud
 
 The chain follows the order of Google's application default credentials:
 
-1. Credentials given in code: a token source, a service account key, or an external account's
-   configuration.
-2. `GOOGLE_APPLICATION_CREDENTIALS`, naming a JSON file. A service account key requests its tokens
+1. `GOOGLE_APPLICATION_CREDENTIALS`, naming a JSON file. A service account key requests its tokens
    with a JWT it signs with its RSA key, through the platform's `RSA`. A workload identity federation
-   configuration exchanges its external token, from a file, a URL or an AWS identity, at Google's
-   security token service, then for the service account it impersonates, if it names one.
-3. The file `gcloud auth application-default login` writes: `$HOME/.config/gcloud/application_default_credentials.json`,
+   configuration exchanges its external token, from a file or a URL, at Google's security token
+   service, then for the service account it impersonates, if it names one. A configuration whose
+   token comes from an AWS identity is refused with a message that says so.
+2. The file `gcloud auth application-default login` writes: `$HOME/.config/gcloud/application_default_credentials.json`,
    or under `%APPDATA%\gcloud` on Windows.
-4. The metadata server of Compute Engine, GKE and Cloud Run (`metadata.google.internal`, with the
+3. The metadata server of Compute Engine, GKE and Cloud Run (`metadata.google.internal`, with the
    header `Metadata-Flavor: Google`), which serves the attached service account's tokens, and on GKE
    the pod's workload identity.
 
@@ -732,12 +766,18 @@ The chain follows the order of Google's application default credentials:
 
 Credentials that expire are renewed five minutes before they do, by one caller while the others keep
 using the current ones, and a failed renewal is retried until the old credentials actually expire.
-A request never waits for a renewal unless its credentials have expired. Secret keys are copied into
-native memory as soon as they are read and wiped when the store is disposed. The string an
-environment variable or a file first gave them in stays on the managed heap until it is collected,
-which no .NET code can prevent, so the native copy narrows the window rather than closing it. Secrets
-never appear in an exception, a log, a trace or a `ToString`, and neither does a request's signature.
-Errors carry the service's code and request id, which is what support asks for and reveals nothing.
+A request never waits for a renewal unless its credentials have expired. A refusal for expired keys or
+an expired token renews only the ones the refused request carried, read back from it, so that the
+refusal of a request signed before a renewal leaves the renewed credentials alone.
+
+Credentials hold no resource and are never disposed. Stores share them, and stores that share a set
+renew its keys and tokens once for all of them. A secret stays in managed memory while its
+credentials live, as it does in the platform's and the cloud SDKs' own clients: the string an
+environment variable or a file first gave it in stays on the managed heap until it is collected, which
+no .NET code can prevent, so a copy kept elsewhere would not shorten its life. Secrets never appear in
+an exception, a log, a trace or a `ToString`, and neither does a request's signature. Errors carry the
+kind of credentials, the access key id on S3, and the service's code and request id, which is what
+support asks for and reveals nothing.
 
 ## 13. Errors
 

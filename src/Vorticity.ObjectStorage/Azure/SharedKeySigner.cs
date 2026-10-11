@@ -5,7 +5,6 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
-using Vorticity.ObjectStorage.Credentials;
 
 namespace Vorticity.ObjectStorage.Azure;
 
@@ -22,14 +21,14 @@ internal static class SharedKeySigner
     /// <param name="account">The account.</param>
     /// <param name="key">The account key, decoded from its base64.</param>
     /// <param name="contentLength">The body's length, 0 for none.</param>
-    internal static string Authorization(HttpRequestMessage request, string account, NativeSecret key, long contentLength) =>
+    internal static string Authorization(HttpRequestMessage request, string account, byte[] key, long contentLength) =>
         $"SharedKey {account}:{Signature(StringToSign(request, account, contentLength), key)}";
 
     /// <summary>
     /// Shared Key over a sub-request of a batch: its method, its date and the resource it names, with
     /// no body and no standard header.
     /// </summary>
-    internal static string SubRequestAuthorization(string method, string path, string date, string account, NativeSecret key)
+    internal static string SubRequestAuthorization(string method, string path, string date, string account, byte[] key)
     {
         string toSign = $"{method}\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{date}\n/{account}{path}";
         return $"SharedKey {account}:{Signature(toSign, key)}";
@@ -104,10 +103,10 @@ internal static class SharedKeySigner
         return text.ToString();
     }
 
-    private static string Signature(string toSign, NativeSecret key)
+    private static string Signature(string toSign, byte[] key)
     {
         Span<byte> mac = stackalloc byte[32];
-        HMACSHA256.HashData(key.Span, Encoding.UTF8.GetBytes(toSign), mac);
+        HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(toSign), mac);
         return Convert.ToBase64String(mac);
     }
 

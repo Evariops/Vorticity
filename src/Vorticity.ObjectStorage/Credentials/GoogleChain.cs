@@ -18,7 +18,7 @@ namespace Vorticity.ObjectStorage.Credentials;
 /// Compute Engine, GKE and Cloud Run. A file holds a service account's key, a user's refresh token, or
 /// an external account's configuration for workload identity federation.
 /// </summary>
-internal sealed class GoogleChain : GoogleCredentials
+internal sealed class GoogleChain : TokenSource
 {
     /// <summary>The scope the tokens are asked for: reading and writing objects, nothing else.</summary>
     internal const string Scope = "https://www.googleapis.com/auth/devstorage.read_write";
@@ -28,31 +28,34 @@ internal sealed class GoogleChain : GoogleCredentials
     private readonly CredentialHost _host;
     private readonly object _gate = new object();
     private RenewingToken? _tokens;
-    private RSA? _key;
     private string _named = "Google's application default credentials";
 
     internal GoogleChain(CredentialHost host) => _host = host;
 
-    internal override async ValueTask<string?> GetAsync(CancellationToken cancellationToken) =>
-        await Resolved().GetAsync(cancellationToken).ConfigureAwait(false);
+    internal override ValueTask<string?> GetAsync(CancellationToken cancellationToken) => Resolved().GetAsync(cancellationToken);
 
-    internal override void Expired() => _tokens?.Expired();
+    internal override void Expired(string token) => Volatile.Read(ref _tokens)?.Expired(token);
 
-    internal override bool UsesTokens => true;
-
-    protected override void Dispose(bool disposing)
-    {
-        _tokens?.Dispose();
-        _key?.Dispose();
-    }
-
-    public override string ToString() => _named;
+    public override string ToString() => Volatile.Read(ref _tokens)?.ToString() ?? _named;
 
     private RenewingToken Resolved()
     {
+        if (Volatile.Read(ref _tokens) is { } tokens)
+        {
+            return tokens;
+        }
+
         lock (_gate)
         {
-            return _tokens ??= new RenewingToken(Resolve(), _host.Time);
+            if (_tokens is { } raced)
+            {
+                return raced;
+            }
+
+            Func<CancellationToken, ValueTask<AccessToken>> source = Resolve();
+            RenewingToken resolved = new RenewingToken(source, _named, _host.Time);
+            Volatile.Write(ref _tokens, resolved);
+            return resolved;
         }
     }
 
@@ -102,7 +105,7 @@ internal sealed class GoogleChain : GoogleCredentials
                     throw new ObjectStoreException($"The private key of '{path}' could not be read.", invalid);
                 }
 
-                _key = key;
+                // Kept for the chain's life, which signs with it at each renewal, and released by its finalizer.
                 _named = $"the service account {email}";
                 return ct => ServiceAccountAsync(key, email, keyId, tokenUri, ct);
             }

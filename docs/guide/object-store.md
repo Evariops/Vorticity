@@ -179,9 +179,10 @@ new ones, and only while nobody else replaced it in between. The memory store co
 service, so the old bytes are read back and sent again in one put. The stores of the
 `Vorticity.ObjectStorage` package copy them on the service instead.
 
-The session disposes the stores it holds, as it disposes its pool and its cache. This one does not
-own the memory store under it, which the sample goes on using. The stores for S3, R2, OVHcloud and
-Scaleway are in the `Vorticity.ObjectStorage` package (see [object-storage.md](object-storage.md)).
+A store registered with a session stays yours: the session never disposes it, so one store can serve
+several sessions, and the sample goes on using this one after its session. The stores for S3 and the
+clouds that speak its API, Azure and Cloud Storage are in the `Vorticity.ObjectStorage` package (see
+[object-storage.md](object-storage.md)).
 
 ## Watch out
 

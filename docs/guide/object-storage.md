@@ -6,21 +6,27 @@ Cloud Storage, with the calls you use on a local path. The stores live in the `V
 package, written over the platform's HTTP client, with no cloud SDK.
 
 ```csharp
+StoreCredentials environment = StoreCredentials.FromEnvironment();
+await using S3ObjectStore lake = S3ObjectStore.FromEnvironment("lake", environment);
+await using S3ObjectStore media = S3ObjectStore.ForR2(accountId, "media", StoreCredentials.AccessKey(r2KeyId, r2Secret));
+await using AzureBlobObjectStore archive = new AzureBlobObjectStore(new AzureBlobStoreOptions
+{
+    Account = "contosoarchive",
+    Container = "archive",
+    Credentials = environment,
+});
+await using GoogleCloudStorageObjectStore warehouse = new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
+{
+    Bucket = "warehouse",
+    Credentials = StoreCredentials.Token(tokenSource),
+});
+
 await using VortexSession session = VortexSession.Create(o =>
 {
-    o.ObjectStores.Add("s3://lake", S3ObjectStore.FromEnvironment("lake"));
-    o.ObjectStores.Add("r2://media", S3ObjectStore.ForR2(accountId, "media", S3Credentials.FromEnvironment()));
-    o.ObjectStores.Add("az://archive", new AzureBlobObjectStore(new AzureBlobStoreOptions
-    {
-        Account = "contosoarchive",
-        Container = "archive",
-        Credentials = AzureCredentials.FromEnvironment(),
-    }));
-    o.ObjectStores.Add("gs://warehouse", new GoogleCloudStorageObjectStore(new GoogleCloudStorageOptions
-    {
-        Bucket = "warehouse",
-        Credentials = GoogleCredentials.Token(tokenSource),
-    }));
+    o.ObjectStores.Add("s3://lake", lake);
+    o.ObjectStores.Add("r2://media", media);
+    o.ObjectStores.Add("az://archive", archive);
+    o.ObjectStores.Add("gs://warehouse", warehouse);
 });
 
 await using (VortexFileWriter writer = session.CreateWriter<Reading>("s3://lake/readings/2026-10.vortex"))
@@ -46,31 +52,61 @@ be served by one store and one of its prefixes by another, with other credential
 
 `VortexSession.Default` holds no store, and a location fails there with a message that says how to
 register one. A library does not open connections or read credentials on a host that did not ask.
-One line serves every `s3://` bucket and every `az://` container from the environment, a store built
-on each one's first use:
+One line serves every `s3://` and `gs://` bucket and every `az://` container from the environment, a
+store built on each one's first use:
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o => o.ObjectStores.UseEnvironment());
 ```
 
-An `s3://` bucket takes the region of `AWS_REGION`, the endpoint of `AWS_ENDPOINT_URL_S3` or
-`AWS_ENDPOINT_URL`, and the AWS credential chain. The endpoint is how a host points at R2, OVHcloud,
-Scaleway or another service, and the store takes its profile from the endpoint's host. An `az://` container takes
-the account of `AZURE_STORAGE_ACCOUNT` or of a connection string, and Azure's chain. A `gs://` bucket
-takes Google's application default credentials, or the emulator `STORAGE_EMULATOR_HOST` names.
+An `s3://` bucket takes the region of `AWS_REGION` and the endpoint of `AWS_ENDPOINT_URL_S3` or
+`AWS_ENDPOINT_URL`. The endpoint is how a host points at R2, OVHcloud, Scaleway or another service
+that speaks the S3 API, and the store takes its profile from the endpoint's host. An `az://` container
+takes the account of `AZURE_STORAGE_ACCOUNT` or of a connection string. A `gs://` bucket takes Google's
+endpoint, or the emulator `STORAGE_EMULATOR_HOST` names. Every store shares one set of the
+environment's credentials, so that each service's keys or tokens are asked for once, however many
+buckets the session reads.
 
-| chain | its sources, in order |
+## Credentials
+
+`StoreCredentials` says how a store authorizes its requests, whichever service it speaks to, and a
+store refuses when it is built the credentials its service does not take.
+
+| credentials | S3 | Azure | Cloud Storage |
+|---|---|---|---|
+| `StoreCredentials.FromEnvironment()`, the chain each service's SDKs follow | yes | yes | yes |
+| `StoreCredentials.AccessKey(accessKeyId, secretAccessKey)`, keys given in code | yes | | |
+| `StoreCredentials.AccessKey(source)`, keys from a source of yours | yes | | |
+| `StoreCredentials.SharedKey(account, accountKey)`, an account key | | yes | |
+| `StoreCredentials.SharedAccessSignature(signature)` | | yes | |
+| `StoreCredentials.Token(source)`, bearer tokens from a source of yours | | yes | yes |
+| `StoreCredentials.Anonymous()`, for an emulator or a bucket anyone may read | yes | yes | yes |
+
+`StoreCredentials.FromEnvironment()` resolves each service's chain at its first request:
+
+| service | its sources, in order |
 |---|---|
-| AWS (`S3Credentials.Default()`) | `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, then a web identity, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` exchanged with STS, as a Kubernetes service account reaches a role on EKS, then a profile of `~/.aws/credentials` and `~/.aws/config`, then the container endpoint of ECS and EKS Pod Identity, then the instance metadata service, version 2 only |
-| Azure (`AzureCredentials.FromEnvironment()`) | a client secret, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_CLIENT_SECRET`, then a workload identity, `AZURE_FEDERATED_TOKEN_FILE`, then the storage credentials Azure's tools read, `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_KEY` or `AZURE_STORAGE_SAS_TOKEN`, then a managed identity, App Service's or the instance's |
-| Google (`GoogleCredentials.FromEnvironment()`) | the file `GOOGLE_APPLICATION_CREDENTIALS` names, a service account's key, a user's refresh token, or an external account's configuration for workload identity federation, then the file `gcloud auth application-default login` writes, then the metadata server of Compute Engine, GKE and Cloud Run |
+| S3 | `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, then a web identity, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN` exchanged with STS, as a Kubernetes service account reaches a role on EKS, then a profile of `~/.aws/credentials` and `~/.aws/config` that holds keys or a web identity, then the container endpoint of ECS and EKS Pod Identity, then the instance metadata service, version 2 only |
+| Azure | a client secret, `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_CLIENT_SECRET`, then a workload identity, `AZURE_FEDERATED_TOKEN_FILE`, then the storage credentials Azure's tools read, `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_KEY` or `AZURE_STORAGE_SAS_TOKEN`, then a managed identity, App Service's or the instance's |
+| Cloud Storage | the file `GOOGLE_APPLICATION_CREDENTIALS` names, a service account's key, a user's refresh token, or an external account's configuration for workload identity federation, then the file `gcloud auth application-default login` writes, then the metadata server of Compute Engine, GKE and Cloud Run |
 
-The first source that answers is kept. Credentials that expire are renewed five minutes before they
-do, by one request while the others go on with the current ones, and a token file that Kubernetes
-rotates is read again at each renewal.
+The first source the environment configures is kept. Credentials that expire are renewed five minutes
+before they do, by one request while the others go on with the current ones, and a token file that
+Kubernetes rotates is read again at each renewal. An AWS profile that takes its keys from IAM Identity
+Center, a credential process or another profile is refused with a message that says so: the AWS SDK's
+own credentials serve it through `StoreCredentials.AccessKey(source)`. The container endpoint named by
+`AWS_CONTAINER_CREDENTIALS_FULL_URI` is taken over HTTPS, or over HTTP on the loopback and the
+container hosts of ECS and EKS only, so that its authorization token never leaves the host.
 
-The session disposes the stores it holds, closing their connections and wiping their keys. Dispose
-every file opened through the session before the session itself.
+Keys and tokens from a source of yours are kept until five minutes before they expire, and asked for
+again when the service refuses them as expired. Keys whose expiry the source does not say are kept
+until then. No secret appears in an exception, a log or a trace, and a refusal names the kind of
+credentials, the access key id on S3, and the service's request id.
+
+Credentials hold no resource. Stores share them freely, and the stores that share a set renew its keys
+and tokens once for all of them. The session disposes the stores `UseEnvironment` builds. A store you
+register stays yours: dispose it after the session, which lets one store serve several sessions.
+Dispose every file opened through the session before the session itself.
 
 ## What each operation costs
 
@@ -124,11 +160,6 @@ request. A bucket is addressed by host, `lake.s3.eu-west-3.amazonaws.com`, unles
 dot, or the endpoint is an address or the loopback, where it is addressed by path. The endpoint is
 reached over HTTPS, and plain HTTP is taken on the loopback only, for an emulator.
 
-Keys come from code, `S3Credentials.Static(accessKeyId, secretAccessKey)`, or from the environment,
-`S3Credentials.FromEnvironment()`. The store copies the secret into native memory and wipes it when it
-is disposed. No secret appears in an exception, a log or a trace, and a refusal names the access key
-id and the service's request id.
-
 A put carries a checksum the service verifies: CRC-64/NVME on Amazon S3, and none by default on R2,
 OVHcloud and Scaleway, whose bytes TLS protects on their way. A bucket under Object Lock refuses a put
 without a checksum, and the store then sends `Content-MD5` with that put again and with every put after
@@ -146,10 +177,10 @@ marked as proven later is taken as absent until the contract tests have run agai
 an option of `S3StoreOptions` overrides it once you have checked it yourself.
 
 `AzureBlobObjectStore` takes the account, the container and its credentials. Microsoft recommends a
-bearer token from Microsoft Entra ID, which `AzureCredentials.Token` takes from a source of yours and
-renews five minutes before it expires. `AzureCredentials.SharedAccessSignature` and
-`AzureCredentials.SharedKey`, the account key, serve the accounts that use them and the emulators, and
-`AzureCredentials.FromConnectionString` reads either from a connection string. Every put carries the
+bearer token from Microsoft Entra ID, which `StoreCredentials.Token` takes from a source of yours.
+`StoreCredentials.SharedAccessSignature` and `StoreCredentials.SharedKey`, the account key, serve the
+accounts that use them and the emulators. `AzureBlobObjectStore.FromConnectionString` takes the
+account, the endpoint and the key or the signature from a connection string. Every put carries the
 CRC-64 of its body, which the service checks, and a larger put goes up in blocks of 16 MiB sent in
 parallel, committed by their list. A read relies on TLS and on the format's own checks, as on S3.
 
@@ -163,8 +194,8 @@ carries the CRC-32C the service checks. The service takes no precondition on an 
 conditional put goes in one request, held in memory up to 5 GiB, and a dataset's data objects, which
 carry no condition, go up in parts. A listing says each object's retention and holds. A deleted object
 stays billed for the bucket's soft-delete period, 7 days by default, so vacuum frees storage a week
-later there unless the bucket's period is 0. `GoogleCredentials.Token` takes OAuth 2.0 tokens from a
-source of yours, and `GoogleCredentials.Anonymous` sends none, for an emulator.
+later there unless the bucket's period is 0. `StoreCredentials.Token` takes OAuth 2.0 tokens from a
+source of yours, and `StoreCredentials.Anonymous` sends none, for an emulator.
 
 ## When the network fails
 

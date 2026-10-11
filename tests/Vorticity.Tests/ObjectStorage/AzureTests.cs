@@ -1,5 +1,5 @@
 // The Azure store against the emulator: Shared Key held to the reference's example, every operation and
-// what it makes of an answer, the structured body, batch deletes, and the three ways to authorize.
+// what it makes of an answer, batch deletes, and the ways to authorize.
 using System;
 using System.Buffers;
 using System.Collections.Generic;
@@ -23,12 +23,12 @@ public sealed class AzureTests
     private const string Lake = "lake";
 
     internal static AzureBlobObjectStore Store(
-        AzureEmulator emulator, AzureCredentials? credentials = null, long threshold = 32L << 20, int block = 16 << 20, int attempts = 5) =>
+        AzureEmulator emulator, StoreCredentials? credentials = null, long threshold = 32L << 20, int block = 16 << 20, int attempts = 5) =>
         new AzureBlobObjectStore(new AzureBlobStoreOptions
         {
             Account = AzureEmulator.Account,
             Container = Lake,
-            Credentials = credentials ?? AzureCredentials.SharedKey(AzureEmulator.Account, AzureEmulator.Key),
+            Credentials = credentials ?? StoreCredentials.SharedKey(AzureEmulator.Account, AzureEmulator.Key),
             Endpoint = emulator.BasePath.Length > 0 ? new Uri("http://127.0.0.1:8080" + emulator.BasePath) : null,
             Handler = emulator,
             PartThreshold = threshold,
@@ -178,7 +178,7 @@ public sealed class AzureTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         using AzureEmulator emulator = new AzureEmulator { Sas = "sv=2025-01-05&sr=c&sig=emulator%2Bsig" };
-        await using AzureBlobObjectStore store = Store(emulator, AzureCredentials.SharedAccessSignature("?sv=2025-01-05&sr=c&sig=emulator%2Bsig"));
+        await using AzureBlobObjectStore store = Store(emulator, StoreCredentials.SharedAccessSignature("?sv=2025-01-05&sr=c&sig=emulator%2Bsig"));
         Assert.Equal(PutOutcome.Created, await PutAsync(store, "a", [1, 2], PutCondition.IfAbsent, ct));
         Assert.Equal(2, (await store.ReadAsync("a", 0, new byte[2], null, ct)).BytesRead);
         Assert.Single(await store.ListAsync(string.Empty, null, ct).ToListAsync(ct));
@@ -193,13 +193,14 @@ public sealed class AzureTests
         using AzureEmulator emulator = new AzureEmulator { Token = "second" };
         emulator.Seed(Lake, "a", [1]);
         int asked = 0;
-        AzureCredentials tokens = AzureCredentials.Token(_ =>
+        StoreCredentials tokens = StoreCredentials.Token(_ =>
             new ValueTask<AccessToken>(new AccessToken(Interlocked.Increment(ref asked) == 1 ? "first" : "second", DateTimeOffset.UtcNow.AddHours(1))));
         await using AzureBlobObjectStore store = Store(emulator, tokens);
         Assert.NotNull(await store.HeadAsync("a", ct));
         Assert.NotNull(await store.HeadAsync("a", ct));
         Assert.Equal((2, 3), (asked, emulator.Requests));
         Assert.DoesNotContain("second", tokens.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("second", tokens.ForAzure!.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -209,7 +210,7 @@ public sealed class AzureTests
         using AzureEmulator emulator = new AzureEmulator();
         emulator.Seed(Lake, "a", [1]);
         string wrong = Convert.ToBase64String(Encoding.ASCII.GetBytes("not the account's key at all"));
-        await using AzureBlobObjectStore store = Store(emulator, AzureCredentials.SharedKey(AzureEmulator.Account, wrong));
+        await using AzureBlobObjectStore store = Store(emulator, StoreCredentials.SharedKey(AzureEmulator.Account, wrong));
         ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(async () => await store.ReadAsync("a", 0, new byte[1], null, ct));
         Assert.Contains("AuthenticationFailed", refused.Message, StringComparison.Ordinal);
         Assert.Contains(AzureEmulator.Account, refused.Message, StringComparison.Ordinal);
@@ -225,8 +226,17 @@ public sealed class AzureTests
 
         AzureConnection signed = AzureConnection.Parse("BlobEndpoint=https://contoso.blob.core.windows.net/;SharedAccessSignature=sv=2025&sig=x");
         Assert.Equal(("contoso", "sv=2025&sig=x"), (signed.Account, signed.Sas));
-        using AzureCredentials credentials = AzureCredentials.FromConnectionString("BlobEndpoint=https://contoso.blob.core.windows.net/;SharedAccessSignature=sv=2025&sig=x");
-        Assert.Throws<ArgumentException>(() => AzureCredentials.FromConnectionString("AccountName=contoso"));
+        Assert.Equal("a shared access signature", signed.Credentials()!.ToString());
+        Assert.Null(AzureConnection.Parse("AccountName=contoso").Credentials());
+    }
+
+    [Fact]
+    public async Task AConnectionStringConfiguresAStoreAndMustHoldCredentials()
+    {
+        await using AzureBlobObjectStore store = AzureBlobObjectStore.FromConnectionString(
+            $"DefaultEndpointsProtocol=https;AccountName=contoso;AccountKey={AzureEmulator.Key};EndpointSuffix=core.windows.net", Lake);
+        Assert.Equal(("contoso", Lake), (store.Account, store.Container));
+        Assert.Throws<ArgumentException>(() => AzureBlobObjectStore.FromConnectionString("AccountName=contoso", Lake));
     }
 
     [Fact]
@@ -234,7 +244,8 @@ public sealed class AzureTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         using AzureEmulator emulator = new AzureEmulator();
-        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("az://lake", Store(emulator, threshold: 256 << 10, block: 64 << 10)));
+        await using AzureBlobObjectStore lake = Store(emulator, threshold: 256 << 10, block: 64 << 10);
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("az://lake", lake));
         DatasetOptions options = new DatasetOptions { Session = session, ClusteringKey = ["Day"] };
         await using (VortexDataset dataset = await VortexDataset.CreateAsync("az://lake/tables/readings", LocationTests.Reading.Schema, options, ct))
         {

@@ -2547,6 +2547,19 @@ Vorticity.RowEncoding:     method string ToString()
 Vorticity.RowEncoding:     property RowSortField Ascending { get; }
 Vorticity.RowEncoding:     property bool Descending { get; }
 Vorticity.RowEncoding:     property bool NullsFirst { get; }
+Vorticity.ObjectStorage: struct Vorticity.ObjectStorage.AccessKey : IEquatable<AccessKey>
+Vorticity.ObjectStorage:     ctor AccessKey(string, string, string = default, Nullable<DateTimeOffset> = default)
+Vorticity.ObjectStorage:     method bool Equals(AccessKey)
+Vorticity.ObjectStorage:     method bool Equals(object)
+Vorticity.ObjectStorage:     method bool op_Equality(AccessKey, AccessKey)
+Vorticity.ObjectStorage:     method bool op_Inequality(AccessKey, AccessKey)
+Vorticity.ObjectStorage:     method int GetHashCode()
+Vorticity.ObjectStorage:     method string ToString()
+Vorticity.ObjectStorage:     method void Deconstruct(out string, out string, out string, out Nullable<DateTimeOffset>)
+Vorticity.ObjectStorage:     property Nullable<DateTimeOffset> ExpiresOn { get; init; }
+Vorticity.ObjectStorage:     property string AccessKeyId { get; init; }
+Vorticity.ObjectStorage:     property string SecretAccessKey { get; init; }
+Vorticity.ObjectStorage:     property string SessionToken { get; init; }
 Vorticity.ObjectStorage: struct Vorticity.ObjectStorage.AccessToken : IEquatable<AccessToken>
 Vorticity.ObjectStorage:     ctor AccessToken(string, DateTimeOffset)
 Vorticity.ObjectStorage:     method bool Equals(AccessToken)
@@ -2560,7 +2573,8 @@ Vorticity.ObjectStorage:     property DateTimeOffset ExpiresOn { get; init; }
 Vorticity.ObjectStorage:     property string Value { get; init; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.AzureBlobObjectStore : IObjectStore
 Vorticity.ObjectStorage:     ctor AzureBlobObjectStore(AzureBlobStoreOptions)
-Vorticity.ObjectStorage:     method AzureBlobObjectStore FromEnvironment(string)
+Vorticity.ObjectStorage:     method AzureBlobObjectStore FromConnectionString(string, string)
+Vorticity.ObjectStorage:     method AzureBlobObjectStore FromEnvironment(string, StoreCredentials = default)
 Vorticity.ObjectStorage:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DisposeAsync()
@@ -2573,7 +2587,7 @@ Vorticity.ObjectStorage:     property string Account { get; }
 Vorticity.ObjectStorage:     property string Container { get; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.AzureBlobStoreOptions
 Vorticity.ObjectStorage:     ctor AzureBlobStoreOptions()
-Vorticity.ObjectStorage:     property AzureCredentials Credentials { get; init; }
+Vorticity.ObjectStorage:     property StoreCredentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
 Vorticity.ObjectStorage:     property bool SendChecksums { get; init; }
@@ -2582,17 +2596,9 @@ Vorticity.ObjectStorage:     property int BlocksInFlight { get; init; }
 Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
 Vorticity.ObjectStorage:     property string Account { get; init; }
 Vorticity.ObjectStorage:     property string Container { get; init; }
-Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.AzureCredentials : IDisposable
-Vorticity.ObjectStorage:     method AzureCredentials FromConnectionString(string)
-Vorticity.ObjectStorage:     method AzureCredentials FromEnvironment()
-Vorticity.ObjectStorage:     method AzureCredentials SharedAccessSignature(string)
-Vorticity.ObjectStorage:     method AzureCredentials SharedKey(string, string)
-Vorticity.ObjectStorage:     method AzureCredentials Token(Func<CancellationToken, ValueTask<AccessToken>>)
-Vorticity.ObjectStorage:     method void Dispose()
-Vorticity.ObjectStorage:     method void Dispose(bool)
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.GoogleCloudStorageObjectStore : IObjectStore
 Vorticity.ObjectStorage:     ctor GoogleCloudStorageObjectStore(GoogleCloudStorageOptions)
-Vorticity.ObjectStorage:     method GoogleCloudStorageObjectStore FromEnvironment(string)
+Vorticity.ObjectStorage:     method GoogleCloudStorageObjectStore FromEnvironment(string, StoreCredentials = default)
 Vorticity.ObjectStorage:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DisposeAsync()
@@ -2604,7 +2610,7 @@ Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get
 Vorticity.ObjectStorage:     property string Bucket { get; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.GoogleCloudStorageOptions
 Vorticity.ObjectStorage:     ctor GoogleCloudStorageOptions()
-Vorticity.ObjectStorage:     property GoogleCredentials Credentials { get; init; }
+Vorticity.ObjectStorage:     property StoreCredentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
 Vorticity.ObjectStorage:     property bool ReadsSuffix { get; init; }
@@ -2613,12 +2619,6 @@ Vorticity.ObjectStorage:     property int PartSize { get; init; }
 Vorticity.ObjectStorage:     property int PartsInFlight { get; init; }
 Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
 Vorticity.ObjectStorage:     property string Bucket { get; init; }
-Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.GoogleCredentials : IDisposable
-Vorticity.ObjectStorage:     method GoogleCredentials Anonymous()
-Vorticity.ObjectStorage:     method GoogleCredentials FromEnvironment()
-Vorticity.ObjectStorage:     method GoogleCredentials Token(Func<CancellationToken, ValueTask<AccessToken>>)
-Vorticity.ObjectStorage:     method void Dispose()
-Vorticity.ObjectStorage:     method void Dispose(bool)
 Vorticity.ObjectStorage: static class Vorticity.ObjectStorage.ObjectStoreRegistryExtensions
 Vorticity.ObjectStorage:     method ObjectStoreRegistry UseEnvironment(ObjectStoreRegistry)
 Vorticity.ObjectStorage: enum Vorticity.ObjectStorage.S3Checksum
@@ -2627,19 +2627,13 @@ Vorticity.ObjectStorage:     const S3Checksum Crc64Nvme = 3
 Vorticity.ObjectStorage:     const S3Checksum Default = 0
 Vorticity.ObjectStorage:     const S3Checksum None = 1
 Vorticity.ObjectStorage:     field int value__
-Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.S3Credentials : IDisposable
-Vorticity.ObjectStorage:     method S3Credentials Default()
-Vorticity.ObjectStorage:     method S3Credentials FromEnvironment()
-Vorticity.ObjectStorage:     method S3Credentials Static(string, string, string = default)
-Vorticity.ObjectStorage:     method void Dispose()
-Vorticity.ObjectStorage:     method void Dispose(bool)
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3ObjectStore : IObjectStore
 Vorticity.ObjectStorage:     ctor S3ObjectStore(S3StoreOptions)
 Vorticity.ObjectStorage:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
-Vorticity.ObjectStorage:     method S3ObjectStore ForOvhcloud(string, string, S3Credentials)
-Vorticity.ObjectStorage:     method S3ObjectStore ForR2(string, string, S3Credentials)
-Vorticity.ObjectStorage:     method S3ObjectStore ForScaleway(string, string, S3Credentials)
-Vorticity.ObjectStorage:     method S3ObjectStore FromEnvironment(string)
+Vorticity.ObjectStorage:     method S3ObjectStore ForOvhcloud(string, string, StoreCredentials)
+Vorticity.ObjectStorage:     method S3ObjectStore ForR2(string, string, StoreCredentials)
+Vorticity.ObjectStorage:     method S3ObjectStore ForScaleway(string, string, StoreCredentials)
+Vorticity.ObjectStorage:     method S3ObjectStore FromEnvironment(string, StoreCredentials = default)
 Vorticity.ObjectStorage:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask DisposeAsync()
 Vorticity.ObjectStorage:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
@@ -2664,7 +2658,7 @@ Vorticity.ObjectStorage:     property Nullable<bool> ListsInOrder { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> PathStyle { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ReadsSuffix { get; init; }
 Vorticity.ObjectStorage:     property S3Checksum Checksum { get; init; }
-Vorticity.ObjectStorage:     property S3Credentials Credentials { get; init; }
+Vorticity.ObjectStorage:     property StoreCredentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
 Vorticity.ObjectStorage:     property int PartSize { get; init; }
@@ -2672,6 +2666,15 @@ Vorticity.ObjectStorage:     property int PartsInFlight { get; init; }
 Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
 Vorticity.ObjectStorage:     property string Bucket { get; init; }
 Vorticity.ObjectStorage:     property string Region { get; init; }
+Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreCredentials
+Vorticity.ObjectStorage:     method StoreCredentials AccessKey(Func<CancellationToken, ValueTask<AccessKey>>)
+Vorticity.ObjectStorage:     method StoreCredentials AccessKey(string, string, string = default)
+Vorticity.ObjectStorage:     method StoreCredentials Anonymous()
+Vorticity.ObjectStorage:     method StoreCredentials FromEnvironment()
+Vorticity.ObjectStorage:     method StoreCredentials SharedAccessSignature(string)
+Vorticity.ObjectStorage:     method StoreCredentials SharedKey(string, string)
+Vorticity.ObjectStorage:     method StoreCredentials Token(Func<CancellationToken, ValueTask<AccessToken>>)
+Vorticity.ObjectStorage:     method string ToString()
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions
 Vorticity.ObjectStorage:     ctor StoreTransportOptions()
 Vorticity.ObjectStorage:     property IWebProxy Proxy { get; init; }

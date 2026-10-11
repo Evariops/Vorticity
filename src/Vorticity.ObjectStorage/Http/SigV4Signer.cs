@@ -14,8 +14,9 @@ namespace Vorticity.ObjectStorage.Http;
 /// </summary>
 /// <remarks>
 /// The canonical request is built in a pooled buffer, and the hashes and the HMAC run through the
-/// platform's static span methods, so a signature allocates its <c>Authorization</c> header and
-/// nothing else once the day's key is derived. A body of data is not hashed: its requests carry
+/// platform's static span methods, so a signature allocates the four strings of its
+/// <c>Authorization</c> header, its scope, its signed headers, its hex signature and the header itself,
+/// once the day's key is derived. A body of data is not hashed: its requests carry
 /// <see cref="UnsignedPayload"/>, its integrity left to TLS and a checksum.
 /// </remarks>
 internal sealed class SigV4Signer
@@ -177,7 +178,7 @@ internal sealed class SigV4Signer
 
         Span<byte> key = stackalloc byte[32];
         Span<byte> text = stackalloc byte[64];
-        HMACSHA256.HashData(keys.SigningSecret.Span, text[..Encoding.ASCII.GetBytes(amzDate.AsSpan(0, 8), text)], key);
+        HMACSHA256.HashData(keys.SigningSecret, text[..Encoding.ASCII.GetBytes(amzDate.AsSpan(0, 8), text)], key);
         HMACSHA256.HashData(key, text[..Encoding.UTF8.GetBytes(_region, text)], key);
         HMACSHA256.HashData(key, text[..Encoding.UTF8.GetBytes(_service, text)], key);
         HMACSHA256.HashData(key, "aws4_request"u8, key);

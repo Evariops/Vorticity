@@ -30,8 +30,8 @@ namespace Vorticity.ObjectStorage;
 /// tail and its length in one request where the service is known to answer one.
 /// </para>
 /// <para>
-/// The store owns its credentials and its connections; disposing it wipes the one and closes the
-/// other. A session that holds it disposes it with itself.
+/// The store owns its connections, which disposing it closes. Its credentials are the caller's, never
+/// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
 public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
@@ -39,6 +39,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
     private readonly S3StoreOptions _options;
+    private readonly AwsKeySource _keys;
     private readonly HttpTransport _transport;
     private readonly S3Profile _profile;
     private readonly ObjectStoreCapabilities _capabilities;
@@ -49,8 +50,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     private int _disposed;
 
     /// <summary>A store over <see cref="S3StoreOptions.Bucket"/>.</summary>
-    /// <param name="options">The bucket, its endpoint, its keys and its connections.</param>
-    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback, or carries a path.</exception>
+    /// <param name="options">The bucket, its endpoint, its credentials and its connections.</param>
+    /// <exception cref="ArgumentException">
+    /// The endpoint is plain HTTP off the loopback, or carries a path, or the credentials cannot sign
+    /// S3 requests.
+    /// </exception>
     public S3ObjectStore(S3StoreOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -61,6 +65,9 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
             CheckEndpoint(endpoint);
         }
 
+        _keys = options.Credentials.ForS3 ?? throw new ArgumentException(
+            $"An S3 store signs its requests with an access key, keys from a source, the environment's credentials or none, not {options.Credentials}.",
+            nameof(options));
         _options = options;
         _profile = options.Profile ?? ProfileOf(options.Endpoint);
         if (options.Bucket.EndsWith("--x-s3", StringComparison.Ordinal))
@@ -91,12 +98,15 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     /// A store over <paramref name="bucket"/> configured from the environment, as the AWS SDKs read it:
     /// the region from <c>AWS_REGION</c> or <c>AWS_DEFAULT_REGION</c>, the endpoint from
     /// <c>AWS_ENDPOINT_URL_S3</c> or <c>AWS_ENDPOINT_URL</c>, its profile from the endpoint's host, and
-    /// the keys from the AWS credential chain (<see cref="S3Credentials.Default"/>), the environment's
-    /// first.
+    /// the keys from the AWS credential chain, <see cref="StoreCredentials.FromEnvironment"/>.
     /// </summary>
     /// <param name="bucket">The bucket.</param>
-    /// <returns>The store; the caller, or the session it is given to, disposes it.</returns>
-    public static S3ObjectStore FromEnvironment(string bucket)
+    /// <param name="credentials">
+    /// The credentials, the environment's when null: credentials shared by several stores renew their
+    /// keys once for all of them.
+    /// </param>
+    /// <returns>The store, which the caller disposes.</returns>
+    public static S3ObjectStore FromEnvironment(string bucket, StoreCredentials? credentials = null)
     {
         string? endpoint = Environment.GetEnvironmentVariable("AWS_ENDPOINT_URL_S3") is { Length: > 0 } s3
             ? s3
@@ -109,7 +119,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
             Bucket = bucket,
             Region = string.IsNullOrEmpty(region) ? null : region,
             Endpoint = string.IsNullOrEmpty(endpoint) ? null : new Uri(endpoint, UriKind.Absolute),
-            Credentials = S3Credentials.Default(),
+            Credentials = credentials ?? StoreCredentials.FromEnvironment(),
         });
     }
 
@@ -118,7 +128,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     /// <param name="bucket">The bucket.</param>
     /// <param name="credentials">An R2 API token's key pair.</param>
     /// <returns>The store.</returns>
-    public static S3ObjectStore ForR2(string accountId, string bucket, S3Credentials credentials)
+    public static S3ObjectStore ForR2(string accountId, string bucket, StoreCredentials credentials)
     {
         ArgumentException.ThrowIfNullOrEmpty(accountId);
         return new S3ObjectStore(new S3StoreOptions
@@ -135,7 +145,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     /// <param name="bucket">The bucket.</param>
     /// <param name="credentials">The S3 key pair of an OVHcloud user.</param>
     /// <returns>The store.</returns>
-    public static S3ObjectStore ForOvhcloud(string region, string bucket, S3Credentials credentials)
+    public static S3ObjectStore ForOvhcloud(string region, string bucket, StoreCredentials credentials)
     {
         ArgumentException.ThrowIfNullOrEmpty(region);
         return new S3ObjectStore(new S3StoreOptions
@@ -153,7 +163,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     /// <param name="bucket">The bucket.</param>
     /// <param name="credentials">The key pair of a Scaleway API key.</param>
     /// <returns>The store.</returns>
-    public static S3ObjectStore ForScaleway(string region, string bucket, S3Credentials credentials)
+    public static S3ObjectStore ForScaleway(string region, string bucket, StoreCredentials credentials)
     {
         ArgumentException.ThrowIfNullOrEmpty(region);
         return new S3ObjectStore(new S3StoreOptions
@@ -177,6 +187,9 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
 
     /// <summary>The transport, for tests.</summary>
     internal HttpTransport Transport => _transport;
+
+    /// <summary>The credentials, for tests.</summary>
+    internal StoreCredentials Credentials => _options.Credentials;
 
     /// <inheritdoc/>
     bool IWholeConditionalPuts.HoldsConditionalPutsWhole => HoldsConditionalPutsWhole;
@@ -242,14 +255,13 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
         while (continuation is not null);
     }
 
-    /// <summary>Closes the connections and wipes the keys.</summary>
+    /// <summary>Closes the connections. The credentials are left to the caller, and to the other stores that share them.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             _transport.Dispose();
-            _options.Credentials.Dispose();
         }
 
         return ValueTask.CompletedTask;
@@ -447,13 +459,10 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
                 throw new StoreRetryException($"{operation} was refused for a skewed clock: {error}", cost: 0);
             }
 
-            if (error.Code is "ExpiredToken" or "TokenRefreshRequired")
+            // The keys of the refused request, read back from it: a request signed since with renewed keys keeps them.
+            if (error.Code is "ExpiredToken" or "TokenRefreshRequired" && HttpAnswers.RequestHeader(response, "x-amz-security-token") is { } expired)
             {
-                if (_lastKeys is { } stale)
-                {
-                    _options.Credentials.Expired(stale);
-                }
-
+                _keys.Expired(expired);
                 throw new StoreRetryException($"{operation} was refused for expired keys: {error}", cost: 0);
             }
 
@@ -470,8 +479,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
                 $"{operation} on '{key}' was sent to the wrong region: the bucket '{Bucket}' is in {region}. Set S3StoreOptions.Region. {error}");
         }
 
-        string identity = _lastKeys is { } keys ? $", as {keys}" : string.Empty;
-        return new ObjectStoreException($"{operation} on '{key}' was refused{identity}: {error}");
+        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_keys}: {error}");
     }
 
     /// <summary>Learns the service's clock from <c>Date</c> when it is off ours by more than five minutes, and says whether it was.</summary>
@@ -523,9 +531,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
         }
     }
 
-    /// <summary>The keys the last request was signed with: the identity a refusal names, and the keys an expiry renews.</summary>
-    private AwsKeys? _lastKeys;
-
     /// <summary>The object's ETag; the caller's own string when it is the token it gave, so a read bound to it allocates none.</summary>
     private static string TokenOf(HttpResponseMessage response, string key, string? ifToken)
     {
@@ -573,14 +578,24 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
 
     /// <summary>
     /// Adds the date, the payload hash, the session token and <paramref name="extra"/>, and the signature
-    /// over them and the host. An extra header named <c>content-…</c> goes on the body.
+    /// over them and the host. An extra header named <c>content-…</c> goes on the body. Without keys,
+    /// the extra headers go alone and the request unsigned.
     /// </summary>
     private async ValueTask SignAsync(
         HttpRequestMessage request, Target target, string canonicalUri, string canonicalQuery, string payloadHash, CancellationToken cancellationToken,
         (string Name, string Value)[]? extra = null)
     {
-        AwsKeys keys = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
-        _lastKeys = keys;
+        AwsKeys? keys = await _keys.GetAsync(cancellationToken).ConfigureAwait(false);
+        if (keys is null)
+        {
+            foreach ((string name, string value) in extra ?? [])
+            {
+                AddHeader(request, name, value);
+            }
+
+            return;
+        }
+
         string amzDate = SigV4Signer.AmzDate(_time.GetUtcNow() + TimeSpan.FromTicks(Interlocked.Read(ref _skewTicks)));
         request.Headers.Host = target.Host;
         request.Headers.TryAddWithoutValidation("x-amz-date", amzDate);
@@ -598,15 +613,21 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
 
         foreach ((string name, string value) in extra ?? [])
         {
-            bool added = name.StartsWith("content-", StringComparison.Ordinal)
-                ? request.Content!.Headers.TryAddWithoutValidation(name, value)
-                : request.Headers.TryAddWithoutValidation(name, value);
-            Debug.Assert(added, $"The header {name} was refused.");
+            AddHeader(request, name, value);
             headers[count++] = (name, value);
         }
 
         string authorization = target.Signer.Authorization(keys, amzDate, request.Method.Method, canonicalUri, canonicalQuery, ((Span<(string, string)>)headers)[..count], payloadHash);
         request.Headers.TryAddWithoutValidation("Authorization", authorization);
+    }
+
+    /// <summary>A header on the request, or on its body for a <c>content-…</c> one.</summary>
+    private static void AddHeader(HttpRequestMessage request, string name, string value)
+    {
+        bool added = name.StartsWith("content-", StringComparison.Ordinal)
+            ? request.Content!.Headers.TryAddWithoutValidation(name, value)
+            : request.Headers.TryAddWithoutValidation(name, value);
+        Debug.Assert(added, $"The header {name} was refused.");
     }
 
     private ValueTask<Target> TargetAsync(CancellationToken cancellationToken) =>
@@ -647,7 +668,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     /// <summary>Where requests go for <paramref name="region"/>: the base, the host signed, the bucket's path when it is addressed by path.</summary>
     private Target TargetFor(string region)
     {
-        Uri endpoint = _options.Endpoint ?? new Uri($"https://s3.{region}.amazonaws.com");
+        Uri endpoint = _options.Endpoint ?? new Uri($"https://s3.{region}.{AwsPartition.DomainOf(region)}");
         bool byPath = _options.PathStyle ?? (_profile == S3Profile.R2 || IsAddressOrLoopback(endpoint) || BucketAddressedByPath(Bucket));
         string host = byPath ? Authority(endpoint) : $"{Bucket}.{Authority(endpoint)}";
         string baseUri = $"{endpoint.Scheme}://{host}";
@@ -687,7 +708,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
         return host.EndsWith(".r2.cloudflarestorage.com", StringComparison.OrdinalIgnoreCase) ? S3Profile.R2
             : host.EndsWith(".cloud.ovh.net", StringComparison.OrdinalIgnoreCase) ? S3Profile.Ovhcloud
             : host.EndsWith(".scw.cloud", StringComparison.OrdinalIgnoreCase) ? S3Profile.Scaleway
-            : host.EndsWith(".amazonaws.com", StringComparison.OrdinalIgnoreCase) ? S3Profile.Amazon
+            : host.EndsWith(".amazonaws.com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".amazonaws.com.cn", StringComparison.OrdinalIgnoreCase) ? S3Profile.Amazon
             : S3Profile.Other;
     }
 

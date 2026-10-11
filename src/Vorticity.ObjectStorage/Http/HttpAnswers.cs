@@ -27,6 +27,29 @@ internal static class HttpAnswers
     }
 
     /// <summary>
+    /// A header of the request an answer replies to, or null: what the refused request was signed with,
+    /// which a request signed since with renewed credentials does not share.
+    /// </summary>
+    internal static string? RequestHeader(HttpResponseMessage response, string name)
+    {
+        if (response.RequestMessage?.Headers.NonValidated.TryGetValues(name, out HeaderStringValues values) == true)
+        {
+            foreach (string value in values)
+            {
+                return value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The bearer token the request an answer replies to carried, or null when it carried none.</summary>
+    internal static string? BearerOf(HttpResponseMessage response) =>
+        RequestHeader(response, "Authorization") is { } authorization && authorization.StartsWith("Bearer ", StringComparison.Ordinal)
+            ? authorization["Bearer ".Length..]
+            : null;
+
+    /// <summary>
     /// The object's length from <c>Content-Range: bytes a-b/total</c>, or from <c>bytes */total</c>,
     /// and the first byte the answer holds; null when the header is missing or says no length.
     /// </summary>

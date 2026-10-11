@@ -48,8 +48,8 @@ internal static class ObjectStore
 
         await using CountingObjectStore counting = new CountingObjectStore(memory);
 
-        // A session that holds a store opens a location in it as it opens a path. The session
-        // disposes the stores it holds; this one does not own the memory store under it.
+        // A session that holds a store opens a location in it as it opens a path. A store registered
+        // with a session stays the caller's, never disposed by the session.
         await using (VortexSession session = VortexSession.Create(o =>
         {
             o.SegmentCache = new SegmentCache(64L * 1024 * 1024);

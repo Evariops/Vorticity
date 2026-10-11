@@ -25,7 +25,7 @@ public sealed class S3ReadTests
             Bucket = Bucket,
             Region = region,
             Endpoint = endpoint,
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = emulator,
             ReadsSuffix = readsSuffix,
             Transport = transport ?? new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero },
@@ -248,7 +248,7 @@ public sealed class S3ReadTests
         {
             Bucket = Bucket,
             Region = "eu-west-3",
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, "a wrong secret"),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, "a wrong secret"),
             Handler = emulator,
         });
         ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(async () => await store.ReadAsync("f", 0, new byte[10], null, ct));
@@ -312,7 +312,8 @@ public sealed class S3ReadTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator();
         emulator.Seed(Bucket, "readings/one.vortex", await System.IO.File.ReadAllBytesAsync(await LocationTests.ReadingsFileAsync(), ct));
-        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", Store(emulator)));
+        await using S3ObjectStore lake = Store(emulator);
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("s3://lake", lake));
         await using (VortexFile file = await session.OpenAsync("s3://lake/readings/one.vortex", cancellationToken: ct))
         {
             Assert.Equal(1, emulator.Requests);
@@ -335,7 +336,7 @@ public sealed class S3ReadTests
         {
             Bucket = Bucket,
             Region = "eu-west-3",
-            Credentials = S3Credentials.Static(S3Emulator.AccessKey, S3Emulator.Secret),
+            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
             Handler = handler,
         });
         string token = LeanHandler.ETag;

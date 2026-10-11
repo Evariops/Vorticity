@@ -12,8 +12,12 @@ public sealed class AzureBlobStoreOptions
     /// <summary>The container.</summary>
     public required string Container { get; init; }
 
-    /// <summary>How requests are authorized, which the store owns from then on.</summary>
-    public required AzureCredentials Credentials { get; init; }
+    /// <summary>
+    /// What authorizes the requests: tokens, a shared access signature, the account key, the
+    /// environment's credentials, or none for a container anyone may read. Other stores may share them,
+    /// and the store never disposes them.
+    /// </summary>
+    public required StoreCredentials Credentials { get; init; }
 
     /// <summary>
     /// The blob endpoint, its account's path included for an emulator that addresses accounts by path.

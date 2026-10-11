@@ -31,8 +31,8 @@ public sealed class CredentialChainTests
         host.Env["AWS_ACCESS_KEY_ID"] = "AKIDENV";
         host.Env["AWS_SECRET_ACCESS_KEY"] = "secret";
         host.Env["AWS_WEB_IDENTITY_TOKEN_FILE"] = "/never/read";
-        using AwsChain chain = new AwsChain(host.Build());
-        AwsKeys keys = await chain.GetAsync(TestContext.Current.CancellationToken);
+        AwsChain chain = new AwsChain(host.Build());
+        AwsKeys keys = (await chain.GetAsync(TestContext.Current.CancellationToken))!;
         Assert.Equal(("AKIDENV", (string?)null), (keys.AccessKeyId, keys.SessionToken));
         Assert.Empty(host.Requests);
     }
@@ -50,9 +50,9 @@ public sealed class CredentialChainTests
         host.Answer = request => request.Uri == "https://sts.eu-west-3.amazonaws.com/"
             ? Ok($"<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>ASIA{++issued}</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>tok</SessionToken><Expiration>{host.Clock.Now.AddHours(1):yyyy-MM-dd'T'HH:mm:ss'Z'}</Expiration></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>")
             : null;
-        using AwsChain chain = new AwsChain(host.Build());
+        AwsChain chain = new AwsChain(host.Build());
 
-        AwsKeys first = await chain.GetAsync(ct);
+        AwsKeys first = (await chain.GetAsync(ct))!;
         Assert.Equal(("ASIA1", "tok"), (first.AccessKeyId, first.SessionToken));
         Assert.Equal("AssumeRoleWithWebIdentity", host.Requests[0].Form["Action"]);
         Assert.Equal(("arn:aws:iam::123:role/reader", "jwt-1"), (host.Requests[0].Form["RoleArn"], host.Requests[0].Form["WebIdentityToken"]));
@@ -61,8 +61,23 @@ public sealed class CredentialChainTests
         // Within five minutes of the expiry, the keys are renewed, the rotated file read again.
         host.Files["/var/run/token"] = "jwt-2";
         host.Clock.Advance(TimeSpan.FromMinutes(56));
-        Assert.Equal("ASIA2", (await chain.GetAsync(ct)).AccessKeyId);
+        Assert.Equal("ASIA2", (await chain.GetAsync(ct))!.AccessKeyId);
         Assert.Equal("jwt-2", host.Requests[1].Form["WebIdentityToken"]);
+    }
+
+    [Fact]
+    public async Task StsIsAskedInTheDomainOfItsRegionsPartition()
+    {
+        FakeHost host = new FakeHost();
+        host.Env["AWS_WEB_IDENTITY_TOKEN_FILE"] = "/var/run/token";
+        host.Env["AWS_ROLE_ARN"] = "arn:aws-cn:iam::123:role/reader";
+        host.Env["AWS_REGION"] = "cn-north-1";
+        host.Files["/var/run/token"] = "jwt";
+        host.Answer = request => request.Uri == "https://sts.cn-north-1.amazonaws.com.cn/"
+            ? Ok("<AssumeRoleWithWebIdentityResponse><AssumeRoleWithWebIdentityResult><Credentials><AccessKeyId>ASIACN</AccessKeyId><SecretAccessKey>s</SecretAccessKey><SessionToken>tok</SessionToken></Credentials></AssumeRoleWithWebIdentityResult></AssumeRoleWithWebIdentityResponse>")
+            : null;
+        AwsChain chain = new AwsChain(host.Build());
+        Assert.Equal("ASIACN", (await chain.GetAsync(TestContext.Current.CancellationToken))!.AccessKeyId);
     }
 
     [Fact]
@@ -72,8 +87,26 @@ public sealed class CredentialChainTests
         host.Env["AWS_PROFILE"] = "dev";
         host.Files["/home/u/.aws/credentials"] = "[default]\naws_access_key_id = AKIDDEFAULT\naws_secret_access_key = a\n\n[dev]\naws_access_key_id = AKIDDEV\naws_secret_access_key = b\n";
         host.Files["/home/u/.aws/config"] = "[profile dev]\nregion = eu-west-3\n";
-        using AwsChain chain = new AwsChain(host.Build());
-        Assert.Equal("AKIDDEV", (await chain.GetAsync(TestContext.Current.CancellationToken)).AccessKeyId);
+        AwsChain chain = new AwsChain(host.Build());
+        Assert.Equal("AKIDDEV", (await chain.GetAsync(TestContext.Current.CancellationToken))!.AccessKeyId);
+    }
+
+    [Theory]
+    [InlineData("credential_process = /usr/local/bin/vault-keys", "a credential process")]
+    [InlineData("sso_session = corp\nsso_account_id = 123\nsso_role_name = reader", "IAM Identity Center")]
+    [InlineData("role_arn = arn:aws:iam::123:role/reader\nsource_profile = base", "a role assumed from another profile")]
+    [InlineData("role_arn = arn:aws:iam::123:role/reader\ncredential_source = Ec2InstanceMetadata", "a role assumed from the host's own credentials")]
+    public async Task AProfileThatTakesItsKeysElsewhereSaysSoRatherThanFallingThrough(string settings, string elsewhere)
+    {
+        // The profile is refused with what it names, and the instance metadata service is never asked.
+        FakeHost host = new FakeHost();
+        host.Env["AWS_PROFILE"] = "dev";
+        host.Files["/home/u/.aws/config"] = $"[profile dev]\n{settings}\n";
+        AwsChain chain = new AwsChain(host.Build());
+        ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(async () => await chain.GetAsync(TestContext.Current.CancellationToken));
+        Assert.Contains($"'dev' takes its keys from {elsewhere}", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("StoreCredentials.AccessKey(source)", refused.Message, StringComparison.Ordinal);
+        Assert.Empty(host.Requests);
     }
 
     [Fact]
@@ -86,8 +119,37 @@ public sealed class CredentialChainTests
         host.Answer = request => request.Uri == "http://169.254.170.23/v1/credentials" && request.Headers.GetValueOrDefault("Authorization") == "pod-token"
             ? Ok($"{{\"AccessKeyId\":\"ASIAPOD\",\"SecretAccessKey\":\"s\",\"Token\":\"t\",\"Expiration\":\"{host.Clock.Now.AddHours(6):O}\"}}")
             : null;
-        using AwsChain chain = new AwsChain(host.Build());
-        Assert.Equal("ASIAPOD", (await chain.GetAsync(TestContext.Current.CancellationToken)).AccessKeyId);
+        AwsChain chain = new AwsChain(host.Build());
+        Assert.Equal("ASIAPOD", (await chain.GetAsync(TestContext.Current.CancellationToken))!.AccessKeyId);
+    }
+
+    [Theory]
+    [InlineData("http://example.com/credentials", false)]
+    [InlineData("http://10.0.0.7/credentials", false)]
+    [InlineData("https://credentials.example.com/v1", true)]
+    [InlineData("http://127.0.0.1:8080/credentials", true)]
+    [InlineData("http://169.254.170.2/v2/credentials", true)]
+    [InlineData("http://[fd00:ec2::23]/v1/credentials", true)]
+    public async Task AFullContainerUriIsTakenOnlyWhereItsTokenStaysOnTheHost(string uri, bool taken)
+    {
+        // Off the host and over plain HTTP, the authorization token would travel in clear: the URI is
+        // refused before any request.
+        FakeHost host = new FakeHost();
+        host.Env["AWS_CONTAINER_CREDENTIALS_FULL_URI"] = uri;
+        host.Env["AWS_CONTAINER_AUTHORIZATION_TOKEN"] = "container-token";
+        host.Answer = request => request.Uri == new Uri(uri).ToString()
+            ? Ok($"{{\"AccessKeyId\":\"ASIACONTAINER\",\"SecretAccessKey\":\"s\",\"Token\":\"t\",\"Expiration\":\"{host.Clock.Now.AddHours(6):O}\"}}")
+            : null;
+        AwsChain chain = new AwsChain(host.Build());
+        if (taken)
+        {
+            Assert.Equal("ASIACONTAINER", (await chain.GetAsync(TestContext.Current.CancellationToken))!.AccessKeyId);
+            return;
+        }
+
+        ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(async () => await chain.GetAsync(TestContext.Current.CancellationToken));
+        Assert.Contains("would leave the host", refused.Message, StringComparison.Ordinal);
+        Assert.Empty(host.Requests);
     }
 
     [Fact]
@@ -102,8 +164,8 @@ public sealed class CredentialChainTests
                 => Ok($"{{\"Code\":\"Success\",\"AccessKeyId\":\"ASIAEC2\",\"SecretAccessKey\":\"s\",\"Token\":\"t\",\"Expiration\":\"{host.Clock.Now.AddHours(6):O}\"}}"),
             _ => null,
         };
-        using AwsChain chain = new AwsChain(host.Build());
-        Assert.Equal("ASIAEC2", (await chain.GetAsync(TestContext.Current.CancellationToken)).AccessKeyId);
+        AwsChain chain = new AwsChain(host.Build());
+        Assert.Equal("ASIAEC2", (await chain.GetAsync(TestContext.Current.CancellationToken))!.AccessKeyId);
         Assert.Equal(3, host.Requests.Count);
         Assert.Contains("instance's role", chain.ToString(), StringComparison.Ordinal);
     }
@@ -113,12 +175,12 @@ public sealed class CredentialChainTests
     {
         FakeHost host = new FakeHost();
         host.Env["AWS_EC2_METADATA_DISABLED"] = "true";
-        using AwsChain disabled = new AwsChain(host.Build());
+        AwsChain disabled = new AwsChain(host.Build());
         ObjectStoreException none = await Assert.ThrowsAsync<ObjectStoreException>(async () => await disabled.GetAsync(TestContext.Current.CancellationToken));
         Assert.Contains("disabled", none.Message, StringComparison.Ordinal);
 
         FakeHost silent = new FakeHost();
-        using AwsChain unanswered = new AwsChain(silent.Build());
+        AwsChain unanswered = new AwsChain(silent.Build());
         ObjectStoreException nothing = await Assert.ThrowsAsync<ObjectStoreException>(async () => await unanswered.GetAsync(TestContext.Current.CancellationToken));
         Assert.Contains("did not answer", nothing.Message, StringComparison.Ordinal);
     }
@@ -136,7 +198,7 @@ public sealed class CredentialChainTests
         {
             Bucket = "lake",
             Region = "eu-west-3",
-            Credentials = new AwsChain(host.Build()),
+            Credentials = StoreCredentials.FromHost(host.Build()),
             Handler = emulator,
         });
         Assert.Equal(3, (await store.ReadAsync("a", 0, new byte[3], null, ct)).BytesRead);
@@ -153,7 +215,7 @@ public sealed class CredentialChainTests
         host.Answer = request => request.Uri == "https://login.microsoftonline.com/tenant/oauth2/v2.0/token"
             ? Ok("{\"token_type\":\"Bearer\",\"expires_in\":3599,\"access_token\":\"entra-token\"}")
             : null;
-        using AzureChain chain = new AzureChain(host.Build());
+        AzureChain chain = new AzureChain(host.Build());
         AzureAuthorization authorization = await chain.GetAsync(TestContext.Current.CancellationToken);
         Assert.Equal("entra-token", authorization.Bearer);
         Dictionary<string, string> form = host.Requests.Single().Form;
@@ -174,7 +236,7 @@ public sealed class CredentialChainTests
         host.Answer = request => request.Uri == "https://login.example/tenant/oauth2/v2.0/token"
             ? Ok($"{{\"expires_in\":3600,\"access_token\":\"t-{request.Form["client_assertion"]}\"}}")
             : null;
-        using AzureChain chain = new AzureChain(host.Build());
+        AzureChain chain = new AzureChain(host.Build());
         Assert.Equal("t-federated-1", (await chain.GetAsync(ct)).Bearer);
         Assert.Equal("urn:ietf:params:oauth:client-assertion-type:jwt-bearer", host.Requests[0].Form["client_assertion_type"]);
 
@@ -203,7 +265,7 @@ public sealed class CredentialChainTests
                 && request.Headers.GetValueOrDefault("Metadata") == "true")
                 ? Ok($"{{\"access_token\":\"managed\",\"expires_on\":\"{expires}\"}}")
                 : null;
-        using AzureChain chain = new AzureChain(host.Build());
+        AzureChain chain = new AzureChain(host.Build());
         Assert.Equal("managed", (await chain.GetAsync(TestContext.Current.CancellationToken)).Bearer);
     }
 
@@ -212,7 +274,7 @@ public sealed class CredentialChainTests
     {
         FakeHost host = new FakeHost();
         host.Env["AZURE_STORAGE_CONNECTION_STRING"] = $"DefaultEndpointsProtocol=https;AccountName=contoso;AccountKey={AzureEmulator.Key};EndpointSuffix=core.windows.net";
-        using AzureChain chain = new AzureChain(host.Build());
+        AzureChain chain = new AzureChain(host.Build());
         AzureAuthorization authorization = await chain.GetAsync(TestContext.Current.CancellationToken);
         Assert.Equal(("contoso", (string?)null), (authorization.Account, authorization.Bearer));
         Assert.Empty(host.Requests);
@@ -243,7 +305,7 @@ public sealed class CredentialChainTests
             assertion = request.Form["assertion"];
             return Ok("{\"access_token\":\"sa-token\",\"expires_in\":3599,\"token_type\":\"Bearer\"}");
         };
-        using GoogleChain chain = new GoogleChain(host.Build());
+        GoogleChain chain = new GoogleChain(host.Build());
         Assert.Equal("sa-token", await chain.GetAsync(TestContext.Current.CancellationToken));
 
         // The JWT: its header names the key, its claims the account, the scope and the audience, and its
@@ -268,7 +330,7 @@ public sealed class CredentialChainTests
         host.Answer = request => request.Uri == "https://oauth2.googleapis.com/token" && request.Form.GetValueOrDefault("refresh_token") == "rt"
             ? Ok("{\"access_token\":\"user-token\",\"expires_in\":3599}")
             : null;
-        using GoogleChain chain = new GoogleChain(host.Build());
+        GoogleChain chain = new GoogleChain(host.Build());
         Assert.Equal("user-token", await chain.GetAsync(TestContext.Current.CancellationToken));
         Assert.Equal("refresh_token", host.Requests.Single().Form["grant_type"]);
     }
@@ -281,7 +343,7 @@ public sealed class CredentialChainTests
             && request.Headers.GetValueOrDefault("Metadata-Flavor") == "Google"
                 ? Ok("{\"access_token\":\"gce-token\",\"expires_in\":3599,\"token_type\":\"Bearer\"}")
                 : null;
-        using GoogleChain chain = new GoogleChain(host.Build());
+        GoogleChain chain = new GoogleChain(host.Build());
         Assert.Equal("gce-token", await chain.GetAsync(TestContext.Current.CancellationToken));
     }
 
@@ -306,7 +368,7 @@ public sealed class CredentialChainTests
                 => Ok($"{{\"accessToken\":\"impersonated\",\"expireTime\":\"{host.Clock.Now.AddHours(1):yyyy-MM-dd'T'HH:mm:ss'Z'}\"}}"),
             _ => null,
         };
-        using GoogleChain chain = new GoogleChain(host.Build());
+        GoogleChain chain = new GoogleChain(host.Build());
         Assert.Equal("impersonated", await chain.GetAsync(TestContext.Current.CancellationToken));
         Assert.Equal(2, host.Requests.Count);
     }

@@ -9,8 +9,11 @@ public sealed class GoogleCloudStorageOptions
     /// <summary>The bucket.</summary>
     public required string Bucket { get; init; }
 
-    /// <summary>How requests are authorized, which the store owns from then on.</summary>
-    public required GoogleCredentials Credentials { get; init; }
+    /// <summary>
+    /// What authorizes the requests: tokens, the environment's credentials, or none for an emulator or
+    /// a bucket anyone may read. Other stores may share them, and the store never disposes them.
+    /// </summary>
+    public required StoreCredentials Credentials { get; init; }
 
     /// <summary>
     /// The endpoint, <c>https://storage.googleapis.com</c> when null, or an emulator's on the loopback,

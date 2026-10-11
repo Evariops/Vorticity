@@ -251,9 +251,9 @@ public sealed class VortexSessionOptions
     public VortexExtensionRegistry Extensions { get; } = new VortexExtensionRegistry();
 
     /// <summary>
-    /// The object stores the session opens locations with, <c>s3://bucket/key</c> and the like, which
-    /// it disposes with itself. None by default: a library opens no connection and reads no credential
-    /// on a host that did not ask.
+    /// The object stores the session opens locations with, <c>s3://bucket/key</c> and the like. The
+    /// session disposes the stores it builds for a scheme, never the ones registered with it. None by
+    /// default: a library opens no connection and reads no credential on a host that did not ask.
     /// </summary>
     public ObjectStoreRegistry ObjectStores { get; } = new ObjectStoreRegistry();
 
@@ -694,7 +694,7 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>
     /// Clears the segment cache, lets the kept mappings go, trims the pool and disposes the object
-    /// stores the session holds. A file of the session still open makes this throw.
+    /// stores the session built for a scheme. A file of the session still open makes this throw.
     /// </summary>
     /// <returns>A task that completes when the stores are disposed.</returns>
     /// <exception cref="InvalidOperationException">A file opened through the session is still open.</exception>

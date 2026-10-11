@@ -58,6 +58,9 @@ internal sealed class S3Emulator : HttpMessageHandler
     /// <summary>Whether a put must carry a checksum, as a bucket under Object Lock asks.</summary>
     internal bool RequireChecksum { get; set; }
 
+    /// <summary>Whether anyone may read the buckets: an unsigned read or head is served, an unsigned write refused.</summary>
+    internal bool PublicRead { get; set; }
+
     /// <summary>The least a part but the last holds, which a completion checks: 0, none, unless a test sets it.</summary>
     internal int MinimumPartSize { get; set; }
 
@@ -544,7 +547,9 @@ internal sealed class S3Emulator : HttpMessageHandler
     {
         if (!request.Headers.TryGetValues("Authorization", out IEnumerable<string>? values))
         {
-            return Error(HttpStatusCode.Forbidden, "AccessDenied", "Anonymous access is refused.");
+            return PublicRead && (request.Method == HttpMethod.Get || request.Method == HttpMethod.Head)
+                ? null
+                : Error(HttpStatusCode.Forbidden, "AccessDenied", "Anonymous access is refused.");
         }
 
         string authorization = values.First();
@@ -593,7 +598,7 @@ internal sealed class S3Emulator : HttpMessageHandler
             .OrderBy(pair => pair.Name, StringComparer.Ordinal)
             .ThenBy(pair => pair.Value, StringComparer.Ordinal)
             .Select(pair => $"{pair.Name}={pair.Value}"));
-        using AwsKeys keys = new AwsKeys(scope[0], secret, null);
+        AwsKeys keys = new AwsKeys(scope[0], secret, null);
         string expected = new SigV4Signer(Region, service).Authorization(keys, amzDate, request.Method.Method, request.RequestUri!.AbsolutePath, canonicalQuery, headers, payload);
         return expected == authorization
             ? null

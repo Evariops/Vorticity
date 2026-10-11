@@ -20,9 +20,9 @@ namespace Vorticity.IO;
 /// buckets of one name at two providers: <c>r2://lake</c> beside <c>s3://lake</c>.
 /// </para>
 /// <para>
-/// The session holds its stores as it holds its pool and its cache, since a store owns connections and
-/// credentials: disposing the session disposes every store registered or built here.
-/// <see cref="VortexSession.Default"/> holds none.
+/// A store registered with <see cref="Add"/> stays its caller's, who may register it with several
+/// sessions and disposes it after them. A store built for a scheme is the session's, which disposes it
+/// with itself. <see cref="VortexSession.Default"/> holds none.
 /// </para>
 /// </remarks>
 public sealed class ObjectStoreRegistry
@@ -39,7 +39,10 @@ public sealed class ObjectStoreRegistry
 
     /// <summary>Registers <paramref name="store"/> for the locations under <paramref name="prefix"/>.</summary>
     /// <param name="prefix">A scheme and a bucket, <c>s3://lake</c>, or one of its prefixes, <c>s3://lake/tables</c>.</param>
-    /// <param name="store">The store over the bucket: a location's key is passed to it relative to the bucket, whatever prefix chose it.</param>
+    /// <param name="store">
+    /// The store over the bucket: a location's key is passed to it relative to the bucket, whatever
+    /// prefix chose it. It stays the caller's: the session never disposes it.
+    /// </param>
     /// <exception cref="ArgumentException">The prefix is not a scheme and a bucket, or is registered already.</exception>
     /// <exception cref="InvalidOperationException">The session is created; its options are frozen.</exception>
     public void Add(string prefix, IObjectStore store)
@@ -66,7 +69,8 @@ public sealed class ObjectStoreRegistry
 
     /// <summary>
     /// Serves every bucket of <paramref name="scheme"/> that no registered prefix serves with a store
-    /// built by <paramref name="storeFor"/> on the bucket's first use, and kept for the session's life.
+    /// built by <paramref name="storeFor"/> on the bucket's first use, kept for the session's life and
+    /// disposed with it.
     /// </summary>
     /// <param name="scheme">The scheme, <c>s3</c> for instance, without <c>://</c>.</param>
     /// <param name="storeFor">Builds the store of a bucket, given its name.</param>
@@ -172,7 +176,7 @@ public sealed class ObjectStoreRegistry
 
     internal void Freeze() => _frozen = true;
 
-    /// <summary>Disposes every store registered or built, each once.</summary>
+    /// <summary>Disposes every store built for a scheme, each once; the stores registered are their callers'.</summary>
     internal async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -180,23 +184,15 @@ public sealed class ObjectStoreRegistry
             return;
         }
 
-        HashSet<IObjectStore> stores = new HashSet<IObjectStore>(ReferenceEqualityComparer.Instance);
-        foreach ((_, IObjectStore store) in _stores)
-        {
-            stores.Add(store);
-        }
-
+        // A builder may hand one store to several buckets.
+        HashSet<IObjectStore> built = new HashSet<IObjectStore>(ReferenceEqualityComparer.Instance);
         lock (_built)
         {
-            foreach (IObjectStore store in _built.Values)
-            {
-                stores.Add(store);
-            }
-
+            built.UnionWith(_built.Values);
             _built.Clear();
         }
 
-        foreach (IObjectStore store in stores)
+        foreach (IObjectStore store in built)
         {
             await store.DisposeAsync().ConfigureAwait(false);
         }
