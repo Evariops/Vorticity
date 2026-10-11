@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -298,16 +299,39 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private int _free;
     private int _queued;
 
+    /// <summary>The bytes the lanes of the splits in flight may hold together: half what the pool keeps parked across its classes.</summary>
+    private const double InFlightBytes = 128 << 20;
+
+    /// <summary>The share of what one of the pool's size classes keeps parked that the lanes of the splits in flight may hold together.</summary>
+    private const double InFlightShare = 0.75;
+
+    /// <summary>What the pool keeps parked of one size class, which the guess puts all of a split's bytes in.</summary>
+    private const double GuessedClassBytes = 64 << 20;
+
     // The first row of a caller's take at or past the split the cursor last reached: a take is
     // walked forward, split after split, so its rows are stepped over rather than searched.
     private int _takeAt;
     private bool _drained;
     private bool _disposed;
 
-    // A scan of one lane over a source that fetches its bytes reads splits ahead of the one it
-    // decodes; null for every other scan, which pays one reference for it:
-    // these paths are held to a ceiling in bytes.
-    private readonly AheadReads? _ahead;
+    // What a scan keeps beside its first lane, the one or the other: the reads ahead of a scan of one
+    // lane over a source that fetches its bytes, which reads splits ahead of the one it decodes, or
+    // the lanes of a scan of several and what bounds their splits. Null for a scan of one lane that
+    // reads in place, which pays one reference for both: these paths are held to a ceiling in bytes.
+    private readonly LaneExtras? _extras;
+
+    /// <summary>The reads ahead, on a scan of one lane that has them.</summary>
+    private AheadReads? Ahead => _extras as AheadReads;
+
+    /// <summary>The lanes of a scan of several, which only such a scan asks for.</summary>
+    private LaneWindow Window
+    {
+        get
+        {
+            Debug.Assert(_extras is LaneWindow, "Only a scan of several lanes has a window of them.");
+            return Unsafe.As<LaneWindow>(_extras!);
+        }
+    }
 
     /// <summary>
     /// The splits a scan of one lane reads ahead of the one it decodes, over a source whose read is a
@@ -362,8 +386,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // reads ahead over a source whose read is a round trip, as many splits as its admission granted.
         // Over a mapping a read is a view, and there is nothing to overlap; the file the scan reads through
         // may be the one the open read whole, which is asked of its source.
-        _ahead = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace ? new AheadReads(readAhead) : null;
-        _segments = new ScanSegments(_ahead is { } ahead ? ahead.Lanes.Length : degree);
+        _extras = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace
+            ? new AheadReads(readAhead)
+            : window > 1 ? new LaneWindow(window, EstimatedRowBytes(schema) * Math.Min(plan.MaxRows, FlatLayoutReader.WindowRows)) : null;
+        _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses
         // how to read it.
@@ -384,9 +410,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _free = degree;
         _lanes = new Lane?[window];
         _lanes[0] = NewLane(file, live, metrics, keepEncodings);
-        if (_ahead is not null)
+        if (_extras is LaneWindow lanes)
         {
-            _ahead.Lanes[0] = _lanes[0];
+            lanes.Return(lanes.Add(_lanes[0]!));
+        }
+        else if (Ahead is { } reads)
+        {
+            reads.Lanes[0] = _lanes[0];
         }
     }
 
@@ -449,7 +479,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return ValueTask.FromCanceled<bool>(_token);
         }
 
-        if (_ahead is { } ahead)
+        if (Ahead is { } ahead)
         {
             return MoveNextAheadAsync(ahead);
         }
@@ -694,12 +724,89 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         DisposeLanes();
     }
 
+    /// <summary>What a scan keeps beside its first lane: <see cref="AheadReads"/> or <see cref="LaneWindow"/>, never both.</summary>
+    private abstract class LaneExtras;
+
+    /// <summary>
+    /// The lanes of a scan of several: every lane made so far, and those holding no split, the one
+    /// freed last on top, so that a split takes the lane whose blocks and caches are warmest and the
+    /// scan makes only as many lanes as it has splits in flight, rather than one per slot of its
+    /// window; and what a split's lane has held at most once decoded, which bounds how many splits
+    /// may be in flight (see <see cref="Pump"/>).
+    /// </summary>
+    private sealed class LaneWindow : LaneExtras
+    {
+        // Every lane made, the idle ones first, the one freed last at the top of them, then those
+        // holding a split: one array for both, the scan's allocation being held to a ceiling.
+        private readonly Lane[] _made;
+        private int _idleCount;
+        private double _splitBytes;
+        private double _splitShare;
+        private int _measured;
+
+        /// <param name="window">The splits the scan may have in flight at most, so the lanes it may make.</param>
+        /// <param name="guessedSplitBytes">The bytes a split is guessed to hold until the first is delivered.</param>
+        internal LaneWindow(int window, double guessedSplitBytes)
+        {
+            _made = new Lane[window];
+            _splitBytes = Math.Max(1, guessedSplitBytes);
+            _splitShare = _splitBytes / GuessedClassBytes;
+        }
+
+        /// <summary>The lanes made so far.</summary>
+        internal int Count { get; private set; }
+
+        /// <summary>Lane <paramref name="index"/> of those made.</summary>
+        internal Lane LaneAt(int index) => _made[index];
+
+        /// <summary>Counts <paramref name="lane"/> among those made, holding a split, and returns it.</summary>
+        internal Lane Add(Lane lane) => _made[Count++] = lane;
+
+        /// <summary>The lane freed last, which now holds a split, or null when every lane made holds one.</summary>
+        internal Lane? TakeIdle() => _idleCount > 0 ? _made[--_idleCount] : null;
+
+        /// <summary>Puts a lane that holds no split on top of the idle ones.</summary>
+        internal void Return(Lane lane)
+        {
+            int at = Array.IndexOf(_made, lane, _idleCount, Count - _idleCount);
+            Debug.Assert(at >= 0, "A lane is returned once, while it holds a split.");
+            _made[at] = _made[_idleCount];
+            _made[_idleCount++] = lane;
+        }
+
+        /// <summary>
+        /// Whether the split numbered <paramref name="sequence"/> is measured: the first few, then
+        /// one in sixteen, since a measure walks every block of the lane on the consumer's thread.
+        /// </summary>
+        internal bool Measures(long sequence) => _measured < 4 || (sequence & 15) == 0;
+
+        /// <summary>
+        /// Takes in what a lane holds once its split is decoded, its idle blocks with it: what
+        /// another split in flight would hold. The largest of the splits measured so far counts,
+        /// and the first replaces the guess.
+        /// </summary>
+        internal void Measure(long bytes, double classShare)
+        {
+            _splitBytes = _measured > 0 ? Math.Max(_splitBytes, bytes) : bytes;
+            _splitShare = _measured > 0 ? Math.Max(_splitShare, classShare) : classShare;
+            _measured++;
+        }
+
+        /// <summary>
+        /// How many splits may be in flight: as many lanes as hold <see cref="InFlightBytes"/>
+        /// together and <see cref="InFlightShare"/> of any size class of the pool, one at least and
+        /// <paramref name="window"/> at most.
+        /// </summary>
+        internal int Budget(int window) =>
+            (int)Math.Clamp(Math.Min(InFlightBytes / _splitBytes, InFlightShare / _splitShare), 1, window);
+    }
+
     /// <summary>
     /// The reads a scan of one lane has in flight ahead of the split it decodes: each on a lane of
     /// its own, the split numbered s on lane s modulo their count, one more than the reads, for the
     /// split being decoded; the reads in the order of their splits, oldest first.
     /// </summary>
-    private sealed class AheadReads
+    private sealed class AheadReads : LaneExtras
     {
         private int _first;
 
@@ -746,7 +853,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _disposed = true;
         _drained = true;
 
-        if (_ahead is { Count: > 0 } ahead)
+        if (Ahead is { Count: > 0 } ahead)
         {
             return new ValueTask(DisposeAheadAsync(ahead));
         }
@@ -1560,11 +1667,19 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             lane.Running = false;
             lane.Context.ResetBatch();
+            ReturnLane(lane);
             throw;
         }
 
         lane.Running = false;
         _currentLane = lane;
+        // What the lane holds once its split is decoded, its idle blocks with it, is what another
+        // split in flight would hold: the largest of the splits measured bounds how many may be.
+        LaneWindow window = Window;
+        if (window.Measures(lane.Sequence))
+        {
+            window.Measure(lane.Context.Canonical.HeldBytes(out double share), share);
+        }
 
         // Every batch before this one has taken its own reference to what it needed, and is dead;
         // a chunk none of them borrowed after an earlier one is borrowed by no later one either.
@@ -1587,13 +1702,53 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         return true;
     }
 
+    /// <summary>The decoded bytes a row of <paramref name="dtype"/> is guessed to take before a split says.</summary>
+    private static double EstimatedRowBytes(DType dtype) => dtype.Kind switch
+    {
+        DTypeKind.Null => 0,
+        DTypeKind.Bool => 1,
+        DTypeKind.Primitive => dtype.PType.ByteWidth(),
+        DTypeKind.Utf8 or DTypeKind.Binary => 32,
+        DTypeKind.Struct => StructRowBytes(dtype),
+        DTypeKind.List => 8 + (4 * EstimatedRowBytes(dtype.ElementType)),
+        DTypeKind.Extension => EstimatedRowBytes(dtype.StorageType),
+        _ => 16,
+    };
+
+    private static double StructRowBytes(DType dtype)
+    {
+        double bytes = 0;
+        for (int i = 0; i < dtype.FieldCount; i++)
+        {
+            bytes += EstimatedRowBytes(dtype.GetField(i));
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
+    /// Starts the splits the window has room for: as many as the scan's window holds, and no more
+    /// than the pool can take back the blocks of.
+    /// </summary>
+    /// <remarks>
+    /// The lanes of the splits in flight hold their decoded blocks until the consumer is past them,
+    /// and a lane keeps its blocks for its next split. A window of one split per lane of a wide
+    /// degree held more than the pool keeps of a size class -- 32 splits of the taxi trips' 64 Ki
+    /// rows, 600 blocks of 512 KiB against 128 -- so every scan freed the excess and the next one
+    /// allocated it again, a page fault per page, behind the process heap's lock; and blocks
+    /// decoded far ahead of the consumer were evicted from the caches before it reached them. The
+    /// splits in flight are held to what <see cref="InFlightBytes"/> and <see cref="InFlightShare"/>
+    /// allow, measured on what a split's lane held, and a split takes the lane freed last.
+    /// </remarks>
     private void Pump()
     {
         int window = _lanes.Length;
         long assigned = _started;
+        LaneWindow lanes = Window;
+        int budget = lanes.Budget(window);
         try
         {
-            while (assigned - _delivered < window)
+            while (assigned - _delivered < budget)
             {
                 if (_drained || !TryNextSplit(out RowRange split))
                 {
@@ -1601,7 +1756,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                     break;
                 }
 
-                Lane lane = _lanes[(int)(assigned % window)] ??= NextLane();
+                Lane lane = lanes.TakeIdle() ?? lanes.Add(NextLane());
+                _lanes[(int)(assigned % window)] = lane;
                 lane.Rows = split;
                 lane.Sequence = assigned;
                 lane.Assign(this);
@@ -1744,9 +1900,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             _queued = 0;
         }
 
-        for (int i = 0; i < _lanes.Length; i++)
+        for (int i = 0; i < MadeLaneCount; i++)
         {
-            if (_lanes[i] is not { Running: true } lane)
+            if (MadeLane(i) is not { Running: true } lane)
             {
                 continue;
             }
@@ -1769,9 +1925,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     private bool HasPendingWork()
     {
-        for (int i = 0; i < _lanes.Length; i++)
+        for (int i = 0; i < MadeLaneCount; i++)
         {
-            if (_lanes[i] is { Running: true })
+            if (MadeLane(i) is { Running: true })
             {
                 return true;
             }
@@ -1792,6 +1948,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         batch?.Dispose();
+
+        // The lane holds nothing once its batch is gone, and takes the next split.
+        if (lane is not null)
+        {
+            ReturnLane(lane);
+        }
     }
 
     /// <summary>
@@ -1835,11 +1997,26 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _metrics.AddBlocksDecoded(_decodedBlocks.Add(lane.Rows, Wanted, _live, Proven));
     }
 
+    /// <summary>Puts a lane that holds no split on top of the idle ones, on the lanes.</summary>
+    private void ReturnLane(Lane lane)
+    {
+        if (_extras is LaneWindow lanes)
+        {
+            lanes.Return(lane);
+        }
+    }
+
+    /// <summary>How many lanes the scan has made: on the lanes, as many as its splits in flight needed; else its one lane.</summary>
+    private int MadeLaneCount => _extras is LaneWindow lanes ? lanes.Count : _lanes.Length;
+
+    /// <summary>Lane <paramref name="index"/> of those <see cref="MadeLaneCount"/> counts.</summary>
+    private Lane? MadeLane(int index) => _extras is LaneWindow lanes ? lanes.LaneAt(index) : _lanes[index];
+
     private void DisposeLanes()
     {
-        for (int i = 0; i < _lanes.Length; i++)
+        for (int i = 0; i < MadeLaneCount; i++)
         {
-            if (_lanes[i] is { } lane)
+            if (MadeLane(i) is { } lane)
             {
                 lane.Stop();
                 ScanContexts.Shared.Return(lane.Context);
@@ -1847,7 +2024,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         // The lanes of the reads ahead past the first, which is the scan's first lane.
-        if (_ahead is { } ahead)
+        if (Ahead is { } ahead)
         {
             for (int i = 1; i < ahead.Lanes.Length; i++)
             {

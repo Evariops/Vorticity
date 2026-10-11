@@ -352,6 +352,15 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
         return true;
     }
 
+    /// <summary>
+    /// The bytes of blocks of <paramref name="capacity"/>'s class the pool keeps parked at most: what
+    /// a reader may hold of the class at once and find again in the pool once it gives it back.
+    /// </summary>
+    /// <param name="capacity">A block's capacity, as <see cref="CapacityFor"/> gives it.</param>
+    /// <remarks>A block past <see cref="MaxPooledLength"/> is never parked, so its class holds no more than one.</remarks>
+    internal long ClassCeilingBytes(int capacity) =>
+        capacity > MaxPooledLength ? capacity : (long)Math.Max(1, _buckets[BucketIndexOf(capacity)].Ceiling) * capacity;
+
     /// <summary>The bytes <see cref="Rent"/> allocates for a block of <paramref name="length"/> bytes: its size class, or the length itself past the largest.</summary>
     /// <param name="length">Length in bytes, non-negative.</param>
     internal int CapacityFor(int length) => length > MaxPooledLength ? length : RoundedSize(length);
@@ -418,6 +427,9 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
         private readonly Lock _gate = new Lock();
         private readonly int _floor;
         private readonly int _ceiling;
+
+        /// <summary>The most blocks the class keeps parked when its demand asks.</summary>
+        internal int Ceiling => _ceiling;
         private NativeSegmentOwner?[] _items;
         private int _count;
 
