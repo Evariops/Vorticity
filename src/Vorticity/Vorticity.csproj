@@ -5,21 +5,28 @@
     <AssemblyName>Vorticity</AssemblyName>
     <PackageId>Vorticity</PackageId>
     <IsPackable>true</IsPackable>
-    <PackageTags>$(PackageTags);simd;zero-copy;aot</PackageTags>
-    <Description>Pure .NET implementation of the Vortex columnar file format, with no third-party dependency.</Description>
+    <PackageTags>$(PackageTags);parquet;simd;zero-copy;aot</PackageTags>
+    <Description>Pure .NET implementation of the Vortex columnar file format, and Apache Parquet read and written by the same engine, with no third-party dependency.</Description>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- The compiler reports an experimental type's uses in its own assembly too: the core uses its
+         Parquet API freely, and only its callers are told it may change. -->
+    <NoWarn>$(NoWarn);VX0003</NoWarn>
   </PropertyGroup>
 
+  <!-- Three zones, told apart by folder, not by namespace: Vortex/ holds what exists to read and
+       write the Vortex format, Parquet/ what exists for Parquet, and the folders at the root the
+       engine both formats feed (the canonical arena and its kernels, scans, queries, keys, columns,
+       I/O, buffers, types, the session). Parquet's public API is experimental type by type, under
+       VX0003, until its surface settles. -->
+
   <!-- The satellites reach into the engine (arenas, the k-way merge, object sources, row encoding
-       over decoded nodes, the scan source a Parquet file plugs into) and ship at the same version as
-       the core. vxdump does not: it is the proof that the public surface is enough for a tool, and
-       Vorticity.ObjectStorage neither, which stores of the same shape written elsewhere can match. -->
+       over decoded nodes) and ship at the same version as the core. vxdump does not: it is the proof
+       that the public surface is enough for a tool, and Vorticity.ObjectStorage neither, which stores
+       of the same shape written elsewhere can match. -->
   <ItemGroup>
     <InternalsVisibleTo Include="Vorticity.RowEncoding" />
     <InternalsVisibleTo Include="Vorticity.Dataset" />
-    <InternalsVisibleTo Include="Vorticity.Parquet" />
     <InternalsVisibleTo Include="Vorticity.Tests" />
-    <InternalsVisibleTo Include="Vorticity.Parquet.Tests" />
     <InternalsVisibleTo Include="Vorticity.Conformance" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks.Scenarios" />

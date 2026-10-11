@@ -168,16 +168,13 @@ jobs:
           - name: Vorticity.Zstd and the conformance corpus
             projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
-          - name: Vorticity.Parquet
-            projects: tests/Vorticity.Parquet.Tests
           # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is
           # exercised: the classes tests/scalar-pass.txt names, which reach every fallback the
-          # whole suite does, and the conformance corpus run again with intrinsics disabled.
-          # Vorticity.Zstd's and Vorticity.Parquet's suites run whole: an x64 runner takes their
-          # x64 paths, and with intrinsics disabled the portable ones, Arm64's shape without its
-          # vectors.
-          - name: Vorticity's fallbacks, Vorticity.Zstd, Vorticity.Parquet and the conformance corpus, intrinsics disabled
-            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Parquet.Tests tests/Vorticity.Conformance
+          # whole suite does, Parquet's tests among them, and the conformance corpus run again with
+          # intrinsics disabled. Vorticity.Zstd's suite runs whole: an x64 runner takes its x64
+          # paths, and with intrinsics disabled the portable ones, Arm64's shape without its vectors.
+          - name: Vorticity's fallbacks, Vorticity.Zstd and the conformance corpus, intrinsics disabled
+            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
             scalar-pass: true
     steps:
@@ -256,7 +253,7 @@ jobs:
       - name: Build
         run: dotnet build Vorticity.slnx --no-restore -c Release ${VERSION_PROPERTY:+"$VERSION_PROPERTY"}
 
-      # The five packages are what a consumer gets, and nothing else here builds them. Most of
+      # The packages are what a consumer gets, and nothing else here builds them. Most of
       # what can go wrong is visible at pack time and nowhere else: a readme or a NOTICE that stops
       # being found, a license expression that stops parsing, a project that becomes packable by
       # accident. Warnings are errors, so a pack warning fails the job.
@@ -372,7 +369,7 @@ jobs:
           test "$crashed" = 0
           test "$scanned" -ge 800
 
-      # The same promise of Vorticity.Parquet, over the standard's own test files, pinned: pqdump
+      # The same promise of the Parquet reader, over the standard's own test files, pinned: pqdump
       # reads what the footer says, scans every batch and holds the footer to the rows, from the
       # public surface alone.
       - name: Fetch the Parquet test files

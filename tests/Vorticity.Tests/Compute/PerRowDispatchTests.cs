@@ -72,30 +72,30 @@ public sealed partial class PerRowDispatchTests
     /// </remarks>
     private static readonly (string File, int Calls, int PerRow, string Point)[] Sites =
     [
-        ("Arrays/Decoders/Canonical/CanonicalConcat.cs", 0, 0, "R7 done: a list view's offsets and sizes are read with their types resolved once a chunk"),
-        ("Arrays/Decoders/Canonical/ConstantCanonicalizer.cs", 1, 0, "legitimate: one write, then Tile"),
-        ("Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
-        ("Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
-        ("Arrays/Decoders/Canonical/ViewKernels.cs", 4, 0, "legitimate: four error paths"),
-        ("Arrays/Decoders/Compressed/AlpRdDecoder.cs", 0, 0, "R4 done: the patch values are read at their own width"),
-        ("Arrays/Decoders/Compressed/CompressedValues.cs", 2, 0, "the definitions of ReadUnsigned/WriteInteger"),
-        ("Arrays/Decoders/Compressed/DictDecoder.cs", 1, 0, "legitimate: an error message"),
-        ("Arrays/Decoders/Compressed/EncodedNodes.cs", 3, 0, "per run, not per row: the binary search for a slice's run bounds and the rebased ends; one error message"),
-        ("Arrays/Decoders/Compressed/FastLanesRleDecoder.cs", 5, 0, "per run, not per row"),
-        ("Arrays/Decoders/Compressed/FsstDecoder.cs", 2, 0, "R11 done: a selection's offsets and lengths are read at their types, resolved once; the two left bound the code stream"),
-        ("Arrays/Decoders/Compressed/OnPairDecoder.cs", 6, 3, "R2; the dictionary's two walks are typed, and the one call left there refuses a type that is not an integer"),
-        ("Arrays/Decoders/Compressed/Patches.cs", 3, 1, "R4 (GetPosition); the other two are per run"),
-        ("Arrays/Decoders/Compressed/RunEndDecoder.cs", 2, 0, "per run, not per row: the walk of a shape with no typed kernel, and the search for a range's first run; the ends' checks and a take's searches read them typed"),
+        ("Arrays/Kernels/CanonicalConcat.cs", 0, 0, "R7 done: a list view's offsets and sizes are read with their types resolved once a chunk"),
+        ("Arrays/Kernels/ViewKernels.cs", 4, 0, "legitimate: four error paths"),
         ("Columns/ExtensionColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
         ("Columns/ListColumn.cs", 2, 0, "legitimate: the column API is per row by design"),
         ("Columns/VortexColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
         ("Compute/ComparisonKernels.cs", 0, 0, "F-4 done: the integer-against-float pair joined CompareOp"),
         ("Compute/LiteralReader.cs", 2, 0, "legitimate: a single literal"),
-        ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
+        ("Parquet/Metadata/SchemaElement.cs", 2, 0, "a local method of the same name, not these"),
         ("Types/Variant/ParquetVariant.cs", 0, 0, "done: its own reader of one to four bytes is Unsigned, not a method of the same name"),
-        ("Writing/ArrayBlobWriter.cs", 0, 0, "W-13 done: a block with nulls takes the lanes and clears its nulls by their bits"),
-        ("Writing/BitPackPlan.cs", 0, 0, "W-11 done: the minimum is read at the element's own width"),
-        ("Vorticity.Parquet/Metadata/SchemaElement.cs", 2, 0, "a local method of the same name, not these"),
+        ("Vortex/Arrays/Decoders/Canonical/ConstantCanonicalizer.cs", 1, 0, "legitimate: one write, then Tile"),
+        ("Vortex/Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
+        ("Vortex/Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
+        ("Vortex/Arrays/Decoders/Compressed/AlpRdDecoder.cs", 0, 0, "R4 done: the patch values are read at their own width"),
+        ("Vortex/Arrays/Decoders/Compressed/CompressedValues.cs", 2, 0, "the definitions of ReadUnsigned/WriteInteger"),
+        ("Vortex/Arrays/Decoders/Compressed/DictDecoder.cs", 1, 0, "legitimate: an error message"),
+        ("Vortex/Arrays/Decoders/Compressed/EncodedNodes.cs", 3, 0, "per run, not per row: the binary search for a slice's run bounds and the rebased ends; one error message"),
+        ("Vortex/Arrays/Decoders/Compressed/FastLanesRleDecoder.cs", 5, 0, "per run, not per row"),
+        ("Vortex/Arrays/Decoders/Compressed/FsstDecoder.cs", 2, 0, "R11 done: a selection's offsets and lengths are read at their types, resolved once; the two left bound the code stream"),
+        ("Vortex/Arrays/Decoders/Compressed/OnPairDecoder.cs", 6, 3, "R2; the dictionary's two walks are typed, and the one call left there refuses a type that is not an integer"),
+        ("Vortex/Arrays/Decoders/Compressed/Patches.cs", 3, 1, "R4 (GetPosition); the other two are per run"),
+        ("Vortex/Arrays/Decoders/Compressed/RunEndDecoder.cs", 2, 0, "per run, not per row: the walk of a shape with no typed kernel, and the search for a range's first run; the ends' checks and a take's searches read them typed"),
+        ("Vortex/Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
+        ("Vortex/Writing/ArrayBlobWriter.cs", 0, 0, "W-13 done: a block with nulls takes the lanes and clears its nulls by their bits"),
+        ("Vortex/Writing/BitPackPlan.cs", 0, 0, "W-11 done: the minimum is read at the element's own width"),
     ];
 
     /// <summary>The table's two grand totals, starting with every call it allows.</summary>
@@ -118,7 +118,7 @@ public sealed partial class PerRowDispatchTests
     {
         Dictionary<string, int> counted = Count();
         StringBuilder report = new StringBuilder(
-            "PER-ROW DISPATCH: calls to ReadInteger/ReadUnsigned/WriteInteger in src/Vorticity and src/Vorticity.Parquet\n");
+            "PER-ROW DISPATCH: calls to ReadInteger/ReadUnsigned/WriteInteger in src/Vorticity\n");
 
         List<string> bad = [];
         int calls = 0;
@@ -181,26 +181,24 @@ public sealed partial class PerRowDispatchTests
     }
 
     /// <summary>
-    /// Every call in <c>src/Vorticity</c>, by path relative to it, and in the Parquet package, which
-    /// reads and writes through the same canonical forms, by path behind the package's name.
+    /// Every call in <c>src/Vorticity</c>, by path relative to it: the Vortex format's code, Parquet's,
+    /// which reads and writes through the same canonical forms, and the engine both feed.
     /// </summary>
     private static Dictionary<string, int> Count()
     {
-        string core = Sources();
         Dictionary<string, int> counted = [];
-        Count(core, string.Empty, counted);
-        Count(System.IO.Path.Combine(System.IO.Path.GetDirectoryName(core)!, "Vorticity.Parquet"), "Vorticity.Parquet/", counted);
+        Count(Sources(), counted);
         return counted;
     }
 
-    private static void Count(string root, string prefix, Dictionary<string, int> counted)
+    private static void Count(string root, Dictionary<string, int> counted)
     {
         foreach (string path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
         {
             string relative = System.IO.Path.GetRelativePath(root, path).Replace('\\', '/');
             if (relative.StartsWith("obj/", StringComparison.Ordinal) ||
                 relative.StartsWith("bin/", StringComparison.Ordinal) ||
-                relative == "Arrays/Decoders/Canonical/CanonicalSupport.cs")
+                relative == "Arrays/Kernels/CanonicalSupport.cs")
             {
                 continue;
             }
@@ -221,7 +219,7 @@ public sealed partial class PerRowDispatchTests
 
             if (calls > 0)
             {
-                counted[prefix + relative] = calls;
+                counted[relative] = calls;
             }
         }
     }

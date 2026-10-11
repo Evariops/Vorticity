@@ -9,11 +9,13 @@
 #
 # The namespaces of the kernels' own tests run whole, so that a test added there joins the pass. A
 # kernel tested from anywhere else, or a method that branches on the hardware and that only a class
-# elsewhere reaches, joins it here, by the class's name.
+# elsewhere reaches, joins it here, by the class's name. Parquet's tests run whole, through the
+# portable paths of its own kernels.
 Vorticity.Tests.Arrays.*
 Vorticity.Tests.Compute.*
 Vorticity.Tests.Aggregation.*
 Vorticity.Tests.RowEncoding.*
+Vorticity.Tests.Parquet.*
 Vorticity.Tests.Api.SinkContractTests
 Vorticity.Tests.Dataset.DatasetLockedStoreTests
 Vorticity.Tests.Indexes.BloomKernelTests

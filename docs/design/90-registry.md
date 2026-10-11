@@ -8,7 +8,7 @@ read-forever floor is `core2025.05.0`, Vortex 0.36.0. The edition records are ve
 
 ## 1. Array encodings
 
-37 ids have a decoder (`src/Vorticity/Arrays/Decoders`). The take column says how a take of a few
+37 ids have a decoder (`src/Vorticity/Vortex/Arrays/Decoders`). The take column says how a take of a few
 rows is served. Selective decoders implement `DecodeSelected` and decode only the rows asked for, or
 only the frames or chunks that hold them, while the others decode the chunk once per scan and gather.
 
