@@ -163,8 +163,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Vorticity
+          # Vorticity.Tests runs on three runners, the work of the two first about even: the query
+          # engine's and the datasets' namespaces on one, every other namespace on the next, which
+          # takes what the first does not name so that a namespace added later is never left out.
+          # The third runs the tests that measure what anything beside them would move (allocations,
+          # peaks, finalizers, a shared pool): the classes of the collections that disable
+          # parallelization, which carry the trait Category=RunsAlone (RunsAloneTests holds them to it).
+          - name: Vorticity, the query engine and the datasets
             projects: tests/Vorticity.Tests
+            filters: >-
+              --filter-not-trait Category=RunsAlone
+              --filter-namespace Vorticity.Tests.Aggregation*
+              --filter-namespace Vorticity.Tests.Dataset*
+              --filter-namespace Vorticity.Tests.Indexes*
+              --filter-namespace Vorticity.Tests.Keys*
+              --filter-namespace Vorticity.Tests.ObjectStorage*
+              --filter-namespace Vorticity.Tests.Sealing*
+          - name: Vorticity, every other namespace
+            projects: tests/Vorticity.Tests
+            filters: >-
+              --filter-not-trait Category=RunsAlone
+              --filter-not-namespace Vorticity.Tests.Aggregation*
+              --filter-not-namespace Vorticity.Tests.Dataset*
+              --filter-not-namespace Vorticity.Tests.Indexes*
+              --filter-not-namespace Vorticity.Tests.Keys*
+              --filter-not-namespace Vorticity.Tests.ObjectStorage*
+              --filter-not-namespace Vorticity.Tests.Sealing*
+          - name: Vorticity, the tests that run alone
+            projects: tests/Vorticity.Tests
+            filters: --filter-trait Category=RunsAlone
           - name: Vorticity.Zstd and the conformance corpus
             projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
             zstd-data: true
@@ -187,12 +214,14 @@ jobs:
         with:
           global-json-file: global.json
 
+      # Without the analyzers, which the package job runs over the whole solution: they hold the code
+      # to its rules, and the tests need only the assemblies. The source generators still run.
       - name: Build
         env:
           PROJECTS: ${{ matrix.projects }}
         run: |
           for project in $PROJECTS; do
-            dotnet build "$project" -c Release
+            dotnet build "$project" -c Release -p:RunAnalyzers=false
           done
 
       # Vorticity.Zstd's tests read zstd's golden files and a corpus of frames from zstd's
@@ -202,14 +231,18 @@ jobs:
         if: matrix.zstd-data
         run: bash tools/native-ref/testdata.sh
 
+      # The filters are words, their wildcards xunit's own: the shell expands no file name.
       - name: Test
         if: ${{ !matrix.scalar-pass }}
         env:
           PROJECTS: ${{ matrix.projects }}
+          FILTERS: ${{ matrix.filters }}
         run: |
+          set -f
           status=0
           for project in $PROJECTS; do
-            dotnet test --project "$project" --no-build -c Release || status=1
+            # shellcheck disable=SC2086
+            dotnet test --project "$project" --no-build -c Release $FILTERS || status=1
           done
           exit $status
 
@@ -440,8 +473,9 @@ jobs:
         with:
           global-json-file: global.json
 
+      # Without the analyzers, as the tests build: the package job runs them.
       - name: Build
-        run: dotnet build tests/Vorticity.Tests -c Release
+        run: dotnet build tests/Vorticity.Tests -c Release -p:RunAnalyzers=false
 
       # The one test that writes the corpus out for the reference, which skips unless the variable
       # names a directory.
