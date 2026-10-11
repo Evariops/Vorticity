@@ -358,6 +358,97 @@ public sealed class PlanMemoryTests
         }
     }
 
+    /// <summary>
+    /// The values of a column's dictionaries that zstd took go to zstd alone for the seven chunks
+    /// after, every candidate being tried on the eighth, and on any chunk after another scheme took them.
+    /// </summary>
+    [Fact]
+    public void ValuesZstdTookGoToItAloneSevenChunksInEight()
+    {
+        ColumnWriter column = new ColumnWriter();
+        Assert.False(column.ValuesHeldByZstd);
+
+        column.NoteValues(ColumnScheme.Zstd, everyCandidate: true);
+        for (int chunk = 1; chunk < ColumnWriter.ValuesTrialEvery; chunk++)
+        {
+            Assert.True(column.ValuesHeldByZstd, $"chunk {chunk}");
+            column.NoteValues(ColumnScheme.Zstd, everyCandidate: false);
+        }
+
+        Assert.False(column.ValuesHeldByZstd);
+        column.NoteValues(ColumnScheme.Fsst, everyCandidate: true);
+        Assert.False(column.ValuesHeldByZstd);
+        column.NoteValues(ColumnScheme.Zstd, everyCandidate: true);
+        Assert.True(column.ValuesHeldByZstd);
+    }
+
+    /// <summary>
+    /// A dictionary column whose entries zstd takes: the writer hands its dictionaries' values the
+    /// column that remembers it, chunk after chunk, and the file reads back as written.
+    /// </summary>
+    [Fact]
+    public async Task ADictionaryColumnRemembersWhatTookItsValues()
+    {
+        Decoders.EnsureRegistered();
+
+        using ColumnFixture f = new ColumnFixture();
+        const int Chunks = 3;
+        int[] roots = new int[Chunks];
+        for (int c = 0; c < Chunks; c++)
+        {
+            byte[]?[] values = new byte[]?[Rows];
+            for (int i = 0; i < Rows; i++)
+            {
+                int entry = ((c * 131) + (i * 7)) % 1_000;
+                values[i] = System.Text.Encoding.UTF8.GetBytes(
+                    "https://www.example.org/catalogue/section-" + (entry % 17) + "/item-" + entry + "?ref=listing");
+            }
+
+            roots[c] = f.Utf8Node(values, Nullability.NonNullable);
+        }
+
+        DType dtype = f.Arena.GetNode(roots[0]).DType;
+        VortexWriteOptions options = new VortexWriteOptions { RowBlockSize = Rows, DataBlockTargetBytes = 1024 };
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-memory-values-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            await using (VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options))
+            {
+                for (int c = 0; c < Chunks; c++)
+                {
+                    await writer.WriteAsync(f.Batch(roots[c], (long)c * Rows), CancellationToken.None);
+                }
+
+                await writer.CompleteAsync(CancellationToken.None);
+                Assert.True(writer.ColumnState(0).ValuesHeldByZstd);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+            long row = 0;
+            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(CancellationToken.None))
+            {
+                BinaryColumn texts = batch.Column(0).AsBinary();
+                for (int i = 0; i < batch.RowCount; i++, row++)
+                {
+                    int c = (int)(row / Rows);
+                    int entry = ((c * 131) + ((int)(row % Rows) * 7)) % 1_000;
+                    Assert.Equal(
+                        "https://www.example.org/catalogue/section-" + (entry % 17) + "/item-" + entry + "?ref=listing",
+                        texts.GetString(i));
+                }
+            }
+
+            Assert.Equal((long)Chunks * Rows, row);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
     private static long[] Values(Func<long, long> of)
     {
         long[] values = new long[Rows];

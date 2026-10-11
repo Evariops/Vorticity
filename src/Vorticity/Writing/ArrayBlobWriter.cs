@@ -234,7 +234,7 @@ internal static class ArrayBlobWriter
         List<PendingBuffer> buffers = blob.Buffers;
         int firstBuffer = buffers.Count;
         written = plan.Scheme;
-        int node = WriteChosen(blob, arena, nodeIndex, in plan, encodings, stats, out long dictionaryLayer);
+        int node = WriteChosen(blob, arena, nodeIndex, in plan, encodings, stats, stats.ValuesOwner ?? cascade.Owner, out long dictionaryLayer);
         long produced = dictionaryLayer;
         if (produced < 0)
         {
@@ -264,7 +264,7 @@ internal static class ArrayBlobWriter
         {
             ChunkStats dry = stats.Dry();
             ColumnPlan exact = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target, in summary, cascade, dry, measure);
-            WriteChosen(measure, arena, nodeIndex, in exact, measured, dry, out _);
+            WriteChosen(measure, arena, nodeIndex, in exact, measured, dry, owner: null, out _);
             long exactBytes = QueuedBytes(measure);
             measure.Discard();
 
@@ -301,6 +301,7 @@ internal static class ArrayBlobWriter
         in ColumnPlan plan,
         EncodingDictionary encodings,
         ChunkStats stats,
+        ColumnWriter? owner,
         out long dictionaryLayer)
     {
         dictionaryLayer = -1;
@@ -387,14 +388,14 @@ internal static class ArrayBlobWriter
 
         if (plan.Scheme == ColumnScheme.RunEnd)
         {
-            return WriteRunEnd(blob, arena, nodeIndex, values, plan, encodings);
+            return WriteRunEnd(blob, arena, nodeIndex, values, plan, encodings, owner);
         }
 
         // Computed over the values child as built and the rows the codes index, with the formula
         // the plan was priced by: the number plan memory compares the prediction to.
         dictionaryLayer = ColumnCompressor.DictionaryLayerBytes(
             arena, arena.GetNode(values), arena.GetNode(nodeIndex).Length);
-        return WriteDict(blob, arena, nodeIndex, values, plan, encodings);
+        return WriteDict(blob, arena, nodeIndex, values, plan, encodings, owner);
     }
 
     /// <summary>
@@ -1681,14 +1682,15 @@ internal static class ArrayBlobWriter
         int nodeIndex,
         int values,
         in ColumnPlan plan,
-        EncodingDictionary encodings)
+        EncodingDictionary encodings,
+        ColumnWriter? owner)
     {
         int length = arena.GetNode(nodeIndex).Length;
         PType endsPType = IndexPType(length);
 
         int ends = WriteIndexColumn(
             blob, arena, nodeIndex, plan.Codes, endsPType, encodings, Cascade.RunEndEnds());
-        int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild());
+        int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
         Span<int> children = stackalloc int[2];
         children[0] = ends;
@@ -1704,7 +1706,8 @@ internal static class ArrayBlobWriter
         int nodeIndex,
         int values,
         in ColumnPlan plan,
-        EncodingDictionary encodings)
+        EncodingDictionary encodings,
+        ColumnWriter? owner)
     {
         int entries = arena.GetNode(values).Length;
         PType codesPType = IndexPType(entries);
@@ -1724,7 +1727,7 @@ internal static class ArrayBlobWriter
         {
             ArrayPool<int>.Shared.Return(plan.Codes);
         }
-        int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild());
+        int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
         Span<int> children = stackalloc int[2];
         children[0] = codes;

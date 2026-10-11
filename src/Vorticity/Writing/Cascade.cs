@@ -52,8 +52,15 @@ internal readonly struct Cascade
         new Cascade(runs: false, dictionary: false, sequence: false, reference: null) { UnitsPerSecond = unitsPerSecond };
 
     /// <summary>The values child of a dictionary or a run-end: a column like any other, ungated.</summary>
-    internal static Cascade ValuesChild() =>
-        new Cascade(runs: false, dictionary: false, sequence: false, reference: null, valuesChild: true);
+    /// <param name="owner">The column whose chunks the values come from, which remembers what the trials made of them; null for none.</param>
+    internal static Cascade ValuesChild(ColumnWriter? owner = null) =>
+        new Cascade(runs: false, dictionary: false, sequence: false, reference: null, valuesChild: true) { Owner = owner };
+
+    /// <summary>
+    /// For the values child of a dictionary or a run-end, the column they come from: what the
+    /// trials made of its last chunk's values (<see cref="ColumnWriter.ValuesHeldByZstd"/>).
+    /// </summary>
+    internal ColumnWriter? Owner { get; private init; }
 
     /// <summary>
     /// Whether run-end is provably declined, so the scan that would decline it need not run.
