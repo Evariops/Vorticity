@@ -363,7 +363,7 @@ public enum ObjectOperation
     /// <summary><see cref="IObjectStore.HeadAsync"/>.</summary>
     Head = 1,
 
-    /// <summary><see cref="IObjectStore.PutAsync"/>, whatever its condition.</summary>
+    /// <summary>A put, from a stream or from bytes in memory, whatever its condition.</summary>
     Put = 2,
 
     /// <summary><see cref="IObjectStore.DeleteAsync"/>, once per batch.</summary>

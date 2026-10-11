@@ -3,12 +3,10 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
-using System.IO.Hashing;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -24,10 +22,11 @@ namespace Vorticity.ObjectStorage;
 /// <summary>The write path: <c>Put Blob</c>, blocks and their list, and deletes in batches.</summary>
 /// <remarks>
 /// <para>
-/// A put up to the part threshold is one <c>Put Blob</c>; a larger one sends its blocks in parallel as
-/// they fill, then commits their list with the condition. Each body carries <c>x-ms-content-crc64</c>,
-/// which the service checks. A block never committed is dropped by the service a week after the last
-/// one was sent, so a put that fails leaves nothing to clean.
+/// A put goes through <see cref="Upload"/>, as every store's does: up to the part threshold one
+/// <c>Put Blob</c>, and past it blocks sent in parallel, then their list committed with the condition.
+/// Each body carries <c>x-ms-content-crc64</c>, which the service checks. A block never committed is
+/// dropped by the service a week after the last one was sent, so a put that fails leaves nothing to
+/// clean.
 /// </para>
 /// <para>
 /// A conditional put carries a put id in the blob's metadata, and a put whose answer is lost learns its
@@ -56,7 +55,7 @@ public sealed partial class AzureBlobObjectStore
             CheckKey(key);
             ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
             ThrowIfDisposed();
-            return await PutCoreAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false);
+            return await Upload.PutAsync(this, _transport, _limits, key, content, length, condition, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception caught)
         {
@@ -67,6 +66,14 @@ public sealed partial class AzureBlobObjectStore
         {
             await content.CompleteAsync(failure).ConfigureAwait(false);
         }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ThrowIfDisposed();
+        return Upload.PutAsync(this, _transport, _limits, key, content, condition, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -101,53 +108,19 @@ public sealed partial class AzureBlobObjectStore
         }
     }
 
-    private async ValueTask<PutOutcome> PutCoreAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+    /// <summary>The size of block <paramref name="number"/> of a blob of <paramref name="length"/> bytes, -1 when unknown.</summary>
+    internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
+
+    /// <inheritdoc/>
+    string IUploadService.PutOperation => "PutBlob";
+
+    /// <inheritdoc/>
+    ValueTask<PutOutcome> IUploadService.PutWholeAsync(string key, ReadOnlySequence<byte> body, PutCondition condition, string? putId, CancellationToken cancellationToken)
     {
-        long threshold = Math.Min(_options.PartThreshold, MaxSinglePut);
-        if (length >= 0 && length <= threshold)
-        {
-            (ChunkedBuffer body, bool ended) = await ChunkedBuffer.FillAsync(content, length, cancellationToken).ConfigureAwait(false);
-            using (body)
-            {
-                if (body.Length < length)
-                {
-                    throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {body.Length}.");
-                }
-
-                if (!ended)
-                {
-                    throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content runs past them.");
-                }
-
-                return await PutBlobAsync(key, body, condition, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        Queue<ChunkedBuffer> carried = new Queue<ChunkedBuffer>();
-        int blockSize = BlockSizeFor(length);
-        if (length < 0)
-        {
-            (ChunkedBuffer? whole, carried) = await PartPump.HeadAsync(content, blockSize, threshold, cancellationToken).ConfigureAwait(false);
-            if (whole is not null)
-            {
-                using (whole)
-                {
-                    return await PutBlobAsync(key, whole, condition, cancellationToken).ConfigureAwait(false);
-                }
-            }
-        }
-
-        return await PutBlocksAsync(key, content, length, condition, blockSize, carried, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>One <c>Put Blob</c>, sent again while its outcome can be learned and it did not land.</summary>
-    private async ValueTask<PutOutcome> PutBlobAsync(string key, ChunkedBuffer body, PutCondition condition, CancellationToken cancellationToken)
-    {
-        string? putId = condition.Kind == PutConditionKind.None ? null : NewPutId();
         List<(string, string)> headers = [("x-ms-blob-type", "BlockBlob")];
         if (_options.SendChecksums)
         {
-            headers.Add(("x-ms-content-crc64", Crc64Header(body.Crc64())));
+            headers.Add(("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(body))));
         }
 
         if (putId is not null)
@@ -156,157 +129,100 @@ public sealed partial class AzureBlobObjectStore
         }
 
         AddCondition(headers, condition);
-        return await SendConditionalAsync(
-            key,
-            putId,
-            condition,
+        return _transport.SendAsync(
             "PutBlob",
-            new WriteRequest(this, key, string.Empty, body.Sequence(), [.. headers], condition),
-            cancellationToken).ConfigureAwait(false);
+            new WriteRequest(this, key, string.Empty, body, [.. headers], condition),
+            static (s, ct) => s.Store.BuildWriteAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, "PutBlob", ct),
+            idempotent: putId is null,
+            cancellationToken);
     }
 
-    /// <summary>
-    /// Blocks sent in parallel as they fill, then their list committed with the condition; a failure
-    /// leaves only uncommitted blocks, which the service drops.
-    /// </summary>
-    private async ValueTask<PutOutcome> PutBlocksAsync(
-        string key, PipeReader content, long length, PutCondition condition, int blockSize, Queue<ChunkedBuffer> carried, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    /// <remarks>Azure has no upload to start: the blocks' ids share a random part of the store's making, and the list carries the put id.</remarks>
+    ValueTask<UploadState> IUploadService.StartAsync(string key, string putId, CancellationToken cancellationToken) =>
+        new ValueTask<UploadState>(new UploadState(key, Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(6)), putId));
+
+    /// <inheritdoc/>
+    async ValueTask<PartReceipt> IUploadService.SendPartAsync(UploadState upload, int number, ReadOnlySequence<byte> body, CancellationToken cancellationToken)
     {
-        // Every id of a blob's blocks is of one length: an upload's random part, then the block's number.
-        string upload = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(6));
-        List<long> blocks = await PartPump.SendAsync(
-            key,
-            content,
-            length,
-            blockSize,
-            MaxBlocks,
-            _options.BlocksInFlight,
-            carried,
-            (number, block, ct) => PutBlockAsync(key, BlockId(upload, number), block, ct),
+        string id = BlockId(upload.Id, number);
+        (string, string)[] headers = _options.SendChecksums ? [("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(body)))] : [];
+        await _transport.SendAsync(
+            "PutBlock",
+            new WriteRequest(this, upload.Key, "comp=block&blockid=" + UriEncoding.Query(id), body, headers, PutCondition.None),
+            static (s, ct) => s.Store.BuildWriteAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, "PutBlock", ct),
+            idempotent: true,
             cancellationToken).ConfigureAwait(false);
-        return await CommitBlocksAsync(key, upload, blocks.Count, condition, cancellationToken).ConfigureAwait(false);
+        return new PartReceipt(id);
     }
 
-    /// <summary>Commits the first <paramref name="count"/> blocks of an upload, in order, with the condition and a put id.</summary>
-    private async ValueTask<PutOutcome> CommitBlocksAsync(string key, string upload, int count, PutCondition condition, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    /// <remarks>The list of the blocks, in order, committed with the condition and the put id.</remarks>
+    ValueTask<PutOutcome> IUploadService.CompleteAsync(UploadState upload, PutCondition condition, CancellationToken cancellationToken)
     {
         byte[] list = ServiceXml.Write(
-            (Upload: upload, Count: count),
-            static (xml, s) =>
+            upload.Parts,
+            static (xml, parts) =>
             {
                 xml.WriteStartElement("BlockList");
-                for (int number = 1; number <= s.Count; number++)
+                foreach (PartReceipt part in parts)
                 {
-                    xml.WriteElementString("Latest", BlockId(s.Upload, number));
+                    xml.WriteElementString("Latest", part.Tag);
                 }
 
                 xml.WriteEndElement();
             },
             declared: true);
-        string putId = NewPutId();
-        List<(string, string)> headers = [(PutIdHeader, putId)];
+        List<(string, string)> headers = [(PutIdHeader, upload.PutId)];
         if (_options.SendChecksums)
         {
-            headers.Add(("x-ms-content-crc64", Crc64Header(Crc64.HashToUInt64(Crc64ParameterSet.Nvme, list))));
+            headers.Add(("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(new ReadOnlySequence<byte>(list)))));
         }
 
         AddCondition(headers, condition);
-        return await SendConditionalAsync(
-            key,
-            putId,
-            condition,
+        return _transport.SendAsync(
             "PutBlockList",
-            new WriteRequest(this, key, "comp=blocklist", new ReadOnlySequence<byte>(list), [.. headers], condition),
-            cancellationToken).ConfigureAwait(false);
+            new WriteRequest(this, upload.Key, "comp=blocklist", new ReadOnlySequence<byte>(list), [.. headers], condition),
+            static (s, ct) => s.Store.BuildWriteAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, "PutBlockList", ct),
+            idempotent: false,
+            cancellationToken);
     }
 
-    private async Task PutBlockAsync(string key, string id, ChunkedBuffer block, CancellationToken cancellationToken)
-    {
-        (string, string)[] headers = _options.SendChecksums ? [("x-ms-content-crc64", Crc64Header(block.Crc64()))] : [];
-        await _transport.SendAsync(
-            "PutBlock",
-            new WriteRequest(this, key, "comp=block&blockid=" + UriEncoding.Query(id), block.Sequence(), headers, PutCondition.None),
-            static (s, ct) => s.Store.BuildWriteAsync(s, ct),
-            static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, "PutBlock", ct),
+    /// <inheritdoc/>
+    /// <remarks>Nothing: the service drops a block never committed a week after the last one was sent.</remarks>
+    ValueTask IUploadService.AbortAsync(UploadState upload) => ValueTask.CompletedTask;
+
+    /// <inheritdoc/>
+    ValueTask<(ObjectHead? Head, string? PutId)> IUploadService.HeadAsync(string key, CancellationToken cancellationToken) =>
+        _transport.SendAsync(
+            "GetBlobProperties",
+            new KeyRequest(this, key),
+            static (s, ct) => s.Store.BuildAsync(HttpMethod.Head, s.Key, string.Empty, null, [], ct),
+            static (response, s, ct) => s.Store.ConsumeHeadAsync(response, s.Key, ct),
             idempotent: true,
-            cancellationToken).ConfigureAwait(false);
-    }
+            cancellationToken);
+
+    /// <summary>What the service takes of a put: blocks of the option's size, up to 50 000 of 4 000 MiB, and a condition on their list.</summary>
+    private static UploadLimits LimitsOf(AzureBlobStoreOptions options) => new UploadLimits
+    {
+        PartThreshold = options.PartThreshold,
+        PartSize = Math.Max(options.PartSize, 1),
+        MaxParts = MaxBlocks,
+        MaxPartBytes = 4_000L << 20,
+        PartsInFlight = options.PartsInFlight,
+        MaxSinglePut = MaxSinglePut,
+        ConditionalParts = true,
+        GrowingParts = true,
+        MaxHeldBytes = options.Transport.MaxHeldBytes,
+        SpoolDirectory = options.Transport.SpoolDirectory,
+    };
 
     /// <summary>The id of block <paramref name="number"/> of an upload, all of one length as Azure asks.</summary>
     private static string BlockId(string upload, int number) =>
         Convert.ToBase64String(Encoding.ASCII.GetBytes(string.Create(CultureInfo.InvariantCulture, $"{upload}{number - 1:D6}")));
-
-    /// <summary>A write that carries a condition: sent again only when its lost answer proves it did not land.</summary>
-    private async ValueTask<PutOutcome> SendConditionalAsync(string key, string? putId, PutCondition condition, string operation, WriteRequest request, CancellationToken cancellationToken)
-    {
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                return await _transport.SendAsync(
-                    operation,
-                    request,
-                    static (s, ct) => s.Store.BuildWriteAsync(s, ct),
-                    static (response, s, ct) => s.Store.ConsumeWriteAsync(response, s, s.Query.Length == 0 ? "PutBlob" : "PutBlockList", ct),
-                    idempotent: putId is null,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (StoreAnswerLostException lost)
-            {
-                if (await LearnPutAsync(key, putId!, condition, lost, cancellationToken).ConfigureAwait(false) is { } learned)
-                {
-                    return learned;
-                }
-
-                if (!await _transport.RetryAfterAsync(attempt, cancellationToken).ConfigureAwait(false))
-                {
-                    throw new ObjectStoreException($"{operation} of '{key}' did not land after {attempt} attempts: {lost.Message}", lost.InnerException!);
-                }
-            }
-        }
-    }
-
-    /// <summary>What became of a put whose answer was lost, from the blob's properties and the put id they carry.</summary>
-    private async ValueTask<PutOutcome?> LearnPutAsync(string key, string putId, PutCondition condition, StoreAnswerLostException lost, CancellationToken cancellationToken)
-    {
-        (ObjectHead? head, string? id) found;
-        try
-        {
-            found = await _transport.SendAsync(
-                "GetBlobProperties",
-                new KeyRequest(this, key),
-                static (s, ct) => s.Store.BuildAsync(HttpMethod.Head, s.Key, string.Empty, null, [], ct),
-                static (response, s, ct) => s.Store.ConsumeHeadAsync(response, s.Key, ct),
-                idempotent: true,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception head) when (head is ObjectStoreException or StoreAnswerLostException)
-        {
-            throw new ObjectStoreException(
-                $"A put of '{key}' lost its answer ({lost.Message}), and the properties that would say whether it landed failed too: the outcome is unknown.",
-                new AggregateException(lost, head))
-            {
-                OutcomeUnknown = true,
-            };
-        }
-
-        if (found.head is not { } blob)
-        {
-            return condition.Kind == PutConditionKind.IfMatch ? PutOutcome.Changed : null;
-        }
-
-        if (string.Equals(found.id, putId, StringComparison.Ordinal))
-        {
-            return PutOutcome.Created;
-        }
-
-        if (condition.Kind == PutConditionKind.IfMatch)
-        {
-            return string.Equals(blob.Token, condition.Token, StringComparison.Ordinal) ? null : PutOutcome.Changed;
-        }
-
-        return condition.Kind == PutConditionKind.IfAbsent ? PutOutcome.Exists : null;
-    }
 
     private async ValueTask<HttpRequestMessage> BuildWriteAsync(WriteRequest s, CancellationToken cancellationToken)
     {
@@ -414,19 +330,6 @@ public sealed partial class AzureBlobObjectStore
         }
     }
 
-    /// <summary>A block's size: the option's, larger when the object would need more than 50 000 blocks, rounded up to a mebibyte.</summary>
-    internal int BlockSizeFor(long length)
-    {
-        long size = Math.Max(_options.BlockSize, 1);
-        long needed = length > 0 ? (length + MaxBlocks - 1) / MaxBlocks : 0;
-        if (needed > size)
-        {
-            size = (needed + (1 << 20) - 1) >> 20 << 20;
-        }
-
-        return (int)Math.Min(size, 4_000L << 20);
-    }
-
     private static void AddCondition(List<(string, string)> headers, PutCondition condition)
     {
         if (condition.Kind == PutConditionKind.IfAbsent)
@@ -446,8 +349,6 @@ public sealed partial class AzureBlobObjectStore
         BinaryPrimitives.WriteUInt64LittleEndian(bytes, crc);
         return Convert.ToBase64String(bytes);
     }
-
-    private static string NewPutId() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 
     private readonly record struct WriteRequest(AzureBlobObjectStore Store, string Key, string Query, ReadOnlySequence<byte> Body, (string, string)[] Headers, PutCondition Condition);
 

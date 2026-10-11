@@ -55,6 +55,15 @@ internal sealed class S3Emulator : HttpMessageHandler
     /// <summary>Runs after a write is applied: true loses its answer, the connection failing as the object lands.</summary>
     internal Func<HttpRequestMessage, bool>? LoseAnswer { get; set; }
 
+    /// <summary>
+    /// Runs before a write is applied: true loses its answer before it lands, as a slow service does, and
+    /// the write lands right after the next request is answered, whatever that request found.
+    /// </summary>
+    internal Func<HttpRequestMessage, bool>? LandsLate { get; set; }
+
+    // The write whose answer was lost before it landed, applied after the next request.
+    private (HttpRequestMessage Request, byte[] Body)? _late;
+
     /// <summary>Whether a put must carry a checksum, as a bucket under Object Lock asks.</summary>
     internal bool RequireChecksum { get; set; }
 
@@ -143,7 +152,19 @@ internal sealed class S3Emulator : HttpMessageHandler
         }
 
         byte[] body = request.Content is null ? [] : await request.Content.ReadAsByteArrayAsync(cancellationToken);
+        if (request.Method != HttpMethod.Get && request.Method != HttpMethod.Head && LandsLate?.Invoke(request) == true)
+        {
+            _late = (request, body);
+            throw new HttpRequestException("The connection was reset before the request landed; it lands later.");
+        }
+
         (HttpResponseMessage response, bool applied) = Serve(request, body);
+        if (_late is { } late)
+        {
+            _late = null;
+            Serve(late.Request, late.Body).Response.Dispose();
+        }
+
         if (applied && LoseAnswer?.Invoke(request) == true)
         {
             response.Dispose();

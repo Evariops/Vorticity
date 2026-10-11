@@ -32,7 +32,7 @@ public sealed class AzureTests
             Endpoint = emulator.BasePath.Length > 0 ? new Uri("http://127.0.0.1:8080" + emulator.BasePath) : null,
             Handler = emulator,
             PartThreshold = threshold,
-            BlockSize = block,
+            PartSize = block,
             Transport = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, MaxAttempts = attempts },
         });
 

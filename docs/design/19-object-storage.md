@@ -359,8 +359,14 @@ twice. So a conditional put is never retried blindly:
 3. If the object carries this put's id, the answer is `Created`. If it carries another id, the answer
    is `Exists`. If there is no object, the put is sent again. If the head fails too, the store throws
    an `ObjectStoreException` that says the outcome is unknown, and the caller decides.
+4. Once an attempt has lost its answer, a later refusal on the condition is checked the same way. A
+   slow service may apply the lost attempt after the head that found nothing, and the attempt sent
+   again then finds the key taken by this put itself: the head finds its id, and the answer is
+   `Created`.
 
-That costs one head, only in the rare case where the network failed at the worst moment.
+That costs a head, two at most, only in the rare case where the network failed at the worst moment.
+The protocol is written once for the three stores (`Http/Upload.cs`), and the S3 emulator can apply
+a write after the head that follows its lost answer, which is the case the tests hold it to.
 
 ### 6.5 Hedged reads
 
@@ -404,7 +410,8 @@ hashed with SHA-256. The small XML bodies the client builds itself are signed.
 | `ListAsync` | `ListObjectsV2` with `prefix`, `start-after`, `max-keys` of 1 000 and `encoding-type=url`. Each entry carries the key, the size, the ETag and the date |
 
 Some answers have a meaning of their own. A conditional `PUT` answered 409 lost a race with a delete
-and may be sent again, while a `CompleteMultipartUpload` answered 409 must start a new upload. An
+and may be sent again, while a `CompleteMultipartUpload` answered 409 must start a new upload, which
+the store does when it can send the content again (see [writing](#11-writing)). An
 upload in progress does not hold its key: another writer may create it meanwhile, and the completion
 is then refused with 412. Both cases are written in the conditional writes guide.
 
@@ -450,9 +457,10 @@ await using S3ObjectStore exports = S3ObjectStore.ForScaleway("fr-par", "exports
 
 Each of them creates a key only if it is absent in one request, which is what a commit needs: a
 commit object is small, far below the 5 GiB that one request takes on all four. On R2, which takes
-no condition on parts, a conditional put goes whole whatever its size, and one past 5 GiB is
-refused. A data object's key ends with a fresh uid, so its put needs no condition, and a large one
-goes up in parts on every profile, R2 included.
+no condition on parts, a conditional put goes whole whatever its size, held in memory up to
+`MaxHeldBytes` when it is read from a stream, or spooled on disk, and one past 5 GiB is refused. A
+data object's key ends with a fresh uid, so its put needs no condition, and a large one goes up in
+parts on every profile, R2 included.
 
 OVHcloud documents neither the consistency of its listings nor suffix reads, and lists
 `ListObjectsV2` without saying that it honours `start-after` and the order. Scaleway documents that
@@ -639,10 +647,32 @@ The object appears whole or not at all, which is what the rename gives a path, a
 object at that key, as a path's file is replaced. The part threshold is 32 MiB and the part size
 16 MiB by default, starting points to set by measurement. Every service takes parts of at least
 5 MiB but the last, and at most as many as its profile allows: 10 000 on S3, R2, OVHcloud and Cloud
-Storage, and 1 000 on Scaleway. The store sizes parts from
+Storage, and 1 000 on Scaleway. The store sizes the parts of an object of known length from
 that number, 16 MiB or the object's size divided by it and rounded up to a mebibyte, whichever is
-larger. Parts grow past 16 MiB from about 16 GiB on Scaleway and from about 156 GiB on S3. R2 wants
-every part but the last of one size, which these fixed parts already are.
+larger: they grow past 16 MiB from about 16 GiB on Scaleway and from about 156 GiB on S3. The parts
+of an object of unknown length, a file written to a location, double every tenth of the parts the
+service takes, up to eight times, so that they reach about 1 TiB on S3 and 100 GiB on Scaleway with
+128 MiB parts at the end. R2 wants every part but the last of one size, so its parts never grow, and
+an object of unknown length past about 156 GiB is refused there at its 10 001st part.
+
+Every store's put goes through one upload (`Http/Upload.cs`), which the three stores give their
+requests to: the whole object, the start of an upload in parts, a part, the completion, the abort and
+the head that settles a lost answer. What a put holds to send again depends on its content:
+
+- Bytes already in memory, `PutAsync(key, ReadOnlySequence<byte>, condition)`, are sent where they
+  lie, whole or as slices, and sent again from there by any retry. A dataset's objects go this way.
+- A stream, the `PipeReader` overload, is held a part at a time while the parts are in flight, or
+  whole when it is small enough to go in one request. A conditional put to a service that takes a
+  condition only on a whole object, R2 or Cloud Storage, is held whole in memory up to
+  `StoreTransportOptions.MaxHeldBytes`, 256 MiB by default, and refused past it before a byte goes.
+- A stream on a store given `StoreTransportOptions.SpoolDirectory` is written whole to a file of
+  that directory, mapped, and sent from the mapping as bytes in memory are, then the file is deleted.
+  Its upload starts once the stream has ended, and it holds no pooled buffer, only the pages the
+  system reads back as it sends them.
+
+A completion that S3 refuses with 409 asks for the upload to be made again: the upload starts anew
+from its first part when the content can be sent again, held in memory or spooled, and the put throws
+for a stream sent as it was read, its message pointing at the spool.
 
 ### 11.2 The objects of a dataset
 
@@ -960,8 +990,8 @@ it, and an option turns it on once it does.
 | `x-ms-content-crc64` as Azure's reference shows it | low byte first, as Azure's SDK sends it | to check against the service |
 | the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks` | a dataset under Object Lock refuses R2 and an OVHcloud Local Zone without knowing the package |
 | the parts and the window reserved through the memory governor | the parts bounded by `PartsInFlight`, the window allocating nothing | the reads a window admits land in the blocks a scan reads into, which an aggregation's admission counts already |
-| a completion answered 409 starts a new upload | it throws | the content of a put cannot be read twice |
-| Cloud Storage takes a conditional put up to 5 TiB | up to 5 GiB, held in memory | the service takes no precondition on the parts of an upload |
+| a completion answered 409 starts a new upload | it does when the content can be sent again, held in memory or spooled, and throws for a stream sent as it was read | a stream is read once |
+| Cloud Storage takes a conditional put up to 5 TiB | from bytes in memory or spooled on disk, and from a stream held in memory up to `MaxHeldBytes` | the service takes no precondition on the parts of an upload |
 | `https://account.blob.core.windows.net/container/key` locations | `az://` locations | a registered prefix serves the same need |
 | the Azure chain's order | the storage credentials of the environment come before a managed identity | a host that sets them never waits on a metadata service it does not have |
 | an external account of Google that exchanges an AWS identity | a subject token from a file or a URL | the AWS source signs a request of its own, left for a host that needs it |

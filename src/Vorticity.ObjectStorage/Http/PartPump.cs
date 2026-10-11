@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Runtime.ExceptionServices;
@@ -9,9 +10,9 @@ using Vorticity.IO;
 namespace Vorticity.ObjectStorage.Http;
 
 /// <summary>
-/// What every store's upload in parts does the same way: the content read a part at a time, each part
-/// sent as soon as it fills while at most a few are in flight, and the length checked at the end. What
-/// a part's request is, a store's own delegate says.
+/// What every store's upload in parts does the same way: the parts taken from their source one at a
+/// time, each sent as soon as it is there while at most a few are in flight, and the length checked at
+/// the end. What a part's request is, the store's own delegate says.
 /// </summary>
 internal static class PartPump
 {
@@ -57,88 +58,81 @@ internal static class PartPump
     }
 
     /// <summary>
-    /// Sends the parts: those <paramref name="carried"/> first, then the content's a part at a time,
-    /// each by <paramref name="send"/> as soon as it fills, at most <paramref name="inFlight"/> at once.
-    /// The first part that fails stops the reading and is the failure that propagates.
+    /// Sends the parts of <paramref name="source"/>, each by <paramref name="send"/> as soon as it is
+    /// there, at most <paramref name="inFlight"/> at once. The first part that fails stops the others,
+    /// and is the failure that propagates.
     /// </summary>
     /// <param name="key">The object's key, for the messages.</param>
-    /// <param name="content">The content past the parts carried.</param>
+    /// <param name="source">Where the parts come from.</param>
     /// <param name="length">The length announced, or -1.</param>
-    /// <param name="partSize">The size of every part but the last.</param>
+    /// <param name="sizeOf">The size of a part, by its number from 1: every part but the last has it.</param>
     /// <param name="maxParts">The most parts the service takes.</param>
     /// <param name="inFlight">The most parts in flight at once.</param>
-    /// <param name="carried">The parts read before the upload began, each disposed once sent.</param>
-    /// <param name="send">Sends a part, by its number from 1; the part is disposed once it returns.</param>
-    /// <param name="cancellationToken">Cancels the reading and the parts.</param>
+    /// <param name="send">Sends a part, by its number from 1.</param>
     /// <param name="produced">
     /// Sees each part in order, before it is sent: what keeps a checksum of the whole object, which the
     /// parts sent in parallel could not give.
     /// </param>
-    /// <returns>The length of every part, in order.</returns>
-    internal static async ValueTask<List<long>> SendAsync(
+    /// <param name="cancellationToken">Cancels the reading and the parts.</param>
+    /// <returns>How many parts went.</returns>
+    internal static async ValueTask<int> SendAsync(
         string key,
-        PipeReader content,
+        PartSource source,
         long length,
-        int partSize,
+        Func<int, int> sizeOf,
         int maxParts,
         int inFlight,
-        Queue<ChunkedBuffer> carried,
-        Func<int, ChunkedBuffer, CancellationToken, Task> send,
-        CancellationToken cancellationToken,
-        Action<ChunkedBuffer>? produced = null)
+        Func<int, ReadOnlySequence<byte>, CancellationToken, Task> send,
+        Action<ReadOnlySequence<byte>>? produced,
+        CancellationToken cancellationToken)
     {
-        List<long> parts = [];
+        int count = 0;
         List<Task> sending = [];
         using SemaphoreSlim slots = new SemaphoreSlim(Math.Max(1, inFlight));
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         long total = 0;
         try
         {
-            bool ended = false;
             while (true)
             {
-                if (!carried.TryDequeue(out ChunkedBuffer? part))
+                SourcePart part = await source.NextAsync(sizeOf(count + 1), failed.Token).ConfigureAwait(false);
+                if (part.Bytes.IsEmpty)
                 {
-                    if (ended)
-                    {
-                        break;
-                    }
-
-                    (part, ended) = await ChunkedBuffer.FillAsync(content, partSize, failed.Token).ConfigureAwait(false);
-                    if (part.Length == 0)
-                    {
-                        part.Dispose();
-                        break;
-                    }
+                    part.Owner?.Dispose();
+                    break;
                 }
 
-                if (parts.Count == maxParts)
+                if (count == maxParts)
                 {
-                    part.Dispose();
-                    throw new ObjectStoreException($"'{key}' needs more than the {maxParts} parts the service takes at {partSize} bytes a part: give its length.");
+                    part.Owner?.Dispose();
+                    throw new ObjectStoreException($"'{key}' needs more than the {maxParts} parts the service takes: give its length.");
                 }
 
-                total += part.Length;
+                total += part.Bytes.Length;
                 if (length >= 0 && total > length)
                 {
-                    part.Dispose();
+                    part.Owner?.Dispose();
                     throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content runs past them.");
                 }
 
-                parts.Add(part.Length);
+                count++;
                 try
                 {
-                    produced?.Invoke(part);
+                    produced?.Invoke(part.Bytes);
                     await slots.WaitAsync(failed.Token).ConfigureAwait(false);
                 }
                 catch
                 {
-                    part.Dispose();
+                    part.Owner?.Dispose();
                     throw;
                 }
 
-                sending.Add(SendOneAsync(parts.Count, part, send, slots, failed));
+                sending.Add(SendOneAsync(count, part, send, slots, failed));
                 sending.RemoveAll(task => task.IsCompletedSuccessfully);
+                if (part.Ended)
+                {
+                    break;
+                }
             }
 
             await Task.WhenAll(sending).ConfigureAwait(false);
@@ -147,13 +141,13 @@ internal static class PartPump
                 throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {total}.");
             }
 
-            return parts;
+            return count;
         }
         catch (Exception caught)
         {
             await failed.CancelAsync().ConfigureAwait(false);
             Exception? partFailed = await SettleAsync(sending).ConfigureAwait(false);
-            Release(carried);
+            source.Release();
 
             // A part that failed cancels the reading of the next: its own failure is the one to say.
             if (caught is OperationCanceledException && !cancellationToken.IsCancellationRequested && partFailed is not null)
@@ -174,11 +168,11 @@ internal static class PartPump
         }
     }
 
-    private static async Task SendOneAsync(int number, ChunkedBuffer part, Func<int, ChunkedBuffer, CancellationToken, Task> send, SemaphoreSlim slots, CancellationTokenSource failed)
+    private static async Task SendOneAsync(int number, SourcePart part, Func<int, ReadOnlySequence<byte>, CancellationToken, Task> send, SemaphoreSlim slots, CancellationTokenSource failed)
     {
         try
         {
-            await send(number, part, failed.Token).ConfigureAwait(false);
+            await send(number, part.Bytes, failed.Token).ConfigureAwait(false);
         }
         catch
         {
@@ -187,7 +181,7 @@ internal static class PartPump
         }
         finally
         {
-            part.Dispose();
+            part.Owner?.Dispose();
             slots.Release();
         }
     }
@@ -212,5 +206,63 @@ internal static class PartPump
         }
 
         return first;
+    }
+}
+
+/// <summary>
+/// A part: its bytes, what holds them until the part is sent, none for bytes the caller holds, and
+/// whether the content ended with it.
+/// </summary>
+internal readonly record struct SourcePart(ReadOnlySequence<byte> Bytes, IDisposable? Owner, bool Ended);
+
+/// <summary>Where the parts of an upload come from: bytes already held, or a stream read a part at a time.</summary>
+internal abstract class PartSource
+{
+    /// <summary>The next part, of <paramref name="size"/> bytes or what is left; empty at the end.</summary>
+    internal abstract ValueTask<SourcePart> NextAsync(int size, CancellationToken cancellationToken);
+
+    /// <summary>Releases what the source read and did not hand out.</summary>
+    internal virtual void Release()
+    {
+    }
+
+    /// <summary>The same parts again from the first, for an upload made anew; null for a stream, read once.</summary>
+    internal virtual PartSource? Replay() => null;
+
+    /// <summary>Parts that are slices of <paramref name="bytes"/>, sent where they lie and sent again from there.</summary>
+    internal static PartSource Of(ReadOnlySequence<byte> bytes) => new Held(bytes);
+
+    /// <summary>Parts read from <paramref name="content"/>, those <paramref name="carried"/> from before the upload began first.</summary>
+    internal static PartSource Of(PipeReader content, Queue<ChunkedBuffer> carried) => new Streamed(content, carried);
+
+    private sealed class Held(ReadOnlySequence<byte> bytes) : PartSource
+    {
+        private long _offset;
+
+        internal override ValueTask<SourcePart> NextAsync(int size, CancellationToken cancellationToken)
+        {
+            long take = Math.Min(size, bytes.Length - _offset);
+            ReadOnlySequence<byte> part = bytes.Slice(_offset, take);
+            _offset += take;
+            return new ValueTask<SourcePart>(new SourcePart(part, null, _offset == bytes.Length));
+        }
+
+        internal override PartSource Replay() => new Held(bytes);
+    }
+
+    private sealed class Streamed(PipeReader content, Queue<ChunkedBuffer> carried) : PartSource
+    {
+        internal override async ValueTask<SourcePart> NextAsync(int size, CancellationToken cancellationToken)
+        {
+            if (carried.TryDequeue(out ChunkedBuffer? read))
+            {
+                return new SourcePart(read.Sequence(), read, Ended: false);
+            }
+
+            (ChunkedBuffer part, bool ended) = await ChunkedBuffer.FillAsync(content, size, cancellationToken).ConfigureAwait(false);
+            return new SourcePart(part.Sequence(), part, ended);
+        }
+
+        internal override void Release() => PartPump.Release(carried);
     }
 }

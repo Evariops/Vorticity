@@ -39,6 +39,26 @@ public sealed class StoreTransportOptions
     /// <summary>The proxy, or null for the environment's (<c>HTTPS_PROXY</c>, <c>NO_PROXY</c>), as the platform reads it.</summary>
     public IWebProxy? Proxy { get; init; }
 
+    /// <summary>
+    /// A directory where a put read from a stream is held whole, on disk, before it is sent, so that any
+    /// attempt can send it again: a part, the whole object, or the upload itself. Null, the default,
+    /// sends a stream as it is read, holding in memory the parts in flight, or a put small enough to go
+    /// whole.
+    /// </summary>
+    /// <remarks>
+    /// A put of bytes already in memory is never spooled. Each put takes a file of its own, deleted when
+    /// the put ends, and its upload starts once its content has ended.
+    /// </remarks>
+    public string? SpoolDirectory { get; init; }
+
+    /// <summary>
+    /// The most a put read from a stream holds in memory to send whole, 256 MiB by default: what a
+    /// conditional put to a service that takes a condition only on a whole object, R2 or Cloud Storage,
+    /// may reach unless <see cref="SpoolDirectory"/> holds it on disk. Past it, such a put is refused
+    /// before a byte is sent.
+    /// </summary>
+    public long MaxHeldBytes { get; init; } = 256L << 20;
+
     /// <summary>The first delay of the exponential backoff, before its jitter.</summary>
     internal TimeSpan RetryBaseDelay { get; init; } = TimeSpan.FromMilliseconds(50);
 
@@ -61,5 +81,10 @@ public sealed class StoreTransportOptions
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(ConnectTimeout, TimeSpan.Zero, nameof(ConnectTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(FirstByteTimeout, TimeSpan.Zero, nameof(FirstByteTimeout));
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(StallTimeout, TimeSpan.Zero, nameof(StallTimeout));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(MaxHeldBytes, nameof(MaxHeldBytes));
+        if (SpoolDirectory is { } spool && !System.IO.Directory.Exists(spool))
+        {
+            throw new ArgumentException($"The spool directory '{spool}' does not exist.", nameof(SpoolDirectory));
+        }
     }
 }

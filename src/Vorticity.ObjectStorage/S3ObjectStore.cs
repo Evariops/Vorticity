@@ -34,7 +34,7 @@ namespace Vorticity.ObjectStorage;
 /// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
-public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
+public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts, IUploadService
 {
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
@@ -43,6 +43,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     private readonly HttpTransport _transport;
     private readonly S3Profile _profile;
     private readonly ObjectStoreCapabilities _capabilities;
+    private readonly UploadLimits _limits;
     private readonly TimeProvider _time;
     private readonly Lock _resolvingGate = new Lock();
     private Target? _target;
@@ -79,6 +80,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
         }
 
         _capabilities = CapabilitiesOf(_profile, options);
+        _limits = LimitsOf(_profile, options);
         _time = options.Transport.TimeProvider;
         _transport = new HttpTransport(options.Transport, ProviderName(_profile), ReadErrorAsync, options.Handler);
 

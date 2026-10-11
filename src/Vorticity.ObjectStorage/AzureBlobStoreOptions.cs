@@ -29,14 +29,17 @@ public sealed class AzureBlobStoreOptions
     /// <summary>The connections, deadlines and retries.</summary>
     public StoreTransportOptions Transport { get; init; } = new StoreTransportOptions();
 
-    /// <summary>The size past which a put goes up in blocks sent in parallel rather than whole, 32 MiB by default.</summary>
+    /// <summary>The size past which a put goes up in parts, Azure's blocks, sent in parallel rather than whole, 32 MiB by default.</summary>
     public long PartThreshold { get; init; } = 32L << 20;
 
-    /// <summary>The size of a block, 16 MiB by default; larger when an object would need more than 50 000.</summary>
-    public int BlockSize { get; init; } = 16 << 20;
+    /// <summary>
+    /// The size of a part, a block, 16 MiB by default; larger when a blob of known length would need more
+    /// than 50 000, and growing with the parts of one of unknown length.
+    /// </summary>
+    public int PartSize { get; init; } = 16 << 20;
 
-    /// <summary>The blocks of one upload in flight at once, 4 by default.</summary>
-    public int BlocksInFlight { get; init; } = 4;
+    /// <summary>The parts of one upload in flight at once, 4 by default, each held in memory until it is sent.</summary>
+    public int PartsInFlight { get; init; } = 4;
 
     /// <summary>
     /// Whether a put carries <c>x-ms-content-crc64</c>, the CRC-64 of its body, which the service checks

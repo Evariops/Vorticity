@@ -113,7 +113,7 @@ internal sealed class CommitObjectBuilder : IPageSink
     }
 
     /// <summary>
-    /// Lays the object out, ready for one <see cref="IObjectStore.PutAsync"/> that creates it. The header
+    /// Lays the object out, ready for one <see cref="IObjectStore.PutAsync(string, System.Buffers.ReadOnlySequence{byte}, PutCondition, System.Threading.CancellationToken)"/> that creates it. The header
     /// may hold references this builder handed out and references into older commits, but it must
     /// name this builder's version.
     /// </summary>

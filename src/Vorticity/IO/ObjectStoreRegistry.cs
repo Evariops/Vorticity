@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
@@ -274,6 +275,9 @@ internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : I
 
     public ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
         inner.PutAsync(prefix + key, content, length, condition, cancellationToken);
+
+    public ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken) =>
+        inner.PutAsync(prefix + key, content, condition, cancellationToken);
 
     public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {

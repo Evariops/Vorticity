@@ -1,17 +1,16 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.IO.Hashing;
 using System.IO.Pipelines;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Vorticity.ObjectStorage.Http;
 
 /// <summary>
-/// A body held whole before it is sent, in pooled chunks of a mebibyte, so that its checksum is known
-/// in time for a header and it can be sent again by a retry. A body never takes one array of its size.
+/// A body read from a stream and held before it is sent, in pooled chunks of a mebibyte, so that its
+/// checksum is known in time for a header and it can be sent again by a retry. A body never takes one
+/// array of its size.
 /// </summary>
 internal sealed class ChunkedBuffer : IDisposable
 {
@@ -97,8 +96,8 @@ internal sealed class ChunkedBuffer : IDisposable
             return new ReadOnlySequence<byte>(_chunks[0], 0, (int)_length);
         }
 
-        Segment first = new Segment(_chunks[0].AsMemory(0, ChunkBytes), 0);
-        Segment last = first;
+        SequenceSegment first = new SequenceSegment(_chunks[0].AsMemory(0, ChunkBytes), 0);
+        SequenceSegment last = first;
         for (int i = 1; i < _chunks.Count; i++)
         {
             int length = i == _chunks.Count - 1 ? (int)(_length - ((long)i * ChunkBytes)) : ChunkBytes;
@@ -106,47 +105,6 @@ internal sealed class ChunkedBuffer : IDisposable
         }
 
         return new ReadOnlySequence<byte>(first, 0, last, last.Memory.Length);
-    }
-
-    /// <summary>The CRC-64/NVME of the bytes, by the platform's parameter set.</summary>
-    internal ulong Crc64()
-    {
-        System.IO.Hashing.Crc64 crc = new System.IO.Hashing.Crc64(Crc64ParameterSet.Nvme);
-        AppendTo(crc);
-        return crc.GetCurrentHashAsUInt64();
-    }
-
-    /// <summary>The CRC-32C of the bytes, by the platform's parameter set.</summary>
-    internal uint Crc32C()
-    {
-        Crc32 crc = new Crc32(Crc32ParameterSet.Crc32C);
-        foreach (ReadOnlyMemory<byte> segment in Sequence())
-        {
-            crc.Append(segment.Span);
-        }
-
-        return crc.GetCurrentHashAsUInt32();
-    }
-
-    /// <summary>Appends the bytes to <paramref name="crc"/>: what keeps a multipart upload's whole-object CRC as its parts fill, in order.</summary>
-    internal void AppendTo(System.IO.Hashing.Crc64 crc)
-    {
-        foreach (ReadOnlyMemory<byte> segment in Sequence())
-        {
-            crc.Append(segment.Span);
-        }
-    }
-
-    /// <summary>The MD5 of the bytes, for a <c>Content-MD5</c> a service asks for; never for security.</summary>
-    internal byte[] Md5()
-    {
-        using IncrementalHash md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
-        foreach (ReadOnlyMemory<byte> segment in Sequence())
-        {
-            md5.AppendData(segment.Span);
-        }
-
-        return md5.GetHashAndReset();
     }
 
     public void Dispose()
@@ -178,22 +136,6 @@ internal sealed class ChunkedBuffer : IDisposable
                 span = span[take..];
                 _length += take;
             }
-        }
-    }
-
-    private sealed class Segment : ReadOnlySequenceSegment<byte>
-    {
-        internal Segment(ReadOnlyMemory<byte> memory, long runningIndex)
-        {
-            Memory = memory;
-            RunningIndex = runningIndex;
-        }
-
-        internal Segment Append(ReadOnlyMemory<byte> memory)
-        {
-            Segment next = new Segment(memory, RunningIndex + Memory.Length);
-            Next = next;
-            return next;
         }
     }
 }

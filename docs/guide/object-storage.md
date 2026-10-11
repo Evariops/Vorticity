@@ -193,8 +193,8 @@ order, signs with sessions of its own, and serves no dataset.
 since what a dataset relies on lies there. An object's token is its generation: a read is bound to it,
 and a put is conditioned on it, a generation of 0 meaning that no object may have the name. Every put
 carries the CRC-32C the service checks. The service takes no precondition on an upload in parts, so a
-conditional put goes in one request, held in memory up to 5 GiB, and a dataset's data objects, which
-carry no condition, go up in parts. A listing says each object's retention and holds. A deleted object
+conditional put goes in one request, and a dataset's data objects, which carry no condition, go up in
+parts. A listing says each object's retention and holds. A deleted object
 stays billed for the bucket's soft-delete period, 7 days by default, so vacuum frees storage a week
 later there unless the bucket's period is 0. `StoreCredentials.Token` takes OAuth 2.0 tokens from a
 source of yours, and `StoreCredentials.Anonymous` sends none, for an emulator.
@@ -213,18 +213,32 @@ the deadlines and the attempts.
 A put conditioned on the key's absence, as a dataset's commit is, is never sent again blindly. A put
 the service throttled, or whose body was cut short, was never applied, and goes again. When its answer
 is lost after its body was sent, the store asks the object's head, whose metadata carries the put's
-id: the put created the object, another writer did, or nothing is there and the put goes again. When
-the head fails too, the store throws an `ObjectStoreException` whose `OutcomeUnknown` is true, and
-the caller decides.
+id: the put created the object, another writer did, or nothing is there and the put goes again. A
+refusal that follows such a loss is checked the same way, since a slow service may apply the lost
+attempt after the head, and the put then finds the key taken by itself. When the head fails too, the
+store throws an `ObjectStoreException` whose `OutcomeUnknown` is true, and the caller decides.
+
+A put of bytes already in memory, `PutAsync(key, ReadOnlySequence<byte>, condition)`, sends them
+where they lie and sends them again from there. A put read from a stream holds what a retry needs, a
+part in flight or the whole of a small put. S3 may refuse the completion of an upload and ask for it
+to be made again, which a stream read once cannot do: the put then throws. Give the store
+`StoreTransportOptions.SpoolDirectory` and every put read from a stream is written whole to a file
+there first, sent from that file, sent again from it by any retry, of a part, of the object or of the
+upload, and the file deleted when the put ends. The upload then starts once the stream has ended.
 
 ## Watch out
 
 * The listings of OVHcloud are not documented to be in order and to honour `start-after`, which a
   dataset needs to find its latest version. A dataset refuses such a store until
   `S3StoreOptions.ListsInOrder` says the bucket does, once you have checked it.
-* R2 takes no condition on the parts of an upload, so a conditional put to R2 goes in one request,
-  which caps it at 5 GiB. A dataset's data object past 32 MiB goes up in parts without the condition,
-  which its key, ending with a fresh uid, makes needless. Cloud Storage does the same.
+* R2 and Cloud Storage take no condition on the parts of an upload, so a conditional put to them goes
+  in one request, 5 GiB at most on R2. Read from a stream, it is held in memory up to
+  `StoreTransportOptions.MaxHeldBytes`, 256 MiB by default, and refused past it, unless
+  `SpoolDirectory` holds it on disk. A dataset's data object goes up in parts without the condition,
+  which its key, ending with a fresh uid, makes needless.
 * A dataset created with `LockedStore` needs a store that keeps locks, and refuses R2, which offers no
   Object Lock, and an OVHcloud Local Zone once its store says `KeepsLocks = false`.
 * Parts in flight are held in memory, 4 of 16 MiB by default per upload (`PartsInFlight`, `PartSize`).
+  The parts of an object of unknown length, a file written to a location, double every tenth of the
+  parts the service takes, up to 128 MiB, so that 10 000 reach about 1 TiB on S3. R2's stay of one
+  size, as R2 asks, which caps such an object at about 156 GiB there.

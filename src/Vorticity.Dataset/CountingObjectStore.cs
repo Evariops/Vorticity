@@ -66,8 +66,8 @@ public sealed class CountingObjectStore : IObjectStore
     }
 
     /// <summary>
-    /// Bytes announced to <see cref="PutAsync"/>, whether or not its condition held; for a put of unknown
-    /// length, the bytes the store read of its content, counted once the put is over.
+    /// Bytes announced to a put, whether or not its condition held; for a put of unknown length, the
+    /// bytes the store read of its content, counted once the put is over.
     /// </summary>
     public long BytesWritten
     {
@@ -216,6 +216,25 @@ public sealed class CountingObjectStore : IObjectStore
                 }
             }
 
+            Leave();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        Enter(ObjectOperation.Put);
+        lock (_gate)
+        {
+            _bytesWritten += content.Length;
+        }
+
+        try
+        {
+            return await _inner.PutAsync(key, content, condition, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
             Leave();
         }
     }

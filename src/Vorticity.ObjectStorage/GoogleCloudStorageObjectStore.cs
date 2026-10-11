@@ -37,13 +37,13 @@ namespace Vorticity.ObjectStorage;
 /// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
-public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWholeConditionalPuts
+public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWholeConditionalPuts, IUploadService
 {
     /// <summary>The metadata a put carries its id in, read back as <c>metadata.vxput</c>.</summary>
     internal const string PutIdHeader = "x-goog-meta-vxput";
 
-    /// <summary>The most a conditional put holds whole in memory, where the service would take 5 TiB.</summary>
-    internal const long MaxSinglePut = 5L << 30;
+    /// <summary>The most one XML <c>PUT</c> takes: 5 TiB, from bytes held in memory or spooled on disk.</summary>
+    internal const long MaxSinglePut = 5L << 40;
 
     private const int MaxParts = 10_000;
     private const int MaxBatch = 100;
@@ -53,6 +53,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     private readonly GoogleCloudStorageOptions _options;
     private readonly TokenSource _tokens;
     private readonly HttpTransport _transport;
+    private readonly UploadLimits _limits;
     private readonly string _base;
     private readonly string _bucketPath;
     private readonly string _jsonObjects;
@@ -76,6 +77,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             $"A Cloud Storage store authorizes its requests with tokens, the environment's credentials or none, not {options.Credentials}.",
             nameof(options));
         _options = options;
+        _limits = LimitsOf(options);
         _base = endpoint.GetLeftPart(UriPartial.Authority);
         _bucketPath = "/" + UriEncoding.Path(options.Bucket);
         _jsonObjects = "/storage/v1/b/" + UriEncoding.Query(options.Bucket) + "/o";
@@ -215,7 +217,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             CheckKey(key);
             ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
             ThrowIfDisposed();
-            return await PutCoreAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false);
+            return await Upload.PutAsync(this, _transport, _limits, key, content, length, condition, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception caught)
         {
@@ -226,6 +228,14 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         {
             await content.CompleteAsync(failure).ConfigureAwait(false);
         }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ThrowIfDisposed();
+        return Upload.PutAsync(this, _transport, _limits, key, content, condition, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -403,67 +413,16 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         }
     }
 
-    private async ValueTask<PutOutcome> PutCoreAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+    /// <summary>The size of part <paramref name="number"/> of an object of <paramref name="length"/> bytes, -1 when unknown.</summary>
+    internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
+
+    /// <inheritdoc/>
+    string IUploadService.PutOperation => "PutObject";
+
+    /// <inheritdoc/>
+    /// <remarks>An XML <c>PUT</c> with its generation precondition and the CRC-32C the service checks.</remarks>
+    ValueTask<PutOutcome> IUploadService.PutWholeAsync(string key, ReadOnlySequence<byte> body, PutCondition condition, string? putId, CancellationToken cancellationToken)
     {
-        // The service takes no precondition on parts: a conditional put goes whole, held in memory.
-        bool whole = condition.Kind != PutConditionKind.None;
-        long threshold = whole ? MaxSinglePut : Math.Min(_options.PartThreshold, MaxSinglePut);
-        if (length > threshold)
-        {
-            if (whole)
-            {
-                throw new ObjectStoreException($"'{key}' is {length} bytes, past the {MaxSinglePut} a conditional put to Cloud Storage holds whole.");
-            }
-
-            return await SendInPartsAsync(key, content, length, new Queue<ChunkedBuffer>(), cancellationToken).ConfigureAwait(false);
-        }
-
-        if (length >= 0)
-        {
-            (ChunkedBuffer body, bool ended) = await ChunkedBuffer.FillAsync(content, length, cancellationToken).ConfigureAwait(false);
-            using (body)
-            {
-                if (body.Length < length || !ended)
-                {
-                    throw new ObjectStoreException(body.Length < length
-                        ? $"'{key}' was announced as {length} bytes and its content ended after {body.Length}."
-                        : $"'{key}' was announced as {length} bytes and its content runs past them.");
-                }
-
-                return await PutWholeAsync(key, body, condition, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        (ChunkedBuffer? ended2, Queue<ChunkedBuffer> carried) = whole
-            ? await HeldWholeAsync(key, content, cancellationToken).ConfigureAwait(false)
-            : await PartPump.HeadAsync(content, PartSize(), threshold, cancellationToken).ConfigureAwait(false);
-        if (ended2 is not null)
-        {
-            using (ended2)
-            {
-                return await PutWholeAsync(key, ended2, condition, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        return await SendInPartsAsync(key, content, length, carried, cancellationToken).ConfigureAwait(false);
-    }
-
-    private static async ValueTask<(ChunkedBuffer? Whole, Queue<ChunkedBuffer> Carried)> HeldWholeAsync(string key, PipeReader content, CancellationToken cancellationToken)
-    {
-        (ChunkedBuffer all, bool ended) = await ChunkedBuffer.FillAsync(content, MaxSinglePut, cancellationToken).ConfigureAwait(false);
-        if (!ended)
-        {
-            all.Dispose();
-            throw new ObjectStoreException($"'{key}' runs past the {MaxSinglePut} bytes a conditional put to Cloud Storage holds whole.");
-        }
-
-        return (all, new Queue<ChunkedBuffer>());
-    }
-
-    /// <summary>One XML <c>PUT</c> with its generation precondition, sent again while its outcome can be learned and it did not land.</summary>
-    private async ValueTask<PutOutcome> PutWholeAsync(string key, ChunkedBuffer body, PutCondition condition, CancellationToken cancellationToken)
-    {
-        string? putId = condition.Kind == PutConditionKind.None ? null : NewPutId();
         List<(string, string)> headers = [];
         if (_options.SendChecksums)
         {
@@ -484,106 +443,35 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             headers.Add(("x-goog-if-generation-match", condition.Token!));
         }
 
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                return await _transport.SendAsync(
-                    "PutObject",
-                    new WriteRequest(this, key, body.Sequence(), [.. headers], condition),
-                    static (s, ct) => s.Store.BuildPutAsync(s, ct),
-                    static (response, s, ct) => s.Store.ConsumePutAsync(response, s, ct),
-                    idempotent: putId is null,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (StoreAnswerLostException lost)
-            {
-                if (await LearnPutAsync(key, putId!, condition, lost, cancellationToken).ConfigureAwait(false) is { } learned)
-                {
-                    return learned;
-                }
-
-                if (!await _transport.RetryAfterAsync(attempt, cancellationToken).ConfigureAwait(false))
-                {
-                    throw new ObjectStoreException($"PutObject of '{key}' did not land after {attempt} attempts: {lost.Message}", lost.InnerException!);
-                }
-            }
-        }
+        return _transport.SendAsync(
+            "PutObject",
+            new WriteRequest(this, key, body, [.. headers], condition),
+            static (s, ct) => s.Store.BuildPutAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumePutAsync(response, s, ct),
+            idempotent: putId is null,
+            cancellationToken);
     }
 
-    /// <summary>An XML multipart upload, for a put without a condition: started, its parts sent as they fill, completed, or aborted on any failure.</summary>
-    private async ValueTask<PutOutcome> SendInPartsAsync(string key, PipeReader content, long length, Queue<ChunkedBuffer> carried, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    /// <remarks>An XML multipart upload, whose object carries the put id: the service takes no condition on it.</remarks>
+    async ValueTask<UploadState> IUploadService.StartAsync(string key, string putId, CancellationToken cancellationToken)
     {
-        string uploadId;
-        try
-        {
-            uploadId = await _transport.SendAsync(
-                "CreateMultipartUpload",
-                new KeyRequest(this, key),
-                static (s, ct) => s.Store.BuildAsync(HttpMethod.Post, s.Store.XmlObject(s.Key) + "?uploads", new ByteArrayContent([]), [], ct),
-                static (response, s, ct) => s.Store.ConsumeCreateUploadAsync(response, s.Key, ct),
-                idempotent: true,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            PartPump.Release(carried);
-            throw;
-        }
-
-        Dictionary<int, string> etags = [];
-        try
-        {
-            List<long> parts = await PartPump.SendAsync(
-                key,
-                content,
-                length,
-                PartSize(),
-                MaxParts,
-                _options.PartsInFlight,
-                carried,
-                async (number, part, ct) =>
-                {
-                    string etag = await UploadPartAsync(key, uploadId, number, part, ct).ConfigureAwait(false);
-                    lock (etags)
-                    {
-                        etags[number] = etag;
-                    }
-                },
-                cancellationToken).ConfigureAwait(false);
-
-            byte[] body = ServiceXml.Write((Count: parts.Count, ETags: etags), static (xml, s) =>
-            {
-                xml.WriteStartElement("CompleteMultipartUpload");
-                for (int number = 1; number <= s.Count; number++)
-                {
-                    xml.WriteStartElement("Part");
-                    xml.WriteElementString("PartNumber", number.ToString(CultureInfo.InvariantCulture));
-                    xml.WriteElementString("ETag", s.ETags[number]);
-                    xml.WriteEndElement();
-                }
-
-                xml.WriteEndElement();
-            });
-            return await _transport.SendAsync(
-                "CompleteMultipartUpload",
-                new UploadRequest(this, key, uploadId, body),
-                static (s, ct) => s.Store.BuildAsync(HttpMethod.Post, s.Store.XmlObject(s.Key) + "?uploadId=" + UriEncoding.Query(s.UploadId), new SequenceContent(new ReadOnlySequence<byte>(s.Body)), [], ct),
-                static (response, s, ct) => s.Store.ConsumeCompleteAsync(response, s.Key, ct),
-                idempotent: true,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            await AbortAsync(key, uploadId).ConfigureAwait(false);
-            throw;
-        }
+        string uploadId = await _transport.SendAsync(
+            "CreateMultipartUpload",
+            new PartRequest(this, key, string.Empty, 0, ReadOnlySequence<byte>.Empty, [(PutIdHeader, putId)]),
+            static (s, ct) => s.Store.BuildAsync(HttpMethod.Post, s.Store.XmlObject(s.Key) + "?uploads", new ByteArrayContent([]), s.Headers, ct),
+            static (response, s, ct) => s.Store.ConsumeCreateUploadAsync(response, s.Key, ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false);
+        return new UploadState(key, uploadId, putId);
     }
 
-    private async Task<string> UploadPartAsync(string key, string uploadId, int number, ChunkedBuffer part, CancellationToken cancellationToken) =>
-        await _transport.SendAsync(
+    /// <inheritdoc/>
+    async ValueTask<PartReceipt> IUploadService.SendPartAsync(UploadState upload, int number, ReadOnlySequence<byte> body, CancellationToken cancellationToken)
+    {
+        string etag = await _transport.SendAsync(
             "UploadPart",
-            new PartRequest(this, key, uploadId, number, part.Sequence(), _options.SendChecksums ? [("x-goog-hash", "crc32c=" + Crc32CHeader(part))] : []),
+            new PartRequest(this, upload.Key, upload.Id, number, body, _options.SendChecksums ? [("x-goog-hash", "crc32c=" + Crc32CHeader(body))] : []),
             static (s, ct) => s.Store.BuildAsync(
                 HttpMethod.Put,
                 s.Store.XmlObject(s.Key) + string.Create(CultureInfo.InvariantCulture, $"?partNumber={s.Number}&uploadId={UriEncoding.Query(s.UploadId)}"),
@@ -595,6 +483,43 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
                 : throw await s.Store.FailureAsync(response, "UploadPart", s.Key, null, ct).ConfigureAwait(false),
             idempotent: true,
             cancellationToken).ConfigureAwait(false);
+        return new PartReceipt(etag);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Never sent again blindly: a completion whose answer was lost and that landed finds its upload gone,
+    /// so the object's metadata and the put id it carries settle it.
+    /// </remarks>
+    ValueTask<PutOutcome> IUploadService.CompleteAsync(UploadState upload, PutCondition condition, CancellationToken cancellationToken)
+    {
+        byte[] body = ServiceXml.Write(upload.Parts, static (xml, parts) =>
+        {
+            xml.WriteStartElement("CompleteMultipartUpload");
+            for (int i = 0; i < parts.Count; i++)
+            {
+                xml.WriteStartElement("Part");
+                xml.WriteElementString("PartNumber", (i + 1).ToString(CultureInfo.InvariantCulture));
+                xml.WriteElementString("ETag", parts[i].Tag);
+                xml.WriteEndElement();
+            }
+
+            xml.WriteEndElement();
+        });
+        return _transport.SendAsync(
+            "CompleteMultipartUpload",
+            new UploadRequest(this, upload.Key, upload.Id, body),
+            static (s, ct) => s.Store.BuildAsync(HttpMethod.Post, s.Store.XmlObject(s.Key) + "?uploadId=" + UriEncoding.Query(s.UploadId), new SequenceContent(new ReadOnlySequence<byte>(s.Body)), [], ct),
+            static (response, s, ct) => s.Store.ConsumeCompleteAsync(response, s.Key, ct),
+            idempotent: false,
+            cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    ValueTask IUploadService.AbortAsync(UploadState upload) => AbortAsync(upload.Key, upload.Id);
+
+    /// <inheritdoc/>
+    ValueTask<(ObjectHead? Head, string? PutId)> IUploadService.HeadAsync(string key, CancellationToken cancellationToken) => MetadataAsync(key, cancellationToken);
 
     /// <summary>Aborts an upload given up, under the transport's abort deadline rather than the caller's token.</summary>
     private ValueTask AbortAsync(string key, string uploadId) =>
@@ -603,41 +528,23 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             new UploadRequest(this, key, uploadId, []),
             static (s, ct) => s.Store.BuildAsync(HttpMethod.Delete, s.Store.XmlObject(s.Key) + "?uploadId=" + UriEncoding.Query(s.UploadId), null, [], ct));
 
-    /// <summary>What became of a put whose answer was lost, from the object's metadata and the put id it carries.</summary>
-    private async ValueTask<PutOutcome?> LearnPutAsync(string key, string putId, PutCondition condition, StoreAnswerLostException lost, CancellationToken cancellationToken)
+    /// <summary>
+    /// What the service takes of a put: up to 10 000 parts of 5 GiB, an object of 5 TiB in one request,
+    /// and a condition only on a whole object.
+    /// </summary>
+    private static UploadLimits LimitsOf(GoogleCloudStorageOptions options) => new UploadLimits
     {
-        (ObjectHead? head, string? id) found;
-        try
-        {
-            found = await MetadataAsync(key, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception head) when (head is ObjectStoreException or StoreAnswerLostException)
-        {
-            throw new ObjectStoreException(
-                $"A put of '{key}' lost its answer ({lost.Message}), and the metadata that would say whether it landed failed too: the outcome is unknown.",
-                new AggregateException(lost, head))
-            {
-                OutcomeUnknown = true,
-            };
-        }
-
-        if (found.head is not { } object_)
-        {
-            return condition.Kind == PutConditionKind.IfMatch ? PutOutcome.Changed : null;
-        }
-
-        if (string.Equals(found.id, putId, StringComparison.Ordinal))
-        {
-            return PutOutcome.Created;
-        }
-
-        if (condition.Kind == PutConditionKind.IfMatch)
-        {
-            return string.Equals(object_.Token, condition.Token, StringComparison.Ordinal) ? null : PutOutcome.Changed;
-        }
-
-        return PutOutcome.Exists;
-    }
+        PartThreshold = options.PartThreshold,
+        PartSize = Math.Max(options.PartSize, 1),
+        MaxParts = MaxParts,
+        MaxPartBytes = 5L << 30,
+        PartsInFlight = options.PartsInFlight,
+        MaxSinglePut = MaxSinglePut,
+        ConditionalParts = false,
+        GrowingParts = true,
+        MaxHeldBytes = options.Transport.MaxHeldBytes,
+        SpoolDirectory = options.Transport.SpoolDirectory,
+    };
 
     private async ValueTask<HttpRequestMessage> BuildPutAsync(WriteRequest s, CancellationToken cancellationToken)
     {
@@ -836,8 +743,6 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
 
     private string JsonObject(string key) => _jsonObjects + "/" + UriEncoding.Query(key);
 
-    private int PartSize() => Math.Max(_options.PartSize, 1);
-
     private async ValueTask<Exception> FailureAsync(HttpResponseMessage response, string operation, string key, string? ifToken, CancellationToken cancellationToken)
     {
         HttpStatusCode status = response.StatusCode;
@@ -902,14 +807,12 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     }
 
     /// <summary><c>x-goog-hash</c>'s CRC-32C: its four bytes, high byte first, in base64.</summary>
-    private static string Crc32CHeader(ChunkedBuffer body)
+    private static string Crc32CHeader(ReadOnlySequence<byte> body)
     {
         Span<byte> bytes = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(bytes, body.Crc32C());
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, Checksums.Crc32C(body));
         return Convert.ToBase64String(bytes);
     }
-
-    private static string NewPutId() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
 
     private static void CheckKey(string key)
     {

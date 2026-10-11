@@ -141,10 +141,10 @@ public static class ObjectStoreExtensions
         return store.PutAsync(key, content, length, PutCondition.IfAbsent, cancellationToken);
     }
 
-    /// <summary>Creates an object from bytes already in memory.</summary>
+    /// <summary>Creates an object from bytes already in memory, sent where they lie.</summary>
     internal static ValueTask<PutOutcome> PutIfAbsentAsync(
         this IObjectStore store, string key, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
-        store.PutAsync(key, PipeReader.Create(new ReadOnlySequence<byte>(content)), content.Length, PutCondition.IfAbsent, cancellationToken);
+        store.PutAsync(key, new ReadOnlySequence<byte>(content), PutCondition.IfAbsent, cancellationToken);
 
     /// <summary>Deletes one object.</summary>
     internal static ValueTask DeleteAsync(this IObjectStore store, string key, CancellationToken cancellationToken) =>

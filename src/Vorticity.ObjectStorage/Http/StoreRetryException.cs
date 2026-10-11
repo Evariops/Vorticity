@@ -36,3 +36,10 @@ internal sealed class StoreRetryException : Exception
 /// the service: the store then learns from the service what became of it.
 /// </summary>
 internal sealed class StoreAnswerLostException(string reason, Exception innerException) : Exception(reason, innerException);
+
+/// <summary>
+/// Thrown by a store when the service refused the completion of an upload and asks for the upload to be
+/// made again from its first part, as S3 does after a concurrent operation on the key: possible when the
+/// put's content can be sent again, held in memory or spooled on disk.
+/// </summary>
+internal sealed class StoreRestartException(string reason) : Exception(reason);

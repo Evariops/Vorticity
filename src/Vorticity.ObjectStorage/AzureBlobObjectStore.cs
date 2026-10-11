@@ -28,7 +28,7 @@ namespace Vorticity.ObjectStorage;
 /// disposed, and other stores may share them.
 /// </para>
 /// </remarks>
-public sealed partial class AzureBlobObjectStore : IObjectStore
+public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
 {
     /// <summary>The service version every request carries, which fixes the shape of the answers.</summary>
     internal const string Version = "2025-01-05";
@@ -38,6 +38,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
     private readonly AzureBlobStoreOptions _options;
     private readonly AzureAuthorizer _authorizer;
     private readonly HttpTransport _transport;
+    private readonly UploadLimits _limits;
     private readonly TimeProvider _time;
     private readonly string _base;
     private readonly string _containerPath;
@@ -63,6 +64,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
             $"An Azure store authorizes its requests with tokens, a shared access signature, an account key, the environment's credentials or none, not {options.Credentials}.",
             nameof(options));
         _options = options;
+        _limits = LimitsOf(options);
         _time = options.Transport.TimeProvider;
         _base = endpoint.GetLeftPart(UriPartial.Authority);
         _containerPath = endpoint.AbsolutePath.TrimEnd('/') + "/" + UriEncoding.Path(options.Container);

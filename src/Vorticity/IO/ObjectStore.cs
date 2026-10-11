@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
@@ -9,7 +10,7 @@ namespace Vorticity.IO;
 /// <summary>An object store: objects under string keys, read by range and written whole.</summary>
 /// <remarks>
 /// <para>
-/// Implementations are thread-safe. A put is atomic: a cancelled or failed <see cref="PutAsync"/>
+/// Implementations are thread-safe. A put is atomic: a cancelled or failed <see cref="PutAsync(string, PipeReader, long, PutCondition, CancellationToken)"/>
 /// leaves the key as it was or holding the new bytes whole, never half-written, and a put conditioned
 /// on the key's absence is answered <see cref="PutOutcome.Created"/> for one caller only when several
 /// race. Reads and heads see every write that completed. A listing may lag, by less than the retention
@@ -87,6 +88,22 @@ public interface IObjectStore : IAsyncDisposable
     /// <exception cref="NotSupportedException">The condition is one the store cannot hold (<see cref="ObjectStoreCapabilities.ReplacesOnTokenMatch"/>).</exception>
     /// <exception cref="ObjectStoreException">The store failed, or cannot tell whether the conditional put landed.</exception>
     ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Writes an object from bytes already in memory, atomically, if <paramref name="condition"/> holds.
+    /// A store that sends them sends them where they lie, and sends them again from there when it must
+    /// retry, so that nothing is copied; the default streams them through
+    /// <see cref="PutAsync(string, PipeReader, long, PutCondition, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="content">The bytes, which the caller keeps unchanged until the put completes.</param>
+    /// <param name="condition">When the put may write.</param>
+    /// <param name="cancellationToken">Cancels the put, leaving the key as it was or holding the new bytes whole.</param>
+    /// <returns>Whether the bytes were written, or which condition failed.</returns>
+    /// <exception cref="NotSupportedException">The condition is one the store cannot hold (<see cref="ObjectStoreCapabilities.ReplacesOnTokenMatch"/>).</exception>
+    /// <exception cref="ObjectStoreException">The store failed, or cannot tell whether the conditional put landed.</exception>
+    ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken) =>
+        PutAsync(key, PipeReader.Create(content), content.Length, condition, cancellationToken);
 
     /// <summary>Deletes objects. An absent key is not an error; a store whose service caps a batch splits it.</summary>
     /// <param name="keys">The keys, in any order.</param>
@@ -216,7 +233,7 @@ public enum PutConditionKind
     IfMatch = 2,
 }
 
-/// <summary>What <see cref="IObjectStore.PutAsync"/> did.</summary>
+/// <summary>What <see cref="IObjectStore.PutAsync(string, PipeReader, long, PutCondition, CancellationToken)"/> did.</summary>
 public enum PutOutcome
 {
     /// <summary>The bytes were written.</summary>

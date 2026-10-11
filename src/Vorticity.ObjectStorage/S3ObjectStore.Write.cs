@@ -7,9 +7,7 @@ using System.IO.Hashing;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http;
-using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -22,12 +20,12 @@ namespace Vorticity.ObjectStorage;
 /// <summary>The write path: puts, whole or in parts, their conditions and checksums, and deletes.</summary>
 /// <remarks>
 /// <para>
-/// A put up to the part threshold is held whole, its checksum computed, and sent in one request; a
-/// larger one, or one of unknown length past the threshold, goes up in parts sent in parallel, each
-/// held only while it is in flight. A put conditioned on the key's absence carries
-/// <c>If-None-Match: *</c>, one on a token <c>If-Match</c>, and both a put id in the object's metadata:
-/// when the answer to such a put is lost, the object's head says whether this put created it, and the
-/// put is sent again only when nothing did.
+/// A put goes through <see cref="Upload"/>, as every store's does: up to the part threshold in one
+/// request, its checksum computed, and past it in parts sent in parallel. Bytes already in memory are
+/// sent where they lie, and a stream is held a part at a time, or whole on disk when the store has a
+/// spool directory. A put conditioned on the key's absence carries <c>If-None-Match: *</c>, one on a
+/// token <c>If-Match</c>, on its one request or on the completion of its upload, and a put id in the
+/// object's metadata, by which a head settles a put whose answer was lost.
 /// </para>
 /// <para>
 /// A delete goes in batches of a thousand keys, each with the <c>Content-MD5</c> the service asks for,
@@ -63,7 +61,7 @@ public sealed partial class S3ObjectStore
             CheckKey(key);
             ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
             ThrowIfDisposed();
-            return await PutCoreAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false);
+            return await Upload.PutAsync(this, _transport, _limits, key, content, length, condition, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception caught)
         {
@@ -74,6 +72,14 @@ public sealed partial class S3ObjectStore
         {
             await content.CompleteAsync(failure).ConfigureAwait(false);
         }
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ThrowIfDisposed();
+        return Upload.PutAsync(this, _transport, _limits, key, content, condition, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -103,190 +109,42 @@ public sealed partial class S3ObjectStore
         }
     }
 
-    private async ValueTask<PutOutcome> PutCoreAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
-    {
-        if (condition.Kind == PutConditionKind.IfMatch && (_capabilities & ObjectStoreCapabilities.ReplacesOnTokenMatch) == 0)
-        {
-            throw new NotSupportedException($"The directory bucket '{Bucket}' is not known to replace an object only while it keeps its ETag.");
-        }
+    /// <summary>The size of part <paramref name="number"/> of an object of <paramref name="length"/> bytes, -1 when unknown.</summary>
+    internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
 
-        // A service that takes no condition on parts gets a conditional put whole, whatever its size.
-        bool whole = condition.Kind != PutConditionKind.None && HoldsConditionalPutsWhole;
-        long threshold = whole ? MaxSinglePut : Math.Min(_options.PartThreshold, MaxSinglePut);
-        if (length > threshold && whole)
-        {
-            throw new ObjectStoreException($"'{key}' is {length} bytes, past the {MaxSinglePut} a conditional put to {_profile} sends in one request.");
-        }
+    /// <inheritdoc/>
+    string IUploadService.PutOperation => "PutObject";
 
-        if (length >= 0 && length <= threshold)
-        {
-            (ChunkedBuffer body, bool ended) = await ChunkedBuffer.FillAsync(content, length, cancellationToken).ConfigureAwait(false);
-            using (body)
-            {
-                CheckEnd(key, length, body.Length, ended);
-                return await SendWholeAsync(key, body, condition, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        if (length < 0 && whole)
-        {
-            (ChunkedBuffer all, bool ended) = await ChunkedBuffer.FillAsync(content, MaxSinglePut, cancellationToken).ConfigureAwait(false);
-            using (all)
-            {
-                if (!ended)
-                {
-                    throw new ObjectStoreException($"'{key}' runs past the {MaxSinglePut} bytes a conditional put to {_profile} sends in one request.");
-                }
-
-                return await SendWholeAsync(key, all, condition, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        Queue<ChunkedBuffer> carried = new Queue<ChunkedBuffer>();
-        if (length < 0)
-        {
-            // Unknown: read a part at a time up to the threshold, and sent whole if it ends there.
-            (ChunkedBuffer? ended, carried) = await PartPump.HeadAsync(content, PartSizeFor(-1), threshold, cancellationToken).ConfigureAwait(false);
-            if (ended is not null)
-            {
-                using (ended)
-                {
-                    return await SendWholeAsync(key, ended, condition, cancellationToken).ConfigureAwait(false);
-                }
-            }
-        }
-
-        return await SendInPartsAsync(key, content, length, condition, carried, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>One request, sent again while its outcome can be learned and it did not land.</summary>
-    private async ValueTask<PutOutcome> SendWholeAsync(string key, ChunkedBuffer body, PutCondition condition, CancellationToken cancellationToken)
-    {
-        string? putId = condition.Kind == PutConditionKind.None ? null : NewPutId();
-        (string Name, string Value)[] extra = PutHeaders(body, putId);
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                return await _transport.SendAsync(
-                    "PutObject",
-                    new PutRequest(this, key, body.Sequence(), extra, condition),
-                    static (s, ct) => s.Store.BuildPutAsync(s, ct),
-                    static (response, s, ct) => s.Store.ConsumePutAsync(response, s.Key, s.Condition, ct),
-                    idempotent: putId is null,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (StoreAnswerLostException lost)
-            {
-                if (await LearnPutAsync(key, putId!, condition, lost, cancellationToken).ConfigureAwait(false) is { } learned)
-                {
-                    return learned;
-                }
-
-                if (!await _transport.RetryAfterAsync(attempt, cancellationToken).ConfigureAwait(false))
-                {
-                    throw new ObjectStoreException($"PutObject of '{key}' did not land after {attempt} attempts: {lost.Message}", lost.InnerException!);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// A multipart upload: started, its parts sent in parallel as they fill, and completed with the
-    /// condition and the whole object's checksum; aborted whatever fails before the completion.
-    /// </summary>
-    private async ValueTask<PutOutcome> SendInPartsAsync(
-        string key, PipeReader content, long length, PutCondition condition, Queue<ChunkedBuffer> carried, CancellationToken cancellationToken)
-    {
-        int partSize = PartSizeFor(length);
-        int maxParts = MaxParts;
-        string putId = NewPutId();
-        bool crc = ChecksumOf() == S3Checksum.Crc64Nvme;
-        string uploadId;
-        try
-        {
-            uploadId = await CreateUploadAsync(key, putId, crc, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            PartPump.Release(carried);
-            throw;
-        }
-
-        // The whole object's CRC, kept as the parts fill in order: they go up in parallel, in any order.
-        Crc64? whole = null;
-        Action<ChunkedBuffer>? produced = null;
-        if (crc)
-        {
-            Crc64 running = new Crc64(Crc64ParameterSet.Nvme);
-            whole = running;
-            produced = part => part.AppendTo(running);
-        }
-
-        List<Part> parts = [];
-        try
-        {
-            await PartPump.SendAsync(
-                key,
-                content,
-                length,
-                partSize,
-                maxParts,
-                _options.PartsInFlight,
-                carried,
-                (number, body, ct) =>
-                {
-                    Part part = new Part(number, body.Length);
-                    lock (parts)
-                    {
-                        parts.Add(part);
-                    }
-
-                    return UploadPartAsync(key, uploadId, part, body, crc, ct);
-                },
-                cancellationToken,
-                produced).ConfigureAwait(false);
-        }
-        catch
-        {
-            await AbortAsync(key, uploadId).ConfigureAwait(false);
-            throw;
-        }
-
-        parts.Sort(static (a, b) => a.Number.CompareTo(b.Number));
-        PutOutcome outcome;
-        try
-        {
-            outcome = await CompleteAsync(key, uploadId, putId, parts, whole?.GetCurrentHashAsUInt64(), condition, cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            await AbortAsync(key, uploadId).ConfigureAwait(false);
-            throw;
-        }
-
-        // A completion refused on its condition leaves its upload, and its parts, behind.
-        if (outcome != PutOutcome.Created)
-        {
-            await AbortAsync(key, uploadId).ConfigureAwait(false);
-        }
-
-        return outcome;
-    }
-
-    /// <summary>Starts an upload in parts carrying <paramref name="putId"/>, and the whole object's CRC-64/NVME when <paramref name="crc"/>.</summary>
-    private ValueTask<string> CreateUploadAsync(string key, string putId, bool crc, CancellationToken cancellationToken) =>
+    /// <inheritdoc/>
+    ValueTask<PutOutcome> IUploadService.PutWholeAsync(string key, ReadOnlySequence<byte> body, PutCondition condition, string? putId, CancellationToken cancellationToken) =>
         _transport.SendAsync(
+            "PutObject",
+            new PutRequest(this, key, body, PutHeaders(body, putId), condition),
+            static (s, ct) => s.Store.BuildPutAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumePutAsync(response, s.Key, s.Condition, ct),
+            idempotent: putId is null,
+            cancellationToken);
+
+    /// <inheritdoc/>
+    /// <remarks>The upload carries the put id, and asks for the whole object's CRC-64/NVME when its parts carry theirs.</remarks>
+    async ValueTask<UploadState> IUploadService.StartAsync(string key, string putId, CancellationToken cancellationToken)
+    {
+        bool crc = ChecksumOf() == S3Checksum.Crc64Nvme;
+        string uploadId = await _transport.SendAsync(
             "CreateMultipartUpload",
             new UploadRequest(this, key, string.Empty, putId, crc),
             static (s, ct) => s.Store.BuildCreateUploadAsync(s, ct),
             static (response, s, ct) => s.Store.ConsumeCreateUploadAsync(response, s.Key, ct),
             idempotent: true,
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+        return new S3Upload(key, uploadId, putId, crc);
+    }
 
-    private async Task UploadPartAsync(string key, string uploadId, Part part, ChunkedBuffer body, bool crc, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    async ValueTask<PartReceipt> IUploadService.SendPartAsync(UploadState upload, int number, ReadOnlySequence<byte> body, CancellationToken cancellationToken)
     {
-        ulong checksum = crc ? body.Crc64() : 0;
+        bool crc = ((S3Upload)upload).Crc;
+        ulong checksum = crc ? Checksums.Crc64Nvme(body) : 0;
         List<(string, string)> extra = [];
         if (crc)
         {
@@ -294,37 +152,35 @@ public sealed partial class S3ObjectStore
         }
         else if (ChecksumOf() == S3Checksum.ContentMd5)
         {
-            extra.Add(("content-md5", Convert.ToBase64String(body.Md5())));
+            extra.Add(("content-md5", Convert.ToBase64String(Checksums.Md5(body))));
         }
 
-        part.Etag = await _transport.SendAsync(
+        string etag = await _transport.SendAsync(
             "UploadPart",
-            new PartRequest(this, key, uploadId, part.Number, body.Sequence(), [.. extra]),
+            new PartRequest(this, upload.Key, upload.Id, number, body, [.. extra]),
             static (s, ct) => s.Store.BuildPartAsync(s, ct),
             static (response, s, ct) => s.Store.ConsumePartAsync(response, s.Key, ct),
             idempotent: true,
             cancellationToken).ConfigureAwait(false);
-        part.Crc = checksum;
+        return new PartReceipt(etag, checksum);
     }
 
-    /// <summary>
-    /// Completes an upload with its condition and, when the parts carry theirs, the whole object's
-    /// CRC-64/NVME, learning its outcome from the head when the answer is lost.
-    /// </summary>
-    private async ValueTask<PutOutcome> CompleteAsync(string key, string uploadId, string putId, List<Part> parts, ulong? whole, PutCondition condition, CancellationToken cancellationToken)
+    /// <inheritdoc/>
+    /// <remarks>The completion carries the condition and, when the parts carry theirs, the whole object's CRC-64/NVME.</remarks>
+    ValueTask<PutOutcome> IUploadService.CompleteAsync(UploadState upload, PutCondition condition, CancellationToken cancellationToken)
     {
-        bool crc = whole is not null;
-        byte[] body = ServiceXml.Write((Parts: parts, Crc: crc), static (xml, s) =>
+        S3Upload s3 = (S3Upload)upload;
+        byte[] body = ServiceXml.Write((Parts: upload.Parts, s3.Crc), static (xml, s) =>
         {
             xml.WriteStartElement("CompleteMultipartUpload", S3Answers.Namespace);
-            foreach (Part part in s.Parts)
+            for (int i = 0; i < s.Parts.Count; i++)
             {
                 xml.WriteStartElement("Part", S3Answers.Namespace);
-                xml.WriteElementString("PartNumber", S3Answers.Namespace, part.Number.ToString(CultureInfo.InvariantCulture));
-                xml.WriteElementString("ETag", S3Answers.Namespace, part.Etag);
+                xml.WriteElementString("PartNumber", S3Answers.Namespace, (i + 1).ToString(CultureInfo.InvariantCulture));
+                xml.WriteElementString("ETag", S3Answers.Namespace, s.Parts[i].Tag);
                 if (s.Crc)
                 {
-                    xml.WriteElementString("ChecksumCRC64NVME", S3Answers.Namespace, Base64(part.Crc));
+                    xml.WriteElementString("ChecksumCRC64NVME", S3Answers.Namespace, Base64(s.Parts[i].Crc));
                 }
 
                 xml.WriteEndElement();
@@ -332,83 +188,30 @@ public sealed partial class S3ObjectStore
 
             xml.WriteEndElement();
         });
-        (string, string)[] extra = whole is { } sum
+        (string, string)[] extra = s3.Whole is { } sum
             ? [("x-amz-checksum-crc64nvme", Base64(sum)), ("x-amz-checksum-type", "FULL_OBJECT")]
             : [];
-        for (int attempt = 1; ; attempt++)
-        {
-            try
-            {
-                return await _transport.SendAsync(
-                    "CompleteMultipartUpload",
-                    new CompleteRequest(this, key, uploadId, body, extra, condition),
-                    static (s, ct) => s.Store.BuildCompleteAsync(s, ct),
-                    static (response, s, ct) => s.Store.ConsumeCompleteAsync(response, s, ct),
-                    idempotent: false,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (StoreAnswerLostException lost)
-            {
-                if (await LearnPutAsync(key, putId, condition, lost, cancellationToken).ConfigureAwait(false) is { } learned)
-                {
-                    return learned;
-                }
-
-                if (!await _transport.RetryAfterAsync(attempt, cancellationToken).ConfigureAwait(false))
-                {
-                    throw new ObjectStoreException($"CompleteMultipartUpload of '{key}' did not land after {attempt} attempts: {lost.Message}", lost.InnerException!);
-                }
-            }
-        }
+        return _transport.SendAsync(
+            "CompleteMultipartUpload",
+            new CompleteRequest(this, upload.Key, upload.Id, body, extra, condition),
+            static (s, ct) => s.Store.BuildCompleteAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeCompleteAsync(response, s, ct),
+            idempotent: false,
+            cancellationToken);
     }
 
-    /// <summary>
-    /// What became of a put whose answer was lost, from the object's head: created by this put when it
-    /// carries its id, taken by another when not, and null, to send the put again, when nothing is there
-    /// or the token it was to replace still is.
-    /// </summary>
-    /// <exception cref="ObjectStoreException">The head failed too, and the outcome is unknown.</exception>
-    private async ValueTask<PutOutcome?> LearnPutAsync(string key, string putId, PutCondition condition, StoreAnswerLostException lost, CancellationToken cancellationToken)
-    {
-        (ObjectHead? head, string? id) found;
-        try
-        {
-            found = await _transport.SendAsync(
-                "HeadObject",
-                new Request(this, key),
-                static (s, ct) => s.Store.BuildAsync(HttpMethod.Head, s.Key, null, ct),
-                static async (response, s, ct) => (await s.Store.ConsumeHeadAsync(response, s.Key, ct).ConfigureAwait(false), HttpAnswers.Header(response, PutIdHeader)),
-                idempotent: true,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception head) when (head is ObjectStoreException or StoreAnswerLostException)
-        {
-            throw new ObjectStoreException(
-                $"A put of '{key}' lost its answer ({lost.Message}), and the head that would say whether it landed failed too: the outcome is unknown.",
-                new AggregateException(lost, head))
-            {
-                OutcomeUnknown = true,
-            };
-        }
+    /// <inheritdoc/>
+    ValueTask IUploadService.AbortAsync(UploadState upload) => AbortAsync(upload.Key, upload.Id);
 
-        if (found.head is not { } object_)
-        {
-            return condition.Kind == PutConditionKind.IfMatch ? PutOutcome.Changed : null;
-        }
-
-        if (string.Equals(found.id, putId, StringComparison.Ordinal))
-        {
-            return PutOutcome.Created;
-        }
-
-        if (condition.Kind == PutConditionKind.IfMatch)
-        {
-            return string.Equals(object_.Token, condition.Token, StringComparison.Ordinal) ? null : PutOutcome.Changed;
-        }
-
-        // Taken by another writer, or, unconditionally, a put that carried no id: an object is there.
-        return condition.Kind == PutConditionKind.IfAbsent ? PutOutcome.Exists : null;
-    }
+    /// <inheritdoc/>
+    ValueTask<(ObjectHead? Head, string? PutId)> IUploadService.HeadAsync(string key, CancellationToken cancellationToken) =>
+        _transport.SendAsync(
+            "HeadObject",
+            new Request(this, key),
+            static (s, ct) => s.Store.BuildAsync(HttpMethod.Head, s.Key, null, ct),
+            static async (response, s, ct) => (await s.Store.ConsumeHeadAsync(response, s.Key, ct).ConfigureAwait(false), HttpAnswers.Header(response, PutIdHeader)),
+            idempotent: true,
+            cancellationToken);
 
     /// <summary>Aborts an upload given up, under the transport's abort deadline rather than the caller's token.</summary>
     private ValueTask AbortAsync(string key, string uploadId) =>
@@ -416,6 +219,25 @@ public sealed partial class S3ObjectStore
             "AbortMultipartUpload",
             new UploadRequest(this, key, uploadId, string.Empty, false),
             static (s, ct) => s.Store.BuildAbortAsync(s, ct));
+
+    /// <summary>
+    /// What the service takes of a put: parts of the option's size, at least the service's minimum, up
+    /// to 1 000 on Scaleway and 10 000 elsewhere; on R2, a condition only on a whole put, and parts of
+    /// one size.
+    /// </summary>
+    private static UploadLimits LimitsOf(S3Profile profile, S3StoreOptions options) => new UploadLimits
+    {
+        PartThreshold = options.PartThreshold,
+        PartSize = Math.Max(options.PartSize, options.MinimumPartSize),
+        MaxParts = profile == S3Profile.Scaleway ? 1_000 : 10_000,
+        MaxPartBytes = MaxSinglePut,
+        PartsInFlight = options.PartsInFlight,
+        MaxSinglePut = MaxSinglePut,
+        ConditionalParts = profile != S3Profile.R2,
+        GrowingParts = profile != S3Profile.R2,
+        MaxHeldBytes = options.Transport.MaxHeldBytes,
+        SpoolDirectory = options.Transport.SpoolDirectory,
+    };
 
     private async ValueTask<HttpRequestMessage> BuildPutAsync(PutRequest s, CancellationToken cancellationToken)
     {
@@ -580,8 +402,7 @@ public sealed partial class S3ObjectStore
 
         if (response.StatusCode == HttpStatusCode.Conflict)
         {
-            throw new ObjectStoreException(
-                $"CompleteMultipartUpload of '{s.Key}' met a concurrent delete: the service asks for a new upload, so the put must be made again. {error}");
+            throw new StoreRestartException($"CompleteMultipartUpload of '{s.Key}' met a concurrent operation, and the service asks for a new upload: {error}.");
         }
 
         throw MapFailure(response, error, "CompleteMultipartUpload", s.Key);
@@ -648,7 +469,7 @@ public sealed partial class S3ObjectStore
     private static (string, string) Crc32Digest(byte[] body)
     {
         byte[] crc = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(crc, System.IO.Hashing.Crc32.HashToUInt32(body));
+        BinaryPrimitives.WriteUInt32BigEndian(crc, Crc32.HashToUInt32(body));
         return ("x-amz-checksum-crc32", Convert.ToBase64String(crc));
     }
 
@@ -670,16 +491,16 @@ public sealed partial class S3ObjectStore
         });
 
     /// <summary>The checksum and the put id a put carries, signed with it.</summary>
-    private (string Name, string Value)[] PutHeaders(ChunkedBuffer body, string? putId)
+    private (string Name, string Value)[] PutHeaders(ReadOnlySequence<byte> body, string? putId)
     {
         List<(string, string)> headers = [];
         switch (ChecksumOf())
         {
             case S3Checksum.Crc64Nvme:
-                headers.Add(("x-amz-checksum-crc64nvme", Base64(body.Crc64())));
+                headers.Add(("x-amz-checksum-crc64nvme", Base64(Checksums.Crc64Nvme(body))));
                 break;
             case S3Checksum.ContentMd5:
-                headers.Add(("content-md5", Convert.ToBase64String(body.Md5())));
+                headers.Add(("content-md5", Convert.ToBase64String(Checksums.Md5(body))));
                 break;
         }
 
@@ -736,32 +557,7 @@ public sealed partial class S3ObjectStore
             }
         }
 
-        using IncrementalHash md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
-        foreach (ReadOnlyMemory<byte> segment in body)
-        {
-            md5.AppendData(segment.Span);
-        }
-
-        return [.. extra, ("content-md5", Convert.ToBase64String(md5.GetHashAndReset()))];
-    }
-
-    /// <summary>The parts an upload may have: 1 000 on Scaleway, 10 000 elsewhere.</summary>
-    private int MaxParts => _profile == S3Profile.Scaleway ? 1_000 : 10_000;
-
-    /// <summary>
-    /// A part's size: the option's, at least the service's minimum, and larger when the object would
-    /// need more parts than the service takes, rounded up to a mebibyte.
-    /// </summary>
-    internal int PartSizeFor(long length)
-    {
-        long size = Math.Max(_options.PartSize, _options.MinimumPartSize);
-        long needed = length > 0 ? (length + MaxParts - 1) / MaxParts : 0;
-        if (needed > size)
-        {
-            size = (needed + (1 << 20) - 1) >> 20 << 20;
-        }
-
-        return (int)Math.Min(size, MaxSinglePut);
+        return [.. extra, ("content-md5", Convert.ToBase64String(Checksums.Md5(body)))];
     }
 
     private static void AddCondition(HttpRequestMessage request, PutCondition condition)
@@ -776,21 +572,6 @@ public sealed partial class S3ObjectStore
         }
     }
 
-    private static void CheckEnd(string key, long length, long read, bool ended)
-    {
-        if (read < length)
-        {
-            throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {read}.");
-        }
-
-        if (!ended)
-        {
-            throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content runs past them.");
-        }
-    }
-
-    private static string NewPutId() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-
     private static string Base64(ulong crc)
     {
         Span<byte> bytes = stackalloc byte[8];
@@ -798,16 +579,24 @@ public sealed partial class S3ObjectStore
         return Convert.ToBase64String(bytes);
     }
 
-    /// <summary>A part of an upload: its number and length, then its ETag and CRC once sent.</summary>
-    private sealed class Part(int number, long length)
+    /// <summary>An S3 upload, and, when its parts carry CRCs, the whole object's, kept as the parts fill in order.</summary>
+    private sealed class S3Upload(string key, string id, string putId, bool crc) : UploadState(key, id, putId)
     {
-        internal int Number => number;
+        private readonly Crc64? _whole = crc ? new Crc64(Crc64ParameterSet.Nvme) : null;
 
-        internal long Length => length;
+        /// <summary>Whether the parts carry their CRC-64/NVME, and the completion the whole object's.</summary>
+        internal bool Crc => crc;
 
-        internal string? Etag { get; set; }
+        /// <summary>The whole object's CRC-64/NVME once every part is produced, or null.</summary>
+        internal ulong? Whole => _whole?.GetCurrentHashAsUInt64();
 
-        internal ulong Crc { get; set; }
+        internal override void Produced(ReadOnlySequence<byte> part)
+        {
+            if (_whole is { } whole)
+            {
+                Checksums.Append(whole, part);
+            }
+        }
     }
 
     private readonly record struct PutRequest(S3ObjectStore Store, string Key, ReadOnlySequence<byte> Body, (string, string)[] Extra, PutCondition Condition);
