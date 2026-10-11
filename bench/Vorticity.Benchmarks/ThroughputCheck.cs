@@ -1684,7 +1684,15 @@ internal static class ThroughputCheck
             text.AppendLine("constant kept as one value: what a writer costs, the read included on both sides.");
         }
 
-        text.AppendLine("Each call opens the file and maps it anew, on both sides.");
+        if (ResultsPage.ReadsPositionally)
+        {
+            text.AppendLine("Each call opens the file anew: Rust maps it, and Vorticity reads it as a session that keeps no");
+            text.AppendLine("mapping does on Windows.");
+        }
+        else
+        {
+            text.AppendLine("Each call opens the file and maps it anew, on both sides.");
+        }
         text.AppendLine("Both implementations in one process, Rust's through a C ABI, taking turns against one clock:");
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
             $"at least {MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up per file, our side on the JIT, warmed."));

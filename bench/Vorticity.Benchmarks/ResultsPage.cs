@@ -45,6 +45,13 @@ internal static class ResultsPage
     }
 
     /// <summary>
+    /// Whether our side reads a file by copying it rather than where it lies: the harnesses keep no
+    /// mapping, and on Windows such a session reads a scan's segments positionally, mapping the
+    /// file only for many segments smaller than a page or a large segment a decode touches little of.
+    /// </summary>
+    internal static bool ReadsPositionally => OperatingSystem.IsWindows();
+
+    /// <summary>
     /// The machine, the runtime, the reference, the commit and the date a section was measured on,
     /// as its last line; a tree with uncommitted changes says so.
     /// </summary>

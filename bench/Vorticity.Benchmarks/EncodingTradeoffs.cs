@@ -263,8 +263,10 @@ internal static class EncodingTradeoffs
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
             $"once; a **take** reads {TakeRows:N0} rows spread over the file. Each figure is the median of {Passes} passes after"));
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-            $"{Warmups} warm-up, the file in the page cache and mapped anew by each pass, so that a larger file pays for its"));
-        text.AppendLine("pages on every read; a write is net of generating its rows. **Crosses at** is the");
+            $"{Warmups} warm-up, the file in the page cache and {(ResultsPage.ReadsPositionally ? "read" : "mapped")} anew by each pass, so that a larger file pays for its"));
+        text.AppendLine(ResultsPage.ReadsPositionally
+            ? "bytes on every read; a write is net of generating its rows. **Crosses at** is the"
+            : "pages on every read; a write is net of generating its rows. **Crosses at** is the");
         text.AppendLine("storage throughput at which a configuration and `Auto` read the column whole in the same time,");
         text.AppendLine("counting its bytes at that throughput and then its scan: below it the smaller file reads faster");
         text.AppendLine("end to end, above it the faster decode does. What the figures mean for a choice is in");
