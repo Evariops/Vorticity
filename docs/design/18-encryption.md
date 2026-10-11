@@ -12,7 +12,7 @@ change once it does. [The scope](01-scope.md#6-what-it-leaves-out) leaves encryp
 format's slot for it is an empty reserved table, and that slot stays empty, as
 [where it sits](#2-where-it-sits) explains. [The threat model](09-contracts.md#4-threat-model)
 claims no confidentiality, and a sealed file gets the confidentiality and the integrity described
-below. Stores are the subject of [17-object-storage.md](17-object-storage.md), and this document
+below. Stores are the subject of [19-object-storage.md](19-object-storage.md), and this document
 relies on it for the key services' clients.
 
 In this document, to seal is to encrypt and authenticate, a sealed object is what sealing produces,
@@ -267,7 +267,7 @@ and wipes the key when it is disposed.
 | keyring | where | wraps with |
 |---|---|---|
 | `VortexKeyring.FromKeys`, keys the application holds, the first one current | the core | AES-256-GCM, a random nonce per wrap, and the key id and context as associated data |
-| `AwsKmsKeyring` | `Vorticity.ObjectStorage`, on the clients of [17-object-storage.md](17-object-storage.md) | KMS `GenerateDataKey` and `Decrypt`, the context passed as the encryption context |
+| `AwsKmsKeyring` | `Vorticity.ObjectStorage`, on the clients of [19-object-storage.md](19-object-storage.md) | KMS `GenerateDataKey` and `Decrypt`, the context passed as the encryption context |
 | `AzureKeyVaultKeyring` | `Vorticity.ObjectStorage` | Key Vault `wrapKey` and `unwrapKey`, RSA-OAEP-256, or AES key wrap on a managed HSM. Neither takes a context, so the context is bound by the derivation alone, and the key id recorded names the key's version, which unwrapping needs |
 | `GoogleCloudKmsKeyring` | `Vorticity.ObjectStorage` | Cloud KMS `encrypt` and `decrypt` with a symmetric key, the context passed as additional authenticated data |
 
@@ -440,7 +440,7 @@ and the sealing stage computes it as they leave it. Verification decrypts every 
 frames, then its hash, and compares its two descriptors.
 
 Opening a data object stays one request: the entry gives the length (see
-[requests per operation](17-object-storage.md#5-requests-per-operation)), and the first read covers the
+[requests per operation](19-object-storage.md#5-requests-per-operation)), and the first read covers the
 trailer and the Vortex tail.
 
 ### 6.4 Scratch
