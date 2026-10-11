@@ -41,6 +41,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
     private SegmentOwner? _tail;
     private long _tailStart;
     private int _tailBytes;
+    private int _lengthRefused;
     private int _disposed;
 
     /// <summary>A source over <paramref name="key"/>.</summary>
@@ -72,6 +73,13 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// token from elsewhere compares it with this one: a difference means the bytes under the key changed.
     /// </summary>
     internal string? Token => Volatile.Read(ref _token);
+
+    /// <summary>
+    /// Whether an answer gave another length than the one the caller recorded, which a read refused as
+    /// a format error: the object under the key is not the one the caller expects. A sealed dataset
+    /// reports it as the failed binding it is.
+    /// </summary>
+    internal bool LengthRefused => Volatile.Read(ref _lengthRefused) != 0;
 
     /// <inheritdoc/>
     public int TailReadSize => TailBytes;
@@ -405,6 +413,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
         long known = Interlocked.CompareExchange(ref _length, objectLength, -1);
         if (known >= 0 && known != objectLength)
         {
+            Volatile.Write(ref _lengthRefused, 1);
             throw new VortexFormatException($"'{_key}' is {objectLength} bytes where {known} were recorded: it is not the object its reader expects.");
         }
     }

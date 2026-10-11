@@ -757,13 +757,21 @@ internal sealed class SealedObjectStore : IObjectStore
                 },
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (VortexFormatException)
+        catch (VortexFormatException cause)
         {
             await source.DisposeAsync().ConfigureAwait(false);
             bool plain = await EndsPlainAsync(_inner, key, cancellationToken).ConfigureAwait(false);
             if (plain)
             {
                 throw Mixed(key, sealedAmongPlain: false);
+            }
+
+            // Another sealed object put under the key, of another length than the entry records: the
+            // authenticated entry and the object disagree, a binding that fails as an object id would.
+            if (source.LengthRefused)
+            {
+                throw VortexEncryptionException.Unauthenticated(
+                    $"'{key}' is not the object its entry names: its length is not the one its entry records.", cause);
             }
 
             throw;

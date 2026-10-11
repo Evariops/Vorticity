@@ -166,13 +166,30 @@ public sealed class EncryptedDatasetTests
         using VortexKeyring keyring = SealedObjects.Keyring();
         await using VortexSession session = Session(keyring);
 
-        // A data object copied over another's key: its envelope binds another uid.
+        // A data object copied over another's key, of the same rows and so of the same length: its
+        // envelope binds another uid.
+        await using (MemoryObjectStore store = await EncryptedStoreAsync(keyring, 2, ct, sameRows: true))
+        {
+            List<string> data = await KeysAsync(store, "data/", ct);
+            byte[] other = await AllAsync(store, data[0], ct);
+            Assert.Equal(other.Length, (await AllAsync(store, data[1], ct)).Length);
+            await ReplaceAsync(store, data[1], other, ct);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, ct);
+            // A count of every row is answered from the entries: the sum reads the objects.
+            VortexEncryptionException swapped = await Assert.ThrowsAsync<VortexEncryptionException>(
+                async () => await dataset.Scan<Reading>().SumAsync(r => r.Day, ct));
+            Assert.Equal(VortexEncryptionError.Unauthenticated, swapped.Error);
+        }
+
+        // One of other rows and another length: the length its entry records refuses it first, and
+        // reports it as the same failed binding.
         await using (MemoryObjectStore store = await EncryptedStoreAsync(keyring, 2, ct))
         {
             List<string> data = await KeysAsync(store, "data/", ct);
-            await ReplaceAsync(store, data[1], await AllAsync(store, data[0], ct), ct);
+            byte[] other = await AllAsync(store, data[0], ct);
+            Assert.NotEqual(other.Length, (await AllAsync(store, data[1], ct)).Length);
+            await ReplaceAsync(store, data[1], other, ct);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, ct);
-            // A count of every row is answered from the entries: the sum reads the objects.
             VortexEncryptionException swapped = await Assert.ThrowsAsync<VortexEncryptionException>(
                 async () => await dataset.Scan<Reading>().SumAsync(r => r.Day, ct));
             Assert.Equal(VortexEncryptionError.Unauthenticated, swapped.Error);
@@ -430,14 +447,14 @@ public sealed class EncryptedDatasetTests
         return Assert.Single(objects);
     }
 
-    private static async Task<MemoryObjectStore> EncryptedStoreAsync(VortexKeyring keyring, int appends, CancellationToken ct)
+    private static async Task<MemoryObjectStore> EncryptedStoreAsync(VortexKeyring keyring, int appends, CancellationToken ct, bool sameRows = false)
     {
         MemoryObjectStore store = new MemoryObjectStore();
         await using VortexSession session = Session(keyring);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(session), ct);
         for (int i = 0; i < appends; i++)
         {
-            await AppendAsync(dataset, i, ct);
+            await AppendAsync(dataset, sameRows ? 0 : i, ct);
         }
 
         return store;
