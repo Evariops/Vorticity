@@ -7,6 +7,7 @@
 // the write-back differ, each format's own. The ratio informs; it gates nothing.
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -35,6 +36,12 @@ internal static class FormatCost
     /// <summary>The most rows a scan's batch holds, when <c>--batch-rows</c> sets it; the scan's default otherwise.</summary>
     private static int BatchRows;
 
+    /// <summary>The zstd level of the Vortex writes, the rewrite of a given file's included: --zstd-level n, 0 for the default.</summary>
+    private static int ZstdLevel;
+
+    /// <summary>The bytes every column's chunks gather in the rewrite of a given file: --column-chunk-bytes n, 0 for the file's chunks.</summary>
+    private static int ColumnChunkBytes;
+
     /// <summary>The column a projection keeps: the report's monotone one, or a given file's first.</summary>
     private static string Projected = Set.Field;
 
@@ -58,6 +65,9 @@ internal static class FormatCost
         int prefetchAt = Array.IndexOf(args, "--prefetch");
         Prefetch = prefetchAt >= 0 && prefetchAt + 1 < args.Length && int.TryParse(args[prefetchAt + 1], CultureInfo.InvariantCulture, out int ahead) ? ahead : null;
         BatchRows = Count(args, "--batch-rows", 0);
+        int levelAt = Array.IndexOf(args, "--zstd-level");
+        ZstdLevel = levelAt >= 0 && levelAt + 1 < args.Length && int.TryParse(args[levelAt + 1], CultureInfo.InvariantCulture, out int level) ? level : 0;
+        ColumnChunkBytes = Count(args, "--column-chunk-bytes", 0);
         string directory = Path.Combine(Path.GetTempPath(), $"vx-format-cost-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         try
@@ -220,11 +230,21 @@ internal static class FormatCost
         await writer.CompleteAsync().ConfigureAwait(false);
     }
 
+    /// <summary>The options of a Vortex write: the degree, and the zstd level and column chunks the command line asks for.</summary>
+    private static VortexWriteOptions WriteOptions(VortexSchema schema, int degree) => new VortexWriteOptions
+    {
+        DegreeOfParallelism = degree,
+        ZstdLevel = ZstdLevel,
+        ColumnChunkTargetBytes = ColumnChunkBytes > 0
+            ? schema.Select(field => field.Name).ToImmutableDictionary(name => name, _ => ColumnChunkBytes, StringComparer.Ordinal)
+            : ImmutableDictionary<string, int>.Empty,
+    };
+
     /// <summary>A Parquet file rewritten as Vortex by this repository's writer, with its defaults; its rows.</summary>
     private static async Task<int> RewriteAsVortexAsync(VortexSession session, string parquet, string vortex)
     {
         await using ParquetFile source = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
-        await using VortexFileWriter writer = session.CreateWriter(vortex, source.Schema);
+        await using VortexFileWriter writer = session.CreateWriter(vortex, source.Schema, WriteOptions(source.Schema, 0));
         await foreach (RecordBatch batch in source.Scan().ToBatchesAsync().ConfigureAwait(false))
         {
             using (batch)
@@ -284,6 +304,8 @@ internal static class FormatCost
             "take" => await CountAsync(file.Scan().Rows(Spread(file.RowCount, Set.ReportTakeCount, rows / Set.ReportTakeCount)).With(options)).ConfigureAwait(false),
             "write" => await file.WriteBackAsync(options, degree).ConfigureAwait(false),
             _ when action.StartsWith("column:", StringComparison.Ordinal) => await CountAsync(file.Scan(action["column:".Length..]).With(options)).ConfigureAwait(false),
+            _ when action.StartsWith("take:", StringComparison.Ordinal) && long.TryParse(action["take:".Length..], CultureInfo.InvariantCulture, out long taken) && taken > 0 =>
+                await CountAsync(file.Scan().Rows(Spread(file.RowCount, taken, file.RowCount / taken)).With(options)).ConfigureAwait(false),
             _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Not one of the report's actions."),
         };
     }
@@ -367,7 +389,7 @@ internal static class FormatCost
         internal override async Task<long> WriteBackAsync(ScanOptions options, int degree)
         {
             await using VortexFileWriter writer = VortexFileWriter.Create(
-                new Set.DiscardSink(), file.DType, new VortexWriteOptions { DegreeOfParallelism = degree });
+                new Set.DiscardSink(), file.DType, WriteOptions(file.Schema, degree));
             long rows = 0;
             await foreach (RecordBatch batch in file.Scan().With(options).ToBatchesAsync().ConfigureAwait(false))
             {
