@@ -545,6 +545,23 @@ public sealed class ObjectStoreContractTests : IDisposable
         Assert.Equal(["files/fresh.vortex", "files/replaced.vortex"], await store.ListAsync("files/", null, 10, ct));
     }
 
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task AReplacementOfTheSameLengthHasAnotherToken(string kind)
+    {
+        // However coarse a file system's clock, two objects written under one key never share a token,
+        // so a read bound to the first refuses the second.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        await store.PutIfAbsentAsync("files/twin.vortex", Bytes("first"), ct);
+        string first = (await store.HeadAsync("files/twin.vortex", ct))!.Value.Token;
+        Assert.Equal(PutOutcome.Created, await PutAsync(store, "files/twin.vortex", Bytes("again"), PutCondition.None, ct));
+
+        Assert.NotEqual(first, (await store.HeadAsync("files/twin.vortex", ct))!.Value.Token);
+        await Assert.ThrowsAsync<VortexFormatException>(
+            async () => await store.ReadAsync("files/twin.vortex", 0, new byte[8], first, ct));
+    }
+
     [Fact]
     public async Task APutOnATokenReplacesOnlyTheObjectThatStillHasIt()
     {

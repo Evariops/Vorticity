@@ -30,6 +30,9 @@ public sealed class FileObjectStore : IObjectStore
 
     private const int BsdWouldBlock = 35;
 
+    /// <summary>The last <see cref="Stamp"/> given, in ticks.</summary>
+    private static long s_lastStamp;
+
     private readonly string _root;
     private bool _disposed;
 
@@ -96,8 +99,10 @@ public sealed class FileObjectStore : IObjectStore
 
         using (handle)
         {
+            // The length and the date of the file this handle opened, which a rename over the key since
+            // leaves as they were: a token read from the path could name the next object.
             long size = RandomAccess.GetLength(handle);
-            string token = Token(new FileInfo(path));
+            string token = Token(size, System.IO.File.GetLastWriteTimeUtc(handle));
             if (ifToken is not null && !string.Equals(ifToken, token, StringComparison.Ordinal))
             {
                 throw ObjectStoreExtensions.Changed(key, ifToken, token);
@@ -141,7 +146,7 @@ public sealed class FileObjectStore : IObjectStore
 
         FileInfo info = new FileInfo(PathOf(key));
         return new ValueTask<ObjectHead?>(
-            info.Exists ? new ObjectHead(info.Length, Token(info), new DateTimeOffset(info.LastWriteTimeUtc)) : null);
+            info.Exists ? new ObjectHead(info.Length, Token(info.Length, info.LastWriteTimeUtc), new DateTimeOffset(info.LastWriteTimeUtc)) : null);
     }
 
     /// <inheritdoc/>
@@ -241,6 +246,8 @@ public sealed class FileObjectStore : IObjectStore
                 {
                     throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {written}.");
                 }
+
+                System.IO.File.SetLastWriteTimeUtc(handle, Stamp());
             }
         }
         catch (Exception caught)
@@ -304,7 +311,7 @@ public sealed class FileObjectStore : IObjectStore
             FileInfo info = new FileInfo(PathOf(key));
             if (info.Exists)
             {
-                yield return new ObjectListing(key, new ObjectHead(info.Length, Token(info), new DateTimeOffset(info.LastWriteTimeUtc)), LockReported: true);
+                yield return new ObjectListing(key, new ObjectHead(info.Length, Token(info.Length, info.LastWriteTimeUtc), new DateTimeOffset(info.LastWriteTimeUtc)), LockReported: true);
             }
         }
     }
@@ -405,11 +412,31 @@ public sealed class FileObjectStore : IObjectStore
 
     /// <summary>
     /// Length and last-write time: an object is never modified, so the only change this has to
-    /// catch is a key deleted and created again.
+    /// catch is a key written again, whose stamp differs (<see cref="Stamp"/>).
     /// </summary>
-    private static string Token(FileInfo info) => string.Create(
+    private static string Token(long length, DateTime lastWrite) => string.Create(
         CultureInfo.InvariantCulture,
-        $"{info.Length:x}-{info.LastWriteTimeUtc.Ticks:x}");
+        $"{length:x}-{lastWrite.Ticks:x}");
+
+    /// <summary>
+    /// The last-write time a put stamps on its object before it shows it: now, or a tick past the
+    /// previous stamp, so that two objects this process writes under one key never share a token, however
+    /// coarse the file system's own clock. Linux dates a write by a clock that moves every few
+    /// milliseconds.
+    /// </summary>
+    private static DateTime Stamp()
+    {
+        long now = DateTime.UtcNow.Ticks;
+        while (true)
+        {
+            long last = Volatile.Read(ref s_lastStamp);
+            long next = Math.Max(now, last + 1);
+            if (Interlocked.CompareExchange(ref s_lastStamp, next, last) == last)
+            {
+                return new DateTime(next, DateTimeKind.Utc);
+            }
+        }
+    }
 
     private static void TryDelete(string path)
     {
