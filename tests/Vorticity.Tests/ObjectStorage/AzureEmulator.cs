@@ -309,7 +309,11 @@ internal sealed class AzureEmulator : HttpMessageHandler
     private HttpResponseMessage List(string container, Dictionary<string, string> query)
     {
         string prefix = query.GetValueOrDefault("prefix", string.Empty);
-        string? from = query.GetValueOrDefault("marker") ?? query.GetValueOrDefault("startFrom");
+
+        // A marker is opaque, as the service's are: here the last name of the page before, in base64.
+        string? from = query.GetValueOrDefault("marker") is { } marker
+            ? Encoding.UTF8.GetString(Convert.FromBase64String(marker))
+            : query.GetValueOrDefault("startFrom");
         bool inclusive = !query.ContainsKey("marker");
         int max = Math.Min(int.Parse(query.GetValueOrDefault("maxresults", "5000"), CultureInfo.InvariantCulture), PageSize);
         List<(string Name, Blob Blob)> blobs;
@@ -337,7 +341,7 @@ internal sealed class AzureEmulator : HttpMessageHandler
         }
 
         xml.Append("</Blobs>");
-        xml.Append(blobs.Count > max ? $"<NextMarker>{Escape(blobs[max - 1].Name)}</NextMarker>" : "<NextMarker />");
+        xml.Append(blobs.Count > max ? $"<NextMarker>{Convert.ToBase64String(Encoding.UTF8.GetBytes(blobs[max - 1].Name))}</NextMarker>" : "<NextMarker />");
         xml.Append("</EnumerationResults>");
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml.ToString(), Encoding.UTF8, "application/xml") };
     }

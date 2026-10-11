@@ -95,7 +95,10 @@ internal sealed class GoogleEmulator : HttpMessageHandler
 
         if (Token is not null && request.Headers.Authorization?.ToString() != "Bearer " + Token)
         {
-            return Json(HttpStatusCode.Unauthorized, """{"error":{"code":401,"message":"Invalid Credentials","errors":[{"reason":"authError"}]}}""");
+            // The answer names its request, as the platform's handler's do: the store reads the token it refused there.
+            HttpResponseMessage refused = Json(HttpStatusCode.Unauthorized, """{"error":{"code":401,"message":"Invalid Credentials","errors":[{"reason":"authError"}]}}""");
+            refused.RequestMessage = request;
+            return refused;
         }
 
         byte[] body = request.Content is null ? [] : await request.Content.ReadAsByteArrayAsync(cancellationToken);
