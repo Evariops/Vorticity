@@ -322,14 +322,17 @@ its announced length.
 
 ### 6.4 Timeouts, retries, and writes whose outcome is unknown
 
-Every attempt has a deadline for its first byte and a floor on its throughput once the body flows,
-so a stalled connection is abandoned rather than awaited. An attempt abandoned before its body ends
-is cancelled, which closes its connection rather than draining it.
+Every attempt has a deadline for the first byte of its answer, counted from the end of its body when
+it sends one, and a body, sent or received, is abandoned when it goes the stall deadline without a
+byte. A stalled connection is abandoned rather than awaited, and a slow one, which makes progress,
+slows a put rather than failing it: the body is written in slices of 256 KiB, each of which pushes the
+deadline back. An attempt abandoned before its body ends is cancelled, which closes its connection
+rather than draining it.
 
 | outcome | what the client does |
 |---|---|
 | 500, 502, 503, 504, 429, a connection refused or reset, a deadline missed | retried with exponential backoff and full jitter, from 50 ms to 20 s, honouring `Retry-After`, while the store's retry budget allows |
-| 503 `SlowDown` (S3), 503 `ServerBusy` (Azure), 429 (R2, Cloud Storage) | the same, and the store halves its connections to that endpoint for a while, since the service is throttling |
+| 503 `SlowDown` (S3), 503 `ServerBusy` (Azure), 429 (R2, Cloud Storage) | the same, and the store halves the requests it sends at once until the service has been calm for 10 seconds, once per episode: the requests in flight when it halved do not halve it again |
 | 400 `RequestTimeout` (S3, a body too slow) | retried once |
 | a clock skew (S3 `RequestTimeTooSkewed`, an Azure date refused) | the offset from the response's `Date` is applied to the signing clock, and the request retried once |
 | an expired token | the credentials refreshed once, and the request retried once |
@@ -350,7 +353,9 @@ twice. So a conditional put is never retried blindly:
    and the clouds that speak it, `x-ms-meta-vxput` on Azure, `x-goog-meta-vxput` on Cloud Storage.
 2. When an attempt fails after its body may have reached the service, the store asks for the
    object's head before anything else. A completion of parts is such an attempt, and so is its
-   retry when the service answers that the upload no longer exists.
+   retry when the service answers that the upload no longer exists. An attempt the service
+   throttled, or whose body was cut short before its end, was never applied, since a service waits
+   for the whole of a body's declared length: it goes again without the head.
 3. If the object carries this put's id, the answer is `Created`. If it carries another id, the answer
    is `Exists`. If there is no object, the put is sent again. If the head fails too, the store throws
    an `ObjectStoreException` that says the outcome is unknown, and the caller decides.
@@ -625,8 +630,10 @@ threshold, the bytes are held and sent in one put at completion, with their chec
 Past it, the upload starts a multipart upload, sends each part as it fills and lets the pipe's
 backpressure slow the writer when the link is the bottleneck. The parts in flight, four by default,
 are held in buffers reserved through the memory governor. Completion sends the last part and
-completes the upload with the whole object's checksum. A writer that is abandoned aborts the
-upload.
+completes the upload with the whole object's checksum. A writer that is abandoned cancels the
+upload at once, its parts in flight included, and aborts it under a deadline of its own, 30 seconds,
+so that a caller who gave up is not held by the abort, and an upload the abort could not reach is
+left to the bucket's lifecycle rule.
 
 The object appears whole or not at all, which is what the rename gives a path, and it replaces the
 object at that key, as a path's file is replaced. The part threshold is 32 MiB and the part size

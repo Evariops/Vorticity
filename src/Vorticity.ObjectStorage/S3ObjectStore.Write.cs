@@ -410,24 +410,12 @@ public sealed partial class S3ObjectStore
         return condition.Kind == PutConditionKind.IfAbsent ? PutOutcome.Exists : null;
     }
 
-    private async ValueTask AbortAsync(string key, string uploadId)
-    {
-        try
-        {
-            await _transport.SendAsync(
-                "AbortMultipartUpload",
-                new UploadRequest(this, key, uploadId, string.Empty, false),
-                static (s, ct) => s.Store.BuildAbortAsync(s, ct),
-                static (response, _, _) => new ValueTask<bool>(response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound),
-                idempotent: true,
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception abandoned) when (abandoned is ObjectStoreException or StoreAnswerLostException or OperationCanceledException)
-        {
-            // An upload left behind holds no key and is cleaned by the bucket's lifecycle rule: the
-            // failure that is on its way out says more.
-        }
-    }
+    /// <summary>Aborts an upload given up, under the transport's abort deadline rather than the caller's token.</summary>
+    private ValueTask AbortAsync(string key, string uploadId) =>
+        _transport.GiveUpAsync(
+            "AbortMultipartUpload",
+            new UploadRequest(this, key, uploadId, string.Empty, false),
+            static (s, ct) => s.Store.BuildAbortAsync(s, ct));
 
     private async ValueTask<HttpRequestMessage> BuildPutAsync(PutRequest s, CancellationToken cancellationToken)
     {

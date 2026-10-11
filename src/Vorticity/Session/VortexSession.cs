@@ -538,7 +538,8 @@ public sealed class VortexSession : IAsyncDisposable
     /// A writer into a pipe whose reader is the store's put of the object at <paramref name="location"/>:
     /// held up to the store's part threshold and sent whole at completion, or sent in parts as they fill,
     /// the pipe's backpressure slowing the writer when the link is the bottleneck. The put replaces the
-    /// object, as a path's file is replaced.
+    /// object, as a path's file is replaced, and the writer's abandon cancels it, its parts in flight
+    /// included.
     /// </summary>
     private VortexFileWriter CreateLocationWriter(string location, VortexSchema schema, VortexWriteOptions? options)
     {
@@ -546,7 +547,8 @@ public sealed class VortexSession : IAsyncDisposable
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 4 << 20, resumeWriterThreshold: 2 << 20, useSynchronizationContext: false));
         VortexFileWriter writer = VortexFileWriter.Create(pipe.Writer, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
         writer.Declare(schema);
-        writer.UploadTo(store.PutAsync(key, pipe.Reader, -1, PutCondition.None, CancellationToken.None).AsTask());
+        CancellationTokenSource abandoned = new CancellationTokenSource();
+        writer.UploadTo(store.PutAsync(key, pipe.Reader, -1, PutCondition.None, abandoned.Token).AsTask(), abandoned);
         return writer;
     }
 

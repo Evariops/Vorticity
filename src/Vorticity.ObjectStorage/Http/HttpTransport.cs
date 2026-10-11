@@ -21,11 +21,13 @@ namespace Vorticity.ObjectStorage.Http;
 /// <remarks>
 /// <para>
 /// Each attempt builds its request afresh, signed for the moment it is sent, and is given a deadline
-/// for its first byte. A body is read by the store's own code, under a stall deadline that is pushed
-/// back by every byte that arrives. A request that may be sent again (a read, a head, a listing, a
-/// delete, a put whose outcome a head can prove) is retried on a service failure, a throttle, a
-/// connection lost or a deadline missed, with exponential backoff and full jitter, while the store's
-/// budget allows.
+/// for the first byte of its answer, counted from the end of its body when it sends one: the body goes
+/// under the stall deadline, pushed back by every slice the connection takes, so that a slow link
+/// slows a put rather than failing it. An answer's body is read by the store's own code, under the
+/// stall deadline too. A request that may be sent again (a read, a head, a listing, a delete, a put
+/// whose outcome a head can prove) is retried on a service failure, a throttle, a connection lost or a
+/// deadline missed, with exponential backoff and full jitter, while the store's budget allows. One that
+/// may not is sent again only when it was not applied: throttled, or cut short before its body ended.
 /// </para>
 /// <para>
 /// The handler is the platform's: it opens connections as it does for any client, under a deadline of
@@ -109,8 +111,9 @@ internal sealed class HttpTransport : IDisposable
             Exception? cause = null;
             ServiceError? refused = null;
             HttpResponseMessage? response = null;
-            bool sendAgain = false;
+            bool notApplied = false;
             await _limit.EnterAsync(cancellationToken).ConfigureAwait(false);
+            int episode = _limit.Episode;
             long started = Stopwatch.GetTimestamp();
             try
             {
@@ -130,8 +133,11 @@ internal sealed class HttpTransport : IDisposable
                 refused = error;
                 if (error.IsThrottle)
                 {
+                    // A throttle refuses a request before the service applies it: even one that may not
+                    // be sent twice goes again, without asking the service what became of it.
                     StoreTelemetry.Throttled();
-                    _limit.Throttled();
+                    _limit.Throttled(episode);
+                    notApplied = true;
                 }
 
                 failure = error.ToString();
@@ -142,16 +148,7 @@ internal sealed class HttpTransport : IDisposable
                 failure = retry.Message;
                 cause = retry.InnerException ?? retry;
                 cost = retry.Cost;
-                if (retry.NotApplied && !idempotent)
-                {
-                    // Refused without being applied: this attempt may be sent again, once more.
-                    if (attempt >= _options.MaxAttempts || (cost > 0 && !_budget.TrySpend(cost)))
-                    {
-                        throw new ObjectStoreException($"{operation} failed after {attempt} attempts: {failure}", cause);
-                    }
-
-                    sendAgain = true;
-                }
+                notApplied = retry.NotApplied;
             }
             catch (OperationCanceledException timeout) when (!cancellationToken.IsCancellationRequested)
             {
@@ -173,14 +170,7 @@ internal sealed class HttpTransport : IDisposable
                 _limit.Exit();
             }
 
-            if (sendAgain)
-            {
-                StoreTelemetry.Retried();
-                await DelayAsync(cost == 0 ? 0 : attempt, null, cancellationToken).ConfigureAwait(false);
-                continue;
-            }
-
-            if (!idempotent)
+            if (!idempotent && !notApplied)
             {
                 // The request may have been applied: its store asks the service what became of it.
                 throw new StoreAnswerLostException($"{operation} failed after it may have reached the service: {failure}", cause ?? new IOException(failure));
@@ -197,20 +187,67 @@ internal sealed class HttpTransport : IDisposable
         }
     }
 
-    /// <summary>Sends one attempt's request and waits for its answer's headers, under the first-byte deadline.</summary>
+    /// <summary>
+    /// Sends one attempt's request and waits for its answer's headers: under the first-byte deadline, or,
+    /// for a body of the store's, under the stall deadline while the body goes and the first-byte
+    /// deadline from its end.
+    /// </summary>
+    /// <exception cref="StoreRetryException">The deadline passed before the body ended, so the service never applied it.</exception>
     private async ValueTask<HttpResponseMessage> FirstByteAsync<TState>(
         TState state, Func<TState, CancellationToken, ValueTask<HttpRequestMessage>> build, CancellationToken cancellationToken)
     {
         HttpRequestMessage request = await build(state, cancellationToken).ConfigureAwait(false);
+        SequenceContent? body = request.Content as SequenceContent;
         using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(_options.FirstByteTimeout);
+        body?.Watch(deadline, _options.StallTimeout, _options.FirstByteTimeout);
         try
         {
             return await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
         }
+        catch (OperationCanceledException missed) when (!cancellationToken.IsCancellationRequested && body is { Complete: false })
+        {
+            long sent = body.Sent;
+            throw new StoreRetryException(
+                sent == 0
+                    ? $"no connection took the body within {_options.FirstByteTimeout.TotalSeconds:0.###} s"
+                    : $"the body stalled for {_options.StallTimeout.TotalSeconds:0.###} s after {sent} of {body.Length} bytes",
+                RetryBudget.TimeoutCost,
+                missed,
+                notApplied: true);
+        }
+        catch (Exception lost) when (lost is HttpRequestException or IOException or SocketException && body is { Complete: false })
+        {
+            throw new StoreRetryException($"the connection failed after {body.Sent} of {body.Length} bytes of the body: {lost.Message}", RetryBudget.RetryCost, lost, notApplied: true);
+        }
         finally
         {
+            body?.Release();
             request.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Sends a request that gives an upload up, under a deadline of its own rather than the caller's
+    /// token, which may be what gave it up. The upload is aborted when the service answers in time,
+    /// and left to the bucket's lifecycle rule otherwise: its failure is swallowed in favour of the one
+    /// on its way out.
+    /// </summary>
+    internal async ValueTask GiveUpAsync<TState>(string operation, TState state, Func<TState, CancellationToken, ValueTask<HttpRequestMessage>> build)
+    {
+        using CancellationTokenSource deadline = new CancellationTokenSource(_options.AbortTimeout, _options.TimeProvider);
+        try
+        {
+            await SendAsync(
+                operation,
+                state,
+                build,
+                static (response, _, _) => new ValueTask<bool>(response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound),
+                idempotent: true,
+                deadline.Token).ConfigureAwait(false);
+        }
+        catch (Exception abandoned) when (abandoned is ObjectStoreException or StoreAnswerLostException or OperationCanceledException)
+        {
         }
     }
 

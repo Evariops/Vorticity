@@ -44,6 +44,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     private readonly S3Profile _profile;
     private readonly ObjectStoreCapabilities _capabilities;
     private readonly TimeProvider _time;
+    private readonly Lock _resolvingGate = new Lock();
     private Target? _target;
     private Task<Target>? _resolving;
     private long _skewTicks;
@@ -631,19 +632,26 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     }
 
     private ValueTask<Target> TargetAsync(CancellationToken cancellationToken) =>
-        Volatile.Read(ref _target) is { } target ? new ValueTask<Target>(target) : new ValueTask<Target>(ResolveAsync(cancellationToken));
+        Volatile.Read(ref _target) is { } target ? new ValueTask<Target>(target) : new ValueTask<Target>(ResolvingAsync().WaitAsync(cancellationToken));
 
-    /// <summary>The bucket's region, learned once from its own answer to an unsigned head: Amazon S3 says it in <c>x-amz-bucket-region</c> whatever else it answers.</summary>
-    private Task<Target> ResolveAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// The bucket's region, learned once for every caller from the bucket's own answer to an unsigned
+    /// head: Amazon S3 says it in <c>x-amz-bucket-region</c> whatever else it answers. The learning runs
+    /// under the transport's deadlines rather than a caller's token, which each caller waits with, so
+    /// that a caller who gives up does not give up for the others. A learning that failed is tried again
+    /// by the next request.
+    /// </summary>
+    private Task<Target> ResolvingAsync()
     {
-        Task<Target>? resolving = Volatile.Read(ref _resolving);
-        if (resolving is null || resolving.IsFaulted || resolving.IsCanceled)
+        lock (_resolvingGate)
         {
-            Task<Target> started = LearnRegionAsync(cancellationToken);
-            resolving = Interlocked.CompareExchange(ref _resolving, started, resolving) == resolving ? started : _resolving!;
-        }
+            if (_resolving is null || _resolving.IsFaulted || _resolving.IsCanceled)
+            {
+                _resolving = LearnRegionAsync(CancellationToken.None);
+            }
 
-        return resolving;
+            return _resolving;
+        }
     }
 
     private async Task<Target> LearnRegionAsync(CancellationToken cancellationToken)

@@ -198,17 +198,101 @@ internal sealed class ChunkedBuffer : IDisposable
     }
 }
 
-/// <summary>A request body over a sequence the store holds, with its length declared; sent as many times as the request is.</summary>
+/// <summary>
+/// A request body over a sequence the store holds, with its length declared; sent as many times as the
+/// request is, a new content for each attempt. It times its attempt: each slice the connection takes
+/// pushes the attempt's deadline back by the stall deadline, and the last sets it to the first-byte
+/// deadline, so that a slow link slows a put rather than failing it.
+/// </summary>
 internal sealed class SequenceContent(ReadOnlySequence<byte> bytes) : System.Net.Http.HttpContent
 {
+    /// <summary>The most written at once: the deadline is pushed back between two slices.</summary>
+    private const int Slice = 256 << 10;
+
+    private readonly Lock _gate = new Lock();
+    private CancellationTokenSource? _deadline;
+    private TimeSpan _stall;
+    private TimeSpan _firstByte;
+    private long _sent;
+    private bool _complete;
+
+    /// <summary>The bytes the connection took, for a message.</summary>
+    internal long Sent
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _sent;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the connection took every byte. A body cut short is never applied, since the service
+    /// waits for the whole of its declared length.
+    /// </summary>
+    internal bool Complete
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _complete;
+            }
+        }
+    }
+
+    /// <summary>The body's length.</summary>
+    internal long Length => bytes.Length;
+
+    /// <summary>
+    /// Times the attempt that sends the body with <paramref name="deadline"/>: pushed back by
+    /// <paramref name="stall"/> as the body goes, then set to <paramref name="firstByte"/> once it is
+    /// sent, until <see cref="Release"/>.
+    /// </summary>
+    internal void Watch(CancellationTokenSource deadline, TimeSpan stall, TimeSpan firstByte)
+    {
+        lock (_gate)
+        {
+            (_deadline, _stall, _firstByte) = (deadline, stall, firstByte);
+        }
+    }
+
+    /// <summary>Lets the deadline go before it is disposed: a slice sent after this no longer touches it.</summary>
+    internal void Release()
+    {
+        lock (_gate)
+        {
+            _deadline = null;
+        }
+    }
+
     protected override async Task SerializeToStreamAsync(System.IO.Stream stream, System.Net.TransportContext? context, CancellationToken cancellationToken)
     {
+        Progressed(0, done: false);
         foreach (ReadOnlyMemory<byte> segment in bytes)
         {
-            await stream.WriteAsync(segment, cancellationToken).ConfigureAwait(false);
+            for (int at = 0; at < segment.Length; at += Slice)
+            {
+                ReadOnlyMemory<byte> slice = segment[at..Math.Min(segment.Length, at + Slice)];
+                await stream.WriteAsync(slice, cancellationToken).ConfigureAwait(false);
+                Progressed(slice.Length, done: false);
+            }
         }
 
+        Progressed(0, done: true);
         StoreTelemetry.Written(bytes.Length);
+    }
+
+    private void Progressed(int sent, bool done)
+    {
+        lock (_gate)
+        {
+            _sent += sent;
+            _complete = done;
+            _deadline?.CancelAfter(done ? _firstByte : _stall);
+        }
     }
 
     protected override Task SerializeToStreamAsync(System.IO.Stream stream, System.Net.TransportContext? context) =>

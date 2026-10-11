@@ -437,6 +437,9 @@ public sealed partial class VortexFileWriter
             _sinkClosed = true;
             pipe.Complete(new OperationCanceledException("The Vortex file was abandoned; the bytes written so far are not a file."));
         }
+
+        // The put of a file at a location stops at once, its parts in flight with it, and aborts its upload.
+        _uploadAbandoned?.Cancel();
     }
 
     /// <summary>Releases what the writer holds; a file not completed is abandoned first.</summary>
@@ -544,6 +547,9 @@ public sealed partial class VortexFileWriter
             {
             }
         }
+
+        _uploadAbandoned?.Dispose();
+        _uploadAbandoned = null;
     }
 
     /// <summary>Takes the rows appended to the writer's builder, and seals them once they fill a chunk.</summary>

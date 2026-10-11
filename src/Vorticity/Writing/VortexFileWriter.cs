@@ -254,6 +254,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private Task? _upload;
 
+    /// <summary>Cancels <see cref="_upload"/> when the file is abandoned, its requests in flight with it.</summary>
+    private CancellationTokenSource? _uploadAbandoned;
+
     /// <summary>Whether the sink has been closed, one way or the other.</summary>
     private bool _sinkClosed;
 
@@ -743,11 +746,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Hands the writer the put that takes what it writes to a store, which completing the file awaits,
-    /// and whose failure a flush that finds the pipe's reader gone throws.
+    /// whose failure a flush that finds the pipe's reader gone throws, and which
+    /// <paramref name="abandoned"/> cancels when the file is given up. The writer disposes it.
     /// </summary>
-    internal void UploadTo(Task upload)
+    internal void UploadTo(Task upload, CancellationTokenSource abandoned)
     {
         _upload = upload;
+        _uploadAbandoned = abandoned;
         switch (_sink)
         {
             case PipeSegmentSink pipe:

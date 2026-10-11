@@ -126,7 +126,8 @@ and asks the service for it on every read, so an object replaced under an open f
 next read with a `VortexFormatException` rather than mixing two objects.
 
 A file written to a location appears whole when its writer completes, or not at all, and replaces the
-object that was there, as a file written to a path replaces it. A writer given up aborts its upload.
+object that was there, as a file written to a path replaces it. A writer given up cancels its upload
+at once, parts in flight included, and aborts it.
 
 A file at a location is not appended to: an object cannot grow, so `session.OpenWriterAsync(location)`
 throws a `NotSupportedException`. Write the file again, or keep rows that keep coming in a dataset,
@@ -140,8 +141,9 @@ its coalesced ranges together. The store sends at most `StoreTransportOptions.Ma
 at once, 64 by default, and a request past them waits for a connection.
 
 A service that throttles, `SlowDown` on S3, `ServerBusy` on Azure, a 429 elsewhere, halves the
-requests the store sends at once. Once the service has been calm for 10 seconds, each success gives
-one back, up to `StoreTransportOptions.MaxConnections`.
+requests the store sends at once, once per episode: the requests in flight when it halved do not
+halve it again. Once the service has been calm for 10 seconds, each success gives one back, up to
+`StoreTransportOptions.MaxConnections`.
 
 ## The stores
 
@@ -199,18 +201,21 @@ source of yours, and `StoreCredentials.Anonymous` sends none, for an emulator.
 
 ## When the network fails
 
-Every attempt has a deadline for its first byte, 15 seconds by default, and a body that goes 30
-seconds without a byte is abandoned. A read, a head, a listing or a delete is sent again after a
-failure of the service, a throttle, a lost connection or a missed deadline, with an exponential and
-random delay, at most 5 times, while the store's retry budget allows. The budget is spent by retries
-and refilled by successes, so a service that is down costs each caller one attempt rather than a storm
-of retries. `StoreTransportOptions` sets the connections, the deadlines and the attempts.
+Every attempt has a deadline for the first byte of its answer, 15 seconds by default, counted from
+the end of its body when it sends one. A body, sent or received, that goes 30 seconds without a byte
+is abandoned, so that a slow link slows a put rather than failing it. A read, a head, a listing or a
+delete is sent again after a failure of the service, a throttle, a lost connection or a missed
+deadline, with an exponential and random delay, at most 5 times, while the store's retry budget
+allows. The budget is spent by retries and refilled by successes, so a service that is down costs
+each caller one attempt rather than a storm of retries. `StoreTransportOptions` sets the connections,
+the deadlines and the attempts.
 
-A put conditioned on the key's absence, as a dataset's commit is, is never sent again blindly. When
-its answer is lost, the store asks the object's head, whose metadata carries the put's id: the put
-created the object, another writer did, or nothing is there and the put goes again. When the head
-fails too, the store throws an `ObjectStoreException` whose `OutcomeUnknown` is true, and the caller
-decides.
+A put conditioned on the key's absence, as a dataset's commit is, is never sent again blindly. A put
+the service throttled, or whose body was cut short, was never applied, and goes again. When its answer
+is lost after its body was sent, the store asks the object's head, whose metadata carries the put's
+id: the put created the object, another writer did, or nothing is there and the put goes again. When
+the head fails too, the store throws an `ObjectStoreException` whose `OutcomeUnknown` is true, and
+the caller decides.
 
 ## Watch out
 

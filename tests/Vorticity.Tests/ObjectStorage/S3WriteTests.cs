@@ -3,6 +3,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.IO;
 using System.IO.Pipelines;
 using System.Linq;
 using System.Net;
@@ -197,21 +198,35 @@ public sealed class S3WriteTests
         using S3Emulator emulator = new S3Emulator();
         await using S3ObjectStore store = Small(emulator);
 
-        // The connection fails before the service sees the put: the head finds nothing, the put goes again.
+        // The connection fails before the body is sent: the service never applied the put, which goes
+        // again without a head.
         emulator.Intercept = (request, index) => index == 0 ? throw new HttpRequestException("connection reset") : null;
         Assert.Equal(PutOutcome.Created, await PutAsync(store, "commit/1", Bytes(100, 17), PutCondition.IfAbsent, ct));
-        Assert.Equal(["PUT /commit/1", "HEAD /commit/1", "PUT /commit/1"], emulator.Log);
+        Assert.Equal(["PUT /commit/1", "PUT /commit/1"], emulator.Log);
+
+        // The connection fails once the body is sent, and nothing landed: the head finds nothing, the put goes again.
+        emulator.Intercept = null;
+        int sent = 0;
+        emulator.Hold = async (request, _, token) =>
+        {
+            if (request.Method == HttpMethod.Put && Interlocked.Increment(ref sent) == 1)
+            {
+                await request.Content!.CopyToAsync(Stream.Null, token);
+                throw new HttpRequestException("connection reset");
+            }
+        };
+        Assert.Equal(PutOutcome.Created, await PutAsync(store, "commit/3", Bytes(100, 17), PutCondition.IfAbsent, ct));
+        Assert.Equal(["PUT /commit/3", "HEAD /commit/3", "PUT /commit/3"], emulator.Log.Skip(2));
 
         // The answer is lost, and the object the head finds is another writer's: the key was taken.
-        emulator.Intercept = (request, index) =>
+        emulator.Hold = async (request, _, token) =>
         {
             if (request.Method == HttpMethod.Put)
             {
                 emulator.Seed(Bucket, "commit/2", Bytes(5, 18));
+                await request.Content!.CopyToAsync(Stream.Null, token);
                 throw new HttpRequestException("connection reset");
             }
-
-            return null;
         };
         Assert.Equal(PutOutcome.Exists, await PutAsync(store, "commit/2", Bytes(100, 19), PutCondition.IfAbsent, ct));
         Assert.Equal(Bytes(5, 18), emulator.BytesOf(Bucket, "commit/2"));
@@ -220,9 +235,18 @@ public sealed class S3WriteTests
     [Fact]
     public async Task AConditionalPutWhoseHeadFailsTooSaysItsOutcomeIsUnknown()
     {
+        // The body goes, then the network: the head that would say what became of the put fails too.
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator();
-        emulator.Intercept = (_, _) => throw new HttpRequestException("network down");
+        emulator.Hold = async (request, _, token) =>
+        {
+            if (request.Content is { } body)
+            {
+                await body.CopyToAsync(Stream.Null, token);
+            }
+
+            throw new HttpRequestException("network down");
+        };
         await using S3ObjectStore store = Small(emulator, attempts: 2);
         ObjectStoreException unknown = await Assert.ThrowsAsync<ObjectStoreException>(
             async () => await PutAsync(store, "commit/1", Bytes(100, 20), PutCondition.IfAbsent, ct));

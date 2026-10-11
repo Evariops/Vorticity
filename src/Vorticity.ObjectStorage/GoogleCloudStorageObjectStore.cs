@@ -596,23 +596,12 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             idempotent: true,
             cancellationToken).ConfigureAwait(false);
 
-    private async ValueTask AbortAsync(string key, string uploadId)
-    {
-        try
-        {
-            await _transport.SendAsync(
-                "AbortMultipartUpload",
-                new UploadRequest(this, key, uploadId, []),
-                static (s, ct) => s.Store.BuildAsync(HttpMethod.Delete, s.Store.XmlObject(s.Key) + "?uploadId=" + UriEncoding.Query(s.UploadId), null, [], ct),
-                static (response, _, _) => new ValueTask<bool>(response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.NotFound),
-                idempotent: true,
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (Exception abandoned) when (abandoned is ObjectStoreException or StoreAnswerLostException or OperationCanceledException)
-        {
-            // An upload left behind holds no name, and the bucket's lifecycle rule cleans it.
-        }
-    }
+    /// <summary>Aborts an upload given up, under the transport's abort deadline rather than the caller's token.</summary>
+    private ValueTask AbortAsync(string key, string uploadId) =>
+        _transport.GiveUpAsync(
+            "AbortMultipartUpload",
+            new UploadRequest(this, key, uploadId, []),
+            static (s, ct) => s.Store.BuildAsync(HttpMethod.Delete, s.Store.XmlObject(s.Key) + "?uploadId=" + UriEncoding.Query(s.UploadId), null, [], ct));
 
     /// <summary>What became of a put whose answer was lost, from the object's metadata and the put id it carries.</summary>
     private async ValueTask<PutOutcome?> LearnPutAsync(string key, string putId, PutCondition condition, StoreAnswerLostException lost, CancellationToken cancellationToken)

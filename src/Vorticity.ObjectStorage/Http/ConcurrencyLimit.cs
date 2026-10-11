@@ -10,6 +10,11 @@ namespace Vorticity.ObjectStorage.Http;
 /// for each success once the service has been calm for a while, as a congestion window is. A request
 /// that finds the limit reached waits in order.
 /// </summary>
+/// <remarks>
+/// The limit halves once per episode, as a congestion window does once per round trip: the requests in
+/// flight when it halved were sent under the old limit, and their throttles say nothing new. A throttle
+/// of a request sent under the new limit opens the next episode.
+/// </remarks>
 internal sealed class ConcurrencyLimit(int maximum, TimeProvider time)
 {
     /// <summary>How long the limit stays down after a throttle before it grows again.</summary>
@@ -20,7 +25,11 @@ internal sealed class ConcurrencyLimit(int maximum, TimeProvider time)
     private readonly int _maximum = maximum;
     private int _limit = maximum;
     private int _inFlight;
+    private int _episode;
     private DateTimeOffset _calmFrom;
+
+    /// <summary>The episode of throttling the limit is in, which a request notes once it enters.</summary>
+    internal int Episode => Volatile.Read(ref _episode);
 
     /// <summary>The requests allowed in flight now.</summary>
     internal int Limit
@@ -63,11 +72,21 @@ internal sealed class ConcurrencyLimit(int maximum, TimeProvider time)
         }
     }
 
-    /// <summary>The service throttled: the limit halves, and stays down until it has been calm a while.</summary>
-    internal void Throttled()
+    /// <summary>
+    /// The service throttled a request that entered in <paramref name="episode"/>: the limit halves and
+    /// stays down until the service has been calm a while, unless it already halved since the request
+    /// entered.
+    /// </summary>
+    internal void Throttled(int episode)
     {
         lock (_gate)
         {
+            if (episode != _episode)
+            {
+                return;
+            }
+
+            _episode++;
             _limit = Math.Max(1, _limit / 2);
             _calmFrom = time.GetUtcNow() + Calm;
         }

@@ -6,7 +6,7 @@ namespace Vorticity.ObjectStorage;
 /// <summary>How a store talks to its service: connections, deadlines and retries.</summary>
 /// <remarks>
 /// The defaults suit a service across a network. A store keeps its own connections, one pool for
-/// every view of it under a prefix, and the session that holds it disposes it.
+/// every view of it under a prefix, which its disposal closes.
 /// </remarks>
 public sealed class StoreTransportOptions
 {
@@ -20,14 +20,16 @@ public sealed class StoreTransportOptions
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
 
     /// <summary>
-    /// How long an attempt waits for the first byte of its answer, 15 seconds by default, before it is
-    /// abandoned and, when the request may be sent again, retried.
+    /// How long an attempt waits for the first byte of its answer once its request is sent, the end of
+    /// its body included, 15 seconds by default, before it is abandoned and, when the request may be
+    /// sent again, retried.
     /// </summary>
     public TimeSpan FirstByteTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
     /// <summary>
-    /// How long a body may go without a byte, 30 seconds by default, before its connection is closed
-    /// and the request retried: a stalled connection is abandoned rather than awaited.
+    /// How long a body, sent or received, may go without a byte, 30 seconds by default, before its
+    /// connection is closed and the request retried: a stalled connection is abandoned rather than
+    /// awaited, and a slow one, which makes progress, is waited for.
     /// </summary>
     public TimeSpan StallTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
@@ -42,6 +44,12 @@ public sealed class StoreTransportOptions
 
     /// <summary>The longest delay between two attempts, a <c>Retry-After</c> included.</summary>
     internal TimeSpan RetryMaxDelay { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// How long the abort of an upload given up may take, its retries included, whatever became of the
+    /// caller's token: past it, the upload is left to the bucket's lifecycle rule.
+    /// </summary>
+    internal TimeSpan AbortTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>The clock the delays run on.</summary>
     internal TimeProvider TimeProvider { get; init; } = TimeProvider.System;
