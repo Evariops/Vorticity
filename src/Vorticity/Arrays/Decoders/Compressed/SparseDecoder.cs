@@ -83,6 +83,13 @@ internal sealed class SparseDecoder : ArrayDecoder
             ? context.DecodeWholeChild(in node, 1, dtype, patchCount)
             : context.DecodeChild(in node, 1, dtype, patchCount);
 
+        // The reference writes the values of patches that all hold one value as a constant, which a
+        // decode hands over as one value and a length: expanded, the patches read it as any other.
+        if (context.Canonical.GetNode(valuesIndex).Kind == CanonicalKind.Constant)
+        {
+            valuesIndex = context.Canonical.MaterializeConstant(valuesIndex);
+        }
+
         bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(
             context, in patchesMetadata, length, indicesIndex, valuesIndex, Id, walked);
