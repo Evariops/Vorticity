@@ -55,12 +55,12 @@ public sealed class FileObjectStore : IObjectStore
     public bool Durable { get; init; }
 
     /// <summary>
-    /// Reads suffixes, lists in order, and keeps no locks, which its listing therefore reports. It
-    /// cannot replace on a token's match: no file system compares and renames in one step across
-    /// processes.
+    /// Reads suffixes, lists in order, and keeps no locks, which each entry of its listing therefore
+    /// reports. It cannot replace on a token's match: no file system compares and renames in one step
+    /// across processes.
     /// </summary>
     public ObjectStoreCapabilities Capabilities =>
-        ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReportsLocksInListing;
+        ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder;
 
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(

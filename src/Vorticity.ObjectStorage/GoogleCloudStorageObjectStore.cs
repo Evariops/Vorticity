@@ -120,8 +120,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
 
     /// <inheritdoc/>
     public ObjectStoreCapabilities Capabilities =>
-        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReportsLocksInListing
-        | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
+        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
         | (_options.ReadsSuffix == true ? ObjectStoreCapabilities.ReadsSuffix : 0);
 
     /// <summary>The transport, for tests.</summary>

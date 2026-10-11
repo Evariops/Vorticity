@@ -167,8 +167,6 @@ public sealed class DatasetLockedStoreTests
     /// <summary>A store whose listing says no lock, as S3's does not: only a head tells.</summary>
     private sealed class LocksInHeadsOnly(IObjectStore inner) : ForwardingStore(inner)
     {
-        public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.ReportsLocksInListing;
-
         public override async IAsyncEnumerable<ObjectListing> ListAsync(
             string prefix, string? startAfter, [EnumeratorCancellation] CancellationToken cancellationToken)
         {

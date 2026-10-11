@@ -135,9 +135,6 @@ public enum ObjectStoreCapabilities
     /// <summary>A listing is in ordinal order and resumes after a key, so that the first keys under a prefix cost one page.</summary>
     ListsInOrder = 2,
 
-    /// <summary>A listing says each object's lock, so that no head is asked for it; a store that keeps no locks says so too.</summary>
-    ReportsLocksInListing = 4,
-
     /// <summary>A put replaces an object only while it still has a token (<see cref="PutCondition.IfMatch"/>).</summary>
     ReplacesOnTokenMatch = 8,
 
@@ -159,7 +156,8 @@ public readonly record struct ObjectRead(int BytesRead, long ObjectLength, strin
 /// <param name="Head">Its length, token and creation time, and its lock when <paramref name="LockReported"/>.</param>
 /// <param name="LockReported">
 /// Whether the listing says the object's lock, so that <see cref="ObjectHead.RetainUntil"/> and
-/// <see cref="ObjectHead.LegalHold"/> mean what they say; otherwise only a head tells.
+/// <see cref="ObjectHead.LegalHold"/> mean what they say, which a store that keeps no locks does by
+/// saying none; otherwise only a head tells.
 /// </param>
 public readonly record struct ObjectListing(string Key, ObjectHead Head, bool LockReported);
 

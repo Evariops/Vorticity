@@ -444,8 +444,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     public async Task EachStoreDeclaresWhatItDoesInOneRequest()
     {
         ObjectStoreCapabilities all = ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder
-            | ObjectStoreCapabilities.ReportsLocksInListing | ObjectStoreCapabilities.ReplacesOnTokenMatch
-            | ObjectStoreCapabilities.KeepsLocks;
+            | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
         await using IObjectStore memory = Open("memory");
         await using IObjectStore file = Open("file");
         Assert.Equal(all, memory.Capabilities);
@@ -606,8 +605,9 @@ public sealed class ObjectStoreContractTests : IDisposable
         Assert.Equal(["data/a.vortex", "data/b.vortex"], listed.Select(o => o.Key));
         foreach (ObjectListing entry in listed)
         {
+            // Every listing says the locks but S3's, whose locks a head alone tells.
             Assert.Equal(await store.HeadAsync(entry.Key, ct), entry.Head);
-            Assert.Equal((store.Capabilities & ObjectStoreCapabilities.ReportsLocksInListing) != 0, entry.LockReported);
+            Assert.Equal(kind != "s3", entry.LockReported);
         }
     }
 

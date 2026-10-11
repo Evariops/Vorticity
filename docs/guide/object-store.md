@@ -59,7 +59,7 @@ public interface IObjectStore : IAsyncDisposable
 | `HeadAsync` | Length, token and creation time, or `null` for a missing key (not an exception). On a store with retention locks, it also gives the date before which a delete is refused (`RetainUntil`) and whether a legal hold applies (`LegalHold`) |
 | `ListAsync` | The objects under a prefix, in ordinal order of their keys, after `startAfter`, each with its head. The implementation fetches pages as the enumeration advances, so a caller that stops early pays for one page. `LockReported` says whether the listing gives the lock too, or whether only a head does |
 | `DeleteAsync` | A batch of keys, in any order. An absent key is not an error, and a store whose service caps batch sizes splits the batch. It reports nothing, since a store cannot always say which keys existed |
-| `Capabilities` | What the store does in one request: a tail read that says the length (`ReadsSuffix`), a listing in order that resumes after a key (`ListsInOrder`), locks in its listing (`ReportsLocksInListing`), a replacement on a token's match (`ReplacesOnTokenMatch`). A caller takes the cheaper path without trying the other |
+| `Capabilities` | What the store does in one request: a tail read that says the length (`ReadsSuffix`), a listing in order that resumes after a key (`ListsInOrder`), a replacement on a token's match (`ReplacesOnTokenMatch`), locks kept as S3 Object Lock keeps them (`KeepsLocks`). A caller takes the cheaper path without trying the other |
 
 An object's token changes whenever the bytes under its key change. A dataset puts each of its
 objects once, with `IfAbsent`, and never replaces one. Implementations must be thread-safe, and

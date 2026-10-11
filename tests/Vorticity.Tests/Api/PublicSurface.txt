@@ -1102,7 +1102,6 @@ Vorticity:     const ObjectStoreCapabilities ListsInOrder = 2
 Vorticity:     const ObjectStoreCapabilities None = 0
 Vorticity:     const ObjectStoreCapabilities ReadsSuffix = 1
 Vorticity:     const ObjectStoreCapabilities ReplacesOnTokenMatch = 8
-Vorticity:     const ObjectStoreCapabilities ReportsLocksInListing = 4
 Vorticity:     field int value__
 Vorticity: sealed class Vorticity.IO.ObjectStoreException : VortexException
 Vorticity:     ctor ObjectStoreException()

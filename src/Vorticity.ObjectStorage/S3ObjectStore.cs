@@ -396,8 +396,8 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            return S3Answers.ParseListing(
-                bytes.AsMemory(0, length), 0, (_capabilities & ObjectStoreCapabilities.ReportsLocksInListing) != 0, s.Page);
+            // An S3 listing says no lock: a head tells it.
+            return S3Answers.ParseListing(bytes.AsMemory(0, length), 0, lockReported: false, s.Page);
         }
         finally
         {

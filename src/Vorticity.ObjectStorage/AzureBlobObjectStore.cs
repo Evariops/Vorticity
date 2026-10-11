@@ -138,8 +138,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
 
     /// <inheritdoc/>
     public ObjectStoreCapabilities Capabilities =>
-        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReportsLocksInListing
-        | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
+        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
 
     /// <summary>The transport, for tests.</summary>
     internal HttpTransport Transport => _transport;
