@@ -274,6 +274,19 @@ public sealed class S3ReadTests
     }
 
     [Fact]
+    public async Task AKeyIsBoundedByItsBytesOfUtf8AsTheServiceCountsThem()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator();
+        await using S3ObjectStore store = Store(emulator);
+
+        // 400 characters of three bytes each are 1 200 bytes: refused before any request.
+        await Assert.ThrowsAsync<ArgumentException>(async () => await store.HeadAsync(new string('€', 400), ct));
+        Assert.Null(await store.HeadAsync(new string('€', 341), ct));
+        Assert.Equal(1, emulator.Requests);
+    }
+
+    [Fact]
     public async Task ABucketsRegionIsLearnedFromItsOwnAnswerAtTheFirstRequest()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

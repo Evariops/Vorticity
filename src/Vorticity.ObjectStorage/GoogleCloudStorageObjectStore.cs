@@ -135,7 +135,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         ThrowIfDisposed();
         if (destination.IsEmpty)
         {
-            return ReadNothingAsync(key, offset, ifToken, cancellationToken);
+            return StoreReads.EmptyAsync(this, key, offset, ifToken, cancellationToken);
         }
 
         return _transport.SendAsync(
@@ -278,22 +278,6 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         return ValueTask.CompletedTask;
     }
 
-    private async ValueTask<ObjectRead> ReadNothingAsync(string key, long offset, string? ifToken, CancellationToken cancellationToken)
-    {
-        ObjectHead head = await HeadAsync(key, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);
-        if (ifToken is not null && !string.Equals(ifToken, head.Token, StringComparison.Ordinal))
-        {
-            throw StoreFailures.Changed(key, ifToken, head.Token);
-        }
-
-        if (offset >= head.Length && !(offset == 0 && head.Length == 0))
-        {
-            throw StoreFailures.PastEnd(key, offset, head.Length);
-        }
-
-        return new ObjectRead(0, head.Length, head.Token);
-    }
-
     /// <summary>An object's head and the put id its metadata carries, from the JSON API, both null for an absent key.</summary>
     private ValueTask<(ObjectHead? Head, string? PutId)> MetadataAsync(string key, CancellationToken cancellationToken) =>
         _transport.SendAsync(
@@ -324,7 +308,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
             if (s.Offset <= 0 && size is null or 0)
             {
-                return await ReadNothingAsync(s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
+                return await StoreReads.EmptyAsync(this, s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
             }
 
             throw StoreFailures.PastEnd(s.Key, s.Offset, size ?? -1);
@@ -749,15 +733,9 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
 
     private async ValueTask<Exception> FailureAsync(HttpResponseMessage response, string operation, string key, string? ifToken, CancellationToken cancellationToken)
     {
-        HttpStatusCode status = response.StatusCode;
-        if (status == HttpStatusCode.NotFound)
+        if (StoreFailures.OfStatus(response.StatusCode, key, ifToken, "another generation") is { } common)
         {
-            return ObjectNotFoundException.For(key);
-        }
-
-        if (status == HttpStatusCode.PreconditionFailed && ifToken is not null)
-        {
-            return StoreFailures.Changed(key, ifToken, "another generation");
+            return common;
         }
 
         ServiceError error = await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
@@ -818,14 +796,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         return Convert.ToBase64String(bytes);
     }
 
-    private static void CheckKey(string key)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(key);
-        if (Encoding.UTF8.GetByteCount(key) > 1024)
-        {
-            throw new ArgumentException("An object's name is at most 1 024 bytes on Cloud Storage.", nameof(key));
-        }
-    }
+    private static void CheckKey(string key) => StoreFailures.CheckKey(key, "Cloud Storage");
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 

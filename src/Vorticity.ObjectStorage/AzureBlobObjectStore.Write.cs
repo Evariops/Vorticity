@@ -277,7 +277,7 @@ public sealed partial class AzureBlobObjectStore
     private async ValueTask<HttpRequestMessage> BuildBatchAsync(BatchRequest s, CancellationToken cancellationToken)
     {
         AzureAuthorization authorization = await _authorizer.GetAsync(cancellationToken).ConfigureAwait(false);
-        string date = Now().ToString("r", CultureInfo.InvariantCulture);
+        string date = _clock.Now.ToString("r", CultureInfo.InvariantCulture);
         StringBuilder body = new StringBuilder();
         for (int i = 0; i < s.Keys.Length; i++)
         {

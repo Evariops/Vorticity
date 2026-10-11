@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using Vorticity.IO;
 
 namespace Vorticity.ObjectStorage.Http;
 
@@ -13,6 +14,16 @@ internal static class HttpAnswers
 
     /// <summary>The most any other answer read whole may hold: an error, or the start or completion of an upload.</summary>
     internal const int MaxAnswerBytes = 64 << 10;
+
+    /// <summary>
+    /// The object's ETag, as S3 and Azure answer it, or the caller's own string when it is the token
+    /// the caller gave, so that a read bound to it allocates none.
+    /// </summary>
+    internal static string ETagOf(HttpResponseMessage response, string key, string? ifToken)
+    {
+        string token = Header(response, "ETag") ?? throw new ObjectStoreException($"'{key}' was answered without an ETag.");
+        return ifToken is not null && string.Equals(token, ifToken, StringComparison.Ordinal) ? ifToken : token;
+    }
 
     /// <summary>A header's first value, or null; read without validation, as the service wrote it.</summary>
     internal static string? Header(HttpResponseMessage response, string name)

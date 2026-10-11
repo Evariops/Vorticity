@@ -44,11 +44,10 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     private readonly S3Profile _profile;
     private readonly ObjectStoreCapabilities _capabilities;
     private readonly UploadLimits _limits;
-    private readonly TimeProvider _time;
+    private readonly ServiceClock _clock;
     private readonly Lock _resolvingGate = new Lock();
     private Target? _target;
     private Task<Target>? _resolving;
-    private long _skewTicks;
     private int _disposed;
 
     /// <summary>A store over <see cref="S3StoreOptions.Bucket"/>.</summary>
@@ -81,7 +80,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
 
         _capabilities = CapabilitiesOf(_profile, options);
         _limits = LimitsOf(_profile, options);
-        _time = options.Transport.TimeProvider;
+        _clock = new ServiceClock(options.Transport.TimeProvider, "x-amz-date", "yyyyMMdd'T'HHmmss'Z'");
         _transport = new HttpTransport(options.Transport, ProviderName(_profile), ReadErrorAsync, options.Handler);
 
         // Amazon S3 says a bucket's region at the first request; another service is told it, or
@@ -268,7 +267,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     {
         if (destination.IsEmpty)
         {
-            return ReadNothingAsync(key, offset, ifToken, cancellationToken);
+            return StoreReads.EmptyAsync(this, key, offset, ifToken, cancellationToken);
         }
 
         return _transport.SendAsync(
@@ -280,28 +279,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             cancellationToken);
     }
 
-    /// <summary>A read into no memory: a head, which says the length and the token a read would.</summary>
-    private async ValueTask<ObjectRead> ReadNothingAsync(string key, long offset, string? ifToken, CancellationToken cancellationToken)
-    {
-        ObjectHead head = await HeadAsync(key, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);
-        if (ifToken is not null && !string.Equals(ifToken, head.Token, StringComparison.Ordinal))
-        {
-            throw StoreFailures.Changed(key, ifToken, head.Token);
-        }
-
-        if (offset >= head.Length && !(offset == 0 && head.Length == 0))
-        {
-            throw StoreFailures.PastEnd(key, offset, head.Length);
-        }
-
-        return new ObjectRead(0, head.Length, head.Token);
-    }
-
     private ValueTask<ObjectRead> ReadSuffixAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         if (destination.IsEmpty)
         {
-            return ReadNothingAsync(key, 0, null, cancellationToken);
+            return StoreReads.EmptyAsync(this, key, 0, null, cancellationToken);
         }
 
         return _transport.SendAsync(
@@ -337,7 +319,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             // Only an empty object refuses a read from its start: its token then comes from a head.
             if (s.Offset <= 0 && size is null or 0)
             {
-                return await ReadNothingAsync(s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
+                return await StoreReads.EmptyAsync(this, s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
             }
 
             throw StoreFailures.PastEnd(s.Key, s.Offset, size ?? -1);
@@ -379,7 +361,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             throw new StoreRetryException($"the body of GetObject on '{s.Key}' ended after {read} of {wanted} bytes", RetryBudget.RetryCost);
         }
 
-        return new ObjectRead(read, total, TokenOf(response, s.Key, s.IfToken));
+        return new ObjectRead(read, total, HttpAnswers.ETagOf(response, s.Key, s.IfToken));
     }
 
     private async ValueTask<ObjectHead?> ConsumeHeadAsync(HttpResponseMessage response, string key, CancellationToken cancellationToken)
@@ -397,7 +379,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         long length = response.Content.Headers.ContentLength
             ?? throw new ObjectStoreException($"HeadObject on '{key}' was answered without a Content-Length.");
         string? retain = HttpAnswers.Header(response, "x-amz-object-lock-retain-until-date");
-        return new ObjectHead(length, TokenOf(response, key, null), HttpAnswers.LastModified(response))
+        return new ObjectHead(length, HttpAnswers.ETagOf(response, key, null), HttpAnswers.LastModified(response))
         {
             RetainUntil = retain is null ? null : S3Answers.IsoDate(retain),
             LegalHold = string.Equals(HttpAnswers.Header(response, "x-amz-object-lock-legal-hold"), "ON", StringComparison.OrdinalIgnoreCase),
@@ -429,15 +411,9 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     /// </summary>
     private async ValueTask<Exception> FailureAsync(HttpResponseMessage response, string operation, string key, string? ifToken, CancellationToken cancellationToken)
     {
-        HttpStatusCode status = response.StatusCode;
-        if (status == HttpStatusCode.NotFound)
+        if (StoreFailures.OfStatus(response.StatusCode, key, ifToken, "another object") is { } common)
         {
-            return ObjectNotFoundException.For(key);
-        }
-
-        if (status == HttpStatusCode.PreconditionFailed && ifToken is not null)
-        {
-            return StoreFailures.Changed(key, ifToken, "another object");
+            return common;
         }
 
         ServiceError error = await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
@@ -450,9 +426,9 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         HttpStatusCode status = response.StatusCode;
         if (status is HttpStatusCode.Forbidden or HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized)
         {
-            if (error.Code is "RequestTimeTooSkewed" or "RequestExpired" || (status == HttpStatusCode.Forbidden && error.Code is null && Skewed(response)))
+            // A head's refusal has no code, so the refused request's own date says whether it was the clock.
+            if (error.Code is "RequestTimeTooSkewed" or "RequestExpired" or null && _clock.Skewed(response))
             {
-                Skewed(response);
                 throw new StoreRetryException($"{operation} was refused for a skewed clock: {error}", cost: 0);
             }
 
@@ -477,24 +453,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         }
 
         return new ObjectStoreException($"{operation} on '{key}' was refused, as {_keys}: {error}");
-    }
-
-    /// <summary>Learns the service's clock from <c>Date</c> when it is off ours by more than five minutes, and says whether it was.</summary>
-    private bool Skewed(HttpResponseMessage response)
-    {
-        if (response.Headers.Date is not { } service)
-        {
-            return false;
-        }
-
-        TimeSpan offset = service - _time.GetUtcNow();
-        if (offset.Duration() < TimeSpan.FromMinutes(5))
-        {
-            return false;
-        }
-
-        Interlocked.Exchange(ref _skewTicks, offset.Ticks);
-        return true;
     }
 
     private async ValueTask<ServiceError> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken) =>
@@ -526,14 +484,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         {
             ArrayPool<byte>.Shared.Return(bytes);
         }
-    }
-
-    /// <summary>The object's ETag; the caller's own string when it is the token it gave, so a read bound to it allocates none.</summary>
-    private static string TokenOf(HttpResponseMessage response, string key, string? ifToken)
-    {
-        string token = HttpAnswers.Header(response, "ETag")
-            ?? throw new ObjectStoreException($"'{key}' was answered without an ETag.");
-        return ifToken is not null && string.Equals(token, ifToken, StringComparison.Ordinal) ? ifToken : token;
     }
 
     /// <summary>A signed request on <paramref name="key"/>: a range or a suffix for a read, nothing more for a head.</summary>
@@ -593,7 +543,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             return;
         }
 
-        string amzDate = SigV4Signer.AmzDate(_time.GetUtcNow() + TimeSpan.FromTicks(Interlocked.Read(ref _skewTicks)));
+        string amzDate = SigV4Signer.AmzDate(_clock.Now);
         request.Headers.Host = target.Host;
         request.Headers.TryAddWithoutValidation("x-amz-date", amzDate);
         request.Headers.TryAddWithoutValidation("x-amz-content-sha256", payloadHash);
@@ -766,14 +716,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         _ => "s3-compatible",
     };
 
-    private static void CheckKey(string key)
-    {
-        ArgumentException.ThrowIfNullOrEmpty(key);
-        if (key.Length > 1024)
-        {
-            throw new ArgumentException("A key is at most 1 024 bytes on S3.", nameof(key));
-        }
-    }
+    private static void CheckKey(string key) => StoreFailures.CheckKey(key, "S3");
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 

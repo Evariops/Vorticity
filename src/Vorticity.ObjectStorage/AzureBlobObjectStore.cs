@@ -39,10 +39,9 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
     private readonly AzureAuthorizer _authorizer;
     private readonly HttpTransport _transport;
     private readonly UploadLimits _limits;
-    private readonly TimeProvider _time;
+    private readonly ServiceClock _clock;
     private readonly string _base;
     private readonly string _containerPath;
-    private long _skewTicks;
     private int _disposed;
 
     /// <summary>A store over <see cref="AzureBlobStoreOptions.Container"/>.</summary>
@@ -65,7 +64,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
             nameof(options));
         _options = options;
         _limits = LimitsOf(options);
-        _time = options.Transport.TimeProvider;
+        _clock = new ServiceClock(options.Transport.TimeProvider, "x-ms-date", "r");
         _base = endpoint.GetLeftPart(UriPartial.Authority);
         _containerPath = endpoint.AbsolutePath.TrimEnd('/') + "/" + UriEncoding.Path(options.Container);
         _transport = new HttpTransport(options.Transport, "azure", ReadErrorAsync, options.Handler);
@@ -153,7 +152,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         ThrowIfDisposed();
         if (destination.IsEmpty)
         {
-            return ReadNothingAsync(key, offset, ifToken, cancellationToken);
+            return StoreReads.EmptyAsync(this, key, offset, ifToken, cancellationToken);
         }
 
         return _transport.SendAsync(
@@ -229,22 +228,6 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         return ValueTask.CompletedTask;
     }
 
-    private async ValueTask<ObjectRead> ReadNothingAsync(string key, long offset, string? ifToken, CancellationToken cancellationToken)
-    {
-        ObjectHead head = await HeadAsync(key, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);
-        if (ifToken is not null && !string.Equals(ifToken, head.Token, StringComparison.Ordinal))
-        {
-            throw StoreFailures.Changed(key, ifToken, head.Token);
-        }
-
-        if (offset >= head.Length && !(offset == 0 && head.Length == 0))
-        {
-            throw StoreFailures.PastEnd(key, offset, head.Length);
-        }
-
-        return new ObjectRead(0, head.Length, head.Token);
-    }
-
     private ValueTask<HttpRequestMessage> BuildReadAsync(ReadRequest s, CancellationToken cancellationToken)
     {
         string range = string.Create(CultureInfo.InvariantCulture, $"bytes={s.Offset}-{s.Offset + s.Destination.Length - 1}");
@@ -265,7 +248,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
             // Only an empty blob refuses a read from its start: its token then comes from its properties.
             if (s.Offset == 0 && size is null or 0)
             {
-                return await ReadNothingAsync(s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
+                return await StoreReads.EmptyAsync(this, s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
             }
 
             throw StoreFailures.PastEnd(s.Key, s.Offset, size ?? -1);
@@ -291,7 +274,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
             throw new StoreRetryException($"the body of GetBlob on '{s.Key}' ended after {read} of {wanted} bytes", RetryBudget.RetryCost);
         }
 
-        return new ObjectRead(read, total, TokenOf(response, s.Key, s.IfToken));
+        return new ObjectRead(read, total, HttpAnswers.ETagOf(response, s.Key, s.IfToken));
     }
 
     /// <summary>A blob's head, and the put id its metadata carries.</summary>
@@ -310,7 +293,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         long length = response.Content.Headers.ContentLength
             ?? throw new ObjectStoreException($"GetBlobProperties on '{key}' was answered without a Content-Length.");
         string? until = HttpAnswers.Header(response, "x-ms-immutability-policy-until-date");
-        ObjectHead head = new ObjectHead(length, TokenOf(response, key, null), HttpAnswers.LastModified(response))
+        ObjectHead head = new ObjectHead(length, HttpAnswers.ETagOf(response, key, null), HttpAnswers.LastModified(response))
         {
             RetainUntil = until is null ? null : AzureAnswers.Date(until),
             LegalHold = string.Equals(HttpAnswers.Header(response, "x-ms-legal-hold"), "true", StringComparison.OrdinalIgnoreCase),
@@ -366,7 +349,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
             Content = content,
         };
         request.Headers.TryAddWithoutValidation("x-ms-version", Version);
-        request.Headers.TryAddWithoutValidation("x-ms-date", Now().ToString("r", CultureInfo.InvariantCulture));
+        request.Headers.TryAddWithoutValidation("x-ms-date", _clock.Now.ToString("r", CultureInfo.InvariantCulture));
         foreach ((string name, string value) in headers)
         {
             if (name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase))
@@ -392,24 +375,15 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         return request;
     }
 
-    /// <summary>The service's clock, as far as its answers have taught it.</summary>
-    private DateTimeOffset Now() => _time.GetUtcNow() + TimeSpan.FromTicks(Interlocked.Read(ref _skewTicks));
-
     /// <summary>
     /// What a refusal becomes: an absent blob, an ETag that no longer matches, a retry after a clock
     /// corrected or a token renewed, or a failure that names the service's code and request id.
     /// </summary>
     private async ValueTask<Exception> FailureAsync(HttpResponseMessage response, string operation, string key, string? ifToken, CancellationToken cancellationToken)
     {
-        HttpStatusCode status = response.StatusCode;
-        if (status == HttpStatusCode.NotFound)
+        if (StoreFailures.OfStatus(response.StatusCode, key, ifToken, "another object") is { } common)
         {
-            return ObjectNotFoundException.For(key);
-        }
-
-        if (status == HttpStatusCode.PreconditionFailed && ifToken is not null)
-        {
-            return StoreFailures.Changed(key, ifToken, "another object");
+            return common;
         }
 
         ServiceError error = await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
@@ -420,7 +394,8 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
     {
         if (response.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized)
         {
-            if (Skewed(response))
+            // Azure words a date too far off as any failed authentication, so the refused request's own date says it.
+            if (_clock.Skewed(response))
             {
                 throw new StoreRetryException($"{operation} was refused for a skewed clock: {error}", cost: 0);
             }
@@ -440,24 +415,6 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         }
 
         return new ObjectStoreException($"{operation} on '{key}' was refused, as {_authorizer}: {error}");
-    }
-
-    /// <summary>Learns the service's clock from <c>Date</c> when it is off ours by more than five minutes, and says whether it was.</summary>
-    private bool Skewed(HttpResponseMessage response)
-    {
-        if (response.Headers.Date is not { } service)
-        {
-            return false;
-        }
-
-        TimeSpan offset = service - _time.GetUtcNow();
-        if (offset.Duration() < TimeSpan.FromMinutes(5) || TimeSpan.FromTicks(Interlocked.Read(ref _skewTicks)) == offset)
-        {
-            return false;
-        }
-
-        Interlocked.Exchange(ref _skewTicks, offset.Ticks);
-        return true;
     }
 
     private async ValueTask<ServiceError> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)
@@ -487,12 +444,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         }
     }
 
-    private static string TokenOf(HttpResponseMessage response, string key, string? ifToken)
-    {
-        string token = HttpAnswers.Header(response, "ETag") ?? throw new ObjectStoreException($"'{key}' was answered without an ETag.");
-        return ifToken is not null && string.Equals(token, ifToken, StringComparison.Ordinal) ? ifToken : token;
-    }
-
+    /// <summary>Refuses a blob name that is empty or past 1 024 characters, which Azure counts where S3 and Cloud Storage count bytes.</summary>
     private static void CheckKey(string key)
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
