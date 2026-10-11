@@ -1084,16 +1084,6 @@ Vorticity:     ctor ObjectNotFoundException(string)
 Vorticity:     ctor ObjectNotFoundException(string, Exception)
 Vorticity:     method ObjectNotFoundException For(string)
 Vorticity:     property string Key { get; init; }
-Vorticity: struct Vorticity.IO.ObjectRange : IDisposable
-Vorticity:     ctor ObjectRange(SegmentLease, string)
-Vorticity:     ctor ObjectRange(SegmentLease, string, long)
-Vorticity:     method void Dispose()
-Vorticity:     property ReadOnlyMemory<byte> Memory { get; }
-Vorticity:     property ReadOnlySequence<byte> Bytes { get; }
-Vorticity:     property bool IsContiguous { get; }
-Vorticity:     property int Length { get; }
-Vorticity:     property long ObjectLength { get; }
-Vorticity:     property string Token { get; }
 Vorticity: struct Vorticity.IO.ObjectRead : IEquatable<ObjectRead>
 Vorticity:     ctor ObjectRead(int, long, string)
 Vorticity:     method bool Equals(ObjectRead)
@@ -1123,7 +1113,6 @@ Vorticity:     property int StatusCode { get; init; }
 Vorticity:     property string ErrorCode { get; init; }
 Vorticity:     property string RequestId { get; init; }
 Vorticity: static class Vorticity.IO.ObjectStoreExtensions
-Vorticity:     method ValueTask<ObjectRange> GetRangeAsync(IObjectStore, string, long, int, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutIfAbsentAsync(IObjectStore, string, PipeReader, long, CancellationToken)
 Vorticity: sealed class Vorticity.IO.ObjectStoreRegistry
 Vorticity:     method IObjectStore Resolve(string)

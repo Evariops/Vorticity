@@ -83,9 +83,10 @@ AWS SDKs do, and a locked dataset on OVHcloud or Scaleway cannot be written.
 
 The store interface moves into the core, in `Vorticity.IO` next to `ISegmentSource`, because a single
 file now opens and is written through it, and a file is the core's business. The dataset package is
-experimental, so the move breaks no stable contract. `ObjectRange`, `ObjectHead`, `PutOutcome` and
-the two store exceptions move with it, and `MemoryObjectStore`, `FileObjectStore` and
-`CountingObjectStore` stay where they are.
+experimental, so the move breaks no stable contract. `ObjectHead`, `PutOutcome` and the two store
+exceptions move with it, `ObjectRange` too but internal, since `ObjectRead` is the one result a
+read has in public, and `MemoryObjectStore`, `FileObjectStore` and `CountingObjectStore` stay where
+they are.
 
 The new package is not experimental by nature, since none of the services is this project's format,
 but it ships at `0.x` until it has run against each of them in production.
@@ -196,8 +197,8 @@ gap closed:
 | a put says its condition | `PutIfAbsentAsync` only, and an object is never overwritten | `PutAsync(key, content, length, condition)`, where the condition is absent, matching a token, or none, and `PutOutcome` gains `Changed` for a token that no longer matches | a file written to a location replaces the object as a path's rename does, and an append replaces it only if nothing else did in between |
 | a listing says what it knows | keys only, so vacuum asks for a head per candidate (`DatasetVacuum.cs`, one awaited after another) | `ListAsync` yields each key with its length, token and creation time, and the lock when the store's listing reports it | vacuum stops asking for heads, except for the locks that S3 and the clouds speaking its API report only in a head |
 
-`GetRangeAsync` and `PutIfAbsentAsync` remain as extension methods over the new members, so the
-dataset's code changes only where it gains something. A store also declares what it can do, so that
+`GetRangeAsync` and `PutIfAbsentAsync` remain as extension methods over the new members, the first
+internal to the dataset, so the dataset's code changes only where it gains something. A store also declares what it can do, so that
 a caller chooses the cheaper path without trying the other:
 
 | capability | S3 | R2, OVHcloud, Scaleway | S3 directory buckets | Azure | Cloud Storage | file | memory |

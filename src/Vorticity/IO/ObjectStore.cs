@@ -18,10 +18,9 @@ namespace Vorticity.IO;
 /// token changes whenever the bytes under its key do.
 /// </para>
 /// <para>
-/// Retries, pooling and credentials belong to the implementation, not to this seam. The extension
-/// methods of <see cref="ObjectStoreExtensions"/> give the shapes a caller often wants, a range in a
-/// pooled buffer (<see cref="ObjectStoreExtensions.GetRangeAsync"/>) and a creation
-/// (<see cref="ObjectStoreExtensions.PutIfAbsentAsync(IObjectStore, string, PipeReader, long, CancellationToken)"/>), over these members.
+/// Retries, pooling and credentials belong to the implementation, not to this seam. A creation is
+/// <see cref="ObjectStoreExtensions.PutIfAbsentAsync(IObjectStore, string, PipeReader, long, CancellationToken)"/>,
+/// over these members.
 /// </para>
 /// </remarks>
 public interface IObjectStore : IAsyncDisposable

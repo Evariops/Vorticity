@@ -69,8 +69,8 @@ never a version. S3, Azure Blob Storage and Google Cloud Storage all offer the c
 `IfAbsent` needs. A store that cannot promise it cannot host a dataset, because two writers would
 both believe they had committed.
 
-`GetRangeAsync` and `PutIfAbsentAsync` are extension methods over these members, for a caller that
-wants a range in a pooled buffer or a plain creation.
+`PutIfAbsentAsync` is an extension method over these members, for a plain creation. A read has one
+result, `ObjectRead`, and lands in memory the caller owns.
 
 A store with retention locks (S3 Object Lock, Azure immutable blob storage, a GCS bucket lock)
 reports each object's lock in its head, and in its listing when the service says it there, and
@@ -78,9 +78,6 @@ refuses a delete before the date. A dataset on such a store declares it once at 
 `DatasetOptions.LockedStore`. It then writes as few bytes as it can and vacuums only what the lock has
 released, asking a head only for an object old enough to go whose lock the listing did not say.
 `MemoryObjectStore.RetainFor` and `Hold` simulate such a store in tests.
-
-`ObjectRange`, what `GetRangeAsync` returns, holds its bytes in a pooled buffer and gives it back
-when the caller disposes the range.
 
 ## The three that ship
 
@@ -161,24 +158,9 @@ a full scan 15 for a 1.51 MB file. The session's segment cache keeps what was re
 again fetches nothing. Because the reads of a scan overlap, `DependentSteps` varies a little from one
 run to the next, while the request and byte counts do not.
 
-A file at a location takes appends as a file at a path does, through `session.OpenWriterAsync`:
-
-```csharp
-await using (VortexFileWriter appending = await session.OpenWriterAsync("mem://lake/files/readings.vortex"))
-{
-    await appending.WriteAsync<Reading>([new Reading(1_000, 21.5, "Lyon"), new Reading(1_001, 22.0, "Lyon")]);
-    await appending.CompleteAsync();
-}
-```
-
-```
-two rows appended at the location: 1000002 rows now; 8 requests (7 read, 0 head, 1 put, 0 list), 8 dependent steps, 3083560 bytes read, 1523077 written
-```
-
-An object cannot grow, so the append replaces it, at completion, with its old bytes followed by the
-new ones, and only while nobody else replaced it in between. The memory store copies nothing on a
-service, so the old bytes are read back and sent again in one put. The stores of the
-`Vorticity.ObjectStorage` package copy them on the service instead.
+A file at a location is not appended to: an object cannot grow, so `session.OpenWriterAsync(location)`
+throws a `NotSupportedException`. Write the file again, or keep rows that keep coming in a dataset,
+which is made for them.
 
 A store registered with a session stays yours: the session never disposes it, so one store can serve
 several sessions, and the sample goes on using this one after its session. The stores for S3 and the
@@ -194,7 +176,6 @@ clouds that speak its API, Azure and Cloud Storage are in the `Vorticity.ObjectS
   reference behaviour.
 * `ReadAsync` writes into the caller's memory until it returns, so that memory must stay alive and
   untouched until the read completes, even when the caller gives up on it.
-* An `ObjectRange` owns its buffer. Dispose it once, and do not read its bytes afterwards.
 
 ## Run it
 

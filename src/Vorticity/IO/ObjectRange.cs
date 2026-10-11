@@ -13,9 +13,11 @@ namespace Vorticity.IO;
 /// </summary>
 /// <remarks>
 /// The bytes are a <see cref="SegmentLease"/>, so a store hands out a pooled buffer, memory it keeps,
-/// or a response that arrived in pieces, and gets it back when the range is disposed.
+/// or a response that arrived in pieces, and gets it back when the range is disposed. The dataset's
+/// own shape: a caller outside reads into its memory with <see cref="IObjectStore.ReadAsync"/>, whose
+/// <see cref="ObjectRead"/> is the one result a store's read has in public.
 /// </remarks>
-public struct ObjectRange : IDisposable
+internal struct ObjectRange : IDisposable
 {
     private SegmentLease _bytes;
 
@@ -105,7 +107,7 @@ public static class ObjectStoreExtensions
     /// <returns>The bytes and the token; the caller disposes the range once.</returns>
     /// <exception cref="ObjectNotFoundException">No object has that key.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The range starts past the object's end.</exception>
-    public static async ValueTask<ObjectRange> GetRangeAsync(
+    internal static async ValueTask<ObjectRange> GetRangeAsync(
         this IObjectStore store, string key, long offset, int length, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
