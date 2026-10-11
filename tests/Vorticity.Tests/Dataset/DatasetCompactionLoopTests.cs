@@ -40,6 +40,10 @@ public sealed class DatasetCompactionLoopTests
             stop.Token);
         await UntilDrainedAsync(dataset, ct);
 
+        // A loop reports a job once its commit is in, so the dataset can be found drained before the
+        // job that drained it is reported: what it ran is counted once that report is in too.
+        await UntilReportedAsync(ran, dataset.Version, ct);
+
         // Drained, it sleeps and asks again: a while later it has run nothing more, and asked the
         // store a head request or so a turn rather than spinning.
         int drained = ran.Count;
@@ -240,6 +244,17 @@ public sealed class DatasetCompactionLoopTests
         {
             await Task.Delay(5, patience.Token);
             await dataset.RefreshAsync(patience.Token);
+        }
+    }
+
+    /// <summary>Waits until a loop has reported the job that created <paramref name="version"/>.</summary>
+    private static async Task UntilReportedAsync(ConcurrentQueue<CompactionResult> ran, ulong version, CancellationToken ct)
+    {
+        using CancellationTokenSource patience = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        patience.CancelAfter(TimeSpan.FromSeconds(60));
+        while (!ran.Any(result => result.Version == version))
+        {
+            await Task.Delay(5, patience.Token);
         }
     }
 
