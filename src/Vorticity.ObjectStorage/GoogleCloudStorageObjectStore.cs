@@ -34,7 +34,7 @@ namespace Vorticity.ObjectStorage;
 /// without one, a dataset's data object, goes up in parts past the threshold.
 /// </para>
 /// </remarks>
-public sealed class GoogleCloudStorageObjectStore : IObjectStore, IMeasuredObjectStore
+public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IMeasuredObjectStore
 {
     /// <summary>The metadata a put carries its id in, read back as <c>metadata.vxput</c>.</summary>
     internal const string PutIdHeader = "x-goog-meta-vxput";

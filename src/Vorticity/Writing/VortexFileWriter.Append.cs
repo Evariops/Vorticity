@@ -85,10 +85,19 @@ public sealed partial class VortexFileWriter
         AppendPlan plan;
         ImmutableDictionary<string, ReadOnlyMemory<byte>> metadata;
         Sealing.SealedLayout? sealedLayout;
+        bool located = wrap is null && Vorticity.IO.ObjectStoreRegistry.IsLocation(path);
+        string? token = null;
         VortexFile file = await session.OpenAsync(path, null, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
             VortexFileRepair.ThrowIfTorn(path, file, "An append");
+            if (located)
+            {
+                // The object grows only while it keeps the token its open read: an append that
+                // another writer's bytes replaced in between is refused rather than written over them.
+                token = ObjectSourceOf(file.Source)?.Token ?? throw new Vorticity.IO.ObjectStoreException(
+                    $"The store said no token for '{path}', and an append needs one to replace the object only if nobody else did.");
+            }
 
             // A sealed file is continued with an epoch under the data key it names; a session that
             // seals what it writes adds no plaintext to a plain one.
@@ -112,10 +121,12 @@ public sealed partial class VortexFileWriter
         // What the writer of a sealed file moves to disk is sealed too.
         effective = effective with { Metadata = metadata.SetItems(effective.Metadata), SealScratch = sealedLayout is not null };
 
-        VortexFileWriter writer = wrap is null
-            ? OpenAppend(path, plan, effective, session, sealedLayout)
-            : await OpenWrappedAsync(path, plan, effective, wrap).ConfigureAwait(false);
-        writer._appendedPath = path;
+        VortexFileWriter writer = located
+            ? OpenLocatedAppend(path, plan, effective, session, sealedLayout, token!)
+            : wrap is null
+                ? OpenAppend(path, plan, effective, session, sealedLayout)
+                : await OpenWrappedAsync(path, plan, effective, wrap).ConfigureAwait(false);
+        writer._appendedPath = located ? null : path;
         writer._appendOrigin = sealedLayout?.ObjectLength ?? plan.FileLength;
         writer.Session = session;
 
@@ -199,6 +210,67 @@ public sealed partial class VortexFileWriter
             throw;
         }
     }
+
+    /// <summary>
+    /// The append's writer for a file at a location: its bytes, positioned after the object's end, go
+    /// into a pipe whose reader is the store's append, which builds the grown object on the service
+    /// when it can and replaces the old one only while it keeps <paramref name="token"/>. Abandoned, the
+    /// append writes nothing, and the object stays as it was.
+    /// </summary>
+    private static VortexFileWriter OpenLocatedAppend(
+        string location, AppendPlan plan, VortexWriteOptions options, VortexSession session, Sealing.SealedLayout? sealedLayout, string token)
+    {
+        (Vorticity.IO.IObjectStore store, string key) = session.Options.ObjectStores.Locate(location);
+        if (Vorticity.IO.ObjectStoreSource.Root(store) is not Vorticity.IO.IAppendingObjectStore
+            && (store.Capabilities & Vorticity.IO.ObjectStoreCapabilities.ReplacesOnTokenMatch) == 0)
+        {
+            plan.AbsorbedScratch?.Dispose();
+            throw new NotSupportedException(
+                $"The store of '{location}' cannot replace an object only while nobody else did, so the file cannot be appended to: write it again instead.");
+        }
+
+        long origin = sealedLayout?.ObjectLength ?? plan.FileLength;
+        System.IO.Pipelines.Pipe pipe = new System.IO.Pipelines.Pipe(new System.IO.Pipelines.PipeOptions(
+            pauseWriterThreshold: 4 << 20, resumeWriterThreshold: 2 << 20, useSynchronizationContext: false));
+        try
+        {
+            ISegmentSink sink = sealedLayout is null
+                ? new PipeSegmentSink(pipe.Writer, plan.FileLength)
+                : new Sealing.SealingSegmentSink(pipe.Writer, sealedLayout, cancellationToken => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, cancellationToken));
+            VortexFileWriter writer = Create(sink, plan.Schema, options, session);
+            writer._callerPipe = pipe.Writer;
+            writer.UploadTo(AppendedAsync(store, key, token, origin, pipe.Reader, location));
+            return writer;
+        }
+        catch
+        {
+            pipe.Writer.Complete();
+            pipe.Reader.Complete();
+            plan.AbsorbedScratch?.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The store's append of what the writer writes, refused when another writer replaced the object in between.</summary>
+    private static async Task AppendedAsync(Vorticity.IO.IObjectStore store, string key, string token, long origin, System.IO.Pipelines.PipeReader content, string location)
+    {
+        Vorticity.IO.PutOutcome outcome = await Vorticity.IO.ObjectAppends
+            .AppendAsync(store, key, token, origin, content, CancellationToken.None).ConfigureAwait(false);
+        if (outcome != Vorticity.IO.PutOutcome.Created)
+        {
+            throw new Vorticity.IO.ObjectStoreException(
+                $"'{location}' was replaced while rows were appended to it: the append is refused, and the object is as the other writer left it. Open it again to append.");
+        }
+    }
+
+    /// <summary>The object source under a file's reader: through the session's wrapper and a sealed file's reader.</summary>
+    private static Vorticity.IO.ObjectStoreSource? ObjectSourceOf(Vorticity.IO.ISegmentReader reader) => reader switch
+    {
+        Vorticity.IO.ObjectStoreSource source => source,
+        SessionReader session => ObjectSourceOf(session.Inner),
+        Sealing.SealedSegmentReader sealedReader => ObjectSourceOf(sealedReader.Inner),
+        _ => null,
+    };
 
     /// <summary>The append's writer over the sink a test builds from the file's stream.</summary>
     private static async ValueTask<VortexFileWriter> OpenWrappedAsync(

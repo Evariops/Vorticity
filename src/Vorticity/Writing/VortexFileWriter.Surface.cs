@@ -395,9 +395,11 @@ public sealed partial class VortexFileWriter
             await pipe.CompleteAsync().ConfigureAwait(false);
         }
 
-        // A file written to a location is complete when the store holds it.
+        // A file written to a location is complete when the store holds it. The put's outcome is the
+        // completion's: a failure is thrown here, and not again by the disposal.
         if (_upload is { } upload)
         {
+            _upload = null;
             await upload.ConfigureAwait(false);
         }
 

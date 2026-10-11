@@ -741,8 +741,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The session the writer belongs to.</summary>
     internal VortexSession Session { get; private set; } = VortexSession.Default;
 
-    /// <summary>Hands the writer the put that takes what it writes to a store, which completing the file awaits.</summary>
-    internal void UploadTo(Task upload) => _upload = upload;
+    /// <summary>
+    /// Hands the writer the put that takes what it writes to a store, which completing the file awaits,
+    /// and whose failure a flush that finds the pipe's reader gone throws.
+    /// </summary>
+    internal void UploadTo(Task upload)
+    {
+        _upload = upload;
+        switch (_sink)
+        {
+            case PipeSegmentSink pipe:
+                pipe.Upload = upload;
+                break;
+            case Sealing.SealingSegmentSink sealing:
+                sealing.Upload = upload;
+                break;
+        }
+    }
 
     /// <summary>The pipe over the file this writer opened, created or appended to; null over a caller's sink.</summary>
     internal FilePipeWriter? FilePipe => _filePipe;

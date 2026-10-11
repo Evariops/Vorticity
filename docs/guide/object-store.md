@@ -160,14 +160,33 @@ a full scan 15 for a 1.51 MB file. The session's segment cache keeps what was re
 again fetches nothing. Because the reads of a scan overlap, `DependentSteps` varies a little from one
 run to the next, while the request and byte counts do not.
 
+A file at a location takes appends as a file at a path does, through `session.OpenWriterAsync`:
+
+```csharp
+await using (VortexFileWriter appending = await session.OpenWriterAsync("mem://lake/files/readings.vortex"))
+{
+    await appending.WriteAsync<Reading>([new Reading(1_000, 21.5, "Lyon"), new Reading(1_001, 22.0, "Lyon")]);
+    await appending.CompleteAsync();
+}
+```
+
+```
+two rows appended at the location: 1000002 rows now; 8 requests (7 read, 0 head, 1 put, 0 list), 8 dependent steps, 3083560 bytes read, 1523077 written
+```
+
+An object cannot grow, so the append replaces it, at completion, with its old bytes followed by the
+new ones, and only while nobody else replaced it in between. The memory store copies nothing on a
+service, so the old bytes are read back and sent again in one put. The stores of the
+`Vorticity.ObjectStorage` package copy them on the service instead.
+
 The session disposes the stores it holds, as it disposes its pool and its cache. This one does not
 own the memory store under it, which the sample goes on using. The stores for S3, R2, OVHcloud and
 Scaleway are in the `Vorticity.ObjectStorage` package (see [object-storage.md](object-storage.md)).
 
 ## Watch out
 
-* The interface may still change while the stores for S3, Azure and Cloud Storage are built, so pin
-  the version.
+* The interface may still change until the stores for S3, Azure and Cloud Storage are tested against
+  the services themselves, so pin the version.
 * A store that declares `ListsInOrder` must honour `startAfter` and ordinal order, or a dataset's
   listing of its commits goes wrong. Test an implementation against `MemoryObjectStore`, which is the
   reference behaviour.

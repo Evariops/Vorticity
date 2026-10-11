@@ -257,7 +257,7 @@ public sealed class ObjectStoreRegistry
 /// A store under a prefix of another: every key it is given is the prefix and the key, and every key it
 /// lists is stripped of the prefix. It shares the store under it and never disposes it.
 /// </summary>
-internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : IObjectStore
+internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : IObjectStore, IAppendingObjectStore
 {
     /// <summary>The store under the view.</summary>
     internal IObjectStore Inner => inner;
@@ -278,6 +278,9 @@ internal sealed class PrefixedObjectStore(IObjectStore inner, string prefix) : I
 
     public ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
         inner.PutAsync(prefix + key, content, length, condition, cancellationToken);
+
+    public ValueTask<PutOutcome> AppendAsync(string key, string token, long length, PipeReader content, CancellationToken cancellationToken) =>
+        ObjectAppends.AppendAsync(inner, prefix + key, token, length, content, cancellationToken);
 
     public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {

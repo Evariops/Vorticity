@@ -9,8 +9,11 @@ is the design of that support: where it lives, what it changes in the store inte
 is built, sent, retried and counted, what each provider does differently, and what each operation
 costs in requests.
 
-It is a design to build. Nothing in it exists in the code yet, and where it changes a rule that
-another document states, it says so. [The scope](01-scope.md#6-what-it-leaves-out) leaves out an S3
+It is built, in the core's store interface and in the package `Vorticity.ObjectStorage`, and held by
+the published vectors of each protocol and by emulators of each service under the HTTP client. The
+tests against the services themselves come next. Where the code departs from this design,
+[the last section](#19-where-the-code-departs-from-this-design) says so, and where the design changes
+a rule that another document states, it says so. [The scope](01-scope.md#6-what-it-leaves-out) leaves out an S3
 client, and [the dataset](13-dataset.md) says that this library never names S3 in code. Both stay
 true of the core and of the dataset package, since the clients live in a package of their own, which
 neither references. Two rules of [the store abstraction](13-dataset.md#11-the-store-abstraction) do
@@ -896,3 +899,27 @@ a proposal of this design, to be measured.
 | a single object's first batch issues about 14 requests at degree 14, against 2 at degree 1 | measured in this repository in October 2026 |
 | a window in bytes sized by bandwidth and latency, the first batch on two lanes | proposal, measured against the source with injected latency |
 | part threshold, part size, parts in flight, connection limits, hedging percentile | proposal, starting points to set by measurement |
+
+## 19. Where the code departs from this design
+
+The code follows this design but for what the table below lists. Most departures wait on the tests
+against the services: a behaviour the documentation leaves open is taken as absent until a test shows
+it, and an option turns it on once it does.
+
+| design | code | why |
+|---|---|---|
+| S3 is sent XXH3-128 in one request | CRC-64/NVME on every put | the byte order of `x-amz-checksum-xxhash128` is to check against the service first, as [the checksums](#113-checksums) ask |
+| Azure reads the structured body by default | `VerifyReads` is off by default | its layout is to check against the service, and a read then relies on TLS and the format's checks, as on S3 |
+| `x-ms-content-crc64` as Azure's reference shows it | low byte first, as Azure's SDK sends it | to check against the service |
+| the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks` | a dataset under Object Lock refuses R2 and an OVHcloud Local Zone without knowing the package |
+| the parts and the window reserved through the memory governor | the parts bounded by `PartsInFlight`, the window allocating nothing | the reads a window admits land in the blocks a scan reads into, which an aggregation's admission counts already |
+| a dataset sends its data object's parts as it writes | the object goes up at the commit | the dataset's writer holds the object until then |
+| a completion answered 409 starts a new upload | it throws | the content of a put cannot be read twice |
+| Cloud Storage takes a conditional put up to 5 TiB | up to 5 GiB, held in memory | the service takes no precondition on the parts of an upload |
+| `https://account.blob.core.windows.net/container/key` locations | `az://` locations | a registered prefix serves the same need |
+| the Azure chain's order | the storage credentials of the environment come before a managed identity | a host that sets them never waits on a metadata service it does not have |
+| an external account of Google that exchanges an AWS identity | a subject token from a file or a URL | the AWS source signs a request of its own, left for a host that needs it |
+| R2 copies the old object by ranges for an append | R2 reads it back and sends it again | R2 takes no documented condition on the completion of an upload, which an append needs |
+| an append to a directory bucket in one request | in pieces of the part threshold past it | a request's body is held in memory until it is sent |
+| an append below 5 MiB as the others | read back and sent again on every service | fewer requests than a copy, and S3 copies no part smaller than 5 MiB |
+| the first batch's reads and the window measured against injected latency | unit and emulator tests only | the window is a ceiling, idle while the link keeps up, and is measured against the services |

@@ -2650,6 +2650,7 @@ Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, 
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property S3Profile Profile { get; }
+Vorticity.ObjectStorage:     property bool IsDirectoryBucket { get; }
 Vorticity.ObjectStorage:     property string Bucket { get; }
 Vorticity.ObjectStorage: enum Vorticity.ObjectStorage.S3Profile
 Vorticity.ObjectStorage:     const S3Profile Amazon = 0
@@ -2661,6 +2662,7 @@ Vorticity.ObjectStorage:     field int value__
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3StoreOptions
 Vorticity.ObjectStorage:     ctor S3StoreOptions()
 Vorticity.ObjectStorage:     property Nullable<S3Profile> Profile { get; init; }
+Vorticity.ObjectStorage:     property Nullable<bool> CopiesParts { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> KeepsLocks { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ListsInOrder { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> PathStyle { get; init; }

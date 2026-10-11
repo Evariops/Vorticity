@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
@@ -64,7 +65,10 @@ public sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Bytes announced to <see cref="PutAsync"/>, whether or not its condition held.</summary>
+    /// <summary>
+    /// Bytes announced to <see cref="PutAsync"/>, whether or not its condition held; for a put of unknown
+    /// length, the bytes the store read of its content, counted once the put is over.
+    /// </summary>
     public long BytesWritten
     {
         get
@@ -193,17 +197,66 @@ public sealed class CountingObjectStore : IObjectStore
         lock (_gate)
         {
             // Counted even when the condition refuses it: the bytes were offered to the seam. A put of
-            // unknown length counts none, its content telling its length only to the store.
+            // unknown length counts what the store read of its content, once the put is over.
             _bytesWritten += Math.Max(length, 0);
         }
 
+        CountingReader? counted = length < 0 ? new CountingReader(content) : null;
         try
         {
-            return await _inner.PutAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false);
+            return await _inner.PutAsync(key, counted ?? content, length, condition, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
+            if (counted is not null)
+            {
+                lock (_gate)
+                {
+                    _bytesWritten += counted.Consumed;
+                }
+            }
+
             Leave();
+        }
+    }
+
+    /// <summary>A put's content that counts the bytes its reader consumed.</summary>
+    private sealed class CountingReader(PipeReader inner) : PipeReader
+    {
+        private ReadOnlySequence<byte> _last;
+
+        internal long Consumed { get; private set; }
+
+        public override void AdvanceTo(SequencePosition consumed) => AdvanceTo(consumed, consumed);
+
+        public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
+        {
+            Consumed += _last.Slice(_last.Start, consumed).Length;
+            inner.AdvanceTo(consumed, examined);
+        }
+
+        public override void CancelPendingRead() => inner.CancelPendingRead();
+
+        public override void Complete(Exception? exception = null) => inner.Complete(exception);
+
+        public override ValueTask CompleteAsync(Exception? exception = null) => inner.CompleteAsync(exception);
+
+        public override async ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
+        {
+            ReadResult result = await inner.ReadAsync(cancellationToken).ConfigureAwait(false);
+            _last = result.Buffer;
+            return result;
+        }
+
+        public override bool TryRead(out ReadResult result)
+        {
+            if (!inner.TryRead(out result))
+            {
+                return false;
+            }
+
+            _last = result.Buffer;
+            return true;
         }
     }
 

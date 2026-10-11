@@ -65,6 +65,18 @@ internal static class ObjectStore
             Console.WriteLine($"a full scan, {await CountAsync(opened)} rows: {Cost(counting)}");
             counting.Reset();
             Console.WriteLine($"the same scan again, its segments in the session's cache, {await CountAsync(opened)} rows: {Cost(counting)}");
+
+            // An append replaces the object with its old bytes and the new ones, only while nobody else
+            // replaced it. This store copies nothing on its service, so the old bytes are read back.
+            counting.Reset();
+            await using (VortexFileWriter appending = await session.OpenWriterAsync("mem://lake/files/readings.vortex"))
+            {
+                await appending.WriteAsync<Reading>([new Reading(1_000, 21.5, "Lyon"), new Reading(1_001, 22.0, "Lyon")]);
+                await appending.CompleteAsync();
+            }
+
+            await using VortexFile appended = await session.OpenAsync("mem://lake/files/readings.vortex");
+            Console.WriteLine($"two rows appended at the location: {appended.RowCount} rows now; {Cost(counting)}");
         }
 
         await using MemoryObjectStore failing = new MemoryObjectStore

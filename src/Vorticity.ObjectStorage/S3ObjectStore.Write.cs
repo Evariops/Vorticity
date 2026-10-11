@@ -105,6 +105,11 @@ public sealed partial class S3ObjectStore
 
     private async ValueTask<PutOutcome> PutCoreAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
+        if (condition.Kind == PutConditionKind.IfMatch && (_capabilities & ObjectStoreCapabilities.ReplacesOnTokenMatch) == 0)
+        {
+            throw new NotSupportedException($"The directory bucket '{Bucket}' is not known to replace an object only while it keeps its ETag.");
+        }
+
         // A service that takes no condition on parts gets a conditional put whole, whatever its size.
         bool whole = condition.Kind != PutConditionKind.None && _profile == S3Profile.R2;
         long threshold = whole ? MaxSinglePut : Math.Min(_options.PartThreshold, MaxSinglePut);
@@ -200,13 +205,7 @@ public sealed partial class S3ObjectStore
         string uploadId;
         try
         {
-            uploadId = await _transport.SendAsync(
-                "CreateMultipartUpload",
-                new UploadRequest(this, key, string.Empty, putId, crc),
-                static (s, ct) => s.Store.BuildCreateUploadAsync(s, ct),
-                static (response, s, ct) => s.Store.ConsumeCreateUploadAsync(response, s.Key, ct),
-                idempotent: true,
-                cancellationToken).ConfigureAwait(false);
+            uploadId = await CreateUploadAsync(key, putId, crc, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -263,6 +262,16 @@ public sealed partial class S3ObjectStore
 
         return outcome;
     }
+
+    /// <summary>Starts an upload in parts carrying <paramref name="putId"/>, and the whole object's CRC-64/NVME when <paramref name="crc"/>.</summary>
+    private ValueTask<string> CreateUploadAsync(string key, string putId, bool crc, CancellationToken cancellationToken) =>
+        _transport.SendAsync(
+            "CreateMultipartUpload",
+            new UploadRequest(this, key, string.Empty, putId, crc),
+            static (s, ct) => s.Store.BuildCreateUploadAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeCreateUploadAsync(response, s.Key, ct),
+            idempotent: true,
+            cancellationToken);
 
     private async Task UploadPartAsync(string key, string uploadId, Part part, ChunkedBuffer body, bool crc, CancellationToken cancellationToken)
     {
@@ -593,7 +602,9 @@ public sealed partial class S3ObjectStore
         {
             Content = new SequenceContent(new ReadOnlySequence<byte>(body)),
         };
-        await SignAsync(request, target, path, "delete=", Convert.ToHexStringLower(SHA256.HashData(body)), cancellationToken, [DeleteDigest(body)]).ConfigureAwait(false);
+        // A directory bucket takes no Content-MD5: its delete carries the CRC-32 the SDKs send there.
+        (string, string) digest = _zone is null ? DeleteDigest(body) : Crc32Digest(body);
+        await SignAsync(request, target, path, "delete=", Convert.ToHexStringLower(SHA256.HashData(body)), cancellationToken, [digest]).ConfigureAwait(false);
         return request;
     }
 
@@ -627,10 +638,16 @@ public sealed partial class S3ObjectStore
         }
         catch (Exception forbidden) when (forbidden is CryptographicException or PlatformNotSupportedException)
         {
-            byte[] crc = new byte[4];
-            BinaryPrimitives.WriteUInt32BigEndian(crc, System.IO.Hashing.Crc32.HashToUInt32(body));
-            return ("x-amz-checksum-crc32", Convert.ToBase64String(crc));
+            return Crc32Digest(body);
         }
+    }
+
+    /// <summary>The CRC-32 checksum header of a body, high byte first, in base64.</summary>
+    private static (string, string) Crc32Digest(byte[] body)
+    {
+        byte[] crc = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(crc, System.IO.Hashing.Crc32.HashToUInt32(body));
+        return ("x-amz-checksum-crc32", Convert.ToBase64String(crc));
     }
 
     private static byte[] DeleteBody(IReadOnlyList<string> keys, int start, int count)

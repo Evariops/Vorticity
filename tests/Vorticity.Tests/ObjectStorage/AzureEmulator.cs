@@ -60,6 +60,12 @@ internal sealed class AzureEmulator : HttpMessageHandler
 
     internal int Requests => Log.Count;
 
+    /// <summary>The blocks copied from a blob, by <c>Put Block From URL</c>.</summary>
+    internal int CopiedBlocks { get; private set; }
+
+    /// <summary>The service SAS the last copied block's source carried, for the tests that read it.</summary>
+    internal string? LastSourceQuery { get; private set; }
+
     internal void Seed(string container, string blob, byte[] bytes, DateTimeOffset? retainUntil = null, bool legalHold = false)
     {
         lock (_gate)
@@ -153,6 +159,10 @@ internal sealed class AzureEmulator : HttpMessageHandler
         {
             return (Head(container, blob), false);
         }
+        else if (method == HttpMethod.Put && query.GetValueOrDefault("comp") == "block" && Header(request, "x-ms-copy-source") is { } source)
+        {
+            return CopyBlock(request, container, blob, query["blockid"], source);
+        }
         else if (method == HttpMethod.Put && query.GetValueOrDefault("comp") == "block")
         {
             if (Damaged(request, body) is { } damaged)
@@ -206,6 +216,82 @@ internal sealed class AzureEmulator : HttpMessageHandler
         }
 
         return (Error(HttpStatusCode.NotImplemented, "NotImplemented", "The emulator does not serve this request."), false);
+    }
+
+    /// <summary>
+    /// <c>Put Block From URL</c>: a block copied from a range of a blob of the account, its source
+    /// authorized as the service asks, a SAS in its URL or a token in <c>x-ms-copy-source-authorization</c>,
+    /// and bound to the ETag <c>x-ms-source-if-match</c> names.
+    /// </summary>
+    private (HttpResponseMessage, bool) CopyBlock(HttpRequestMessage request, string container, string blob, string blockId, string source)
+    {
+        Uri from = new Uri(source);
+        LastSourceQuery = from.Query.TrimStart('?');
+        (string sourceContainer, string sourceBlob) = Address(from);
+        if (!SourceAuthorized(request, from, sourceContainer, sourceBlob))
+        {
+            return (Error(HttpStatusCode.Forbidden, "CannotVerifyCopySource", "Server failed to authenticate the request."), false);
+        }
+
+        lock (_gate)
+        {
+            if (!Container(sourceContainer).TryGetValue(sourceBlob, out Blob found))
+            {
+                return (Error(HttpStatusCode.NotFound, "CannotVerifyCopySource", "The specified blob does not exist."), false);
+            }
+
+            if (Header(request, "x-ms-source-if-match") is { } match && match != found.ETag)
+            {
+                return (Error(HttpStatusCode.PreconditionFailed, "CannotVerifyCopySource", "The condition specified using HTTP conditional header(s) is not met."), false);
+            }
+
+            long first = 0;
+            long last = found.Bytes.Length - 1;
+            if (Header(request, "x-ms-source-range") is { } range)
+            {
+                string[] bounds = range["bytes=".Length..].Split('-');
+                first = long.Parse(bounds[0], CultureInfo.InvariantCulture);
+                last = long.Parse(bounds[1], CultureInfo.InvariantCulture);
+                if (first > last || last >= found.Bytes.Length)
+                {
+                    return (Error(HttpStatusCode.RequestedRangeNotSatisfiable, "InvalidRange", "The range specified is invalid for the current size of the resource."), false);
+                }
+            }
+
+            _blocks[$"{container}/{blob}/{blockId}"] = found.Bytes[(int)first..(int)(last + 1)];
+            CopiedBlocks++;
+        }
+
+        return (new HttpResponseMessage(HttpStatusCode.Created) { Content = new ByteArrayContent([]) }, true);
+    }
+
+    /// <summary>
+    /// Whether a copy's source is authorized: the store's token in <c>x-ms-copy-source-authorization</c>,
+    /// the store's SAS in the source's URL, or, under Shared Key, a read-only service SAS on that blob
+    /// that the account key signs and that has not expired.
+    /// </summary>
+    private bool SourceAuthorized(HttpRequestMessage request, Uri source, string container, string blob)
+    {
+        if (Token is not null)
+        {
+            return Header(request, "x-ms-copy-source-authorization") == "Bearer " + Token;
+        }
+
+        if (Sas is not null)
+        {
+            return source.Query.Contains(Sas, StringComparison.Ordinal);
+        }
+
+        Dictionary<string, string> sas = Query(source);
+        if (sas.GetValueOrDefault("sr") != "b" || sas.GetValueOrDefault("sp") != "r" || !sas.TryGetValue("se", out string? expiry)
+            || DateTimeOffset.Parse(expiry, CultureInfo.InvariantCulture) <= Now())
+        {
+            return false;
+        }
+
+        string toSign = string.Join('\n', "r", string.Empty, expiry, $"/blob/{Account}/{container}/{blob}", string.Empty, string.Empty, string.Empty,
+            sas.GetValueOrDefault("sv"), "b", string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
+        return sas.GetValueOrDefault("sig") == Sign(toSign);
     }
 
     private (HttpResponseMessage, bool) Store(HttpRequestMessage request, string container, string blob, byte[] bytes)

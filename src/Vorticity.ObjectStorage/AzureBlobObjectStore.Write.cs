@@ -182,9 +182,14 @@ public sealed partial class AzureBlobObjectStore
             carried,
             (number, block, ct) => PutBlockAsync(key, BlockId(upload, number), block, ct),
             cancellationToken).ConfigureAwait(false);
+        return await CommitBlocksAsync(key, upload, blocks.Count, condition, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>Commits the first <paramref name="count"/> blocks of an upload, in order, with the condition and a put id.</summary>
+    private async ValueTask<PutOutcome> CommitBlocksAsync(string key, string upload, int count, PutCondition condition, CancellationToken cancellationToken)
+    {
         StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
-        for (int number = 1; number <= blocks.Count; number++)
+        for (int number = 1; number <= count; number++)
         {
             xml.Append("<Latest>").Append(BlockId(upload, number)).Append("</Latest>");
         }
