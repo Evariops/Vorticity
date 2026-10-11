@@ -858,9 +858,11 @@ dependent steps, which no meter can.
 ## 15. How it is tested
 
 - The store contract, `ObjectStoreContractTests`, extended with the revised members, runs against
-  the memory store, the file store and the emulators in CI, and against S3, R2, OVHcloud, Scaleway,
-  Azure and Cloud Storage themselves on a schedule, with credentials the CI holds. Those runs settle
-  every capability this document marks to check, and a profile changes only when they do.
+  the memory store, the file store and the emulators of this repository on every run. It runs as well
+  against any bucket the environment names, of S3, R2, OVHcloud, Scaleway, Azure or Cloud Storage,
+  with credentials of its own. `LiveServiceTests` adds there what only a service proves: an upload in
+  parts it assembles, a suffix read, a dataset in a bucket. Those runs settle every capability this
+  document marks to check, and a profile changes only when they do.
 - The protocol is tested against published vectors: AWS's Signature Version 4 test suite, the Shared
   Key examples of the Azure reference, the CRC-64/NVME and CRC-32C check values, and the structured
   body examples.

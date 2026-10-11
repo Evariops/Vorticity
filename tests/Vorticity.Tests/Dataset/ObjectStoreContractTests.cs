@@ -27,8 +27,20 @@ public sealed class ObjectStoreContractTests : IDisposable
     private readonly List<string> _directories = [];
     private readonly List<IDisposable> _emulators = [];
 
-    /// <summary>The stores under test, each with the name its failures are reported under.</summary>
-    public static TheoryData<string> Stores() => ["memory", "file", "s3", "azure", "gcs"];
+    /// <summary>
+    /// The stores under test, each with the name its failures are reported under: the emulators always,
+    /// and the services themselves when the environment names a bucket (<see cref="Vorticity.Tests.ObjectStorage.LiveStores"/>).
+    /// </summary>
+    public static TheoryData<string> Stores()
+    {
+        TheoryData<string> stores = ["memory", "file", "s3", "azure", "gcs"];
+        foreach (string live in Vorticity.Tests.ObjectStorage.LiveStores.Kinds())
+        {
+            stores.Add(live);
+        }
+
+        return stores;
+    }
 
     /// <summary>The stores whose keys are paths, which refuse a key that could leave their root.</summary>
     public static TheoryData<string> PathStores() => ["memory", "file"];
@@ -38,6 +50,11 @@ public sealed class ObjectStoreContractTests : IDisposable
         if (kind == "memory")
         {
             return new MemoryObjectStore();
+        }
+
+        if (kind.EndsWith("-live", StringComparison.Ordinal))
+        {
+            return Vorticity.Tests.ObjectStorage.LiveStores.Open(kind);
         }
 
         if (kind == "s3")
@@ -607,7 +624,7 @@ public sealed class ObjectStoreContractTests : IDisposable
         {
             // Every listing says the locks but S3's, whose locks a head alone tells.
             Assert.Equal(await store.HeadAsync(entry.Key, ct), entry.Head);
-            Assert.Equal(kind != "s3", entry.LockReported);
+            Assert.Equal(!kind.StartsWith("s3", StringComparison.Ordinal), entry.LockReported);
         }
     }
 
