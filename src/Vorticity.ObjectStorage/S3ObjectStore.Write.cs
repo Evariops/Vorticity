@@ -602,8 +602,7 @@ public sealed partial class S3ObjectStore
         {
             Content = new SequenceContent(new ReadOnlySequence<byte>(body)),
         };
-        // A directory bucket takes no Content-MD5: its delete carries the CRC-32 the SDKs send there.
-        (string, string) digest = _zone is null ? DeleteDigest(body) : Crc32Digest(body);
+        (string, string) digest = DeleteDigest(body);
         await SignAsync(request, target, path, "delete=", Convert.ToHexStringLower(SHA256.HashData(body)), cancellationToken, [digest]).ConfigureAwait(false);
         return request;
     }

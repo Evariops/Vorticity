@@ -39,6 +39,17 @@ public sealed partial class LocationTests
         Assert.Equal(location, ObjectStoreRegistry.IsLocation(text));
 
     [Fact]
+    public async Task AFileAtALocationIsNotAppendedTo()
+    {
+        // An object cannot grow: the append is refused before any request, and the object is left alone.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore lake = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("mem://lake", lake));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await session.OpenWriterAsync("mem://lake/readings.vortex", cancellationToken: ct));
+        Assert.Empty(await lake.ListEntriesAsync(string.Empty, ct));
+    }
+
+    [Fact]
     public async Task TheLongestRegisteredPrefixServesALocation()
     {
         await using MemoryObjectStore lake = new MemoryObjectStore();

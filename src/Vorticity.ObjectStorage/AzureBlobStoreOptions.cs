@@ -49,7 +49,4 @@ public sealed class AzureBlobStoreOptions
 
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }
-
-    /// <summary>The smallest blob an append copies on the service rather than reads back: 5 MiB, which tests lower.</summary>
-    internal long MinimumCopiedBytes { get; init; } = AzureBlobObjectStore.MinimumCopiedBytes;
 }

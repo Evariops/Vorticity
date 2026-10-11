@@ -38,9 +38,6 @@ internal sealed class GoogleEmulator : HttpMessageHandler
 
     internal int Requests => Log.Count;
 
-    /// <summary>The objects built by composition.</summary>
-    internal int Composed { get; private set; }
-
     internal int OpenUploads
     {
         get
@@ -131,11 +128,6 @@ internal sealed class GoogleEmulator : HttpMessageHandler
             if (parts.Length == 2 && method == HttpMethod.Get)
             {
                 return (List(bucket, query), false);
-            }
-
-            if (method == HttpMethod.Post && parts[2].EndsWith("/compose", StringComparison.Ordinal))
-            {
-                return Compose(bucket, Uri.UnescapeDataString(parts[2][..^"/compose".Length]), query, body);
             }
 
             string name = Uri.UnescapeDataString(parts[2]);
@@ -248,63 +240,6 @@ internal sealed class GoogleEmulator : HttpMessageHandler
         }
 
         return (XmlError(HttpStatusCode.NotImplemented, "NotImplemented"), false);
-    }
-
-    /// <summary>
-    /// The JSON API's composition: the sources joined in order under the destination's name, each bound
-    /// to the generation its preconditions name, and the destination to <c>ifGenerationMatch</c>.
-    /// </summary>
-    private (HttpResponseMessage, bool) Compose(string bucket, string destination, Dictionary<string, string> query, byte[] body)
-    {
-        using JsonDocument request = JsonDocument.Parse(body);
-        JsonElement sources = request.RootElement.GetProperty("sourceObjects");
-        if (sources.GetArrayLength() is 0 or > 32)
-        {
-            return (Json(HttpStatusCode.BadRequest, """{"error":{"code":400,"message":"between 1 and 32 sources","errors":[{"reason":"invalid"}]}}"""), false);
-        }
-
-        Dictionary<string, string> metadata = [];
-        if (request.RootElement.TryGetProperty("destination", out JsonElement target) && target.TryGetProperty("metadata", out JsonElement named))
-        {
-            foreach (JsonProperty pair in named.EnumerateObject())
-            {
-                metadata[pair.Name] = pair.Value.GetString()!;
-            }
-        }
-
-        lock (_gate)
-        {
-            SortedDictionary<string, StoredObject> objects = Bucket(bucket);
-            bool exists = objects.TryGetValue(destination, out StoredObject current);
-            if (query.TryGetValue("ifGenerationMatch", out string? match) && (match == "0" ? exists : !exists || match != current.Generation))
-            {
-                return (Json(HttpStatusCode.PreconditionFailed, """{"error":{"code":412,"message":"Precondition Failed","errors":[{"reason":"conditionNotMet"}]}}"""), false);
-            }
-
-            List<byte> joined = [];
-            foreach (JsonElement source in sources.EnumerateArray())
-            {
-                string name = source.GetProperty("name").GetString()!;
-                if (!objects.TryGetValue(name, out StoredObject found))
-                {
-                    return (Json(HttpStatusCode.NotFound, """{"error":{"code":404,"message":"No such object","errors":[{"reason":"notFound"}]}}"""), false);
-                }
-
-                if (source.TryGetProperty("objectPreconditions", out JsonElement preconditions)
-                    && preconditions.TryGetProperty("ifGenerationMatch", out JsonElement generation)
-                    && (generation.ValueKind == JsonValueKind.String ? generation.GetString() : generation.GetRawText()) != found.Generation)
-                {
-                    return (Json(HttpStatusCode.PreconditionFailed, """{"error":{"code":412,"message":"Precondition Failed","errors":[{"reason":"conditionNotMet"}]}}"""), false);
-                }
-
-                joined.AddRange(found.Bytes);
-            }
-
-            StoredObject stored = new StoredObject([.. joined], NextGeneration(), Stamp(), null, false, metadata);
-            objects[destination] = stored;
-            Composed++;
-            return (Json(HttpStatusCode.OK, Describe(destination, stored, withMetadata: true)), true);
-        }
     }
 
     private HttpResponseMessage Get(HttpRequestMessage request, string bucket, string name)

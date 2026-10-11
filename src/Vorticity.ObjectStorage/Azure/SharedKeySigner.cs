@@ -104,34 +104,6 @@ internal static class SharedKeySigner
         return text.ToString();
     }
 
-    /// <summary>The version of the service SAS <see cref="BlobReadSas"/> signs, whose string has sixteen fields.</summary>
-    internal const string SasVersion = "2022-11-02";
-
-    /// <summary>
-    /// A service SAS that lets the service read one blob until <paramref name="expiry"/>, as a copy from
-    /// a URL needs its source authorized: the query that follows the blob's URL.
-    /// </summary>
-    /// <param name="account">The account.</param>
-    /// <param name="container">The container.</param>
-    /// <param name="blob">The blob's name, unencoded.</param>
-    /// <param name="key">The account key.</param>
-    /// <param name="expiry">When the signature stops holding.</param>
-    internal static string BlobReadSas(string account, string container, string blob, NativeSecret key, DateTimeOffset expiry)
-    {
-        string se = expiry.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
-        string toSign = BlobReadSasString(account, container, blob, se);
-        return $"sv={SasVersion}&sr=b&sp=r&se={Uri.EscapeDataString(se)}&sig={Uri.EscapeDataString(Signature(toSign, key))}";
-    }
-
-    /// <summary>
-    /// The string a read-only service SAS on a blob signs, for versions from 2020-12-06: the permissions,
-    /// the start, the expiry, the resource, the identifier, the addresses, the protocol, the version, the
-    /// resource type, the snapshot, the encryption scope and the five response headers, empty but these.
-    /// </summary>
-    internal static string BlobReadSasString(string account, string container, string blob, string expiry) =>
-        string.Join('\n', "r", string.Empty, expiry, $"/blob/{account}/{container}/{blob}", string.Empty, string.Empty, string.Empty,
-            SasVersion, "b", string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty, string.Empty);
-
     private static string Signature(string toSign, NativeSecret key)
     {
         Span<byte> mac = stackalloc byte[32];

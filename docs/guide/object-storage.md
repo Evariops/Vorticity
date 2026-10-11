@@ -83,7 +83,6 @@ every file opened through the session before the session itself.
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
 | commit a dataset's object | up to 32 MiB, 1 put at the commit. Past it, an upload whose parts go while the rows are written, so that the commit waits for the last part and the completion only |
-| append to a file | the open's, then on S3 an upload whose first parts copy the old object on the service, on Azure a block list whose first blocks do, on Cloud Storage a temporary object and a composition. An object under 5 MiB is read back and sent again in 1 put |
 | a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's and Cloud Storage's listings say the locks), a request per 1 000 deletes on S3, per 256 on Azure and per 100 on Cloud Storage, where each delete is billed as a request |
 
 A read lands in the block the scan decodes from, with no copy but the one TLS makes, and allocates a
@@ -94,24 +93,9 @@ next read with a `VortexFormatException` rather than mixing two objects.
 A file written to a location appears whole when its writer completes, or not at all, and replaces the
 object that was there, as a file written to a path replaces it. A writer given up aborts its upload.
 
-## Appending to a file in a store
-
-`session.OpenWriterAsync(location)` appends rows to a file at a location, as it does to a path. An
-object cannot grow, so the append replaces it with its old bytes followed by the new ones, and does
-it on the service wherever it can, so that the old bytes do not travel twice:
-
-| service | how the old bytes stay on the service |
-|---|---|
-| Amazon S3, Scaleway, Ceph | the old object is copied into the first parts of an upload (`UploadPartCopy`), the new bytes follow as the next parts |
-| Azure | the old blob is copied into the first blocks (`Put Block From URL`), its source authorized as the store is: a SAS, a token, or a read-only SAS on that blob that the account key signs |
-| Cloud Storage | the new bytes go up as a temporary object, which a composition joins after the old one under its name, then is deleted |
-| S3 directory buckets | the new bytes are appended at the object's end (`x-amz-write-offset-bytes`) |
-| OVHcloud, R2 | the old bytes are read back and sent again with the new ones, in one put |
-
-Everywhere, the grown object replaces the old one only while the old one keeps the token the open
-read: an object another writer replaced in between makes the completion throw an
-`ObjectStoreException`, and nothing is written. An append given up leaves the object as it was. An
-object under 5 MiB is read back and sent again in one put, which takes fewer requests than a copy.
+A file at a location is not appended to: an object cannot grow, so `session.OpenWriterAsync(location)`
+throws a `NotSupportedException`. Write the file again, or keep rows that keep coming in a dataset,
+which is made for them.
 
 ## Reading at the speed of the link
 
@@ -185,11 +169,8 @@ CRC-64 of its body, which the service checks, and a larger put goes up in blocks
 parallel, committed by their list. `VerifyReads` asks the service to follow every 4 MiB of a read with
 its CRC-64, checked as the bytes arrive, once the contract tests have proven it against the service.
 
-A bucket whose name ends in `--x-s3` is a directory bucket of S3 Express One Zone, reached at its
-zone's endpoint with the region given in `S3StoreOptions.Region`. Its requests are signed with a
-session that `CreateSession` issues for five minutes, and that the store creates again a minute before
-it expires. A directory bucket lists in no particular order and does not resume a listing after a key,
-so it holds single files, where its latency of a few milliseconds pays, and a dataset refuses it.
+A directory bucket of S3 Express One Zone, whose name ends in `--x-s3`, is refused: it lists in no
+order, signs with sessions of its own, and serves no dataset.
 
 `GoogleCloudStorageObjectStore` speaks Cloud Storage's own APIs rather than its S3 interoperability,
 since what a dataset relies on lies there. An object's token is its generation: a read is bound to it,
@@ -227,15 +208,3 @@ decides.
 * A dataset created with `LockedStore` needs a store that keeps locks, and refuses R2, which offers no
   Object Lock, and an OVHcloud Local Zone once its store says `KeepsLocks = false`.
 * Parts in flight are held in memory, 4 of 16 MiB by default per upload (`PartsInFlight`, `PartSize`).
-* On Cloud Storage, an object composed is made of the components of its sources, at most 1 024: a file
-  appended to more than a thousand times is refused, and is written again instead. A process that dies
-  in the middle of an append leaves a temporary object named after the file, with `.vx-append-` and a
-  random suffix.
-* On a directory bucket, an append of more than the part threshold, 32 MiB, goes in pieces of that
-  size, between which the file opens at its version before the append. An append given up past the
-  first piece leaves the file torn, and it opens at that version until it is written again. The service
-  checks the object's length, not its ETag, so an object replaced by another of exactly that length is
-  appended to.
-* OVHcloud does not list `UploadPartCopy`, and R2 takes no condition on the completion of an upload, so
-  an append there reads the old object back. `S3StoreOptions.CopiesParts` turns the copy on once you
-  have checked it works.

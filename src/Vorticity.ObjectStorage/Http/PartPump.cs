@@ -68,9 +68,8 @@ internal static class PartPump
     /// <param name="maxParts">The most parts the service takes.</param>
     /// <param name="inFlight">The most parts in flight at once.</param>
     /// <param name="carried">The parts read before the upload began, each disposed once sent.</param>
-    /// <param name="send">Sends a part, by its number from <paramref name="firstPart"/>; the part is disposed once it returns.</param>
+    /// <param name="send">Sends a part, by its number from 1; the part is disposed once it returns.</param>
     /// <param name="cancellationToken">Cancels the reading and the parts.</param>
-    /// <param name="firstPart">The number of the first part: 1, or the one after the parts an append copied on the service.</param>
     /// <returns>The length of every part, in order.</returns>
     internal static async ValueTask<List<long>> SendAsync(
         string key,
@@ -81,8 +80,7 @@ internal static class PartPump
         int inFlight,
         Queue<ChunkedBuffer> carried,
         Func<int, ChunkedBuffer, CancellationToken, Task> send,
-        CancellationToken cancellationToken,
-        int firstPart = 1)
+        CancellationToken cancellationToken)
     {
         List<long> parts = [];
         List<Task> sending = [];
@@ -133,7 +131,7 @@ internal static class PartPump
                     throw;
                 }
 
-                sending.Add(SendOneAsync(firstPart - 1 + parts.Count, part, send, slots, failed));
+                sending.Add(SendOneAsync(parts.Count, part, send, slots, failed));
                 sending.RemoveAll(task => task.IsCompletedSuccessfully);
             }
 

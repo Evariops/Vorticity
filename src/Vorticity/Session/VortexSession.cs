@@ -631,22 +631,17 @@ public sealed class VortexSession : IAsyncDisposable
     }
 
     /// <summary>Opens the file at <paramref name="path"/> to append rows to it.</summary>
-    /// <param name="path">
-    /// A file this library wrote, or one of the same shape: a path, or a location, whose object is
-    /// replaced at completion by the old bytes and the new, built on the service where the store can,
-    /// and only while nobody else replaced it in between.
-    /// </param>
+    /// <param name="path">A file this library wrote, or one of the same shape, on a local path.</param>
     /// <param name="options">What the new rows look like; null takes the file's own policy.</param>
     /// <param name="cancellationToken">Cancels the reads and the first writes.</param>
     /// <returns>
     /// The writer, positioned after the file's rows; <c>RowCount</c> says where the append resumes.
-    /// Abandoned, or disposed without completing, it truncates the file back to what it was, and
-    /// leaves an object as it was.
+    /// Abandoned, or disposed without completing, it truncates the file back to what it was.
     /// </returns>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can continue.</exception>
-    /// <exception cref="ObjectStoreException">
-    /// At completion: the object at the location was replaced by another writer while the rows were
-    /// appended, and nothing was written.
+    /// <exception cref="NotSupportedException">
+    /// The path is a location: an object in a store cannot grow, so a file there is written again
+    /// rather than appended to, and rows that keep coming belong in a dataset.
     /// </exception>
     public ValueTask<VortexFileWriter> OpenWriterAsync(string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
     {

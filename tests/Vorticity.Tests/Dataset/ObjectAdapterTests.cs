@@ -147,41 +147,6 @@ public sealed class ObjectAdapterTests
         Assert.Equal(0, allocated);
     }
 
-    [Theory]
-    [InlineData(32, false, 2, false)]
-    [InlineData(32, true, 32, true)]
-    [InlineData(4, true, 1, false)]
-    public async Task ASparseSetReadsItsTailsOnTheirOwnOnceBridgingThemWouldReadTheObject(int mebibytes, bool sparse, int reads, bool tailsOnly)
-    {
-        // A kilobyte at the end of every mebibyte, as an append reads the tails of a file's chunks:
-        // bridged, they read the whole object; a sparse set reads them on their own once that would
-        // waste more than SparseWasteBytes, and a small object still in one read.
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        byte[] content = new byte[mebibytes << 20];
-        new Random(0x5_9A_25E).NextBytes(content);
-        await using MemoryObjectStore memory = new MemoryObjectStore();
-        await memory.PutIfAbsentAsync(Key, content, ct);
-        await using CountingObjectStore store = new CountingObjectStore(memory);
-        await using ObjectStoreSource source = new ObjectStoreSource(store, Key, content.Length);
-        using SegmentRequestSet set = new SegmentRequestSet() { Sparse = sparse };
-        for (int mebibyte = 1; mebibyte <= mebibytes; mebibyte++)
-        {
-            set.Add(new SegmentSpec((ulong)((mebibyte << 20) - 1_024), 1_024, 0, 0, 0));
-        }
-
-        await source.ReadManyAsync(set, ct);
-
-        for (int slot = 0; slot < mebibytes; slot++)
-        {
-            Assert.True(set.GetBuffer(slot).Span.SequenceEqual(content.AsSpan(((slot + 1) << 20) - 1_024, 1_024)));
-        }
-
-        // Bridged, the runs reach their 16 MiB ceiling; on their own, each reads its tail and the few
-        // bytes before it that align it.
-        Assert.Equal(reads, store.CountOf(ObjectOperation.Read));
-        Assert.True(tailsOnly ? store.BytesRead <= mebibytes * 1_088 : store.BytesRead > (long)mebibytes << 19, $"{store.BytesRead} bytes read");
-    }
-
     [Fact]
     public async Task ASourceRefusesAnObjectOfAnotherLengthThanTheOneItWasTold()
     {

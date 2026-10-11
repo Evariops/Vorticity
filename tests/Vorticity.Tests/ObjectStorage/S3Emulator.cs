@@ -35,9 +35,7 @@ internal sealed class S3Emulator : HttpMessageHandler
     private readonly object _gate = new object();
     private readonly Dictionary<string, SortedDictionary<string, StoredObject>> _buckets = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Upload> _uploads = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, (string Secret, string Token, DateTimeOffset Expiration)> _sessions = new(StringComparer.Ordinal);
     private long _etags;
-    private int _sessionCount;
 
     /// <summary>The region the buckets are in, which a head of a bucket says.</summary>
     internal string Region { get; init; } = "eu-west-3";
@@ -62,18 +60,6 @@ internal sealed class S3Emulator : HttpMessageHandler
 
     /// <summary>The least a part but the last holds, which a completion checks: 0, none, unless a test sets it.</summary>
     internal int MinimumPartSize { get; set; }
-
-    /// <summary>The parts copied from an object, by <c>UploadPartCopy</c>.</summary>
-    internal int CopiedParts { get; private set; }
-
-    /// <summary>How long a directory bucket's session lasts: five minutes, as the service's do.</summary>
-    internal TimeSpan SessionLifetime { get; set; } = TimeSpan.FromMinutes(5);
-
-    /// <summary>The sessions created on directory buckets.</summary>
-    internal int SessionsCreated => Volatile.Read(ref _sessionCount);
-
-    /// <summary>The appends a directory bucket took, by <c>x-amz-write-offset-bytes</c>.</summary>
-    internal int Appends { get; private set; }
 
     /// <summary>Every request received, in order: its method, path and query, and the range it asked.</summary>
     internal ConcurrentQueue<string> Log { get; } = new ConcurrentQueue<string>();
@@ -180,15 +166,9 @@ internal sealed class S3Emulator : HttpMessageHandler
 
         Dictionary<string, string> query = Query(request.RequestUri!);
         HttpMethod method = request.Method;
-        bool createsSession = IsDirectory(bucket) && key.Length == 0 && method == HttpMethod.Get && query.ContainsKey("session");
-        if (Verify(request, body, bucket, createsSession) is { } refused)
+        if (Verify(request, body) is { } refused)
         {
             return (refused, false);
-        }
-
-        if (createsSession)
-        {
-            return (CreateSession(), true);
         }
 
         if (key.Length == 0)
@@ -210,10 +190,6 @@ internal sealed class S3Emulator : HttpMessageHandler
         else if (method == HttpMethod.Head)
         {
             return (Head(bucket, key), false);
-        }
-        else if (method == HttpMethod.Put && query.TryGetValue("uploadId", out string? copiedInto) && Header(request, "x-amz-copy-source") is { } source)
-        {
-            return UploadPartCopy(request, copiedInto, int.Parse(query["partNumber"], CultureInfo.InvariantCulture), source);
         }
         else if (method == HttpMethod.Put && query.TryGetValue("uploadId", out string? partOf))
         {
@@ -254,32 +230,6 @@ internal sealed class S3Emulator : HttpMessageHandler
         lock (_gate)
         {
             SortedDictionary<string, StoredObject> objects = Bucket(bucket);
-            if (Header(request, "x-amz-write-offset-bytes") is { } offset)
-            {
-                // A directory bucket's append: at the object's end, or refused.
-                if (!IsDirectory(bucket))
-                {
-                    return (Error(HttpStatusCode.NotImplemented, "NotImplemented", "Appends are for directory buckets."), false);
-                }
-
-                if (!objects.TryGetValue(key, out StoredObject current))
-                {
-                    return (Error(HttpStatusCode.NotFound, "NoSuchKey", "The specified key does not exist."), false);
-                }
-
-                if (long.Parse(offset, CultureInfo.InvariantCulture) != current.Bytes.Length)
-                {
-                    return (Error(HttpStatusCode.BadRequest, "InvalidWriteOffset", "The write offset value that you specified does not match the current object size."), false);
-                }
-
-                StoredObject grown = current with { Bytes = [.. current.Bytes, .. body], ETag = NextETag() };
-                objects[key] = grown;
-                Appends++;
-                HttpResponseMessage appended = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
-                appended.Headers.TryAddWithoutValidation("ETag", grown.ETag);
-                return (appended, true);
-            }
-
             if (Condition(request, objects, key) is { } failed)
             {
                 return (failed, false);
@@ -325,56 +275,6 @@ internal sealed class S3Emulator : HttpMessageHandler
             HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
             response.Headers.TryAddWithoutValidation("ETag", etag);
             return (response, true);
-        }
-    }
-
-    /// <summary>
-    /// A part copied from an object, bound to its ETag when the request says one, its range or the whole
-    /// object, answered with its ETag and, on an upload that sums its parts, its CRC-64/NVME.
-    /// </summary>
-    private (HttpResponseMessage, bool) UploadPartCopy(HttpRequestMessage request, string uploadId, int number, string source)
-    {
-        string path = Uri.UnescapeDataString(source.TrimStart('/'));
-        int slash = path.IndexOf('/', StringComparison.Ordinal);
-        string sourceBucket = path[..slash];
-        string sourceKey = path[(slash + 1)..];
-        lock (_gate)
-        {
-            if (!_uploads.TryGetValue(uploadId, out Upload? upload))
-            {
-                return (Error(HttpStatusCode.NotFound, "NoSuchUpload", "The specified upload does not exist."), false);
-            }
-
-            if (!Bucket(sourceBucket).TryGetValue(sourceKey, out StoredObject o))
-            {
-                return (Error(HttpStatusCode.NotFound, "NoSuchKey", "The specified key does not exist."), false);
-            }
-
-            if (Header(request, "x-amz-copy-source-if-match") is { } match && match != o.ETag)
-            {
-                return (Error(HttpStatusCode.PreconditionFailed, "PreconditionFailed", "At least one of the pre-conditions you specified did not hold"), false);
-            }
-
-            long first = 0;
-            long last = o.Bytes.Length - 1;
-            if (Header(request, "x-amz-copy-source-range") is { } range)
-            {
-                string[] bounds = range["bytes=".Length..].Split('-');
-                first = long.Parse(bounds[0], CultureInfo.InvariantCulture);
-                last = long.Parse(bounds[1], CultureInfo.InvariantCulture);
-                if (first > last || last >= o.Bytes.Length)
-                {
-                    return (Error(HttpStatusCode.BadRequest, "InvalidArgument", "The x-amz-copy-source-range value must be within the source object."), false);
-                }
-            }
-
-            byte[] bytes = o.Bytes[(int)first..(int)(last + 1)];
-            string etag = NextETag();
-            upload.Parts[number] = (bytes, etag);
-            CopiedParts++;
-            string sum = upload.Algorithm == "CRC64NVME" ? $"<ChecksumCRC64NVME>{Crc(bytes)}</ChecksumCRC64NVME>" : string.Empty;
-            string xml = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CopyPartResult><LastModified>{Now():yyyy-MM-ddTHH:mm:ss.fffZ}</LastModified><ETag>{Escape(etag)}</ETag>{sum}</CopyPartResult>";
-            return (new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml, Encoding.UTF8, "application/xml") }, true);
         }
     }
 
@@ -435,10 +335,6 @@ internal sealed class S3Emulator : HttpMessageHandler
     {
         string? md5 = request.Content?.Headers.ContentMD5 is { } digest ? Convert.ToBase64String(digest) : null;
         string? crc32 = Header(request, "x-amz-checksum-crc32");
-        if (md5 is not null && IsDirectory(bucket))
-        {
-            return (Error(HttpStatusCode.BadRequest, "InvalidRequest", "Content-MD5 is not supported for directory buckets."), false);
-        }
         if (md5 is null && crc32 is null)
         {
             return (Error(HttpStatusCode.BadRequest, "InvalidRequest", "Missing required header for this request: Content-MD5"), false);
@@ -607,17 +503,6 @@ internal sealed class S3Emulator : HttpMessageHandler
     private HttpResponseMessage List(string bucket, Dictionary<string, string> query)
     {
         string prefix = query.GetValueOrDefault("prefix", string.Empty);
-        bool directory = IsDirectory(bucket);
-        if (directory && query.ContainsKey("start-after"))
-        {
-            return Error(HttpStatusCode.BadRequest, "InvalidArgument", "start-after is not supported for directory buckets.");
-        }
-
-        if (directory && prefix.Length > 0 && !prefix.EndsWith('/'))
-        {
-            return Error(HttpStatusCode.BadRequest, "InvalidArgument", "For directory buckets, only prefixes that end in a delimiter (/) are supported.");
-        }
-
         string? after = query.TryGetValue("continuation-token", out string? token)
             ? Encoding.UTF8.GetString(Convert.FromBase64String(token))
             : query.GetValueOrDefault("start-after");
@@ -626,14 +511,9 @@ internal sealed class S3Emulator : HttpMessageHandler
         List<(string Key, StoredObject Object)> keys;
         lock (_gate)
         {
-            // A directory bucket lists in no particular order: the emulator lists it backwards.
-            keys = directory
-                ? [.. Bucket(bucket).Reverse()
-                    .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal) && (after is null || string.CompareOrdinal(pair.Key, after) < 0))
-                    .Select(pair => (pair.Key, pair.Value))]
-                : [.. Bucket(bucket)
-                    .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal) && (after is null || string.CompareOrdinal(pair.Key, after) > 0))
-                    .Select(pair => (pair.Key, pair.Value))];
+            keys = [.. Bucket(bucket)
+                .Where(pair => pair.Key.StartsWith(prefix, StringComparison.Ordinal) && (after is null || string.CompareOrdinal(pair.Key, after) > 0))
+                .Select(pair => (pair.Key, pair.Value))];
         }
 
         bool truncated = keys.Count > max;
@@ -659,32 +539,8 @@ internal sealed class S3Emulator : HttpMessageHandler
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml.ToString(), Encoding.UTF8, "application/xml") };
     }
 
-    /// <summary>Whether the bucket is a directory bucket, by its name.</summary>
-    private static bool IsDirectory(string bucket) => bucket.EndsWith("--x-s3", StringComparison.Ordinal);
-
-    /// <summary>A session of a directory bucket: keys and a token that last <see cref="SessionLifetime"/>.</summary>
-    private HttpResponseMessage CreateSession()
-    {
-        int number = Interlocked.Increment(ref _sessionCount);
-        string id = $"ASIASESSION{number:D4}";
-        string secret = $"session/secret/{number}";
-        string token = $"session-token-{number}";
-        DateTimeOffset expiration = Now() + SessionLifetime;
-        lock (_gate)
-        {
-            _sessions[id] = (secret, token, expiration);
-        }
-
-        string xml = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<CreateSessionResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Credentials><SessionToken>{token}</SessionToken><SecretAccessKey>{Escape(secret)}</SecretAccessKey><AccessKeyId>{id}</AccessKeyId><Expiration>{expiration.UtcDateTime:yyyy-MM-dd'T'HH:mm:ss'Z'}</Expiration></Credentials></CreateSessionResult>";
-        return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml, Encoding.UTF8, "application/xml") };
-    }
-
     /// <summary>Checks the signature and the signed payload against the request as received; null when they hold.</summary>
-    /// <remarks>
-    /// A directory bucket's requests sign for the service <c>s3express</c>, with a session's keys and its
-    /// token in <c>x-amz-s3session-token</c>; the request that creates a session signs with the store's keys.
-    /// </remarks>
-    private HttpResponseMessage? Verify(HttpRequestMessage request, byte[] body, string bucket, bool createsSession)
+    private HttpResponseMessage? Verify(HttpRequestMessage request, byte[] body)
     {
         if (!request.Headers.TryGetValues("Authorization", out IEnumerable<string>? values))
         {
@@ -707,33 +563,9 @@ internal sealed class S3Emulator : HttpMessageHandler
 
         string credential = Field(authorization, "Credential=");
         string[] scope = credential.Split('/');
-        bool directory = IsDirectory(bucket);
-        string service = directory ? "s3express" : "s3";
+        const string service = "s3";
         string secret = Secret;
-        if (directory && !createsSession)
-        {
-            (string Secret, string Token, DateTimeOffset Expiration) session;
-            lock (_gate)
-            {
-                if (!_sessions.TryGetValue(scope[0], out session))
-                {
-                    return Error(HttpStatusCode.Forbidden, "InvalidAccessKeyId", $"No session has the key {scope[0]}.");
-                }
-            }
-
-            if (Header(request, "x-amz-s3session-token") != session.Token || request.Headers.Contains("x-amz-security-token"))
-            {
-                return Error(HttpStatusCode.Forbidden, "AccessDenied", "A directory bucket's request carries its session's token in x-amz-s3session-token.");
-            }
-
-            if (session.Expiration <= Now())
-            {
-                return Error(HttpStatusCode.BadRequest, "ExpiredToken", "The provided token has expired.");
-            }
-
-            secret = session.Secret;
-        }
-        else if (scope[0] != AccessKey)
+        if (scope[0] != AccessKey)
         {
             return Error(HttpStatusCode.Forbidden, "InvalidAccessKeyId", $"Credential scope {credential} is not this service's.");
         }
@@ -796,12 +628,6 @@ internal sealed class S3Emulator : HttpMessageHandler
     private static (string Bucket, string Key) Address(Uri uri, string host)
     {
         string path = Uri.UnescapeDataString(uri.AbsolutePath);
-        int zonal = host.IndexOf("--x-s3.", StringComparison.Ordinal);
-        if (zonal > 0)
-        {
-            return (host[..(zonal + "--x-s3".Length)], path.TrimStart('/'));
-        }
-
         if (host.Contains(".s3.", StringComparison.Ordinal) && !host.StartsWith("s3.", StringComparison.Ordinal))
         {
             return (host[..host.IndexOf(".s3.", StringComparison.Ordinal)], path.TrimStart('/'));

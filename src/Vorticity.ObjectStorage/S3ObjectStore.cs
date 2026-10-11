@@ -42,10 +42,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     private readonly S3Profile _profile;
     private readonly ObjectStoreCapabilities _capabilities;
     private readonly TimeProvider _time;
-
-    // A directory bucket's zone, and the session its requests are signed with; both null on a general purpose bucket.
-    private readonly string? _zone;
-    private readonly Renewing<AwsKeys>? _session;
     private Target? _target;
     private Task<Target>? _resolving;
     private long _skewTicks;
@@ -66,20 +62,16 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
 
         _options = options;
         _profile = options.Profile ?? ProfileOf(options.Endpoint);
-        _zone = ZoneOf(options.Bucket);
-        _capabilities = CapabilitiesOf(_profile, options, _zone is not null);
+        if (options.Bucket.EndsWith("--x-s3", StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"'{options.Bucket}' is a directory bucket of S3 Express One Zone, which lists in no order and which this store does not serve.",
+                nameof(options));
+        }
+
+        _capabilities = CapabilitiesOf(_profile, options);
         _time = options.Transport.TimeProvider;
         _transport = new HttpTransport(options.Transport, ProviderName(_profile), ReadErrorAsync, options.Handler);
-        if (_zone is not null)
-        {
-            // A directory bucket signs with a session that CreateSession issues for five minutes.
-            if (options.Region is null)
-            {
-                throw new ArgumentException($"The directory bucket '{options.Bucket}' needs its region: set S3StoreOptions.Region.", nameof(options));
-            }
-
-            _session = new Renewing<AwsKeys>(CreateSessionAsync, static keys => keys.Expiration ?? DateTimeOffset.MaxValue, SessionMargin, _time);
-        }
 
         // Amazon S3 says a bucket's region at the first request; another service is told it, or
         // signs for the one its profile or its host names.
@@ -195,7 +187,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     bool IWholeConditionalPuts.HoldsConditionalPutsWhole => HoldsConditionalPutsWhole;
 
     /// <summary>Whether a conditional put goes whole: on R2, which takes no condition on the parts of an upload.</summary>
-    private bool HoldsConditionalPutsWhole => _profile == S3Profile.R2 && _zone is null;
+    private bool HoldsConditionalPutsWhole => _profile == S3Profile.R2;
 
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
@@ -235,10 +227,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     {
         ArgumentNullException.ThrowIfNull(prefix);
         ThrowIfDisposed();
-
-        // A directory bucket takes no start-after and only a prefix that ends a directory: it is asked
-        // for the directory, and what lies outside the prefix or before the key is skipped here.
-        string asked = _zone is null || prefix.Length == 0 || prefix.EndsWith('/') ? prefix : prefix[..(prefix.LastIndexOf('/') + 1)];
         List<ObjectListing> page = [];
         string? continuation = null;
         do
@@ -246,20 +234,13 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
             page.Clear();
             continuation = await _transport.SendAsync(
                 "ListObjectsV2",
-                new ListRequest(this, asked, continuation is null && _zone is null ? startAfter : null, continuation, page),
+                new ListRequest(this, prefix, continuation is null ? startAfter : null, continuation, page),
                 static (s, ct) => s.Store.BuildListAsync(s, ct),
                 static (response, s, ct) => s.Store.ConsumeListAsync(response, s, ct),
                 idempotent: true,
                 cancellationToken).ConfigureAwait(false);
             foreach (ObjectListing listed in page)
             {
-                if (_zone is not null
-                    && (!listed.Key.StartsWith(prefix, StringComparison.Ordinal)
-                        || (startAfter is not null && string.CompareOrdinal(listed.Key, startAfter) <= 0)))
-                {
-                    continue;
-                }
-
                 yield return listed;
             }
         }
@@ -273,15 +254,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
             _transport.Dispose();
-            _session?.Dispose();
             _options.Credentials.Dispose();
         }
 
         return ValueTask.CompletedTask;
     }
-
-    /// <summary>Whether the bucket is a directory bucket of S3 Express One Zone, named <c>base--zone--x-s3</c>.</summary>
-    public bool IsDirectoryBucket => _zone is not null;
 
     private ValueTask<ObjectRead> ReadCoreAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
@@ -479,8 +456,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
 
             if (error.Code is "ExpiredToken" or "TokenRefreshRequired")
             {
-                // A directory bucket's session expired, or the keys it was created with.
-                _session?.Expired();
                 if (_lastKeys is { } stale)
                 {
                     _options.Credentials.Expired(stale);
@@ -609,14 +584,9 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     /// </summary>
     private async ValueTask SignAsync(
         HttpRequestMessage request, Target target, string canonicalUri, string canonicalQuery, string payloadHash, CancellationToken cancellationToken,
-        (string Name, string Value)[]? extra = null, bool baseKeys = false)
+        (string Name, string Value)[]? extra = null)
     {
-        // A directory bucket's requests sign with its session, which travels in its own header; the
-        // request that creates the session signs with the store's keys.
-        bool session = _session is not null && !baseKeys;
-        AwsKeys keys = session
-            ? await _session!.GetAsync(cancellationToken).ConfigureAwait(false)
-            : await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
+        AwsKeys keys = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
         _lastKeys = keys;
         string amzDate = SigV4Signer.AmzDate(_time.GetUtcNow() + TimeSpan.FromTicks(Interlocked.Read(ref _skewTicks)));
         request.Headers.Host = target.Host;
@@ -629,9 +599,8 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
         int count = 3;
         if (keys.SessionToken is { } token)
         {
-            string name = session ? "x-amz-s3session-token" : "x-amz-security-token";
-            request.Headers.TryAddWithoutValidation(name, token);
-            headers[count++] = (name, token);
+            request.Headers.TryAddWithoutValidation("x-amz-security-token", token);
+            headers[count++] = ("x-amz-security-token", token);
         }
 
         foreach ((string name, string value) in extra ?? [])
@@ -685,14 +654,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     /// <summary>Where requests go for <paramref name="region"/>: the base, the host signed, the bucket's path when it is addressed by path.</summary>
     private Target TargetFor(string region)
     {
-        if (_zone is not null)
-        {
-            // A directory bucket is addressed by host only, at its zone's endpoint, and signs for s3express.
-            Uri zonal = _options.Endpoint ?? new Uri($"https://s3express-{_zone}.{region}.amazonaws.com");
-            string zonalHost = $"{Bucket}.{Authority(zonal)}";
-            return new Target($"{zonal.Scheme}://{zonalHost}", zonalHost, string.Empty, new SigV4Signer(region, "s3express"));
-        }
-
         Uri endpoint = _options.Endpoint ?? new Uri($"https://s3.{region}.amazonaws.com");
         bool byPath = _options.PathStyle ?? (_profile == S3Profile.R2 || IsAddressOrLoopback(endpoint) || BucketAddressedByPath(Bucket));
         string host = byPath ? Authority(endpoint) : $"{Bucket}.{Authority(endpoint)}";
@@ -764,16 +725,10 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
     /// <summary>
     /// What the service does: suffix reads proven on Amazon S3 and taken as absent elsewhere until the
     /// contract tests prove them, listings in order everywhere but on OVHcloud, whose order is to check,
-    /// and replacement on a token's match everywhere. A directory bucket lists in no order, keeps no lock,
-    /// and its replacement on a token's match is to check.
+    /// and replacement on a token's match everywhere.
     /// </summary>
-    private static ObjectStoreCapabilities CapabilitiesOf(S3Profile profile, S3StoreOptions options, bool directory)
+    private static ObjectStoreCapabilities CapabilitiesOf(S3Profile profile, S3StoreOptions options)
     {
-        if (directory)
-        {
-            return options.ReadsSuffix ?? true ? ObjectStoreCapabilities.ReadsSuffix : 0;
-        }
-
         bool suffix = options.ReadsSuffix ?? profile is S3Profile.Amazon or S3Profile.Other;
         bool ordered = options.ListsInOrder ?? profile != S3Profile.Ovhcloud;
         bool locks = options.KeepsLocks ?? profile != S3Profile.R2;
@@ -781,66 +736,6 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, 
             | (suffix ? ObjectStoreCapabilities.ReadsSuffix : 0)
             | (ordered ? ObjectStoreCapabilities.ListsInOrder : 0)
             | (locks ? ObjectStoreCapabilities.KeepsLocks : 0);
-    }
-
-    /// <summary>How long before its session expires a directory bucket's store creates the next: a minute of the five a session lasts.</summary>
-    internal static readonly TimeSpan SessionMargin = TimeSpan.FromMinutes(1);
-
-    /// <summary>The zone of a directory bucket, from its name <c>base--zone--x-s3</c>; null for a general purpose bucket.</summary>
-    internal static string? ZoneOf(string bucket)
-    {
-        const string Suffix = "--x-s3";
-        if (!bucket.EndsWith(Suffix, StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        string named = bucket[..^Suffix.Length];
-        int separator = named.LastIndexOf("--", StringComparison.Ordinal);
-        return separator > 0 && separator + 2 < named.Length
-            ? named[(separator + 2)..]
-            : throw new ArgumentException($"'{bucket}' ends as a directory bucket's name and names no zone: base--zone--x-s3.", nameof(bucket));
-    }
-
-    /// <summary>A directory bucket's session, from <c>CreateSession</c> signed with the store's keys: keys and a token that last five minutes.</summary>
-    private async ValueTask<AwsKeys> CreateSessionAsync(CancellationToken cancellationToken) =>
-        await _transport.SendAsync(
-            "CreateSession",
-            this,
-            static async (store, ct) =>
-            {
-                Target target = await store.TargetAsync(ct).ConfigureAwait(false);
-                HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, new Uri(target.Base + "/?session", in Verbatim));
-                await store.SignAsync(request, target, "/", "session=", SigV4Signer.EmptyPayloadHash, ct, baseKeys: true).ConfigureAwait(false);
-                return request;
-            },
-            static (response, store, ct) => store.ConsumeSessionAsync(response, ct),
-            idempotent: true,
-            cancellationToken).ConfigureAwait(false);
-
-    private async ValueTask<AwsKeys> ConsumeSessionAsync(HttpResponseMessage response, CancellationToken cancellationToken)
-    {
-        if (response.StatusCode != HttpStatusCode.OK)
-        {
-            throw await FailureAsync(response, "CreateSession", Bucket, null, cancellationToken).ConfigureAwait(false);
-        }
-
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
-        try
-        {
-            ReadOnlySpan<byte> xml = bytes.AsSpan(0, length);
-            string Element(ReadOnlySpan<byte> answer, ReadOnlySpan<byte> name, string what) =>
-                S3Answers.ParseElement(answer, name) ?? throw new ObjectStoreException($"CreateSession on '{Bucket}' was answered without {what}.");
-            return new AwsKeys(
-                Element(xml, "AccessKeyId"u8, "an access key id"),
-                Element(xml, "SecretAccessKey"u8, "a secret"),
-                Element(xml, "SessionToken"u8, "a session token"),
-                S3Answers.IsoDate(Element(xml, "Expiration"u8, "an expiration")));
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(bytes);
-        }
     }
 
     private static string ProviderName(S3Profile profile) => profile switch

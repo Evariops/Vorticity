@@ -95,15 +95,6 @@ public sealed class S3StoreOptions
     /// </summary>
     public bool? KeepsLocks { get; init; }
 
-    /// <summary>
-    /// Whether the service copies a part of an upload from an object (<c>UploadPartCopy</c>), which an
-    /// append to a stored file builds the grown object with, the old bytes staying on the service. Null
-    /// takes the profile's: yes but on OVHcloud, which does not list the operation, and on R2, which
-    /// takes no condition on the completion of an upload. Without it, the old bytes are read back and
-    /// sent again with the new ones, in one put conditioned on the object's ETag.
-    /// </summary>
-    public bool? CopiesParts { get; init; }
-
     /// <summary>The checksum each put carries; <see cref="S3Checksum.Default"/> takes the profile's.</summary>
     public S3Checksum Checksum { get; init; }
 

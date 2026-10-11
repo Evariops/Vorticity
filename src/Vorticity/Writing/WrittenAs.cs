@@ -87,10 +87,7 @@ internal static class WrittenAs
     {
         string[] labels = new string[chunks.Count];
         int[] slots = new int[chunks.Count];
-
-        // A kilobyte from each chunk, chunks apart: a source over a network reads them on their own
-        // rather than the whole object between them.
-        using SegmentRequestSet requests = new SegmentRequestSet(Math.Max(chunks.Count, 1)) { Sparse = true };
+        using SegmentRequestSet requests = new SegmentRequestSet(Math.Max(chunks.Count, 1));
         for (int i = 0; i < chunks.Count; i++)
         {
             (LayoutNode flat, DType dtype) = chunks[i];

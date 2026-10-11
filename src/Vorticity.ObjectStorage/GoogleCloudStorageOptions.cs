@@ -45,7 +45,4 @@ public sealed class GoogleCloudStorageOptions
 
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }
-
-    /// <summary>The smallest object an append composes on the service rather than reads back: 5 MiB, which tests lower.</summary>
-    internal long MinimumComposedBytes { get; init; } = GoogleCloudStorageObjectStore.MinimumComposedBytes;
 }

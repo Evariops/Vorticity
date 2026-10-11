@@ -54,7 +54,7 @@ public sealed class DatasetStreamingTests
         ConcurrentQueue<string?> conditions = Conditions(emulator);
         await using S3ObjectStore store = Store(emulator, "https://account.r2.cloudflarestorage.com");
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, Options(), ct);
-        Reading[] rows = S3AppendTests.Rows(300_000);
+        Reading[] rows = Rows(300_000);
 
         await using (ObjectDraft draft = dataset.StartObject())
         {
@@ -94,7 +94,7 @@ public sealed class DatasetStreamingTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
             store, Reading.Schema, Options() with { Session = session, Encrypted = true }, ct);
-        Reading[] rows = S3AppendTests.Rows(300_000);
+        Reading[] rows = Rows(300_000);
 
         await using (ObjectDraft draft = dataset.StartObject())
         {
@@ -117,7 +117,7 @@ public sealed class DatasetStreamingTests
 
         await using (ObjectDraft draft = dataset.StartObject())
         {
-            await draft.Writer.WriteAsync<Reading>(S3AppendTests.Rows(100), ct);
+            await draft.Writer.WriteAsync<Reading>(Rows(100), ct);
             await dataset.AppendAsync(draft, ct);
             Assert.False(draft.Sink.IsStreaming);
         }
@@ -157,6 +157,10 @@ public sealed class DatasetStreamingTests
 
     private static DatasetOptions Options() => new DatasetOptions { StreamObjectsFromBytes = 2 * Part };
 
+    /// <summary>Rows whose temperatures repeat in no short cycle, so that their chunks do not compress to nothing.</summary>
+    internal static Reading[] Rows(int count) =>
+        [.. Enumerable.Range(0, count).Select(i => new Reading(i, ((i * 7919) % 4000) / 100.0))];
+
     /// <summary>
     /// Writes rows into the draft, each batch flushed to its sink, until <paramref name="condition"/>
     /// holds: the store reads what a flush publishes, and waits for the next to learn whether the object
@@ -170,7 +174,7 @@ public sealed class DatasetStreamingTests
         while (!condition())
         {
             Assert.True(waited.Elapsed < TimeSpan.FromSeconds(30), "the condition never held");
-            Reading[] batch = [.. S3AppendTests.Rows(written.Count + 20_000).Skip(written.Count)];
+            Reading[] batch = [.. Rows(written.Count + 20_000).Skip(written.Count)];
             await draft.Writer.WriteAsync<Reading>(batch, ct);
             await draft.Writer.FlushAsync(ct);
             written.AddRange(batch);
