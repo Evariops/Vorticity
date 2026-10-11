@@ -750,6 +750,14 @@ public sealed class SharedPoolCollection
 [Trait("Category", "RunsAlone")]
 public sealed class SharedPoolTests
 {
+    /// <summary>
+    /// Empties the pool before each test. A class already past its floor, in a pool parked past its
+    /// budget, frees a block given back rather than parking it, and the next rent then takes another
+    /// of the blocks the class holds: what the tests run earlier left parked would decide what these
+    /// read, and xunit orders the collections differently from one run to the next.
+    /// </summary>
+    public SharedPoolTests() => AlignedBufferPool.Shared.Trim();
+
     [Fact]
     public void The_shared_pool_rents_and_recycles()
     {
