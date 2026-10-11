@@ -1119,6 +1119,9 @@ Vorticity:     ctor ObjectStoreException()
 Vorticity:     ctor ObjectStoreException(string)
 Vorticity:     ctor ObjectStoreException(string, Exception)
 Vorticity:     property bool OutcomeUnknown { get; init; }
+Vorticity:     property int StatusCode { get; init; }
+Vorticity:     property string ErrorCode { get; init; }
+Vorticity:     property string RequestId { get; init; }
 Vorticity: static class Vorticity.IO.ObjectStoreExtensions
 Vorticity:     method ValueTask<ObjectRange> GetRangeAsync(IObjectStore, string, long, int, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutIfAbsentAsync(IObjectStore, string, PipeReader, long, CancellationToken)

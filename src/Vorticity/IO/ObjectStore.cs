@@ -310,4 +310,13 @@ public sealed class ObjectStoreException : VortexException
     /// and the head asked afterwards failed too. The caller decides, since neither outcome is proven.
     /// </summary>
     public bool OutcomeUnknown { get; init; }
+
+    /// <summary>The HTTP status of the service's refusal, or 0 when no service answered.</summary>
+    public int StatusCode { get; init; }
+
+    /// <summary>The service's code for the refusal, <c>AccessDenied</c> or <c>SlowDown</c>, when it named one.</summary>
+    public string? ErrorCode { get; init; }
+
+    /// <summary>The id the service gave the refused request, which its support asks for, when it gave one.</summary>
+    public string? RequestId { get; init; }
 }

@@ -123,6 +123,7 @@ public sealed class S3ProfileTests
         {
             ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(async () => await PutAsync(plain, "first", 100, ct));
             Assert.Contains("PutChecksum.ContentMd5", refused.Message, StringComparison.Ordinal);
+            Assert.Equal((400, "InvalidRequest"), (refused.StatusCode, refused.ErrorCode));
             Assert.Equal(["PUT /first"], emulator.Log);
         }
 

@@ -213,6 +213,11 @@ allows. The budget is spent by retries and refilled by successes, so a service t
 each caller one attempt rather than a storm of retries. `StoreTransportOptions` sets the connections,
 the deadlines and the attempts.
 
+The `ObjectStoreException` a service's refusal becomes carries its HTTP status (`StatusCode`), the
+service's code (`ErrorCode`, `AccessDenied` or `SlowDown`) and the id its support asks for
+(`RequestId`), so a caller tells a refusal of its rights from a service that stays down without
+reading the message.
+
 A put conditioned on the key's absence, as a dataset's commit is, is never sent again blindly. A put
 the service throttled, or whose body was cut short, was never applied, and goes again. When its answer
 is lost after its body was sent, the store asks the object's head, whose metadata carries the put's

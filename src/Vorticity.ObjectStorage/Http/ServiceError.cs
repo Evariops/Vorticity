@@ -1,4 +1,5 @@
 using System;
+using Vorticity.IO;
 
 namespace Vorticity.ObjectStorage.Http;
 
@@ -12,6 +13,15 @@ internal readonly record struct ServiceError(int Status, string? Code, string? M
 {
     /// <summary>Whether the service asked to slow down.</summary>
     internal bool IsThrottle => Status == 429 || (Status == 503 && Code is null or "SlowDown" or "ServerBusy" or "Throttling");
+
+    /// <summary>The exception that says this refusal, with its status, code and request id as properties a caller tests.</summary>
+    internal ObjectStoreException ToException(string message) =>
+        new ObjectStoreException(message)
+        {
+            StatusCode = Status,
+            ErrorCode = Code,
+            RequestId = RequestId,
+        };
 
     /// <summary>The error as a message names it.</summary>
     public override string ToString()

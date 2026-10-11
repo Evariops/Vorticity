@@ -751,7 +751,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             throw new StoreRetryException($"{operation} was refused for an expired token: {error}", cost: 0);
         }
 
-        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_tokens}: {error}");
+        return error.ToException($"{operation} on '{key}' was refused, as {_tokens}: {error}");
     }
 
     /// <summary>The service's error, from the XML API's body or the JSON API's.</summary>

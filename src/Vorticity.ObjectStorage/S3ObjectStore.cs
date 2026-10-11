@@ -448,11 +448,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
         if (status is HttpStatusCode.MovedPermanently or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect)
         {
             string region = HttpAnswers.Header(response, "x-amz-bucket-region") ?? "another region";
-            return new ObjectStoreException(
+            return error.ToException(
                 $"{operation} on '{key}' was sent to the wrong region: the bucket '{Bucket}' is in {region}. Set S3StoreOptions.Region. {error}");
         }
 
-        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_keys}: {error}");
+        return error.ToException($"{operation} on '{key}' was refused, as {_keys}: {error}");
     }
 
     private async ValueTask<ServiceError> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken) =>

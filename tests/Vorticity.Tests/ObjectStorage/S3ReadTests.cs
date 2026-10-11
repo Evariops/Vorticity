@@ -218,6 +218,9 @@ public sealed class S3ReadTests
         Assert.Equal(3, emulator.Requests);
         Assert.Contains("after 3 attempts", failed.Message, StringComparison.Ordinal);
         Assert.Contains("SlowDown", failed.Message, StringComparison.Ordinal);
+
+        // A caller tests the service's answer without reading the message.
+        Assert.Equal((503, "SlowDown"), (failed.StatusCode, failed.ErrorCode));
     }
 
     [Fact]
@@ -256,6 +259,7 @@ public sealed class S3ReadTests
         Assert.Contains(S3Emulator.AccessKey, refused.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("wrong secret", refused.Message, StringComparison.Ordinal);
         Assert.Equal(1, emulator.Requests);
+        Assert.Equal((403, "SignatureDoesNotMatch", "EMU"), (refused.StatusCode, refused.ErrorCode, refused.RequestId));
     }
 
     [Fact]

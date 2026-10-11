@@ -414,7 +414,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
             throw new StoreRetryException($"{operation} was too slow for the service: {error}", RetryBudget.RetryCost);
         }
 
-        return new ObjectStoreException($"{operation} on '{key}' was refused, as {_authorizer}: {error}");
+        return error.ToException($"{operation} on '{key}' was refused, as {_authorizer}: {error}");
     }
 
     private async ValueTask<ServiceError> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)

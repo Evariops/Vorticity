@@ -179,7 +179,12 @@ internal sealed class HttpTransport : IDisposable
             if (attempt >= _options.MaxAttempts || (cost > 0 && !_budget.TrySpend(cost)))
             {
                 string why = attempt >= _options.MaxAttempts ? $"after {attempt} attempts" : "the store's retry budget is spent";
-                throw new ObjectStoreException($"{operation} failed {why}: {failure}", cause ?? new IOException(failure));
+                throw new ObjectStoreException($"{operation} failed {why}: {failure}", cause ?? new IOException(failure))
+                {
+                    StatusCode = refused?.Status ?? 0,
+                    ErrorCode = refused?.Code,
+                    RequestId = refused?.RequestId,
+                };
             }
 
             StoreTelemetry.Retried();

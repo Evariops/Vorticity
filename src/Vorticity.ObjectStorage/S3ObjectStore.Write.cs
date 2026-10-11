@@ -522,7 +522,7 @@ public sealed partial class S3ObjectStore
     /// </summary>
     private ObjectStoreException? WantsChecksum(ServiceError error, string operation, string key) =>
         error.Code == "InvalidRequest" && error.Message?.Contains("Content-MD5", StringComparison.OrdinalIgnoreCase) == true && ChecksumOf() == Sum.None
-            ? new ObjectStoreException(
+            ? error.ToException(
                 $"{operation} of '{key}' was refused for want of a checksum, as a bucket under Object Lock refuses one: set S3StoreOptions.Checksum to PutChecksum.ContentMd5. {error}")
             : null;
 
