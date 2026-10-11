@@ -41,7 +41,10 @@ internal sealed class ChunkedBuffer : IDisposable
                 ReadOnlySequence<byte> bytes = result.Buffer;
                 long take = Math.Min(bytes.Length, limit - buffer._length);
                 buffer.Append(bytes.Slice(0, take));
-                content.AdvanceTo(bytes.GetPosition(take), bytes.End);
+
+                // What is left past the limit stays unexamined, so that the next read returns it at once:
+                // marked examined, it would wait for bytes the writer may never send, having sent them all.
+                content.AdvanceTo(bytes.GetPosition(take));
                 if (result.IsCanceled)
                 {
                     throw new OperationCanceledException("The content was cancelled.");
