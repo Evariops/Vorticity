@@ -13,8 +13,8 @@ namespace Vorticity.IO;
 /// Implementations are thread-safe. A put is atomic: a cancelled or failed <see cref="PutAsync(string, PipeReader, long, PutCondition, CancellationToken)"/>
 /// leaves the key as it was or holding the new bytes whole, never half-written, and a put conditioned
 /// on the key's absence is answered <see cref="PutOutcome.Created"/> for one caller only when several
-/// race. Reads and heads see every write that completed. A listing may lag, by less than the retention
-/// window of a dataset it serves, which costs a dataset freshness and never a version. An object's
+/// race. Reads and heads see every write that completed. A listing may lag behind them for a while, as
+/// some services let it, so a caller that must see a write it knows of reads its key. An object's
 /// token changes whenever the bytes under its key do.
 /// </para>
 /// <para>
@@ -133,7 +133,7 @@ public enum ObjectStoreCapabilities
     /// <summary><see cref="IObjectStore.ReadTailAsync"/> is one request, its answer saying the object's length.</summary>
     ReadsSuffix = 1,
 
-    /// <summary>A listing is in ordinal order and resumes after a key, which a dataset needs to find its latest version.</summary>
+    /// <summary>A listing is in ordinal order and resumes after a key, so that the first keys under a prefix cost one page.</summary>
     ListsInOrder = 2,
 
     /// <summary>A listing says each object's lock, so that no head is asked for it; a store that keeps no locks says so too.</summary>
@@ -144,7 +144,7 @@ public enum ObjectStoreCapabilities
 
     /// <summary>
     /// The store keeps an object under a retention date or a legal hold when its bucket says so, as S3
-    /// Object Lock does: what a dataset created for a locked store needs. R2 keeps none.
+    /// Object Lock does, refuses to delete or overwrite it until then, and reports the lock in a head.
     /// </summary>
     KeepsLocks = 16,
 }
@@ -168,8 +168,9 @@ public readonly record struct ObjectListing(string Key, ObjectHead Head, bool Lo
 /// <param name="Length">Its bytes.</param>
 /// <param name="Token">A value that changes whenever the bytes under the key change.</param>
 /// <param name="LastModified">
-/// When the store wrote it, by the store's clock: two writers' clocks need not agree, and vacuum
-/// dates an object's age against the shared one.
+/// When the store wrote it, by the store's clock, which a caller compares with the store's other dates
+/// rather than with its own clock, since two writers' clocks need not agree. A store may date an object
+/// written in parts by the start of its upload, as S3 does, earlier than the moment it appeared.
 /// </param>
 public readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified)
 {
@@ -273,32 +274,14 @@ public sealed class ObjectNotFoundException : VortexException
     /// <summary>The key, when the thrower named it.</summary>
     public string Key { get; init; } = string.Empty;
 
-    /// <summary>
-    /// The dataset version whose read found the object missing; 0 when the thrower was not reading
-    /// a version.
-    /// </summary>
-    public ulong Version { get; init; }
-
     /// <summary>The exception naming the key that is not there.</summary>
     /// <param name="key">The key.</param>
     /// <returns>The exception.</returns>
     public static ObjectNotFoundException For(string key) =>
         new ObjectNotFoundException($"No object at '{key}'.") { Key = key };
-
-    /// <summary>The exception a reader of a version throws for an object that is gone.</summary>
-    internal static ObjectNotFoundException InVersion(string key, ulong version, Exception cause) =>
-        new ObjectNotFoundException(
-            $"Version {version} of the dataset names '{key}', which the store no longer holds. A reader that " +
-            "outlives the retention window loses its objects to vacuum; refresh to read the latest " +
-            "version.",
-            cause)
-        {
-            Key = key,
-            Version = version,
-        };
 }
 
-/// <summary>A store refused or failed an operation, or a dataset operation the store's answers refused.</summary>
+/// <summary>A store refused or failed an operation, or a caller found its answers inconsistent.</summary>
 public sealed class ObjectStoreException : VortexException
 {
     /// <summary>Creates the exception with a default message.</summary>

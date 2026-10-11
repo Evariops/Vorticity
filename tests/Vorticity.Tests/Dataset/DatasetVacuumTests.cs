@@ -86,7 +86,8 @@ public sealed class DatasetVacuumTests
         // A reader on a swept version reports the object it lost, and its version.
         ObjectNotFoundException lost = await Assert.ThrowsAsync<ObjectNotFoundException>(
             async () => await KeysAsync(stale.ScanBuilder()));
-        Assert.Equal(staleVersion, lost.Version);
+        Assert.Contains($"Version {staleVersion} of the dataset", lost.Message, StringComparison.Ordinal);
+        Assert.IsType<ObjectNotFoundException>(lost.InnerException);
         Assert.Contains(lost.Key, swept.Deleted);
         Assert.Contains("retention window", lost.Message, StringComparison.Ordinal);
 

@@ -287,9 +287,9 @@ internal sealed class CommitPageSource : IPageSource
                     .ReadPageAsync(_store, key, reference, now, cancellationToken).ConfigureAwait(false);
             }
         }
-        catch (ObjectNotFoundException missing) when (Reading != 0 && missing.Version == 0)
+        catch (ObjectNotFoundException missing) when (Reading != 0 && !DatasetVacuum.IsLost(missing))
         {
-            throw ObjectNotFoundException.InVersion(key, Reading, missing);
+            throw DatasetVacuum.Lost(key, Reading, missing);
         }
     }
 

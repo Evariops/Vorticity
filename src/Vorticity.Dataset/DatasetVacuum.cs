@@ -68,12 +68,31 @@ public sealed record VacuumResult
 /// Deletes what no version inside the retention window references, and never runs by itself. Ages
 /// are the store's timestamps, not a header's, since writers' clocks need not agree; and nothing is
 /// deleted until every retained version is marked, because a missed mark would delete a live
-/// object. A writer or reader that outlives the window loses its objects.
+/// object. A writer or reader that outlives the window loses its objects. A listing that lags, as a
+/// store may let it, by less than the window costs a dataset freshness and never a version. A store
+/// may date an object written in parts by the start of its upload, as S3 does, so the window must also
+/// outlast the longest upload.
 /// </summary>
 internal static class DatasetVacuum
 {
     /// <summary>The retention window applied when the dataset sets none.</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// The exception a reader of <paramref name="version"/> throws for an object the store no longer
+    /// holds, the store's own as its cause.
+    /// </summary>
+    public static ObjectNotFoundException Lost(string key, ulong version, ObjectNotFoundException cause) =>
+        new ObjectNotFoundException(
+            $"Version {version} of the dataset names '{key}', which the store no longer holds. A reader that " +
+            "outlives the retention window loses its objects to vacuum: refresh to read the latest version.",
+            cause)
+        {
+            Key = key,
+        };
+
+    /// <summary>Whether <paramref name="missing"/> is one <see cref="Lost"/> made, which names its version already.</summary>
+    public static bool IsLost(ObjectNotFoundException missing) => missing.InnerException is ObjectNotFoundException;
 
     /// <summary>The window a header's retention sets: its seconds, or <see cref="DefaultWindow"/> when it sets none.</summary>
     public static TimeSpan WindowOf(RetentionSettings retention) =>

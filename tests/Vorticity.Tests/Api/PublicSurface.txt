@@ -1084,7 +1084,6 @@ Vorticity:     ctor ObjectNotFoundException(string)
 Vorticity:     ctor ObjectNotFoundException(string, Exception)
 Vorticity:     method ObjectNotFoundException For(string)
 Vorticity:     property string Key { get; init; }
-Vorticity:     property ulong Version { get; init; }
 Vorticity: struct Vorticity.IO.ObjectRange : IDisposable
 Vorticity:     ctor ObjectRange(SegmentLease, string)
 Vorticity:     ctor ObjectRange(SegmentLease, string, long)
