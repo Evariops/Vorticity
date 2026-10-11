@@ -913,7 +913,6 @@ it, and an option turns it on once it does.
 | `x-ms-content-crc64` as Azure's reference shows it | low byte first, as Azure's SDK sends it | to check against the service |
 | the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks` | a dataset under Object Lock refuses R2 and an OVHcloud Local Zone without knowing the package |
 | the parts and the window reserved through the memory governor | the parts bounded by `PartsInFlight`, the window allocating nothing | the reads a window admits land in the blocks a scan reads into, which an aggregation's admission counts already |
-| a dataset sends its data object's parts as it writes | the object goes up at the commit | the dataset's writer holds the object until then |
 | a completion answered 409 starts a new upload | it throws | the content of a put cannot be read twice |
 | Cloud Storage takes a conditional put up to 5 TiB | up to 5 GiB, held in memory | the service takes no precondition on the parts of an upload |
 | `https://account.blob.core.windows.net/container/key` locations | `az://` locations | a registered prefix serves the same need |

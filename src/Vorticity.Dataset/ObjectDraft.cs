@@ -59,7 +59,7 @@ public sealed class ObjectDraft : IAsyncDisposable
         _taken = true;
         Writer.Abandon();
         await Writer.DisposeAsync().ConfigureAwait(false);
-        Sink.Discard();
+        await Sink.DiscardAsync().ConfigureAwait(false);
     }
 
     /// <summary>Marks the draft as taken by a commit, once.</summary>

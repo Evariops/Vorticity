@@ -111,7 +111,7 @@ public sealed partial class S3ObjectStore
         }
 
         // A service that takes no condition on parts gets a conditional put whole, whatever its size.
-        bool whole = condition.Kind != PutConditionKind.None && _profile == S3Profile.R2;
+        bool whole = condition.Kind != PutConditionKind.None && HoldsConditionalPutsWhole;
         long threshold = whole ? MaxSinglePut : Math.Min(_options.PartThreshold, MaxSinglePut);
         if (length > threshold && whole)
         {

@@ -33,7 +33,7 @@ namespace Vorticity.ObjectStorage;
 /// other. A session that holds it disposes it with itself.
 /// </para>
 /// </remarks>
-public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore
+public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore, IWholeConditionalPuts
 {
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
@@ -190,6 +190,12 @@ public sealed partial class S3ObjectStore : IObjectStore, IMeasuredObjectStore
 
     /// <inheritdoc/>
     long IMeasuredObjectStore.BandwidthDelayBytes => _transport.Link.BandwidthDelayBytes;
+
+    /// <inheritdoc/>
+    bool IWholeConditionalPuts.HoldsConditionalPutsWhole => HoldsConditionalPutsWhole;
+
+    /// <summary>Whether a conditional put goes whole: on R2, which takes no condition on the parts of an upload.</summary>
+    private bool HoldsConditionalPutsWhole => _profile == S3Profile.R2 && _zone is null;
 
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

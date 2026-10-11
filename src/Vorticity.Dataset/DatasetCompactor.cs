@@ -481,7 +481,7 @@ internal static class DatasetCompactor
 
             _draft = null;
             await draft.Writer.DisposeAsync().ConfigureAwait(false);
-            draft.Sink.Discard();
+            await draft.Sink.DiscardAsync().ConfigureAwait(false);
         }
     }
 }

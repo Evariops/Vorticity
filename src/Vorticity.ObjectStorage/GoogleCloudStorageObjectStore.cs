@@ -34,7 +34,7 @@ namespace Vorticity.ObjectStorage;
 /// without one, a dataset's data object, goes up in parts past the threshold.
 /// </para>
 /// </remarks>
-public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IMeasuredObjectStore
+public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IMeasuredObjectStore, IWholeConditionalPuts
 {
     /// <summary>The metadata a put carries its id in, read back as <c>metadata.vxput</c>.</summary>
     internal const string PutIdHeader = "x-goog-meta-vxput";
@@ -118,6 +118,10 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IMeasu
 
     /// <inheritdoc/>
     long IMeasuredObjectStore.BandwidthDelayBytes => _transport.Link.BandwidthDelayBytes;
+
+    /// <inheritdoc/>
+    /// <remarks>The service takes no precondition on an upload in parts.</remarks>
+    bool IWholeConditionalPuts.HoldsConditionalPutsWhole => true;
 
     /// <inheritdoc/>
     public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)

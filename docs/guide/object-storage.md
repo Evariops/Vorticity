@@ -82,6 +82,7 @@ every file opened through the session before the session itself.
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
+| commit a dataset's object | up to 32 MiB, 1 put at the commit. Past it, an upload whose parts go while the rows are written, so that the commit waits for the last part and the completion only |
 | append to a file | the open's, then on S3 an upload whose first parts copy the old object on the service, on Azure a block list whose first blocks do, on Cloud Storage a temporary object and a composition. An object under 5 MiB is read back and sent again in 1 put |
 | a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's and Cloud Storage's listings say the locks), a request per 1 000 deletes on S3, per 256 on Azure and per 100 on Cloud Storage, where each delete is billed as a request |
 
@@ -221,7 +222,8 @@ decides.
   dataset needs to find its latest version. A dataset refuses such a store until
   `S3StoreOptions.ListsInOrder` says the bucket does, once you have checked it.
 * R2 takes no condition on the parts of an upload, so a conditional put to R2 goes in one request,
-  which caps it at 5 GiB. A dataset's data objects are not conditional and go up in parts.
+  which caps it at 5 GiB. A dataset's data object past 32 MiB goes up in parts without the condition,
+  which its key, ending with a fresh uid, makes needless. Cloud Storage does the same.
 * A dataset created with `LockedStore` needs a store that keeps locks, and refuses R2, which offers no
   Object Lock, and an OVHcloud Local Zone once its store says `KeepsLocks = false`.
 * Parts in flight are held in memory, 4 of 16 MiB by default per upload (`PartsInFlight`, `PartSize`).

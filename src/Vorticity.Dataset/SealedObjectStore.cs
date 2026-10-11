@@ -273,11 +273,14 @@ internal sealed class SealedObjectStore : IObjectStore
 
         SealParameters parameters = new SealParameters(FrameLog2, objectId, Binding(id, commit ? version : null), id, ReadOnlyMemory<byte>.Empty);
         int descriptorLength = SealDescriptor.LengthOf(name.KeyId, id.Length, name.Wrapped.Length);
-        long sealedLength = SealedFormat.SealedLength(descriptorLength, length, 1 << FrameLog2);
+
+        // A content of unknown length, a data object streamed as it is written, is put as unknown,
+        // its sealed length following from the plaintext's once it has ended.
+        long sealedLength = length < 0 ? -1 : SealedFormat.SealedLength(descriptorLength, length, 1 << FrameLog2);
         DataKey dataKey = await _keys.UnwrapAsync(name.KeyId, name.Wrapped, id, cancellationToken).ConfigureAwait(false);
 
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 1 << 20, resumeWriterThreshold: 1 << 19, useSynchronizationContext: false));
-        Task<Exception?> produce = ProduceAsync(pipe.Writer, content, length, parameters, dataKey, cancellationToken);
+        Task<(Exception? Failure, long Taken)> produce = ProduceAsync(pipe.Writer, content, length, parameters, dataKey, cancellationToken);
         PutOutcome outcome;
         try
         {
@@ -290,10 +293,15 @@ internal sealed class SealedObjectStore : IObjectStore
             throw;
         }
 
-        Exception? failure = await produce.ConfigureAwait(false);
+        (Exception? failure, long taken) = await produce.ConfigureAwait(false);
         if (outcome == PutOutcome.Created && failure is not null)
         {
             throw failure;
+        }
+
+        if (sealedLength < 0)
+        {
+            sealedLength = SealedFormat.SealedLength(descriptorLength, taken, 1 << FrameLog2);
         }
 
         if (commit && outcome == PutOutcome.Created)
@@ -318,10 +326,11 @@ internal sealed class SealedObjectStore : IObjectStore
 
     /// <summary>
     /// Seals <paramref name="content"/> into <paramref name="sealedBytes"/> as the put reads it, a
-    /// mebibyte flushed at a time. The failure is returned rather than thrown: a put that finds the
-    /// key taken lets go of the bytes before their end, and that is no failure of the put.
+    /// mebibyte flushed at a time; <paramref name="length"/> is -1 for a content of unknown length. The
+    /// failure is returned rather than thrown: a put that finds the key taken lets go of the bytes
+    /// before their end, and that is no failure of the put. The plaintext's bytes are returned with it.
     /// </summary>
-    private static async Task<Exception?> ProduceAsync(
+    private static async Task<(Exception? Failure, long Taken)> ProduceAsync(
         PipeWriter sealedBytes, PipeReader content, long length, SealParameters parameters, DataKey dataKey, CancellationToken cancellationToken)
     {
         bool handedOver = false;
@@ -331,9 +340,9 @@ internal sealed class SealedObjectStore : IObjectStore
             return new ValueTask<DataKey>(dataKey);
         });
         Exception? failure = null;
+        long taken = 0;
         try
         {
-            long taken = 0;
             while (true)
             {
                 ReadResult result = await content.ReadAsync(cancellationToken).ConfigureAwait(false);
@@ -344,7 +353,7 @@ internal sealed class SealedObjectStore : IObjectStore
 
                 taken += result.Buffer.Length;
                 content.AdvanceTo(result.Buffer.End);
-                if (taken > length)
+                if (length >= 0 && taken > length)
                 {
                     throw new ObjectStoreException($"The content was announced as {length} bytes and runs past them.");
                 }
@@ -360,7 +369,7 @@ internal sealed class SealedObjectStore : IObjectStore
                 }
             }
 
-            if (taken != length)
+            if (length >= 0 && taken != length)
             {
                 throw new ObjectStoreException($"The content was announced as {length} bytes and ended after {taken}.");
             }
@@ -384,7 +393,7 @@ internal sealed class SealedObjectStore : IObjectStore
             await sealedBytes.CompleteAsync(failure).ConfigureAwait(false);
         }
 
-        return failure;
+        return (failure, taken);
     }
 
     // ---- commit objects --------------------------------------------------------------------
@@ -828,7 +837,7 @@ internal sealed class SealedObjectStore : IObjectStore
     }
 
     /// <summary>The uid a data object's key names: <c>data/&lt;uid&gt;.vortex</c>, the uid in 32 hexadecimal digits.</summary>
-    private static bool TryUid(string key, out Guid uid)
+    internal static bool TryUid(string key, out Guid uid)
     {
         uid = Guid.Empty;
         return key.Length == CommitKey.DataPrefix.Length + 32 + CommitKey.DataSuffix.Length

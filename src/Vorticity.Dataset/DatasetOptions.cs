@@ -45,6 +45,9 @@ public sealed record DatasetOptions
     /// <summary>The most bytes one data object may take while it is written, before the store takes it; 1 GiB by default.</summary>
     public long MaxObjectBytes { get; init; } = ObjectSegmentSink.DefaultMaxBytes;
 
+    /// <summary>The bytes past which a data object's put starts while it is written: 32 MiB, which tests lower.</summary>
+    internal long StreamObjectsFromBytes { get; init; } = ObjectSegmentSink.DefaultStreamFromBytes;
+
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
     /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the clustering key's columns are always among them.</remarks>
     public IReadOnlyList<string>? SummaryColumns { get; init; }
