@@ -124,6 +124,12 @@ public enum ObjectStoreCapabilities
 
     /// <summary>A put replaces an object only while it still has a token (<see cref="PutCondition.IfMatch"/>).</summary>
     ReplacesOnTokenMatch = 8,
+
+    /// <summary>
+    /// The store keeps an object under a retention date or a legal hold when its bucket says so, as S3
+    /// Object Lock does: what a dataset created for a locked store needs. R2 keeps none.
+    /// </summary>
+    KeepsLocks = 16,
 }
 
 /// <summary>What one read brought: the bytes written into the caller's memory, the object's length and its token.</summary>

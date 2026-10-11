@@ -709,9 +709,11 @@ public sealed partial class S3ObjectStore : IObjectStore
     {
         bool suffix = options.ReadsSuffix ?? profile is S3Profile.Amazon or S3Profile.Other;
         bool ordered = options.ListsInOrder ?? profile != S3Profile.Ovhcloud;
+        bool locks = options.KeepsLocks ?? profile != S3Profile.R2;
         return ObjectStoreCapabilities.ReplacesOnTokenMatch
             | (suffix ? ObjectStoreCapabilities.ReadsSuffix : 0)
-            | (ordered ? ObjectStoreCapabilities.ListsInOrder : 0);
+            | (ordered ? ObjectStoreCapabilities.ListsInOrder : 0)
+            | (locks ? ObjectStoreCapabilities.KeepsLocks : 0);
     }
 
     private static string ProviderName(S3Profile profile) => profile switch

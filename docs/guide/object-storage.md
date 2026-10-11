@@ -90,8 +90,20 @@ is disposed. No secret appears in an exception, a log or a trace, and a refusal 
 id and the service's request id.
 
 A put carries a checksum the service verifies: CRC-64/NVME on Amazon S3, and none by default on R2,
-OVHcloud and Scaleway, whose bytes TLS protects on their way. `S3StoreOptions.Checksum` chooses
-another, `ContentMd5` for instance, which a bucket under Object Lock on OVHcloud or Scaleway needs.
+OVHcloud and Scaleway, whose bytes TLS protects on their way. A bucket under Object Lock refuses a put
+without a checksum, and the store then sends `Content-MD5` with that put again and with every put after
+it. `S3StoreOptions.Checksum` chooses one from the start.
+
+| | Amazon S3 | R2 | OVHcloud | Scaleway | another service |
+|---|---|---|---|---|---|
+| opens a file in one request | yes | once proven | once proven | once proven | yes |
+| hosts a dataset | yes | yes | once its listing order is proven (`ListsInOrder`) | yes | yes |
+| hosts a locked dataset | yes | no, it keeps no Object Lock | yes, not in a Local Zone (`KeepsLocks`) | yes | yes |
+| parts of an upload | 10 000 | 10 000, a conditional put whole | 10 000 | 1 000 | 10 000 |
+
+What a service is taken to do comes from its profile, which the endpoint's host names. A capability
+marked as proven later is taken as absent until the contract tests have run against the service, and
+an option of `S3StoreOptions` overrides it once you have checked it yourself.
 
 ## When the network fails
 
@@ -115,5 +127,6 @@ decides.
   `S3StoreOptions.ListsInOrder` says the bucket does, once you have checked it.
 * R2 takes no condition on the parts of an upload, so a conditional put to R2 goes in one request,
   which caps it at 5 GiB. A dataset's data objects are not conditional and go up in parts.
-* A dataset created with `LockedStore` needs a bucket under Object Lock, which R2 does not offer.
+* A dataset created with `LockedStore` needs a store that keeps locks, and refuses R2, which offers no
+  Object Lock, and an OVHcloud Local Zone once its store says `KeepsLocks = false`.
 * Parts in flight are held in memory, 4 of 16 MiB by default per upload (`PartsInFlight`, `PartSize`).

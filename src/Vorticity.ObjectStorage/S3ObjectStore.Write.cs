@@ -50,6 +50,9 @@ public sealed partial class S3ObjectStore
     /// </summary>
     private const int ExpectContinueBytes = 1 << 20;
 
+    // 1 once a bucket has refused a put for want of a checksum.
+    private int _md5Required;
+
     /// <inheritdoc/>
     public async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
@@ -532,7 +535,7 @@ public sealed partial class S3ObjectStore
         };
         request.Headers.ExpectContinue = s.Body.Length >= ExpectContinueBytes;
         AddCondition(request, s.Condition);
-        await SignAsync(request, target, path, string.Empty, SigV4Signer.UnsignedPayload, cancellationToken, s.Extra).ConfigureAwait(false);
+        await SignAsync(request, target, path, string.Empty, SigV4Signer.UnsignedPayload, cancellationToken, WithDigest(s.Extra, s.Body)).ConfigureAwait(false);
         return request;
     }
 
@@ -555,6 +558,11 @@ public sealed partial class S3ObjectStore
         if (error.Code is "BadDigest" or "InvalidDigest" or "XAmzContentChecksumMismatch" or "IncompleteBody")
         {
             throw new StoreRetryException($"PutObject of '{key}' arrived damaged: {error}", RetryBudget.RetryCost, notApplied: true);
+        }
+
+        if (LearnsChecksum(error))
+        {
+            throw new StoreRetryException($"PutObject of '{key}' was refused for want of a checksum: {error}", cost: 0);
         }
 
         throw MapFailure(response, error, "PutObject", key);
@@ -601,7 +609,7 @@ public sealed partial class S3ObjectStore
             Content = new SequenceContent(s.Body),
         };
         request.Headers.ExpectContinue = s.Body.Length >= ExpectContinueBytes;
-        await SignAsync(request, target, path, query, SigV4Signer.UnsignedPayload, cancellationToken, s.Extra).ConfigureAwait(false);
+        await SignAsync(request, target, path, query, SigV4Signer.UnsignedPayload, cancellationToken, WithDigest(s.Extra, s.Body)).ConfigureAwait(false);
         return request;
     }
 
@@ -616,6 +624,11 @@ public sealed partial class S3ObjectStore
         if (error.Code is "BadDigest" or "InvalidDigest" or "XAmzContentChecksumMismatch" or "IncompleteBody")
         {
             throw new StoreRetryException($"UploadPart of '{key}' arrived damaged: {error}", RetryBudget.RetryCost, notApplied: true);
+        }
+
+        if (LearnsChecksum(error))
+        {
+            throw new StoreRetryException($"UploadPart of '{key}' was refused for want of a checksum: {error}", cost: 0);
         }
 
         throw MapFailure(response, error, "UploadPart", key);
@@ -773,9 +786,59 @@ public sealed partial class S3ObjectStore
         return [.. headers];
     }
 
-    private S3Checksum ChecksumOf() => _options.Checksum != S3Checksum.Default
-        ? _options.Checksum
-        : _profile is S3Profile.Amazon ? S3Checksum.Crc64Nvme : S3Checksum.None;
+    /// <summary>
+    /// The checksum a put carries: the option's, or the profile's, which is none on the clouds that
+    /// share only <c>Content-MD5</c> until a bucket under Object Lock refuses a put without one, after
+    /// which every put of the store carries it.
+    /// </summary>
+    private S3Checksum ChecksumOf()
+    {
+        S3Checksum chosen = _options.Checksum != S3Checksum.Default
+            ? _options.Checksum
+            : _profile is S3Profile.Amazon ? S3Checksum.Crc64Nvme : S3Checksum.None;
+        return chosen == S3Checksum.None && Volatile.Read(ref _md5Required) != 0 ? S3Checksum.ContentMd5 : chosen;
+    }
+
+    /// <summary>
+    /// Whether the service refused a put for want of a checksum, as a bucket under Object Lock does:
+    /// the store then sends <c>Content-MD5</c> with every put, and this one again.
+    /// </summary>
+    private bool LearnsChecksum(ServiceError error)
+    {
+        if (error.Code != "InvalidRequest" || error.Message?.Contains("Content-MD5", StringComparison.OrdinalIgnoreCase) != true
+            || ChecksumOf() != S3Checksum.None)
+        {
+            return false;
+        }
+
+        Volatile.Write(ref _md5Required, 1);
+        return true;
+    }
+
+    /// <summary>The headers a body's put signs, <c>Content-MD5</c> added when the store has learned its bucket asks for one.</summary>
+    private (string Name, string Value)[] WithDigest((string Name, string Value)[] extra, ReadOnlySequence<byte> body)
+    {
+        if (ChecksumOf() != S3Checksum.ContentMd5)
+        {
+            return extra;
+        }
+
+        foreach ((string name, _) in extra)
+        {
+            if (name == "content-md5")
+            {
+                return extra;
+            }
+        }
+
+        using IncrementalHash md5 = IncrementalHash.CreateHash(HashAlgorithmName.MD5);
+        foreach (ReadOnlyMemory<byte> segment in body)
+        {
+            md5.AppendData(segment.Span);
+        }
+
+        return [.. extra, ("content-md5", Convert.ToBase64String(md5.GetHashAndReset()))];
+    }
 
     /// <summary>The parts an upload may have: 1 000 on Scaleway, 10 000 elsewhere.</summary>
     private int MaxParts => _profile == S3Profile.Scaleway ? 1_000 : 10_000;
@@ -784,7 +847,7 @@ public sealed partial class S3ObjectStore
     /// A part's size: the option's, at least the service's minimum, and larger when the object would
     /// need more parts than the service takes, rounded up to a mebibyte.
     /// </summary>
-    private int PartSizeFor(long length)
+    internal int PartSizeFor(long length)
     {
         long size = Math.Max(_options.PartSize, _options.MinimumPartSize);
         long needed = length > 0 ? (length + MaxParts - 1) / MaxParts : 0;

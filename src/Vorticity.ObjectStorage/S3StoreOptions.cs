@@ -88,6 +88,13 @@ public sealed class S3StoreOptions
     /// </summary>
     public bool? ListsInOrder { get; init; }
 
+    /// <summary>
+    /// Whether the service keeps objects under Object Lock's retention and legal hold, which a dataset
+    /// created for a locked store needs. Null takes the profile's: no on R2, yes elsewhere. Set it false
+    /// for an OVHcloud Local Zone, which keeps neither.
+    /// </summary>
+    public bool? KeepsLocks { get; init; }
+
     /// <summary>The checksum each put carries; <see cref="S3Checksum.Default"/> takes the profile's.</summary>
     public S3Checksum Checksum { get; init; }
 

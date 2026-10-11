@@ -144,7 +144,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
     /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
-    /// <exception cref="NotSupportedException">The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>).</exception>
+    /// <exception cref="NotSupportedException">
+    /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), or the dataset is
+    /// created for a locked store and the store keeps no locks (<see cref="ObjectStoreCapabilities.KeepsLocks"/>).
+    /// </exception>
     public static ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
         VortexSchema schema,
@@ -959,6 +962,12 @@ public sealed class VortexDataset : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(store);
         RequireOrderedListing(store);
         options ??= new DatasetOptions();
+        if (options.LockedStore && (store.Capabilities & ObjectStoreCapabilities.KeepsLocks) == 0)
+        {
+            throw new NotSupportedException(
+                $"A dataset created for a locked store needs a store that keeps locks, and {store.GetType().Name} keeps none " +
+                "(ObjectStoreCapabilities.KeepsLocks): its objects would be deleted while it believes them kept.");
+        }
 
         // Encrypted when asked, and when the session seals what it writes or refuses plaintext, whose
         // own open would refuse a plain dataset.

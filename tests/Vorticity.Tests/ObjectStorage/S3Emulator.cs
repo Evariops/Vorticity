@@ -58,6 +58,9 @@ internal sealed class S3Emulator : HttpMessageHandler
     /// <summary>Every request received, in order: its method, path and query, and the range it asked.</summary>
     internal ConcurrentQueue<string> Log { get; } = new ConcurrentQueue<string>();
 
+    /// <summary>The host each request was sent to, in order.</summary>
+    internal ConcurrentQueue<string> Hosts { get; } = new ConcurrentQueue<string>();
+
     /// <summary>The requests received.</summary>
     internal int Requests => Log.Count;
 
@@ -117,6 +120,7 @@ internal sealed class S3Emulator : HttpMessageHandler
     {
         int index = Log.Count;
         Uri uri = request.RequestUri!;
+        Hosts.Enqueue(request.Headers.Host ?? uri.Authority);
         Log.Enqueue($"{request.Method} {uri.AbsolutePath}{uri.Query}{(request.Headers.TryGetValues("Range", out IEnumerable<string>? range) ? " " + range.First() : string.Empty)}");
         if (Intercept?.Invoke(request, index) is { } intercepted)
         {

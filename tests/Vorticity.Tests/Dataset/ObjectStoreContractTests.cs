@@ -430,13 +430,14 @@ public sealed class ObjectStoreContractTests : IDisposable
     public async Task EachStoreDeclaresWhatItDoesInOneRequest()
     {
         ObjectStoreCapabilities all = ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder
-            | ObjectStoreCapabilities.ReportsLocksInListing | ObjectStoreCapabilities.ReplacesOnTokenMatch;
+            | ObjectStoreCapabilities.ReportsLocksInListing | ObjectStoreCapabilities.ReplacesOnTokenMatch
+            | ObjectStoreCapabilities.KeepsLocks;
         await using IObjectStore memory = Open("memory");
         await using IObjectStore file = Open("file");
         Assert.Equal(all, memory.Capabilities);
 
-        // No file system compares and renames in one step across processes.
-        Assert.Equal(all & ~ObjectStoreCapabilities.ReplacesOnTokenMatch, file.Capabilities);
+        // No file system compares and renames in one step across processes, and a directory keeps no lock.
+        Assert.Equal(all & ~ObjectStoreCapabilities.ReplacesOnTokenMatch & ~ObjectStoreCapabilities.KeepsLocks, file.Capabilities);
     }
 
     [Theory]
