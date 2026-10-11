@@ -771,7 +771,7 @@ internal readonly struct ZstdPlan
             fixed (byte* input = stream)
             fixed (byte* output = destination)
             {
-                compressed = across.Compress(workspace.Fan!, input, output, count);
+                compressed = across.Compress(workspace.Fan!, input, output, count, workspace.ZstdLevel);
             }
 
             if (!compressed)

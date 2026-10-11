@@ -41,6 +41,7 @@ that does not fit throws `ArgumentException` there, before a single byte is writ
 | `ColumnChunkTargetBytes` | empty | a chunk target of its own for a top-level column that wants larger chunks than the file's. Its chunks span whole chunks of the file ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `Compression` | `Auto` | what the encoder optimises for: `Auto`, `Fastest`, `Smallest` or `None` |
 | `Hints` | empty | an encoding to try first, by column path |
+| `ZstdLevel` | 0, zstd's own 3 | the zstd level of the columns zstd takes. Lower writes faster and larger, higher writes slower and smaller ([zstd level](#zstd-level)) |
 | `DegreeOfParallelism` | 0, the session's | the threads the writer summarizes its columns and compresses zstd frames on. The file is byte for byte the same whatever the degree ([threads.md](threads.md)) |
 | `TargetEdition` | `VortexEditions.Default` | the edition every component must belong to ([editions.md](editions.md)) |
 | `WriteStatistics` | `true` | the per-column statistics the open reads back: null count, order, and the minimum and maximum of a numeric column |
@@ -123,6 +124,24 @@ A hint is a preference, and the report is where you find out whether it held:
   such a hint for a file written once and rarely read, and keep `Auto` for files scanned often. Better
   still, measure on your own data with `VortexSession.AdviseAsync`
   ([choose-encodings.md](choose-encodings.md#let-your-data-choose)).
+
+## Zstd level
+
+`ZstdLevel` sets how hard zstd works on the columns it takes, and the level their trials are priced
+at. The same million rows with `Celsius` and `City` both hinted as `Zstd`, best of three:
+
+| `ZstdLevel` | bytes | written in | decoded in |
+|---|---|---|---|
+| 1 | 252 988 | 31 ms | 7.4 ms |
+| 3, the default | 247 228 | 35 ms | 7.2 ms |
+| 9 | 240 956 | 83 ms | 6.0 ms |
+| 19 | 228 220 | 309 ms | 5.2 ms |
+
+A lower level writes faster, which counts when zstd takes wide text columns and the write is what
+waits: on the ClickBench hits table, level 1 writes the file 11 to 15 percent faster on 1 to 32
+threads, for a file 4 percent larger that scans at the same speed. A higher level writes several
+times slower for a few percent fewer bytes, and its frames decode a little faster, which suits a file
+written once and read often. Levels go from `ZstdCompressor.MinLevel`, negative and fastest, to 22.
 
 ## String bounds
 

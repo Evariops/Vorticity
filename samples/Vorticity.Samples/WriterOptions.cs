@@ -59,6 +59,9 @@ internal static class WriterOptions
         await Hints(session, path, readings);
 
         Console.WriteLine();
+        await ZstdLevels(session, path, readings);
+
+        Console.WriteLine();
         await StringBounds(session, path);
 
         Console.WriteLine();
@@ -143,6 +146,48 @@ internal static class WriterOptions
         catch (ArgumentException e)
         {
             Console.WriteLine($"a hint on a column that does not exist: {e.GetType().Name}: {e.Message}");
+        }
+    }
+
+    /// <summary>Both value columns as zstd, at four levels: bytes, write time, and a full decode.</summary>
+    private static async Task ZstdLevels(VortexSession session, string path, Reading[] readings)
+    {
+        foreach (int level in (int[])[1, 3, 9, 19])
+        {
+            VortexWriteOptions options = new()
+            {
+                ZstdLevel = level,
+                Hints = ImmutableDictionary<string, EncodingHint>.Empty
+                    .Add(Reading.ColumnNames.Celsius, EncodingHint.Zstd)
+                    .Add(Reading.ColumnNames.City, EncodingHint.Zstd),
+            };
+            long write = long.MaxValue;
+            WriteReport? report = null;
+            for (int round = 0; round < 3; round++)
+            {
+                Stopwatch clock = Stopwatch.StartNew();
+                report = await Write(session, path, readings, options);
+                write = Math.Min(write, clock.ElapsedMilliseconds);
+            }
+
+            double read = double.MaxValue;
+            await using (VortexFile file = await VortexFile.OpenAsync(path))
+            {
+                for (int round = 0; round < 3; round++)
+                {
+                    Stopwatch clock = Stopwatch.StartNew();
+                    await foreach (var (day, celsius, city) in file.Scan<Reading>())
+                    {
+                        day.AsCanonical();
+                        celsius.AsCanonical();
+                        city.AsCanonical();
+                    }
+
+                    read = Math.Min(read, clock.Elapsed.TotalMilliseconds);
+                }
+            }
+
+            Console.WriteLine($"ZstdLevel {level}: {report!.Bytes.Total} bytes, written in {write} ms, decoded in {read:F1} ms");
         }
     }
 

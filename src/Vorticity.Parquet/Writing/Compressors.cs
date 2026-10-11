@@ -12,8 +12,8 @@ namespace Vorticity.Parquet.Writing;
 /// </summary>
 /// <remarks>
 /// A compressor writes whole frames, one a call, each the same bytes whatever it compressed before,
-/// so which compressor a page takes changes nothing of the file. At the default level they come from
-/// the writers' shared pool and go back to it with the writer.
+/// so which compressor a page takes changes nothing of the file. They come from the writers' shared
+/// pool, at the writer's level, and go back to it with the writer.
 /// </remarks>
 internal sealed class Compressors(int level)
 {
@@ -31,7 +31,7 @@ internal sealed class Compressors(int level)
             }
         }
 
-        return level == ZstdCompressor.DefaultLevel ? ZstdEncoders.Rent() : new ZstdCompressor(level);
+        return ZstdEncoders.Rent(level);
     }
 
     /// <summary>Takes back a compressor <see cref="Rent"/> gave.</summary>
@@ -43,17 +43,14 @@ internal sealed class Compressors(int level)
         }
     }
 
-    /// <summary>Gives the compressors of the default level back to the writers' pool, as the writer closes.</summary>
+    /// <summary>Gives the compressors back to the writers' pool, as the writer closes.</summary>
     internal void Release()
     {
         lock (_gate)
         {
-            if (level == ZstdCompressor.DefaultLevel)
+            foreach (ZstdCompressor compressor in _free)
             {
-                foreach (ZstdCompressor compressor in _free)
-                {
-                    ZstdEncoders.Return(compressor);
-                }
+                ZstdEncoders.Return(compressor);
             }
 
             _free.Clear();

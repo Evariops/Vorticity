@@ -119,6 +119,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Whether the chooser prices each column by its bytes alone, as <see cref="CompressionProfile.Smallest"/> asks.</summary>
     private bool _sizeFirst;
 
+    /// <summary>The zstd level of the columns zstd takes, as <see cref="VortexWriteOptions.ZstdLevel"/> sets it; 0 for the default.</summary>
+    private int _zstdLevel;
+
     bool IChunkLedger.SizeFirst => _sizeFirst;
 
     /// <summary>
@@ -560,6 +563,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.SealScratch)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
+            _zstdLevel = options.ZstdLevel,
             _metadata = UserMetadata.Ordered(options.Metadata),
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
@@ -1340,7 +1344,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
     /// an index payload.
     /// </summary>
-    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan, SizeFirst = _sizeFirst };
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
     private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes) : null;

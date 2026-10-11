@@ -34,6 +34,7 @@ internal sealed unsafe class ZstdFrames : IFanWork
     private int[] _plan = [];
     private byte* _input;
     private byte* _output;
+    private int _level;
     private int _failed;
 
     private ZstdFrames()
@@ -97,11 +98,13 @@ internal sealed unsafe class ZstdFrames : IFanWork
     /// <param name="input">The values, pinned.</param>
     /// <param name="output">The destination, pinned, as long as every room.</param>
     /// <param name="count">The frames.</param>
+    /// <param name="level">The zstd level; 0 for the default.</param>
     /// <returns>Whether every frame compressed.</returns>
-    internal bool Compress(WorkFan fan, byte* input, byte* output, int count)
+    internal bool Compress(WorkFan fan, byte* input, byte* output, int count, int level)
     {
         _input = input;
         _output = output;
+        _level = level;
         _failed = 0;
         fan.Run(this, count);
         _input = null;
@@ -118,7 +121,7 @@ internal sealed unsafe class ZstdFrames : IFanWork
         int to = _plan[at + 1];
         ReadOnlySpan<byte> source = new ReadOnlySpan<byte>(_input + from, to - from);
         Span<byte> room = new Span<byte>(_output + _plan[at + 2], _plan[at + 3]);
-        ZstdCompressor encoder = ZstdEncoders.Rent();
+        ZstdCompressor encoder = ZstdEncoders.Rent(_level);
         try
         {
             OperationStatus status = encoder.Compress(source, room, out _, out int written);

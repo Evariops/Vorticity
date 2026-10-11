@@ -2966,7 +2966,10 @@ internal static class ArrayBlobWriter
         /// with the first and given back with the workspace: its tables are two megabytes, made
         /// once for many files rather than once per trial or per file.
         /// </summary>
-        internal ZstdCompressor Zstd => _zstd ??= ZstdEncoders.Rent();
+        internal ZstdCompressor Zstd => _zstd ??= ZstdEncoders.Rent(ZstdLevel);
+
+        /// <summary>The zstd level the workspace's trials and frames compress at; 0 for the default.</summary>
+        internal int ZstdLevel { get; init; }
 
         /// <summary>
         /// The rows a zstd frame holds the values of, the writer's block; 0 for one frame a column.
@@ -3033,7 +3036,7 @@ internal static class ArrayBlobWriter
         internal (Workspace Blob, EncodingDictionary Encodings) Measure(VortexEdition target)
         {
             // Never size first: what it measures is the plan every other profile writes.
-            _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan, OwnTypes = OwnTypes };
+            _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel };
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {
                 _measureEncodings = new EncodingDictionary(ComponentKind.Array, target);
