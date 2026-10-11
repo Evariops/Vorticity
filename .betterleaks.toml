@@ -1,0 +1,8 @@
+# betterleaks' default rules, read by the hook and by CI, with what they mistake for secrets here.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The published constants of hash functions, which their authors call secrets: rapidhash's and XXH3's."
+regexTarget = "line"
+regexes = ['''const (ulong|uint) Secret\d+ = 0x[0-9a-fA-F]+''']
