@@ -101,16 +101,16 @@ public sealed record VortexWriteOptions
     /// higher one, up to 22, smaller and slower, and its frames decode a little faster.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">
-    /// The level is below <see cref="Vorticity.Zstd.ZstdCompressor.MinLevel"/> or above
-    /// <see cref="Vorticity.Zstd.ZstdCompressor.MaxLevel"/>.
+    /// The level is below <see cref="ManagedCompressions.Zstd.ZstdCompressor.MinLevel"/> or above
+    /// <see cref="ManagedCompressions.Zstd.ZstdCompressor.MaxLevel"/>.
     /// </exception>
     public int ZstdLevel
     {
         get => _zstdLevel;
         init
         {
-            ArgumentOutOfRangeException.ThrowIfLessThan(value, Vorticity.Zstd.ZstdCompressor.MinLevel);
-            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, Vorticity.Zstd.ZstdCompressor.MaxLevel);
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, ManagedCompressions.Zstd.ZstdCompressor.MinLevel);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, ManagedCompressions.Zstd.ZstdCompressor.MaxLevel);
             _zstdLevel = value;
         }
     }

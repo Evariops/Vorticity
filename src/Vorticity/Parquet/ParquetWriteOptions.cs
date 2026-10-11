@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using Vorticity.Zstd;
+using ManagedCompressions.Zstd;
 
 namespace Vorticity.Parquet;
 
@@ -21,10 +21,10 @@ public enum ParquetCompression : byte
     /// <summary>Brotli, through the base class library.</summary>
     Brotli = 4,
 
-    /// <summary>Zstandard, through Vorticity.Zstd.</summary>
+    /// <summary>Zstandard, through ManagedCompressions.Zstd.</summary>
     Zstd = 6,
 
-    /// <summary>The LZ4 block format, this library's own.</summary>
+    /// <summary>The LZ4 block format, through ManagedCompressions.Lz4.</summary>
     Lz4Raw = 7,
 }
 

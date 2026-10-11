@@ -201,8 +201,8 @@ skips the page faults of its mapping. Parquet's scans, in milliseconds:
 
 Every compressed page of each file, decompressed in memory one after another on one thread: the
 median of 9 passes. Vorticity reads GZIP with its own DEFLATE decoder, which gives the same bytes as
-.NET's on every page, 17% faster. Snappy, LZ4_RAW and ZSTD are the repository's own too, and BROTLI
-is .NET's.
+.NET's on every page, 17% faster. Snappy is the repository's own too, ZSTD and LZ4_RAW come from
+the managed codecs of ManagedCompressions, and BROTLI is .NET's.
 
 ## Reproducing
 

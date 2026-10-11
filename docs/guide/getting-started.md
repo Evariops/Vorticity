@@ -17,8 +17,8 @@ only runs at build time, and `PrivateAssets` keeps it out of whatever your proje
 ```
 
 `Vorticity` is the whole format: opening, scanning, filtering, aggregating, indexes and the writer.
-Its only dependencies are `System.IO.Hashing` and `Vorticity.Zstd`, the managed Zstandard of this
-repository. `Vorticity.Generators` turns a `[VortexRecord]` type into the code that reads and writes
+Its only dependencies are `System.IO.Hashing`, and `ManagedCompressions.Zstd` and
+`ManagedCompressions.Lz4`, the managed Zstandard and LZ4 of a sibling project. `Vorticity.Generators` turns a `[VortexRecord]` type into the code that reads and writes
 it, and ships the analyzers. Two more packages cover separate subjects. Both are experimental and
 referenced the same way, at the same version as the core: `Vorticity.Dataset` for a versioned
 dataset over an object store ([datasets.md](datasets.md)), and `Vorticity.RowEncoding` for

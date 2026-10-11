@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Threading;
+using ManagedCompressions.Zstd;
 using Vorticity.Writing;
-using Vorticity.Zstd;
 
 namespace Vorticity.Parquet.Writing;
 

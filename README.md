@@ -47,8 +47,10 @@ figure is on the pages [against Rust](docs/guide/benchmarks.md),
   file Vorticity writes is read back by the Rust reference in CI.
 
 Beyond the base class library, the core references only `System.IO.Hashing`, a first-party package
-used for the write path's hashes and for Bloom filters, and `Vorticity.Zstd`, this repository's
-managed Zstandard, which handles `vortex.zstd`.
+used for the write path's hashes and for Bloom filters, and two managed codecs from
+[ManagedCompressions](https://github.com/Evariops/ManagedCompressions), a sibling project:
+`ManagedCompressions.Zstd`, which handles `vortex.zstd` and Parquet's ZSTD, and
+`ManagedCompressions.Lz4`, which handles Parquet's LZ4_RAW.
 
 Parity with Rust means that Rust reads every file Vorticity writes and every value reads back equal.
 It does not mean byte parity. The two writers choose their encodings differently by design, so the

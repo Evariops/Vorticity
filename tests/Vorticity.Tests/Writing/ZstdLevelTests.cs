@@ -8,10 +8,10 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
+using ManagedCompressions.Zstd;
 using Vorticity.File;
 using Vorticity.Tests.Scan;
 using Vorticity.Writing;
-using Vorticity.Zstd;
 
 using Xunit;
 

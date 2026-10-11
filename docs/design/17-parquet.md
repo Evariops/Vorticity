@@ -48,7 +48,7 @@ written; interoperability with other readers is not measured.
 | what a page decodes into | the core's canonical arena, the nodes a Vortex block decodes into | 5.5 |
 | the pages it writes | data pages v2, on a grid of 8 192 rows shared by every column | 6.1 |
 | the encodings it writes | chosen per page by exact formulas from one statistics pass, as the core's writer chooses | 6.2 |
-| the codecs | ZSTD through `Vorticity.Zstd`; SNAPPY, LZ4_RAW and GZIP's decoding written here; GZIP's encoding and BROTLI through the base class library; neither LZ4 nor LZO, whose formats the standard does not give | 6.4, 3.2, 7 |
+| the codecs | ZSTD through `ManagedCompressions.Zstd` and LZ4_RAW through `ManagedCompressions.Lz4`; SNAPPY and GZIP's decoding written here; GZIP's encoding and BROTLI through the base class library; neither LZ4 nor LZO, whose formats the standard does not give | 6.4, 3.2, 7 |
 | the gaps in the standard | sixteen, each decided | 3.2 |
 
 ## 2. Where it sits
@@ -56,7 +56,8 @@ written; interoperability with other readers is not measured.
 The code lives in `src/Vorticity/Parquet`, one of the core's three zones: what exists for the Vortex
 format lives in `src/Vorticity/Vortex`, what exists for Parquet here, and the engine both formats
 feed in the folders at the root of `src/Vorticity`. It ships in the `Vorticity` package and depends
-on nothing the core does not, `Vorticity.Zstd` and `System.IO.Hashing`. It targets `net11.0`, is
+on nothing the core does not, `ManagedCompressions.Zstd`, `ManagedCompressions.Lz4` and
+`System.IO.Hashing`. It targets `net11.0`, is
 compatible with trimming and Native AOT, and each of its public types is marked
 `[Experimental("VX0003")]` until its surface settles, as the dataset and the row encoding are.
 
@@ -89,7 +90,7 @@ await writer.CompleteAsync();
 | `Metadata/` | the footer's index and its lazy views; the schema compiled to leaves and levels |
 | `Pages/` | page headers, decompression into place, checksums |
 | `Encodings/` | every encoding of the standard, decoded and encoded |
-| `Codecs/` | SNAPPY, LZ4_RAW, and GZIP's members and DEFLATE data read; adapters to `Vorticity.Zstd` and to the base class library's GZIP encoder and Brotli |
+| `Codecs/` | SNAPPY, and GZIP's members and DEFLATE data read; adapters to `ManagedCompressions.Zstd`, to `ManagedCompressions.Lz4` and to the base class library's GZIP encoder and Brotli |
 | `Levels/` | definition and repetition levels, to and from the arena's validity and list offsets |
 | `Reading/` | `ParquetScanSource`: the planner, the pruning cascade, the column cursors |
 | `Writing/` | the writer, one column writer per leaf, the page index, the Bloom filters, the footer |
@@ -726,8 +727,9 @@ A column chunk has one codec, ZSTD at level 3 under `Auto`, LZ4_RAW under `Faste
 19 under `Smallest`, none under `None`; a column may name its own codec and level in
 `ColumnCompression`, the columns of one ZSTD level sharing their compressors. A v2 page whose values do not
 shrink by an eighth is stored with `is_compressed` false, so its reader skips the codec; a dictionary
-page, which has no such flag, takes the chunk's codec. ZSTD goes through `Vorticity.Zstd`, one frame
-per page. SNAPPY and LZ4_RAW are this package's own, each a valid stream of its format by its own
+page, which has no such flag, takes the chunk's codec. ZSTD goes through `ManagedCompressions.Zstd`,
+one frame per page, and LZ4_RAW through `ManagedCompressions.Lz4`, which writes the blocks lz4 1.10.0
+writes at its default level. SNAPPY is this package's own, a valid stream of its format by its own
 deterministic algorithm, with no claim to match another compressor's bytes. GZIP and BROTLI go
 through `System.IO.Compression`, whose GZIP stream allocates per page; a GZIP page is read by this
 package's own decoder (§7).
@@ -839,7 +841,7 @@ again with hardware intrinsics disabled and compares bit for bit
 | dictionary gather | materializing a dictionary column | gathers of 4 and 8 bytes, views by pairs of 8; codes 8 bits wide or narrower unpacked a byte each, through which a dictionary of up to 128 bytes of values is permuted in registers, 64 bytes of output an instruction (`VPERMI2B`): ClickBench's first file, mostly such columns, scans in 127 ms on one lane against 146 through codes of four bytes |
 | UTF-8 | text | `System.Text.Unicode.Utf8.IsValid` |
 | GZIP | the codec's decoding | members and their trailers checked as zlib checks them; DEFLATE's symbols read from tables of their next bits, 2^11 entries for the literals and lengths and 2^8 for the distances, a longer codeword through a subtable, each entry the bits it takes with its extra bits and its value; the bits in a 64-bit word refilled with no branch while the input holds 16 bytes, up to three literals a refill, matches copied 16 bytes at a time while the output holds 290: the taxi trips' pages decode at 0.67 GB/s against the base class library's 0.59, their scan on one lane in 155 ms against 171, with no allocation per page |
-| SNAPPY, LZ4_RAW | the codecs | Snappy's elements read from a table of their tag while the input holds 64 bytes past it and the output 80, a literal of up to 60 bytes and a copy of up to 64 stored whole in 16-byte vectors, a short offset's pattern doubled into a word, the next tag found from the tag alone: ClickBench's `Title` column, a third of its bytes, reads in 26 ms against 40; LZ4's copies as overlapping 16-byte stores within the slack; encoders by a hash table, greedy, LZ4's end-of-block rules kept |
+| SNAPPY | the codec | Snappy's elements read from a table of their tag while the input holds 64 bytes past it and the output 80, a literal of up to 60 bytes and a copy of up to 64 stored whole in 16-byte vectors, a short offset's pattern doubled into a word, the next tag found from the tag alone: ClickBench's `Title` column, a third of its bytes, reads in 26 ms against 40; the encoder by a hash table, greedy |
 | checksums, hashes | CRC32, XXH64, the split-block filter | `System.IO.Hashing`; the core's `SplitBlockBloom` |
 
 **What the core's ALP brings, and what it does not.** The exponent and factor search and the
@@ -885,7 +887,7 @@ this writer's files under every page version, codec and forced encoding (`FuzzSe
 `VX_FUZZ_SEEDS` names the directory). 300 000 mutations of the suite and 100 000 of this writer's
 files read or fail cleanly; a third of the suite's read to the end.
 
-The package's own decoders, SNAPPY, LZ4_RAW and GZIP's DEFLATE, stop a fast loop where too little
+The package's own decoders, SNAPPY and GZIP's DEFLATE, stop a fast loop where too little
 room is left, as the bytes left or as the first position past the room, the buffer's start where the
 buffer is shorter; never at its end less a margin: an empty buffer is a null pointer, which the
 subtraction wraps past every other address. Twenty thousand mutations of this writer's files found

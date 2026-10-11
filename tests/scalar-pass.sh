@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Runs what CI runs with intrinsics disabled: the classes of Vorticity.Tests that tests/scalar-pass.txt
-# names, which reach every scalar fallback the whole suite does, Parquet's tests among them,
-# Vorticity.Zstd's suite whole, through its portable paths rather than x64's, and the conformance
-# corpus, through the scalar decoders.
+# names, which reach every scalar fallback the whole suite does, Parquet's tests among them, and the
+# conformance corpus, through the scalar decoders.
 # Arguments go to each dotnet test, --no-build say.
 #
 #   bash tests/scalar-pass.sh
@@ -17,6 +16,5 @@ done < <(grep -v -E '^[[:space:]]*(#|$)' "$root/tests/scalar-pass.txt")
 export DOTNET_EnableHWIntrinsic=0
 status=0
 dotnet test --project "$root/tests/Vorticity.Tests" -c Release "${filters[@]}" "$@" || status=1
-dotnet test --project "$root/tests/Vorticity.Zstd.Tests" -c Release "$@" || status=1
 dotnet test --project "$root/tests/Vorticity.Conformance" -c Release "$@" || status=1
 exit $status

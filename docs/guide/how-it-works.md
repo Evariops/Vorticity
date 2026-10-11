@@ -123,10 +123,11 @@ purpose, and the engine can change underneath them.
 | `Vorticity.Generators` | the `[VortexRecord]` generator and the analyzers, at build time only: [records.md](records.md), [diagnostics.md](diagnostics.md) |
 | `Vorticity.Dataset` | a versioned dataset over an object store, experimental: [datasets.md](datasets.md) |
 | `Vorticity.RowEncoding` | the byte-sortable row encoding, experimental: [row-keys.md](row-keys.md) |
-| `Vorticity.Zstd` | the managed Zstandard codec the core uses, also usable on its own |
 
 Only `Vorticity` is needed to read or write a file. Beyond the shared framework it depends on
-nothing but `System.IO.Hashing` and `Vorticity.Zstd`.
+nothing but `System.IO.Hashing`, and `ManagedCompressions.Zstd` and `ManagedCompressions.Lz4`, the
+managed codecs of [ManagedCompressions](https://github.com/Evariops/ManagedCompressions), which are
+also usable on their own.
 
 ## Where to read further
 

@@ -4,17 +4,17 @@
 // the default writer emits neither, both are legal, and `validate` upstream has explicit rules for
 // them.
 //
-// Fixtures are compressed here rather than checked in, because Vorticity.Zstd's compressor writes
-// the frame content size into the header -- which is exactly what the decoder's
+// Fixtures are compressed here rather than checked in, because ManagedCompressions.Zstd's compressor
+// writes the frame content size into the header -- which is exactly what the decoder's
 // validate_frame_content_size check reads back.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text;
+using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
-using Vorticity.Zstd;
 using Xunit;
 
 namespace Vorticity.Tests.Arrays.Decoders.Compressed;

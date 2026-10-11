@@ -1,7 +1,7 @@
 using System;
 using System.Buffers;
 using System.Threading;
-using Vorticity.Zstd;
+using ManagedCompressions.Zstd;
 
 namespace Vorticity.Writing;
 

@@ -1,11 +1,11 @@
 using System;
 using System.Buffers.Binary;
 using System.Text;
+using ManagedCompressions.Zstd;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Encodings;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
-using Vorticity.Zstd;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;

@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Threading;
 using System.Threading.Tasks;
+using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -19,7 +20,6 @@ using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Thrift;
 using Vorticity.Types.Numerics;
 using Vorticity.Writing;
-using Vorticity.Zstd;
 
 namespace Vorticity.Parquet.Writing;
 

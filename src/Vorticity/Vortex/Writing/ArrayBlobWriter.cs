@@ -7,6 +7,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -19,7 +20,6 @@ using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 using Vorticity.Types.Serialization;
-using Vorticity.Zstd;
 
 namespace Vorticity.Writing;
 

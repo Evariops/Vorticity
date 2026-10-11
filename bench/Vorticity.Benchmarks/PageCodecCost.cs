@@ -14,10 +14,10 @@ using System.IO.Compression;
 using System.Linq;
 using System.Threading.Tasks;
 
+using ManagedCompressions.Zstd;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;
-using Vorticity.Zstd;
 
 namespace Vorticity.Benchmarks;
 

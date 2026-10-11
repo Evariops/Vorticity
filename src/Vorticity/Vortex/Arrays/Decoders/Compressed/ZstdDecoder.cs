@@ -7,11 +7,11 @@ using System.Runtime.Intrinsics.X86;
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Unicode;
+using ManagedCompressions.Zstd;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
-using Vorticity.Zstd;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 

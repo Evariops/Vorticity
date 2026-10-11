@@ -296,8 +296,8 @@ Two caveats:
 * Zstd and Pco are not enabled by default (they need `with_compact()` and the `zstd` and `pco`
   features), so ordinary files need neither. This library reads both, including every type, mode and
   delta pco has, and writes both. Zstd costs it no third-party dependency, since its frames go
-  through `Vorticity.Zstd`, this repository's managed Zstandard, which writes libzstd's frames byte
-  for byte. Pco is ported, and its encoder is tried by the size-first profile the way
+  through `ManagedCompressions.Zstd`, the managed Zstandard of a sibling Evariops project, which
+  writes libzstd's frames byte for byte. Pco is ported, and its encoder is tried by the size-first profile the way
   `with_compact()` tries it.
 * `fastlanes.delta` belongs to no edition. The Delta scheme is in the list, but the edition allowlist
   forbids its id, so it only appears in files written with enforcement turned off.

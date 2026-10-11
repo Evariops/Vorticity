@@ -87,7 +87,7 @@ jobs:
               # hand, their output committed).
               docs/* | LICENSE | .gitignore | renovate.json | .github/ISSUE_TEMPLATE/* | \
                 .github/release-drafter.yml | .github/workflows/release-drafter.yml | \
-                tools/row-vectors/* | tools/vxbench-rs/* | tools/pmu/* | tools/disasm.sh) ;;
+                tools/row-vectors/* | tools/vxbench-rs/* | tools/disasm.sh) ;;
               # Every job builds the library. Its markdown is code too: a package's readme, the
               # analyzer release notes the generators read.
               src/*) test=true package=true crosscheck=true ;;
@@ -99,8 +99,6 @@ jobs:
               tools/conformance-gen/* | spec/*) crosscheck=true ;;
               # In the solution the package job builds, and referenced by no test project.
               bench/* | samples/* | tools/vxdump/* | tools/pqdump/* | tools/testimpact/*) package=true ;;
-              # The script that writes Vorticity.Zstd's test data.
-              tools/native-ref/*) test=true ;;
               # The tests, the build's configuration, this workflow, and any path added later.
               *) test=true package=true crosscheck=true ;;
             esac
@@ -197,19 +195,16 @@ jobs:
             key: alone
             projects: tests/Vorticity.Tests
             runs-alone: true
-          - name: Vorticity.Zstd and the conformance corpus
-            key: zstd
-            projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
-            zstd-data: true
+          - name: the conformance corpus
+            key: conformance
+            projects: tests/Vorticity.Conformance
           # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is
           # exercised: the classes tests/scalar-pass.txt names, which reach every fallback the
           # whole suite does, Parquet's tests among them, and the conformance corpus run again with
-          # intrinsics disabled. Vorticity.Zstd's suite runs whole: an x64 runner takes its x64
-          # paths, and with intrinsics disabled the portable ones, Arm64's shape without its vectors.
-          - name: Vorticity's fallbacks, Vorticity.Zstd and the conformance corpus, intrinsics disabled
+          # intrinsics disabled.
+          - name: Vorticity's fallbacks and the conformance corpus, intrinsics disabled
             key: scalar
-            projects: tests/Vorticity.Tests tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
-            zstd-data: true
+            projects: tests/Vorticity.Tests tests/Vorticity.Conformance
             scalar-pass: true
     steps:
       # Nothing here pushes to git: the token is not left on disk.
@@ -230,13 +225,6 @@ jobs:
           for project in $PROJECTS; do
             dotnet build "$project" -c Release -p:RunAnalyzers=false
           done
-
-      # Vorticity.Zstd's tests read zstd's golden files and a corpus of frames from zstd's
-      # decodecorpus, which the repository does not keep: written here from zstd 1.5.7's release,
-      # checked against its SHA-256. The tests that read them fail in CI without them.
-      - name: Write Vorticity.Zstd's test data
-        if: matrix.zstd-data
-        run: bash tools/native-ref/testdata.sh
 
       # The filters are words, their wildcards xunit's own: the shell expands no file name. Every
       # step below writes an xunit report of each test's time, which the last one keeps.
