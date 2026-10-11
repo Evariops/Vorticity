@@ -219,11 +219,45 @@ public sealed class MemorySegmentSourceTests
         await source.ReadManyAsync(set, CancellationToken.None);
         Assert.True(set.IsPopulated);
         SegmentOwner owner = set.GetOwner(slot);
+        int held = owner.RefCount;
 
         await source.ReadManyAsync(set, CancellationToken.None);
 
         Assert.Same(owner, set.GetOwner(slot));
-        Assert.Equal(1, owner.RefCount);
+        Assert.Equal(held, owner.RefCount);
+    }
+
+    [Fact]
+    public async Task A_batch_shares_the_source_and_allocates_nothing_per_slot()
+    {
+        // The slots of a batch are views of the bytes the source holds, each a retain of its one
+        // owner: a scan's every batch would otherwise pay an owner per segment.
+        ISegmentReader source = new MemorySegmentSource(Placed(Pattern(1 << 16), 0));
+        using SegmentRequestSet set = new SegmentRequestSet();
+        for (int slot = 0; slot < 64; slot++)
+        {
+            set.Add(Spec((ulong)slot * 1_024, 1_000, alignmentExponent: 6));
+        }
+
+        await source.ReadManyAsync(set, CancellationToken.None);
+        SegmentOwner shared = set.GetOwner(0);
+        for (int slot = 0; slot < set.Count; slot++)
+        {
+            Assert.Same(shared, set.GetOwner(slot));
+            Assert.Equal(Pattern(1 << 16).AsSpan(slot * 1_024, 1_000).ToArray(), set.GetBuffer(slot).Span.ToArray());
+        }
+
+        set.Release();
+        for (int slot = 0; slot < 64; slot++)
+        {
+            set.Add(Spec((ulong)slot * 1_024, 1_000, alignmentExponent: 6));
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        await source.ReadManyAsync(set, CancellationToken.None);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        set.Release();
+        Assert.Equal(0, allocated);
     }
 
     /// <summary><paramref name="data"/> copied into pinned memory, <paramref name="past"/> bytes past a 64-byte boundary.</summary>

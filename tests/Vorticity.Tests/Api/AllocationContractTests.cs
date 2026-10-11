@@ -46,6 +46,43 @@ public sealed class AllocationContractTests
     }
 
     /// <summary>
+    /// A sealed file's batches cost what a plain file's do: the frames decrypted into pooled blocks,
+    /// cipher instances kept per lane, the ciphertext read through a request set the reader keeps.
+    /// The sealed bytes are held in memory by a <c>MemorySegmentSource</c>, whose batch reads are views
+    /// of them that allocate nothing, so that what is counted is the sealing.
+    /// </summary>
+    [Fact]
+    public async Task AScanOfASealedFileAllocatesNothingPerBatchAfterTheFirst()
+    {
+        ReleaseOnlyCeilings.Require();
+        System.Threading.CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+        byte[] sealedBytes;
+        using (DataKey key = await keyring.GenerateAsync(ReadOnlyMemory<byte>.Empty, ct))
+        {
+            byte[] plain = await System.IO.File.ReadAllBytesAsync(await ContractFile.PathAsync(), ct);
+            sealedBytes = await Sealing.SealedObjects.SealAsync(plain, key, Vorticity.Sealing.SealParameters.ForFile(), 1 << 20, ct);
+        }
+
+        Vorticity.Sealing.SealedSegmentReader reader = await Vorticity.Sealing.SealedSegmentReader.OpenAsync(
+            new Vorticity.IO.MemorySegmentSource(sealedBytes),
+            ownsInner: true,
+            (descriptor, token) => keyring.UnwrapAsync(descriptor.KeyId, descriptor.WrappedKey, descriptor.KeyContext, token),
+            ct);
+        await using VortexFile file = await VortexFile.OpenAsync(reader, VortexOpenOptions.Default, ct);
+        for (int i = 0; i < WarmUp; i++)
+        {
+            await TypedAsync(file, Sequential);
+        }
+
+        (long batches, long allocated) = await TypedAsync(file, Sequential);
+        Assert.True(batches > 8, $"the file gave {batches} batches, too few to say anything per batch");
+        Assert.True(
+            allocated == 0,
+            string.Create(CultureInfo.InvariantCulture, $"a scan of a sealed file allocated {allocated} B over its {batches - 1} batches after the first"));
+    }
+
+    /// <summary>
     /// A filter adds the evaluation, the comparison an encoding answers in place, and either the
     /// compaction or the selection a batch delivered whole carries.
     /// </summary>
@@ -386,4 +423,5 @@ public sealed class AllocationContractTests
 
         return sum;
     }
+
 }

@@ -370,20 +370,39 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// Whether the commit object of <paramref name="version"/> is whole: read in full and checked from
-    /// its preamble to its trailer, which a writer that stopped early never wrote.
+    /// its preamble to its trailer, which a writer that stopped early never wrote. A sealed one read
+    /// without the dataset's keys is checked by its envelope's header and trailer instead.
     /// </summary>
     public static async ValueTask<bool> IsWholeAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
     {
         string key = CommitKey.For(version);
-        ObjectHead head = await store.HeadAsync(key, cancellationToken).ConfigureAwait(false)
-            ?? throw ObjectNotFoundException.For(key);
-        if (head.Length > int.MaxValue)
+        long objectLength;
+        if (store is SealedObjectStore { Seals: true } sealedStore)
+        {
+            // A sealed commit's plaintext length comes from its head; one torn short of its trailer has none.
+            try
+            {
+                objectLength = await sealedStore.CommitLengthAsync(key, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CommitFormatException)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            ObjectHead head = await store.HeadAsync(key, cancellationToken).ConfigureAwait(false)
+                ?? throw ObjectNotFoundException.For(key);
+            objectLength = head.Length;
+        }
+
+        if (objectLength > int.MaxValue)
         {
             return false;
         }
 
         const int Chunk = 1 << 20;
-        byte[] bytes = new byte[head.Length];
+        byte[] bytes = new byte[objectLength];
         for (int at = 0; at < bytes.Length; at += Chunk)
         {
             int length = Math.Min(Chunk, bytes.Length - at);
@@ -394,6 +413,17 @@ internal static class DatasetCommitter
             }
 
             range.Bytes.CopyTo(bytes.AsSpan(at));
+        }
+
+        // A sealed commit read without the dataset's keys is judged by its envelope, which is whole
+        // exactly when its writer finished it.
+        if (bytes.AsSpan().StartsWith(Sealing.SealedFormat.HeaderMagic))
+        {
+            Vorticity.IO.MemorySegmentSource envelope = new Vorticity.IO.MemorySegmentSource(bytes);
+            await using (envelope.ConfigureAwait(false))
+            {
+                return await Sealing.SealedFiles.IsWholeAsync(envelope, bytes.Length, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         try
@@ -829,6 +859,11 @@ internal static class DatasetCommitter
 
                     break;
                 }
+
+                case DatasetOperation.Rekey:
+                    // The tree as it is, under the data key the store now seals with.
+                    outcomes.Add(OperationOutcome.Applied);
+                    break;
 
                 default:
                     throw new ArgumentException(

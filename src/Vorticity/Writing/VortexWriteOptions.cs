@@ -242,6 +242,9 @@ public sealed record VortexWriteOptions
     /// <summary>Where a locating index's chunk runs wait for their merge; null for the system's temporary directory.</summary>
     internal string? ScratchDirectory { get; init; }
 
+    /// <summary>Whether the runs the writer moves to <see cref="ScratchDirectory"/> are sealed: set for a writer of a session that seals its files.</summary>
+    internal bool SealScratch { get; init; }
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

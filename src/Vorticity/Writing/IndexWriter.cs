@@ -79,7 +79,7 @@ internal sealed class IndexWriter : IDisposable
     internal IndexWriter(
         WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
-        long wideRowsAbove = uint.MaxValue)
+        long wideRowsAbove = uint.MaxValue, bool sealScratch = false)
     {
         _policy = policy;
         _isTabular = isTabular;
@@ -179,7 +179,7 @@ internal sealed class IndexWriter : IDisposable
                 builder.Order = order++;
                 if (builder is KeyIndexBuilder locating)
                 {
-                    _scratch ??= new RunScratch(scratchMemoryBytes, scratchDirectory);
+                    _scratch ??= new RunScratch(scratchMemoryBytes, scratchDirectory, sealScratch);
                     locating.Scratch = _scratch;
                     locating.BlockRows = blockRows;
                     locating.WideRowsAbove = wideRowsAbove;

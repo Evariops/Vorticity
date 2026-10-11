@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +26,9 @@ public sealed class VortexSessionOptions
     private QueryMemoryBudget? _memoryBudget;
     private string? _scratchDirectory;
     private ScratchBudget? _scratchBudget;
+    private VortexKeyring? _keyring;
+    private bool _encryptFiles;
+    private bool _refusePlaintext;
     private bool _frozen;
 
     internal VortexSessionOptions()
@@ -207,6 +211,42 @@ public sealed class VortexSessionOptions
         set => _scratchBudget = Set(value);
     }
 
+    /// <summary>
+    /// The keys the session seals files with and opens sealed files with; null, the default, opens
+    /// none and seals none. A sealed file opens whenever its key is in the ring, whatever
+    /// <see cref="EncryptFiles"/> and <see cref="RefusePlaintext"/> say.
+    /// </summary>
+    /// <remarks>
+    /// The keyring is the host's: disposing the session leaves it alone, and wipes only the data keys
+    /// the session drew from it or unwrapped with it. A sealed file is read positionally and never
+    /// mapped, through the session's <see cref="SegmentCache"/>, which then holds plaintext.
+    /// </remarks>
+    public VortexKeyring? Keyring
+    {
+        get => _keyring;
+        set => _keyring = Set(value);
+    }
+
+    /// <summary>
+    /// Whether every file the session writes is sealed under <see cref="Keyring"/>: to a path or to a
+    /// caller's pipe. False by default. A session that seals appends to no file yet.
+    /// </summary>
+    public bool EncryptFiles
+    {
+        get => _encryptFiles;
+        set => _encryptFiles = Set(value);
+    }
+
+    /// <summary>
+    /// Whether a plain file is refused at open, so that a reader that expects sealed data cannot be
+    /// handed plain bytes in their place. False by default.
+    /// </summary>
+    public bool RefusePlaintext
+    {
+        get => _refusePlaintext;
+        set => _refusePlaintext = Set(value);
+    }
+
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>
     public VortexExtensionRegistry Extensions { get; } = new VortexExtensionRegistry();
 
@@ -215,6 +255,18 @@ public sealed class VortexSessionOptions
 
     internal void Freeze()
     {
+        if ((_encryptFiles || _refusePlaintext) && _keyring is null)
+        {
+            throw new InvalidOperationException(
+                "EncryptFiles and RefusePlaintext need a Keyring: set VortexSessionOptions.Keyring too.");
+        }
+
+        if (_keyring is not null && !System.Security.Cryptography.AesGcm.IsSupported)
+        {
+            throw new PlatformNotSupportedException(
+                "This platform has no AES-GCM, so a session can neither seal files nor open sealed ones.");
+        }
+
         _frozen = true;
         Extensions.Freeze();
     }
@@ -250,6 +302,7 @@ public sealed class VortexSession : IAsyncDisposable
         Mappings = options.MapFiles && options.MappedFileCacheCount > 0 && FileInode.IsSupported
             ? new MappedFileCache(options.MappedFileCacheCount)
             : null;
+        Keys = options.Keyring is { } keyring ? new Sealing.SessionKeys(keyring) : null;
     }
 
     /// <summary>
@@ -266,6 +319,12 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
     internal MappedFileCache? Mappings { get; }
+
+    /// <summary>The data keys the session holds, or null when it has no keyring.</summary>
+    internal Sealing.SessionKeys? Keys { get; }
+
+    /// <summary>Whether the files the session writes are sealed.</summary>
+    internal bool Seals => Keys is not null && Options.EncryptFiles;
 
     /// <summary>A session configured by <paramref name="configure"/>.</summary>
     /// <param name="configure">Sets the options; they are frozen when it returns.</param>
@@ -310,9 +369,104 @@ public sealed class VortexSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(source);
         ThrowIfDisposed();
         ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true, Options.EnginePool);
-        VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(reader, this), Effective(options), cancellationToken).ConfigureAwait(false);
+        VortexOpenOptions effective = Effective(options);
+        VortexTornTail? torn = null;
+        if (Keys is not null)
+        {
+            bool ownsSource = !effective.LeaveSourceOpen;
+            ISegmentReader opened;
+            try
+            {
+                (opened, torn) = await Sealing.SealedFiles.ReaderAsync(
+                    reader, ownsSource, this, source.GetType().Name, effective.TornTail, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (ownsSource)
+                {
+                    await reader.DisposeAsync().ConfigureAwait(false);
+                }
+
+                throw;
+            }
+
+            // The file owns the sealed reader, which owns the caller's source as the options say.
+            if (!ReferenceEquals(opened, reader))
+            {
+                reader = opened;
+                effective = effective with { LeaveSourceOpen = false };
+            }
+        }
+
+        VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(reader, this), effective, cancellationToken).ConfigureAwait(false);
+        if (torn is not null)
+        {
+            file.TornTail = torn;
+        }
+
         await AttachAsync(file, source.GetType().Name).ConfigureAwait(false);
         return file;
+    }
+
+    /// <summary>
+    /// Writes the plaintext of the sealed file at <paramref name="path"/> to <paramref name="destination"/>:
+    /// byte for byte the Vortex file its writer would have written plain, which any Vortex reader opens.
+    /// </summary>
+    /// <param name="path">A sealed file whose key the session's keyring holds.</param>
+    /// <param name="destination">Where the plaintext goes; the caller disposes it.</param>
+    /// <param name="cancellationToken">Cancels the reads and the writes.</param>
+    /// <returns>A task that completes when every byte is written.</returns>
+    /// <exception cref="InvalidOperationException">The session holds no keyring.</exception>
+    /// <exception cref="VortexFormatException">The file is not sealed.</exception>
+    /// <exception cref="VortexEncryptionException">The file's key is not in the ring, or the file was altered.</exception>
+    public async ValueTask DecryptAsync(string path, System.IO.Stream destination, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(destination);
+        ThrowIfDisposed();
+        Sealing.SessionKeys keys = Keys ?? throw new InvalidOperationException(
+            "The session holds no keyring, so it opens no sealed file: set VortexSessionOptions.Keyring.");
+        const int Chunk = 4 << 20;
+        FileSegmentSource file = new FileSegmentSource(path);
+        Sealing.SealedSegmentReader reader;
+        try
+        {
+            reader = await Sealing.SealedSegmentReader.OpenAsync(file, ownsInner: true, keys.UnwrapAsync, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await file.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        await using (reader.ConfigureAwait(false))
+        {
+            long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+            byte[] buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min(Chunk, Math.Max(length, 1)));
+            try
+            {
+                for (long at = 0; at < length; at += Chunk)
+                {
+                    int wanted = (int)Math.Min(Chunk, length - at);
+                    SegmentOwner owner = await reader.ReadRangeAsync(at, wanted, 1, cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        owner.Buffer.Span.CopyTo(buffer);
+                    }
+                    finally
+                    {
+                        owner.Release();
+                    }
+
+                    await destination.WriteAsync(buffer.AsMemory(0, wanted), cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(buffer);
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
     }
 
     /// <summary>
@@ -400,6 +554,40 @@ public sealed class VortexSession : IAsyncDisposable
     }
 
     /// <summary>
+    /// Indexes the file at <paramref name="path"/> under <paramref name="policy"/> and appends the runs
+    /// behind it, as <see cref="VortexFileIndexer.AppendIndexesAsync(string, IndexPolicy, CancellationToken)"/> does, in this session: a sealed
+    /// file takes them as an epoch of its own, under the data key it names.
+    /// </summary>
+    /// <param name="path">A file this library wrote, or one of the same shape.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="cancellationToken">Cancels the read and the build; the copy behind the file, once begun, completes.</param>
+    /// <returns>What became of every index the policy asked for.</returns>
+    /// <exception cref="VortexEncryptionException">The file is sealed and its key cannot be had, or it is plain and the session seals what it writes.</exception>
+    public ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(string path, IndexPolicy policy, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return VortexFileIndexer.AppendIndexesAsync(path, policy, this, cancellationToken);
+    }
+
+    /// <summary>
+    /// Indexes the rows <paramref name="rows"/> of the file at <paramref name="path"/> into a fragment,
+    /// as <see cref="VortexFileIndexer.BuildFragmentAsync(string, IndexPolicy, RowRange?, CancellationToken)"/>
+    /// does, in this session: the fragment of a sealed file, or one built in a session that seals what
+    /// it writes, is sealed, and opens in a session whose keyring holds its key.
+    /// </summary>
+    /// <param name="path">The file, read and never written.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="rows">The rows to index, whole blocks; null for the whole file.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The fragment, and what became of every index the policy asked for.</returns>
+    /// <exception cref="VortexEncryptionException">The file is sealed and its key cannot be had.</exception>
+    public ValueTask<IndexFragment> BuildFragmentAsync(string path, IndexPolicy policy, RowRange? rows = null, CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        return VortexFileIndexer.BuildFragmentAsync(path, policy, rows, this, cancellationToken);
+    }
+
+    /// <summary>
     /// Measures, on a sample of <paramref name="file"/>, every way the writer can write each of its
     /// columns, and ranks them for the reads <paramref name="goal"/> describes.
     /// </summary>
@@ -472,6 +660,7 @@ public sealed class VortexSession : IAsyncDisposable
 
         Options.SegmentCache?.Clear();
         Mappings?.Clear();
+        Keys?.Dispose();
         if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))
         {
             aligned.Dispose();

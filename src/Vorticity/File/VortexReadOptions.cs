@@ -107,4 +107,11 @@ internal sealed class VortexReadOptions
     /// being left out with its reason. Default <see langword="false"/>.
     /// </summary>
     public bool IndexFragmentsNeedIdentity { get; init; }
+
+    /// <summary>
+    /// Whether the fragments come from a store that authenticated them, as a dataset's commits are
+    /// when the dataset is encrypted: a session that refuses plaintext takes them plain. Others it
+    /// takes sealed only.
+    /// </summary>
+    internal bool IndexFragmentsAuthenticated { get; init; }
 }

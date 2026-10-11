@@ -31,9 +31,17 @@ public sealed record IndexFragment(ReadOnlyMemory<byte> Bytes, IReadOnlyList<Ind
 
 /// <summary>Builds indexes over a file that already exists; no data byte moves.</summary>
 /// <remarks>
+/// <para>
 /// The rows are read back and go through the builders as they would have on the write. The policy
 /// is the writer's, with its budget, its key encoder and its <c>required</c> indexes, the budget
 /// measured against the file's own bytes.
+/// </para>
+/// <para>
+/// The members that take a path work in <see cref="VortexSession.Default"/>. A sealed file is indexed
+/// through a session whose keyring holds its key, with <see cref="VortexSession.AppendIndexesAsync"/>
+/// and <see cref="VortexSession.BuildFragmentAsync"/>: the runs appended to it are sealed as an epoch
+/// of its own, and a fragment built from it, or in a session that seals what it writes, is sealed too.
+/// </para>
 /// </remarks>
 public static class VortexFileIndexer
 {
@@ -63,11 +71,16 @@ public static class VortexFileIndexer
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can index.</exception>
     /// <exception cref="IOException">The file changed while it was being indexed, or could not be written.</exception>
     public static ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
-        string path, IndexPolicy policy, CancellationToken cancellationToken = default)
+        string path, IndexPolicy policy, CancellationToken cancellationToken = default) =>
+        AppendIndexesAsync(path, policy, VortexSession.Default, cancellationToken);
+
+    /// <summary>The same indexing, of a file opened in <paramref name="session"/>.</summary>
+    internal static ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
+        string path, IndexPolicy policy, VortexSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(policy);
-        return AppendCoreAsync(path, policy.ToWritePolicy(), OptionsOf(policy), policy, cancellationToken);
+        return AppendCoreAsync(path, policy.ToWritePolicy(), OptionsOf(policy), policy, session, cancellationToken);
     }
 
     /// <summary>
@@ -95,18 +108,23 @@ public static class VortexFileIndexer
     /// <exception cref="VortexException">An index the policy marked required was not built.</exception>
     /// <exception cref="VortexFormatException">The file is malformed, or has a torn tail.</exception>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can index.</exception>
-    public static async ValueTask<IndexFragment> BuildFragmentAsync(
-        string path, IndexPolicy policy, RowRange? rows = null, CancellationToken cancellationToken = default)
+    public static ValueTask<IndexFragment> BuildFragmentAsync(
+        string path, IndexPolicy policy, RowRange? rows = null, CancellationToken cancellationToken = default) =>
+        BuildFragmentAsync(path, policy, rows, VortexSession.Default, cancellationToken);
+
+    /// <summary>The same fragment, of a file opened in <paramref name="session"/>.</summary>
+    internal static async ValueTask<IndexFragment> BuildFragmentAsync(
+        string path, IndexPolicy policy, RowRange? rows, VortexSession session, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(policy);
-        VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
+        VortexFile file = await session.OpenAsync(path, null, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
             string? token = file.StoredIdentity is null ? IndexContainer.TokenOf(path) : null;
             return await FragmentCoreAsync(
                 file, policy.ToWritePolicy(), rows ?? new RowRange(0, file.RowCount), token, null, OptionsOf(policy), policy,
-                cancellationToken).ConfigureAwait(false);
+                SealsFragment(file), cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -124,7 +142,8 @@ public static class VortexFileIndexer
     /// <returns>The fragment, and what became of every index the policy asked for.</returns>
     /// <remarks>
     /// As <see cref="BuildFragmentAsync(string, IndexPolicy, RowRange?, CancellationToken)"/>, for a
-    /// file whose bytes come from anywhere: the store, a cache, memory.
+    /// file whose bytes come from anywhere: the store, a cache, memory. The fragment of a sealed file,
+    /// or of a file opened in a session that seals what it writes, is sealed under that session's keys.
     /// </remarks>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException">
@@ -142,7 +161,7 @@ public static class VortexFileIndexer
         ArgumentNullException.ThrowIfNull(policy);
         return FragmentCoreAsync(
             file, policy.ToWritePolicy(), rows ?? new RowRange(0, file.RowCount), null, null, OptionsOf(policy), policy,
-            cancellationToken);
+            SealsFragment(file), cancellationToken);
     }
 
     /// <summary>
@@ -159,8 +178,11 @@ public static class VortexFileIndexer
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(policy);
-        return AppendCoreAsync(path, policy, options, null, cancellationToken);
+        return AppendCoreAsync(path, policy, options, null, VortexSession.Default, cancellationToken);
     }
+
+    /// <summary>Whether a fragment of <paramref name="file"/> is sealed: the file is, or its session seals what it writes.</summary>
+    private static bool SealsFragment(VortexFile file) => file.SealedLayout is not null || file.Session.Seals;
 
     /// <summary>Why a file's shape keeps it from being indexed after it was written.</summary>
     private static VortexUnsupportedException Refused(string why) =>
@@ -191,27 +213,40 @@ public static class VortexFileIndexer
     }
 
     private static async ValueTask<IReadOnlyList<IndexWriteReport>> AppendCoreAsync(
-        string path, WritePolicy policy, VortexWriteOptions? options, IndexPolicy? declared, CancellationToken cancellationToken)
+        string path, WritePolicy policy, VortexWriteOptions? options, IndexPolicy? declared, VortexSession session,
+        CancellationToken cancellationToken)
     {
         string scratch = path + ".indexing-" + Guid.NewGuid().ToString("N");
         IReadOnlyList<IndexWriteReport> reports;
         long length;
         try
         {
-            VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
+            VortexFile file = await session.OpenAsync(path, null, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
                 VortexFileRepair.ThrowIfTorn(path, file, "An index");
                 RequireColumns(file.DType, declared);
-                length = file.FileLength;
+
+                // A sealed file takes the runs and the tail as an epoch of its own, under the data key
+                // it names, after its last trailer; a session that seals adds no plaintext to a plain one.
+                Sealing.SealedLayout? sealedLayout = file.SealedLayout;
+                if (sealedLayout is null && session.Seals)
+                {
+                    throw VortexFileWriter.RefusedPlainAppend(path, "an index");
+                }
+
+                length = sealedLayout?.ObjectLength ?? file.FileLength;
 
                 // The tail is written into the scratch from its start, while its offsets count from
-                // the end of the file it goes behind.
+                // the end of the file it goes behind: of its plaintext, for a sealed one. The scratch
+                // of a sealed file holds the sealed epoch, so no plaintext reaches it.
                 FilePipeWriter tail = new FilePipeWriter(
                     System.IO.File.OpenHandle(scratch, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.Asynchronous),
                     0,
                     file.Session.Options.MemoryPool);
-                PipeSegmentSink sink = new PipeSegmentSink(tail, length);
+                ISegmentSink sink = sealedLayout is null
+                    ? new PipeSegmentSink(tail, file.FileLength)
+                    : new Sealing.SealingSegmentSink(tail, sealedLayout, ct => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, ct));
                 try
                 {
                     EncodingDictionary encodings = new EncodingDictionary(ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
@@ -226,10 +261,11 @@ public static class VortexFileIndexer
                         ? await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false)
                         : null;
                     using IndexWriter indexes = await BuildAsync(
-                        file, sink, policy, options, encodings, previous?.Entries ?? [], length,
-                        new RowRange(0, file.RowCount), cancellationToken).ConfigureAwait(false);
+                        file, sink, policy, options, encodings, previous?.Entries ?? [], file.FileLength,
+                        new RowRange(0, file.RowCount), sealedLayout is not null, cancellationToken).ConfigureAwait(false);
                     reports = [.. indexes.Reports];
                     await WriteTailAsync(file, sink, indexes, encodings, options?.Identity, cancellationToken).ConfigureAwait(false);
+                    await sink.FinishAsync(cancellationToken).ConfigureAwait(false);
                     await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
                     await tail.CompleteAsync().ConfigureAwait(false);
                 }
@@ -237,6 +273,10 @@ public static class VortexFileIndexer
                 {
                     tail.Abandon();
                     throw;
+                }
+                finally
+                {
+                    (sink as Sealing.SealingSegmentSink)?.Release();
                 }
             }
 
@@ -346,12 +386,15 @@ public static class VortexFileIndexer
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(policy);
-        return FragmentCoreAsync(file, policy, rows, storeToken, contentHash, options, null, cancellationToken);
+
+        // A dataset's fragments go in its commits, which an encrypted dataset seals whole.
+        return FragmentCoreAsync(file, policy, rows, storeToken, contentHash, options, null, seal: false, cancellationToken);
     }
 
+    /// <summary>The fragment, in memory: sealed under the file's session's keys when <paramref name="seal"/> says so.</summary>
     private static async ValueTask<IndexFragment> FragmentCoreAsync(
         VortexFile file, WritePolicy policy, RowRange rows, string? storeToken, UInt128? contentHash,
-        VortexWriteOptions? options, IndexPolicy? declared, CancellationToken cancellationToken)
+        VortexWriteOptions? options, IndexPolicy? declared, bool seal, CancellationToken cancellationToken)
     {
         VortexFileRepair.ThrowIfTorn("The file", file, "A fragment");
         if (file.StoredIdentity is null && storeToken is null)
@@ -365,39 +408,64 @@ public static class VortexFileIndexer
 
         RequireColumns(file.DType, declared);
         MemoryStream bytes = new MemoryStream();
-        StreamSegmentSink sink = new StreamSegmentSink(bytes);
-        await using (sink.ConfigureAwait(false))
+        if (!seal)
+        {
+            StreamSegmentSink sink = new StreamSegmentSink(bytes);
+            await using (sink.ConfigureAwait(false))
+            {
+                IReadOnlyList<IndexWriteReport> reports = await WriteContainerAsync(
+                    file, sink, policy, rows, storeToken, contentHash, options, sealScratch: false, cancellationToken).ConfigureAwait(false);
+                return new IndexFragment(bytes.ToArray(), reports);
+            }
+        }
+
+        // Sealed as a file the session writes is, as it is written: its plaintext is never whole in memory.
+        System.IO.Pipelines.PipeWriter pipe = System.IO.Pipelines.PipeWriter.Create(
+            bytes, new System.IO.Pipelines.StreamPipeWriterOptions(leaveOpen: true));
+        Sealing.SealingSegmentSink sealing = new Sealing.SealingSegmentSink(
+            pipe, Sealing.SealParameters.ForFile(), file.Session.Keys!.FileKeyAsync);
+        try
         {
             IReadOnlyList<IndexWriteReport> reports = await WriteContainerAsync(
-                file, sink, policy, rows, storeToken, contentHash, options, cancellationToken).ConfigureAwait(false);
+                file, sealing, policy, rows, storeToken, contentHash, options, sealScratch: true, cancellationToken).ConfigureAwait(false);
+            await pipe.CompleteAsync().ConfigureAwait(false);
             return new IndexFragment(bytes.ToArray(), reports);
+        }
+        finally
+        {
+            sealing.Release();
         }
     }
 
     /// <summary>Writes one container: the magic, the runs, the bound directory and the trailer.</summary>
     private static async ValueTask<IReadOnlyList<IndexWriteReport>> WriteContainerAsync(
         VortexFile file, ISegmentSink sink, WritePolicy policy, RowRange rows, string? token, UInt128? hash,
-        VortexWriteOptions? options, CancellationToken cancellationToken)
+        VortexWriteOptions? options, bool sealScratch, CancellationToken cancellationToken)
     {
         await sink.WriteAsync(IndexContainer.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
         EncodingDictionary encodings = new EncodingDictionary(
             ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
         using IndexWriter indexes = await BuildAsync(
-            file, sink, policy, options, encodings, [], 0, rows, cancellationToken).ConfigureAwait(false);
+            file, sink, policy, options, encodings, [], 0, rows, sealScratch, cancellationToken).ConfigureAwait(false);
         FragmentBinding binding = new FragmentBinding(file.FileLength, file.StoredIdentity, token, hash, [.. encodings.Ids]);
         long offset = sink.Position;
         byte[] directory = indexes.Directory(file.RowCount, binding)!;
         await sink.WriteAsync(directory, cancellationToken).ConfigureAwait(false);
         await sink.WriteAsync(IndexContainer.Trailer(offset, directory.Length), cancellationToken).ConfigureAwait(false);
+        await sink.FinishAsync(cancellationToken).ConfigureAwait(false);
         await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
         return [.. indexes.Reports];
     }
 
-    /// <summary>Feeds the range's rows to the builders and writes their runs.</summary>
+    /// <summary>
+    /// Feeds the range's rows to the builders and writes their runs. What the builders move to disk is
+    /// sealed when <c>sealScratch</c> asks, as for a sealed fragment, and always for a sealed file or a
+    /// file in a session that seals.
+    /// </summary>
     private static async ValueTask<IndexWriter> BuildAsync(
         VortexFile file, ISegmentSink sink, WritePolicy policy, VortexWriteOptions? options,
         EncodingDictionary encodings, IReadOnlyList<IndexEntry> previous, long previousEof, RowRange range,
-        CancellationToken cancellationToken)
+        bool sealScratch, CancellationToken cancellationToken)
     {
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -460,7 +528,7 @@ public static class VortexFileIndexer
             policy, schema, isTabular: true, fields,
             options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
             options?.ScratchDirectory, options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes,
-            options?.WideRowsAbove ?? uint.MaxValue)
+            options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals)
         {
             Fences = options?.Fences ?? FenceShape.Default,
         };

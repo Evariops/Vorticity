@@ -717,6 +717,11 @@ Vorticity:     property int Decoded { get; init; }
 Vorticity:     property int Proven { get; init; }
 Vorticity:     property int Pruned { get; init; }
 Vorticity:     property long Rows { get; init; }
+Vorticity: sealed class Vorticity.DataKey : IDisposable
+Vorticity:     ctor DataKey(string, ReadOnlySpan<byte>, ReadOnlySpan<byte>)
+Vorticity:     method void Dispose()
+Vorticity:     property ReadOnlyMemory<byte> WrappedKey { get; }
+Vorticity:     property string KeyId { get; }
 Vorticity: static class Vorticity.DecimalAggregates
 Vorticity:     method Sym<Nullable<double>> Average<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
 Vorticity:     method Sym<Nullable<double>> Average<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
@@ -1658,6 +1663,16 @@ Vorticity:     method Nullable<VortexEdition> IntroducedIn(ComponentKind, string
 Vorticity:     method bool Contains(VortexEdition, ComponentKind, string)
 Vorticity:     method string MinimumRustVersion(VortexEdition)
 Vorticity:     method string Name(VortexEdition)
+Vorticity: enum Vorticity.VortexEncryptionError
+Vorticity:     const VortexEncryptionError NoKey = 0
+Vorticity:     const VortexEncryptionError Refused = 2
+Vorticity:     const VortexEncryptionError Unauthenticated = 1
+Vorticity:     field int value__
+Vorticity: sealed class Vorticity.VortexEncryptionException : VortexException
+Vorticity:     ctor VortexEncryptionException(VortexEncryptionError, string)
+Vorticity:     ctor VortexEncryptionException(VortexEncryptionError, string, Exception)
+Vorticity:     property VortexEncryptionError Error { get; }
+Vorticity:     property string KeyId { get; init; }
 Vorticity: class Vorticity.VortexException : Exception
 Vorticity:     ctor VortexException()
 Vorticity:     ctor VortexException(string)
@@ -1776,6 +1791,17 @@ Vorticity:     property Nullable<bool> FileHashHolds { get; init; }
 Vorticity:     property bool Holds { get; }
 Vorticity:     property long Bare { get; init; }
 Vorticity:     property long Held { get; init; }
+Vorticity: struct Vorticity.VortexKey
+Vorticity:     ctor VortexKey(string, ReadOnlyMemory<byte>)
+Vorticity:     property ReadOnlyMemory<byte> Key { get; }
+Vorticity:     property string Id { get; }
+Vorticity: abstract class Vorticity.VortexKeyring : IDisposable
+Vorticity:     ctor VortexKeyring()
+Vorticity:     method ValueTask<DataKey> GenerateAsync(ReadOnlyMemory<byte>, CancellationToken)
+Vorticity:     method ValueTask<DataKey> UnwrapAsync(string, ReadOnlyMemory<byte>, ReadOnlyMemory<byte>, CancellationToken)
+Vorticity:     method VortexKeyring FromKeys(ReadOnlySpan<VortexKey>)
+Vorticity:     method void Dispose()
+Vorticity:     method void Dispose(bool)
 Vorticity: sealed class Vorticity.VortexLayout : IEquatable<VortexLayout>
 Vorticity:     ctor VortexLayout(string, long, VortexType, ImmutableArray<int>, int, long, bool, string, ImmutableArray<VortexLayout>)
 Vorticity:     method VortexLayout <Clone>$()
@@ -1880,9 +1906,12 @@ Vorticity:     property int Alignment { get; init; }
 Vorticity:     property int Length { get; init; }
 Vorticity:     property long Offset { get; init; }
 Vorticity: sealed class Vorticity.VortexSession : IAsyncDisposable
+Vorticity:     method ValueTask DecryptAsync(string, Stream, CancellationToken = default)
 Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync(VortexFile, EncodingGoal = default, CancellationToken = default)
 Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync<TRecord>(ReadOnlyMemory<TRecord>, EncodingGoal = default, CancellationToken = default)
+Vorticity:     method ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(string, IndexPolicy, CancellationToken = default)
+Vorticity:     method ValueTask<IndexFragment> BuildFragmentAsync(string, IndexPolicy, Nullable<RowRange> = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(ISegmentSource, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(string, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFileWriter> OpenWriterAsync(string, VortexWriteOptions = default, CancellationToken = default)
@@ -1899,7 +1928,10 @@ Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
+Vorticity:     property VortexKeyring Keyring { get; set; }
+Vorticity:     property bool EncryptFiles { get; set; }
 Vorticity:     property bool MapFiles { get; set; }
+Vorticity:     property bool RefusePlaintext { get; set; }
 Vorticity:     property int MappedFileCacheCount { get; set; }
 Vorticity:     property int MaxConcurrentReads { get; set; }
 Vorticity:     property int MaxDegreeOfParallelism { get; set; }
@@ -2197,6 +2229,7 @@ Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
+Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
@@ -2290,11 +2323,13 @@ Vorticity.Dataset:     const ObjectOperation PutIfAbsent = 2
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: struct Vorticity.Dataset.ObjectRange : IDisposable
 Vorticity.Dataset:     ctor ObjectRange(SegmentLease, string)
+Vorticity.Dataset:     ctor ObjectRange(SegmentLease, string, long)
 Vorticity.Dataset:     method void Dispose()
 Vorticity.Dataset:     property ReadOnlyMemory<byte> Memory { get; }
 Vorticity.Dataset:     property ReadOnlySequence<byte> Bytes { get; }
 Vorticity.Dataset:     property bool IsContiguous { get; }
 Vorticity.Dataset:     property int Length { get; }
+Vorticity.Dataset:     property long ObjectLength { get; }
 Vorticity.Dataset:     property string Token { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectStoreException : VortexException
 Vorticity.Dataset:     ctor ObjectStoreException()
@@ -2397,11 +2432,13 @@ Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, Cancella
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> RekeyAsync(CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
 Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; }
 Vorticity.Dataset:     property VortexSchema Schema { get; }
 Vorticity.Dataset:     property VortexSession Session { get; }
+Vorticity.Dataset:     property bool IsEncrypted { get; }
 Vorticity.Dataset:     property long Lag { get; }
 Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
