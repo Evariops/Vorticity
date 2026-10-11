@@ -39,6 +39,15 @@ internal sealed class SegmentRequestSet : IDisposable
     /// <summary>Filled at <see cref="Add"/> time (a zero-length segment); survives a retry.</summary>
     private const byte StatePermanent = 2;
 
+    /// <summary>
+    /// Set beside an empty slot's state when its decode touches less than a quarter of the segment,
+    /// in the same byte rather than an array of its own, so that a set costs nothing more for it.
+    /// </summary>
+    private const byte StateTouchesLittle = 0x80;
+
+    /// <summary>The bits of a slot's state that are its state.</summary>
+    private const byte StateBits = 0x7F;
+
     private SegmentSpec[] _specs;
     private SegmentOwner?[] _owners;
     private VortexBuffer[] _buffers;
@@ -74,6 +83,13 @@ internal sealed class SegmentRequestSet : IDisposable
     public bool IsPopulated => _populated;
 
     /// <summary>
+    /// The share of the rows of the split being registered that its decode reads, below 1 for a
+    /// take: what a layout reader estimates how much of its segment a decode touches from. Two
+    /// bytes, held where the set's layout has room for them.
+    /// </summary>
+    internal Half WantedShare { get; set; } = Half.One;
+
+    /// <summary>
     /// Registers a segment and returns its slot.
     /// </summary>
     /// <param name="spec">The locator, straight off the wire.</param>
@@ -89,14 +105,38 @@ internal sealed class SegmentRequestSet : IDisposable
     /// A <em>new</em> segment is registered after the set was populated. Its slot could never be
     /// filled, so this is a caller bug, not a file problem.
     /// </exception>
-    public int Add(in SegmentSpec spec)
+    public int Add(in SegmentSpec spec) => AddTouched(in spec, long.MaxValue);
+
+    /// <summary>
+    /// Registers a segment of which the decode is expected to touch only
+    /// <paramref name="touchedBytes"/>, and returns its slot.
+    /// </summary>
+    /// <param name="spec">The locator, straight off the wire.</param>
+    /// <param name="touchedBytes">
+    /// The bytes the decode is expected to touch: under a quarter of the segment, a source that
+    /// copies what it reads may serve the segment from a mapping instead.
+    /// </param>
+    /// <returns>The slot, as <see cref="Add"/> returns it.</returns>
+    /// <remarks>
+    /// A segment registered twice touches little only when both registrations do: a second reader
+    /// of the same bytes may touch more of them.
+    /// </remarks>
+    /// <exception cref="VortexFormatException">The spec is malformed.</exception>
+    /// <exception cref="InvalidOperationException">A new segment is registered after the set was populated.</exception>
+    internal int AddTouched(in SegmentSpec spec, long touchedBytes)
     {
         SegmentIo.ValidateSpec(in spec, out _, out int length);
+        bool little = touchedBytes < length / 4;
 
         int hash = HashOf(spec.Offset, spec.Length);
         int existing = Find(in spec, hash);
         if (existing >= 0)
         {
+            if (!_populated && !little)
+            {
+                _states[existing] &= StateBits;
+            }
+
             // Two registrations of one segment can declare different alignments. Keep the
             // stronger claim while the buffer does not exist yet: the run buffer is 64-aligned
             // either way, so widening never over-reports for an honest file, and once populated
@@ -139,7 +179,7 @@ internal sealed class SegmentRequestSet : IDisposable
         }
         else
         {
-            _states[slot] = StateEmpty;
+            _states[slot] = little ? (byte)(StateEmpty | StateTouchesLittle) : StateEmpty;
         }
 
         Insert(hash, slot);
@@ -169,7 +209,16 @@ internal sealed class SegmentRequestSet : IDisposable
     public bool IsFilled(int slot)
     {
         CheckSlot(slot);
-        return _states[slot] != StateEmpty;
+        return (_states[slot] & StateBits) != StateEmpty;
+    }
+
+    /// <summary>Whether the decode of <paramref name="slot"/>'s segment touches less than a quarter of it, as its registrations said.</summary>
+    /// <param name="slot">A slot returned by <see cref="Add"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="slot"/> is not a live slot.</exception>
+    internal bool TouchesLittle(int slot)
+    {
+        CheckSlot(slot);
+        return (_states[slot] & StateTouchesLittle) != 0;
     }
 
     /// <summary>The bytes of <paramref name="slot"/>.</summary>
@@ -330,7 +379,7 @@ internal sealed class SegmentRequestSet : IDisposable
 
         for (int i = 0; i < _count; i++)
         {
-            if (_states[i] == StateEmpty)
+            if ((_states[i] & StateBits) == StateEmpty)
             {
                 ThrowIncomplete(i);
             }
@@ -441,7 +490,7 @@ internal sealed class SegmentRequestSet : IDisposable
             ThrowAlreadyPopulated();
         }
 
-        if (_states[slot] != StateEmpty)
+        if ((_states[slot] & StateBits) != StateEmpty)
         {
             ThrowSlotFilled(slot);
         }

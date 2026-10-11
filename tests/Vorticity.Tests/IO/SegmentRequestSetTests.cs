@@ -52,6 +52,55 @@ public sealed class SegmentRequestSetTests
     }
 
     [Fact]
+    public void A_segment_touches_little_only_when_registered_as_touching_under_a_quarter()
+    {
+        using SegmentRequestSet set = new SegmentRequestSet();
+
+        int whole = set.Add(Spec(0, 4096));
+        int little = set.AddTouched(Spec(8192, 4096), 1023);
+        int quarter = set.AddTouched(Spec(16384, 4096), 1024);
+        int empty = set.AddTouched(Spec(32768, 0), 0);
+
+        Assert.False(set.TouchesLittle(whole));
+        Assert.True(set.TouchesLittle(little));
+        Assert.False(set.TouchesLittle(quarter));
+        Assert.False(set.TouchesLittle(empty));
+        Assert.False(set.IsFilled(little));
+        Assert.True(set.IsFilled(empty));
+    }
+
+    [Fact]
+    public void A_segment_registered_twice_touches_little_only_if_both_say_so_through_growth()
+    {
+        using SegmentRequestSet set = new SegmentRequestSet(initialCapacity: 2);
+
+        int slot = set.AddTouched(Spec(0, 1 << 20), 1000);
+        Assert.Equal(slot, set.AddTouched(Spec(0, 1 << 20), 10));
+        Assert.True(set.TouchesLittle(slot));
+        for (int i = 1; i < 10; i++)
+        {
+            set.Add(Spec((ulong)i << 21, 64));
+        }
+
+        Assert.True(set.TouchesLittle(slot));
+        Assert.Equal(slot, set.Add(Spec(0, 1 << 20)));
+        Assert.False(set.TouchesLittle(slot));
+    }
+
+    [Fact]
+    public void A_slot_that_touches_little_is_filled_and_completed_like_any_other()
+    {
+        using SegmentRequestSet set = new SegmentRequestSet();
+        int slot = set.AddTouched(Spec(0, 1000), 10);
+        Assert.Throws<InvalidOperationException>(() => set.Complete());
+
+        set.SetResult(slot, OwnerOf(1000));
+        Assert.True(set.IsFilled(slot));
+        set.Complete();
+        Assert.True(set.IsPopulated);
+    }
+
+    [Fact]
     public void Segments_that_differ_only_in_length_are_distinct()
     {
         using SegmentRequestSet set = new SegmentRequestSet();

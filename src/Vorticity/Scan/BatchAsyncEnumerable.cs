@@ -1115,7 +1115,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     private void Register(ScanContext context, RowRange rows)
     {
-        SplitExecution.Register(context, _tree, in _mask, rows);
+        SplitExecution.Register(context, _tree, in _mask, rows, _take);
         VortexFile.FillFromTail(_source, context.Segments);
     }
 

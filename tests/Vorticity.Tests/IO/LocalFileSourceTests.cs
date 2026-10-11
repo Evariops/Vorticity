@@ -286,11 +286,43 @@ public sealed class LocalFileSourceTests
     }
 
     [Fact]
+    public async Task APositionalReadServesALargeSegmentItTouchesLittleOfFromAMapping()
+    {
+        // Two MiB: a large segment the decode touches half of and a small one it touches a page of,
+        // both copied; then a large one it touches a page of, served from a mapping on Windows,
+        // which outlives the reader as a copy does.
+        const int length = 2 << 20;
+        byte[] content = Pattern(length);
+        using TempFile file = new TempFile(content);
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        source.AnticipateData();
+
+        using (SegmentRequestSet copied = new SegmentRequestSet())
+        {
+            int dense = copied.AddTouched(Spec(0, 512 * 1024), 256 * 1024);
+            int small = copied.AddTouched(Spec(1 << 20, 128 * 1024), 4096);
+            await ((ISegmentReader)source).ReadManyAsync(copied, CancellationToken.None);
+
+            Assert.True(copied.GetBuffer(dense).Span.SequenceEqual(content.AsSpan(0, 512 * 1024)));
+            Assert.True(copied.GetBuffer(small).Span.SequenceEqual(content.AsSpan(1 << 20, 128 * 1024)));
+            Assert.False(source.MapsSparseSegments);
+        }
+
+        using SegmentRequestSet sparse = new SegmentRequestSet();
+        int slot = sparse.AddTouched(Spec(1 << 20, 768 * 1024), 4096);
+        await ((ISegmentReader)source).ReadManyAsync(sparse, CancellationToken.None);
+        Assert.Equal(OperatingSystem.IsWindows(), source.MapsSparseSegments);
+
+        await source.DisposeAsync();
+        Assert.True(sparse.GetBuffer(slot).Span.SequenceEqual(content.AsSpan(1 << 20, 768 * 1024)));
+    }
+
+    [Fact]
     public async Task ASessionThatKeepsNoMappingScansWithoutOneOnWindows()
     {
         Decoders.EnsureRegistered();
         await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
-        await using VortexFile file = await session.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"), cancellationToken: CancellationToken.None);
+        await using VortexFile file = await session.OpenAsync(Corpus.Path("distributions/high_cardinality_i64_r8193"), cancellationToken: CancellationToken.None);
         LocalFileSource source = Assert.IsType<LocalFileSource>(file.Source);
 
         long rows = 0;
@@ -301,6 +333,45 @@ public sealed class LocalFileSourceTests
 
         Assert.Equal(file.RowCount, rows);
         Assert.Equal(!OperatingSystem.IsWindows(), source.IsMapped);
+    }
+
+    [Fact]
+    public async Task AScanOfManySegmentsSmallerThanAPageMapsTheFileEverywhere()
+    {
+        // 325 segments of 2 KiB on average: a read per run of them costs more than the pages they
+        // share, once the scan reads enough of them to repay the mapping. A narrow filter reads a
+        // few, and on Windows reads them positionally.
+        Decoders.EnsureRegistered();
+        await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
+        string path = Corpus.Path("containers/zoned_many_zones_nulls");
+
+        await using (VortexFile narrow = await session.OpenAsync(path, cancellationToken: CancellationToken.None))
+        {
+            LocalFileSource source = Assert.IsType<LocalFileSource>(narrow.Source);
+            VortexExpr band = Expr.And(
+                Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_000_300L))),
+                Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_001_800L))));
+            long kept = 0;
+            await foreach (RecordBatch batch in narrow.ScanBuilder().Where(band).ExecuteAsync())
+            {
+                kept += batch.RowCount;
+            }
+
+            Assert.True(kept > 0);
+            Assert.Equal(!OperatingSystem.IsWindows(), source.IsMapped);
+        }
+
+        await using VortexFile file = await session.OpenAsync(path, cancellationToken: CancellationToken.None);
+        LocalFileSource whole = Assert.IsType<LocalFileSource>(file.Source);
+        long rows = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
+        {
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(file.RowCount, rows);
+        Assert.True(whole.IsMapped);
+        Assert.True(((ISegmentReader)whole).ReadsInPlace);
     }
 
     [Fact]

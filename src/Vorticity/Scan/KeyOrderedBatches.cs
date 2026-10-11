@@ -570,7 +570,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             context.Batch = ticket;
             for (int i = from; i < to; i++)
             {
-                SplitExecution.Register(context, tree, in _read, _splits[i]);
+                SplitExecution.Register(context, tree, in _read, _splits[i], selection);
             }
 
             VortexFile.FillFromTail(_scan.File.Segments, context.Segments);

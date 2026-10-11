@@ -4,6 +4,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.IO;
+using Vorticity.Types;
 
 namespace Vorticity.Layouts;
 
@@ -47,11 +48,31 @@ internal sealed class FlatLayoutReader : LayoutReader
         // A flat layout is indivisible: whatever rows are wanted, the whole segment is read and the
         // array decoded, then sliced. Upstream says the same with `is_indivisible() -> true`. An
         // inlined tree that declares no buffer is the array whole, and its segment is not read.
-        if (!node.Bufferless)
+        if (node.Bufferless)
         {
-            RegisterSegment(in node, 0, segments);
+            return;
         }
+
+        // How much of the segment the decode touches: the fields a projection keeps of a struct
+        // stored whole, and for a take a page or two of each of them per wanted row. The segment is
+        // read once for every split of its node, so a take's rows are counted over the node, at
+        // the share this split wants. A reader that copies what it reads serves a large segment
+        // touched little from a mapping instead.
+        DType dtype = node.DType;
+        int fieldCount = dtype.Kind == DTypeKind.Struct ? dtype.FieldCount : 0;
+        int kept = fieldCount == 0 ? 1 : Math.Max(fields.SelectedCount(fieldCount), 1);
+        double share = fieldCount == 0 || fields.IsAll ? 1.0 : (double)kept / fieldCount;
+        double wanted = (double)segments.WantedShare;
+        long cap = wanted < 1 ? (long)Math.Min(wanted * node.RowCount * kept * BytesTouchedPerRow, long.MaxValue) : long.MaxValue;
+
+        RegisterSegment(in node, 0, segments, share, cap);
     }
+
+    /// <summary>
+    /// The bytes a decode is taken to touch for each row a take wants of each field: two pages, one
+    /// in the values and one in the validity or the offsets beside them.
+    /// </summary>
+    private const long BytesTouchedPerRow = 2 * 4096;
 
     /// <inheritdoc/>
     public override int Execute(in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context)
