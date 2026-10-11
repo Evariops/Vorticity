@@ -190,7 +190,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
     /// <remarks>
     /// <para>
     /// The runs are read one after another, rather than several in flight behind a bounded depth
-    /// as <c>ObjectSegmentSource</c> does. A depth pays when a call issues dozens of small
+    /// as <see cref="ObjectStoreSource"/> does. A depth pays when a call issues dozens of small
     /// positional reads, and it buys nothing at the scale a scan works at, because a wide file's
     /// columns are adjacent: the coalescer hands this method one run for a whole split of
     /// registered segments, and a depth has nothing to hold.

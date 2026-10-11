@@ -167,7 +167,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         if (_store is SealedObjectStore sealedStore)
         {
             (outcome, StoredLength) = await sealedStore
-                .PutAsync(_key, PipeReader.Create(Bytes()), _written, cancellationToken).ConfigureAwait(false);
+                .PutSealedAsync(_key, PipeReader.Create(Bytes()), _written, PutCondition.IfAbsent, cancellationToken).ConfigureAwait(false);
         }
         else
         {

@@ -11,6 +11,7 @@ using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 
@@ -446,7 +447,7 @@ internal static class DatasetRowChanges
             return scan.ExecuteAsync();
         }
 
-        ObjectRead read = columns.Read(filter, whole ? FieldMask.All : FieldMask.Empty);
+        ObjectReadPlan read = columns.Read(filter, whole ? FieldMask.All : FieldMask.Empty);
         ScanBuilder adapted = file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false).WithCompaction(false);
         if (read.Pushed is { } pushed)
         {
@@ -543,7 +544,7 @@ internal static class DatasetRowChanges
         VortexExpr counted = filter;
         if (columns is not null)
         {
-            ObjectRead read = columns.Read(filter, FieldMask.Empty);
+            ObjectReadPlan read = columns.Read(filter, FieldMask.Empty);
             switch (read.Fate)
             {
                 case FilterFate.None:
@@ -587,7 +588,7 @@ internal static class DatasetRowChanges
                 : file.ScanBuilder().ExecuteAsync();
         }
 
-        ObjectRead read = columns.Read(null, FieldMask.All);
+        ObjectReadPlan read = columns.Read(null, FieldMask.All);
         ScanBuilder scan = file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false);
         IAsyncEnumerable<RecordBatch> rows = entry.HasDeletions
             ? LiveRows.WithoutDeletedAsync(scan.WithCompaction(false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken)

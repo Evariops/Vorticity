@@ -22,6 +22,7 @@ using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -94,7 +95,7 @@ public sealed class DatasetVerifyTests
             // parses. No reader computes the content hash, so no reader can tell.
             Assert.Equal(victim.Bytes, (await store.HeadAsync(victim.Key, ct))!.Value.Length);
             await using (VortexFile reopened = await VortexFile.OpenAsync(
-                new ObjectSegmentSource(store, victim.Key), new VortexOpenOptions(), ct))
+                new ObjectStoreSource(store, victim.Key), new VortexOpenOptions(), ct))
             {
                 Assert.Equal(victim.Uid, VortexDataset.Identity(reopened));
                 Assert.Equal(victim.Rows, reopened.RowCount);

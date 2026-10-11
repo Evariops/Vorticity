@@ -35,7 +35,7 @@ namespace Vorticity.Dataset;
 /// <para>
 /// What it opens: the commit objects only, by their head, in the one request a plain one costs when the
 /// store gives the object's length with its answer. A data object is opened by the dataset's object
-/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, CancellationToken)"/>),
+/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken)"/>),
 /// which serves the Vortex open from the read that brought the trailer. A head says what the store
 /// holds: the sealed length.
 /// </para>
@@ -141,29 +141,58 @@ internal sealed class SealedObjectStore : IObjectStore
     // ---- IObjectStore ----------------------------------------------------------------------
 
     /// <inheritdoc/>
-    public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken)
+    public ObjectStoreCapabilities Capabilities => _inner.Capabilities;
+
+    /// <inheritdoc/>
+    /// <remarks>A commit object's plaintext, decrypted and copied into the destination; anything else as the store under it holds it.</remarks>
+    public ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken) =>
+        CommitKey.TryParse(key, out ulong version)
+            ? ReadCommitIntoAsync(key, version, offset, destination, cancellationToken)
+            : _inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+
+    /// <inheritdoc/>
+    public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         if (!CommitKey.TryParse(key, out ulong version))
         {
-            return _inner.GetRangeAsync(key, offset, length, cancellationToken);
+            return await _inner.ReadTailAsync(key, destination, cancellationToken).ConfigureAwait(false);
         }
 
-        if (KnownPlain)
-        {
-            return offset == 0 ? PlainCommitAsync(key, length, cancellationToken) : _inner.GetRangeAsync(key, offset, length, cancellationToken);
-        }
-
-        return ReadCommitAsync(key, version, offset, length, cancellationToken);
+        long length = await CommitLengthAsync(key, cancellationToken).ConfigureAwait(false);
+        return await ReadCommitIntoAsync(key, version, Math.Max(0, length - destination.Length), destination, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
     public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) => _inner.HeadAsync(key, cancellationToken);
 
     /// <inheritdoc/>
-    public async ValueTask<PutOutcome> PutIfAbsentAsync(string key, PipeReader content, long length, CancellationToken cancellationToken)
+    public async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
-        (PutOutcome outcome, _) = await PutAsync(key, content, length, cancellationToken).ConfigureAwait(false);
+        (PutOutcome outcome, _) = await PutSealedAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false);
         return outcome;
+    }
+
+    /// <summary>A commit object's bytes from <paramref name="offset"/>, its plaintext when it is sealed, copied into <paramref name="destination"/>.</summary>
+    private async ValueTask<ObjectRead> ReadCommitIntoAsync(string key, ulong version, long offset, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        ObjectRange read;
+        if (!KnownPlain)
+        {
+            read = await ReadCommitAsync(key, version, offset, destination.Length, cancellationToken).ConfigureAwait(false);
+        }
+        else if (offset == 0)
+        {
+            read = await PlainCommitAsync(key, destination.Length, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            read = await _inner.GetRangeAsync(key, offset, destination.Length, cancellationToken).ConfigureAwait(false);
+        }
+
+        using ObjectRange range = read;
+        range.Bytes.CopyTo(destination.Span);
+        long length = range.ObjectLength >= 0 ? range.ObjectLength : await CommitLengthAsync(key, cancellationToken).ConfigureAwait(false);
+        return new ObjectRead(range.Length, length, range.Token);
     }
 
     /// <inheritdoc/>
@@ -178,7 +207,7 @@ internal sealed class SealedObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
+    public IAsyncEnumerable<ObjectListing> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
         _inner.ListAsync(prefix, startAfter, cancellationToken);
 
     /// <summary>Wipes the keys of the commit objects it opened; the store under it stays the caller's.</summary>
@@ -207,8 +236,8 @@ internal sealed class SealedObjectStore : IObjectStore
     /// Creates an object, sealed when it is one of an encrypted dataset's commit or data objects and as
     /// given otherwise, and answers what the store answered and the bytes it now holds.
     /// </summary>
-    internal async ValueTask<(PutOutcome Outcome, long StoredLength)> PutAsync(
-        string key, PipeReader content, long length, CancellationToken cancellationToken)
+    internal async ValueTask<(PutOutcome Outcome, long StoredLength)> PutSealedAsync(
+        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
         bool commit = CommitKey.TryParse(key, out ulong version);
         bool data = !commit && TryUid(key, out _);
@@ -220,7 +249,7 @@ internal sealed class SealedObjectStore : IObjectStore
 
         if (!Seals || (!commit && !data))
         {
-            return (await _inner.PutIfAbsentAsync(key, content, length, cancellationToken).ConfigureAwait(false), length);
+            return (await _inner.PutAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false), length);
         }
 
         byte[] id = DatasetId();
@@ -252,7 +281,7 @@ internal sealed class SealedObjectStore : IObjectStore
         PutOutcome outcome;
         try
         {
-            outcome = await _inner.PutIfAbsentAsync(key, pipe.Reader, sealedLength, cancellationToken).ConfigureAwait(false);
+            outcome = await _inner.PutAsync(key, pipe.Reader, sealedLength, condition, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -664,9 +693,9 @@ internal sealed class SealedObjectStore : IObjectStore
     /// object as it lies otherwise.
     /// </summary>
     /// <exception cref="VortexEncryptionException">The object is plain in an encrypted dataset, or not the one its entry names.</exception>
-    internal async ValueTask<ISegmentReader> OpenDataAsync(string key, UInt128 uid, CancellationToken cancellationToken)
+    internal async ValueTask<ISegmentReader> OpenDataAsync(string key, UInt128 uid, long length, CancellationToken cancellationToken)
     {
-        ObjectSegmentSource source = new ObjectSegmentSource(_inner, key);
+        ObjectStoreSource source = new ObjectStoreSource(_inner, key, length);
         if (!Seals)
         {
             return source;
@@ -691,8 +720,8 @@ internal sealed class SealedObjectStore : IObjectStore
         }
         catch (VortexFormatException)
         {
-            bool plain = await EndsPlainAsync(source, cancellationToken).ConfigureAwait(false);
             await source.DisposeAsync().ConfigureAwait(false);
+            bool plain = await EndsPlainAsync(_inner, key, cancellationToken).ConfigureAwait(false);
             if (plain)
             {
                 throw Mixed(key, sealedAmongPlain: false);
@@ -707,11 +736,14 @@ internal sealed class SealedObjectStore : IObjectStore
         }
     }
 
-    /// <summary>The reader over a data object of the dataset behind <paramref name="store"/>, sealed or plain as the dataset is.</summary>
-    internal static ValueTask<ISegmentReader> OpenDataAsync(IObjectStore store, string key, UInt128 uid, CancellationToken cancellationToken) =>
+    /// <summary>
+    /// The reader over a data object of the dataset behind <paramref name="store"/>, sealed or plain as
+    /// the dataset is, told the object's length when its entry records it, which spares a request.
+    /// </summary>
+    internal static ValueTask<ISegmentReader> OpenDataAsync(IObjectStore store, string key, UInt128 uid, long length, CancellationToken cancellationToken) =>
         store is SealedObjectStore sealedStore
-            ? sealedStore.OpenDataAsync(key, uid, cancellationToken)
-            : new ValueTask<ISegmentReader>(new ObjectSegmentSource(store, key));
+            ? sealedStore.OpenDataAsync(key, uid, length, cancellationToken)
+            : new ValueTask<ISegmentReader>(new ObjectStoreSource(store, key, length));
 
     /// <summary>
     /// What verification finds wrong with a sealed object's envelope beyond its frames: two copies of
@@ -847,25 +879,15 @@ internal sealed class SealedObjectStore : IObjectStore
         return new ObjectRange(new SegmentLease(copy), read.Token, read.ObjectLength);
     }
 
-    private static async ValueTask<bool> EndsPlainAsync(ObjectSegmentSource source, CancellationToken cancellationToken)
+    private static async ValueTask<bool> EndsPlainAsync(IObjectStore store, string key, CancellationToken cancellationToken)
     {
+        // The object's own end, whatever length its entry recorded: a plain file put in its place
+        // has another length.
         try
         {
-            long length = await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            if (length < 4)
-            {
-                return false;
-            }
-
-            Buffers.SegmentOwner end = await source.ReadRangeAsync(length - 4, 4, 1, cancellationToken).ConfigureAwait(false);
-            try
-            {
-                return end.Buffer.Span.SequenceEqual("VTXF"u8);
-            }
-            finally
-            {
-                end.Release();
-            }
+            byte[] end = new byte[4];
+            ObjectRead read = await store.ReadTailAsync(key, end, cancellationToken).ConfigureAwait(false);
+            return read.BytesRead == end.Length && end.AsSpan().SequenceEqual("VTXF"u8);
         }
         catch (Exception)
         {

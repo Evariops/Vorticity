@@ -1026,6 +1026,14 @@ Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask ReadAsync(ReadOnlyMemory<SegmentRange>, Memory<SegmentLease>, CancellationToken)
 Vorticity:     method ValueTask<SegmentLease> ReadAsync(SegmentRange, CancellationToken)
 Vorticity:     property long Length { get; }
+Vorticity: interface Vorticity.IO.IObjectStore : IAsyncDisposable
+Vorticity:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
+Vorticity:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
+Vorticity:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
+Vorticity:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
+Vorticity:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
+Vorticity:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity: interface Vorticity.IO.ISegmentSource : IAsyncDisposable
 Vorticity:     method ValueTask ReadAsync(ReadOnlyMemory<SegmentRange>, Memory<SegmentLease>, CancellationToken)
 Vorticity:     method ValueTask<SegmentLease> ReadAsync(SegmentRange, CancellationToken)
@@ -1042,6 +1050,99 @@ Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask ReadAsync(ReadOnlyMemory<SegmentRange>, Memory<SegmentLease>, CancellationToken)
 Vorticity:     method ValueTask<SegmentLease> ReadAsync(SegmentRange, CancellationToken)
 Vorticity:     property long Length { get; }
+Vorticity: struct Vorticity.IO.ObjectHead : IEquatable<ObjectHead>
+Vorticity:     ctor ObjectHead(long, string, DateTimeOffset)
+Vorticity:     method bool Equals(ObjectHead)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool IsLockedAt(DateTimeOffset)
+Vorticity:     method bool op_Equality(ObjectHead, ObjectHead)
+Vorticity:     method bool op_Inequality(ObjectHead, ObjectHead)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out long, out string, out DateTimeOffset)
+Vorticity:     property DateTimeOffset LastModified { get; init; }
+Vorticity:     property Nullable<DateTimeOffset> RetainUntil { get; init; }
+Vorticity:     property bool LegalHold { get; init; }
+Vorticity:     property long Length { get; init; }
+Vorticity:     property string Token { get; init; }
+Vorticity: struct Vorticity.IO.ObjectListing : IEquatable<ObjectListing>
+Vorticity:     ctor ObjectListing(string, ObjectHead, bool)
+Vorticity:     method bool Equals(ObjectListing)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(ObjectListing, ObjectListing)
+Vorticity:     method bool op_Inequality(ObjectListing, ObjectListing)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out string, out ObjectHead, out bool)
+Vorticity:     property ObjectHead Head { get; init; }
+Vorticity:     property bool LockReported { get; init; }
+Vorticity:     property string Key { get; init; }
+Vorticity: sealed class Vorticity.IO.ObjectNotFoundException : VortexException
+Vorticity:     ctor ObjectNotFoundException()
+Vorticity:     ctor ObjectNotFoundException(string)
+Vorticity:     ctor ObjectNotFoundException(string, Exception)
+Vorticity:     method ObjectNotFoundException For(string)
+Vorticity:     property string Key { get; init; }
+Vorticity:     property ulong Version { get; init; }
+Vorticity: struct Vorticity.IO.ObjectRange : IDisposable
+Vorticity:     ctor ObjectRange(SegmentLease, string)
+Vorticity:     ctor ObjectRange(SegmentLease, string, long)
+Vorticity:     method void Dispose()
+Vorticity:     property ReadOnlyMemory<byte> Memory { get; }
+Vorticity:     property ReadOnlySequence<byte> Bytes { get; }
+Vorticity:     property bool IsContiguous { get; }
+Vorticity:     property int Length { get; }
+Vorticity:     property long ObjectLength { get; }
+Vorticity:     property string Token { get; }
+Vorticity: struct Vorticity.IO.ObjectRead : IEquatable<ObjectRead>
+Vorticity:     ctor ObjectRead(int, long, string)
+Vorticity:     method bool Equals(ObjectRead)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(ObjectRead, ObjectRead)
+Vorticity:     method bool op_Inequality(ObjectRead, ObjectRead)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out int, out long, out string)
+Vorticity:     property int BytesRead { get; init; }
+Vorticity:     property long ObjectLength { get; init; }
+Vorticity:     property string Token { get; init; }
+Vorticity: enum Vorticity.IO.ObjectStoreCapabilities
+Vorticity:     const ObjectStoreCapabilities ListsInOrder = 2
+Vorticity:     const ObjectStoreCapabilities None = 0
+Vorticity:     const ObjectStoreCapabilities ReadsSuffix = 1
+Vorticity:     const ObjectStoreCapabilities ReplacesOnTokenMatch = 8
+Vorticity:     const ObjectStoreCapabilities ReportsLocksInListing = 4
+Vorticity:     field int value__
+Vorticity: sealed class Vorticity.IO.ObjectStoreException : VortexException
+Vorticity:     ctor ObjectStoreException()
+Vorticity:     ctor ObjectStoreException(string)
+Vorticity:     ctor ObjectStoreException(string, Exception)
+Vorticity:     property bool OutcomeUnknown { get; init; }
+Vorticity: static class Vorticity.IO.ObjectStoreExtensions
+Vorticity:     method ValueTask<ObjectRange> GetRangeAsync(IObjectStore, string, long, int, CancellationToken)
+Vorticity:     method ValueTask<PutOutcome> PutIfAbsentAsync(IObjectStore, string, PipeReader, long, CancellationToken)
+Vorticity: struct Vorticity.IO.PutCondition : IEquatable<PutCondition>
+Vorticity:     method PutCondition IfMatch(string)
+Vorticity:     method bool Equals(PutCondition)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(PutCondition, PutCondition)
+Vorticity:     method bool op_Inequality(PutCondition, PutCondition)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     property PutCondition IfAbsent { get; }
+Vorticity:     property PutCondition None { get; }
+Vorticity:     property PutConditionKind Kind { get; }
+Vorticity:     property string Token { get; }
+Vorticity: enum Vorticity.IO.PutConditionKind
+Vorticity:     const PutConditionKind IfAbsent = 1
+Vorticity:     const PutConditionKind IfMatch = 2
+Vorticity:     const PutConditionKind None = 0
+Vorticity:     field int value__
+Vorticity: enum Vorticity.IO.PutOutcome
+Vorticity:     const PutOutcome Changed = 2
+Vorticity:     const PutOutcome Created = 0
+Vorticity:     const PutOutcome Exists = 1
+Vorticity:     field int value__
 Vorticity: struct Vorticity.IO.SegmentLease : IDisposable
 Vorticity:     ctor SegmentLease(ReadOnlyMemory<byte>, IDisposable = default)
 Vorticity:     ctor SegmentLease(ReadOnlySequence<byte>, IDisposable = default)
@@ -2183,14 +2284,16 @@ Vorticity.Dataset:     const CompactionTrigger None = 0
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.CountingObjectStore : IObjectStore
 Vorticity.Dataset:     ctor CountingObjectStore(IObjectStore, bool = default)
-Vorticity.Dataset:     method IAsyncEnumerable<string> ListAsync(string, string, CancellationToken)
+Vorticity.Dataset:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
 Vorticity.Dataset:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
-Vorticity.Dataset:     method ValueTask<ObjectRange> GetRangeAsync(string, long, int, CancellationToken)
-Vorticity.Dataset:     method ValueTask<PutOutcome> PutIfAbsentAsync(string, PipeReader, long, CancellationToken)
+Vorticity.Dataset:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
+Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
+Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     method long CountOf(ObjectOperation)
 Vorticity.Dataset:     method void Reset()
+Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property long BytesRead { get; }
 Vorticity.Dataset:     property long BytesWritten { get; }
 Vorticity.Dataset:     property long DependentSteps { get; }
@@ -2258,32 +2361,30 @@ Vorticity.Dataset:     property ulong Since { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.FileObjectStore : IObjectStore
 Vorticity.Dataset:     ctor FileObjectStore(string)
-Vorticity.Dataset:     method IAsyncEnumerable<string> ListAsync(string, string, CancellationToken)
+Vorticity.Dataset:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
 Vorticity.Dataset:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
-Vorticity.Dataset:     method ValueTask<ObjectRange> GetRangeAsync(string, long, int, CancellationToken)
-Vorticity.Dataset:     method ValueTask<PutOutcome> PutIfAbsentAsync(string, PipeReader, long, CancellationToken)
+Vorticity.Dataset:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
+Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
+Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property bool Durable { get; init; }
 Vorticity.Dataset:     property string Root { get; }
-Vorticity.Dataset: interface Vorticity.Dataset.IObjectStore : IAsyncDisposable
-Vorticity.Dataset:     method IAsyncEnumerable<string> ListAsync(string, string, CancellationToken)
-Vorticity.Dataset:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
-Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
-Vorticity.Dataset:     method ValueTask<ObjectRange> GetRangeAsync(string, long, int, CancellationToken)
-Vorticity.Dataset:     method ValueTask<PutOutcome> PutIfAbsentAsync(string, PipeReader, long, CancellationToken)
 Vorticity.Dataset: sealed class Vorticity.Dataset.MemoryObjectStore : IObjectStore
 Vorticity.Dataset:     ctor MemoryObjectStore()
-Vorticity.Dataset:     method IAsyncEnumerable<string> ListAsync(string, string, CancellationToken)
+Vorticity.Dataset:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
 Vorticity.Dataset:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
 Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
-Vorticity.Dataset:     method ValueTask<ObjectRange> GetRangeAsync(string, long, int, CancellationToken)
-Vorticity.Dataset:     method ValueTask<PutOutcome> PutIfAbsentAsync(string, PipeReader, long, CancellationToken)
+Vorticity.Dataset:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
+Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
+Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     method void Hold(string, bool)
 Vorticity.Dataset:     property Func<ObjectOperation, string, bool> Fails { get; set; }
 Vorticity.Dataset:     property Func<string, bool> CrashesAfterPut { get; set; }
 Vorticity.Dataset:     property Nullable<TimeSpan> RetainFor { get; set; }
+Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; set; }
 Vorticity.Dataset:     property TimeSpan Latency { get; set; }
 Vorticity.Dataset:     property int Count { get; }
@@ -2292,58 +2393,18 @@ Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectDraft : IAsyncDisposable
 Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     property VortexFileWriter Writer { get; }
 Vorticity.Dataset:     property string Key { get; }
-Vorticity.Dataset: struct Vorticity.Dataset.ObjectHead : IEquatable<ObjectHead>
-Vorticity.Dataset:     ctor ObjectHead(long, string, DateTimeOffset)
-Vorticity.Dataset:     method bool Equals(ObjectHead)
-Vorticity.Dataset:     method bool Equals(object)
-Vorticity.Dataset:     method bool IsLockedAt(DateTimeOffset)
-Vorticity.Dataset:     method bool op_Equality(ObjectHead, ObjectHead)
-Vorticity.Dataset:     method bool op_Inequality(ObjectHead, ObjectHead)
-Vorticity.Dataset:     method int GetHashCode()
-Vorticity.Dataset:     method string ToString()
-Vorticity.Dataset:     method void Deconstruct(out long, out string, out DateTimeOffset)
-Vorticity.Dataset:     property DateTimeOffset LastModified { get; init; }
-Vorticity.Dataset:     property Nullable<DateTimeOffset> RetainUntil { get; init; }
-Vorticity.Dataset:     property bool LegalHold { get; init; }
-Vorticity.Dataset:     property long Length { get; init; }
-Vorticity.Dataset:     property string Token { get; init; }
-Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectNotFoundException : VortexException
-Vorticity.Dataset:     ctor ObjectNotFoundException()
-Vorticity.Dataset:     ctor ObjectNotFoundException(string)
-Vorticity.Dataset:     ctor ObjectNotFoundException(string, Exception)
-Vorticity.Dataset:     method ObjectNotFoundException For(string)
-Vorticity.Dataset:     property string Key { get; init; }
-Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: enum Vorticity.Dataset.ObjectOperation
 Vorticity.Dataset:     const ObjectOperation Delete = 3
-Vorticity.Dataset:     const ObjectOperation GetRange = 0
 Vorticity.Dataset:     const ObjectOperation Head = 1
 Vorticity.Dataset:     const ObjectOperation List = 4
-Vorticity.Dataset:     const ObjectOperation PutIfAbsent = 2
+Vorticity.Dataset:     const ObjectOperation Put = 2
+Vorticity.Dataset:     const ObjectOperation Read = 0
 Vorticity.Dataset:     field int value__
-Vorticity.Dataset: struct Vorticity.Dataset.ObjectRange : IDisposable
-Vorticity.Dataset:     ctor ObjectRange(SegmentLease, string)
-Vorticity.Dataset:     ctor ObjectRange(SegmentLease, string, long)
-Vorticity.Dataset:     method void Dispose()
-Vorticity.Dataset:     property ReadOnlyMemory<byte> Memory { get; }
-Vorticity.Dataset:     property ReadOnlySequence<byte> Bytes { get; }
-Vorticity.Dataset:     property bool IsContiguous { get; }
-Vorticity.Dataset:     property int Length { get; }
-Vorticity.Dataset:     property long ObjectLength { get; }
-Vorticity.Dataset:     property string Token { get; }
-Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectStoreException : VortexException
-Vorticity.Dataset:     ctor ObjectStoreException()
-Vorticity.Dataset:     ctor ObjectStoreException(string)
-Vorticity.Dataset:     ctor ObjectStoreException(string, Exception)
 Vorticity.Dataset: enum Vorticity.Dataset.OperationOutcome
 Vorticity.Dataset:     const OperationOutcome Abandoned = 3
 Vorticity.Dataset:     const OperationOutcome AlreadyThere = 1
 Vorticity.Dataset:     const OperationOutcome Applied = 0
 Vorticity.Dataset:     const OperationOutcome Dropped = 2
-Vorticity.Dataset:     field int value__
-Vorticity.Dataset: enum Vorticity.Dataset.PutOutcome
-Vorticity.Dataset:     const PutOutcome Created = 0
-Vorticity.Dataset:     const PutOutcome Exists = 1
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.ReplaceResult : IEquatable<ReplaceResult>
 Vorticity.Dataset:     ctor ReplaceResult()

@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 

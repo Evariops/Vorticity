@@ -23,6 +23,7 @@ using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.File;
 using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;

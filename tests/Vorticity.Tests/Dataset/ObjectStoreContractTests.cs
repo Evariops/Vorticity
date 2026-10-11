@@ -17,6 +17,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -402,6 +403,177 @@ public sealed class ObjectStoreContractTests : IDisposable
         await Assert.ThrowsAnyAsync<ArgumentException>(
             async () => await store.PutIfAbsentAsync(null!, Bytes("x"), ct));
     }
+
+    [Fact]
+    public async Task EachStoreDeclaresWhatItDoesInOneRequest()
+    {
+        ObjectStoreCapabilities all = ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder
+            | ObjectStoreCapabilities.ReportsLocksInListing | ObjectStoreCapabilities.ReplacesOnTokenMatch;
+        await using IObjectStore memory = Open("memory");
+        await using IObjectStore file = Open("file");
+        Assert.Equal(all, memory.Capabilities);
+
+        // No file system compares and renames in one step across processes.
+        Assert.Equal(all & ~ObjectStoreCapabilities.ReplacesOnTokenMatch, file.Capabilities);
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task AReadFillsTheCallersMemoryAndSaysTheLengthAndTheToken(string kind)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        byte[] content = Bytes("0123456789");
+        await store.PutIfAbsentAsync("data/read", content, ct);
+        string token = (await store.HeadAsync("data/read", ct))!.Value.Token;
+
+        // The bytes land from the destination's start, as many as the object has past the offset.
+        byte[] destination = new byte[16];
+        Assert.Equal(new ObjectRead(4, 10, token), await store.ReadAsync("data/read", 6, destination, null, ct));
+        Assert.Equal(Bytes("6789"), destination[..4]);
+        Assert.Equal(new ObjectRead(3, 10, token), await store.ReadAsync("data/read", 2, destination.AsMemory(0, 3), token, ct));
+        Assert.Equal(Bytes("234"), destination[..3]);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            async () => await store.ReadAsync("data/read", 10, destination, null, ct));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(
+            async () => await store.ReadAsync("data/none", 0, destination, null, ct));
+
+        // An empty object reads at offset 0, the one offset it has.
+        await store.PutIfAbsentAsync("data/empty", default, ct);
+        Assert.Equal((0, 0L), Pick(await store.ReadAsync("data/empty", 0, destination, null, ct)));
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task ATailReadSaysTheLengthWithTheLastBytes(string kind)
+    {
+        // What opens a file of unknown length in one request on a store that reads suffixes.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        await store.PutIfAbsentAsync("data/tail", Bytes("0123456789"), ct);
+        string token = (await store.HeadAsync("data/tail", ct))!.Value.Token;
+
+        byte[] destination = new byte[4];
+        Assert.Equal(new ObjectRead(4, 10, token), await store.ReadTailAsync("data/tail", destination, ct));
+        Assert.Equal(Bytes("6789"), destination);
+
+        byte[] larger = new byte[64];
+        Assert.Equal(new ObjectRead(10, 10, token), await store.ReadTailAsync("data/tail", larger, ct));
+        Assert.Equal(Bytes("0123456789"), larger[..10]);
+
+        await store.PutIfAbsentAsync("data/empty", default, ct);
+        Assert.Equal((0, 0L), Pick(await store.ReadTailAsync("data/empty", larger, ct)));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(
+            async () => await store.ReadTailAsync("data/none", larger, ct));
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task AReadBoundToATokenRefusesAnotherObject(string kind)
+    {
+        // The object a reader opened, deleted and created again under its key: the read asks for the
+        // token it knows, and the store refuses to send the new object's bytes.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        await store.PutIfAbsentAsync("data/bound", Bytes("first"), ct);
+        string first = (await store.HeadAsync("data/bound", ct))!.Value.Token;
+        await store.DeleteAsync(["data/bound"], ct);
+        await store.PutIfAbsentAsync("data/bound", Bytes("second, longer"), ct);
+
+        byte[] destination = new byte[32];
+        await Assert.ThrowsAsync<VortexFormatException>(
+            async () => await store.ReadAsync("data/bound", 0, destination, first, ct));
+        string second = (await store.HeadAsync("data/bound", ct))!.Value.Token;
+        Assert.Equal(14, (await store.ReadAsync("data/bound", 0, destination, second, ct)).BytesRead);
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task APutWithoutAConditionReplacesTheObjectWhole(string kind)
+    {
+        // A file written to a location replaces the object as a rename replaces a path's file.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        await store.PutIfAbsentAsync("files/replaced.vortex", Bytes("first"), ct);
+        string first = (await store.HeadAsync("files/replaced.vortex", ct))!.Value.Token;
+
+        Assert.Equal(PutOutcome.Created, await PutAsync(store, "files/replaced.vortex", Bytes("second, longer"), PutCondition.None, ct));
+        ObjectHead head = (await store.HeadAsync("files/replaced.vortex", ct))!.Value;
+        Assert.Equal(14, head.Length);
+        Assert.NotEqual(first, head.Token);
+        Assert.Equal(PutOutcome.Created, await PutAsync(store, "files/fresh.vortex", Bytes("new"), PutCondition.None, ct));
+
+        // Nothing else is left under the prefix, a temporary file of the file store included.
+        Assert.Equal(["files/fresh.vortex", "files/replaced.vortex"], await store.ListAsync("files/", null, 10, ct));
+    }
+
+    [Fact]
+    public async Task APutOnATokenReplacesOnlyTheObjectThatStillHasIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await store.PutIfAbsentAsync("files/appended.vortex", Bytes("first"), ct);
+        string first = (await store.HeadAsync("files/appended.vortex", ct))!.Value.Token;
+
+        Assert.Equal(PutOutcome.Created, await PutAsync(store, "files/appended.vortex", Bytes("second"), PutCondition.IfMatch(first), ct));
+
+        // Another writer got there first: its token is not the one this writer read.
+        Assert.Equal(PutOutcome.Changed, await PutAsync(store, "files/appended.vortex", Bytes("third"), PutCondition.IfMatch(first), ct));
+        Assert.Equal(PutOutcome.Changed, await PutAsync(store, "files/none.vortex", Bytes("third"), PutCondition.IfMatch(first), ct));
+        using ObjectRange range = await store.GetRangeAsync("files/appended.vortex", 0, 64, ct);
+        Assert.Equal(Bytes("second"), range.Bytes.ToArray());
+        Assert.Null(await store.HeadAsync("files/none.vortex", ct));
+    }
+
+    [Fact]
+    public async Task AFileStoreRefusesAPutOnATokenItCannotHold()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open("file");
+        await store.PutIfAbsentAsync("files/one.vortex", Bytes("first"), ct);
+        string token = (await store.HeadAsync("files/one.vortex", ct))!.Value.Token;
+        await Assert.ThrowsAsync<NotSupportedException>(
+            async () => await PutAsync(store, "files/one.vortex", Bytes("second"), PutCondition.IfMatch(token), ct));
+        Assert.Equal(5, (await store.HeadAsync("files/one.vortex", ct))!.Value.Length);
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task AListingCarriesEachObjectsHead(string kind)
+    {
+        // What spares vacuum a head per object: the listing says length, token and date.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        await store.PutIfAbsentAsync("data/a.vortex", Bytes("a"), ct);
+        await store.PutIfAbsentAsync("data/b.vortex", Bytes("bb"), ct);
+
+        List<ObjectListing> listed = await store.ListAsync("data/", null, ct).ToListAsync(ct);
+        Assert.Equal(["data/a.vortex", "data/b.vortex"], listed.Select(o => o.Key));
+        foreach (ObjectListing entry in listed)
+        {
+            Assert.Equal(await store.HeadAsync(entry.Key, ct), entry.Head);
+            Assert.Equal((store.Capabilities & ObjectStoreCapabilities.ReportsLocksInListing) != 0, entry.LockReported);
+        }
+    }
+
+    [Fact]
+    public async Task AMemoryStoreListsTheLocksItKeeps()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock, RetainFor = TimeSpan.FromDays(30) };
+        await store.PutIfAbsentAsync("data/kept", Bytes("kept"), ct);
+        store.Hold("data/kept", held: true);
+
+        ObjectListing listed = Assert.Single(await store.ListAsync("data/", null, ct).ToListAsync(ct));
+        Assert.Equal((clock.Now + TimeSpan.FromDays(30), true, true), (listed.Head.RetainUntil, listed.Head.LegalHold, listed.LockReported));
+    }
+
+    private static (int BytesRead, long ObjectLength) Pick(ObjectRead read) => (read.BytesRead, read.ObjectLength);
+
+    private static ValueTask<PutOutcome> PutAsync(IObjectStore store, string key, byte[] content, PutCondition condition, CancellationToken ct) =>
+        store.PutAsync(key, PipeReader.Create(new ReadOnlySequence<byte>(content)), content.Length, condition, ct);
 
     [Theory]
     [MemberData(nameof(Stores))]

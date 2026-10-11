@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Runtime.InteropServices;
+using Vorticity.IO;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Dataset;
@@ -112,7 +113,7 @@ internal sealed class CommitObjectBuilder : IPageSink
     }
 
     /// <summary>
-    /// Lays the object out, ready for one <see cref="IObjectStore.PutIfAbsentAsync"/>. The header
+    /// Lays the object out, ready for one <see cref="IObjectStore.PutAsync"/> that creates it. The header
     /// may hold references this builder handed out and references into older commits, but it must
     /// name this builder's version.
     /// </summary>

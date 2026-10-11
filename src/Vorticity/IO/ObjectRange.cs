@@ -4,9 +4,8 @@ using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.IO;
 
-namespace Vorticity.Dataset;
+namespace Vorticity.IO;
 
 /// <summary>
 /// A byte range of an object and the object's token, in one answer: bytes fetched in one call and a
@@ -44,11 +43,7 @@ public struct ObjectRange : IDisposable
     /// <summary>The object's token, as <see cref="ObjectHead.Token"/> defines it.</summary>
     public string Token { get; }
 
-    /// <summary>
-    /// The whole object's length, as the answer that brought the bytes gave it (an S3 or Azure
-    /// <c>Content-Range</c>), or -1 when the store does not say. A sealed commit object is opened by
-    /// its head with one request when the store says it.
-    /// </summary>
+    /// <summary>The whole object's length, as the answer that brought the bytes gave it, or -1 when the store does not say.</summary>
     public long ObjectLength { get; }
 
     /// <summary>The bytes, valid until <see cref="Dispose"/>.</summary>
@@ -94,13 +89,62 @@ internal sealed class PooledBuffer : IDisposable
     }
 }
 
-/// <summary>The store operations the dataset asks in the shapes it uses them in.</summary>
-internal static class ObjectStoreExtensions
+/// <summary>The shapes a caller often wants, over the members of <see cref="IObjectStore"/>.</summary>
+public static class ObjectStoreExtensions
 {
+    /// <summary>
+    /// Reads a byte range of an object into a buffer from the shared pool, with the object's token and
+    /// length. The length is clamped to the object, which lets a reader open a file by its tail
+    /// without knowing its length.
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="key">The object's key.</param>
+    /// <param name="offset">The first byte; at or past the end is refused, except 0 on an empty object.</param>
+    /// <param name="length">The most bytes to read.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The bytes and the token; the caller disposes the range once.</returns>
+    /// <exception cref="ObjectNotFoundException">No object has that key.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The range starts past the object's end.</exception>
+    public static async ValueTask<ObjectRange> GetRangeAsync(
+        this IObjectStore store, string key, long offset, int length, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        (byte[] array, PooledBuffer owner) = PooledBuffer.Rent(length);
+        try
+        {
+            ObjectRead read = await store.ReadAsync(key, offset, array.AsMemory(0, length), null, cancellationToken).ConfigureAwait(false);
+            return new ObjectRange(new SegmentLease(array.AsMemory(0, read.BytesRead), owner), read.Token, read.ObjectLength);
+        }
+        catch
+        {
+            owner.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Creates an object from <paramref name="content"/> if its key is free, atomically.
+    /// <see cref="PutOutcome.Exists"/> says only that the key was taken, never whose bytes are there.
+    /// </summary>
+    /// <param name="store">The store.</param>
+    /// <param name="key">The object's key.</param>
+    /// <param name="content">The bytes, streamed; the store completes the reader whatever the outcome.</param>
+    /// <param name="length">How many bytes <paramref name="content"/> holds.</param>
+    /// <param name="cancellationToken">Cancels the creation, leaving the key created or absent.</param>
+    /// <returns>Whether the key was free and now holds the bytes.</returns>
+    public static ValueTask<PutOutcome> PutIfAbsentAsync(
+        this IObjectStore store, string key, PipeReader content, long length, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        return store.PutAsync(key, content, length, PutCondition.IfAbsent, cancellationToken);
+    }
+
     /// <summary>Creates an object from bytes already in memory.</summary>
     internal static ValueTask<PutOutcome> PutIfAbsentAsync(
         this IObjectStore store, string key, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
-        store.PutIfAbsentAsync(key, PipeReader.Create(new ReadOnlySequence<byte>(content)), content.Length, cancellationToken);
+        store.PutAsync(key, PipeReader.Create(new ReadOnlySequence<byte>(content)), content.Length, PutCondition.IfAbsent, cancellationToken);
 
     /// <summary>Deletes one object.</summary>
     internal static ValueTask DeleteAsync(this IObjectStore store, string key, CancellationToken cancellationToken) =>
@@ -112,9 +156,9 @@ internal static class ObjectStoreExtensions
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(max);
         List<string> keys = [];
-        await foreach (string key in store.ListAsync(prefix, startAfter, cancellationToken).ConfigureAwait(false))
+        await foreach (ObjectListing listed in store.ListAsync(prefix, startAfter, cancellationToken).ConfigureAwait(false))
         {
-            keys.Add(key);
+            keys.Add(listed.Key);
             if (keys.Count == max)
             {
                 break;
@@ -129,12 +173,25 @@ internal static class ObjectStoreExtensions
         this IObjectStore store, string prefix, CancellationToken cancellationToken)
     {
         List<string> keys = [];
-        await foreach (string key in store.ListAsync(prefix, null, cancellationToken).ConfigureAwait(false))
+        await foreach (ObjectListing listed in store.ListAsync(prefix, null, cancellationToken).ConfigureAwait(false))
         {
-            keys.Add(key);
+            keys.Add(listed.Key);
         }
 
         return keys;
+    }
+
+    /// <summary>Every object under a prefix, with its head.</summary>
+    internal static async ValueTask<List<ObjectListing>> ListEntriesAsync(
+        this IObjectStore store, string prefix, CancellationToken cancellationToken)
+    {
+        List<ObjectListing> listed = [];
+        await foreach (ObjectListing entry in store.ListAsync(prefix, null, cancellationToken).ConfigureAwait(false))
+        {
+            listed.Add(entry);
+        }
+
+        return listed;
     }
 
     /// <summary>
@@ -198,4 +255,12 @@ internal static class ObjectStoreExtensions
             await content.CompleteAsync(failure).ConfigureAwait(false);
         }
     }
+
+    /// <summary>The refusal of a read past an object's end, as every store words it.</summary>
+    internal static ArgumentOutOfRangeException PastEnd(string key, long offset, long length) =>
+        new ArgumentOutOfRangeException(nameof(offset), offset, $"'{key}' holds {length} bytes, so the range starts past its end.");
+
+    /// <summary>The refusal of a read whose token condition failed: the object changed under its reader.</summary>
+    internal static VortexFormatException Changed(string key, string expected, string actual) =>
+        new VortexFormatException($"'{key}' changed under this reader: it was {expected} and is now {actual}.");
 }

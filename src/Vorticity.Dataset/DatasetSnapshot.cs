@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
+using Vorticity.IO;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;

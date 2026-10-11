@@ -25,18 +25,23 @@ internal static class ObjectStore
         ObjectHead? head = await memory.HeadAsync("files/readings.vortex", ct);
         Console.WriteLine($"head: {head?.Length} bytes, token {head?.Token}; a missing key: {(await memory.HeadAsync("files/nothing", ct) is null ? "null" : "found")}");
 
-        using (ObjectRange tail = await memory.GetRangeAsync("files/readings.vortex", file.Length - 8, 64, ct))
-        {
-            Console.WriteLine($"range: asked 64 bytes 8 before the end, got {tail.Length}, token {tail.Token}, contiguous {tail.IsContiguous}");
-        }
+        byte[] buffer = new byte[64];
+        ObjectRead near = await memory.ReadAsync("files/readings.vortex", file.Length - 8, buffer, null, ct);
+        Console.WriteLine($"read: asked 64 bytes 8 before the end, got {near.BytesRead} of an object of {near.ObjectLength}, token {near.Token}");
+        ObjectRead tail = await memory.ReadTailAsync("files/readings.vortex", buffer, ct);
+        Console.WriteLine($"tail: the last {tail.BytesRead} bytes, and the length with them, {tail.ObjectLength}");
+
+        PutOutcome stale = await memory.PutAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, PutCondition.IfMatch("0"), ct);
+        PutOutcome replaced = await memory.PutAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, PutCondition.IfMatch(head!.Value.Token), ct);
+        Console.WriteLine($"replace while the token is 0: {stale}; while it is {head.Value.Token}: {replaced}, the token now {(await memory.HeadAsync("files/readings.vortex", ct))?.Token}");
 
         for (int i = 0; i < 5; i++)
         {
             await memory.PutIfAbsentAsync($"logs/{i:D2}", PipeReader.Create(new ReadOnlySequence<byte>([(byte)i])), 1, ct);
         }
 
-        List<string> page = await memory.ListAsync("logs/", "logs/01", ct).Take(2).ToListAsync(ct);
-        Console.WriteLine($"list under logs/ after logs/01, first two: {string.Join(", ", page)}");
+        List<ObjectListing> page = await memory.ListAsync("logs/", "logs/01", ct).Take(2).ToListAsync(ct);
+        Console.WriteLine($"list under logs/ after logs/01, first two: {string.Join(", ", page.Select(o => $"{o.Key} ({o.Head.Length} byte)"))}");
 
         await memory.DeleteAsync(["logs/00", "logs/01", "logs/99"], ct);
         Console.WriteLine($"deleted a batch of three keys, one absent: {memory.Count} objects left");
@@ -74,7 +79,7 @@ internal static class ObjectStore
 
         await using MemoryObjectStore failing = new MemoryObjectStore
         {
-            Fails = (operation, key) => operation == ObjectOperation.GetRange,
+            Fails = (operation, key) => operation == ObjectOperation.Read,
         };
         await failing.PutIfAbsentAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, ct);
         try
@@ -109,8 +114,8 @@ internal static class ObjectStore
     }
 
     private static string Cost(CountingObjectStore store) =>
-        $"{store.Requests} requests ({store.CountOf(ObjectOperation.GetRange)} get, {store.CountOf(ObjectOperation.Head)} head, " +
-        $"{store.CountOf(ObjectOperation.PutIfAbsent)} put, {store.CountOf(ObjectOperation.List)} list), " +
+        $"{store.Requests} requests ({store.CountOf(ObjectOperation.Read)} read, {store.CountOf(ObjectOperation.Head)} head, " +
+        $"{store.CountOf(ObjectOperation.Put)} put, {store.CountOf(ObjectOperation.List)} list), " +
         $"{store.DependentSteps} dependent steps, {store.BytesRead} bytes read, {store.BytesWritten} written";
 
     /// <summary>One object of a store read as a file: one ranged get per segment, the gets of a batch issued together.</summary>

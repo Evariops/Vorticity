@@ -14,6 +14,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -45,7 +46,7 @@ public sealed class MemoryStoreFaultTests
             (await read).Dispose();
         }
 
-        Assert.Equal(8, store.CountOf(ObjectOperation.GetRange));
+        Assert.Equal(8, store.CountOf(ObjectOperation.Read));
 
         // Eight requests, one step: they never waited for each other. The step count is the proof,
         // and no clock is asked to agree: a wall-clock ceiling is a flake on a busy runner, where
@@ -73,7 +74,7 @@ public sealed class MemoryStoreFaultTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await store.PutIfAbsentAsync("data/kept", Bytes("kept"), ct);
 
-        store.Fails = (operation, key) => operation == ObjectOperation.PutIfAbsent && key == "data/new";
+        store.Fails = (operation, key) => operation == ObjectOperation.Put && key == "data/new";
         await Assert.ThrowsAsync<ObjectStoreException>(
             async () => await store.PutIfAbsentAsync("data/new", Bytes("never"), ct));
         Assert.Null(await store.HeadAsync("data/new", ct));

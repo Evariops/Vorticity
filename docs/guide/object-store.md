@@ -10,36 +10,41 @@ PutOutcome again = await memory.PutIfAbsentAsync("files/readings.vortex", PipeRe
 
 ObjectHead? head = await memory.HeadAsync("files/readings.vortex", ct);
 
-using (ObjectRange tail = await memory.GetRangeAsync("files/readings.vortex", file.Length - 8, 64, ct))
-{
-    Console.WriteLine($"range: asked 64 bytes 8 before the end, got {tail.Length}, token {tail.Token}, contiguous {tail.IsContiguous}");
-}
+byte[] buffer = new byte[64];
+ObjectRead near = await memory.ReadAsync("files/readings.vortex", file.Length - 8, buffer, null, ct);
+ObjectRead tail = await memory.ReadTailAsync("files/readings.vortex", buffer, ct);
 
-List<string> page = await memory.ListAsync("logs/", "logs/01", ct).Take(2).ToListAsync(ct);
+PutOutcome stale = await memory.PutAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, PutCondition.IfMatch("0"), ct);
+PutOutcome replaced = await memory.PutAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, PutCondition.IfMatch(head!.Value.Token), ct);
+
+List<ObjectListing> page = await memory.ListAsync("logs/", "logs/01", ct).Take(2).ToListAsync(ct);
 await memory.DeleteAsync(["logs/00", "logs/01", "logs/99"], ct);
 ```
 
 ```
 put: Created, then Exists; the store holds 1 object, 1508316 bytes
 head: 1508316 bytes, token 1; a missing key: null
-range: asked 64 bytes 8 before the end, got 8, token 1, contiguous True
-list under logs/ after logs/01, first two: logs/02, logs/03
+read: asked 64 bytes 8 before the end, got 8 of an object of 1508316, token 1
+tail: the last 64 bytes, and the length with them, 1508316
+replace while the token is 0: Changed; while it is 1: Created, the token now 2
+list under logs/ after logs/01, first two: logs/02 (1 byte), logs/03 (1 byte)
 deleted a batch of three keys, one absent: 4 objects left
 ```
 
-`IObjectStore` is the interface a dataset reads and writes through. It lives in `Vorticity.Dataset`,
-which is experimental (see [datasets.md](datasets.md)), and depends on no cloud SDK. Talking to S3,
-Azure Blob Storage or Google Cloud Storage is the implementation's job, and so are retries, pooling
-and credentials.
+`IObjectStore` is the interface a dataset reads and writes through, in `Vorticity.IO` beside the
+core's other I/O interfaces. It depends on no cloud SDK. Talking to S3, Azure Blob Storage or Google
+Cloud Storage is the implementation's job, and so are retries, pooling and credentials.
 
 ```csharp
 public interface IObjectStore : IAsyncDisposable
 {
-    ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken);
+    ObjectStoreCapabilities Capabilities { get; }
+    ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken);
+    ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken);
     ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken);
-    ValueTask<PutOutcome> PutIfAbsentAsync(string key, PipeReader content, long length, CancellationToken cancellationToken);
+    ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken);
     ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken);
-    IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken);
+    IAsyncEnumerable<ObjectListing> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken);
 }
 ```
 
@@ -47,27 +52,34 @@ public interface IObjectStore : IAsyncDisposable
 
 | | |
 |---|---|
-| `PutIfAbsentAsync` | The one that must be exact. It returns `Created` when the key was free and now holds the bytes, `Exists` when it was taken, and never `Created` to two racing callers. That is what makes a commit atomic. The content is a `PipeReader` of the announced `length`, read as it is sent, so an object never has to fit in memory and a store can switch to a multipart upload based on the length. Content that ends early or runs long is refused and nothing is created. A cancelled put leaves the key either created or absent, never half written |
-| `GetRangeAsync` | The bytes of a range and the object's token in a single answer, because a token read in a separate call proves nothing about the bytes. The length is clamped to the object, which lets a reader open a file by its tail without knowing its length. A missing key throws `ObjectNotFoundException` |
+| `PutAsync` | The one that must be exact. Its condition says when it may write. `PutCondition.IfAbsent` writes only when the key is free and answers `Exists` when it is taken, and never `Created` to two racing callers, which is what makes a commit atomic. `PutCondition.IfMatch(token)` writes only while the object still has that token and answers `Changed` otherwise. `PutCondition.None` replaces whatever is there. The content is a `PipeReader` of the announced `length`, read as it is sent, so an object never has to fit in memory and a store can switch to a multipart upload based on the length. Content that ends early or runs long is refused and nothing is written. A cancelled put leaves the key as it was or holding the new bytes whole, never half written |
+| `ReadAsync` | Bytes from an offset into the caller's memory, with the object's length and token from the same answer, because a token read in a separate call proves nothing about the bytes. The read stops at the object's end, and an offset at or past it is refused. Given a token, the store refuses to read another object rather than send its bytes. A missing key throws `ObjectNotFoundException` |
+| `ReadTailAsync` | The last bytes of an object with its length, which lets a reader open a file by its tail without knowing its length. A store that reads suffixes answers in one request |
 | `HeadAsync` | Length, token and creation time, or `null` for a missing key (not an exception). On a store with retention locks, it also gives the date before which a delete is refused (`RetainUntil`) and whether a legal hold applies (`LegalHold`) |
-| `ListAsync` | The keys under a prefix, in ordinal order, after `startAfter`. The implementation fetches pages as the enumeration advances, so a caller that stops early pays for one page |
+| `ListAsync` | The objects under a prefix, in ordinal order of their keys, after `startAfter`, each with its head. The implementation fetches pages as the enumeration advances, so a caller that stops early pays for one page. `LockReported` says whether the listing gives the lock too, or whether only a head does |
 | `DeleteAsync` | A batch of keys, in any order. An absent key is not an error, and a store whose service caps batch sizes splits the batch. It reports nothing, since a store cannot always say which keys existed |
+| `Capabilities` | What the store does in one request: a tail read that says the length (`ReadsSuffix`), a listing in order that resumes after a key (`ListsInOrder`), locks in its listing (`ReportsLocksInListing`), a replacement on a token's match (`ReplacesOnTokenMatch`). A caller takes the cheaper path without trying the other |
 
-An object is never overwritten, and its token changes whenever the bytes under its key change, which
-for immutable objects means the key was deleted and created again. Implementations must be
-thread-safe and list with strong consistency. S3, Azure Blob Storage and Google Cloud Storage all
-offer the conditional put that `PutIfAbsentAsync` needs. A store that cannot promise it cannot host
-a dataset, because two writers would both believe they had committed.
+An object's token changes whenever the bytes under its key change. A dataset puts each of its
+objects once, with `IfAbsent`, and never replaces one. Implementations must be thread-safe, and
+their reads and heads must see every write that completed. A listing may lag, by less than the
+retention window of a dataset the store serves, since a lagging listing costs a dataset freshness and
+never a version. S3, Azure Blob Storage and Google Cloud Storage all offer the conditional put that
+`IfAbsent` needs. A store that cannot promise it cannot host a dataset, because two writers would
+both believe they had committed.
+
+`GetRangeAsync` and `PutIfAbsentAsync` are extension methods over these members, for a caller that
+wants a range in a pooled buffer or a plain creation.
 
 A store with retention locks (S3 Object Lock, Azure immutable blob storage, a GCS bucket lock)
-reports each object's lock in its head and refuses a delete before the date. A dataset on such a
-store declares it once at creation with `DatasetOptions.LockedStore`. It then writes as few bytes as
-it can and vacuums only what the lock has released. `MemoryObjectStore.RetainFor` and `Hold`
-simulate such a store in tests.
+reports each object's lock in its head, and in its listing when the service says it there, and
+refuses a delete before the date. A dataset on such a store declares it once at creation with
+`DatasetOptions.LockedStore`. It then writes as few bytes as it can and vacuums only what the lock has
+released, asking a head only for an object old enough to go whose lock the listing did not say.
+`MemoryObjectStore.RetainFor` and `Hold` simulate such a store in tests.
 
-`ObjectRange` holds its bytes as a `SegmentLease`, so a store can hand back a pooled buffer, memory
-it keeps, or a response that arrived in pieces, and gets it back when the caller disposes the range.
-`Bytes` is always valid, and `Memory` only when `IsContiguous` is true.
+`ObjectRange`, what `GetRangeAsync` returns, holds its bytes in a pooled buffer and gives it back
+when the caller disposes the range.
 
 ## The three that ship
 
@@ -82,7 +94,10 @@ to the device before returning, for a store that is the system of record. Claimi
 there, but writing the content is not, so a process that dies mid-put leaves a short object under a
 taken key, which the format detects when the object is read. A read that meets a put still in
 progress waits for it. A commit left short throws `TornCommitException`, which names its version,
-and `VortexDataset.RemoveTornCommitAsync` removes it.
+and `VortexDataset.RemoveTornCommitAsync` removes it. A put without a condition writes a temporary
+file and renames it over the key, so a reader sees the old object or the new one. No file system
+compares and renames in one step across processes, so a put on a token throws `NotSupportedException`
+there.
 
 `MemoryObjectStore` is a test double with hooks for exercising your own error paths. `Fails` refuses
 a chosen operation, `CrashesAfterPut` throws after a put has landed (so the object exists but its
@@ -90,7 +105,7 @@ writer never learned it), `Latency` delays every call, and `TimeProvider` stamps
 creates.
 
 ```
-a store told to fail: ObjectStoreException: The store was told to fail GetRange on 'files/readings.vortex'.
+a store told to fail: ObjectStoreException: The store was told to fail Read on 'files/readings.vortex'.
 a key that is not there: ObjectNotFoundException, key 'files/nothing'
 ```
 
@@ -105,8 +120,8 @@ a lower bound on the round trips that had to wait one after another, and it is w
 a store where each request costs tens of milliseconds. `Reset` starts the counts again.
 
 ```
-creating a dataset: 5 requests (1 get, 0 head, 1 put, 3 list), 5 dependent steps, 123 bytes read, 123 written
-opening it: 2 requests (1 get, 0 head, 0 put, 1 list), 2 dependent steps, 123 bytes read, 0 written
+creating a dataset: 5 requests (1 read, 0 head, 1 put, 3 list), 5 dependent steps, 123 bytes read, 123 written
+opening it: 2 requests (1 read, 0 head, 0 put, 1 list), 2 dependent steps, 123 bytes read, 0 written
 ```
 
 [dataset-maintenance.md](dataset-maintenance.md) prices compaction, verification and vacuum the
@@ -142,10 +157,10 @@ await using (VortexFile opened = await VortexSession.Default.OpenAsync(new Store
 ```
 
 ```
-open from the store: 1000000 rows; 2 requests (1 get, 1 head, 0 put, 0 list), 2 dependent steps, 65564 bytes read, 0 written
-mean of Celsius for Day >= 900: 30.000; 4 requests (4 get, 0 head, 0 put, 0 list), 4 dependent steps, 151392 bytes read, 0 written
-a full scan, 1000000 rows: 45 requests (45 get, 0 head, 0 put, 0 list), 35 dependent steps, 1465556 bytes read, 0 written
-a full scan through a session with a segment cache, 1000000 rows: 45 requests (45 get, 0 head, 0 put, 0 list), 37 dependent steps, 1465556 bytes read, 0 written
+open from the store: 1000000 rows; 2 requests (1 read, 1 head, 0 put, 0 list), 2 dependent steps, 65564 bytes read, 0 written
+mean of Celsius for Day >= 900: 30.000; 4 requests (4 read, 0 head, 0 put, 0 list), 4 dependent steps, 151392 bytes read, 0 written
+a full scan, 1000000 rows: 45 requests (45 read, 0 head, 0 put, 0 list), 34 dependent steps, 1465556 bytes read, 0 written
+a full scan through a session with a segment cache, 1000000 rows: 45 requests (45 read, 0 head, 0 put, 0 list), 43 dependent steps, 1465556 bytes read, 0 written
 ```
 
 The open costs one ranged read of the tail, plus the head the sample uses to learn the length. From
@@ -164,9 +179,13 @@ byte counts do not.
 
 ## Watch out
 
-* The interface is experimental along with the rest of the package, so pin the version.
-* `ListAsync` must honour `startAfter` and ordinal order, or a dataset's listing of its commits goes
-  wrong. Test an implementation against `MemoryObjectStore`, which is the reference behaviour.
+* The interface may still change while the stores for S3, Azure and Cloud Storage are built, so pin
+  the version.
+* A store that declares `ListsInOrder` must honour `startAfter` and ordinal order, or a dataset's
+  listing of its commits goes wrong. Test an implementation against `MemoryObjectStore`, which is the
+  reference behaviour.
+* `ReadAsync` writes into the caller's memory until it returns, so that memory must stay alive and
+  untouched until the read completes, even when the caller gives up on it.
 * An `ObjectRange` owns its buffer. Dispose it once, and do not read its bytes afterwards.
 
 ## Run it

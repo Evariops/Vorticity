@@ -18,6 +18,7 @@ using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -92,6 +93,31 @@ public sealed class DatasetVacuumTests
         // And a second vacuum finds nothing left to do.
         VacuumResult again = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
         Assert.Empty(again.Deleted);
+    }
+
+    [Fact]
+    public async Task AVacuumAsksForNoHeadOnAStoreThatKeepsNoLocks()
+    {
+        // The listing says each object's length, token and date, which is all the vacuum judges by.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore inner = new MemoryObjectStore { TimeProvider = clock };
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        for (int i = 0; i < Objects; i++)
+        {
+            await dataset.AppendAsync(Of(types, schema, i * PerObject, PerObject), ct);
+        }
+
+        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1 << 20 }, ct));
+        clock.Advance(TimeSpan.FromHours(2));
+        store.Reset();
+        VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.NotEmpty(swept.Deleted);
+        Assert.Equal(0, store.CountOf(ObjectOperation.Head));
     }
 
     [Fact]

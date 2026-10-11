@@ -81,7 +81,7 @@ public sealed class DatasetClusteringTests
         await dataset.AppendAsync(Batches(types, schema, 0), ct);
 
         ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
-        await using ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, entry.Key);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
 
         // The column is not sorted, and yet a key cursor opens and seeks: that is the run.

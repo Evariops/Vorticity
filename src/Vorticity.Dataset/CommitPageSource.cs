@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.IO.Hashing;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 

@@ -51,13 +51,31 @@ public sealed class FileObjectStore : IObjectStore
     /// </summary>
     public bool Durable { get; init; }
 
+    /// <summary>
+    /// Reads suffixes, lists in order, and keeps no locks, which its listing therefore reports. It
+    /// cannot replace on a token's match: no file system compares and renames in one step across
+    /// processes.
+    /// </summary>
+    public ObjectStoreCapabilities Capabilities =>
+        ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReportsLocksInListing;
+
     /// <inheritdoc/>
-    public async ValueTask<ObjectRange> GetRangeAsync(
-        string key, long offset, int length, CancellationToken cancellationToken)
+    public ValueTask<ObjectRead> ReadAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        return ReadCoreAsync(key, offset, destination, ifToken, tail: false, cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken) =>
+        ReadCoreAsync(key, 0, destination, null, tail: true, cancellationToken);
+
+    /// <summary>A read from <paramref name="offset"/>, or of the last bytes with <paramref name="tail"/>, on one handle that also gives the length.</summary>
+    private async ValueTask<ObjectRead> ReadCoreAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, bool tail, CancellationToken cancellationToken)
     {
         ObjectKey.Check(key);
-        ArgumentOutOfRangeException.ThrowIfNegative(offset);
-        ArgumentOutOfRangeException.ThrowIfNegative(length);
         ObjectDisposedException.ThrowIf(_disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -79,38 +97,38 @@ public sealed class FileObjectStore : IObjectStore
         using (handle)
         {
             long size = RandomAccess.GetLength(handle);
-            if (offset >= size && !(offset == 0 && size == 0))
+            string token = Token(new FileInfo(path));
+            if (ifToken is not null && !string.Equals(ifToken, token, StringComparison.Ordinal))
             {
-                throw new ArgumentOutOfRangeException(
-                    nameof(offset), offset, $"'{key}' holds {size} bytes, so the range starts past its end.");
+                throw ObjectStoreExtensions.Changed(key, ifToken, token);
             }
 
-            int available = (int)Math.Min(length, size - offset);
-            (byte[] bytes, PooledBuffer owner) = PooledBuffer.Rent(available);
-            try
+            if (tail)
             {
-                int read = 0;
-                while (read < available)
-                {
-                    int got = await RandomAccess
-                        .ReadAsync(handle, bytes.AsMemory(read, available - read), offset + read, cancellationToken)
-                        .ConfigureAwait(false);
-                    if (got == 0)
-                    {
-                        throw new ObjectStoreException(
-                            $"'{key}' ended after {read} of {available} bytes; it changed under the read.");
-                    }
+                offset = Math.Max(0, size - destination.Length);
+            }
+            else if (offset >= size && !(offset == 0 && size == 0))
+            {
+                throw ObjectStoreExtensions.PastEnd(key, offset, size);
+            }
 
-                    read += got;
+            int available = (int)Math.Min(destination.Length, size - offset);
+            int read = 0;
+            while (read < available)
+            {
+                int got = await RandomAccess
+                    .ReadAsync(handle, destination[read..available], offset + read, cancellationToken)
+                    .ConfigureAwait(false);
+                if (got == 0)
+                {
+                    throw new ObjectStoreException(
+                        $"'{key}' ended after {read} of {available} bytes; it changed under the read.");
                 }
 
-                return new ObjectRange(new SegmentLease(bytes.AsMemory(0, available), owner), Token(new FileInfo(path)), size);
+                read += got;
             }
-            catch
-            {
-                owner.Dispose();
-                throw;
-            }
+
+            return new ObjectRead(available, size, token);
         }
     }
 
@@ -127,30 +145,48 @@ public sealed class FileObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async ValueTask<PutOutcome> PutIfAbsentAsync(
-        string key, PipeReader content, long length, CancellationToken cancellationToken)
+    /// <remarks>
+    /// A creation claims the key before it writes, so a read that meets it waits for its last byte. A
+    /// put that replaces writes beside the object and renames over it, so a reader sees the old bytes
+    /// or the new, whole. A put on a token's match is refused: no file system compares and renames in
+    /// one step across processes.
+    /// </remarks>
+    public async ValueTask<PutOutcome> PutAsync(
+        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(content);
         SafeFileHandle handle;
         string path;
+        string target;
         try
         {
             ObjectKey.Check(key);
             ArgumentOutOfRangeException.ThrowIfNegative(length);
             ObjectDisposedException.ThrowIf(_disposed, this);
             cancellationToken.ThrowIfCancellationRequested();
+            if (condition.Kind == PutConditionKind.IfMatch)
+            {
+                throw new NotSupportedException(
+                    $"A {nameof(FileObjectStore)} cannot replace '{key}' only while it keeps a token: no file system compares and renames in one step across processes.");
+            }
+
+            // A replacement is written beside the object under a name no key can have, a character
+            // past ASCII in it, so that no listing ever shows it.
             path = PathOf(key);
+            target = condition.Kind == PutConditionKind.IfAbsent
+                ? path
+                : string.Create(CultureInfo.InvariantCulture, $"{path}.·{Guid.NewGuid():N}");
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             try
             {
                 handle = System.IO.File.OpenHandle(
-                    path,
+                    target,
                     FileMode.CreateNew,
                     FileAccess.Write,
                     FileShare.None,
                     Durable ? FileOptions.Asynchronous | FileOptions.WriteThrough : FileOptions.Asynchronous);
             }
-            catch (IOException) when (System.IO.File.Exists(path))
+            catch (IOException) when (condition.Kind == PutConditionKind.IfAbsent && System.IO.File.Exists(path))
             {
                 await content.CompleteAsync().ConfigureAwait(false);
                 return PutOutcome.Exists;
@@ -209,15 +245,21 @@ public sealed class FileObjectStore : IObjectStore
         }
         catch (Exception caught)
         {
-            // The claim is ours and the content is not: take the key back rather than leave a torn
-            // object behind.
+            // The claim is ours and the content is not: take the key back, or drop the replacement,
+            // rather than leave a torn object behind.
             failure = caught;
-            TryDelete(path);
+            TryDelete(target);
             throw;
         }
         finally
         {
             await content.CompleteAsync(failure).ConfigureAwait(false);
+        }
+
+        if (!ReferenceEquals(target, path))
+        {
+            // A rename over the object, which a reader sees whole on either side of.
+            System.IO.File.Move(target, path, overwrite: true);
         }
 
         return PutOutcome.Created;
@@ -247,11 +289,24 @@ public sealed class FileObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken)
+    public IAsyncEnumerable<ObjectListing> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prefix);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return System.Linq.AsyncEnumerable.ToAsyncEnumerable(Keys(prefix, startAfter, cancellationToken));
+        return System.Linq.AsyncEnumerable.ToAsyncEnumerable(Listed(prefix, startAfter, cancellationToken));
+    }
+
+    /// <summary>The keys of <see cref="Keys"/> with their heads, each read as it is reached; a key deleted meanwhile is skipped.</summary>
+    private IEnumerable<ObjectListing> Listed(string prefix, string? startAfter, CancellationToken cancellationToken)
+    {
+        foreach (string key in Keys(prefix, startAfter, cancellationToken))
+        {
+            FileInfo info = new FileInfo(PathOf(key));
+            if (info.Exists)
+            {
+                yield return new ObjectListing(key, new ObjectHead(info.Length, Token(info), new DateTimeOffset(info.LastWriteTimeUtc)), LockReported: true);
+            }
+        }
     }
 
     /// <summary>
@@ -279,8 +334,11 @@ public sealed class FileObjectStore : IObjectStore
         {
             cancellationToken.ThrowIfCancellationRequested();
             string key = Path.GetRelativePath(_root, file).Replace(Path.DirectorySeparatorChar, '/');
+
+            // A replacement being written lies under a name no key can have.
             if (key.StartsWith(prefix, StringComparison.Ordinal)
-                && (startAfter is not { } after || string.CompareOrdinal(key, after) > 0))
+                && (startAfter is not { } after || string.CompareOrdinal(key, after) > 0)
+                && ObjectKey.IsValid(key))
             {
                 keys.Add(key);
             }

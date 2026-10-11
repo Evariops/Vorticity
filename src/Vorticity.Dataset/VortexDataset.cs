@@ -141,6 +141,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
     /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
+    /// <exception cref="NotSupportedException">The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>).</exception>
     public static ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
         VortexSchema schema,
@@ -160,10 +161,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The handle, pinned to the latest version until it commits or refreshes; the caller disposes it.</returns>
     /// <exception cref="ObjectNotFoundException">The store holds no dataset.</exception>
     /// <exception cref="TornCommitException">The newest commit is not whole; <see cref="RemoveTornCommitAsync"/> removes it.</exception>
+    /// <exception cref="NotSupportedException">The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>).</exception>
     public static async ValueTask<VortexDataset> OpenAsync(
         IObjectStore store, DatasetOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
+        RequireOrderedListing(store);
         options ??= new DatasetOptions();
         DateTimeOffset asked = options.TimeProvider.GetUtcNow();
         store = SealedObjectStore.Over(store, options.Session);
@@ -187,6 +190,20 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a store whose listing is not in ordinal order, as an S3 directory bucket's is not: the
+    /// latest version is the first key of <c>commit/</c>, which such a listing does not give.
+    /// </summary>
+    private static void RequireOrderedListing(IObjectStore store)
+    {
+        if ((store.Capabilities & ObjectStoreCapabilities.ListsInOrder) == 0)
+        {
+            throw new NotSupportedException(
+                $"A dataset needs a store whose listing is in ordinal order and resumes after a key, and {store.GetType().Name} " +
+                "does not declare one (ObjectStoreCapabilities.ListsInOrder): the latest version is the first key of commit/.");
         }
     }
 
@@ -447,7 +464,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ?? throw ObjectNotFoundException.For(objectKey);
 
         long end = await EndAsync(cancellationToken).ConfigureAwait(false);
-        ISegmentReader source = await ImportReaderAsync(objectKey, cancellationToken).ConfigureAwait(false);
+        ISegmentReader source = await ImportReaderAsync(objectKey, head.Length, cancellationToken).ConfigureAwait(false);
         ObjectEntry entry;
         ReadOnlyMemory<byte> treeKey;
         await using (source.ConfigureAwait(false))
@@ -499,14 +516,14 @@ public sealed class VortexDataset : IAsyncDisposable
     /// plain one, and plain into a plain one, which refuses a sealed one, as a dataset is sealed
     /// whole or not at all.
     /// </summary>
-    private async ValueTask<ISegmentReader> ImportReaderAsync(string objectKey, CancellationToken cancellationToken)
+    private async ValueTask<ISegmentReader> ImportReaderAsync(string objectKey, long length, CancellationToken cancellationToken)
     {
         if (_store is SealedObjectStore { Seals: true } sealedStore)
         {
-            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, cancellationToken).ConfigureAwait(false);
+            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, length, cancellationToken).ConfigureAwait(false);
         }
 
-        ObjectSegmentSource plain = new ObjectSegmentSource(_store, objectKey);
+        ObjectStoreSource plain = new ObjectStoreSource(_store, objectKey, length);
         if (_store is SealedObjectStore && await Sealing.SealedFiles.EndsSealedAsync(plain, cancellationToken).ConfigureAwait(false))
         {
             await plain.DisposeAsync().ConfigureAwait(false);
@@ -859,6 +876,7 @@ public sealed class VortexDataset : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
+        RequireOrderedListing(store);
         options ??= new DatasetOptions();
 
         // Encrypted when asked, and when the session seals what it writes or refuses plaintext, whose

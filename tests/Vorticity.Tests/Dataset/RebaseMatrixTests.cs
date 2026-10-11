@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -88,8 +89,8 @@ public sealed class RebaseMatrixTests
         Assert.Equal(2UL, second.Version);
         Assert.Equal(3, store.DependentSteps);
         Assert.Equal(1, store.CountOf(ObjectOperation.List));
-        Assert.Equal(1, store.CountOf(ObjectOperation.GetRange));
-        Assert.Equal(1, store.CountOf(ObjectOperation.PutIfAbsent));
+        Assert.Equal(1, store.CountOf(ObjectOperation.Read));
+        Assert.Equal(1, store.CountOf(ObjectOperation.Put));
         Assert.Equal(2, second.Tree.Entries);
     }
 
@@ -282,14 +283,14 @@ public sealed class RebaseMatrixTests
 
         Assert.Equal(before.Version + 1, after.Version);
         Assert.Equal(1, store.CountOf(ObjectOperation.List));
-        Assert.Equal(1, store.CountOf(ObjectOperation.PutIfAbsent));
+        Assert.Equal(1, store.CountOf(ObjectOperation.Put));
 
         // ONE read, not `depth + 2`: inlining pages in the header pays for itself here. The
         // previous commit's header carried the whole tree of 400 objects -- the pages it wrote and
         // the ones it had read on the way -- so this commit's descent and rewrite found every page
         // it needed in the header it had already read, and the three steps are the List, that
         // header, the put.
-        Assert.Equal(1, store.CountOf(ObjectOperation.GetRange));
+        Assert.Equal(1, store.CountOf(ObjectOperation.Read));
         Assert.Equal(3, store.DependentSteps);
     }
 
@@ -309,29 +310,13 @@ public sealed class RebaseMatrixTests
     }
 
     /// <summary>A store whose creations always lose, to exercise the give-up path.</summary>
-    private sealed class AlwaysTaken(IObjectStore inner) : IObjectStore
+    private sealed class AlwaysTaken(IObjectStore inner) : ForwardingStore(inner)
     {
-        public ValueTask<ObjectRange> GetRangeAsync(
-            string key, long offset, int length, CancellationToken cancellationToken) =>
-            inner.GetRangeAsync(key, offset, length, cancellationToken);
-
-        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
-            inner.HeadAsync(key, cancellationToken);
-
-        public async ValueTask<PutOutcome> PutIfAbsentAsync(
-            string key, PipeReader content, long length, CancellationToken cancellationToken)
+        public override async ValueTask<PutOutcome> PutAsync(
+            string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
         {
             await content.CompleteAsync().ConfigureAwait(false);
             return PutOutcome.Exists;
         }
-
-        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(keys, cancellationToken);
-
-        public IAsyncEnumerable<string> ListAsync(
-            string prefix, string? startAfter, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

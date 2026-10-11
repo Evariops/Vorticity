@@ -90,7 +90,7 @@ public sealed class DatasetCompactionTests
         // And the output says what it is: a sorted key column, which is what lets a lookup inside it
         // be a seek without reading the run at all.
         ObjectEntry compacted = Assert.Single(await ObjectsAsync(dataset));
-        await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, compacted.Key);
+        await using ObjectStoreSource bytes = new ObjectStoreSource(store, compacted.Key);
         await using VortexFile output = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), ct);
         Assert.True(IsSorted(output, "key"), "a merge writes its output sorted by construction (§5.3)");
 
@@ -927,7 +927,7 @@ public sealed class DatasetCompactionTests
     /// <summary>Whether an object carries a sorted run, read from its own index directory.</summary>
     private static async Task<bool> HasRunAsync(IObjectStore store, ObjectEntry entry, CancellationToken ct)
     {
-        await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, entry.Key);
+        await using ObjectStoreSource bytes = new ObjectStoreSource(store, entry.Key);
         await using VortexFile file = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), ct);
         IndexDirectory? directory = await file.ReadIndexDirectoryAsync(ct);
         return directory is not null && directory.Entries.Any(index => index.Kind == IndexKinds.SortedRuns);

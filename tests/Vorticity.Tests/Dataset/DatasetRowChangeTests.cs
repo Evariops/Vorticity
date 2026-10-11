@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.IO;
 using Vorticity.Tests.Scan;
 using Xunit;
 
@@ -358,17 +359,11 @@ public sealed class DatasetRowChangeTests
     }
 
     /// <summary>A store that runs <see cref="BeforeCommit"/> once, before the first commit object it is asked to create.</summary>
-    private sealed class InterposingStore(IObjectStore inner) : IObjectStore
+    private sealed class InterposingStore(IObjectStore inner) : ForwardingStore(inner)
     {
         internal Func<Task>? BeforeCommit { get; set; }
 
-        public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken) =>
-            inner.GetRangeAsync(key, offset, length, cancellationToken);
-
-        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
-            inner.HeadAsync(key, cancellationToken);
-
-        public async ValueTask<PutOutcome> PutIfAbsentAsync(string key, PipeReader content, long length, CancellationToken cancellationToken)
+        public override async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
         {
             if (key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal) && BeforeCommit is { } interpose)
             {
@@ -376,15 +371,7 @@ public sealed class DatasetRowChangeTests
                 await interpose();
             }
 
-            return await inner.PutIfAbsentAsync(key, content, length, cancellationToken);
+            return await Inner.PutAsync(key, content, length, condition, cancellationToken);
         }
-
-        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(keys, cancellationToken);
-
-        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

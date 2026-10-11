@@ -1,4 +1,5 @@
 using System;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 

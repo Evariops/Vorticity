@@ -13,6 +13,7 @@ using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
@@ -213,34 +214,29 @@ public sealed class MergeFanInTests
     }
 
     /// <summary>A store that counts the ranges read from data objects, and not from commits.</summary>
-    private sealed class DataReads(IObjectStore inner) : IObjectStore
+    private sealed class DataReads(IObjectStore inner) : ForwardingStore(inner)
     {
         internal long Count;
 
-        public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken)
+        public override ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            Note(key);
+            return Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+
+        public override ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            Note(key);
+            return Inner.ReadTailAsync(key, destination, cancellationToken);
+        }
+
+        private void Note(string key)
         {
             if (key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal))
             {
                 Interlocked.Increment(ref Count);
             }
-
-            return inner.GetRangeAsync(key, offset, length, cancellationToken);
         }
-
-        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
-            inner.HeadAsync(key, cancellationToken);
-
-        public ValueTask<PutOutcome> PutIfAbsentAsync(
-            string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken) =>
-            inner.PutIfAbsentAsync(key, content, length, cancellationToken);
-
-        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(keys, cancellationToken);
-
-        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static async Task<long> WalkAsync(DatasetScanBuilder scan, CancellationToken ct)
