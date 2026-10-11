@@ -10,9 +10,9 @@ is built, sent, retried and counted, what each provider does differently, and wh
 costs in requests.
 
 It is built, in the core's store interface and in the package `Vorticity.ObjectStorage`, and held by
-the published vectors of each protocol and by emulators of each service under the HTTP client. The
-tests against the services themselves come next. Where the code departs from this design,
-[the last section](#19-where-the-code-departs-from-this-design) says so, and where the design changes
+the published vectors of each protocol, by emulators of each service under the HTTP client, and by
+the store contract run against a service's own bucket when the environment names one. Where the code
+departs from this design, [the last section](#19-where-the-code-departs-from-this-design) says so, and where the design changes
 a rule that another document states, it says so. [The scope](01-scope.md#6-what-it-leaves-out) leaves out an S3
 client, and [the dataset](13-dataset.md) says that this library never names S3 in code. Both stay
 true of the core and of the dataset package, since the clients live in a package of their own, which
@@ -29,7 +29,7 @@ Five requirements, each of which becomes a test or a ratchet once built:
 
 | requirement | what it means, measured |
 |---|---|
-| the same API | a file opens, scans, is written and appended with the calls it has on a path, given a location instead. A dataset takes a store, or a location. Nothing else in the public API changes, whichever provider holds the bytes |
+| the same API | a file opens, scans and is written with the calls it has on a path, given a location instead, though an object takes no append. A dataset takes a store, or a location. Nothing else in the public API changes, whichever provider holds the bytes |
 | few round trips | every operation has a count of requests and of dependent steps, written in [the budget](#5-requests-per-operation), and counting tests hold it. Opening a file is one request on a store that reads suffixes, and opening an object of a dataset is one request on any store. Nothing that a response already said is asked again |
 | the bandwidth of the link | reads run in parallel on many connections, coalesced into ranges of up to 16 MiB, and large objects go up in parts sent in parallel |
 | bounded allocation, one copy | a request allocates a constant amount, never a buffer the size of its body, and this library's own code allocates nothing per batch. A response body reaches the block the scan decodes from with no copy but the one TLS makes |
@@ -48,14 +48,13 @@ references.
 
 | built in this repository | taken from .NET |
 |---|---|
-| the transport's policy over HTTP: deadlines and stall detection, retries and their budget, hedged reads, the spreading of connections over a bucket's addresses, and the outcome of a conditional write whose answer was lost | HTTP (`HttpClient` over `SocketsHttpHandler`): connections and their pool, proxies, chunked bodies, `100-continue` |
+| the transport's policy over HTTP: deadlines and stall detection, retries and their budget, the requests a throttled service is sent at once, and the outcome of a conditional write whose answer was lost | HTTP (`HttpClient` over `SocketsHttpHandler`): connections and their pool, name resolution, proxies, chunked bodies, `100-continue` |
 | the S3 dialect: Signature Version 4, ranged and suffix reads, conditional writes, multipart uploads, `DeleteObjects`, `ListObjectsV2`, checksums, and the profiles of R2, OVHcloud and Scaleway | TLS (`SslStream`, under `SocketsHttpHandler`), which runs the operating system's TLS library and validates certificates against the system's trust store |
-| the Azure dialect: Shared Key signing, shared access signatures, bearer tokens, `Put Block List`, `Blob Batch`, `List Blobs`, the structured body format | name resolution (`Dns`), for the addresses a new connection takes in turn |
-| the Cloud Storage dialect: generation preconditions, the JSON API's listings, metadata and batches, the XML API's reads and multipart uploads, composition | JSON parsing (`Utf8JsonReader`), for the token endpoints, the instance metadata and Cloud Storage's JSON API |
-| the credential chains of AWS, Azure and Google Cloud, and their refresh | entropy (`RandomNumberGenerator`) |
-| an XML reader for the services' responses, and the few writers their requests need | SHA-256, HMAC-SHA-256 and MD5 (`SHA256.HashData`, `HMACSHA256.HashData`, `MD5.HashData`), for the signatures and the `Content-MD5` some requests need |
-| CRC-64/NVME, which `System.IO.Hashing` lacks, since its `Crc64` is ECMA-182's, and CRC-32C, a loop over `BitOperations.Crc32C`, which runs the processor's instruction | RSA signatures (`RSA`), for the token requests of a Google service account key |
-| | XXH3-128 and CRC-32 (`System.IO.Hashing`) |
+| the Azure dialect: Shared Key signing, shared access signatures, bearer tokens, `Put Block List`, `Blob Batch`, `List Blobs` | XML (`XmlReader`, `XmlWriter`), for the services' answers and the few documents their requests carry |
+| the Cloud Storage dialect: generation preconditions, the JSON API's listings, metadata and batches, the XML API's reads and multipart uploads | JSON parsing (`Utf8JsonReader`), for the token endpoints, the instance metadata and Cloud Storage's JSON API |
+| the credential chains of AWS, Azure and Google Cloud, and their refresh | SHA-256, HMAC-SHA-256 and MD5 (`SHA256.HashData`, `HMACSHA256.HashData`, `MD5.HashData`), for the signatures and the `Content-MD5` some requests need |
+| | RSA signatures (`RSA`), for the token requests of a Google service account key, and entropy (`RandomNumberGenerator`) |
+| | CRC-64/NVME, CRC-32C, CRC-32 and XXH3-128 (`System.IO.Hashing`, whose version 11 takes the parameters of any CRC) |
 
 The line falls at HTTP. What is specific to object storage, the signatures, the operations, the
 retries and what they mean for a commit, is this library's, and it is where every requirement of
@@ -194,19 +193,22 @@ gap closed:
 | a read fills the caller's buffer | `GetRangeAsync` returns bytes the store owns, and the dataset's object source copies each segment out of them into an aligned block (`ObjectSegmentSource.cs`, `Aligned`) | `ReadAsync(key, offset, destination, ifToken)` reads into memory the caller gives and returns the bytes read, the object's length and its token | the body lands in the block the scan decodes from, and the per-segment copy disappears |
 | the end of an object, without its length | the open asks the length first (`GetLengthAsync`, a head), then reads the tail (`VortexFile.cs`, the open path) | `ReadTailAsync(key, destination)` reads the last bytes and returns the object's length with them | one request instead of two on a store that reads suffixes. Another store answers with a head and a read, as today |
 | a condition on the token | a range's token is compared with the first one after the bytes arrived (`ObjectSegmentSource.cs`, `Note`) | the token travels with the read as a condition, and the store answers 412 rather than bytes of another object | an object replaced under a reader fails the next read, and its bytes are never downloaded |
-| a put says its condition | `PutIfAbsentAsync` only, and an object is never overwritten | `PutAsync(key, content, length, condition)`, where the condition is absent, matching a token, or none, and `PutOutcome` gains `Changed` for a token that no longer matches | a file written to a location replaces the object as a path's rename does, and an append replaces it only if nothing else did in between |
+| a put says its condition | `PutIfAbsentAsync` only, and an object is never overwritten | `PutAsync(key, content, length, condition)`, where the condition is absent, matching a token, or none, and `PutOutcome` gains `Changed` for a token that no longer matches | a file written to a location replaces the object as a path's rename does, and a caller that read an object replaces it only if nothing else did in between |
 | a listing says what it knows | keys only, so vacuum asks for a head per candidate (`DatasetVacuum.cs`, one awaited after another) | `ListAsync` yields each key with its length, token and creation time, and the lock when the store's listing reports it | vacuum stops asking for heads, except for the locks that S3 and the clouds speaking its API report only in a head |
 
 `GetRangeAsync` and `PutIfAbsentAsync` remain as extension methods over the new members, the first
 internal to the dataset, so the dataset's code changes only where it gains something. A store also declares what it can do, so that
 a caller chooses the cheaper path without trying the other:
 
-| capability | S3 | R2, OVHcloud, Scaleway | S3 directory buckets | Azure | Cloud Storage | file | memory |
-|---|---|---|---|---|---|---|---|
-| reads a suffix without the length | yes | to check | yes | no | to check | yes | yes |
-| lists in ordinal order, after a key | yes | yes, OVHcloud's to check | no | yes | yes | yes | yes |
-| reports locks in a listing | no | no | no | yes | yes | no locks | yes |
-| replaces on a token's match | yes | yes | to check | yes | yes | no | yes |
+| capability | S3 | R2, OVHcloud, Scaleway, another S3 service | Azure | Cloud Storage | file | memory |
+|---|---|---|---|---|---|---|
+| reads a suffix without the length | yes | to check | no | to check | yes | yes |
+| lists in ordinal order, after a key | yes | yes, OVHcloud's to check | yes | yes | yes | yes |
+| replaces on a token's match | yes | yes | yes | yes | no | yes |
+| keeps locks, as S3 Object Lock does | yes | to check, never on R2 or in an OVHcloud Local Zone | yes | yes | no | yes |
+
+A listing says on each entry whether it gave the object's lock: Azure's, Cloud Storage's and the
+memory store's do, the file store's does by saying none, and S3's never does, so a head tells there.
 
 A capability marked to check is taken as absent until the contract tests prove it against the
 service, so a store whose suffix reads are not proven opens a file with a head and a read, as today.
@@ -232,8 +234,8 @@ atomic conditional creations.
 
 S3's directory buckets list in no particular order and refuse `start-after`, both checked in the
 `ListObjectsV2` reference. The first key of `commit/` means nothing in such a listing, so a
-directory bucket hosts single files, where its low latency pays, and never a dataset, which refuses
-such a store when it opens.
+directory bucket could host single files and never a dataset, and the store refuses one when it is
+built ([directory buckets](#73-directory-buckets)).
 
 The token stays an opaque string, compared ordinally: an ETag on S3 and Azure, the generation, a
 number the service assigns at each creation, on Cloud Storage. To keep a read free of allocation, the
@@ -276,7 +278,7 @@ of its gains survives a look at what the platform's client does:
 |---|---|
 | a body read without a copy | it reads a response body from the TLS stream straight into the caller's memory whenever its own buffer is empty (`HttpConnection.ReadAsync` in dotnet/runtime), so only the bytes that arrived with the headers, a few kilobytes at most, are copied. The copy this design removes is the store interface's (see [the store interface, revised](#4-the-store-interface-revised)), not HTTP's |
 | no allocation per request | it allocates per request the request and response messages, their headers, a few strings and the state of its calls, a few kilobytes in all, a figure to measure. That is a constant per request, never proportional to the body. In ranges of a mebibyte, it is under half a percent of the bytes moved, objects that die young, which the young generation collects for almost nothing |
-| control of connections and deadlines | `MaxConnectionsPerServer`, `PooledConnectionIdleTimeout`, `PooledConnectionLifetime`, `ConnectCallback`, which picks the address of each new connection, and `Expect100ContinueTimeout` cover the connections, and a cancellation token covers every deadline. Retries, hedging and the outcome of a lost conditional write are logic above HTTP, written here whichever client sends the bytes |
+| control of connections and deadlines | `MaxConnectionsPerServer`, `ConnectTimeout`, `PooledConnectionIdleTimeout`, `PooledConnectionLifetime` and `Expect100ContinueTimeout` cover the connections, and a cancellation token covers every deadline. Retries and the outcome of a lost conditional write are logic above HTTP, written here whichever client sends the bytes |
 
 A client of our own would cost what the platform's has already paid for. A connection reused after a
 body was only partly read hands its leftover bytes to the next request, which is silent corruption.
@@ -297,14 +299,13 @@ nothing else.
 | setting | value |
 |---|---|
 | handler | one `SocketsHttpHandler` per store, shared by the store's views under its prefixes |
-| connections | `MaxConnectionsPerServer`, 64 by default. A request waits for a free connection rather than opening one past the cap |
-| spreading | `ConnectCallback` resolves the endpoint and gives each new connection the next of its addresses. S3's guidance is to spread requests over many connections, since the service is a large distributed system and not one endpoint |
-| lifetime | `PooledConnectionIdleTimeout` of 20 s and `PooledConnectionLifetime` of 5 minutes, so the pool follows the service's name resolution |
+| connections | `MaxConnectionsPerServer`, 64 by default. A request waits for a free connection rather than opening one past the cap. S3's guidance is to spread requests over many connections, which the pool's connections do |
+| lifetime | `PooledConnectionIdleTimeout` of 20 s and `PooledConnectionLifetime` of 5 minutes, so the pool follows the service's name resolution, and a connection takes the addresses the platform resolves |
 | TLS | TLS 1.2 or 1.3, the server's certificate checked against the system's trust store. Plain HTTP only for an endpoint marked as an emulator on loopback |
 | turned off | cookies, automatic decompression and redirects, since S3 answers a request sent to the wrong region with a redirect that names the right one, and the store signs the request again for it |
 | proxies | the environment's (`HTTPS_PROXY`, `NO_PROXY`), as the platform reads them, or one given in the options |
 | large puts | `Expect: 100-continue` on a put larger than a part, so a request refused on its headers, a denied one or a bad signature, costs no body |
-| draining | none (`MaxResponseDrainSize` of 0): a body abandoned before its end, a hedge's loser or a stalled read, closes its connection instead of being read to the end for nothing |
+| draining | none (`MaxResponseDrainSize` of 0): a body abandoned before its end, a stalled read, closes its connection instead of being read to the end for nothing |
 | tracing | the platform's metrics and traces stay on. The trace header it adds is outside every service's signature, and a store can turn its propagation off |
 
 ### 6.3 A request
@@ -335,7 +336,7 @@ rather than draining it.
 | 500, 502, 503, 504, 429, a connection refused or reset, a deadline missed | retried with exponential backoff and full jitter, from 50 ms to 20 s, honouring `Retry-After`, while the store's retry budget allows |
 | 503 `SlowDown` (S3), 503 `ServerBusy` (Azure), 429 (R2, Cloud Storage) | the same, and the store halves the requests it sends at once until the service has been calm for 10 seconds, once per episode: the requests in flight when it halved do not halve it again |
 | 400 `RequestTimeout` (S3, a body too slow) | retried once |
-| a clock skew (S3 `RequestTimeTooSkewed`, an Azure date refused) | the offset from the response's `Date` is applied to the signing clock, and the request retried once |
+| a request dated more than five minutes off the service's `Date`, as the refused request itself says (S3 `RequestTimeTooSkewed`, an Azure date refused) | the offset from the response's `Date` is applied to the signing clock, and the request sent again, dated anew. A request refused for another reason is not, even on a host whose clock is off |
 | an expired token | the credentials refreshed once, and the request retried once |
 | 404, 412, 416, 401, 403 and the other 4xx | answers, not failures: they are mapped as [errors](#13-errors) says |
 
@@ -372,16 +373,11 @@ a write after the head that follows its lost answer, which is the case the tests
 ### 6.5 Hedged reads
 
 A read that has not seen its first byte when most reads have finished is probably on a slow path,
-and a second request is likely to take another one. S3's performance guidance makes the same point
-about aggressive timeouts and retries. The client tracks the first-byte latency of each endpoint in
-a small histogram and, for reads only, sends a second request when the first passes a percentile of
-it, keeps whichever answers first and closes the other's connection.
-
-A hedge costs a request, and requests cost money. Hedging is therefore off by default, a store's
-option with a budget (`HedgeAfterPercentile`, 99 by default once enabled, and at most 2 % of reads
-hedged), and counted apart from the reads (see [observability](#14-observability)), so the request
-ratchets stay exact. Whether it should be on by default is one of the
-[decisions to take](#17-decisions-to-take).
+and a second request is likely to take another one, as S3's performance guidance says of aggressive
+timeouts and retries. Hedging was built, a second request sent past a percentile of the first-byte
+latency, and removed: each hedge is a request that costs money, the request ratchets had to count
+hedges apart, and nothing measured what a hedge gains against a service. It comes back with that
+measurement.
 
 ## 7. S3, and the clouds that speak its API
 
@@ -403,7 +399,7 @@ hashed with SHA-256. The small XML bodies the client builds itself are signed.
 | store operation | S3 request |
 |---|---|
 | `ReadAsync` | `GET` with `Range: bytes=a-b`, and `If-Match` when the token is known. S3 serves one range per request, so a coalesced range is one request |
-| `ReadTailAsync` | `GET` with `Range: bytes=-n`. `Content-Range` says the object's length in the same answer |
+| `ReadTailAsync` | `GET` with `Range: bytes=-n`, whose `Content-Range` says the object's length in the same answer, on a service whose suffix reads are proven. Elsewhere a `HEAD`, then the range |
 | `HeadAsync` | `HEAD`, which also says the Object Lock retention date and the legal hold |
 | `PutAsync`, up to the part threshold | `PUT` with `If-None-Match: *` when the key must be absent, `If-Match` when the token must match, and the content's checksum in a header (see [writing](#11-writing)) |
 | `PutAsync`, above it | `CreateMultipartUpload` with the checksum algorithm, `UploadPart` in parallel, then `CompleteMultipartUpload` with the condition and the whole object's checksum |
@@ -423,10 +419,10 @@ never written twice, and a lease's key names a span of time that has ended.
 ### 7.3 Directory buckets
 
 S3 Express One Zone's directory buckets answer in single-digit milliseconds, sign with a session
-token that `CreateSession` issues and that the store renews before it expires, and accept appends
-(`x-amz-write-offset-bytes`, up to 10 000 parts per object). They list in no order and without
-`start-after`, so they host single files and never datasets. The store detects a directory bucket by
-its name's `--x-s3` suffix.
+token that `CreateSession` issues, and accept appends. They list in no order and without
+`start-after`, so they could host single files and never datasets. Their sessions and appends were
+built and removed, for want of a user whose files need that latency. The store refuses a bucket
+whose name ends in `--x-s3` when it is built, with a message that says why.
 
 ### 7.4 Cloudflare R2, OVHcloud and Scaleway
 
@@ -451,9 +447,8 @@ await using S3ObjectStore exports = S3ObjectStore.ForScaleway("fr-par", "exports
 | listing strongly consistent | yes | yes | not documented | not documented, reads after writes are |
 | suffix reads | yes | to check | to check | to check |
 | parts | 10 000 at most, 5 MiB to 5 GiB | 10 000 at most, 5 MiB to 5 GiB, all of one size but the last | 10 000 at most, 5 MiB to 5 GiB | 1 000 at most, 5 MB to 5 GB |
-| a part copied from an object, for appends | yes | yes | not listed | yes |
-| Object Lock in a head | yes | no Object Lock header | yes in regions, not in Local Zones | yes, in compliance mode |
-| checksum sent with a put | XXHash128 in one request, CRC-64/NVME in parts | none by default | none by default | none by default |
+| Object Lock in a head | yes | no Object Lock header | yes in regions, not in Local Zones, to check | yes, in compliance mode, to check |
+| checksum sent with a put | CRC-64/NVME | none by default, `Content-MD5` as an option | none by default, `Content-MD5` as an option | none by default, `Content-MD5` as an option |
 | limits to live with | 3 500 writes and 5 500 reads a second per prefix | one write a second to the same key, answered 429 | 300 writes and 900 reads a second per bucket, soft limits, and 1 Gb/s per connection | none documented beyond the parts |
 
 Each of them creates a key only if it is absent in one request, which is what a commit needs: a
@@ -477,7 +472,8 @@ and on OVHcloud's Local Zones, which keep no retention or legal hold. R2 answers
 second write to the same key within a second. A dataset writes each key once, so only a retry meets
 it, and a retry waits as [the retries](#64-timeouts-retries-and-writes-whose-outcome-is-unknown)
 say. OVHcloud's 1 Gb/s per connection means that a 10 Gb/s link needs ten connections in flight at
-least, which the window of [the reads in flight](#101-the-reads-in-flight) provides.
+least, which the ranges a batch issues together provide when they are many
+([the reads in flight](#101-the-reads-in-flight)).
 
 The three clouds share no checksum but `Content-MD5`, and R2 documents no other. The store sends none
 by default, since TLS already protects the bytes on their way, and MD5 would cost a pass over every
@@ -501,9 +497,8 @@ against such a service as against the others, once the environment names one of 
 ### 8.1 Requests and signing
 
 Requests go to `account.blob.core.windows.net/container/blob`, or to an endpoint given for an emulator
-or a sovereign cloud, with an `x-ms-version` the store pins. The version must be 2025-01-05 or later,
-for the structured body, which also covers `startFrom` in listings (2023-05-03) and the immutability
-policy in listings and heads (2020-06-12).
+or a sovereign cloud, with an `x-ms-version` the store pins, 2025-01-05, which covers `startFrom` in
+listings (2023-05-03) and the immutability policy in listings and heads (2020-06-12).
 
 A request is authorized by a bearer token from Microsoft Entra ID, which Microsoft recommends, by a
 shared access signature, or by Shared Key, an HMAC-SHA-256 of a canonical string with the account
@@ -514,10 +509,10 @@ emulator and for accounts that still use it.
 
 | store operation | Azure request |
 |---|---|
-| `ReadAsync` | `Get Blob` with `x-ms-range: bytes=a-b`, `If-Match` when the token is known, and the structured body when the store verifies reads (see [reading](#10-reading-at-the-speed-of-the-link)) |
+| `ReadAsync` | `Get Blob` with `x-ms-range: bytes=a-b`, and `If-Match` when the token is known |
 | `ReadTailAsync` | Azure accepts `bytes=a-` and `bytes=a-b` only, never a suffix, so `Get Blob Properties` then `Get Blob`, unless the caller gives the length |
 | `HeadAsync` | `Get Blob Properties`, which also says `x-ms-immutability-policy-until-date` and `x-ms-legal-hold` |
-| `PutAsync`, up to the part threshold | `Put Blob` with `If-None-Match: *` or `If-Match`, and `x-ms-content-crc64` |
+| `PutAsync`, up to the part threshold | `Put Blob` with `If-None-Match: *` or `If-Match`, and `x-ms-content-crc64`, or `Content-MD5` or nothing as the store's options say |
 | `PutAsync`, above it | `Put Block` in parallel, then `Put Block List` with the condition |
 | `DeleteAsync` | `Blob Batch` scoped to the container, up to 256 `Delete Blob` per request and 4 MB of body, each one authorized in the batch |
 | `ListAsync` | `List Blobs` with `prefix`, `startFrom` (inclusive, so a key equal to `startAfter` is skipped), `maxresults` of 5 000, and `include=immutabilitypolicy,legalhold` on a locked store |
@@ -530,10 +525,10 @@ order a dataset relies on keep it.
 ### 8.3 Checksums
 
 Azure's CRC-64 is CRC-64/NVME, the polynomial S3 uses for `CRC64NVME`, so one implementation serves
-both services. A `Put Blob` or `Put Block` carries `x-ms-content-crc64`, which the service checks. A
-read can ask for a structured body, in which the service cuts the bytes into segments of 4 MiB, each
-followed by its CRC-64, and ends with the CRC-64 of the whole. The client reads the segment headers
-apart and the data straight into the destination, so verifying a read costs a CRC pass and no copy.
+both services. A `Put Blob` or `Put Block` carries `x-ms-content-crc64`, which the service checks.
+A read could ask for a structured body, in which the service cuts the bytes into segments of 4 MiB,
+each followed by its CRC-64. Its reader was built and removed until its layout is checked against
+the service, so a read from Azure relies on TLS and the format's checks, as on S3.
 
 ## 9. Google Cloud Storage
 
@@ -547,7 +542,6 @@ speaks Cloud Storage's own APIs instead, because what a dataset relies on lies t
 - A listing that says each object's retention and holds, so vacuum asks no head.
 - Deletes in batches.
 - The platform's identities, a service account or a workload's, rather than HMAC keys.
-- Composition, which assembles objects on the server.
 
 ### 9.2 Requests and authorization
 
@@ -581,27 +575,25 @@ bucket, billed, for the bucket's soft-delete period, 7 days by default: vacuum f
 later there than on the other services, unless the bucket's period is set to 0.
 
 The service records a CRC-32C for every object, multipart and composite ones included, which have no
-MD5. The store sends the CRC-32C of what it puts, computed with the processor's instruction through
-`BitOperations.Crc32C`. Reads return the whole object's hashes only, so a ranged read relies on TLS
-and the format's checks, as on S3.
+MD5. The store sends the CRC-32C of what it puts, computed by `System.IO.Hashing`. Reads return the
+whole object's hashes only, so a ranged read relies on TLS and the format's checks, as on S3.
 
 ## 10. Reading at the speed of the link
 
 ### 10.1 The reads in flight
 
-Today the session's bound on reads in flight counts batch reads: a batch takes one slot, and the
-dataset's object source then issues every coalesced range of the batch at once
+The session's bound on reads in flight counts batch reads, 16 by default, on every store: a batch
+takes one slot, and the source then issues every coalesced range of the batch at once
 (`SessionReader.cs`, `ReadManyAsync`, and `ObjectSegmentSource.cs`, the reads issued together). Over
-HTTP/1.1 a request in flight is a connection, so the number of connections a session opens is not
-bounded by anything the session states. Revised, the bound counts requests: each range takes a slot
-for the time its request is in flight, and the store's connections are the slots.
+HTTP/1.1 a request in flight is a connection, and the store sends at most `MaxConnections` requests
+at once, so the memory the reads hold and the connections they open are both bounded.
 
 What a link needs in flight is its bandwidth times its latency. At 10 Gb/s and 30 ms that is about
-37 MB, three ranges of 16 MiB or 36 of 1 MiB. The session's fixed count of 16 reads fills such a
-link only when the ranges are large. The window becomes bytes, shared by the lanes of a query and
-sized from the throughput and the first-byte latency the store has measured. Its buffers are
-reserved through the memory governor when the query is admitted, a fixed cost as the governor's
-other working memory is, so a window never grows past what the process can hold.
+37 MB, three ranges of 16 MiB or 36 of 1 MiB. A window in bytes, sized from the throughput and the
+first-byte latency the store measured, was built and removed: as it sized itself, it fell to one
+request in flight once ranges passed a few megabytes, it bounded again what the connections and the
+session already bound, and nothing measured it against a service. It comes back with a measurement
+of a scan against the services, if the session's count falls short of a link.
 
 ### 10.2 Bytes land once
 
@@ -616,12 +608,9 @@ into to the block, which any client over `SslStream` makes.
 ### 10.3 The first batch
 
 A scan's read-ahead runs on every lane, so a single object's first batch at degree 14 issues about 14
-requests today, against 2 at degree 1, each of which is latency on an object store. A scan over a
-source that does network I/O starts on two lanes and widens to its degree once the consumer asks for
-the next batch. A lane of a parallel aggregation also takes its next range one step ahead and starts
-its reads then, so the first read of each range stops waiting on the critical path. Both changes are
-the scan's, and are measured against the source with injected latency that the query tests already
-use.
+requests, against 2 at degree 1, each of which is latency on an object store. Starting a scan over
+the network on two lanes, widened once the consumer asks for the next batch, was built with the
+window and removed with it. Both are the scan's, and come back measured against a service.
 
 ### 10.4 Integrity of what is read
 
@@ -629,9 +618,8 @@ S3 returns a checksum for a whole object, or for a range aligned on one of its p
 arbitrary range, and neither do R2, OVHcloud, Scaleway or Cloud Storage. A read from them relies on
 TLS for the transport and on the format's own checks for the rest: the dataset's pages and headers
 carry XXH3, the index regions carry checksums, and a file's structures are validated as they are
-parsed. A read from Azure asks for the structured body and verifies each segment's CRC-64 as it
-arrives, which costs a pass of carry-less multiplications at several gigabytes per second per core,
-a figure to measure.
+parsed. Azure's structured body would verify a read segment by segment, and waits for its layout to
+be checked against the service ([Azure's checksums](#83-checksums)).
 
 ## 11. Writing
 
@@ -705,26 +693,20 @@ as they leave it, and the header carries that hash
 the big-endian value in base64. That S3's XXHash128 is the XXH3-128 of `System.IO.Hashing`, and in
 which byte order that type writes it, are checked by the contract tests before the header is relied
 on. A multipart upload accepts XXH3-128 only as a composite of its parts, so it uses CRC-64/NVME
-over the whole object instead, the parts' CRCs combined by multiplication in GF(2). Azure checks the
+over the whole object instead, kept as the parts are produced, in order. Azure checks the
 CRC-64 of each request, and Cloud Storage the CRC-32C of each put. R2, OVHcloud and Scaleway are sent
-none by default, as [their profiles](#74-cloudflare-r2-ovhcloud-and-scaleway) explain.
+none by default, as [their profiles](#74-cloudflare-r2-ovhcloud-and-scaleway) explain. `PutChecksum`
+chooses the same way on the three stores: the service's own by default, `Content-MD5`, or none.
 
 ### 11.4 Appends
 
-`OpenWriterAsync(location)` appends to a file in a store. A Vortex append writes its blocks after the
-old end and a new tail after them ([write strategy](11-write-strategy.md)), and an object cannot
-grow, so the object is rewritten without its bytes passing through the client twice:
-
-| service | how the old bytes stay on the server |
-|---|---|
-| S3, Scaleway | the old object is copied as the first part (`UploadPartCopy`), the new bytes follow as parts, and the completion carries `If-Match` with the old token. A copied part must be at least 5 MiB, so an old object smaller than that is read and sent again |
-| R2 | the same, but its parts are of one size: the old object is copied in parts of the part size, by ranges, and its last partial part is read and sent again with the new bytes |
-| OVHcloud | its compatibility table does not list `UploadPartCopy`, so the old object is read and sent again, until a contract test shows the copy works |
-| directory buckets | a native append |
-| Azure | `Put Block From URL` takes the old bytes, and `Put Block List` commits with `If-Match` |
-| Cloud Storage | the new bytes go up as a temporary object, which is composed after the old one under the object's name, conditioned on the old generation, then deleted. Composition takes up to 32 sources and runs on the server |
-
-Appends to stored files are the last phase of the work.
+A Vortex append writes its blocks after the old end and a new tail after them
+([write strategy](11-write-strategy.md)), and an object cannot grow. Rewriting the object with the
+old bytes copied on the service, `UploadPartCopy` on S3, `Put Block From URL` on Azure, composition
+on Cloud Storage, was built and removed: six paths, one per service, each with its exceptions, for a
+need no user had stated, and none run against a service. `OpenWriterAsync(location)` throws a
+`NotSupportedException`. A file at a location is written again, and rows that keep coming go to a
+dataset, which is made for them.
 
 ## 12. Credentials
 
@@ -846,9 +828,8 @@ nobody listens ([observability](09-contracts.md#5-observability)):
 |---|---|
 | `vortex.store.requests`, tagged by operation, provider and status class | what was asked, of whom, and how much of it failed |
 | `vortex.store.bytes_read`, `vortex.store.bytes_written` | traffic, against what the plans said |
-| `vortex.store.retries`, `vortex.store.throttles`, `vortex.store.hedges` | how much latency and money the retries and hedges cost |
-| `vortex.store.connections_opened` | whether the pool holds its connections |
-| `vortex.store.first_byte`, a histogram in milliseconds | the latency the window and the hedges are sized from |
+| `vortex.store.retries`, `vortex.store.throttles` | how much latency and money the retries cost, and how often a service asked to slow down |
+| `vortex.store.first_byte`, a histogram in milliseconds | the latency of a service, the figure any sizing of the reads in flight would start from |
 
 Tags never carry a key, a bucket name or a token, so their cardinality stays bounded. Below them, the
 platform's HTTP client reports its own requests, connections and durations through `System.Net.Http`,
@@ -864,14 +845,13 @@ dependent steps, which no meter can.
   parts it assembles, a suffix read, a dataset in a bucket. Those runs settle every capability this
   document marks to check, and a profile changes only when they do.
 - The protocol is tested against published vectors: AWS's Signature Version 4 test suite, the Shared
-  Key examples of the Azure reference, the CRC-64/NVME and CRC-32C check values, and the structured
-  body examples.
+  Key examples of the Azure reference, and the CRC-64/NVME and CRC-32C check values.
 - A message handler given to the store's `HttpClient` in the tests answers with delays, resets, 503s,
   429s, 409s and 412s, short bodies and wrong `Content-Range`s, so every row of [errors](#13-errors)
   and of the retry table is exercised without a network, including the put whose answer is lost after
   the object was created.
-- The XML reader, the JSON readers and the structured body's decoder are fuzzed: no input crashes
-  them, hangs them, or makes them allocate past their bounds.
+- The reading of the services' XML and JSON answers is fuzzed: no input crashes it, hangs it, or
+  makes it allocate past its bounds.
 - Ratchets: requests and dependent steps per operation, held by `CountingObjectStore` as the dataset's
   budget tests are, bytes allocated per request, a constant held by a ceiling, and nothing allocated
   per batch by this library's code.
@@ -890,14 +870,16 @@ dependent steps, which no meter can.
    with the contract tests against S3.
 4. The profiles of R2, OVHcloud and Scaleway, with their contract tests, which settle what this
    document marks to check.
-5. Azure, every operation, its signatures and tokens, and the structured body.
+5. Azure, every operation, its signatures and tokens.
 6. Cloud Storage: its generation preconditions, its JSON listings, metadata and batches, its XML
-   reads and multipart uploads, and composition.
+   reads and multipart uploads.
 7. The credential chains: web identity, container credentials, instance metadata, workload and
    managed identities, and Google's application default credentials.
-8. The reads in flight counted per request, the window in bytes, the first batch on two lanes, and
-   hedging.
-9. Appends to stored files, and directory buckets.
+8. The store contract against each provider's bucket, and the capabilities it proves turned on in
+   the profiles.
+9. Each of what was built and removed, once a measurement or a user asks for it: the reads in flight
+   in bytes, the first batch on two lanes, hedging, Azure's structured body, appends to stored files
+   and directory buckets.
 
 ## 17. Decisions to take
 
@@ -908,15 +890,16 @@ dependent steps, which no meter can.
 | the default session resolves locations from the environment | no, one line opts in | a library does not open connections or read credentials on a host that did not ask, as it does not take its cores |
 | the platform's `HttpClient` rather than a client of this repository | the platform's | it reads bodies without an extra copy and exposes every control the stores need. Its allocation per request is a constant, and a client of our own would carry the risks the platform's has already paid for |
 | R2, OVHcloud and Scaleway | profiles of the S3 store | they speak the API, and differ in a few capabilities that a profile states and the contract tests check |
-| Cloud Storage | its own APIs rather than its S3 interoperability | generation preconditions, a listing that carries retention and holds, deletes in batches, the platform's identities, and composition |
+| Cloud Storage | its own APIs rather than its S3 interoperability | generation preconditions, a listing that carries retention and holds, deletes in batches, and the platform's identities |
 | checksums on the clouds that share only `Content-MD5` | none by default, `Content-MD5` as an option | TLS already protects the bytes on their way, and MD5 costs a pass over every byte |
 | a capability of an S3 service that no test against it has proven | taken as absent, an option sets it | a wrong absence costs a request, a wrong presence a failed open or a lock the dataset believes kept |
 | a locked dataset on S3 elsewhere than on Amazon | refused until `KeepsLocks` is set | R2 and an OVHcloud Local Zone keep no retention or legal hold where a head reports it, and the others are to check |
 | the listing returns heads, a change to the interface | yes | vacuum stops asking for a head per object, one awaited after another |
 | a listing that lags, on a store that does not document its consistency | allowed, by less than the retention window | a lag costs a dataset freshness and never a version, so OVHcloud and Scaleway can host datasets |
-| hedged reads on by default | no, an option with a budget | each hedge is a request that costs money, and the request ratchets must stay exact |
+| hedged reads | not built until measured | each hedge is a request that costs money, and the request ratchets must stay exact |
 | part threshold and size | 32 MiB and 16 MiB, then measured | every service's minimum part is 5 MiB, and parallel parts are what fill a link |
-| directory buckets | single files only | they list without order, which the dataset's discovery needs |
+| directory buckets | refused | they list without order, which the dataset's discovery needs, and no user asked for their latency |
+| appends to stored files | refused | an object cannot grow, and a path per service to copy the old bytes is a lot of code for a need no user stated |
 
 ## 18. What this rests on
 
@@ -934,7 +917,7 @@ a proposal of this design, to be measured.
 | a lease is created once, under a key naming the end of its span, and only vacuum deletes it, a window after that end | code: `CompactionSchedule.cs` (`CompactionLoop`), `DatasetVacuum.cs` |
 | the sink hashes every object with XXH3-128 | code: `ObjectSegmentSink.cs` |
 | the dataset's object source allocates per batch: a list, task arrays, a task per read, an array of ranges, a delegate | code: `ObjectSegmentSource.cs`, `ReadManyAsync` |
-| `System.IO.Hashing`'s `Crc64` is ECMA-182's, not CRC-64/NVME | code: the documentation of `System.IO.Hashing` 10.0.12 |
+| `System.IO.Hashing` 11 takes the parameters of any CRC, CRC-64/NVME and CRC-32C among them, where 10's `Crc64` was ECMA-182's alone | code: `Crc64ParameterSet.cs` and `Crc64.cs` in dotnet/runtime, and the documentation of `System.IO.Hashing` 10.0.12 |
 | `SocketsHttpHandler` reads a response body straight from the TLS stream into the caller's memory when its own buffer is empty, which starts at 4 KiB | code: dotnet/runtime, `HttpConnection.ReadAsync(Memory<byte>)` and `ReadBufferedAsync`, read on 2026-10-10 |
 | one range per S3 `GET`, suffix ranges, Object Lock headers on reads and heads | source: Amazon S3 API reference, `GetObject` |
 | a put to a bucket under Object Lock needs `Content-MD5` or a checksum header | source: Amazon S3 API reference, `PutObject` |
@@ -945,7 +928,6 @@ a proposal of this design, to be measured.
 | the AWS SDKs send a CRC-32 checksum header instead of `Content-MD5` on `DeleteObjects` | source: GitLab's container registry, issue 2309, a lead only, checked by the contract tests |
 | `ListObjectsV2`: 1 000 keys a page, ordered on general purpose buckets, unordered and without `start-after` on directory buckets | source: Amazon S3 API reference, `ListObjectsV2` |
 | XXH3-128 and four other checksums accepted since 2026-04-23, composite only for multipart, CRC-64/NVME full object | source: Amazon S3 user guide, checking object integrity, and the announcement of 2026-04-23 |
-| appends on directory buckets, 10 000 parts | source: Amazon S3 user guide, appending data to objects |
 | spreading requests over connections, byte-range fetches, aggressive retries | source: Amazon S3 user guide, performance guidelines |
 | S3's 3 500 writes and 5 500 reads a second per prefix | source: Amazon S3 user guide, optimizing performance |
 | S3's general purpose endpoints answer in HTTP/1.1 | source: an AWS re:Post answer, a lead only, checked by the contract tests |
@@ -981,13 +963,11 @@ a proposal of this design, to be measured.
 | Cloud Storage: XML multipart uploads take no precondition, and multipart objects have no MD5 | source: Cloud Storage documentation, XML API multipart uploads |
 | Cloud Storage: batches of up to 100 calls under 10 MiB, unordered, not atomic, billed per call | source: Cloud Storage documentation, batch requests |
 | Cloud Storage: 10 000 parts of 5 MiB to 5 GiB, objects up to 5 TiB whatever the way they are written | source: Cloud Storage documentation, quotas and limits |
-| Cloud Storage: composition of 1 to 32 sources, CRC-32C only | source: Cloud Storage documentation, composite objects |
 | Cloud Storage: soft delete on by default for 7 days, the deleted objects billed meanwhile | source: Cloud Storage documentation, soft delete, updated 2026-10-07 |
 | Google's application default credentials and their order | source: Google Cloud documentation, application default credentials |
 | the platform's client allocates a few kilobytes per request | estimate, measured in the second phase of the work |
 | a single object's first batch issues about 14 requests at degree 14, against 2 at degree 1 | measured in this repository in October 2026 |
-| a window in bytes sized by bandwidth and latency, the first batch on two lanes | proposal, measured against the source with injected latency |
-| part threshold, part size, parts in flight, connection limits, hedging percentile | proposal, starting points to set by measurement |
+| part threshold, part size, parts in flight, connection limits | proposal, starting points to set by measurement |
 
 ## 19. Where the code departs from this design
 
@@ -998,17 +978,11 @@ it, and an option turns it on once it does.
 | design | code | why |
 |---|---|---|
 | S3 is sent XXH3-128 in one request | CRC-64/NVME on every put | the byte order of `x-amz-checksum-xxhash128` is to check against the service first, as [the checksums](#113-checksums) ask |
-| Azure reads the structured body by default | `VerifyReads` is off by default | its layout is to check against the service, and a read then relies on TLS and the format's checks, as on S3 |
 | `x-ms-content-crc64` as Azure's reference shows it | low byte first, as Azure's SDK sends it | to check against the service |
-| the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks`, which an S3 store states on Amazon S3 alone unless its options say otherwise | a dataset under Object Lock refuses a store that keeps no locks without knowing the package |
-| the parts and the window reserved through the memory governor | the parts bounded by `PartsInFlight`, the window allocating nothing | the reads a window admits land in the blocks a scan reads into, which an aggregation's admission counts already |
+| the parts in flight reserved through the memory governor | bounded by `PartsInFlight`, and a conditional put held whole by `MaxHeldBytes` | the governor's reservation of upload buffers comes in a change of its own |
 | a dataset sends its data object's parts as it writes | the object goes up at the commit, from the dataset's buffer | the dataset holds the object until then anyway, and the gain of an early start is to measure against a service |
 | a completion answered 409 starts a new upload | it does when the content can be sent again, held in memory or spooled, and throws for a stream sent as it was read | a stream is read once |
 | Cloud Storage takes a conditional put up to 5 TiB | from bytes in memory or spooled on disk, and from a stream held in memory up to `MaxHeldBytes` | the service takes no precondition on the parts of an upload |
 | `https://account.blob.core.windows.net/container/key` locations | `az://` locations | a registered prefix serves the same need |
 | the Azure chain's order | the storage credentials of the environment come before a managed identity | a host that sets them never waits on a metadata service it does not have |
 | an external account of Google that exchanges an AWS identity | a subject token from a file or a URL | the AWS source signs a request of its own, left for a host that needs it |
-| R2 copies the old object by ranges for an append | R2 reads it back and sends it again | R2 takes no documented condition on the completion of an upload, which an append needs |
-| an append to a directory bucket in one request | in pieces of the part threshold past it | a request's body is held in memory until it is sent |
-| an append below 5 MiB as the others | read back and sent again on every service | fewer requests than a copy, and S3 copies no part smaller than 5 MiB |
-| the first batch's reads and the window measured against injected latency | unit and emulator tests only | the window is a ceiling, idle while the link keeps up, and is measured against the services |
