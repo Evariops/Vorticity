@@ -141,7 +141,7 @@ jobs:
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
-          go install github.com/betterleaks/betterleaks@v1.7.4
+          go install github.com/betterleaks/betterleaks@v1.9.0
           case "$EVENT" in
             pull_request) range="$BASE..HEAD" ;;
             push) if [[ "$BEFORE" =~ ^0+$ ]]; then range=HEAD; else range="$BEFORE..HEAD"; fi ;;
