@@ -90,16 +90,8 @@ internal sealed class SplitPlan
     /// <returns>A positive row count.</returns>
     internal static long NaturalBatchRows(LayoutTree tree)
     {
-        int nodes = tree.NodeCount;
-        for (int i = 0; i < nodes; i++)
-        {
-            if (tree.GetNode(i).TryGetZoneMap(out ZoneMap map) && map.ZoneLength > 0)
-            {
-                return map.ZoneLength;
-            }
-        }
-
-        return DefaultBatchRows;
+        long zoneLength = tree.FirstZoneLength;
+        return zoneLength > 0 ? zoneLength : DefaultBatchRows;
     }
 
     /// <summary>Walks the selected subtrees and collects their split boundaries.</summary>

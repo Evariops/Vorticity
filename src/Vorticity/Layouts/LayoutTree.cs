@@ -15,23 +15,39 @@ using Vorticity.Types;
 namespace Vorticity.Layouts;
 
 /// <summary>
-/// The whole layout tree of one file, flattened and parsed a single time when the file is opened.
-/// Immutable after <see cref="Parse(VortexFile)"/> and safe for concurrent scans.
+/// The whole layout tree of one file, flattened, parsed once per open file and shared by its scans.
+/// Immutable once parsed and safe for concurrent scans.
 /// </summary>
 /// <remarks>
+/// <para>
 /// A layout node carries no dtype on the wire, so every node's dtype is derived top-down at parse
 /// time. How a file splits into row groups and columns is the writer's choice, so a reader
 /// interprets whatever tree it is given rather than expecting a fixed nesting of layouts.
+/// </para>
+/// <para>
+/// A struct root's columns are each a tree of their own, parsed when a walk first reaches them: a
+/// scan of one column of a wide file parses that column, where it parsed every chunk of every
+/// column. A column's nodes are numbered after the nodes of the columns published before it, so an
+/// index names one node of the file whatever order the columns were parsed in, and the order of the
+/// tree when they were parsed in order.
+/// </para>
 /// </remarks>
 internal sealed class LayoutTree
 {
-    private readonly VortexFile? _file;
-    private readonly string[]? _detachedEncodingIds;
+    // The file, or for a tree detached from any the layout ids its footer would hold.
+    private readonly object? _source;
     private readonly byte[] _layoutBytes;
     private readonly LayoutNodeRecord[] _records;
+    private readonly int _count;
     private readonly int[] _childIndices;
     private readonly ZoneMap[] _zoneMaps;
     private readonly long[] _chunkOffsets;
+
+    /// <summary>A struct root's columns, parsed as they are reached; null in a column's tree and under any other root.</summary>
+    private readonly Columns? _columns;
+
+    /// <summary>The index of this tree's first node in the file's: 0 for the root's, set when a column's is published.</summary>
+    private int _indexBase;
 
     private LayoutTree(
         VortexFile? file,
@@ -41,16 +57,17 @@ internal sealed class LayoutTree
         int nodeCount,
         int[] childIndices,
         ZoneMap[] zoneMaps,
-        long[] chunkOffsets)
+        long[] chunkOffsets,
+        Columns? columns)
     {
-        _file = file;
-        _detachedEncodingIds = detachedEncodingIds;
+        _source = (object?)file ?? detachedEncodingIds;
         _layoutBytes = layoutBytes;
         _records = records;
-        NodeCount = nodeCount;
+        _count = nodeCount;
         _childIndices = childIndices;
         _zoneMaps = zoneMaps;
         _chunkOffsets = chunkOffsets;
+        _columns = columns;
     }
 
     /// <summary>
@@ -118,6 +135,24 @@ internal sealed class LayoutTree
         ReadOnlySpan<string> layoutEncodingIds,
         int segmentCount)
     {
+        // Parsed whole, in order: a tree detached from a file is one a test or a tool looks at
+        // entire, and a malformed column fails here rather than when it is first reached.
+        LayoutTree tree = ParseDeferred(layoutBytes, schema, layoutEncodingIds, segmentCount);
+        tree.ParseColumns();
+        return tree;
+    }
+
+    /// <summary>
+    /// Parses a layout tree detached from any file as a file's is parsed: a struct root's columns
+    /// when a walk first reaches them.
+    /// </summary>
+    /// <inheritdoc cref="Parse(ReadOnlySpan{byte}, DType, ReadOnlySpan{string}, int)"/>
+    internal static LayoutTree ParseDeferred(
+        ReadOnlySpan<byte> layoutBytes,
+        DType schema,
+        ReadOnlySpan<string> layoutEncodingIds,
+        int segmentCount)
+    {
         ArgumentOutOfRangeException.ThrowIfNegative(segmentCount);
 
         string[] ids = layoutEncodingIds.Length == 0 ? [] : new string[layoutEncodingIds.Length];
@@ -131,28 +166,172 @@ internal sealed class LayoutTree
 
     /// <summary>The file this tree was parsed from.</summary>
     /// <exception cref="InvalidOperationException">The tree was parsed detached from a file.</exception>
-    public VortexFile File => _file ?? DetachedFile();
+    public VortexFile File => _source as VortexFile ?? DetachedFile();
 
     /// <summary><see langword="true"/> when this tree is backed by an open file.</summary>
-    public bool HasFile => _file is not null;
+    public bool HasFile => _source is VortexFile;
 
-    /// <summary>How many nodes the flattened tree holds.</summary>
-    public int NodeCount { get; }
+    /// <summary>How many nodes the flattened tree holds; the columns not yet parsed are parsed to count them.</summary>
+    public int NodeCount
+    {
+        get
+        {
+            if (_columns is not { } columns)
+            {
+                return _count;
+            }
+
+            ParseColumns();
+            return Volatile.Read(ref columns.NextIndex);
+        }
+    }
 
     /// <summary>The root node, always index 0.</summary>
     public LayoutNode Root => new LayoutNode(this, 0);
 
-    /// <summary>One node of the tree.</summary>
+    /// <summary>The index of this tree's first node among the file's.</summary>
+    internal int IndexBase => _indexBase;
+
+    /// <summary>One node of the tree, by its index among the file's; the columns not yet parsed are parsed to find it.</summary>
     /// <param name="index">0-based, below <see cref="NodeCount"/>.</param>
     /// <exception cref="VortexFormatException"><paramref name="index"/> is out of range.</exception>
     public LayoutNode GetNode(int index)
     {
-        if ((uint)index >= (uint)NodeCount)
+        if ((uint)index < (uint)_count)
         {
-            LayoutsThrow.NodeIndex(index, NodeCount);
+            return new LayoutNode(this, index);
         }
 
-        return new LayoutNode(this, index);
+        if (_columns is { } columns)
+        {
+            ParseColumns();
+            foreach (LayoutTree? column in columns.Trees)
+            {
+                int local = index - column!._indexBase;
+                if ((uint)local < (uint)column._count)
+                {
+                    return new LayoutNode(column, local);
+                }
+            }
+        }
+
+        LayoutsThrow.NodeIndex(index, NodeCount);
+        return default;
+    }
+
+    /// <summary>
+    /// The zone length of the first zone map in the tree's order that has one, or 0 when none does.
+    /// Under a struct root the columns are parsed in order until one does, and the answer kept.
+    /// </summary>
+    internal long FirstZoneLength
+    {
+        get
+        {
+            if (_columns is not { } columns)
+            {
+                return FirstZoneLengthUnder(Root);
+            }
+
+            long found = Volatile.Read(ref columns.FirstZoneLength);
+            if (found < 0)
+            {
+                found = FirstZoneLengthUnder(Root);
+                Volatile.Write(ref columns.FirstZoneLength, found);
+            }
+
+            return found;
+        }
+    }
+
+    // The parse bounded the depth of every tree it built, so the walk is bounded by it too.
+    private static long FirstZoneLengthUnder(in LayoutNode node)
+    {
+        if (node.TryGetZoneMap(out ZoneMap map) && map.ZoneLength > 0)
+        {
+            return map.ZoneLength;
+        }
+
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            long found = FirstZoneLengthUnder(node.GetChild(i));
+            if (found > 0)
+            {
+                return found;
+            }
+        }
+
+        return 0;
+    }
+
+    /// <summary>Whether child <paramref name="slot"/> of a struct root was parsed: for the tests of what a walk parses.</summary>
+    internal bool ColumnParsed(int slot) => _columns is null || Volatile.Read(ref _columns.Trees[slot]) is not null;
+
+    /// <summary>The root of column <paramref name="slot"/>'s tree, parsed when first asked for.</summary>
+    internal LayoutNode Column(int slot) =>
+        new LayoutNode(Volatile.Read(ref _columns!.Trees[slot]) ?? ParseColumn(slot), 0);
+
+    /// <summary>Parses every column not yet parsed, in order.</summary>
+    private void ParseColumns()
+    {
+        if (_columns is { } columns)
+        {
+            for (int slot = 0; slot < columns.Trees.Length; slot++)
+            {
+                _ = Column(slot);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Parses column <paramref name="slot"/> into a tree of its own and publishes it, numbered after
+    /// the columns published before it; a column a racing walk published first is taken instead.
+    /// </summary>
+    /// <remarks>
+    /// The column spends what the root's parse left of its budgets, and what it spent is taken from
+    /// them as it is published: the columns of a file parsed one by one spend no more than the
+    /// tree parsed whole would, so a layout whose tables are shared between parents is refused as
+    /// it was. A parse that loses the race spends nothing of them, and was bounded by them all the
+    /// same.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private LayoutTree ParseColumn(int slot)
+    {
+        Columns columns = _columns!;
+        int tables = Volatile.Read(ref columns.TableBudget);
+        long inspection = Volatile.Read(ref columns.InspectionBudget);
+        int tablesLeft = tables;
+        long inspected;
+        LayoutTree column;
+        Builder builder = Builder.Take(_source as VortexFile, _source as string[], columns.SegmentCount, _layoutBytes);
+        try
+        {
+            builder.Limit(Volatile.Read(ref columns.NodeBudget), inspection);
+            builder.Shared = columns;
+            LayoutView root = LayoutView.Root(_layoutBytes, ref tablesLeft);
+            LayoutParser.ParseColumn(builder, in root, _records[0].DType, slot);
+            inspected = inspection - builder.InspectionBudget;
+            column = builder.Freeze();
+        }
+        finally
+        {
+            builder.Give();
+        }
+
+        lock (columns.Gate)
+        {
+            if (columns.Trees[slot] is { } published)
+            {
+                return published;
+            }
+
+            column._indexBase = columns.NextIndex;
+            columns.NextIndex += column._count;
+            columns.NodeBudget -= column._count;
+            columns.TableBudget -= tables - tablesLeft;
+            columns.InspectionBudget -= inspected;
+            Volatile.Write(ref columns.Trees[slot], column);
+            return column;
+        }
     }
 
     internal ref readonly LayoutNodeRecord RecordRef(int index) => ref _records[index];
@@ -183,12 +362,12 @@ internal sealed class LayoutTree
 
     internal string EncodingIdText(ushort specIndex)
     {
-        if (_file is not null)
+        if (_source is VortexFile file)
         {
-            return _file.GetLayoutEncodingId(specIndex);
+            return file.GetLayoutEncodingId(specIndex);
         }
 
-        string[] ids = _detachedEncodingIds!;
+        string[] ids = (string[])_source!;
         return specIndex < ids.Length
             ? ids[specIndex]
             : "<layout spec " + specIndex.ToString(CultureInfo.InvariantCulture) + ">";
@@ -217,14 +396,16 @@ internal sealed class LayoutTree
         Builder builder = Builder.Take(file, detachedEncodingIds, segmentCount, retained);
         try
         {
-            // The budget lives for the whole traversal: forward-only uoffsets exclude cycles but
-            // not sharing, and a small buffer whose children are shared between parents is an
-            // acyclic graph with exponentially many root-to-leaf paths.
+            // The budget lives for the whole traversal, the columns parsed later included:
+            // forward-only uoffsets exclude cycles but not sharing, and a small buffer whose
+            // children are shared between parents is an acyclic graph with exponentially many
+            // root-to-leaf paths.
             int tableBudget = VortexLimits.MaxFlatBufferTables;
             LayoutView root = LayoutView.Root(retained, ref tableBudget);
+            builder.DefersColumns = true;
             LayoutParser.ParseNode(builder, in root, schema, depth: 1);
 
-            return builder.Freeze();
+            return builder.Freeze(tableBudget);
         }
         finally
         {
@@ -286,6 +467,9 @@ internal sealed class LayoutTree
             ZoneMapCount = 0;
             ChunkOffsetCount = 0;
             ZoneAggregateCount = 0;
+            DefersColumns = false;
+            DeferredColumns = false;
+            Shared = null;
             File = null;
             DetachedEncodingIds = null;
             Buffer = [];
@@ -350,6 +534,12 @@ internal sealed class LayoutTree
 
         internal VortexFile? File { get; private set; }
 
+        /// <summary>Whether a struct at the root leaves its children to be parsed as columns of their own.</summary>
+        internal bool DefersColumns { get; set; }
+
+        /// <summary>Whether the root left its children to be parsed as columns: the parse's tree carries them.</summary>
+        internal bool DeferredColumns { get; set; }
+
         internal string[]? DetachedEncodingIds { get; private set; }
 
         internal int SegmentSpecCount { get; private set; }
@@ -372,6 +562,15 @@ internal sealed class LayoutTree
         /// than the buffer that contains them.
         /// </remarks>
         internal long InspectionBudget { get; private set; }
+
+        /// <summary>Holds a column's parse to what the parses of the file's tree before it left of the budgets.</summary>
+        /// <param name="maxNodes">The nodes it may still make.</param>
+        /// <param name="inspectionBudget">The bytes of vectors it may still inspect.</param>
+        internal void Limit(long maxNodes, long inspectionBudget)
+        {
+            MaxNodes = maxNodes;
+            InspectionBudget = inspectionBudget;
+        }
 
         internal void Charge(long bytes)
         {
@@ -421,6 +620,39 @@ internal sealed class LayoutTree
         internal DTypeArena Types => _types ??= new DTypeArena();
 
         private DTypeArena? _types;
+
+        /// <summary>For a column's parse, the columns of its tree, whose zone tables it shares; null for any other parse.</summary>
+        internal Columns? Shared { get; set; }
+
+        /// <summary>
+        /// The table of the zone map of <paramref name="metadata"/> over <paramref name="column"/>,
+        /// whose specs <see cref="Specs"/> holds, and its aggregates packed into <paramref name="aggregates"/>.
+        /// </summary>
+        /// <returns>Whether the aggregates derive a table at all.</returns>
+        /// <remarks>
+        /// A column's parse takes the table another column of its tree derived for the same dtype
+        /// and zone map, or derives it in an arena of its own and shares it: a table is read by
+        /// whatever parses or scans the columns after, on any thread, so nothing may write its
+        /// arena once it is shared, and the arena of the parse is written until its column is done.
+        /// </remarks>
+        internal bool ZoneTable(DType column, ReadOnlySpan<byte> metadata, Span<int> aggregates, out DType table)
+        {
+            if (Shared is not { } shared)
+            {
+                return ZoneMapSchema.TryBuildAggregateTable(Types, column, Specs, out table, aggregates);
+            }
+
+            if (shared.FindZoneTable(Buffer, column, metadata) is { } known)
+            {
+                known.Aggregates.CopyTo(aggregates);
+                table = known.Table;
+                return known.Derived;
+            }
+
+            bool derived = ZoneMapSchema.TryBuildAggregateTable(new DTypeArena(8), column, Specs, out table, aggregates);
+            shared.AddZoneTable(new ZoneTable(column, OffsetOf(metadata), metadata.Length, derived, table, aggregates.ToArray()));
+            return derived;
+        }
 
         /// <summary>The specs of the zone map being parsed, each zone map's read and used up before the next one's.</summary>
         internal AggregateSpecList Specs => _specs ??= new AggregateSpecList();
@@ -575,7 +807,8 @@ internal sealed class LayoutTree
         }
 
         /// <summary>The tree, holding exact copies of what the parse gathered.</summary>
-        internal LayoutTree Freeze()
+        /// <param name="tablesLeft">What the parse left of its table budget, for the columns it left to parse.</param>
+        internal LayoutTree Freeze(int tablesLeft = 0)
         {
             // The zone maps read their aggregates from the tree's copy of the table, which only
             // exists now.
@@ -586,6 +819,10 @@ internal sealed class LayoutTree
                 zoneMaps[i] = ZoneMaps[i].WithAggregates(aggregates);
             }
 
+            Columns? columns = DeferredColumns
+                ? new Columns(Records[0].ChildCount, RecordCount, SegmentSpecCount, tablesLeft, MaxNodes - RecordCount, InspectionBudget)
+                : null;
+
             return new LayoutTree(
                 File,
                 DetachedEncodingIds,
@@ -594,8 +831,82 @@ internal sealed class LayoutTree
                 RecordCount,
                 ChildIndices.AsSpan(0, ChildIndexCount).ToArray(),
                 zoneMaps,
-                ChunkOffsets.AsSpan(0, ChunkOffsetCount).ToArray());
+                ChunkOffsets.AsSpan(0, ChunkOffsetCount).ToArray(),
+                columns);
         }
+    }
+
+    /// <summary>A struct root's columns, and what the parse of the root left them of its budgets.</summary>
+    internal sealed class Columns(int count, int firstIndex, int segmentCount, int tableBudget, long nodeBudget, long inspectionBudget)
+    {
+        /// <summary>Per child of the root, its tree once parsed.</summary>
+        internal readonly LayoutTree?[] Trees = new LayoutTree?[count];
+
+        /// <summary>Taken to publish a column, or a zone table one derived: its numbering and the budgets it spent are the tree's.</summary>
+        internal readonly Lock Gate = new();
+
+        internal readonly int SegmentCount = segmentCount;
+
+        /// <summary>The index the next column published numbers its nodes from.</summary>
+        internal int NextIndex = firstIndex;
+
+        internal int TableBudget = tableBudget;
+        internal long NodeBudget = nodeBudget;
+        internal long InspectionBudget = inspectionBudget;
+
+        /// <summary>The tree's <see cref="LayoutTree.FirstZoneLength"/>; -1 until asked.</summary>
+        internal long FirstZoneLength = -1;
+
+        /// <summary>The zone tables the columns derived, replaced whole by each one added.</summary>
+        private ZoneTable[] _zoneTables = [];
+
+        /// <summary>
+        /// The zone table a column derived for the zone map of <paramref name="metadata"/> over
+        /// <paramref name="column"/>, or null when none has: the columns of a file share a handful
+        /// of them, where each derived its own in an arena of its own.
+        /// </summary>
+        internal ZoneTable? FindZoneTable(byte[] buffer, DType column, ReadOnlySpan<byte> metadata)
+        {
+            foreach (ZoneTable table in Volatile.Read(ref _zoneTables))
+            {
+                if (buffer.AsSpan(table.MetadataStart, table.MetadataLength).SequenceEqual(metadata) && table.Column.Equals(column))
+                {
+                    return table;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>Shares a zone table a column derived with the columns parsed after it.</summary>
+        internal void AddZoneTable(ZoneTable table)
+        {
+            lock (Gate)
+            {
+                _zoneTables = [.. _zoneTables, table];
+            }
+        }
+    }
+
+    /// <summary>
+    /// The zone table one zone map derived: its column's dtype and the zone map's metadata, which
+    /// derive it whole, and what they derived. Its dtype is built in an arena nothing writes after.
+    /// </summary>
+    internal sealed class ZoneTable(DType column, int metadataStart, int metadataLength, bool derived, DType table, int[] aggregates)
+    {
+        internal DType Column { get; } = column;
+
+        internal int MetadataStart { get; } = metadataStart;
+
+        internal int MetadataLength { get; } = metadataLength;
+
+        /// <summary>Whether the aggregates derived a table at all.</summary>
+        internal bool Derived { get; } = derived;
+
+        internal DType Table { get; } = table;
+
+        /// <summary>The aggregates as <see cref="ZoneMap.Pack"/> packs them, each with its column in the table.</summary>
+        internal int[] Aggregates { get; } = aggregates;
     }
 }
 
@@ -654,8 +965,8 @@ internal readonly struct LayoutNode
     /// <summary>The tree this node belongs to.</summary>
     public LayoutTree Tree => _tree;
 
-    /// <summary>This node's index in <see cref="Tree"/>.</summary>
-    public int Index => _index;
+    /// <summary>This node's index among the file's: what names it to the caches a scan keeps by node.</summary>
+    public int Index => _tree.IndexBase + _index;
 
     /// <summary>The resolved layout encoding, or <see cref="LayoutEncodingId.Unknown"/>.</summary>
     public LayoutEncodingId Encoding => _tree.RecordRef(_index).Encoding;
@@ -705,7 +1016,9 @@ internal readonly struct LayoutNode
             LayoutsThrow.ChildIndex(index, r.ChildCount);
         }
 
-        return new LayoutNode(_tree, _tree.ChildAt(r.ChildStart + index));
+        // A struct root's children are columns of their own, which their slot names: ~slot.
+        int child = _tree.ChildAt(r.ChildStart + index);
+        return child >= 0 ? new LayoutNode(_tree, child) : _tree.Column(~child);
     }
 
     /// <summary>

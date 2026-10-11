@@ -292,18 +292,25 @@ public sealed class PathAllocationTests
         // A scan of one lane reads its next splits while it decodes one, over a source whose read
         // is a round trip: what it holds for that is behind one
         // reference of the enumerator, null over a mapping, 8 bytes on every axis that scans.
-        ("open, first batch", File, 43_536, FirstBatch),
+        //
+        // A struct root's columns are parsed when a scan first reaches them, each into a tree of
+        // its own. An axis that reads every column parses each into arrays of its own, and the zone
+        // tables of these five columns of five dtypes each into an arena of its own, where one tree
+        // shared them: 5 504 bytes more here, 26 KB more on a full scan of a file of 105 columns of
+        // ten dtypes, whose columns share their tables. An axis that reads one column parses it alone.
+        ("open, first batch", File, 49_040, FirstBatch),
         // A scan binds each batch into the object its previous batch was rather than allocating
         // one: 120 bytes less a batch after the first, on every axis below that reads more than
         // one -- 7 560 over the 64 batches of this file, 120 over the two the pruned filter reads.
         // A full scan now costs what its first batch does.
-        ("full scan", File, 43_536, FullScan),
+        ("full scan", File, 49_040, FullScan),
         // A projection of one whole column is held in the mask itself, with no node and no arrays:
         // 104 bytes less.
-        ("projected scan, 1 of 5 columns", File, 45_880, ProjectedScan),
+        // It parses the one column it reads, not the five: 20 736 bytes less.
+        ("projected scan, 1 of 5 columns", File, 25_144, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 44_784, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 50_288, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -325,7 +332,10 @@ public sealed class PathAllocationTests
         // mask of one column that is the mask itself; the pushed comparison's mask is no longer a
         // builder's and a record's; the evaluator holds the share of rows kept so far, which the
         // second pass reads its columns by: 168 bytes less on both axes.
-        ("selective filter, pruning on", File, 55_216, PrunedFilter),
+        //
+        // Each filter parses the columns it reads, not the five: 20 856 bytes less, and 20 864 with
+        // pruning off.
+        ("selective filter, pruning on", File, 34_360, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -339,7 +349,7 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 47_296, UnprunedFilter),
+        ("selective filter, pruning off", File, 26_432, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
