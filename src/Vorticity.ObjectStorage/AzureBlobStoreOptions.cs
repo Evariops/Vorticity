@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using Vorticity.ObjectStorage.Http;
 
 namespace Vorticity.ObjectStorage;
 
@@ -30,16 +31,16 @@ public sealed class AzureBlobStoreOptions
     public StoreTransportOptions Transport { get; init; } = new StoreTransportOptions();
 
     /// <summary>The size past which a put goes up in parts, Azure's blocks, sent in parallel rather than whole, 32 MiB by default.</summary>
-    public long PartThreshold { get; init; } = 32L << 20;
+    public long PartThreshold { get; init; } = UploadLimits.DefaultPartThreshold;
 
     /// <summary>
     /// The size of a part, a block, 16 MiB by default; larger when a blob of known length would need more
     /// than 50 000, and growing with the parts of one of unknown length.
     /// </summary>
-    public int PartSize { get; init; } = 16 << 20;
+    public int PartSize { get; init; } = UploadLimits.DefaultPartSize;
 
     /// <summary>The parts of one upload in flight at once, 4 by default, each held in memory until it is sent.</summary>
-    public int PartsInFlight { get; init; } = 4;
+    public int PartsInFlight { get; init; } = UploadLimits.DefaultPartsInFlight;
 
     /// <summary>
     /// The checksum each put carries, which the service checks before it stores the bytes: by default

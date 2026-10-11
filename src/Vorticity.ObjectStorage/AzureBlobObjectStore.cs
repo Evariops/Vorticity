@@ -471,7 +471,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
             return new ServiceError(status, code, null, requestId, retryAfter);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             (string? bodyCode, string? message, _, _) = ServiceXml.ParseError(bytes.AsMemory(0, length));

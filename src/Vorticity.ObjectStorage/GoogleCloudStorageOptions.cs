@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using Vorticity.ObjectStorage.Http;
 
 namespace Vorticity.ObjectStorage;
 
@@ -28,13 +29,16 @@ public sealed class GoogleCloudStorageOptions
     /// The size past which a put that carries no condition goes up in parts sent in parallel, 32 MiB by
     /// default. The service takes no condition on an upload in parts, so a conditional put goes whole.
     /// </summary>
-    public long PartThreshold { get; init; } = 32L << 20;
+    public long PartThreshold { get; init; } = UploadLimits.DefaultPartThreshold;
 
-    /// <summary>The size of a part, 16 MiB by default.</summary>
-    public int PartSize { get; init; } = 16 << 20;
+    /// <summary>
+    /// The size of a part, 16 MiB by default; larger when an object would need more than 10 000, and
+    /// growing with the parts of one of unknown length.
+    /// </summary>
+    public int PartSize { get; init; } = UploadLimits.DefaultPartSize;
 
-    /// <summary>The parts of one upload in flight at once, 4 by default.</summary>
-    public int PartsInFlight { get; init; } = 4;
+    /// <summary>The parts of one upload in flight at once, 4 by default, each held in memory until it is sent.</summary>
+    public int PartsInFlight { get; init; } = UploadLimits.DefaultPartsInFlight;
 
     /// <summary>
     /// Whether the service answers a suffix range (<c>bytes=-n</c>) with the object's length, which opens

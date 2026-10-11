@@ -301,7 +301,7 @@ public sealed partial class S3ObjectStore
             throw await FailureAsync(response, "CreateMultipartUpload", key, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             return ServiceXml.ParseElement(bytes.AsMemory(0, length), "UploadId")
@@ -363,7 +363,7 @@ public sealed partial class S3ObjectStore
         {
             case HttpStatusCode.OK:
                 // A completion may fail after its 200 is sent, its error then in the body.
-                (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+                (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
                 try
                 {
                     if (ServiceXml.IsError(bytes.AsMemory(0, length), out string? code))

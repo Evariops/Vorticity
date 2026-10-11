@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using Vorticity.ObjectStorage.Http;
 
 namespace Vorticity.ObjectStorage;
 
@@ -94,16 +95,16 @@ public sealed class S3StoreOptions
     /// The size past which a put goes up in parts sent in parallel rather than whole, 32 MiB by default.
     /// A put whose condition the service takes on no part, on R2, goes whole whatever its size.
     /// </summary>
-    public long PartThreshold { get; init; } = 32L << 20;
+    public long PartThreshold { get; init; } = UploadLimits.DefaultPartThreshold;
 
     /// <summary>
     /// The size of a part, 16 MiB by default and at least 5 MiB; larger when the object would otherwise
     /// need more parts than the service takes.
     /// </summary>
-    public int PartSize { get; init; } = 16 << 20;
+    public int PartSize { get; init; } = UploadLimits.DefaultPartSize;
 
     /// <summary>The parts of one upload in flight at once, 4 by default, each held in memory until it is sent.</summary>
-    public int PartsInFlight { get; init; } = 4;
+    public int PartsInFlight { get; init; } = UploadLimits.DefaultPartsInFlight;
 
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }

@@ -327,7 +327,7 @@ public sealed partial class AzureBlobObjectStore
         }
 
         string boundary = type[(at + 9)..].Trim('"', ' ');
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 16 << 20, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             return AzureAnswers.ParseBatch(Encoding.UTF8.GetString(bytes, 0, length), boundary, s.Keys);

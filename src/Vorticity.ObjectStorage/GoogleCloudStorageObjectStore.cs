@@ -583,7 +583,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             throw await FailureAsync(response, "CreateMultipartUpload", key, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             return ServiceXml.ParseElement(bytes.AsMemory(0, length), "UploadId")
@@ -602,7 +602,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             throw await FailureAsync(response, "CompleteMultipartUpload", key, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             if (ServiceXml.IsError(bytes.AsMemory(0, length), out string? code))
@@ -661,7 +661,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         }
 
         string boundary = type[(at + 9)..].Trim('"', ' ');
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 16 << 20, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             return BatchFailures(Encoding.UTF8.GetString(bytes, 0, length), boundary, s.Keys);
@@ -787,7 +787,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
             return new ServiceError(status, null, null, requestId, retryAfter);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             ReadOnlyMemory<byte> body = bytes.AsMemory(0, length);

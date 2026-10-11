@@ -511,7 +511,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             return (new ServiceError(status, HttpAnswers.Header(response, "x-amz-error-code"), null, requestId, retryAfter), null);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxAnswerBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             (string? code, string? message, string? id, long? size) = ServiceXml.ParseError(bytes.AsMemory(0, length));

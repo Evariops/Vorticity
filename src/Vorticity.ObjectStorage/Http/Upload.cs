@@ -50,6 +50,15 @@ internal interface IUploadService
 /// <summary>What a service takes of a put, which the upload sizes its requests by.</summary>
 internal sealed record UploadLimits
 {
+    /// <summary>The size past which a put goes up in parts unless a store's options say otherwise, the same on every store.</summary>
+    internal const long DefaultPartThreshold = 32L << 20;
+
+    /// <summary>The size of a part unless a store's options say otherwise.</summary>
+    internal const int DefaultPartSize = 16 << 20;
+
+    /// <summary>The parts of one upload in flight at once unless a store's options say otherwise.</summary>
+    internal const int DefaultPartsInFlight = 4;
+
     /// <summary>The size past which a put goes up in parts.</summary>
     internal required long PartThreshold { get; init; }
 

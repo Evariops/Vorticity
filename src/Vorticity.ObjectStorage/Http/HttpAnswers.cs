@@ -8,8 +8,11 @@ namespace Vorticity.ObjectStorage.Http;
 /// <summary>What every service's answers say in their headers, read the same way by the three stores.</summary>
 internal static class HttpAnswers
 {
-    /// <summary>The most a listing's or an error's body may hold: a page of a thousand long keys is well under it.</summary>
+    /// <summary>The most a listing's or a batch's answer may hold: a page of a thousand long keys is well under it.</summary>
     internal const int MaxDocumentBytes = 16 << 20;
+
+    /// <summary>The most any other answer read whole may hold: an error, or the start or completion of an upload.</summary>
+    internal const int MaxAnswerBytes = 64 << 10;
 
     /// <summary>A header's first value, or null; read without validation, as the service wrote it.</summary>
     internal static string? Header(HttpResponseMessage response, string name)
