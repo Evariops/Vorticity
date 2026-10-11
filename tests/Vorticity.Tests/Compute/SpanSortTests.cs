@@ -78,6 +78,51 @@ public sealed class SpanSortTests
         Assert.Equal([12, 9, 9, 5, 1, 0, -3, -3], keys);
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(17)]
+    [InlineData(300)]
+    [InlineData(5_000)]
+    public void EqualKeysEndWhereListSortLeavesThem(int keys)
+    {
+        // Pairs of a key and where it began, compared by the key alone: equal keys are told apart by
+        // where they end, which only the same steps as List.Sort's introsort reproduce.
+        Random random = new Random(keys);
+        for (int round = 0; round < 200; round++)
+        {
+            int length = random.Next(0, keys + 1);
+            (int Key, int Origin)[] pairs = new (int Key, int Origin)[length];
+            for (int i = 0; i < length; i++)
+            {
+                pairs[i] = (random.Next(0, 1 + (length / 4)), i);
+            }
+
+            List<(int Key, int Origin)> expected = [.. pairs];
+            expected.Sort(static (a, b) => b.Key.CompareTo(a.Key));
+            SpanSort.Sort(pairs.AsSpan(), default(ByKeyDescending));
+            Assert.Equal(expected, pairs);
+        }
+    }
+
+    [Fact]
+    public void EqualKeysPastTheDepthLimitEndWhereListSortLeavesThem()
+    {
+        // The organ pipe drives both into the heap, each pair keeping where it began.
+        const int Half = 20_000;
+        (int Key, int Origin)[] pairs = new (int Key, int Origin)[2 * Half];
+        for (int i = 0; i < Half; i++)
+        {
+            pairs[i] = (i / 3, i);
+            pairs[(2 * Half) - 1 - i] = (i / 3, (2 * Half) - 1 - i);
+        }
+
+        List<(int Key, int Origin)> expected = [.. pairs];
+        expected.Sort(static (a, b) => b.Key.CompareTo(a.Key));
+        SpanSort.Sort(pairs.AsSpan(), default(ByKeyDescending));
+        Assert.Equal(expected, pairs);
+    }
+
     private static void AssertSortsLikeArraySort(long[] keys)
     {
         long[] expected = (long[])keys.Clone();
@@ -89,5 +134,10 @@ public sealed class SpanSortTests
     private readonly struct Descending : IComparer<int>
     {
         public int Compare(int x, int y) => y.CompareTo(x);
+    }
+
+    private readonly struct ByKeyDescending : IComparer<(int Key, int Origin)>
+    {
+        public int Compare((int Key, int Origin) x, (int Key, int Origin) y) => y.Key.CompareTo(x.Key);
     }
 }

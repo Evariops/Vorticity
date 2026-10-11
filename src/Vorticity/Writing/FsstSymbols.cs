@@ -60,7 +60,7 @@ internal sealed class FsstSymbols
         private ulong[]? _pairBits;
         private Line[]? _sample;
         private Dictionary<Candidate, long>? _candidates;
-        private List<KeyValuePair<Candidate, long>>? _ranked;
+        private KeyValuePair<Candidate, long>[]? _ranked;
 
         /// <summary>
         /// Room for the drawn sample: at most <see cref="SampleTarget"/> lines, since either way of
@@ -93,8 +93,16 @@ internal sealed class FsstSymbols
         internal Dictionary<Candidate, long> Candidates =>
             _candidates ??= new Dictionary<Candidate, long>(512);
 
-        internal List<KeyValuePair<Candidate, long>> Ranked =>
-            _ranked ??= new List<KeyValuePair<Candidate, long>>(512);
+        /// <summary>Room for <paramref name="count"/> candidates to rank, kept from one generation and one column-chunk to the next.</summary>
+        internal Span<KeyValuePair<Candidate, long>> Ranked(int count)
+        {
+            if (_ranked is null || _ranked.Length < count)
+            {
+                _ranked = new KeyValuePair<Candidate, long>[Math.Max(count, 512)];
+            }
+
+            return _ranked.AsSpan(0, count);
+        }
     }
 
     /// <summary>Bytes of sample the trainer aims for before it stops drawing lines.</summary>
@@ -697,18 +705,18 @@ internal sealed class FsstSymbols
             }
         }
 
-        List<KeyValuePair<Candidate, long>> ranked = tables.Ranked;
-        ranked.Clear();
+        // The candidates in the order they were proposed, which a dictionary with no removal keeps,
+        // ranked by the introsort List.Sort runs: unstable, so the proposal order decides which of
+        // two equal candidates wins the last slot, and the written bytes with it. SpanSort takes the
+        // same steps with its comparison inline, where List.Sort calls a delegate a comparison.
+        Span<KeyValuePair<Candidate, long>> ranked = tables.Ranked(candidates.Count);
+        int proposed = 0;
         foreach (KeyValuePair<Candidate, long> entry in candidates)
         {
-            ranked.Add(entry);
+            ranked[proposed++] = entry;
         }
 
-        ranked.Sort(static (a, b) =>
-        {
-            int byGain = b.Value.CompareTo(a.Value);
-            return byGain != 0 ? byGain : b.Key.Length.CompareTo(a.Key.Length);
-        });
+        SpanSort.Sort(ranked, default(ByGainThenLength));
 
         // One bit per slot of the reader's matcher. A symbol it could not hold is skipped here
         // rather than removed later, so the next candidate takes the code and the table still
@@ -717,7 +725,7 @@ internal sealed class FsstSymbols
         taken.Clear();
 
         Clear();
-        for (int i = 0; i < ranked.Count && _count < MaxSymbols; i++)
+        for (int i = 0; i < ranked.Length && _count < MaxSymbols; i++)
         {
             Candidate candidate = ranked[i].Key;
             if (prune)
@@ -758,10 +766,18 @@ internal sealed class FsstSymbols
     private static void Add(Dictionary<Candidate, long> candidates, Candidate candidate, long gain)
     {
         // Summed rather than maximized: the same symbol is reachable through several codes, and its
-        // worth is how often it occurs in total.
-        candidates[candidate] = candidates.TryGetValue(candidate, out long existing)
-            ? existing + gain
-            : gain;
+        // worth is how often it occurs in total. One probe: a new candidate's sum starts at zero.
+        CollectionsMarshal.GetValueRefOrAddDefault(candidates, candidate, out _) += gain;
+    }
+
+    /// <summary>Candidates by gain, the larger first, and among equal gains the longer first.</summary>
+    private readonly struct ByGainThenLength : IComparer<KeyValuePair<Candidate, long>>
+    {
+        public int Compare(KeyValuePair<Candidate, long> a, KeyValuePair<Candidate, long> b)
+        {
+            int byGain = b.Value.CompareTo(a.Value);
+            return byGain != 0 ? byGain : b.Key.Length.CompareTo(a.Key.Length);
+        }
     }
 
     /// <summary>
@@ -912,13 +928,45 @@ internal sealed class FsstSymbols
         _count = code + 1;
     }
 
+    /// <summary>
+    /// Empties the table: once the lookups hold -1 everywhere, every other entry is a symbol's own,
+    /// put there by <see cref="Insert"/>, so only the symbols' entries are cleared rather than the
+    /// 64 Ki entries of the two-byte lookup, which every generation of every training cleared.
+    /// </summary>
     private void Clear()
     {
+        if (!_cleared)
+        {
+            Array.Fill(_oneByte, (short)-1);
+            Array.Fill(_twoByte, (short)-1);
+            Array.Fill(_slots, (short)-1);
+            _cleared = true;
+        }
+        else
+        {
+            for (int code = 0; code < _count; code++)
+            {
+                ulong bits = _bits[code];
+                switch (_lengths[code])
+                {
+                    case 1:
+                        _oneByte[(int)(byte)bits] = -1;
+                        break;
+                    case 2:
+                        _twoByte[(int)(ushort)bits] = -1;
+                        break;
+                    default:
+                        _slots[ReferenceSlot(bits)] = -1;
+                        break;
+                }
+            }
+        }
+
         _count = 0;
-        Array.Fill(_oneByte, (short)-1);
-        Array.Fill(_twoByte, (short)-1);
-        Array.Fill(_slots, (short)-1);
     }
+
+    /// <summary>Whether the lookups hold -1 everywhere but at the symbols' own entries.</summary>
+    private bool _cleared;
 
     /// <summary>A symbol proposed for the table: its bytes and its length.</summary>
     internal readonly struct Candidate(ulong bits, byte length) : IEquatable<Candidate>
@@ -931,6 +979,8 @@ internal sealed class FsstSymbols
 
         public override bool Equals(object? obj) => obj is Candidate other && Equals(other);
 
-        public override int GetHashCode() => HashCode.Combine(Bits, Length);
+        // One multiplication: the map that sums the candidates enumerates them in the order they
+        // were added, whatever the hash, so the hash decides how fast a probe is and nothing else.
+        public override int GetHashCode() => (int)(((Bits ^ ((ulong)Length << 56)) * 0x9E3779B97F4A7C15UL) >> 32);
     }
 }
