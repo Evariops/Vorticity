@@ -1,0 +1,69 @@
+using System.Threading;
+
+namespace Vorticity.Parquet.Reading;
+
+/// <summary>
+/// What the scans of a file did to its pages, counted for the gates of the performance contract: the
+/// data pages and dictionary pages decoded, the pages decompressed, and the batches copied out of the
+/// pages they span rather than sliced from one in place.
+/// </summary>
+internal sealed class PageCounters
+{
+    private long _pages;
+    private long _dictionaries;
+    private long _decompressions;
+    private long _gathers;
+    private long _ahead;
+    private long _viewsAhead;
+    private long _piped;
+
+    /// <summary>Data pages decoded: their levels and values made into the page's slots.</summary>
+    internal long Pages => Interlocked.Read(ref _pages);
+
+    /// <summary>Dictionary pages decoded, to prune or to read.</summary>
+    internal long Dictionaries => Interlocked.Read(ref _dictionaries);
+
+    /// <summary>Pages decompressed, dictionary pages among them.</summary>
+    internal long Decompressions => Interlocked.Read(ref _decompressions);
+
+    /// <summary>Batches whose values were copied out of the pages they span: any other batch is one page's slots, in place.</summary>
+    internal long Gathers => Interlocked.Read(ref _gathers);
+
+    /// <summary>
+    /// Data pages a column of the scan took a lane to decompress while the pages before them are read,
+    /// whichever thread then decompresses them: the lane, or the column when it comes to the page first.
+    /// </summary>
+    internal long Ahead => Interlocked.Read(ref _ahead);
+
+    /// <summary>Data pages whose byte arrays the lane that decompressed them cut into views, which the read then took as they were.</summary>
+    internal long ViewsAhead => Interlocked.Read(ref _viewsAhead);
+
+    /// <summary>Batches the scan read whose fields decoded ahead of it, a field at a time.</summary>
+    internal long Piped => Interlocked.Read(ref _piped);
+
+    internal void AddPage() => Interlocked.Increment(ref _pages);
+
+    internal void AddDictionary() => Interlocked.Increment(ref _dictionaries);
+
+    internal void AddDecompression() => Interlocked.Increment(ref _decompressions);
+
+    internal void AddGather() => Interlocked.Increment(ref _gathers);
+
+    internal void AddAhead() => Interlocked.Increment(ref _ahead);
+
+    internal void AddViewsAhead() => Interlocked.Increment(ref _viewsAhead);
+
+    internal void AddPiped() => Interlocked.Increment(ref _piped);
+
+    /// <summary>Starts every count again from zero.</summary>
+    internal void Reset()
+    {
+        Interlocked.Exchange(ref _pages, 0);
+        Interlocked.Exchange(ref _dictionaries, 0);
+        Interlocked.Exchange(ref _decompressions, 0);
+        Interlocked.Exchange(ref _gathers, 0);
+        Interlocked.Exchange(ref _ahead, 0);
+        Interlocked.Exchange(ref _viewsAhead, 0);
+        Interlocked.Exchange(ref _piped, 0);
+    }
+}

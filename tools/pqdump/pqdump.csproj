@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Tools.PqDump</RootNamespace>
+    <AssemblyName>pqdump</AssemblyName>
+    <Description>Inspects a Parquet file: schema, row groups, column chunks, statistics, key-value metadata, and what its footer says that its rows do not bear out.</Description>
+
+    <!-- Application properties, which have no effect on a class library: CI publishes pqdump as
+         Native AOT and runs it over Parquet files, as it does vxdump over the Vortex corpus. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <PublishAot>true</PublishAot>
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <UseLdClassicXCodeLinker>false</UseLdClassicXCodeLinker>
+
+    <!-- The package's own tool: it follows the experimental API as it changes, release with release. -->
+    <NoWarn>$(NoWarn);VX0003</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Parquet/Vorticity.Parquet.csproj" />
+  </ItemGroup>
+
+</Project>

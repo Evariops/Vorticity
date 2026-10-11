@@ -4546,10 +4546,7 @@ internal static class AggregationEngine
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Lanes do not all go at one pace: one runs on a slower core, waits on its reads, or shares its
-    /// core with another process. Whatever the cause, the queue does not ask: each range is at most
-    /// a share of what is left of the rows (<see cref="ShrinkingShares"/>), so the lane that takes
-    /// the last ones finishes soon after the others, down to a lane half as fast as the mean.
+    /// The shares are <see cref="LaneCuts"/>'s, which every source cuts its rows by.
     /// </para>
     /// <para>
     /// A range ends where a chunk does, so that no chunk is read twice, and the last ranges shrink
@@ -4588,12 +4585,7 @@ internal static class AggregationEngine
             return null;
         }
 
-        long first = Math.Max(blockRows, alive / (degree * (long)RangesPerLane));
-        long left = alive;
-        long target = ShrinkingShares(first, left, degree, blockRows);
-        List<RowRange> parts = [];
-        long start = rows.Start;
-        long held = 0;
+        LaneCuts cuts = new LaneCuts(rows, alive, degree, blockRows);
         long previous = rows.Start;
         for (int b = 0; b < plan.BoundaryCount; b++)
         {
@@ -4603,34 +4595,12 @@ internal static class AggregationEngine
                 continue;
             }
 
-            held += Live(live, new RowRange(previous, at));
+            cuts.Boundary(at, Live(live, new RowRange(previous, at)));
             previous = at;
-            if (held >= target)
-            {
-                parts.Add(new RowRange(start, at));
-                left -= held;
-                target = ShrinkingShares(first, left, degree, blockRows);
-                start = at;
-                held = 0;
-            }
         }
 
-        parts.Add(new RowRange(start, rows.End));
-        return parts.Count > 1 ? [.. parts] : null;
+        return cuts.Finish();
     }
-
-    /// <summary>The ranges a queue holds per lane at first, before they shrink: a quarter of a lane's share each.</summary>
-    private const int RangesPerLane = 4;
-
-    /// <summary>
-    /// The live rows of the next range: <paramref name="first"/>, until what is left is half of the
-    /// rows; then a share of what is left, <paramref name="left"/> over twice the degree, down to a
-    /// block. A lane that takes a range when <paramref name="left"/> rows remain then finishes it
-    /// no later than the others finish theirs and the rest, as long as it goes at least half as fast
-    /// as the mean lane: guided self-scheduling, halved.
-    /// </summary>
-    private static long ShrinkingShares(long first, long left, int degree, long blockRows) =>
-        Math.Max(blockRows, Math.Min(first, left / (2L * degree)));
 
     /// <summary>The live rows of <paramref name="rows"/>: every one without a mask.</summary>
     private static long Live(BlockMask? live, RowRange rows)

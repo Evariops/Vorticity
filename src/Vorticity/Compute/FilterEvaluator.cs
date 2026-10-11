@@ -744,6 +744,15 @@ internal sealed class FilterEvaluator
                     nameof(field));
             }
 
+            // A variant is held as a struct of its metadata and its value, which are not fields of
+            // the schema: its fields are its values', which a path does not name.
+            if (node.DType.Kind == DTypeKind.Variant)
+            {
+                throw new ArgumentException(
+                    $"'{field.Path}' descends into a Variant column, which has no fields.",
+                    nameof(field));
+            }
+
             int index = node.DType.IndexOfField(segments[i]);
             if (index < 0)
             {

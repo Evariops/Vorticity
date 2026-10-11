@@ -164,43 +164,17 @@ internal ref struct ProtoReader
     [MethodImpl(MethodImplOptions.NoInlining)]
     private ulong ReadVarintMultiByte()
     {
-        ReadOnlySpan<byte> data = _data;
-        int pos = _position;
-        ulong result = 0;
+        // The position is stored on the read's way out and nowhere else, so that nothing stays live
+        // across the calls that throw.
+        return Varint.Read64<VarintErrors>(_data, ref _position);
+    }
 
-        // Bytes 1..9 carry seven value bits each: bits 0..62.
-        for (int shift = 0; shift <= 56; shift += 7)
-        {
-            if ((uint)pos >= (uint)data.Length)
-            {
-                return ProtoThrow.TruncatedVarint<ulong>(pos);
-            }
+    /// <summary>Protobuf's refusals of a varint.</summary>
+    private readonly struct VarintErrors : IVarintErrors
+    {
+        public static ulong Truncated(int position) => ProtoThrow.TruncatedVarint<ulong>(position);
 
-            byte b = data[pos++];
-            result |= (ulong)(b & 0x7Fu) << shift;
-            if ((b & 0x80) == 0)
-            {
-                _position = pos;
-                return result;
-            }
-        }
-
-        // Byte 10 carries exactly one value bit (bit 63). Any other bit set means either the
-        // continuation bit (an 11-byte varint) or a value bit above 63 - both unrepresentable.
-        if ((uint)pos >= (uint)data.Length)
-        {
-            return ProtoThrow.TruncatedVarint<ulong>(pos);
-        }
-
-        byte last = data[pos++];
-        if (last > 1)
-        {
-            return ProtoThrow.MalformedVarint<ulong>(pos - 1, last);
-        }
-
-        result |= (ulong)last << 63;
-        _position = pos;
-        return result;
+        public static ulong Malformed(int position, byte value) => ProtoThrow.MalformedVarint<ulong>(position, value);
     }
 
     /// <summary>
@@ -249,14 +223,14 @@ internal ref struct ProtoReader
 
     /// <summary>Reads a ZigZag-encoded <c>sint32</c>.</summary>
     /// <exception cref="VortexFormatException">The varint is malformed.</exception>
-    public int ReadSInt32() => ProtoWire.ZigZagDecode32(unchecked((uint)ReadVarint()));
+    public int ReadSInt32() => Varint.ZigZagDecode32(unchecked((uint)ReadVarint()));
 
     /// <summary>
     /// Reads a ZigZag-encoded <c>sint64</c> — the encoding of
     /// <c>vortex.scalar.ScalarValue.int64_value</c>.
     /// </summary>
     /// <exception cref="VortexFormatException">The varint is malformed.</exception>
-    public long ReadSInt64() => ProtoWire.ZigZagDecode64(ReadVarint());
+    public long ReadSInt64() => Varint.ZigZagDecode64(ReadVarint());
 
     /// <summary>Reads four little-endian bytes.</summary>
     /// <exception cref="VortexFormatException">Fewer than four bytes remain.</exception>

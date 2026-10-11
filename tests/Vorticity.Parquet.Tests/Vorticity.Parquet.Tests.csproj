@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Vorticity.Parquet's own suite, apart from Vorticity.Tests so that work on the package builds
+       and runs its tests alone. It references the core as the package does: the tests read what a
+       page decodes into from the core's arena. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Parquet.Tests</RootNamespace>
+    <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
+    <TestingPlatformCaptureOutput>false</TestingPlatformCaptureOutput>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Parquet/Vorticity.Parquet.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <!-- The core's surface renderer, so that every surface on record is rendered one way. -->
+  <ItemGroup>
+    <Compile Include="../Vorticity.Tests/Api/SurfaceRenderer.cs" Link="Api/SurfaceRenderer.cs" />
+    <!-- The fuzzer's Parquet mutations, which the smoke campaign runs in the suite. -->
+    <Compile Include="../Vorticity.Fuzz/ParquetMutator.cs" Link="Fuzz/ParquetMutator.cs" />
+  </ItemGroup>
+
+  <!-- Every test runs beside the others, each row of a theory a test of its own: tests/xunit.runner.json. -->
+  <ItemGroup>
+    <None Include="../xunit.runner.json" Link="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

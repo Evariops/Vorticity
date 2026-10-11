@@ -6,8 +6,10 @@
 // choice, its eight salts in its order and its sizing. `BloomHash.XxHash64` must reproduce them;
 // if it did not, a filter we wrote for a Parquet reader would be a filter that drops rows.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -71,6 +73,60 @@ public sealed class ParquetBloomVectorTests
         foreach (byte[] key in vector.Keys)
         {
             Assert.True(SplitBlockBloom.Contains(theirs, SplitBlockBloom.Hash(key, BloomHash.XxHash64)));
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Cases))]
+    public void AFixedWidthKeyHashesAsItsBytesDo(string name, int blocks)
+    {
+        // A writer hashes a column of 4- and 8-byte values without a span each: the hashes must be
+        // the ones of the same bytes.
+        foreach (byte[] key in Find(name, blocks).Keys)
+        {
+            ulong expected = SplitBlockBloom.Hash(key, BloomHash.XxHash64);
+            if (key.Length == sizeof(uint))
+            {
+                Assert.Equal(expected, SplitBlockBloom.XxHash64Of(BinaryPrimitives.ReadUInt32LittleEndian(key)));
+            }
+            else if (key.Length == sizeof(ulong))
+            {
+                Assert.Equal(expected, SplitBlockBloom.XxHash64Of(BinaryPrimitives.ReadUInt64LittleEndian(key)));
+            }
+        }
+    }
+
+    [Fact]
+    public void TheFixedWidthHashesAreXxHash64()
+    {
+        Random random = new(11);
+        byte[] bytes = new byte[sizeof(ulong)];
+        for (int i = 0; i < 10_000; i++)
+        {
+            random.NextBytes(bytes);
+            Assert.Equal(XxHash64.HashToUInt64(bytes), SplitBlockBloom.XxHash64Of(BinaryPrimitives.ReadUInt64LittleEndian(bytes)));
+            Assert.Equal(XxHash64.HashToUInt64(bytes.AsSpan(0, sizeof(uint))), SplitBlockBloom.XxHash64Of(BinaryPrimitives.ReadUInt32LittleEndian(bytes)));
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Cases))]
+    public void AFoldedFilterIsParquetsAtTheSmallerSize(string name, int blocks)
+    {
+        // Built at sixty-four times the size, then folded: Parquet's filter of the same keys.
+        Vector vector = Find(name, blocks);
+        foreach (int times in (int[])[2, 64])
+        {
+            uint[] words = new uint[blocks * times * SplitBlockBloom.WordsPerBlock];
+            foreach (byte[] key in vector.Keys)
+            {
+                SplitBlockBloom.Insert(words, SplitBlockBloom.Hash(key, BloomHash.XxHash64));
+            }
+
+            SplitBlockBloom.Fold(words, blocks * times, blocks);
+            Assert.Equal(
+                Convert.ToHexString(vector.Filter),
+                Convert.ToHexString(MemoryMarshal.AsBytes(words.AsSpan(0, blocks * SplitBlockBloom.WordsPerBlock))));
         }
     }
 

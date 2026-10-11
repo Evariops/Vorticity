@@ -126,7 +126,7 @@ internal static class PcoPageDecoder
                         ref reader, remaining, batch, second, lookbacks, in scratch, out secondaryFirst, out ulong secondaryStep);
                     if (secondaryShape == PcoBatchShape.Ramp)
                     {
-                        Ramp(second, secondaryFirst, secondaryStep);
+                        Progression.Fill(second, secondaryFirst, secondaryStep);
                         secondaryShape = PcoBatchShape.Written;
                     }
                 }
@@ -201,7 +201,7 @@ internal static class PcoPageDecoder
         }
         else if (shape == PcoBatchShape.Ramp)
         {
-            Ramp(values, first, step);
+            Progression.Fill(values, first, step);
         }
     }
 
@@ -217,7 +217,7 @@ internal static class PcoPageDecoder
                 values.Fill(unchecked(first + shift));
                 break;
             case PcoBatchShape.Ramp:
-                Ramp(values, unchecked(first + shift), step);
+                Progression.Fill(values, unchecked(first + shift), step);
                 break;
             default:
                 Add(values, shift);
@@ -412,7 +412,7 @@ internal static class PcoPageDecoder
                         values.Fill((primaryFirst * modeBase) + added);
                         break;
                     case PcoBatchShape.Ramp:
-                        Ramp(values, (primaryFirst * modeBase) + added, primaryStep * modeBase);
+                        Progression.Fill(values, (primaryFirst * modeBase) + added, primaryStep * modeBase);
                         break;
                     default:
                         for (int i = Multiplied(values, default, modeBase, added); i < values.Length; i++)
@@ -434,7 +434,7 @@ internal static class PcoPageDecoder
                     Add(values, secondary);
                     break;
                 case PcoBatchShape.Ramp:
-                    Ramp(values, (primaryFirst * modeBase) + shift, primaryStep * modeBase);
+                    Progression.Fill(values, (primaryFirst * modeBase) + shift, primaryStep * modeBase);
                     Add(values, secondary);
                     break;
                 default:
@@ -482,28 +482,6 @@ internal static class PcoPageDecoder
         }
 
         return i;
-    }
-
-    /// <summary>Writes <paramref name="start"/> plus i <paramref name="step"/>s into slot i, wrapping.</summary>
-    internal static void Ramp(Span<ulong> values, ulong start, ulong step)
-    {
-        int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
-        {
-            int lanes = Vector<ulong>.Count;
-            Vector<ulong> ramp = (Vector<ulong>.Indices * step) + new Vector<ulong>(start);
-            Vector<ulong> stride = new Vector<ulong>(unchecked((ulong)lanes * step));
-            for (; i <= values.Length - lanes; i += lanes)
-            {
-                ramp.StoreUnsafe(ref values[i]);
-                ramp += stride;
-            }
-        }
-
-        for (; i < values.Length; i++)
-        {
-            values[i] = unchecked(start + ((ulong)i * step));
-        }
     }
 
     /// <summary>Adds <paramref name="by"/> to every value, one vector add per lane group.</summary>
@@ -913,7 +891,7 @@ internal sealed class PcoLatentState
             // The recentring of the delta, on the one value.
             ulong step = unchecked(lower + _mid);
             ulong moment = _deltaMoments[order];
-            PcoPageDecoder.Ramp(values, moment, step);
+            Progression.Fill(values, moment, step);
             _deltaMoments[order] = unchecked(moment + ((ulong)values.Length * step));
             order--;
         }

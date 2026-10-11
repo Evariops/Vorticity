@@ -25,6 +25,13 @@ internal sealed class StructStore : ColumnStore
 
     internal ColumnStore[] Children { get; }
 
+    /// <summary>
+    /// Adds the node of the first <paramref name="rows"/> rows in the shape of the file's root this
+    /// store holds the rows of: itself, or its one column for a root that is not a struct.
+    /// </summary>
+    internal int BuildRoot(CanonicalArena arena, int rows) =>
+        DType.Kind == DTypeKind.Struct ? Build(arena, rows) : Children[0].Build(arena, rows);
+
     /// <summary>The untyped builder over this struct, made once.</summary>
     internal ColumnsBuilder? Facade { get; set; }
 
@@ -539,6 +546,18 @@ internal static class ColumnStores
         ColumnStore store = Create(dtype, pool);
         Attach(store, extensions);
         return store;
+    }
+
+    /// <summary>
+    /// The store of a file's rows, whose root is <paramref name="schema"/>: the struct of its columns,
+    /// or, for a root that is not a struct, its one column seen as a struct of it.
+    /// </summary>
+    internal static StructStore Root(DType schema, AlignedBufferPool pool, VortexExtensionRegistry? extensions)
+    {
+        ColumnStore store = Create(schema, pool, extensions);
+        return schema.Kind == DTypeKind.Struct
+            ? (StructStore)store
+            : new StructStore(schema, VortexType.Struct([new VortexField(string.Empty, store.Type)]), [store], pool);
     }
 
     private static void Attach(ColumnStore store, VortexExtensionRegistry? extensions)

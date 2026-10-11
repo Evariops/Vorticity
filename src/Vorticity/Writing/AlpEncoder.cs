@@ -157,10 +157,6 @@ internal readonly struct AlpPlan
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
 
         (int e, int f) = BestExponentsDouble(values, mask, rows);
-        double scale = AlpTables.F10Double[e];
-        double inverse = AlpTables.If10Double[f];
-        double back = AlpTables.F10Double[f];
-        double backInverse = AlpTables.If10Double[e];
 
         // The integers go straight into the bytes the plan will carry, so a candidate never builds
         // the column twice. Leaving the rental uninitialized is safe because every slot is written
@@ -185,6 +181,113 @@ internal readonly struct AlpPlan
         bool kept = false;
         try
         {
+        patchCount = EncodeRows(values, mask, rows, e, f, encoded, indices, patches);
+        long size = Estimate<long>(encoded, patchCount, sizeof(double), sizeof(long));
+        if (size + Overhead >= plain)
+        {
+            return null;
+        }
+
+        AlpPlan plan = new AlpPlan(
+            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
+            RentedCopy(indices.AsSpan(0, patchCount)),
+            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+            patchCount, sizeof(double), size);
+        kept = true;
+        return plan;
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(indices);
+            ArrayPool<double>.Shared.Return(patches);
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(encodedBytes);
+            }
+        }
+    }
+
+    private static AlpPlan? BuildSingle(CanonicalArena arena, CanonicalNode node, long plain)
+    {
+        int rows = node.Length;
+        ReadOnlySpan<float> values = MemoryMarshal.Cast<byte, float>(node.Values.Span)[..rows];
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+
+        (int e, int f) = BestExponentsSingle(values, mask, rows);
+
+        int encodedLength = rows * sizeof(int);
+        byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
+        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan(0, encodedLength));
+        int[] indices = ArrayPool<int>.Shared.Rent(rows);
+        float[] patches = ArrayPool<float>.Shared.Rent(rows);
+        int patchCount = 0;
+        bool kept = false;
+        try
+        {
+        patchCount = EncodeRows(values, mask, rows, e, f, encoded, indices, patches);
+        long size = Estimate<int>(encoded, patchCount, sizeof(float), sizeof(int));
+        if (size + Overhead >= plain)
+        {
+            return null;
+        }
+
+        AlpPlan plan = new AlpPlan(
+            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
+            RentedCopy(indices.AsSpan(0, patchCount)),
+            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+            patchCount, sizeof(float), size);
+        kept = true;
+        return plan;
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(indices);
+            ArrayPool<float>.Shared.Return(patches);
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(encodedBytes);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The exponents a sample of <paramref name="values"/>, none null, prices cheapest: the pair ALP
+    /// encodes them at, with <c>e</c> below 18.
+    /// </summary>
+    internal static (int E, int F) BestExponents(ReadOnlySpan<double> values) =>
+        BestExponentsDouble(values, ValidityMask.NonNullable, values.Length);
+
+    /// <inheritdoc cref="BestExponents(ReadOnlySpan{double})"/>
+    internal static (int E, int F) BestExponents(ReadOnlySpan<float> values) =>
+        BestExponentsSingle(values, ValidityMask.NonNullable, values.Length);
+
+    /// <summary>
+    /// Encodes <paramref name="values"/>, none null, at <paramref name="e"/> and <paramref name="f"/>:
+    /// each value's integer into <paramref name="encoded"/> where decoding it, times <c>10^f</c> then
+    /// <c>10^-e</c>, gives the value's very bits, else its row into <paramref name="indices"/> and the
+    /// value into <paramref name="patches"/>, both of a row a value at least, its slot then taking the
+    /// first integer kept. The patches' count.
+    /// </summary>
+    internal static int Encode(ReadOnlySpan<double> values, int e, int f, Span<long> encoded, int[] indices, double[] patches) =>
+        EncodeRows(values, ValidityMask.NonNullable, values.Length, e, f, encoded, indices, patches);
+
+    /// <inheritdoc cref="Encode(ReadOnlySpan{double}, int, int, Span{long}, int[], double[])"/>
+    internal static int Encode(ReadOnlySpan<float> values, int e, int f, Span<int> encoded, int[] indices, float[] patches) =>
+        EncodeRows(values, ValidityMask.NonNullable, values.Length, e, f, encoded, indices, patches);
+
+    /// <summary>
+    /// The rows of <paramref name="values"/> at <paramref name="e"/> and <paramref name="f"/>: a
+    /// valid row's integer where it decodes to the row's very bits, else a patch; then the patched and
+    /// the null rows' slots filled with the first integer kept. The patches' count.
+    /// </summary>
+    private static int EncodeRows(
+        ReadOnlySpan<double> values, ValidityMask mask, int rows, int e, int f, Span<long> encoded, int[] indices, double[] patches)
+    {
+        double scale = AlpTables.F10Double[e];
+        double inverse = AlpTables.If10Double[f];
+        double back = AlpTables.F10Double[f];
+        double backInverse = AlpTables.If10Double[e];
+        int patchCount = 0;
         long? fill = null;
         int done = mask.AllInvalid ? 0
             : Vector512.IsHardwareAccelerated
@@ -221,55 +324,19 @@ internal readonly struct AlpPlan
         // Patched and null slots take a real encoded value rather than zero: the integers are
         // bit-packed downstream over their own range, and a stray zero among values near 10^9
         // widens that range for nothing.
-        long filler = fill ?? 0;
-        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, filler);
-
-        long size = Estimate<long>(encoded, patchCount, sizeof(double), sizeof(long));
-        if (size + Overhead >= plain)
-        {
-            return null;
-        }
-
-        AlpPlan plan = new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
-            RentedCopy(indices.AsSpan(0, patchCount)),
-            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
-            patchCount, sizeof(double), size);
-        kept = true;
-        return plan;
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(indices);
-            ArrayPool<double>.Shared.Return(patches);
-            if (!kept)
-            {
-                ArrayPool<byte>.Shared.Return(encodedBytes);
-            }
-        }
+        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, fill ?? 0);
+        return patchCount;
     }
 
-    private static AlpPlan? BuildSingle(CanonicalArena arena, CanonicalNode node, long plain)
+    /// <inheritdoc cref="EncodeRows(ReadOnlySpan{double}, ValidityMask, int, int, int, Span{long}, int[], double[])"/>
+    private static int EncodeRows(
+        ReadOnlySpan<float> values, ValidityMask mask, int rows, int e, int f, Span<int> encoded, int[] indices, float[] patches)
     {
-        int rows = node.Length;
-        ReadOnlySpan<float> values = MemoryMarshal.Cast<byte, float>(node.Values.Span)[..rows];
-        ValidityMask mask = ValidityMask.From(arena, node.Validity);
-
-        (int e, int f) = BestExponentsSingle(values, mask, rows);
         float scale = AlpTables.F10Single[e];
         float inverse = AlpTables.If10Single[f];
         float back = AlpTables.F10Single[f];
         float backInverse = AlpTables.If10Single[e];
-
-        int encodedLength = rows * sizeof(int);
-        byte[] encodedBytes = ArrayPool<byte>.Shared.Rent(Math.Max(encodedLength, 1));
-        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan(0, encodedLength));
-        int[] indices = ArrayPool<int>.Shared.Rent(rows);
-        float[] patches = ArrayPool<float>.Shared.Rent(rows);
         int patchCount = 0;
-        bool kept = false;
-        try
-        {
         int? fill = null;
         int done = mask.AllInvalid ? 0
             : Vector512.IsHardwareAccelerated
@@ -301,32 +368,8 @@ internal readonly struct AlpPlan
             patchCount++;
         }
 
-        int filler = fill ?? 0;
-        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, filler);
-
-        long size = Estimate<int>(encoded, patchCount, sizeof(float), sizeof(int));
-        if (size + Overhead >= plain)
-        {
-            return null;
-        }
-
-        AlpPlan plan = new AlpPlan(
-            (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
-            RentedCopy(indices.AsSpan(0, patchCount)),
-            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
-            patchCount, sizeof(float), size);
-        kept = true;
-        return plan;
-        }
-        finally
-        {
-            ArrayPool<int>.Shared.Return(indices);
-            ArrayPool<float>.Shared.Return(patches);
-            if (!kept)
-            {
-                ArrayPool<byte>.Shared.Return(encodedBytes);
-            }
-        }
+        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, fill ?? 0);
+        return patchCount;
     }
 
     /// <summary>
