@@ -111,6 +111,14 @@ public sealed partial class AzureBlobObjectStore
     /// <summary>The size of block <paramref name="number"/> of a blob of <paramref name="length"/> bytes, -1 when unknown.</summary>
     internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
 
+    /// <summary>The header that carries a body's checksum, as the options choose it, or null for none.</summary>
+    private (string Name, string Value)? ChecksumOf(ReadOnlySequence<byte> body) => _options.Checksum switch
+    {
+        PutChecksum.None => null,
+        PutChecksum.ContentMd5 => ("Content-MD5", Convert.ToBase64String(Checksums.Md5(body))),
+        _ => ("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(body))),
+    };
+
     /// <inheritdoc/>
     string IUploadService.PutOperation => "PutBlob";
 
@@ -118,9 +126,9 @@ public sealed partial class AzureBlobObjectStore
     ValueTask<PutOutcome> IUploadService.PutWholeAsync(string key, ReadOnlySequence<byte> body, PutCondition condition, string? putId, CancellationToken cancellationToken)
     {
         List<(string, string)> headers = [("x-ms-blob-type", "BlockBlob")];
-        if (_options.SendChecksums)
+        if (ChecksumOf(body) is { } checksum)
         {
-            headers.Add(("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(body))));
+            headers.Add(checksum);
         }
 
         if (putId is not null)
@@ -147,7 +155,7 @@ public sealed partial class AzureBlobObjectStore
     async ValueTask<PartReceipt> IUploadService.SendPartAsync(UploadState upload, int number, ReadOnlySequence<byte> body, CancellationToken cancellationToken)
     {
         string id = BlockId(upload.Id, number);
-        (string, string)[] headers = _options.SendChecksums ? [("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(body)))] : [];
+        (string, string)[] headers = ChecksumOf(body) is { } checksum ? [checksum] : [];
         await _transport.SendAsync(
             "PutBlock",
             new WriteRequest(this, upload.Key, "comp=block&blockid=" + UriEncoding.Query(id), body, headers, PutCondition.None),
@@ -176,9 +184,9 @@ public sealed partial class AzureBlobObjectStore
             },
             declared: true);
         List<(string, string)> headers = [(PutIdHeader, upload.PutId)];
-        if (_options.SendChecksums)
+        if (ChecksumOf(new ReadOnlySequence<byte>(list)) is { } checksum)
         {
-            headers.Add(("x-ms-content-crc64", Crc64Header(Checksums.Crc64Nvme(new ReadOnlySequence<byte>(list)))));
+            headers.Add(checksum);
         }
 
         AddCondition(headers, condition);

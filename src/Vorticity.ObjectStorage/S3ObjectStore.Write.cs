@@ -48,8 +48,13 @@ public sealed partial class S3ObjectStore
     /// </summary>
     private const int ExpectContinueBytes = 1 << 20;
 
-    // 1 once a bucket has refused a put for want of a checksum.
-    private int _md5Required;
+    /// <summary>The checksums an S3 put may carry.</summary>
+    private enum Sum
+    {
+        None,
+        Md5,
+        Crc64,
+    }
 
     /// <inheritdoc/>
     public async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
@@ -129,7 +134,7 @@ public sealed partial class S3ObjectStore
     /// <remarks>The upload carries the put id, and asks for the whole object's CRC-64/NVME when its parts carry theirs.</remarks>
     async ValueTask<UploadState> IUploadService.StartAsync(string key, string putId, CancellationToken cancellationToken)
     {
-        bool crc = ChecksumOf() == S3Checksum.Crc64Nvme;
+        bool crc = ChecksumOf() == Sum.Crc64;
         string uploadId = await _transport.SendAsync(
             "CreateMultipartUpload",
             new UploadRequest(this, key, string.Empty, putId, crc),
@@ -150,7 +155,7 @@ public sealed partial class S3ObjectStore
         {
             extra.Add(("x-amz-checksum-crc64nvme", Base64(checksum)));
         }
-        else if (ChecksumOf() == S3Checksum.ContentMd5)
+        else if (ChecksumOf() == Sum.Md5)
         {
             extra.Add(("content-md5", Convert.ToBase64String(Checksums.Md5(body))));
         }
@@ -249,7 +254,7 @@ public sealed partial class S3ObjectStore
         };
         request.Headers.ExpectContinue = s.Body.Length >= ExpectContinueBytes;
         AddCondition(request, s.Condition);
-        await SignAsync(request, target, path, string.Empty, SigV4Signer.UnsignedPayload, cancellationToken, WithDigest(s.Extra, s.Body)).ConfigureAwait(false);
+        await SignAsync(request, target, path, string.Empty, SigV4Signer.UnsignedPayload, cancellationToken, s.Extra).ConfigureAwait(false);
         return request;
     }
 
@@ -274,12 +279,7 @@ public sealed partial class S3ObjectStore
             throw new StoreRetryException($"PutObject of '{key}' arrived damaged: {error}", RetryBudget.RetryCost, notApplied: true);
         }
 
-        if (LearnsChecksum(error))
-        {
-            throw new StoreRetryException($"PutObject of '{key}' was refused for want of a checksum: {error}", cost: 0);
-        }
-
-        throw MapFailure(response, error, "PutObject", key);
+        throw WantsChecksum(error, "PutObject", key) ?? MapFailure(response, error, "PutObject", key);
     }
 
     private async ValueTask<HttpRequestMessage> BuildCreateUploadAsync(UploadRequest s, CancellationToken cancellationToken)
@@ -323,7 +323,7 @@ public sealed partial class S3ObjectStore
             Content = new SequenceContent(s.Body),
         };
         request.Headers.ExpectContinue = s.Body.Length >= ExpectContinueBytes;
-        await SignAsync(request, target, path, query, SigV4Signer.UnsignedPayload, cancellationToken, WithDigest(s.Extra, s.Body)).ConfigureAwait(false);
+        await SignAsync(request, target, path, query, SigV4Signer.UnsignedPayload, cancellationToken, s.Extra).ConfigureAwait(false);
         return request;
     }
 
@@ -340,12 +340,7 @@ public sealed partial class S3ObjectStore
             throw new StoreRetryException($"UploadPart of '{key}' arrived damaged: {error}", RetryBudget.RetryCost, notApplied: true);
         }
 
-        if (LearnsChecksum(error))
-        {
-            throw new StoreRetryException($"UploadPart of '{key}' was refused for want of a checksum: {error}", cost: 0);
-        }
-
-        throw MapFailure(response, error, "UploadPart", key);
+        throw WantsChecksum(error, "UploadPart", key) ?? MapFailure(response, error, "UploadPart", key);
     }
 
     private async ValueTask<HttpRequestMessage> BuildCompleteAsync(CompleteRequest s, CancellationToken cancellationToken)
@@ -496,10 +491,10 @@ public sealed partial class S3ObjectStore
         List<(string, string)> headers = [];
         switch (ChecksumOf())
         {
-            case S3Checksum.Crc64Nvme:
+            case Sum.Crc64:
                 headers.Add(("x-amz-checksum-crc64nvme", Base64(Checksums.Crc64Nvme(body))));
                 break;
-            case S3Checksum.ContentMd5:
+            case Sum.Md5:
                 headers.Add(("content-md5", Convert.ToBase64String(Checksums.Md5(body))));
                 break;
         }
@@ -512,53 +507,24 @@ public sealed partial class S3ObjectStore
         return [.. headers];
     }
 
-    /// <summary>
-    /// The checksum a put carries: the option's, or the profile's, which is none on the clouds that
-    /// share only <c>Content-MD5</c> until a bucket under Object Lock refuses a put without one, after
-    /// which every put of the store carries it.
-    /// </summary>
-    private S3Checksum ChecksumOf()
+    /// <summary>The checksum a put carries: the option's, or the profile's, CRC-64/NVME on Amazon S3 and none elsewhere.</summary>
+    private Sum ChecksumOf() => _options.Checksum switch
     {
-        S3Checksum chosen = _options.Checksum != S3Checksum.Default
-            ? _options.Checksum
-            : _profile is S3Profile.Amazon ? S3Checksum.Crc64Nvme : S3Checksum.None;
-        return chosen == S3Checksum.None && Volatile.Read(ref _md5Required) != 0 ? S3Checksum.ContentMd5 : chosen;
-    }
+        PutChecksum.None => Sum.None,
+        PutChecksum.ContentMd5 => Sum.Md5,
+        _ => _profile == S3Profile.Amazon ? Sum.Crc64 : Sum.None,
+    };
 
     /// <summary>
-    /// Whether the service refused a put for want of a checksum, as a bucket under Object Lock does:
-    /// the store then sends <c>Content-MD5</c> with every put, and this one again.
+    /// The refusal of a put sent without the checksum a bucket under Object Lock asks for, worded to name
+    /// the option that cures it; null for any other refusal. The service's text words the message and
+    /// decides nothing: the store sends what its option says.
     /// </summary>
-    private bool LearnsChecksum(ServiceError error)
-    {
-        if (error.Code != "InvalidRequest" || error.Message?.Contains("Content-MD5", StringComparison.OrdinalIgnoreCase) != true
-            || ChecksumOf() != S3Checksum.None)
-        {
-            return false;
-        }
-
-        Volatile.Write(ref _md5Required, 1);
-        return true;
-    }
-
-    /// <summary>The headers a body's put signs, <c>Content-MD5</c> added when the store has learned its bucket asks for one.</summary>
-    private (string Name, string Value)[] WithDigest((string Name, string Value)[] extra, ReadOnlySequence<byte> body)
-    {
-        if (ChecksumOf() != S3Checksum.ContentMd5)
-        {
-            return extra;
-        }
-
-        foreach ((string name, _) in extra)
-        {
-            if (name == "content-md5")
-            {
-                return extra;
-            }
-        }
-
-        return [.. extra, ("content-md5", Convert.ToBase64String(Checksums.Md5(body)))];
-    }
+    private ObjectStoreException? WantsChecksum(ServiceError error, string operation, string key) =>
+        error.Code == "InvalidRequest" && error.Message?.Contains("Content-MD5", StringComparison.OrdinalIgnoreCase) == true && ChecksumOf() == Sum.None
+            ? new ObjectStoreException(
+                $"{operation} of '{key}' was refused for want of a checksum, as a bucket under Object Lock refuses one: set S3StoreOptions.Checksum to PutChecksum.ContentMd5. {error}")
+            : null;
 
     private static void AddCondition(HttpRequestMessage request, PutCondition condition)
     {

@@ -18,27 +18,11 @@ public enum S3Profile
     /// <summary>Scaleway Object Storage.</summary>
     Scaleway = 3,
 
-    /// <summary>Another store that speaks the API, Ceph for instance: its options say what it does.</summary>
-    Other = 4,
-}
-
-/// <summary>The checksum a put carries, which the service verifies before it creates the object.</summary>
-public enum S3Checksum
-{
-    /// <summary>The profile's: CRC-64/NVME on Amazon S3, none on the clouds that share only <c>Content-MD5</c>, whose bytes TLS already protects.</summary>
-    Default = 0,
-
-    /// <summary>None: TLS protects the bytes on their way, and the format's own checks the rest.</summary>
-    None = 1,
-
     /// <summary>
-    /// <c>Content-MD5</c>, the one checksum R2, OVHcloud and Scaleway share; a bucket under Object Lock
-    /// refuses a put without a checksum, so a locked dataset there needs it. Never for security.
+    /// Another service that speaks the API, Ceph for instance: it is taken to list in order, and its
+    /// options say what else it does.
     /// </summary>
-    ContentMd5 = 2,
-
-    /// <summary>CRC-64/NVME, of a put sent whole or of the whole object of a multipart upload.</summary>
-    Crc64Nvme = 3,
+    Other = 4,
 }
 
 /// <summary>An S3 store's bucket, endpoint, keys and connections.</summary>
@@ -93,13 +77,18 @@ public sealed class S3StoreOptions
 
     /// <summary>
     /// Whether the service keeps objects under Object Lock's retention and legal hold, which a dataset
-    /// created for a locked store needs. Null takes the profile's: no on R2, yes elsewhere. Set it false
-    /// for an OVHcloud Local Zone, which keeps neither.
+    /// created for a locked store needs. Null takes the profile's: yes on Amazon S3, and no elsewhere
+    /// until the contract tests prove it, R2 keeping none and an OVHcloud Local Zone neither. Set it true
+    /// once you have checked that the bucket keeps them.
     /// </summary>
     public bool? KeepsLocks { get; init; }
 
-    /// <summary>The checksum each put carries; <see cref="S3Checksum.Default"/> takes the profile's.</summary>
-    public S3Checksum Checksum { get; init; }
+    /// <summary>
+    /// The checksum each put carries: CRC-64/NVME on Amazon S3 and none elsewhere by default, and
+    /// <see cref="PutChecksum.ContentMd5"/> for a bucket under Object Lock on R2, OVHcloud or Scaleway,
+    /// which refuses a put without one.
+    /// </summary>
+    public PutChecksum Checksum { get; init; }
 
     /// <summary>
     /// The size past which a put goes up in parts sent in parallel rather than whole, 32 MiB by default.

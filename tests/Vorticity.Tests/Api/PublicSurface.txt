@@ -2590,10 +2590,10 @@ Vorticity.ObjectStorage:     property string Account { get; }
 Vorticity.ObjectStorage:     property string Container { get; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.AzureBlobStoreOptions
 Vorticity.ObjectStorage:     ctor AzureBlobStoreOptions()
+Vorticity.ObjectStorage:     property PutChecksum Checksum { get; init; }
 Vorticity.ObjectStorage:     property StoreCredentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
-Vorticity.ObjectStorage:     property bool SendChecksums { get; init; }
 Vorticity.ObjectStorage:     property int PartSize { get; init; }
 Vorticity.ObjectStorage:     property int PartsInFlight { get; init; }
 Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
@@ -2614,22 +2614,21 @@ Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get
 Vorticity.ObjectStorage:     property string Bucket { get; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.GoogleCloudStorageOptions
 Vorticity.ObjectStorage:     ctor GoogleCloudStorageOptions()
+Vorticity.ObjectStorage:     property Nullable<bool> ReadsSuffix { get; init; }
+Vorticity.ObjectStorage:     property PutChecksum Checksum { get; init; }
 Vorticity.ObjectStorage:     property StoreCredentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
-Vorticity.ObjectStorage:     property bool ReadsSuffix { get; init; }
-Vorticity.ObjectStorage:     property bool SendChecksums { get; init; }
 Vorticity.ObjectStorage:     property int PartSize { get; init; }
 Vorticity.ObjectStorage:     property int PartsInFlight { get; init; }
 Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
 Vorticity.ObjectStorage:     property string Bucket { get; init; }
 Vorticity.ObjectStorage: static class Vorticity.ObjectStorage.ObjectStoreRegistryExtensions
 Vorticity.ObjectStorage:     method ObjectStoreRegistry UseEnvironment(ObjectStoreRegistry)
-Vorticity.ObjectStorage: enum Vorticity.ObjectStorage.S3Checksum
-Vorticity.ObjectStorage:     const S3Checksum ContentMd5 = 2
-Vorticity.ObjectStorage:     const S3Checksum Crc64Nvme = 3
-Vorticity.ObjectStorage:     const S3Checksum Default = 0
-Vorticity.ObjectStorage:     const S3Checksum None = 1
+Vorticity.ObjectStorage: enum Vorticity.ObjectStorage.PutChecksum
+Vorticity.ObjectStorage:     const PutChecksum ContentMd5 = 2
+Vorticity.ObjectStorage:     const PutChecksum Default = 0
+Vorticity.ObjectStorage:     const PutChecksum None = 1
 Vorticity.ObjectStorage:     field int value__
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3ObjectStore : IObjectStore
 Vorticity.ObjectStorage:     ctor S3ObjectStore(S3StoreOptions)
@@ -2662,7 +2661,7 @@ Vorticity.ObjectStorage:     property Nullable<bool> KeepsLocks { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ListsInOrder { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> PathStyle { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ReadsSuffix { get; init; }
-Vorticity.ObjectStorage:     property S3Checksum Checksum { get; init; }
+Vorticity.ObjectStorage:     property PutChecksum Checksum { get; init; }
 Vorticity.ObjectStorage:     property StoreCredentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }

@@ -28,8 +28,8 @@ public sealed class S3ProfileTests
         await using S3ObjectStore amazon = new S3ObjectStore(new S3StoreOptions { Bucket = "lake", Region = "eu-west-3", Credentials = Keys() });
 
         Assert.Equal((S3Profile.R2, Proven), (r2.Profile, r2.Capabilities));
-        Assert.Equal((S3Profile.Ovhcloud, ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks), (ovh.Profile, ovh.Capabilities));
-        Assert.Equal((S3Profile.Scaleway, Proven | ObjectStoreCapabilities.KeepsLocks), (scaleway.Profile, scaleway.Capabilities));
+        Assert.Equal((S3Profile.Ovhcloud, ObjectStoreCapabilities.ReplacesOnTokenMatch), (ovh.Profile, ovh.Capabilities));
+        Assert.Equal((S3Profile.Scaleway, Proven), (scaleway.Profile, scaleway.Capabilities));
         Assert.Equal((S3Profile.Amazon, Proven | ObjectStoreCapabilities.KeepsLocks | ObjectStoreCapabilities.ReadsSuffix), (amazon.Profile, amazon.Capabilities));
     }
 
@@ -98,21 +98,37 @@ public sealed class S3ProfileTests
     }
 
     [Fact]
-    public async Task ABucketUnderObjectLockThatRefusesAPutWithoutAChecksumIsSentContentMd5FromThenOn()
+    public async Task ALockedDatasetWaitsForTheOptionsToSayTheServiceKeepsLocksWhereNoTestHasProvenIt()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        using S3Emulator emulator = new S3Emulator { Region = "fr-par", RequireChecksum = true };
-        await using S3ObjectStore store = new S3ObjectStore(new S3StoreOptions
+        using S3Emulator emulator = new S3Emulator { Region = "fr-par" };
+        DatasetOptions locked = new DatasetOptions { LockedStore = true };
+        await using (S3ObjectStore unproven = Scaleway(emulator))
         {
-            Bucket = "lake",
-            Endpoint = new Uri("https://s3.fr-par.scw.cloud"),
-            Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
-            Handler = emulator,
-        });
-        Assert.Equal(PutOutcome.Created, await PutAsync(store, "first", 100, ct));
-        Assert.Equal(["PUT /first", "PUT /first"], emulator.Log);
-        Assert.Equal(PutOutcome.Created, await PutAsync(store, "second", 100, ct));
-        Assert.Equal(3, emulator.Requests);
+            await Assert.ThrowsAsync<NotSupportedException>(async () => await VortexDataset.CreateAsync(unproven, LocationTests.Reading.Schema, locked, ct));
+        }
+
+        await using S3ObjectStore checkedLocks = Scaleway(emulator, keepsLocks: true);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(checkedLocks, LocationTests.Reading.Schema, locked, ct);
+        Assert.True(dataset.LockedStore);
+    }
+
+    [Fact]
+    public async Task ABucketUnderObjectLockThatRefusesAPutWithoutAChecksumNamesTheOptionThatSendsOne()
+    {
+        // The refusal's text words the message and decides nothing: a store sends what its option says.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator { Region = "fr-par", RequireChecksum = true };
+        await using (S3ObjectStore plain = Scaleway(emulator))
+        {
+            ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(async () => await PutAsync(plain, "first", 100, ct));
+            Assert.Contains("PutChecksum.ContentMd5", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(["PUT /first"], emulator.Log);
+        }
+
+        await using S3ObjectStore md5 = Scaleway(emulator, checksum: PutChecksum.ContentMd5);
+        Assert.Equal(PutOutcome.Created, await PutAsync(md5, "second", 100, ct));
+        Assert.Equal(2, emulator.Requests);
     }
 
     [Fact]
@@ -129,6 +145,16 @@ public sealed class S3ProfileTests
         // 200 GiB on S3: 10 000 parts of 21 MiB.
         Assert.Equal(21 << 20, amazon.PartSizeFor(200L << 30));
     }
+
+    private static S3ObjectStore Scaleway(S3Emulator emulator, bool? keepsLocks = null, PutChecksum checksum = PutChecksum.Default) => new S3ObjectStore(new S3StoreOptions
+    {
+        Bucket = "lake",
+        Endpoint = new Uri("https://s3.fr-par.scw.cloud"),
+        Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
+        Handler = emulator,
+        KeepsLocks = keepsLocks,
+        Checksum = checksum,
+    });
 
     private static S3ObjectStore Ovh(S3Emulator emulator, bool? listsInOrder) => new S3ObjectStore(new S3StoreOptions
     {

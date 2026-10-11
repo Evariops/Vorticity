@@ -22,7 +22,7 @@ public sealed class S3WriteTests
     private const string Bucket = "lake";
 
     /// <summary>A store whose parts are small, so that a test sends a multipart upload in a few hundred kilobytes.</summary>
-    private static S3ObjectStore Small(S3Emulator emulator, S3Profile? profile = null, S3Checksum checksum = S3Checksum.Default, int attempts = 5) =>
+    private static S3ObjectStore Small(S3Emulator emulator, S3Profile? profile = null, PutChecksum checksum = PutChecksum.Default, int attempts = 5) =>
         new S3ObjectStore(new S3StoreOptions
         {
             Bucket = Bucket,
@@ -69,13 +69,13 @@ public sealed class S3WriteTests
     }
 
     [Theory]
-    [InlineData(S3Checksum.Default)]
-    [InlineData(S3Checksum.ContentMd5)]
-    [InlineData(S3Checksum.None)]
-    public async Task EachChecksumIsOneTheServiceVerifies(S3Checksum checksum)
+    [InlineData(PutChecksum.Default)]
+    [InlineData(PutChecksum.ContentMd5)]
+    [InlineData(PutChecksum.None)]
+    public async Task EachChecksumIsOneTheServiceVerifies(PutChecksum checksum)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
-        using S3Emulator emulator = new S3Emulator { RequireChecksum = checksum != S3Checksum.None };
+        using S3Emulator emulator = new S3Emulator { RequireChecksum = checksum != PutChecksum.None };
         await using S3ObjectStore store = Small(emulator, checksum: checksum);
         Assert.Equal(PutOutcome.Created, await PutAsync(store, "whole", Bytes(1_000, 7), PutCondition.None, ct));
         Assert.Equal(PutOutcome.Created, await PutAsync(store, "parts", Bytes(300_000, 8), PutCondition.None, ct));

@@ -469,8 +469,10 @@ a dataset freshness only, as [the store interface, revised](#4-the-store-interfa
 The order and `start-after` are another matter, since without them the first key of `commit/` is not
 the latest version, so a dataset is allowed on OVHcloud once the contract tests have checked both.
 
-R2 accepts no Object Lock header, so a dataset created with `LockedStore` refuses an R2 store, and
-the same holds on OVHcloud's Local Zones, which keep no retention or legal hold. R2 answers 429 to a
+Locks are taken as kept on Amazon S3 alone until the contract tests prove them elsewhere, so a dataset
+created with `LockedStore` refuses an OVHcloud or Scaleway store until `S3StoreOptions.KeepsLocks`
+says that the bucket keeps them. The option stays false on R2, which accepts no Object Lock header,
+and on OVHcloud's Local Zones, which keep no retention or legal hold. R2 answers 429 to a
 second write to the same key within a second. A dataset writes each key once, so only a retry meets
 it, and a retry waits as [the retries](#64-timeouts-retries-and-writes-whose-outcome-is-unknown)
 say. OVHcloud's 1 Gb/s per connection means that a 10 Gb/s link needs ten connections in flight at
@@ -478,19 +480,20 @@ least, which the window of [the reads in flight](#101-the-reads-in-flight) provi
 
 The three clouds share no checksum but `Content-MD5`, and R2 documents no other. The store sends none
 by default, since TLS already protects the bytes on their way, and MD5 would cost a pass over every
-byte in a hash no processor accelerates. A store can turn `Content-MD5` on, and the contract tests
-establish what else each cloud verifies. A bucket under Object Lock is the exception, since S3's
-Object Lock refuses a put that carries no checksum: a store created for a locked dataset on OVHcloud
-or Scaleway sends `Content-MD5` with every put.
+byte in a hash no processor accelerates. `S3StoreOptions.Checksum` turns `Content-MD5` on, and the
+contract tests establish what else each cloud verifies. A bucket under Object Lock needs it, since
+S3's Object Lock refuses a put that carries no checksum: a store for a locked dataset on OVHcloud or
+Scaleway is given `PutChecksum.ContentMd5`, and the refusal of a put without it names the option. The
+store never changes what it sends on the text of a refusal, which a provider may reword.
 
 ### 7.5 Other stores that speak the API
 
-A store that speaks S3's API without a profile here, Ceph for instance, declares its
-differences in its options rather than being detected at run time: whether it honours conditional
-writes, which checksums it accepts, whether it needs `Content-MD5` on deletes, how many parts it
-takes, and whether it addresses buckets by path. A dataset refuses a store that cannot create
-conditionally, as [the store abstraction](13-dataset.md#11-the-store-abstraction) requires. The
-contract tests run against such a store for that reason, besides the services themselves.
+A service that speaks S3's API without a profile here, Ceph for instance, is taken to list in order
+and to do nothing that a test has not proven. Its options say the rest rather than a detection at run
+time: whether it reads suffixes, keeps locks or wants `Content-MD5`, and whether it addresses buckets
+by path. A dataset refuses a store that cannot create conditionally, as
+[the store abstraction](13-dataset.md#11-the-store-abstraction) requires. The contract tests run
+against such a service as against the others, once the environment names one of its buckets.
 
 ## 8. Azure Blob Storage
 
@@ -903,8 +906,9 @@ dependent steps, which no meter can.
 | the platform's `HttpClient` rather than a client of this repository | the platform's | it reads bodies without an extra copy and exposes every control the stores need. Its allocation per request is a constant, and a client of our own would carry the risks the platform's has already paid for |
 | R2, OVHcloud and Scaleway | profiles of the S3 store | they speak the API, and differ in a few capabilities that a profile states and the contract tests check |
 | Cloud Storage | its own APIs rather than its S3 interoperability | generation preconditions, a listing that carries retention and holds, deletes in batches, the platform's identities, and composition |
-| checksums on the clouds that share only `Content-MD5` | none by default | TLS already protects the bytes on their way, and MD5 costs a pass over every byte |
-| a locked dataset on R2 or an OVHcloud Local Zone | refused | neither keeps an object's retention or legal hold where a head reports it |
+| checksums on the clouds that share only `Content-MD5` | none by default, `Content-MD5` as an option | TLS already protects the bytes on their way, and MD5 costs a pass over every byte |
+| a capability of an S3 service that no test against it has proven | taken as absent, an option sets it | a wrong absence costs a request, a wrong presence a failed open or a lock the dataset believes kept |
+| a locked dataset on S3 elsewhere than on Amazon | refused until `KeepsLocks` is set | R2 and an OVHcloud Local Zone keep no retention or legal hold where a head reports it, and the others are to check |
 | the listing returns heads, a change to the interface | yes | vacuum stops asking for a head per object, one awaited after another |
 | a listing that lags, on a store that does not document its consistency | allowed, by less than the retention window | a lag costs a dataset freshness and never a version, so OVHcloud and Scaleway can host datasets |
 | hedged reads on by default | no, an option with a budget | each hedge is a request that costs money, and the request ratchets must stay exact |
@@ -993,7 +997,7 @@ it, and an option turns it on once it does.
 | S3 is sent XXH3-128 in one request | CRC-64/NVME on every put | the byte order of `x-amz-checksum-xxhash128` is to check against the service first, as [the checksums](#113-checksums) ask |
 | Azure reads the structured body by default | `VerifyReads` is off by default | its layout is to check against the service, and a read then relies on TLS and the format's checks, as on S3 |
 | `x-ms-content-crc64` as Azure's reference shows it | low byte first, as Azure's SDK sends it | to check against the service |
-| the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks` | a dataset under Object Lock refuses R2 and an OVHcloud Local Zone without knowing the package |
+| the capabilities of the table of [the store interface](#4-the-store-interface-revised) | a fifth, `KeepsLocks`, which an S3 store states on Amazon S3 alone unless its options say otherwise | a dataset under Object Lock refuses a store that keeps no locks without knowing the package |
 | the parts and the window reserved through the memory governor | the parts bounded by `PartsInFlight`, the window allocating nothing | the reads a window admits land in the blocks a scan reads into, which an aggregation's admission counts already |
 | a dataset sends its data object's parts as it writes | the object goes up at the commit, from the dataset's buffer | the dataset holds the object until then anyway, and the gain of an early start is to measure against a service |
 | a completion answered 409 starts a new upload | it does when the content can be sent again, held in memory or spooled, and throws for a stream sent as it was read | a stream is read once |

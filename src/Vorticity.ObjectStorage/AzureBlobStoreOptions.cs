@@ -42,10 +42,10 @@ public sealed class AzureBlobStoreOptions
     public int PartsInFlight { get; init; } = 4;
 
     /// <summary>
-    /// Whether a put carries <c>x-ms-content-crc64</c>, the CRC-64 of its body, which the service checks
-    /// before it stores the bytes. True by default.
+    /// The checksum each put carries, which the service checks before it stores the bytes: by default
+    /// <c>x-ms-content-crc64</c>, the CRC-64 of the body, otherwise <c>Content-MD5</c> or none.
     /// </summary>
-    public bool SendChecksums { get; init; } = true;
+    public PutChecksum Checksum { get; init; }
 
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }

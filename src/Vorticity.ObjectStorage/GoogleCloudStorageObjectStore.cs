@@ -122,7 +122,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     public ObjectStoreCapabilities Capabilities =>
         ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReportsLocksInListing
         | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
-        | (_options.ReadsSuffix ? ObjectStoreCapabilities.ReadsSuffix : 0);
+        | (_options.ReadsSuffix == true ? ObjectStoreCapabilities.ReadsSuffix : 0);
 
     /// <summary>The transport, for tests.</summary>
     internal HttpTransport Transport => _transport;
@@ -152,7 +152,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     {
         CheckKey(key);
         ThrowIfDisposed();
-        if (_options.ReadsSuffix && !destination.IsEmpty)
+        if (_options.ReadsSuffix == true && !destination.IsEmpty)
         {
             return await _transport.SendAsync(
                 "GetObject",
@@ -412,6 +412,14 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     /// <summary>The size of part <paramref name="number"/> of an object of <paramref name="length"/> bytes, -1 when unknown.</summary>
     internal int PartSizeFor(long length, int number = 1) => _limits.PartSizeOf(number, length);
 
+    /// <summary>The header that carries a body's checksum, as the options choose it, or null for none.</summary>
+    private (string Name, string Value)? ChecksumOf(ReadOnlySequence<byte> body) => _options.Checksum switch
+    {
+        PutChecksum.None => null,
+        PutChecksum.ContentMd5 => ("Content-MD5", Convert.ToBase64String(Checksums.Md5(body))),
+        _ => ("x-goog-hash", "crc32c=" + Crc32CHeader(body)),
+    };
+
     /// <inheritdoc/>
     string IUploadService.PutOperation => "PutObject";
 
@@ -420,9 +428,9 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     ValueTask<PutOutcome> IUploadService.PutWholeAsync(string key, ReadOnlySequence<byte> body, PutCondition condition, string? putId, CancellationToken cancellationToken)
     {
         List<(string, string)> headers = [];
-        if (_options.SendChecksums)
+        if (ChecksumOf(body) is { } checksum)
         {
-            headers.Add(("x-goog-hash", "crc32c=" + Crc32CHeader(body)));
+            headers.Add(checksum);
         }
 
         if (putId is not null)
@@ -467,7 +475,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     {
         string etag = await _transport.SendAsync(
             "UploadPart",
-            new PartRequest(this, upload.Key, upload.Id, number, body, _options.SendChecksums ? [("x-goog-hash", "crc32c=" + Crc32CHeader(body))] : []),
+            new PartRequest(this, upload.Key, upload.Id, number, body, ChecksumOf(body) is { } checksum ? [checksum] : []),
             static (s, ct) => s.Store.BuildAsync(
                 HttpMethod.Put,
                 s.Store.XmlObject(s.Key) + string.Create(CultureInfo.InvariantCulture, $"?partNumber={s.Number}&uploadId={UriEncoding.Query(s.UploadId)}"),

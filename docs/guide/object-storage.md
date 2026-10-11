@@ -112,7 +112,7 @@ Dispose every file opened through the session before the session itself.
 
 | operation | requests |
 |---|---|
-| open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until the contract tests prove that the service answers one: the object's metadata, then the tail |
+| open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until a test against the service proves that it answers one: the object's metadata, then the tail |
 | a batch of a scan | the batch's segments coalesced into ranges of up to 16 MiB, issued together |
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
@@ -162,29 +162,31 @@ request. A bucket is addressed by host, `lake.s3.eu-west-3.amazonaws.com`, unles
 dot, or the endpoint is an address or the loopback, where it is addressed by path. The endpoint is
 reached over HTTPS, and plain HTTP is taken on the loopback only, for an emulator.
 
-A put carries a checksum the service verifies: CRC-64/NVME on Amazon S3, and none by default on R2,
-OVHcloud and Scaleway, whose bytes TLS protects on their way. A bucket under Object Lock refuses a put
-without a checksum, and the store then sends `Content-MD5` with that put again and with every put after
-it. `S3StoreOptions.Checksum` chooses one from the start.
+A put carries a checksum the service verifies: CRC-64/NVME on Amazon S3, and none by default elsewhere,
+the bytes being protected by TLS on their way. `S3StoreOptions.Checksum` chooses another,
+`PutChecksum.ContentMd5`, which every service checks, or `PutChecksum.None`. A bucket under Object Lock
+on OVHcloud or Scaleway refuses a put that carries no `Content-MD5`: set the option to
+`PutChecksum.ContentMd5` for such a bucket, as the store's refusal says.
 
 | | Amazon S3 | R2 | OVHcloud | Scaleway | another service |
 |---|---|---|---|---|---|
-| opens a file in one request | yes | once proven | once proven | once proven | yes |
-| hosts a dataset | yes | yes | once its listing order is proven (`ListsInOrder`) | yes | yes |
-| hosts a locked dataset | yes | no, it keeps no Object Lock | yes, not in a Local Zone (`KeepsLocks`) | yes | yes |
+| opens a file in one request (`ReadsSuffix`) | yes | once proven | once proven | once proven | once proven |
+| hosts a dataset (`ListsInOrder`) | yes | yes | once its listing order is proven | yes | yes |
+| hosts a locked dataset (`KeepsLocks`) | yes | no, it keeps no Object Lock | once proven, never in a Local Zone | once proven | once proven |
 | parts of an upload | 10 000 | 10 000, a conditional put whole | 10 000 | 1 000 | 10 000 |
 
 What a service is taken to do comes from its profile, which the endpoint's host names. A capability
-marked as proven later is taken as absent until the contract tests have run against the service, and
-an option of `S3StoreOptions` overrides it once you have checked it yourself.
+marked as proven later is taken as absent until a test against the service proves it, and the option
+of `S3StoreOptions` named in the table sets it once you have checked it yourself.
 
 `AzureBlobObjectStore` takes the account, the container and its credentials. Microsoft recommends a
 bearer token from Microsoft Entra ID, which `StoreCredentials.Token` takes from a source of yours.
 `StoreCredentials.SharedAccessSignature` and `StoreCredentials.SharedKey`, the account key, serve the
 accounts that use them and the emulators. `AzureBlobObjectStore.FromConnectionString` takes the
 account, the endpoint and the key or the signature from a connection string. Every put carries the
-CRC-64 of its body, which the service checks, and a larger put goes up in blocks of 16 MiB sent in
-parallel, committed by their list. A read relies on TLS and on the format's own checks, as on S3.
+CRC-64 of its body, which the service checks, unless `AzureBlobStoreOptions.Checksum` chooses
+`Content-MD5` or none, and a larger put goes up in blocks of 16 MiB sent in parallel, committed by
+their list. A read relies on TLS and on the format's own checks, as on S3.
 
 A directory bucket of S3 Express One Zone, whose name ends in `--x-s3`, is refused: it lists in no
 order, signs with sessions of its own, and serves no dataset.
@@ -192,7 +194,8 @@ order, signs with sessions of its own, and serves no dataset.
 `GoogleCloudStorageObjectStore` speaks Cloud Storage's own APIs rather than its S3 interoperability,
 since what a dataset relies on lies there. An object's token is its generation: a read is bound to it,
 and a put is conditioned on it, a generation of 0 meaning that no object may have the name. Every put
-carries the CRC-32C the service checks. The service takes no precondition on an upload in parts, so a
+carries the CRC-32C the service checks, unless `GoogleCloudStorageOptions.Checksum` chooses
+`Content-MD5` or none. The service takes no precondition on an upload in parts, so a
 conditional put goes in one request, and a dataset's data objects, which carry no condition, go up in
 parts. A listing says each object's retention and holds. A deleted object
 stays billed for the bucket's soft-delete period, 7 days by default, so vacuum frees storage a week
@@ -236,8 +239,10 @@ upload, and the file deleted when the put ends. The upload then starts once the 
   `StoreTransportOptions.MaxHeldBytes`, 256 MiB by default, and refused past it, unless
   `SpoolDirectory` holds it on disk. A dataset's data object goes up in parts without the condition,
   which its key, ending with a fresh uid, makes needless.
-* A dataset created with `LockedStore` needs a store that keeps locks, and refuses R2, which offers no
-  Object Lock, and an OVHcloud Local Zone once its store says `KeepsLocks = false`.
+* A dataset created with `LockedStore` needs a store that keeps locks. Among the S3 services, only
+  Amazon S3 is taken to keep them: set `S3StoreOptions.KeepsLocks` once you have checked that the
+  bucket does, never on R2, which offers no Object Lock, nor in an OVHcloud Local Zone, which keeps
+  none.
 * Parts in flight are held in memory, 4 of 16 MiB by default per upload (`PartsInFlight`, `PartSize`).
   The parts of an object of unknown length, a file written to a location, double every tenth of the
   parts the service takes, up to 128 MiB, so that 10 000 reach about 1 TiB on S3. R2's stay of one

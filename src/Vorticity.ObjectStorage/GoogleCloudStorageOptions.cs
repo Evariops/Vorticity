@@ -38,13 +38,16 @@ public sealed class GoogleCloudStorageOptions
 
     /// <summary>
     /// Whether the service answers a suffix range (<c>bytes=-n</c>) with the object's length, which opens
-    /// a file of unknown length in one request. False until the contract tests against the service
-    /// prove it: the object's metadata comes first.
+    /// a file of unknown length in one request. Null takes it as absent until the contract tests against
+    /// the service prove it: the object's metadata comes first.
     /// </summary>
-    public bool ReadsSuffix { get; init; }
+    public bool? ReadsSuffix { get; init; }
 
-    /// <summary>Whether a put carries the CRC-32C of its body, which the service checks. True by default.</summary>
-    public bool SendChecksums { get; init; } = true;
+    /// <summary>
+    /// The checksum each put carries, which the service checks before it stores the bytes: by default
+    /// the CRC-32C of the body in <c>x-goog-hash</c>, otherwise <c>Content-MD5</c> or none.
+    /// </summary>
+    public PutChecksum Checksum { get; init; }
 
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }
