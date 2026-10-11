@@ -11,7 +11,7 @@ using Xunit;
 namespace Vorticity.Tests.Api;
 
 /// <summary>
-/// Renders everything the three shipped assemblies expose and compares it to a tracked file.
+/// Renders everything the four shipped assemblies expose and compares it to a tracked file.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -135,6 +135,7 @@ public sealed class PublicSurfaceTests
         typeof(Vorticity.Types.DType).Assembly,
         typeof(Vorticity.Dataset.VortexDataset).Assembly,
         typeof(Vorticity.RowEncoding.RowKeyEncoder).Assembly,
+        typeof(Vorticity.ObjectStorage.S3ObjectStore).Assembly,
     ];
 
     private static string WriteActual(string directory, string actual)

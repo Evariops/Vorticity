@@ -48,6 +48,9 @@ public sealed class VortexDataset : IAsyncDisposable
     // has nothing to add, since the running one takes the same job.
     private int _compactingInline;
 
+    // The store the handle made for a local directory it was given by location, which it disposes.
+    private IObjectStore? _ownedStore;
+
     private VortexDataset(IObjectStore store, DatasetOptions options, ulong version, CommitObject commit, DateTimeOffset knownAt)
     {
         _store = store;
@@ -150,6 +153,43 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(schema);
         return CreateAsync(store, VortexTypes.ToDType(schema, new DTypeArena()), options, cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates a dataset at <paramref name="location"/>: under a location of a store the options'
+    /// session holds, <c>s3://bucket/tables/readings/</c>, or in a local directory.
+    /// </summary>
+    /// <param name="location">A location, whose keys the dataset's are relative to, or a local directory.</param>
+    /// <param name="schema">The columns every object of the dataset holds.</param>
+    /// <param name="options">The clustering key, the retention, how objects are written and the session; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The handle, on version 1; the caller disposes it.</returns>
+    /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
+    /// <exception cref="ObjectStoreException">The location already holds a dataset.</exception>
+    public static ValueTask<VortexDataset> CreateAsync(
+        string location, VortexSchema schema, DatasetOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        options ??= new DatasetOptions();
+        (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
+        return OwningAsync(CreateAsync(store, schema, options, cancellationToken), owned);
+    }
+
+    /// <summary>
+    /// Opens the latest version of the dataset at <paramref name="location"/>: under a location of a store
+    /// the options' session holds, or in a local directory.
+    /// </summary>
+    /// <param name="location">A location, whose keys the dataset's are relative to, or a local directory.</param>
+    /// <param name="options">How this handle reads and writes, and its session; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The handle; the caller disposes it.</returns>
+    /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
+    /// <exception cref="ObjectNotFoundException">The location holds no dataset.</exception>
+    public static ValueTask<VortexDataset> OpenAsync(string location, DatasetOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        options ??= new DatasetOptions();
+        (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
+        return OwningAsync(OpenAsync(store, options, cancellationToken), owned);
     }
 
     /// <summary>
@@ -862,6 +902,47 @@ public sealed class VortexDataset : IAsyncDisposable
         if (_store is SealedObjectStore sealedStore)
         {
             await sealedStore.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (Interlocked.Exchange(ref _ownedStore, null) is { } owned)
+        {
+            await owned.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The store at <paramref name="location"/>: a view of the session's store for a location, which
+    /// the session owns, or a <see cref="FileObjectStore"/> over a local directory, which the handle owns.
+    /// </summary>
+    private static (IObjectStore Store, IObjectStore? Owned) StoreAt(string location, DatasetOptions options)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(location);
+        if (ObjectStoreRegistry.IsLocation(location))
+        {
+            return (options.Session.Options.ObjectStores.Resolve(location), null);
+        }
+
+        FileObjectStore directory = new FileObjectStore(location);
+        return (directory, directory);
+    }
+
+    /// <summary>Hands the handle the store it made, or disposes the store when no handle came of it.</summary>
+    private static async ValueTask<VortexDataset> OwningAsync(ValueTask<VortexDataset> opening, IObjectStore? owned)
+    {
+        try
+        {
+            VortexDataset dataset = await opening.ConfigureAwait(false);
+            dataset._ownedStore = owned;
+            return dataset;
+        }
+        catch
+        {
+            if (owned is not null)
+            {
+                await owned.DisposeAsync().ConfigureAwait(false);
+            }
+
+            throw;
         }
     }
 

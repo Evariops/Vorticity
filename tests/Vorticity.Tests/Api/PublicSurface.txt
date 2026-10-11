@@ -1121,6 +1121,11 @@ Vorticity:     property bool OutcomeUnknown { get; init; }
 Vorticity: static class Vorticity.IO.ObjectStoreExtensions
 Vorticity:     method ValueTask<ObjectRange> GetRangeAsync(IObjectStore, string, long, int, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutIfAbsentAsync(IObjectStore, string, PipeReader, long, CancellationToken)
+Vorticity: sealed class Vorticity.IO.ObjectStoreRegistry
+Vorticity:     method IObjectStore Resolve(string)
+Vorticity:     method bool IsLocation(string)
+Vorticity:     method void Add(string, IObjectStore)
+Vorticity:     method void AddScheme(string, Func<string, IObjectStore>)
 Vorticity: struct Vorticity.IO.PutCondition : IEquatable<PutCondition>
 Vorticity:     method PutCondition IfMatch(string)
 Vorticity:     method bool Equals(PutCondition)
@@ -2025,6 +2030,7 @@ Vorticity:     property VortexSession Default { get; }
 Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
 Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
+Vorticity:     property ObjectStoreRegistry ObjectStores { get; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
 Vorticity:     property ScratchBudget ScratchBudget { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
@@ -2487,7 +2493,9 @@ Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Fu
 Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VacuumResult> VacuumAsync(VacuumOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> CreateAsync(IObjectStore, VortexSchema, DatasetOptions = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<VortexDataset> CreateAsync(string, VortexSchema, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, DatasetOptions = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
@@ -2538,3 +2546,51 @@ Vorticity.RowEncoding:     method string ToString()
 Vorticity.RowEncoding:     property RowSortField Ascending { get; }
 Vorticity.RowEncoding:     property bool Descending { get; }
 Vorticity.RowEncoding:     property bool NullsFirst { get; }
+Vorticity.ObjectStorage: static class Vorticity.ObjectStorage.ObjectStoreRegistryExtensions
+Vorticity.ObjectStorage:     method ObjectStoreRegistry UseEnvironment(ObjectStoreRegistry)
+Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.S3Credentials : IDisposable
+Vorticity.ObjectStorage:     method S3Credentials FromEnvironment()
+Vorticity.ObjectStorage:     method S3Credentials Static(string, string, string = default)
+Vorticity.ObjectStorage:     method void Dispose()
+Vorticity.ObjectStorage:     method void Dispose(bool)
+Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3ObjectStore : IObjectStore
+Vorticity.ObjectStorage:     ctor S3ObjectStore(S3StoreOptions)
+Vorticity.ObjectStorage:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
+Vorticity.ObjectStorage:     method S3ObjectStore ForOvhcloud(string, string, S3Credentials)
+Vorticity.ObjectStorage:     method S3ObjectStore ForR2(string, string, S3Credentials)
+Vorticity.ObjectStorage:     method S3ObjectStore ForScaleway(string, string, S3Credentials)
+Vorticity.ObjectStorage:     method S3ObjectStore FromEnvironment(string)
+Vorticity.ObjectStorage:     method ValueTask DeleteAsync(IReadOnlyList<string>, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask DisposeAsync()
+Vorticity.ObjectStorage:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
+Vorticity.ObjectStorage:     property S3Profile Profile { get; }
+Vorticity.ObjectStorage:     property string Bucket { get; }
+Vorticity.ObjectStorage: enum Vorticity.ObjectStorage.S3Profile
+Vorticity.ObjectStorage:     const S3Profile Amazon = 0
+Vorticity.ObjectStorage:     const S3Profile Other = 4
+Vorticity.ObjectStorage:     const S3Profile Ovhcloud = 2
+Vorticity.ObjectStorage:     const S3Profile R2 = 1
+Vorticity.ObjectStorage:     const S3Profile Scaleway = 3
+Vorticity.ObjectStorage:     field int value__
+Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3StoreOptions
+Vorticity.ObjectStorage:     ctor S3StoreOptions()
+Vorticity.ObjectStorage:     property Nullable<S3Profile> Profile { get; init; }
+Vorticity.ObjectStorage:     property Nullable<bool> ListsInOrder { get; init; }
+Vorticity.ObjectStorage:     property Nullable<bool> PathStyle { get; init; }
+Vorticity.ObjectStorage:     property Nullable<bool> ReadsSuffix { get; init; }
+Vorticity.ObjectStorage:     property S3Credentials Credentials { get; init; }
+Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
+Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
+Vorticity.ObjectStorage:     property string Bucket { get; init; }
+Vorticity.ObjectStorage:     property string Region { get; init; }
+Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions
+Vorticity.ObjectStorage:     ctor StoreTransportOptions()
+Vorticity.ObjectStorage:     property IWebProxy Proxy { get; init; }
+Vorticity.ObjectStorage:     property TimeSpan FirstByteTimeout { get; init; }
+Vorticity.ObjectStorage:     property TimeSpan StallTimeout { get; init; }
+Vorticity.ObjectStorage:     property int MaxAttempts { get; init; }
+Vorticity.ObjectStorage:     property int MaxConnections { get; init; }
