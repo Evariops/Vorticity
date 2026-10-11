@@ -551,7 +551,7 @@ a scan that stops at its first batch opens a single object.
 
 `IObjectStore`, in the core's `Vorticity.IO`, is what a store library implements. Its design, and the
 stores this repository ships for S3, Azure and Cloud Storage, are in
-[the object storage design](17-object-storage.md#4-the-store-interface-revised).
+[the object storage design](19-object-storage.md#4-the-store-interface-revised).
 
 | operation | used by |
 |---|---|
