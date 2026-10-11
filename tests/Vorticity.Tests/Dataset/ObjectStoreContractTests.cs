@@ -322,7 +322,12 @@ public sealed class ObjectStoreContractTests : IDisposable
         // A prefix is a string, not a directory: it may end inside a name, and names no parent.
         Assert.Equal(["data/a.vortex"], await store.ListAsync("data/a", null, 10, ct));
         Assert.Equal(keys[..3], await store.ListAsync("comm", null, 10, ct));
-        Assert.Empty(await store.ListAsync("../", null, 10, ct));
+        // A prefix that climbs out lists nothing where keys are paths. A service whose objects are files is
+        // free to refuse it, and S3 lists it as any other.
+        if (kind is "memory" or "file")
+        {
+            Assert.Empty(await store.ListAsync("../", null, 10, ct));
+        }
     }
 
     [Fact]
