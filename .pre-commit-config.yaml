@@ -1,0 +1,12 @@
+# Managed with prek (https://github.com/j178/prek). Install the hooks with `prek install`. CI runs
+# them again on every pull request, since a local hook can be skipped.
+repos:
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: v1.7.4
+    hooks:
+      - id: betterleaks
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.29.0
+    hooks:
+      - id: zizmor
+        files: ^\.github/

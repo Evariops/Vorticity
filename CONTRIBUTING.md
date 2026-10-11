@@ -43,6 +43,19 @@ read them are skipped without them, and fail in CI, whose workflow writes them f
 tools/native-ref/testdata.sh                         # once
 ```
 
+## Hooks
+
+betterleaks, which looks for secrets in what is about to be committed, and zizmor, which reads the
+GitHub workflows, run before each commit once prek has installed them:
+
+```
+prek install
+```
+
+CI runs them again on every pull request, betterleaks over every commit the pull request brings, so
+a hook skipped on a machine is caught there. `.betterleaks.toml` lists what betterleaks mistakes for
+a secret in this repository, each entry with the reason it is none.
+
 ## What to run before a change is done
 
 The chain runs when a change is finished, not at every commit. Between two, the suite is enough. Pick

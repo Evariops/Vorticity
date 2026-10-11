@@ -6,6 +6,36 @@
   "prHourlyLimit": 0,
   "minimumReleaseAge": "2 days",
   "internalChecksFilter": "strict",
+  "pre-commit": {
+    "enabled": true
+  },
+  "customManagers": [
+    {
+      "description": "CI pins zizmor inline (pipx run zizmor==X), which the pre-commit manager cannot see.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/build\\.yml$/"
+      ],
+      "matchStrings": [
+        "zizmor==(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "zizmorcore/zizmor",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "description": "CI pins betterleaks inline (go install ...@vX), which the pre-commit manager cannot see.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/build\\.yml$/"
+      ],
+      "matchStrings": [
+        "github\\.com/betterleaks/betterleaks@(?<currentValue>v\\d+\\.\\d+\\.\\d+)"
+      ],
+      "depNameTemplate": "github.com/betterleaks/betterleaks",
+      "datasourceTemplate": "go"
+    }
+  ],
   "packageRules": [
     {
       "description": "The vortex crates move together, crates.io pins and git tags alike: one crate per pull request leaves two vortex versions side by side in a lockfile until the last one lands.",
