@@ -51,7 +51,7 @@ public sealed class ObjectStoreRegistry
         ArgumentNullException.ThrowIfNull(prefix);
         ArgumentNullException.ThrowIfNull(store);
         ThrowIfFrozen();
-        string normalized = prefix.TrimEnd('/');
+        string normalized = WithLowerScheme(prefix.TrimEnd('/'));
         if (!TrySplit(normalized, out _, out _, out _))
         {
             throw new ArgumentException($"'{prefix}' is not a scheme and a bucket, such as s3://lake or s3://lake/tables.", nameof(prefix));
@@ -135,13 +135,15 @@ public sealed class ObjectStoreRegistry
             throw new ArgumentException($"'{location}' is not a location: a scheme, a bucket and a key, such as s3://lake/readings.vortex.", nameof(location));
         }
 
+        // A scheme matches whatever its case, as RFC 3986 says, and a bucket and a key only with theirs.
+        string normalized = WithLowerScheme(location);
         IObjectStore? best = null;
         int longest = -1;
         foreach ((string prefix, IObjectStore store) in _stores)
         {
             if (prefix.Length > longest
-                && location.StartsWith(prefix, StringComparison.Ordinal)
-                && (location.Length == prefix.Length || location[prefix.Length] == '/'))
+                && normalized.StartsWith(prefix, StringComparison.Ordinal)
+                && (normalized.Length == prefix.Length || normalized[prefix.Length] == '/'))
             {
                 best = store;
                 longest = prefix.Length;
@@ -205,6 +207,15 @@ public sealed class ObjectStoreRegistry
         {
             throw new InvalidOperationException("The session is created; its options are frozen. Register stores inside VortexSession.Create.");
         }
+    }
+
+    /// <summary><paramref name="location"/> with its scheme in lower case, the rest as it is; the same string when it already is.</summary>
+    private static string WithLowerScheme(string location)
+    {
+        int separator = location.IndexOf("://", StringComparison.Ordinal);
+        return separator > 0 && location.AsSpan(0, separator).ContainsAnyInRange('A', 'Z')
+            ? string.Concat(location[..separator].ToLowerInvariant(), location.AsSpan(separator))
+            : location;
     }
 
     /// <summary>Splits <c>scheme://bucket/key</c>; the key may be empty, the bucket may not.</summary>

@@ -70,6 +70,22 @@ public sealed partial class LocationTests
     }
 
     [Fact]
+    public async Task ASchemeIsMatchedWhateverItsCaseAndABucketOnlyWithIts()
+    {
+        await using MemoryObjectStore lake = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(o => o.ObjectStores.Add("MEM://lake", lake));
+
+        Assert.Equal((lake, "one.vortex"), Located(session, "mem://lake/one.vortex"));
+        Assert.Equal((lake, "one.vortex"), Located(session, "Mem://lake/one.vortex"));
+        Assert.Throws<InvalidOperationException>(() => session.Options.ObjectStores.Locate("mem://Lake/one.vortex"));
+        Assert.Throws<ArgumentException>(() => VortexSession.Create(o =>
+        {
+            o.ObjectStores.Add("mem://lake", lake);
+            o.ObjectStores.Add("MEM://lake/", lake);
+        }));
+    }
+
+    [Fact]
     public async Task ASchemeBuildsAStorePerBucketOnFirstUseWhichTheSessionDisposesAndARegisteredStoreStaysTheCallers()
     {
         List<TrackedStore> built = [];
