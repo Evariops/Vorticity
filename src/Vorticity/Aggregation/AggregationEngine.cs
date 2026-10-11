@@ -2505,6 +2505,16 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>
+    /// Reserves <paramref name="bytes"/>, what a merge into the partition grows its tables by, before the
+    /// merge starts: its arrays come out of them until <see cref="GiveBackAhead"/>. Whether the budget
+    /// granted them; true for a partition nothing counts.
+    /// </summary>
+    internal bool ReserveAhead(long bytes) => _arrays is null || _arrays.ReserveAhead(bytes);
+
+    /// <summary>What <see cref="ReserveAhead"/> reserved and the merge did not use, given back.</summary>
+    internal void GiveBackAhead() => _arrays?.GiveBackAhead();
+
     /// <summary>Gives back what the partition reserved past what its groups hold: the room for a doubling, once its table grows no more.</summary>
     internal void Trim()
     {
