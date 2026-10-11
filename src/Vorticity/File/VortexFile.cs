@@ -75,7 +75,10 @@ public sealed partial class VortexFile : IAsyncDisposable
     private readonly IdLocation[] _layoutEncodingIds;
     private readonly int _segmentSpecsByteOffset;
     private readonly int _segmentSpecCount;
-    private readonly byte[] _rootLayoutBytes;
+    // Where the root layout lies in the tail window, and its bytes once the layout tree first asks for them.
+    private readonly int _rootLayoutStart;
+    private readonly int _rootLayoutLength;
+    private byte[]? _rootLayoutBytes;
     private readonly FileStatistics? _statistics;
 
     /// <summary>Lazily parsed by <see cref="LayoutTree"/>; see its remarks on the benign race.</summary>
@@ -102,7 +105,8 @@ public sealed partial class VortexFile : IAsyncDisposable
         _layoutEncodingIds = state.LayoutEncodingIds;
         _segmentSpecsByteOffset = state.SegmentSpecsByteOffset;
         _segmentSpecCount = state.SegmentSpecCount;
-        _rootLayoutBytes = state.RootLayoutBytes;
+        _rootLayoutStart = state.RootLayoutStart;
+        _rootLayoutLength = state.RootLayoutLength;
         _statistics = state.Statistics;
         _metadataKeys = state.MetadataKeys;
         _metadataKeysUtf8 = state.MetadataKeysUtf8;
@@ -740,7 +744,9 @@ public sealed partial class VortexFile : IAsyncDisposable
         public required IdLocation[] LayoutEncodingIds { get; init; }
         public required int SegmentSpecsByteOffset { get; init; }
         public required int SegmentSpecCount { get; init; }
-        public required byte[] RootLayoutBytes { get; init; }
+        public required int RootLayoutStart { get; init; }
+
+        public required int RootLayoutLength { get; init; }
         public required FileStatistics? Statistics { get; init; }
         public required string[] MetadataKeys { get; init; }
         public required byte[][] MetadataKeysUtf8 { get; init; }
@@ -827,9 +833,9 @@ public sealed partial class VortexFile : IAsyncDisposable
             FileThrow.RowCountTooLarge(wireRowCount);
         }
 
-        // Copied, not borrowed: one bounded allocation at open buys a ReadOnlyMemory the layouts
-        // component can hold without wrapping native memory in a MemoryManager.
-        byte[] rootLayoutBytes = layoutBytes.ToArray();
+        // Kept where it lies, and copied when the layout tree is first parsed (RootLayoutBytes): an
+        // open for the schema, the statistics or a count never pays the copy.
+        int rootLayoutStart = (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(window), ref MemoryMarshal.GetReference(layoutBytes));
 
         // --- file statistics
         FileStatistics? statistics = null;
@@ -856,7 +862,8 @@ public sealed partial class VortexFile : IAsyncDisposable
             LayoutEncodingIds = layoutEncodingIds,
             SegmentSpecsByteOffset = specsByteOffset,
             SegmentSpecCount = specs.Length,
-            RootLayoutBytes = rootLayoutBytes,
+            RootLayoutStart = rootLayoutStart,
+            RootLayoutLength = layoutBytes.Length,
             Statistics = statistics,
             MetadataKeys = postscript.MetadataKeys,
             MetadataKeysUtf8 = postscript.MetadataKeysUtf8,
@@ -1509,7 +1516,28 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// The root layout FlatBuffer bytes. Parsed by the layouts component; this component never
     /// interprets a layout.
     /// </summary>
-    internal ReadOnlyMemory<byte> RootLayoutBytes => _rootLayoutBytes;
+    /// <remarks>
+    /// Copied out of the tail window when first asked for, which the layout tree does once per open
+    /// file: one bounded allocation buys a ReadOnlyMemory the layouts component can hold without
+    /// wrapping native memory in a MemoryManager. Two scans asking at once may both copy; either
+    /// copy is the same bytes.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
+    internal ReadOnlyMemory<byte> RootLayoutBytes
+    {
+        get
+        {
+            byte[]? bytes = Volatile.Read(ref _rootLayoutBytes);
+            if (bytes is null)
+            {
+                ThrowIfDisposed();
+                bytes = _tail.Buffer.Span.Slice(_rootLayoutStart, _rootLayoutLength).ToArray();
+                Volatile.Write(ref _rootLayoutBytes, bytes);
+            }
+
+            return bytes;
+        }
+    }
 
     /// <summary>True when the file carries a statistics segment.</summary>
     internal bool HasFileStatistics => _statistics is not null;
