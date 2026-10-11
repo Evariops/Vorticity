@@ -28,7 +28,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     private readonly List<IDisposable> _emulators = [];
 
     /// <summary>The stores under test, each with the name its failures are reported under.</summary>
-    public static TheoryData<string> Stores() => ["memory", "file", "s3"];
+    public static TheoryData<string> Stores() => ["memory", "file", "s3", "azure"];
 
     /// <summary>The stores whose keys are paths, which refuse a key that could leave their root.</summary>
     public static TheoryData<string> PathStores() => ["memory", "file"];
@@ -45,6 +45,13 @@ public sealed class ObjectStoreContractTests : IDisposable
             Vorticity.Tests.ObjectStorage.S3Emulator emulator = new Vorticity.Tests.ObjectStorage.S3Emulator();
             _emulators.Add(emulator);
             return Vorticity.Tests.ObjectStorage.S3ReadTests.Store(emulator);
+        }
+
+        if (kind == "azure")
+        {
+            Vorticity.Tests.ObjectStorage.AzureEmulator emulator = new Vorticity.Tests.ObjectStorage.AzureEmulator();
+            _emulators.Add(emulator);
+            return Vorticity.Tests.ObjectStorage.AzureTests.Store(emulator);
         }
 
         string root = Path.Combine(Path.GetTempPath(), $"vorticity-store-{Guid.NewGuid():N}");

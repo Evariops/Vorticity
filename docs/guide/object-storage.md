@@ -1,14 +1,21 @@
-# Files and datasets on S3
+# Files and datasets on S3 and Azure
 
 Open, write and scan files and datasets in a bucket of Amazon S3, Cloudflare R2, OVHcloud, Scaleway or
-another service that speaks the S3 API, with the calls you use on a local path. The stores live in the `Vorticity.ObjectStorage`
-package, written over the platform's HTTP client, with no cloud SDK.
+another service that speaks the S3 API, or in a container of Azure Blob Storage, with the calls you use
+on a local path. The stores live in the `Vorticity.ObjectStorage` package, written over the platform's
+HTTP client, with no cloud SDK.
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>
 {
     o.ObjectStores.Add("s3://lake", S3ObjectStore.FromEnvironment("lake"));
     o.ObjectStores.Add("r2://media", S3ObjectStore.ForR2(accountId, "media", S3Credentials.FromEnvironment()));
+    o.ObjectStores.Add("az://archive", new AzureBlobObjectStore(new AzureBlobStoreOptions
+    {
+        Account = "contosoarchive",
+        Container = "archive",
+        Credentials = AzureCredentials.FromEnvironment(),
+    }));
 });
 
 await using (VortexFileWriter writer = session.CreateWriter<Reading>("s3://lake/readings/2026-10.vortex"))
@@ -34,16 +41,19 @@ be served by one store and one of its prefixes by another, with other credential
 
 `VortexSession.Default` holds no store, and a location fails there with a message that says how to
 register one. A library does not open connections or read credentials on a host that did not ask.
-One line serves every `s3://` bucket from the environment, a store built on each bucket's first use:
+One line serves every `s3://` bucket and every `az://` container from the environment, a store built
+on each one's first use:
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o => o.ObjectStores.UseEnvironment());
 ```
 
-The environment is the one the AWS SDKs read: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_ENDPOINT_URL_S3` or `AWS_ENDPOINT_URL`. The endpoint is how a
-host points at R2, OVHcloud, Scaleway or another service, and the store takes its profile from the endpoint's
-host.
+An `s3://` bucket takes the environment the AWS SDKs read: `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, and `AWS_ENDPOINT_URL_S3` or
+`AWS_ENDPOINT_URL`. The endpoint is how a host points at R2, OVHcloud, Scaleway or another service, and
+the store takes its profile from the endpoint's host. An `az://` container takes the environment Azure's
+tools read: `AZURE_STORAGE_CONNECTION_STRING`, or `AZURE_STORAGE_ACCOUNT` with `AZURE_STORAGE_KEY` or
+`AZURE_STORAGE_SAS_TOKEN`.
 
 The session disposes the stores it holds, closing their connections and wiping their keys. Dispose
 every file opened through the session before the session itself.
@@ -52,12 +62,12 @@ every file opened through the session before the session itself.
 
 | operation | requests |
 |---|---|
-| open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 elsewhere, a head then the tail, until the contract tests prove that the service answers a suffix |
+| open a file at a location | 1 on Amazon S3: the last 64 KiB and the object's length in one answer. 2 on Azure, which reads no suffix, and elsewhere until the contract tests prove that the service answers one: a head, then the tail |
 | a batch of a scan | the batch's segments coalesced into ranges, issued together |
 | open an object of a dataset | 1, its length known from the dataset's entry |
 | write a file up to 32 MiB | 1, sent at completion |
 | write a larger file | 1 to start an upload, its parts of 16 MiB sent in parallel as they fill, 1 to complete it |
-| a dataset's vacuum | the listing's pages, a head only for an object old enough to go when the bucket is under Object Lock, a request per 1 000 deletes |
+| a dataset's vacuum | the listing's pages, a head only for an object old enough to go when an S3 bucket is under Object Lock (Azure's listing says the locks), a request per 1 000 deletes on S3 and per 256 on Azure |
 
 A read lands in the block the scan decodes from, with no copy but the one TLS makes, and allocates a
 constant, about 3 KB, whatever its size. A file opened at a location keeps the ETag of its first answer
@@ -104,6 +114,15 @@ it. `S3StoreOptions.Checksum` chooses one from the start.
 What a service is taken to do comes from its profile, which the endpoint's host names. A capability
 marked as proven later is taken as absent until the contract tests have run against the service, and
 an option of `S3StoreOptions` overrides it once you have checked it yourself.
+
+`AzureBlobObjectStore` takes the account, the container and its credentials. Microsoft recommends a
+bearer token from Microsoft Entra ID, which `AzureCredentials.Token` takes from a source of yours and
+renews five minutes before it expires. `AzureCredentials.SharedAccessSignature` and
+`AzureCredentials.SharedKey`, the account key, serve the accounts that use them and the emulators, and
+`AzureCredentials.FromConnectionString` reads either from a connection string. Every put carries the
+CRC-64 of its body, which the service checks, and a larger put goes up in blocks of 16 MiB sent in
+parallel, committed by their list. `VerifyReads` asks the service to follow every 4 MiB of a read with
+its CRC-64, checked as the bytes arrive, once the contract tests have proven it against the service.
 
 ## When the network fails
 

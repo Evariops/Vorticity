@@ -54,6 +54,45 @@ internal ref struct XmlScanner
     /// <summary>The raw text, for <see cref="XmlToken.Text"/> and <see cref="XmlToken.CData"/>.</summary>
     internal ReadOnlySpan<byte> Text { get; private set; }
 
+    /// <summary>The attributes of the last <see cref="XmlToken.Start"/>, raw, as the tag wrote them.</summary>
+    internal ReadOnlySpan<byte> Attributes { get; private set; }
+
+    /// <summary>The value of the attribute <paramref name="name"/> of the last start tag, decoded, or null.</summary>
+    internal readonly string? Attribute(ReadOnlySpan<byte> name)
+    {
+        ReadOnlySpan<byte> rest = Attributes;
+        while (true)
+        {
+            rest = rest.TrimStart(" \t\r\n/"u8);
+            int equals = rest.IndexOf((byte)'=');
+            if (equals <= 0)
+            {
+                return null;
+            }
+
+            ReadOnlySpan<byte> found = rest[..equals].Trim(" \t\r\n"u8);
+            rest = rest[(equals + 1)..].TrimStart(" \t\r\n"u8);
+            if (rest.IsEmpty || rest[0] is not ((byte)'"' or (byte)'\''))
+            {
+                throw Malformed("an attribute's value is not quoted");
+            }
+
+            int close = rest[1..].IndexOf(rest[0]);
+            if (close < 0)
+            {
+                throw Malformed("an attribute's value does not end");
+            }
+
+            ReadOnlySpan<byte> value = rest.Slice(1, close);
+            if (found.SequenceEqual(name))
+            {
+                return Decode(value);
+            }
+
+            rest = rest[(close + 2)..];
+        }
+    }
+
     /// <summary>Moves to the next start, end or text.</summary>
     /// <returns>False at the end of the document.</returns>
     internal bool Read()
@@ -129,6 +168,7 @@ internal ref struct XmlScanner
                 CheckName(Name);
                 int tagEnd = TagEnd(rest, 1 + nameEnd);
                 _closePending = rest[tagEnd - 1] == (byte)'/';
+                Attributes = rest[(1 + nameEnd)..tagEnd];
                 Token = XmlToken.Start;
                 _at += tagEnd + 1;
                 return true;

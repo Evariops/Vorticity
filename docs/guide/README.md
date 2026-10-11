@@ -95,7 +95,7 @@ production.
 
 | page | what you get |
 |---|---|
-| [object-storage.md](object-storage.md) | files and datasets on S3, R2, OVHcloud, Scaleway and the other services that speak the S3 API: locations, stores, credentials, retries |
+| [object-storage.md](object-storage.md) | files and datasets on S3, R2, OVHcloud, Scaleway, the other services that speak the S3 API, and Azure: locations, stores, credentials, retries |
 
 ## Experimental packages
 
