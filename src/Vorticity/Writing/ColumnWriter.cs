@@ -468,6 +468,34 @@ internal sealed class ColumnWriter
     /// <summary>The memory of the last chunk written, or none for the first.</summary>
     internal PlanMemory? Memory { get; private set; }
 
+    /// <summary>Chunks between two trials of every candidate on values zstd takes: one in eight.</summary>
+    internal const int ValuesTrialEvery = 8;
+
+    // What the trials made of the values of this column's dictionaries and run-ends, and the
+    // chunks since they last tried every candidate on them.
+    private ColumnScheme _valuesScheme;
+    private int _valuesHeld;
+
+    /// <summary>
+    /// Whether this chunk's dictionary or run-end values go to zstd alone: zstd took the last
+    /// chunk's, and every candidate was tried on them within the last <see cref="ValuesTrialEvery"/>
+    /// chunks.
+    /// </summary>
+    /// <remarks>
+    /// The values of one column's chunks are alike, and a dictionary's are its distinct entries:
+    /// zstd, priced first, takes them chunk after chunk, and FSST and OnPair, trained and run on
+    /// every chunk to lose to it, cost a text column's chunk more than zstd does. On the reference
+    /// files they never took one.
+    /// </remarks>
+    internal bool ValuesHeldByZstd => _valuesScheme == ColumnScheme.Zstd && _valuesHeld < ValuesTrialEvery - 1;
+
+    /// <summary>Records what the trials made of a chunk's values, and whether they tried every candidate.</summary>
+    internal void NoteValues(ColumnScheme scheme, bool everyCandidate)
+    {
+        _valuesScheme = scheme;
+        _valuesHeld = everyCandidate ? 0 : _valuesHeld + 1;
+    }
+
     private int _plansPriced;
     private int _plansHeld;
 

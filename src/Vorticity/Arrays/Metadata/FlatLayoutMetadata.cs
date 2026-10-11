@@ -1,5 +1,7 @@
 using System;
+using System.Buffers.Binary;
 using Vorticity.Serialization.Protobuf;
+using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.Arrays.Metadata;
 
@@ -9,9 +11,11 @@ namespace Vorticity.Arrays.Metadata;
 /// </summary>
 /// <remarks>
 /// A <c>ref struct</c>: <see cref="ArrayEncodingTree"/> is a slice of the caller's metadata buffer,
-/// never a copy. When the field is present the Array FlatBuffer is inlined here and the segment
-/// holds buffers only, which is a different offset-reconstruction path from the usual one — rare,
-/// since a default writer does not produce it, but legal and readable.
+/// never a copy. When the field is present the Array FlatBuffer is inlined here and the buffers are
+/// read from the start of the segment, whose tail a reader then never reaches: the reference's
+/// writer still puts the whole blob there, and so does this library's, which inlines only a tree
+/// that declares no buffer (<see cref="BufferlessTree"/>). A reader that ignores the field reads the
+/// segment as it always did.
 /// </remarks>
 internal readonly ref struct FlatLayoutMetadata
 {
@@ -57,6 +61,28 @@ internal readonly ref struct FlatLayoutMetadata
         }
 
         return result;
+    }
+
+    /// <summary>Whether an Array FlatBuffer declares no buffer, so that it is its array whole.</summary>
+    /// <param name="arrayTree">The Array FlatBuffer.</param>
+    /// <exception cref="VortexFormatException">The tree is not a well-formed Array FlatBuffer.</exception>
+    public static bool DeclaresNoBuffer(ReadOnlySpan<byte> arrayTree)
+    {
+        int tableBudget = VortexLimits.MaxFlatBufferTables;
+        return ArrayView.Root(arrayTree, ref tableBudget).Buffers.IsEmpty;
+    }
+
+    /// <summary>
+    /// The array tree of <paramref name="blob"/> when it declares no buffer, the one a flat layout
+    /// over the blob inlines so that a read of the array needs nothing of the segment; empty
+    /// otherwise. The blob stays whole in the segment, as the reference's writer leaves it.
+    /// </summary>
+    /// <param name="blob">An array blob as a writer assembled it, its FlatBuffer and length at the end.</param>
+    public static ReadOnlySpan<byte> BufferlessTree(ReadOnlySpan<byte> blob)
+    {
+        int treeLength = (int)BinaryPrimitives.ReadUInt32LittleEndian(blob[^4..]);
+        ReadOnlySpan<byte> tree = blob.Slice(blob.Length - 4 - treeLength, treeLength);
+        return DeclaresNoBuffer(tree) ? tree : default;
     }
 
     /// <summary>Writes the message body: no outer tag, no length prefix.</summary>

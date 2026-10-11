@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -28,7 +29,11 @@ public sealed class LocalFileSourceTests
     {
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+
+        // A reader maps the file for a scan where the session keeps its mappings; without, on
+        // Windows, it reads positionally throughout.
+        MappedFileCache? kept = mapped ? new MappedFileCache(4) : null;
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_, kept);
         if (mapped)
         {
             source.AnticipateData();
@@ -63,16 +68,24 @@ public sealed class LocalFileSourceTests
         Assert.True(tail.Buffer.Span.SequenceEqual(content.AsSpan(FileLength - 1_000)));
         using SegmentOwner clamped = await reader.ReadRangeAsync(FileLength - 10, 100, 1, CancellationToken.None);
         Assert.True(clamped.Buffer.Span.SequenceEqual(content.AsSpan(FileLength - 10)));
+
+        await source.DisposeAsync();
+        kept?.Clear();
     }
 
-    [Fact]
-    public async Task ABatchOfManySegmentsBeforeAMappingGivesEachItsBytes()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ABatchOfManySegmentsBeforeAMappingGivesEachItsBytes(bool kept)
     {
-        // Enough segments that the positional reads run on several threads at once: each slot still
-        // gets its own bytes, segments of no bytes and repeats among them, and nothing maps the file.
+        // Enough segments that the positional reads run on several threads at once where the
+        // session keeps its mappings, or as coalesced runs where on Windows it keeps none: each slot
+        // still gets its own bytes, segments of no bytes and repeats among them, and nothing maps
+        // the file.
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        MappedFileCache? mappings = kept ? new MappedFileCache(4) : null;
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_, mappings);
         ISegmentReader reader = source;
         using (SegmentRequestSet set = new SegmentRequestSet())
         {
@@ -112,11 +125,15 @@ public sealed class LocalFileSourceTests
     public async Task AReadPastTheFileIsRefusedPositionallyAsMapped()
     {
         using TempFile file = new TempFile(Pattern(FileLength));
-        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        MappedFileCache kept = new MappedFileCache(4);
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_, kept);
         ISegmentReader reader = source;
         await Assert.ThrowsAnyAsync<VortexFormatException>(async () => await reader.ReadAsync(Spec(FileLength - 10, 20), CancellationToken.None));
         source.AnticipateData();
+        Assert.True(source.IsMapped);
         await Assert.ThrowsAnyAsync<VortexFormatException>(async () => await reader.ReadAsync(Spec(FileLength - 10, 20), CancellationToken.None));
+        await source.DisposeAsync();
+        kept.Clear();
     }
 
     [Fact]
@@ -193,11 +210,14 @@ public sealed class LocalFileSourceTests
     {
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        LocalFileSource source = LocalFileSource.Open(file.Path_);
+        MappedFileCache kept = new MappedFileCache(4);
+        LocalFileSource source = LocalFileSource.Open(file.Path_, kept);
         source.AnticipateData();
+        Assert.True(source.IsMapped);
         SegmentOwner lease = await ((ISegmentReader)source).ReadAsync(Spec(1_024, 2_048), CancellationToken.None);
 
         await source.DisposeAsync();
+        kept.Clear();
 
         using (lease)
         {
@@ -210,13 +230,77 @@ public sealed class LocalFileSourceTests
     {
         byte[] content = Pattern(FileLength);
         using TempFile file = new TempFile(content);
-        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        MappedFileCache kept = new MappedFileCache(4);
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_, kept);
 
         Parallel.For(0, 16, _ => source.AnticipateData());
 
         Assert.True(source.IsMapped);
-        using SegmentOwner owner = await ((ISegmentReader)source).ReadAsync(Spec(7, 900), CancellationToken.None);
-        Assert.True(owner.Buffer.Span.SequenceEqual(content.AsSpan(7, 900)));
+        using (SegmentOwner owner = await ((ISegmentReader)source).ReadAsync(Spec(7, 900), CancellationToken.None))
+        {
+            Assert.True(owner.Buffer.Span.SequenceEqual(content.AsSpan(7, 900)));
+        }
+
+        await source.DisposeAsync();
+        kept.Clear();
+    }
+
+    [Fact]
+    public async Task WithoutAKeptMappingAScanReadsCoalescedRunsOnWindows()
+    {
+        // Six MiB: a run of small segments a few KiB apart, mostly gaps, which is copied out; a run
+        // of adjacent segments, which its segments are views of; and a segment past the 4 MiB a run
+        // grows to, read whole.
+        const int length = 6 << 20;
+        byte[] content = Pattern(length);
+        using TempFile file = new TempFile(content);
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        source.AnticipateData();
+        Assert.Equal(!OperatingSystem.IsWindows(), source.IsMapped);
+        Assert.Equal(source.IsMapped, ((ISegmentReader)source).ReadsInPlace);
+
+        using SegmentRequestSet set = new SegmentRequestSet();
+        List<(int Slot, int Offset, int Length)> expected = [];
+        for (int i = 0; i < 100; i++)
+        {
+            int offset = 64 * 1024 + (i * 10 * 1024);
+            expected.Add((set.Add(Spec((ulong)offset, 100)), offset, 100));
+        }
+
+        for (int i = 0; i < 8; i++)
+        {
+            int offset = (5 << 18) + (i * 4_096);
+            expected.Add((set.Add(Spec((ulong)offset, 4_096, 6)), offset, 4_096));
+        }
+
+        int large = 3 << 19;
+        Assert.True(length - large > 4 << 20);
+        expected.Add((set.Add(Spec((ulong)large, (uint)(length - large))), large, length - large));
+
+        await ((ISegmentReader)source).ReadManyAsync(set, CancellationToken.None);
+        Assert.True(set.IsPopulated);
+        foreach ((int slot, int offset, int bytes) in expected)
+        {
+            Assert.True(set.GetBuffer(slot).Span.SequenceEqual(content.AsSpan(offset, bytes)), $"{offset}+{bytes}");
+        }
+    }
+
+    [Fact]
+    public async Task ASessionThatKeepsNoMappingScansWithoutOneOnWindows()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
+        await using VortexFile file = await session.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"), cancellationToken: CancellationToken.None);
+        LocalFileSource source = Assert.IsType<LocalFileSource>(file.Source);
+
+        long rows = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
+        {
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(file.RowCount, rows);
+        Assert.Equal(!OperatingSystem.IsWindows(), source.IsMapped);
     }
 
     [Fact]

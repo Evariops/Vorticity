@@ -72,7 +72,15 @@ public sealed class DatasetRankSeekTests
         await using VortexDataset dataset = await BuildAsync(store, types, schema, shape, text, sortedColumn, ct);
         if (shape == Shape.Compacted)
         {
-            Assert.True(dataset.Levels.Count > 1 && dataset.Levels[1].Entries > 0 && dataset.Levels[0].Entries > 0);
+            // Objects at level 0 and above it, whichever level the compaction left them at: which one
+            // follows from their bytes against the level targets, and the merge reads every level alike.
+            bool above = false;
+            for (int level = 1; level < dataset.Levels.Count; level++)
+            {
+                above |= dataset.Levels[level].Entries > 0;
+            }
+
+            Assert.True(above && dataset.Levels[0].Entries > 0);
         }
 
         // The walk from the first is the merge's order, ties between objects included.

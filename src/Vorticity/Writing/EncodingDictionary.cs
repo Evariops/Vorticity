@@ -32,6 +32,25 @@ internal sealed class EncodingDictionary
     internal int Count => _ids.Count;
 
     /// <summary>
+    /// Forgets every id, keeping the store: a dictionary a column's blob is written against before
+    /// its ids are the file's, emptied for the next column.
+    /// </summary>
+    internal void Clear() => _ids.Clear();
+
+    /// <summary>
+    /// Empties the dictionary and takes over <paramref name="ids"/> at their indices: a column's own
+    /// dictionary starting from the file's, so that an id the file holds keeps its index there.
+    /// </summary>
+    internal void Reset(ReadOnlySpan<string> ids)
+    {
+        _ids.Clear();
+        foreach (string id in ids)
+        {
+            _ids.Add(id);
+        }
+    }
+
+    /// <summary>
     /// The index of <paramref name="idUtf8"/>, assigning one if it is new. The scan is linear and
     /// compares against the strings already kept, because a file names only a couple of dozen
     /// distinct ids. On a miss the id is the registry's own string when the registry knows it, and

@@ -7,6 +7,7 @@
 // the write-back differ, each format's own. The ratio informs; it gates nothing.
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -32,6 +33,15 @@ internal static class FormatCost
     /// <summary>The batches a scan decodes ahead, when <c>--prefetch</c> sets it; the scan's default otherwise.</summary>
     private static int? Prefetch;
 
+    /// <summary>The most rows a scan's batch holds, when <c>--batch-rows</c> sets it; the scan's default otherwise.</summary>
+    private static int BatchRows;
+
+    /// <summary>The zstd level of the Vortex writes, the rewrite of a given file's included: --zstd-level n, 0 for the default.</summary>
+    private static int ZstdLevel;
+
+    /// <summary>The bytes every column's chunks gather in the rewrite of a given file: --column-chunk-bytes n, 0 for the file's chunks.</summary>
+    private static int ColumnChunkBytes;
+
     /// <summary>The column a projection keeps: the report's monotone one, or a given file's first.</summary>
     private static string Projected = Set.Field;
 
@@ -54,6 +64,10 @@ internal static class FormatCost
 
         int prefetchAt = Array.IndexOf(args, "--prefetch");
         Prefetch = prefetchAt >= 0 && prefetchAt + 1 < args.Length && int.TryParse(args[prefetchAt + 1], CultureInfo.InvariantCulture, out int ahead) ? ahead : null;
+        BatchRows = Count(args, "--batch-rows", 0);
+        int levelAt = Array.IndexOf(args, "--zstd-level");
+        ZstdLevel = levelAt >= 0 && levelAt + 1 < args.Length && int.TryParse(args[levelAt + 1], CultureInfo.InvariantCulture, out int level) ? level : 0;
+        ColumnChunkBytes = Count(args, "--column-chunk-bytes", 0);
         string directory = Path.Combine(Path.GetTempPath(), $"vx-format-cost-{Guid.NewGuid():N}");
         Directory.CreateDirectory(directory);
         try
@@ -65,7 +79,11 @@ internal static class FormatCost
             // The report's table, written as Vortex then rewritten as Parquet; or, with --file, a
             // Parquet file of another writer as it is, rewritten as Vortex by ours.
             int fileAt = Array.IndexOf(args, "--file");
-            string vortex = Path.Combine(directory, "table.vortex");
+            // --vortex <path> keeps the Vortex rewrite of a given Parquet file there, and reads it again
+            // rather than writing it when it already exists, so that a loop does not pay the rewrite.
+            int vortexAt = Array.IndexOf(args, "--vortex");
+            string? kept = fileAt >= 0 && vortexAt >= 0 && vortexAt + 1 < args.Length ? Path.GetFullPath(args[vortexAt + 1]) : null;
+            string vortex = kept ?? Path.Combine(directory, "table.vortex");
             string parquet = fileAt >= 0 && fileAt + 1 < args.Length ? Path.GetFullPath(args[fileAt + 1]) : Path.Combine(directory, "table.parquet");
             string[] actions = Actions;
             if (fileAt >= 0)
@@ -74,7 +92,9 @@ internal static class FormatCost
                 int looping = Array.IndexOf(args, "--loop");
                 bool parquetAlone = looping >= 0 && looping + 1 < args.Length && string.Equals(args[looping + 1], "parquet", StringComparison.OrdinalIgnoreCase);
                 await using ParquetFile given = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
-                rows = parquetAlone ? checked((int)given.RowCount) : await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
+                rows = parquetAlone || (kept is not null && System.IO.File.Exists(kept))
+                    ? checked((int)given.RowCount)
+                    : await RewriteAsVortexAsync(session, parquet, vortex).ConfigureAwait(false);
                 Projected = given.Schema[0].Name;
                 actions = given.Schema.Any(f => f.Name == Set.Field) ? Actions : [.. Actions.Where(a => !a.StartsWith("filter", StringComparison.Ordinal))];
             }
@@ -95,21 +115,34 @@ internal static class FormatCost
                 new("Parquet", parquet, async path => new ParquetSide(session, await session.OpenParquetAsync(path, null, CancellationToken.None).ConfigureAwait(false))),
             ];
 
-            // One action of one format in a bare loop, for dotnet-trace: --loop <format> <action> [seconds].
+            // One action of one format in a bare loop, for a profiler or an A/B of two builds:
+            // --loop <format> <action> [seconds]. --warm <seconds> runs it untimed first, past the
+            // JIT's recompilations and the pools' first fills, which a short loop would average in.
             int loop = Array.IndexOf(args, "--loop");
             if (loop >= 0 && loop + 2 < args.Length)
             {
                 Format looped = formats.Single(f => string.Equals(f.Name, args[loop + 1], StringComparison.OrdinalIgnoreCase));
                 double seconds = loop + 3 < args.Length && double.TryParse(args[loop + 3], CultureInfo.InvariantCulture, out double given) ? given : 10;
-                long calls = 0;
+                int degree = Count(args, "--degree", 1);
+                Stopwatch warming = Stopwatch.StartNew();
+                while (warming.Elapsed.TotalSeconds < Count(args, "--warm", 0))
+                {
+                    await RunAsync(looped, args[loop + 2], rows, degree).ConfigureAwait(false);
+                }
+
+                List<double> calls = [];
                 Stopwatch clock = Stopwatch.StartNew();
                 while (clock.Elapsed.TotalSeconds < seconds)
                 {
-                    await RunAsync(looped, args[loop + 2], rows, Count(args, "--degree", 1)).ConfigureAwait(false);
-                    calls++;
+                    long began = Stopwatch.GetTimestamp();
+                    await RunAsync(looped, args[loop + 2], rows, degree).ConfigureAwait(false);
+                    calls.Add(Stopwatch.GetElapsedTime(began).TotalMilliseconds);
                 }
 
-                Console.Out.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{calls} calls, {clock.Elapsed.TotalMilliseconds / calls:F3} ms a call"));
+                calls.Sort();
+                Console.Out.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{calls.Count} calls, {clock.Elapsed.TotalMilliseconds / calls.Count:F3} ms a call, median {calls[calls.Count / 2]:F3} ms"));
                 return 0;
             }
 
@@ -197,11 +230,21 @@ internal static class FormatCost
         await writer.CompleteAsync().ConfigureAwait(false);
     }
 
+    /// <summary>The options of a Vortex write: the degree, and the zstd level and column chunks the command line asks for.</summary>
+    private static VortexWriteOptions WriteOptions(VortexSchema schema, int degree) => new VortexWriteOptions
+    {
+        DegreeOfParallelism = degree,
+        ZstdLevel = ZstdLevel,
+        ColumnChunkTargetBytes = ColumnChunkBytes > 0
+            ? schema.Select(field => field.Name).ToImmutableDictionary(name => name, _ => ColumnChunkBytes, StringComparer.Ordinal)
+            : ImmutableDictionary<string, int>.Empty,
+    };
+
     /// <summary>A Parquet file rewritten as Vortex by this repository's writer, with its defaults; its rows.</summary>
     private static async Task<int> RewriteAsVortexAsync(VortexSession session, string parquet, string vortex)
     {
         await using ParquetFile source = await session.OpenParquetAsync(parquet, null, CancellationToken.None).ConfigureAwait(false);
-        await using VortexFileWriter writer = session.CreateWriter(vortex, source.Schema);
+        await using VortexFileWriter writer = session.CreateWriter(vortex, source.Schema, WriteOptions(source.Schema, 0));
         await foreach (RecordBatch batch in source.Scan().ToBatchesAsync().ConfigureAwait(false))
         {
             using (batch)
@@ -247,7 +290,9 @@ internal static class FormatCost
     /// <summary>One call of <paramref name="action"/> on the format's file, from its open to its last row.</summary>
     private static async Task<long> RunAsync(Format format, string action, int rows, int degree)
     {
-        ScanOptions options = Prefetch is { } prefetch ? new() { DegreeOfParallelism = degree, Prefetch = prefetch } : new() { DegreeOfParallelism = degree };
+        ScanOptions options = Prefetch is { } prefetch
+            ? new() { DegreeOfParallelism = degree, Prefetch = prefetch, BatchRows = BatchRows }
+            : new() { DegreeOfParallelism = degree, BatchRows = BatchRows };
         await using Side file = await format.OpenAsync(format.Path).ConfigureAwait(false);
         return action switch
         {
@@ -259,6 +304,8 @@ internal static class FormatCost
             "take" => await CountAsync(file.Scan().Rows(Spread(file.RowCount, Set.ReportTakeCount, rows / Set.ReportTakeCount)).With(options)).ConfigureAwait(false),
             "write" => await file.WriteBackAsync(options, degree).ConfigureAwait(false),
             _ when action.StartsWith("column:", StringComparison.Ordinal) => await CountAsync(file.Scan(action["column:".Length..]).With(options)).ConfigureAwait(false),
+            _ when action.StartsWith("take:", StringComparison.Ordinal) && long.TryParse(action["take:".Length..], CultureInfo.InvariantCulture, out long taken) && taken > 0 =>
+                await CountAsync(file.Scan().Rows(Spread(file.RowCount, taken, file.RowCount / taken)).With(options)).ConfigureAwait(false),
             _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Not one of the report's actions."),
         };
     }
@@ -342,7 +389,7 @@ internal static class FormatCost
         internal override async Task<long> WriteBackAsync(ScanOptions options, int degree)
         {
             await using VortexFileWriter writer = VortexFileWriter.Create(
-                new Set.DiscardSink(), file.DType, new VortexWriteOptions { DegreeOfParallelism = degree });
+                new Set.DiscardSink(), file.DType, WriteOptions(file.Schema, degree));
             long rows = 0;
             await foreach (RecordBatch batch in file.Scan().With(options).ToBatchesAsync().ConfigureAwait(false))
             {

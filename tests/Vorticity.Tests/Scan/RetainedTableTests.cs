@@ -65,6 +65,33 @@ public sealed class RetainedTableTests
         Assert.Equal(24, pool.Count);
     }
 
+    /// <summary>
+    /// A context meets other lanes only where it retains into a table several contexts decode into
+    /// side by side, once the table holds a decode: a scan of one lane, a context retaining into a
+    /// table of its own and a table holding nothing read their columns in schema order.
+    /// </summary>
+    [Fact]
+    public void AContextMeetsOtherLanesOnceTheTableTheyShareHoldsADecode()
+    {
+        using ScanContext lane = new ScanContext(["vortex.primitive"]);
+        Assert.False(lane.MeetsOtherLanes);
+
+        using RetainedChunks shared = new RetainedChunks(columns: 2, lanes: 2);
+        lane.ShareRetained(shared);
+        Assert.False(lane.MeetsOtherLanes);
+        Assert.False(shared.TryGet(7, lane, batch: 1, out RetainedChunk? claim, out _, out _));
+        Assert.True(lane.MeetsOtherLanes);
+        shared.Publish(claim!, nodeIndex: 0, batch: 1);
+        Assert.True(lane.MeetsOtherLanes);
+
+        using ScanContext alone = new ScanContext(["vortex.primitive"]);
+        using RetainedChunks single = new RetainedChunks(columns: 2, lanes: 1);
+        alone.ShareRetained(single);
+        Assert.False(single.TryGet(7, alone, batch: 1, out RetainedChunk? own, out _, out _));
+        single.Publish(own!, nodeIndex: 0, batch: 1);
+        Assert.False(alone.MeetsOtherLanes);
+    }
+
     [Fact]
     public void AnEntryIsFoundUntilItsBatchesAreDeadAndThenEvicted()
     {

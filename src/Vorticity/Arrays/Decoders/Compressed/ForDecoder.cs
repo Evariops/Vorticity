@@ -92,12 +92,20 @@ internal sealed class ForDecoder : ArrayDecoder
         ulong referenceBits = ReadBits(referenceBytes);
 
         // The encoded child carries the array's dtype unchanged, including its nullability, and the
-        // node has no validity of its own: the child's is the array's.
-        int encoded = selective
-            ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
-            : start == 0 && count == length
-                ? context.DecodeChild(in node, 0, dtype, length)
-                : context.DecodeChildRange(in node, 0, dtype, length, start, count);
+        // node has no validity of its own: the child's is the array's. A bit-packed child adds the
+        // reference in the pass that unpacks it, so the values are written once rather than
+        // unpacked into one buffer and added into another.
+        int encoded = -1;
+        bool added = !selective && referenceBits != 0 && count > 0
+            && (encoded = context.DecodeChildAdding(in node, 0, dtype, length, start, count, referenceBits)) >= 0;
+        if (!added)
+        {
+            encoded = selective
+                ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
+                : start == 0 && count == length
+                    ? context.DecodeChild(in node, 0, dtype, length)
+                    : context.DecodeChildRange(in node, 0, dtype, length, start, count);
+        }
 
         // Everything below is expressed in the number of rows produced, which the selection or
         // the range shortens; the child's own bound checks still use the node's declared length.
@@ -124,8 +132,8 @@ internal sealed class ForDecoder : ArrayDecoder
         }
 
         // A zero reference adds nothing, so the child is returned untouched: same buffer, same
-        // validity, same dtype.
-        if (referenceBits == 0)
+        // validity, same dtype; and a child that added it is the array already.
+        if (referenceBits == 0 || added)
         {
             return encoded;
         }

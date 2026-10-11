@@ -114,6 +114,12 @@ internal readonly struct ChunkStats
     /// <summary>The column's memory of its last chunk, or none; none for a dry cursor, which prices in full.</summary>
     internal ColumnWriter.PlanMemory? Memory => _dry ? null : _column?.Memory;
 
+    /// <summary>
+    /// The column whose dictionary and run-end values the trials remember
+    /// (<see cref="ColumnWriter.ValuesHeldByZstd"/>), or none; none for a dry cursor, which prices in full.
+    /// </summary>
+    internal ColumnWriter? ValuesOwner => _dry ? null : _column;
+
     /// <summary>Whether the file asks for its columns priced by their bytes alone.</summary>
     internal bool SizeFirst => _ledger is { SizeFirst: true };
 

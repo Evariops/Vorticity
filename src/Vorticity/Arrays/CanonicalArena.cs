@@ -670,6 +670,52 @@ internal partial class CanonicalArena
     }
 
     /// <summary>
+    /// The bytes of every block the arena holds, those handed out and the idle ones kept for the
+    /// next batch alike: what the arena keeps from the pool, by the blocks' capacities.
+    /// </summary>
+    /// <param name="classShare">
+    /// The largest share, over the pool's size classes, of what a class keeps parked at most that
+    /// the arena's blocks of that class come to: past 1, the pool could not take them all back.
+    /// </param>
+    internal long HeldBytes(out double classShare)
+    {
+        // A block's class is its capacity's power of two, which a pooled block's capacity is.
+        Span<long> byClass = stackalloc long[32];
+        byClass.Clear();
+        long held = 0;
+        NativeSegmentOwner? cursor = _owned;
+        if (_slabUsed >= 0)
+        {
+            held += cursor!.Capacity;
+            byClass[System.Numerics.BitOperations.Log2((uint)cursor.Capacity)] += cursor.Capacity;
+            cursor = cursor.NextOwned;
+        }
+
+        if (cursor is not null)
+        {
+            NativeSegmentOwner owner = cursor;
+            do
+            {
+                owner = owner.NextOwned!;
+                held += owner.Capacity;
+                byClass[System.Numerics.BitOperations.Log2((uint)owner.Capacity)] += owner.Capacity;
+            }
+            while (owner != cursor);
+        }
+
+        classShare = 0;
+        for (int log = 0; log < byClass.Length; log++)
+        {
+            if (byClass[log] != 0)
+            {
+                classShare = Math.Max(classShare, (double)byClass[log] / _pool.ClassCeilingBytes(1 << log));
+            }
+        }
+
+        return held;
+    }
+
+    /// <summary>
     /// Counts the blocks of this arena, which a batch its caller owns holds, in
     /// <see cref="OwnedBatchBytes"/> until <see cref="Reset"/> gives them back or their finalizers
     /// free them.

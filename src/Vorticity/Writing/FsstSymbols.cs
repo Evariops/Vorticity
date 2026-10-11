@@ -34,37 +34,48 @@ internal sealed class FsstSymbols
     /// <summary>The generations, as fractions of 128 of the sample.</summary>
     private static readonly int[] Generations = [8, 38, 68, 98, 128];
 
+    /// <summary>
+    /// Per generation, the share of its sample estimate a column's code stream is held to come to at
+    /// least, by the end of the training, when a bound is given: 0 where nothing is checked.
+    /// </summary>
+    /// <remarks>
+    /// A generation counts its fraction of the sample with the table the one before built, which
+    /// is the bytes the codes of those lines would take: scaled to the column, an estimate of its
+    /// code stream. The table improves with each generation, so a share below one leaves it room:
+    /// over the 808 FSST trials of ClickBench's hits, the stream came to 0.69 of the second
+    /// generation's estimate at the least, 0.86 of the third's and 0.97 of the fourth's, and the
+    /// shares are set below those. A column whose estimate is past the bound by that much is given
+    /// up before the last generations and the pass over every row, which cost most of a training.
+    /// </remarks>
+    private static readonly double[] EstimateShares = [0, 0.6, 0.75, 0.85, 0];
+
     /// <summary><see cref="ulong"/>s per <c>count2</c> row: 512 bits of pair presence.</summary>
     private const int PairWordsPerRow = (CodeMask + 1) / 64;
 
     /// <summary>
     /// The trainer's working tables, a megabyte of counters reused across column-chunks. Ownership
-    /// is explicit rather than thread-static, since a continuation may resume on another thread:
-    /// one cached set is taken with an exchange that leaves null behind, and a second trainer
-    /// allocates its own rather than sharing. Every table is cleared at the top of a generation, so
-    /// reuse cannot change a symbol.
+    /// is explicit rather than thread-static, since a continuation may resume on another thread: the
+    /// sets are kept in <see cref="SpareSlots{T}"/>, each taken whole by one trainer, and a trainer
+    /// that finds none allocates its own rather than sharing. Every table is cleared at the top of a
+    /// generation, so reuse cannot change a symbol.
     /// </summary>
     internal sealed class TrainingTables
     {
-        /// <summary>The one cached set; null while somebody holds it.</summary>
-        private static TrainingTables? Cached;
-
         /// <summary>
-        /// Takes the cached set, or a fresh one when another trainer holds it; the caller owns it
-        /// outright until it calls <see cref="Give"/>.
+        /// A kept set, or a fresh one when every kept set is held; the caller owns it outright until
+        /// it calls <see cref="Give"/>.
         /// </summary>
-        internal static TrainingTables Take() =>
-            Interlocked.Exchange(ref Cached, null) ?? new TrainingTables();
+        internal static TrainingTables Take() => SpareSlots<TrainingTables>.Take() ?? new TrainingTables();
 
-        /// <summary>Gives a set back. Losing the race simply drops one set to the collector.</summary>
-        internal static void Give(TrainingTables tables) => Volatile.Write(ref Cached, tables);
+        /// <summary>Gives a set back, for the next trainer on any thread.</summary>
+        internal static void Give(TrainingTables tables) => SpareSlots<TrainingTables>.Give(tables);
 
         private int[]? _count1;
         private int[]? _count2;
         private ulong[]? _pairBits;
         private Line[]? _sample;
         private Dictionary<Candidate, long>? _candidates;
-        private List<KeyValuePair<Candidate, long>>? _ranked;
+        private KeyValuePair<Candidate, long>[]? _ranked;
 
         /// <summary>
         /// Room for the drawn sample: at most <see cref="SampleTarget"/> lines, since either way of
@@ -97,8 +108,16 @@ internal sealed class FsstSymbols
         internal Dictionary<Candidate, long> Candidates =>
             _candidates ??= new Dictionary<Candidate, long>(512);
 
-        internal List<KeyValuePair<Candidate, long>> Ranked =>
-            _ranked ??= new List<KeyValuePair<Candidate, long>>(512);
+        /// <summary>Room for <paramref name="count"/> candidates to rank, kept from one generation and one column-chunk to the next.</summary>
+        internal Span<KeyValuePair<Candidate, long>> Ranked(int count)
+        {
+            if (_ranked is null || _ranked.Length < count)
+            {
+                _ranked = new KeyValuePair<Candidate, long>[Math.Max(count, 512)];
+            }
+
+            return _ranked.AsSpan(0, count);
+        }
     }
 
     /// <summary>Bytes of sample the trainer aims for before it stops drawing lines.</summary>
@@ -125,26 +144,23 @@ internal sealed class FsstSymbols
 
     private int _count;
 
-    /// <summary>A table no plan reads any more, kept for the next training; null while none is.</summary>
-    /// <remarks>
-    /// A table's lookup of two-byte symbols alone is 128 KiB, an allocation of the large-object
-    /// heap, and pricing FSST trains one per column-chunk whether FSST wins or not. One is kept,
-    /// taken with an exchange that leaves null behind: a second trainer builds its own.
-    /// </remarks>
-    private static FsstSymbols? Spare;
-
     private FsstSymbols()
     {
         Clear();
     }
 
     /// <summary>Gives the table back for a later training, once nothing reads it.</summary>
-    internal void Recycle() => Volatile.Write(ref Spare, this);
+    /// <remarks>
+    /// A table's lookup of two-byte symbols alone is 128 KiB, an allocation of the large-object
+    /// heap, and pricing FSST trains one per column-chunk whether FSST wins or not: tables are kept
+    /// for the trainers of the columns a chunk writes at once.
+    /// </remarks>
+    internal void Recycle() => SpareSlots<FsstSymbols>.Give(this);
 
     /// <summary>A cleared table: the spare one, or a new one when there is none.</summary>
     private static FsstSymbols Fresh()
     {
-        FsstSymbols? spare = Interlocked.Exchange(ref Spare, null);
+        FsstSymbols? spare = SpareSlots<FsstSymbols>.Take();
         if (spare is null)
         {
             return new FsstSymbols();
@@ -195,10 +211,20 @@ internal sealed class FsstSymbols
 
     /// <summary>
     /// Trains a table on rows held as slices of one contiguous heap; null when there is nothing to
-    /// train on. A row is two ints rather than a memory, so a wide column costs no per-row object.
+    /// train on, or when the column's code stream would come past <paramref name="bound"/>. A row
+    /// is two ints rather than a memory, so a wide column costs no per-row object.
     /// </summary>
+    /// <param name="heap">The rows' bytes.</param>
+    /// <param name="starts">Each row's first byte in <paramref name="heap"/>.</param>
+    /// <param name="lengths">Each row's length.</param>
+    /// <param name="plain">The bytes of every row together, against which the sample's estimates are scaled.</param>
+    /// <param name="bound">
+    /// The code stream past which the table would decide nothing, the caller's ceiling; a training
+    /// whose estimate passes it by <see cref="EstimateShares"/> is given up. None when the caller keeps any table.
+    /// </param>
     internal static FsstSymbols? Train(
-        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths)
+        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, long plain = 0,
+        long bound = long.MaxValue)
     {
         FsstSymbols table = Fresh();
 
@@ -207,7 +233,7 @@ internal sealed class FsstSymbols
         {
             Span<Line> sample = tables.Sample;
             MakeSample(starts, lengths, sample, out int drawn, out bool sampled);
-            FsstSymbols? trained = drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables);
+            FsstSymbols? trained = drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables, plain, bound);
             if (trained is null)
             {
                 table.Recycle();
@@ -237,16 +263,19 @@ internal sealed class FsstSymbols
 
     private static FsstSymbols? TrainCore(
         FsstSymbols table, ReadOnlySpan<byte> heap, ReadOnlySpan<Line> sample, bool sampled,
-        TrainingTables tables)
+        TrainingTables tables, long plain, long bound)
     {
         int[] count1 = tables.Count1;
         int[] count2 = tables.Count2;
         ulong[] pairBits = tables.PairBits;
 
-        foreach (int generation in Generations)
+        for (int step = 0; step < Generations.Length; step++)
         {
+            int generation = Generations[step];
             Array.Clear(count1);
             ClearPairCounts(count2, pairBits);
+            long input = 0;
+            long coded = 0;
 
             for (int i = 0; i < sample.Length; i++)
             {
@@ -258,7 +287,16 @@ internal sealed class FsstSymbols
                 }
 
                 Line line = sample[i];
-                table.CountLine(heap.Slice(line.Start, line.Length), count1, count2, pairBits);
+                coded += table.CountLine(heap.Slice(line.Start, line.Length), count1, count2, pairBits);
+                input += line.Length;
+            }
+
+            // The lines counted, coded with the table the generation before built: scaled to the
+            // column, what its code stream is estimated at, which the table still to come improves
+            // on by no more than the generation's share leaves room for.
+            if (input > 0 && EstimateShares[step] * coded / input * plain > bound)
+            {
+                return null;
             }
 
             table.Optimize(tables, count1, count2, pairBits, generation, prune: generation >= 128 && !sampled);
@@ -569,18 +607,23 @@ internal sealed class FsstSymbols
     private static ulong Hash(ulong value) => (value * 2971215073UL) ^ (value >> 15);
 
     /// <summary>
-    /// Compresses one sample line with the current table, counting codes and adjacent code pairs.
+    /// Compresses one sample line with the current table, counting codes and adjacent code pairs,
+    /// and returns the bytes its codes take.
     /// A merged symbol's gain is how often its two halves occur next to each other, which is what
     /// the next generation proposes as a candidate; the extra single-byte count keeps the option of
     /// a shorter symbol alive.
     /// </summary>
-    private void CountLine(ReadOnlySpan<byte> line, int[] count1, int[] count2, ulong[] pairBits)
+    private int CountLine(ReadOnlySpan<byte> line, int[] count1, int[] count2, ulong[] pairBits)
     {
         int read = 0;
         int previous = CodeMask;
+        int coded = 0;
         while (read < line.Length)
         {
             int code = FindLongest(Word(line, read), line.Length - read, out int length);
+
+            // A symbol's code is a byte, an escaped byte two.
+            coded += code >= CodeBase ? 1 : 2;
             count1[code]++;
             CountPair(count2, pairBits, previous, code);
 
@@ -594,6 +637,8 @@ internal sealed class FsstSymbols
             read += length;
             previous = code;
         }
+
+        return coded;
     }
 
     /// <summary>
@@ -704,18 +749,18 @@ internal sealed class FsstSymbols
             }
         }
 
-        List<KeyValuePair<Candidate, long>> ranked = tables.Ranked;
-        ranked.Clear();
+        // The candidates in the order they were proposed, which a dictionary with no removal keeps,
+        // ranked by the introsort List.Sort runs: unstable, so the proposal order decides which of
+        // two equal candidates wins the last slot, and the written bytes with it. SpanSort takes the
+        // same steps with its comparison inline, where List.Sort calls a delegate a comparison.
+        Span<KeyValuePair<Candidate, long>> ranked = tables.Ranked(candidates.Count);
+        int proposed = 0;
         foreach (KeyValuePair<Candidate, long> entry in candidates)
         {
-            ranked.Add(entry);
+            ranked[proposed++] = entry;
         }
 
-        ranked.Sort(static (a, b) =>
-        {
-            int byGain = b.Value.CompareTo(a.Value);
-            return byGain != 0 ? byGain : b.Key.Length.CompareTo(a.Key.Length);
-        });
+        SpanSort.Sort(ranked, default(ByGainThenLength));
 
         // One bit per slot of the reader's matcher. A symbol it could not hold is skipped here
         // rather than removed later, so the next candidate takes the code and the table still
@@ -724,7 +769,7 @@ internal sealed class FsstSymbols
         taken.Clear();
 
         Clear();
-        for (int i = 0; i < ranked.Count && _count < MaxSymbols; i++)
+        for (int i = 0; i < ranked.Length && _count < MaxSymbols; i++)
         {
             Candidate candidate = ranked[i].Key;
             if (prune)
@@ -765,10 +810,18 @@ internal sealed class FsstSymbols
     private static void Add(Dictionary<Candidate, long> candidates, Candidate candidate, long gain)
     {
         // Summed rather than maximized: the same symbol is reachable through several codes, and its
-        // worth is how often it occurs in total.
-        candidates[candidate] = candidates.TryGetValue(candidate, out long existing)
-            ? existing + gain
-            : gain;
+        // worth is how often it occurs in total. One probe: a new candidate's sum starts at zero.
+        CollectionsMarshal.GetValueRefOrAddDefault(candidates, candidate, out _) += gain;
+    }
+
+    /// <summary>Candidates by gain, the larger first, and among equal gains the longer first.</summary>
+    private readonly struct ByGainThenLength : IComparer<KeyValuePair<Candidate, long>>
+    {
+        public int Compare(KeyValuePair<Candidate, long> a, KeyValuePair<Candidate, long> b)
+        {
+            int byGain = b.Value.CompareTo(a.Value);
+            return byGain != 0 ? byGain : b.Key.Length.CompareTo(a.Key.Length);
+        }
     }
 
     /// <summary>
@@ -919,13 +972,45 @@ internal sealed class FsstSymbols
         _count = code + 1;
     }
 
+    /// <summary>
+    /// Empties the table: once the lookups hold -1 everywhere, every other entry is a symbol's own,
+    /// put there by <see cref="Insert"/>, so only the symbols' entries are cleared rather than the
+    /// 64 Ki entries of the two-byte lookup, which every generation of every training cleared.
+    /// </summary>
     private void Clear()
     {
+        if (!_cleared)
+        {
+            Array.Fill(_oneByte, (short)-1);
+            Array.Fill(_twoByte, (short)-1);
+            Array.Fill(_slots, (short)-1);
+            _cleared = true;
+        }
+        else
+        {
+            for (int code = 0; code < _count; code++)
+            {
+                ulong bits = _bits[code];
+                switch (_lengths[code])
+                {
+                    case 1:
+                        _oneByte[(int)(byte)bits] = -1;
+                        break;
+                    case 2:
+                        _twoByte[(int)(ushort)bits] = -1;
+                        break;
+                    default:
+                        _slots[ReferenceSlot(bits)] = -1;
+                        break;
+                }
+            }
+        }
+
         _count = 0;
-        Array.Fill(_oneByte, (short)-1);
-        Array.Fill(_twoByte, (short)-1);
-        Array.Fill(_slots, (short)-1);
     }
+
+    /// <summary>Whether the lookups hold -1 everywhere but at the symbols' own entries.</summary>
+    private bool _cleared;
 
     /// <summary>A symbol proposed for the table: its bytes and its length.</summary>
     internal readonly struct Candidate(ulong bits, byte length) : IEquatable<Candidate>
@@ -938,6 +1023,8 @@ internal sealed class FsstSymbols
 
         public override bool Equals(object? obj) => obj is Candidate other && Equals(other);
 
-        public override int GetHashCode() => HashCode.Combine(Bits, Length);
+        // One multiplication: the map that sums the candidates enumerates them in the order they
+        // were added, whatever the hash, so the hash decides how fast a probe is and nothing else.
+        public override int GetHashCode() => (int)(((Bits ^ ((ulong)Length << 56)) * 0x9E3779B97F4A7C15UL) >> 32);
     }
 }

@@ -50,6 +50,7 @@ public sealed record VortexWriteOptions
     private readonly int _chunkTargetBytes;
     private readonly int _stringBoundBytes = 16;
     private readonly int _degreeOfParallelism;
+    private readonly int _zstdLevel;
     private readonly IndexPolicy _indexes = IndexPolicy.None;
     private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, int> _columnChunkTargets = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
@@ -119,8 +120,28 @@ public sealed record VortexWriteOptions
     public CompressionProfile Compression { get; init; } = CompressionProfile.Auto;
 
     /// <summary>
-    /// How many threads the writer summarizes its columns on as the rows come in, and compresses a
-    /// column's zstd frames on; 0 for the session's
+    /// The zstd level of the columns zstd takes, which their trials are priced at too; 0, the
+    /// default, is zstd's own default, 3. Level 1 or a negative one writes faster and larger, a
+    /// higher one, up to 22, smaller and slower, and its frames decode a little faster.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// The level is below <see cref="Vorticity.Zstd.ZstdCompressor.MinLevel"/> or above
+    /// <see cref="Vorticity.Zstd.ZstdCompressor.MaxLevel"/>.
+    /// </exception>
+    public int ZstdLevel
+    {
+        get => _zstdLevel;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, Vorticity.Zstd.ZstdCompressor.MinLevel);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(value, Vorticity.Zstd.ZstdCompressor.MaxLevel);
+            _zstdLevel = value;
+        }
+    }
+
+    /// <summary>
+    /// How many threads the writer summarizes its columns on as the rows come in, compresses a
+    /// chunk's columns on side by side, and a column's zstd frames on; 0 for the session's
     /// <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/>. The file is the same bytes
     /// whatever the degree.
     /// </summary>

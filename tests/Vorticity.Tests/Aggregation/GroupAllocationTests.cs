@@ -110,7 +110,7 @@ public sealed partial class GroupAllocationTests
         ("spread integers", 4, GroupCoreReason.Spread, 1_245_184, DenseAsync),
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
-        ("six keys", 1, GroupCoreReason.None, 109_056, SixAsync),
+        ("six keys", 1, GroupCoreReason.None, 107_008, SixAsync),
         ("six keys", 4, GroupCoreReason.FirstRows, 1_638_400, SixAsync),
     ];
 

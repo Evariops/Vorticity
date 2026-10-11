@@ -50,6 +50,7 @@ internal sealed class RetainedChunks : IDisposable
 {
     private readonly int _capacity;
     private readonly int _lendingCapacity;
+    private readonly bool _sideBySide;
     private RetainedChunk?[] _entries = [];
 
     // How many entries the table has room for, a power of two: in order in the first slots, and past
@@ -85,7 +86,15 @@ internal sealed class RetainedChunks : IDisposable
         // boundary; the table grows to that once, at the first loan, which the first window makes.
         _lendingCapacity = Math.Max(4 * columns + 2, 6);
         _prepare = lanes > 1;
+        _sideBySide = lanes > 1;
     }
+
+    /// <summary>
+    /// Whether contexts decode side by side into the table and it holds an entry: whether a lane
+    /// may find another decoding a chunk it is about to read. Read without the lock, so a lane may
+    /// learn it a batch late.
+    /// </summary>
+    internal bool Contended => _sideBySide && Volatile.Read(ref _count) != 0;
 
     /// <summary>
     /// The entry under <paramref name="key"/>, when it is published; otherwise a claim on the key

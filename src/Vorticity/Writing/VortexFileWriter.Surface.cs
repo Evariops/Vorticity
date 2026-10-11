@@ -495,6 +495,7 @@ public sealed partial class VortexFileWriter
         // go back to the process's.
         _blobs?.Dispose();
         _blobs = null;
+        ReleaseColumnsAcross();
         if (_fan is { } fan)
         {
             _fan = null;
@@ -512,6 +513,7 @@ public sealed partial class VortexFileWriter
         }
 
         _chunkRows.Release();
+        _flatMetadata.Release();
         ReleaseSegments();
         _segmentCount = 0;
 

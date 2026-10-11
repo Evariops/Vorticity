@@ -101,10 +101,12 @@ public sealed partial class SelectTests
                 rows.Take(7).Select(r => new CityFare(r.City, r.Fare)),
                 await ListAsync(file.Scan<Trip>().Select(r => (r.City, r.Fare)).Take(7).As<CityFare>()));
 
-            // Ten rows read the split that holds them, not the file.
-            Projection<long> ten = file.Scan<Trip>().Select(r => r.Id).Take(10);
+            // Ten rows read the split that holds them, not the file. Counted on the fares: the ids
+            // are a progression, whose chunks their flats' inlined trees hold whole, read from no
+            // segment at all.
+            Projection<double?> ten = file.Scan<Trip>().Select(r => r.Fare).Take(10);
             Assert.Equal(10, (await ten.ToListAsync(Ct)).Count);
-            Projection<long> all = file.Scan<Trip>().Select(r => r.Id);
+            Projection<double?> all = file.Scan<Trip>().Select(r => r.Fare);
             Assert.Equal(Rows, (await all.ToListAsync(Ct)).Count);
             Assert.Equal(1, ten.Metrics.Batches);
             Assert.True(ten.Metrics.Requests < all.Metrics.Requests, $"{ten.Metrics.Requests} requests against {all.Metrics.Requests}");

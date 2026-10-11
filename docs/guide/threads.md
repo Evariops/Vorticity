@@ -96,10 +96,10 @@ ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the defa
 A writer uses the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` overrides it
 for one file. When a batch of a block or more comes in, the writer summarizes its columns side by
 side: each column's statistics, plus a text column's bounds and the distinct values a dictionary is
-priced from. It also compresses a column's zstd frames in parallel, one frame per block, once the
-column holds a quarter of a megabyte of values. Choosing and writing the encodings stays on the
-calling thread, and the file is byte for byte the same whatever the degree. A write that builds
-indexes summarizes its columns on one thread.
+priced from. It then chooses and compresses a chunk's columns side by side, a column with a chunk
+target of its own included, and a column's zstd frames in parallel, one frame per block, once the
+column holds a quarter of a megabyte of values. The file is byte for byte the same whatever the
+degree. A write that builds indexes summarizes its columns on one thread.
 
 Measured on the demonstration file, warmed up, each variant run in turn, the best of fifteen rounds in
 a process and the median of seven processes:
@@ -124,6 +124,11 @@ batches. The batch ahead is decoded on the thread pool, so a scan at the default
 pool thread beside yours, and `Prefetch = 0` keeps everything on your thread. On a mapped file with a
 loop that works on every value it changed nothing measurable, about 3.1 ms at 0, 1 and 2. It pays
 off when the source has latency to hide, as a remote one does.
+
+A batch that costs less to decode than the trip to a pool thread and back is decoded on your thread
+instead, whatever the degree and the prefetch: a column of a few thousand values read from a local
+file costs a few microseconds, about what the trip adds. The scan starts that way when its first batch
+looks small, and hands the batches after it to the pool as soon as one costs more.
 
 ## Local and remote
 

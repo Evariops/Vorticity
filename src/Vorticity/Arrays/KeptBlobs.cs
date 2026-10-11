@@ -16,24 +16,37 @@ namespace Vorticity.Arrays;
 /// bytes at the address they name.
 /// </para>
 /// <para>
-/// An arena no layout of the batch in flight has read is parsed over first; while every arena
-/// holds a blob the batch reads, another is made, up to <see cref="Capacity"/>, past which the
-/// oldest is parsed over and a batch reading that many layouts parses each blob again.
+/// An arena no layout of the batch in flight has read is parsed over first, the one read longest
+/// ago; while every arena holds a blob the batch reads, another is made, up to
+/// <see cref="Capacity"/>, past which the one read longest ago is parsed over. A batch of a wide
+/// table reads a blob of every column, so the arenas are found by their layout, through buckets,
+/// and kept in the order they were read, through a list, and neither a lookup nor a choice of the
+/// arena to parse over walks the others.
 /// </para>
 /// </remarks>
 internal sealed class KeptBlobs
 {
-    /// <summary>The most blobs kept.</summary>
-    internal const int Capacity = 64;
+    /// <summary>The most blobs kept: more than the columns of all but the widest tables.</summary>
+    internal const int Capacity = 256;
 
     /// <summary>The nodes a kept blob's arena starts with; it grows as the blob needs.</summary>
     private const int SlotNodes = 4;
+
+    /// <summary>The buckets the arenas are found in by layout, a power of two, twice the capacity.</summary>
+    private const int BucketCount = 2 * Capacity;
 
     private Slot[] _slots = [];
     private int _count;
     private int _current = -1;
     private long _clock;
     private long _batchFrom;
+
+    // Per bucket, the first arena holding a blob of a layout of it, or -1; made with the first arena.
+    private int[] _buckets = [];
+
+    // The arenas in the order they were read, the latest first.
+    private int _latest = -1;
+    private int _oldest = -1;
 
     /// <summary>The arena of the blob made current in the batch in flight, or null.</summary>
     internal ArrayNodeArena? Current => _current >= 0 ? _slots[_current].Arena : null;
@@ -66,31 +79,27 @@ internal sealed class KeptBlobs
     internal bool Take(int layout, VortexBuffer segment, int treeBytes)
     {
         long now = ++_clock;
-        int oldest = -1;
-        for (int i = 0; i < _count; i++)
+        int found = Find(layout);
+        if (found >= 0 && _slots[found].Source.SameAs(segment))
         {
-            ref Slot slot = ref _slots[i];
-            if (slot.Layout == layout && slot.Source.SameAs(segment))
-            {
-                slot.LastUse = now;
-                _current = i;
-                return true;
-            }
-
-            if (oldest < 0 || slot.LastUse < _slots[oldest].LastUse)
-            {
-                oldest = i;
-            }
+            Read(found, now);
+            _current = found;
+            return true;
         }
 
-        int taken = oldest >= 0 && (_slots[oldest].LastUse < _batchFrom || _count == Capacity)
-            ? oldest
-            : Add(treeBytes);
+        // The layout's blob from other bytes is parsed over where it lies; another layout takes
+        // the arena read longest ago when no layout of this batch read it, or the arenas are all
+        // there may be, and a new arena otherwise.
+        int taken = found >= 0
+            ? found
+            : _oldest >= 0 && (_slots[_oldest].LastUse < _batchFrom || _count == Capacity)
+                ? _oldest
+                : Add(treeBytes);
+        Unhold(taken);
         ref Slot target = ref _slots[taken];
-        target.Layout = -1;
         target.Source = default;
         target.Ranged = null;
-        target.LastUse = now;
+        Read(taken, now);
         _current = taken;
         return false;
     }
@@ -100,11 +109,18 @@ internal sealed class KeptBlobs
     /// <param name="segment">The segment the blob was parsed from.</param>
     internal void RememberCurrent(int layout, VortexBuffer segment)
     {
-        if (_current >= 0)
+        if (_current < 0)
         {
-            _slots[_current].Layout = layout;
-            _slots[_current].Source = segment;
+            return;
         }
+
+        Unhold(_current);
+        ref Slot slot = ref _slots[_current];
+        slot.Layout = layout;
+        slot.Source = segment;
+        int bucket = Bucket(layout);
+        slot.Chain = _buckets[bucket];
+        _buckets[bucket] = _current;
     }
 
     /// <summary>Forgets what the current arena holds, before a blob is loaded into it.</summary>
@@ -112,7 +128,7 @@ internal sealed class KeptBlobs
     {
         if (_current >= 0)
         {
-            _slots[_current].Layout = -1;
+            Unhold(_current);
             _slots[_current].Source = default;
             _slots[_current].Ranged = null;
         }
@@ -133,29 +149,144 @@ internal sealed class KeptBlobs
             ref Slot slot = ref _slots[i];
             slot.Arena.Reset();
             slot.Layout = -1;
+            slot.Chain = -1;
             slot.Source = default;
             slot.Ranged = null;
+        }
+
+        if (_buckets.Length > 0)
+        {
+            _buckets.AsSpan().Fill(-1);
         }
 
         _current = -1;
     }
 
+    /// <summary>The arena holding a blob of <paramref name="layout"/>, or -1.</summary>
+    private int Find(int layout)
+    {
+        if (_count == 0)
+        {
+            return -1;
+        }
+
+        for (int at = _buckets[Bucket(layout)]; at >= 0; at = _slots[at].Chain)
+        {
+            if (_slots[at].Layout == layout)
+            {
+                return at;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Takes arena <paramref name="at"/> out of its layout's bucket, holding no layout's blob.</summary>
+    private void Unhold(int at)
+    {
+        int layout = _slots[at].Layout;
+        if (layout < 0)
+        {
+            return;
+        }
+
+        int bucket = Bucket(layout);
+        if (_buckets[bucket] == at)
+        {
+            _buckets[bucket] = _slots[at].Chain;
+        }
+        else
+        {
+            int before = _buckets[bucket];
+            while (_slots[before].Chain != at)
+            {
+                before = _slots[before].Chain;
+            }
+
+            _slots[before].Chain = _slots[at].Chain;
+        }
+
+        _slots[at].Layout = -1;
+        _slots[at].Chain = -1;
+    }
+
+    /// <summary>Marks arena <paramref name="at"/> read at <paramref name="now"/>: the latest read.</summary>
+    private void Read(int at, long now)
+    {
+        ref Slot slot = ref _slots[at];
+        slot.LastUse = now;
+        if (_latest == at)
+        {
+            return;
+        }
+
+        // Out of the order where it was, then in at the front.
+        if (slot.Later >= 0)
+        {
+            _slots[slot.Later].Earlier = slot.Earlier;
+        }
+
+        if (slot.Earlier >= 0)
+        {
+            _slots[slot.Earlier].Later = slot.Later;
+        }
+
+        if (_oldest == at)
+        {
+            _oldest = slot.Later;
+        }
+
+        slot.Earlier = _latest;
+        slot.Later = -1;
+        if (_latest >= 0)
+        {
+            _slots[_latest].Later = at;
+        }
+
+        _latest = at;
+        if (_oldest < 0)
+        {
+            _oldest = at;
+        }
+    }
+
+    private static int Bucket(int layout) => (int)((uint)layout * 0x9E3779B1u >> 23) & (BucketCount - 1);
+
     private int Add(int treeBytes)
     {
         if (_count == _slots.Length)
         {
-            Array.Resize(ref _slots, Math.Max(4, _slots.Length * 2));
+            Array.Resize(ref _slots, Math.Max(4, Math.Min(_slots.Length * 2, Capacity)));
         }
 
-        _slots[_count] = new Slot { Arena = new ArrayNodeArena(SlotNodes, treeBytes), Layout = -1 };
+        if (_buckets.Length == 0)
+        {
+            _buckets = new int[BucketCount];
+            _buckets.AsSpan().Fill(-1);
+        }
+
+        _slots[_count] = new Slot
+        {
+            Arena = new ArrayNodeArena(SlotNodes, treeBytes),
+            Layout = -1,
+            Chain = -1,
+            Earlier = -1,
+            Later = -1,
+        };
         return _count++;
     }
 
-    /// <summary>A kept blob: its arena, the flat layout it is, or -1, and the segment it was parsed from.</summary>
+    /// <summary>
+    /// A kept blob: its arena, the flat layout it is, or -1, the segment it was parsed from, the next
+    /// arena of its layout's bucket, and its neighbours in the order the arenas were read.
+    /// </summary>
     private struct Slot
     {
         internal ArrayNodeArena Arena;
         internal int Layout;
+        internal int Chain;
+        internal int Earlier;
+        internal int Later;
         internal VortexBuffer Source;
         internal long LastUse;
         internal bool? Ranged;

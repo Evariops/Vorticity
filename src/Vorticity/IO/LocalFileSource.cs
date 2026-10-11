@@ -18,7 +18,8 @@ internal interface IReadAnticipation
 
 /// <summary>
 /// The reader of a file opened from a path: positional reads until a scan's plan announces data
-/// to read, and a mapping of the whole file from then on.
+/// to read, and a mapping of the whole file from then on; or, on Windows when the session keeps
+/// no mapping, positional reads throughout.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -31,6 +32,17 @@ internal interface IReadAnticipation
 /// would save the mapping's cost, about 16 µs and 0.8 µs for each 16 KiB page touched a first
 /// time, only on a file read once and under 4 MiB, and would pay for it with an allocation and an
 /// asynchronous completion per batch.
+/// </para>
+/// <para>
+/// That holds where the mapping is kept, and where a page is 16 KiB. Windows maps 4 KiB pages,
+/// faults each in for 0.5 to 0.9 µs, and unmaps each a scan touched for 0.3 to 2 µs more, on the
+/// thread that closes the file, the dearest when the lanes of a wide scan touched them on many
+/// cores; a page that a segment of 100 bytes touches costs all of it. A file mapped for one scan
+/// and dropped with its reader, when the session keeps no mapping, spent a quarter to a third of
+/// a cold scan of the reference files unmapping it as it closed, and its projections touched a
+/// page per segment. There a scan reads positionally: the segments of a batch in runs coalesced
+/// over gaps a read costs less than, each run one read on the lane's thread into a pooled block
+/// its segments are views of, a copy from the system cache with no fault and nothing to unmap.
 /// </para>
 /// <para>
 /// A positional read is a <c>pread</c> on the caller's thread into a pooled buffer, completed
@@ -55,6 +67,17 @@ internal interface IReadAnticipation
 /// </remarks>
 internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
 {
+    /// <summary>
+    /// The runs a scan reads positionally: segments less than 16 KiB apart are read as one, the
+    /// bytes between them copied for less than a read costs, about 2 µs, and a run is at most
+    /// 4 MiB, a block the pool keeps.
+    /// </summary>
+    private static readonly SegmentReadOptions Runs = new SegmentReadOptions
+    {
+        CoalesceGapBytes = 16 * 1024,
+        MaxCoalescedReadBytes = 4 << 20,
+    };
+
     // Null when the open took over a kept mapping without opening the file.
     private readonly SafeFileHandle? _handle;
     private readonly string _path;
@@ -62,12 +85,16 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     private MappedFileOwner? _mapping;
     private int _disposed;
 
+    /// <summary>Whether scans read positionally rather than through a mapping: on Windows, when the session keeps none.</summary>
+    private readonly bool _positional;
+
     private LocalFileSource(SafeFileHandle handle, string path, MappedFileCache? mappings, long length)
     {
         _handle = handle;
         _path = path;
         _mappings = mappings;
         Length = length;
+        _positional = mappings is null && OperatingSystem.IsWindows();
     }
 
     private LocalFileSource(MappedFileOwner kept, string path, MappedFileCache mappings, long length)
@@ -112,7 +139,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     public void AnticipateData()
     {
         // A reader without a handle took its mapping over at the open, and has it until disposed.
-        if (Length == 0 || Volatile.Read(ref _mapping) is not null || Volatile.Read(ref _disposed) != 0 || _handle is null)
+        if (_positional || Length == 0 || Volatile.Read(ref _mapping) is not null || Volatile.Read(ref _disposed) != 0 || _handle is null)
         {
             return;
         }
@@ -172,20 +199,24 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         }
 
         MappedFileOwner? mapping = Borrow();
-        if (mapping is null && Pending(requests) >= ParallelBatch)
+        if (mapping is null && !_positional && Pending(requests) >= ParallelBatch)
         {
             return ReadManyInParallelAsync(requests, cancellationToken);
         }
 
         try
         {
-            if (mapping is null)
+            if (mapping is not null)
             {
-                ReadManyPositionally(requests);
+                mapping.ReadMany(requests, Length);
+            }
+            else if (_positional)
+            {
+                CoalescedReads.ReadMany(requests, _handle!, Length, Runs);
             }
             else
             {
-                mapping.ReadMany(requests, Length);
+                ReadManyPositionally(requests);
             }
 
             requests.Complete();
@@ -225,8 +256,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         }
     }
 
-    // A scan maps the file before it reads a data segment.
-    bool ISegmentReader.ReadsInPlace => true;
+    // A scan maps the file before it reads a data segment, unless it reads positionally.
+    bool ISegmentReader.ReadsInPlace => !_positional;
 
     // A positional read is a copy and no round trip: the last 8 KiB hold the footer of a file of a
     // few columns, and read in a quarter of the time the window's 64 KiB take; a larger footer is

@@ -31,6 +31,29 @@ public sealed class SparseDecoderTests
     }
 
     [Fact]
+    public void PatchesThatAllHoldOneValueAreReadFromAConstant()
+    {
+        // What the reference writes when every patch holds the same value, as Vortex 0.86.1 does on a
+        // column of the ClickBench hits table: the values child a constant of the patch count.
+        ScalarStore store = new();
+        TestNode root = new TestNode("vortex.sparse")
+            .WithMetadata(TestMetadata.Sparse(PatchesMetadata.Create(3, 0, PType.U32)))
+            .WithBuffer(0)
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(1))
+            .WithChild(new TestNode("vortex.constant").WithBuffer(2));
+
+        using DecodeHarness harness = DecodeHarness.Load(
+            root,
+            TestMetadata.Scalar(store.Int64(0)),
+            TestBuffers.UInt32(1, 2, 4),
+            TestMetadata.Scalar(store.Int64(-5)));
+
+        DType i32 = harness.Types.Primitive(PType.I32, Nullability.NonNullable);
+        CanonicalNode node = harness.Node(harness.DecodeRoot(i32, 6));
+        Assert.Equal([0, -5, -5, 0, -5, 0], ForDecoderTests.ReadInt32(node));
+    }
+
+    [Fact]
     public void ThePatchOffsetShiftsEveryIndex()
     {
         ScalarStore store = new();

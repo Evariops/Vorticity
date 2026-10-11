@@ -71,7 +71,7 @@ internal static class Program
 
         if (args.Length > 0 && args[0] == "--ffi-check")
         {
-            return await FfiCheck().ConfigureAwait(false);
+            return await FfiCheck(args[1..]).ConfigureAwait(false);
         }
 
         // `--scenario` is one scenario in this process, for `--report` to spawn and time. It prints
@@ -580,7 +580,8 @@ internal static class Program
                                                        under five goals, the choice and its reason
                                      --out <page>      the tables as the page's section, after a
                                                        run of every column
-          --ffi-check             rows AND decoded values agree with the reference, < 1 s
+          --ffi-check [file ...]  rows AND decoded values agree with the reference, < 1 s; on
+                                     the given files instead of seven of the corpus
           --report                 the published comparison: eight high-level scenarios at 2^20
                                      rows and ten times that, EACH SIDE IN ITS OWN PROCESS, on one
                                      core and on all of them, on our file and on the reference's,
@@ -654,7 +655,7 @@ internal static class Program
 
         """);
 
-    private static async Task<int> FfiCheck()
+    private static async Task<int> FfiCheck(string[] files)
     {
         if (!RustReader.Available)
         {
@@ -677,9 +678,9 @@ internal static class Program
         ];
 
         int mismatches = 0;
-        foreach (string id in ids)
+        foreach (string id in files.Length > 0 ? files : ids)
         {
-            string path = Corpus.Path(id);
+            string path = files.Length > 0 ? System.IO.Path.GetFullPath(id) : Corpus.Path(id);
             long ours = 0;
             long ourBatches = 0;
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))

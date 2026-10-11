@@ -102,8 +102,14 @@ internal sealed class StructLayoutReader : LayoutReader
             Span<int> nameSpan = names.Span;
             Span<DType> typeSpan = fieldTypes.Span;
 
-            for (int s = 0; s < selected; s++)
+            // Where lanes share the decodes of chunks wider than a batch, each batch starts at
+            // another column, so that lanes on neighbouring batches do not reach one column's
+            // shared decode together and wait there one after the other. Elsewhere the columns go
+            // in order.
+            int first = selected > 1 && context.MeetsOtherLanes ? FirstColumn(context.Batch, selected) : 0;
+            for (int t = 0; t < selected; t++)
             {
+                int s = t + first < selected ? t + first : t + first - selected;
                 int k = fields.SelectedField(s);
                 LayoutNode child = node.GetChild(k + validityChildren);
                 FieldMask childMask = fields.SelectedMask(s);
@@ -143,6 +149,10 @@ internal sealed class StructLayoutReader : LayoutReader
             children.Dispose();
         }
     }
+
+    /// <summary>The selected column batch <paramref name="batch"/> starts at: neighbouring batches start far apart.</summary>
+    private static int FirstColumn(long batch, int selected) =>
+        (int)((((ulong)batch * 0x9E3779B97F4A7C15UL) >> 40) % (ulong)selected);
 
     private static DType RequireStruct(in LayoutNode node)
     {

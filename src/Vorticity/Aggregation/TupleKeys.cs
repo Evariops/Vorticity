@@ -103,7 +103,10 @@ internal sealed class TupleLayout
         Shapes = shapes;
         Offsets = offsets;
         _memory = memory;
-        _longIds = new ConcurrentDictionary<byte[], int>(LongComparer.Instance);
+
+        // One lock, since the texts are numbered one at a time under the gate and looked up without
+        // it: the default, a lock and a count per processor, made every run pay for the machine's cores.
+        _longIds = new ConcurrentDictionary<byte[], int>(concurrencyLevel: 1, capacity: 31, LongComparer.Instance);
         _longLookup = _longIds.GetAlternateLookup<ReadOnlySpan<byte>>();
     }
 
@@ -119,28 +122,19 @@ internal sealed class TupleLayout
     /// </summary>
     internal static TupleLayout? Of(ColumnShape[] shapes, QueryMemory? memory)
     {
-        if (shapes.Length is < 2 or > 8)
+        if (!Fits(shapes))
         {
             return null;
         }
 
-        int[] widths = new int[shapes.Length];
-        for (int p = 0; p < shapes.Length; p++)
-        {
-            widths[p] = WidthOf(shapes[p]);
-            if (widths[p] == 0)
-            {
-                return null;
-            }
-        }
-
         int[] offsets = new int[shapes.Length];
         int at = 0;
-        foreach (int width in (int[])[WordBytes, 8, 4, 2, 1])
+        ReadOnlySpan<int> order = [WordBytes, 8, 4, 2, 1];
+        foreach (int width in order)
         {
             for (int p = 0; p < shapes.Length; p++)
             {
-                if (widths[p] == width)
+                if (WidthOf(shapes[p]) == width)
                 {
                     offsets[p] = at;
                     at += width;
@@ -148,7 +142,30 @@ internal sealed class TupleLayout
             }
         }
 
-        return at <= FlagsAt ? new TupleLayout(shapes, offsets, memory) : null;
+        return new TupleLayout(shapes, offsets, memory);
+    }
+
+    /// <summary>Whether a tuple can hold a key of <paramref name="shapes"/>, as <see cref="Of"/> decides, without making its layout.</summary>
+    internal static bool Fits(ColumnShape[] shapes)
+    {
+        if (shapes.Length is < 2 or > 8)
+        {
+            return false;
+        }
+
+        int bytes = 0;
+        foreach (ColumnShape shape in shapes)
+        {
+            int width = WidthOf(shape);
+            if (width == 0)
+            {
+                return false;
+            }
+
+            bytes += width;
+        }
+
+        return bytes <= FlagsAt;
     }
 
     /// <summary>The bytes column <paramref name="shape"/> takes in a tuple: a word for a text, its width for an integer; 0 for any other.</summary>

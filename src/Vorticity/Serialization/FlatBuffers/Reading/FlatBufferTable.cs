@@ -155,6 +155,14 @@ internal readonly ref struct FlatBufferTable
     /// <exception cref="VortexFormatException">The slot points outside the table body.</exception>
     public bool HasField(int fieldId) => TryGetFieldPos(fieldId, 1, out _);
 
+    /// <summary>
+    /// The absolute position, in the table's buffer, of a scalar field of <paramref name="width"/>
+    /// bytes the vtable holds, for a caller that rewrites it in place.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The slot points outside the table body.</exception>
+    internal bool TryGetFieldPosition(int fieldId, int width, out int position) =>
+        TryGetFieldPos(fieldId, width, out position);
+
     /// <summary>Reads a <c>byte</c> field, or <paramref name="defaultValue"/> when absent.</summary>
     public sbyte GetInt8(int fieldId, sbyte defaultValue = 0) =>
         TryGetFieldPos(fieldId, sizeof(sbyte), out int pos)

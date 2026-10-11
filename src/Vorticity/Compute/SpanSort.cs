@@ -13,8 +13,9 @@ namespace Vorticity.Compute;
 /// An introsort: an insertion sort below sixteen elements, a quicksort on the median of three above
 /// it, and a heapsort once the partitions nest deeper than twice the logarithm of the length, so the
 /// worst case stays n log n. The comparer is a value type, so each instantiation compiles its
-/// comparison inline. Not stable, which no caller needs: what they sort is distinct or totally
-/// ordered.
+/// comparison inline. Not stable, but step for step the introsort .NET's own sorts run, two and
+/// three elements included, so equal keys end in the order <c>List&lt;T&gt;.Sort</c> leaves them in:
+/// a caller whose output follows that order, as FSST's symbol ranking does, keeps it here.
 /// </remarks>
 internal static class SpanSort
 {
@@ -41,6 +42,20 @@ internal static class SpanSort
         {
             if (size <= InsertionThreshold)
             {
+                if (size == 2)
+                {
+                    SwapIfGreater(keys, comparer, 0, 1);
+                    return;
+                }
+
+                if (size == 3)
+                {
+                    SwapIfGreater(keys, comparer, 0, 1);
+                    SwapIfGreater(keys, comparer, 0, 2);
+                    SwapIfGreater(keys, comparer, 1, 2);
+                    return;
+                }
+
                 InsertionSort(keys[..size], comparer);
                 return;
             }

@@ -1043,7 +1043,7 @@ internal static class ColumnCompressor
             return ColumnPlan.ForBitPacking(winner);
         }
 
-        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
+        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace);
     }
 
     /// <summary>
@@ -1066,11 +1066,34 @@ internal static class ColumnCompressor
     /// construction and its trial cheap, so the guard has nothing to guard
     /// (<see cref="Cascade.IsValuesChild"/>).
     /// </param>
+    /// <param name="owner">
+    /// For the values child of a dictionary or a run-end, the column they come from, which remembers
+    /// what the trials made of its last chunk's values; null for any other column.
+    /// </param>
     /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder; null for one of its own.</param>
     private static ColumnPlan Trials(
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
-        bool gatesOff, ArrayBlobWriter.Workspace? workspace)
+        bool gatesOff, ColumnWriter? owner, ArrayBlobWriter.Workspace? workspace)
     {
+        // Values zstd took the chunk before go to zstd alone, when it prices them; every candidate
+        // is tried again one chunk in eight, and on every chunk of a size-first write.
+        ColumnWriter? remembers = gatesOff && workspace is not { SizeFirst: true } ? owner : null;
+        ColumnPlan plan = Candidates(arena, nodeIndex, node, target, budget, gatesOff, remembers is { ValuesHeldByZstd: true }, workspace, out bool everyCandidate);
+        remembers?.NoteValues(plan.Scheme, everyCandidate);
+        return plan;
+    }
+
+    /// <summary>
+    /// The trials themselves, with FSST and OnPair passed over when zstd prices the column and
+    /// <c>zstdAlone</c> says it took its values the chunk before; <c>everyCandidate</c> says
+    /// whether they were tried.
+    /// </summary>
+    private static ColumnPlan Candidates(
+        CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
+        bool gatesOff, bool zstdAlone, ArrayBlobWriter.Workspace? workspace, out bool everyCandidate)
+    {
+        everyCandidate = true;
+
         // Every ceiling below is derived from this one.
         long plain = budget;
 
@@ -1147,8 +1170,12 @@ internal static class ColumnCompressor
             }
         }
 
+        // Values zstd took the chunk before, and prices again, are its alone this chunk.
+        bool rest = !(zstdAlone && frame is not null);
+        everyCandidate = rest;
+
         FsstPlan? fsst = null;
-        if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
+        if (rest && node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst"))
         {
             // Two bars, and FSST has to clear both, so the ceiling handed down is the tighter one.
             //
@@ -1176,7 +1203,7 @@ internal static class ColumnCompressor
         // OnPair, on text the same bars hold for, and a tenth under FSST where FSST priced: two
         // encodings that decode alike, so the second has to be worth it. Its training scans a
         // sample, and the sample's codes decide before the pass over every row.
-        if (node.Kind == CanonicalKind.VarBinView && node.DType.Kind == DTypeKind.Utf8 && Allows(target, "vortex.onpair"))
+        if (rest && node.Kind == CanonicalKind.VarBinView && node.DType.Kind == DTypeKind.Utf8 && Allows(target, "vortex.onpair"))
         {
             long ceiling = plain * 9 / 10;
             if (frame is { } priced)
@@ -1815,7 +1842,7 @@ internal static class ColumnCompressor
             default:
                 return sizeFirst
                     ? SmallestTrial(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace)
-                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
+                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, cascade.Owner, workspace);
         }
     }
 

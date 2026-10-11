@@ -59,7 +59,7 @@ internal static class LayoutParser
         switch (record.Encoding)
         {
             case LayoutEncodingId.Flat:
-                ParseFlat(metadata, segments.Length, wireChildren);
+                record.Bufferless = ParseFlat(metadata, segments.Length, wireChildren);
                 break;
 
             case LayoutEncodingId.Chunked:
@@ -112,7 +112,8 @@ internal static class LayoutParser
 
     // ------------------------------------------------------------------------------ vortex.flat
 
-    private static void ParseFlat(ReadOnlySpan<byte> metadata, int segmentCount, int childCount)
+    /// <returns>Whether the metadata inlines an array tree that declares no buffer.</returns>
+    private static bool ParseFlat(ReadOnlySpan<byte> metadata, int segmentCount, int childCount)
     {
         // Exactly one segment, no children.
         if (segmentCount != 1)
@@ -125,9 +126,10 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.flat", "children", childCount, 0);
         }
 
-        // Parsed for validation only. Normally absent; when present it inlines the whole array
-        // flatbuffer.
-        FlatLayoutMetadata.Read(metadata);
+        // Normally absent; when present it inlines the whole array flatbuffer, and a tree that
+        // declares no buffer is the whole array, read without its segment.
+        FlatLayoutMetadata flat = FlatLayoutMetadata.Read(metadata);
+        return flat.HasArrayEncodingTree && FlatLayoutMetadata.DeclaresNoBuffer(flat.ArrayEncodingTree);
     }
 
     // --------------------------------------------------------------------------- vortex.chunked
@@ -237,29 +239,67 @@ internal static class LayoutParser
         record.ChildStart = b.ReserveChildren(wireChildren);
         record.ChildCount = wireChildren;
 
+        // At the root, each child is a column parsed when a walk first reaches it, into a tree of
+        // its own (LayoutTree.Column); the slot holds ~i until then. Its row count is read here all
+        // the same, from its table, so that a column that disagrees with the root fails the parse
+        // as it always did.
+        if (depth == 1 && b.DefersColumns)
+        {
+            b.DeferredColumns = true;
+            for (int i = 0; i < wireChildren; i++)
+            {
+                ulong wireRows = view.GetChild(i).RowCount;
+                if (wireRows > long.MaxValue)
+                {
+                    LayoutsThrow.RowCountRange(wireRows);
+                }
+
+                CheckFieldRows(nullable, i, validityChildren, (long)wireRows, record.RowCount);
+                b.ChildIndices[record.ChildStart + i] = ~i;
+            }
+
+            return;
+        }
+
         for (int i = 0; i < wireChildren; i++)
         {
-            // Serialized order: validity first when the struct dtype is nullable, then the fields
-            // in dtype order. The validity child is a non-nullable Bool.
-            DType childType = nullable && i == 0
-                ? b.Types.Bool(Nullability.NonNullable)
-                : dtype.GetField(i - validityChildren);
-
             LayoutView child = view.GetChild(i);
-            int childIndex = ParseNode(b, in child, childType, depth + 1);
+            int childIndex = ParseNode(b, in child, FieldType(b, dtype, nullable, i), depth + 1);
             b.ChildIndices[record.ChildStart + i] = childIndex;
+            CheckFieldRows(nullable, i, validityChildren, b.Records[childIndex].RowCount, record.RowCount);
+        }
+    }
 
-            long childRows = b.Records[childIndex].RowCount;
-            if (childRows != record.RowCount)
-            {
-                LayoutsThrow.RowCountMismatch(
-                    "vortex.struct",
-                    nullable && i == 0
-                        ? "validity"
-                        : "field " + (i - validityChildren).ToString(CultureInfo.InvariantCulture),
-                    childRows,
-                    record.RowCount);
-            }
+    /// <summary>
+    /// Parses child <paramref name="slot"/> of the struct at the root, which the root's parse left
+    /// to be parsed when first reached: the root of a column's tree.
+    /// </summary>
+    internal static void ParseColumn(LayoutTree.Builder b, in LayoutView root, DType rootType, int slot)
+    {
+        LayoutView child = root.GetChild(slot);
+        ParseNode(b, in child, FieldType(b, rootType, rootType.IsNullable, slot), depth: 2);
+    }
+
+    /// <summary>
+    /// The dtype of a struct's child <paramref name="i"/> in serialized order: validity first when
+    /// the struct dtype is nullable, a non-nullable Bool, then the fields in dtype order.
+    /// </summary>
+    private static DType FieldType(LayoutTree.Builder b, DType dtype, bool nullable, int i) =>
+        nullable && i == 0
+            ? b.Types.Bool(Nullability.NonNullable)
+            : dtype.GetField(i - (nullable ? 1 : 0));
+
+    private static void CheckFieldRows(bool nullable, int i, int validityChildren, long childRows, long rows)
+    {
+        if (childRows != rows)
+        {
+            LayoutsThrow.RowCountMismatch(
+                "vortex.struct",
+                nullable && i == 0
+                    ? "validity"
+                    : "field " + (i - validityChildren).ToString(CultureInfo.InvariantCulture),
+                childRows,
+                rows);
         }
     }
 
@@ -434,8 +474,7 @@ internal static class LayoutParser
         // growing the table would leave the span behind.
         int aggregateCount = b.Specs.Count;
         int aggregateStart = b.ReserveZoneAggregates(aggregateCount);
-        bool derived = ZoneMapSchema.TryBuildAggregateTable(
-            b.Types, dtype, b.Specs, out DType zonesType, b.ZoneAggregates.AsSpan(aggregateStart, aggregateCount));
+        bool derived = b.ZoneTable(dtype, metadata, b.ZoneAggregates.AsSpan(aggregateStart, aggregateCount), out DType zonesType);
 
         int childCount = derived ? 2 : 1;
         record.ChildStart = b.ReserveChildren(childCount);
