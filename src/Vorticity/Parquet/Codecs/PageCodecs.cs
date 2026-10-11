@@ -3,8 +3,9 @@ using System.Buffers;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using ManagedCompressions.Lz4;
+using ManagedCompressions.Zstd;
 using Vorticity.Parquet.Metadata;
-using Vorticity.Zstd;
 
 namespace Vorticity.Parquet.Codecs;
 
@@ -17,10 +18,11 @@ namespace Vorticity.Parquet.Codecs;
 /// <para>
 /// A decompression writes into a destination of exactly the page's uncompressed length, which the
 /// caller has held to its cap before allocating it, and a page that decompresses to any other length
-/// is <see cref="ParquetFormatException"/>. ZSTD goes through <c>Vorticity.Zstd</c>, with the
-/// decompressor the caller's scan holds; SNAPPY, LZ4_RAW and GZIP's decoding are this package's;
-/// GZIP's encoding and BROTLI are the base class library's. LZO and the deprecated LZ4 have no format
-/// the standard gives, and are refused, as is a codec number the standard does not define.
+/// is <see cref="ParquetFormatException"/>. ZSTD goes through <c>ManagedCompressions.Zstd</c>, with
+/// the decompressor the caller's scan holds, and LZ4_RAW through <c>ManagedCompressions.Lz4</c>;
+/// SNAPPY and GZIP's decoding are this package's; GZIP's encoding and BROTLI are the base class
+/// library's. LZO and the deprecated LZ4 have no format the standard gives, and are refused, as is a
+/// codec number the standard does not define.
 /// </para>
 /// </remarks>
 internal static class PageCodecs
@@ -42,7 +44,16 @@ internal static class PageCodecs
                 Snappy.Decompress(source, destination);
                 return;
             case CompressionCodec.Lz4Raw:
-                Lz4Block.Decompress(source, destination);
+                if (!Lz4Block.TryDecompress(source, destination, out int lz4))
+                {
+                    ParquetThrow.Format("An LZ4 page is corrupt, or decompresses to more than its header declares.");
+                }
+
+                if (lz4 != destination.Length)
+                {
+                    ParquetThrow.Format("An LZ4 page decompresses to fewer bytes than its header declares.");
+                }
+
                 return;
             case CompressionCodec.Zstd:
                 DecompressZstd(source, destination, zstd ?? throw new ArgumentNullException(nameof(zstd)));

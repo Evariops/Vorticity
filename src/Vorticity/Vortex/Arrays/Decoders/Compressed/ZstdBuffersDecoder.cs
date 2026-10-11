@@ -3,10 +3,10 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
+using ManagedCompressions.Zstd;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
-using Vorticity.Zstd;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 

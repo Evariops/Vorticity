@@ -1,8 +1,8 @@
 using System;
+using ManagedCompressions.Zstd;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;
-using Vorticity.Zstd;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;
@@ -113,7 +113,7 @@ public sealed class PageCodecTests
         // sequence, which holds no literal.
         byte[] block = [0x35, 0x61, 0x62, 0x63, 0x03, 0x00, 0x00];
         byte[] read = new byte[12];
-        Lz4Block.Decompress(block, read);
+        PageCodecs.Decompress(CompressionCodec.Lz4Raw, block, read, null);
         Assert.Equal("abcabcabcabc"u8.ToArray(), read);
     }
 
@@ -148,7 +148,7 @@ public sealed class PageCodecTests
     [InlineData(new byte[] { 0x35, 0x61, 0x62 })]
     [InlineData(new byte[] { 0x35, 0x61, 0x62, 0x63, 0x03, 0x00 })]
     public void ACorruptLz4BlockIsRefused(byte[] block) =>
-        Assert.Throws<ParquetFormatException>(() => Lz4Block.Decompress(block, new byte[12]));
+        Assert.Throws<ParquetFormatException>(() => PageCodecs.Decompress(CompressionCodec.Lz4Raw, block, new byte[12], null));
 
     [Theory]
     [InlineData(CompressionCodec.Snappy)]
@@ -156,8 +156,8 @@ public sealed class PageCodecTests
     [InlineData(CompressionCodec.Gzip)]
     internal void AMutatedStreamIsReadOrRefusedIntoADestinationOfAnySize(CompressionCodec codec)
     {
-        // This package's own decoders, each stream mutated a few bytes and read into a destination
-        // of the edge sizes, empty among them, as a page header that lies would give it.
+        // This package's own decoders and LZ4's, each stream mutated a few bytes and read into a
+        // destination of the edge sizes, empty among them, as a page header that lies would give it.
         Random random = new((int)codec * 41);
         for (int trial = 0; trial < 2_000; trial++)
         {

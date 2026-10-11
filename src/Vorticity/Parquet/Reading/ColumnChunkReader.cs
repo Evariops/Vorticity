@@ -8,6 +8,7 @@ using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 using System.Threading;
+using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -174,7 +175,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// The ZSTD decompressors the reader's pages decompressed ahead use, one a page in flight, kept from
     /// one page to the next: the core's pool keeps sixteen, and a scan's lanes may be more.
     /// </summary>
-    private readonly Zstd.ZstdDecompressor?[] _laneZstd = new Zstd.ZstdDecompressor?[PageLanes.Depth];
+    private readonly ZstdDecompressor?[] _laneZstd = new ZstdDecompressor?[PageLanes.Depth];
 
     /// <summary>A reader of <paramref name="leaf"/>'s chunks.</summary>
     /// <param name="leaf">The column.</param>
@@ -1278,7 +1279,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// The context's ZSTD decompressor for a chunk of ZSTD pages, null for any other codec: a context
     /// rents one when first asked, and a scan's fields decode side by side, each in a context of its own.
     /// </summary>
-    private Zstd.ZstdDecompressor? ZstdOf(ScanContext context) => _codec == CompressionCodec.Zstd ? context.Zstd : null;
+    private ZstdDecompressor? ZstdOf(ScanContext context) => _codec == CompressionCodec.Zstd ? context.Zstd : null;
 
     /// <summary>
     /// <paramref name="size"/> bytes of <paramref name="source"/> decompressed: the block a lane
@@ -1458,7 +1459,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>A ZSTD decompressor for a page decompressed ahead: one of the reader's, or the core pool's.</summary>
-    private Zstd.ZstdDecompressor TakeZstd()
+    private ZstdDecompressor TakeZstd()
     {
         for (int i = 0; i < _laneZstd.Length; i++)
         {
@@ -1472,7 +1473,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     }
 
     /// <summary>Keeps a decompressor for the reader's next page decompressed ahead, or gives it back to the core's pool.</summary>
-    private void GiveZstd(Zstd.ZstdDecompressor zstd)
+    private void GiveZstd(ZstdDecompressor zstd)
     {
         for (int i = 0; i < _laneZstd.Length; i++)
         {
@@ -1555,7 +1556,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         /// </summary>
         protected override void Run()
         {
-            Zstd.ZstdDecompressor? zstd = codec == CompressionCodec.Zstd ? reader.TakeZstd() : null;
+            ZstdDecompressor? zstd = codec == CompressionCodec.Zstd ? reader.TakeZstd() : null;
             try
             {
                 PageCodecs.Decompress(codec, source.Span, Block.WritableSpan, zstd);

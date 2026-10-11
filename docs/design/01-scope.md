@@ -24,10 +24,12 @@ component and its state.
 ## 2. What Vorticity is
 
 Vorticity is a reader and a writer of Vortex files for .NET 11, with no third-party dependency. The
-FlatBuffers and Protobuf runtimes are written here, and so is the Zstandard codec,
-`Vorticity.Zstd`. The only other package the core references is Microsoft's `System.IO.Hashing`
-(see [the founding constraints](03-architecture.md#1-founding-constraints)). It is compatible with
-Native AOT and trimming.
+FlatBuffers and Protobuf runtimes are written here. The Zstandard and LZ4 codecs are
+`ManagedCompressions.Zstd` and `ManagedCompressions.Lz4`, managed packages from a sibling Evariops
+project, [ManagedCompressions](https://github.com/Evariops/ManagedCompressions). The only other
+package the core references is Microsoft's `System.IO.Hashing` (see
+[the founding constraints](03-architecture.md#1-founding-constraints)). It is compatible with Native
+AOT and trimming.
 
 | package | what it holds |
 |---|---|
@@ -35,7 +37,6 @@ Native AOT and trimming.
 | `Vorticity.Generators` | the `[VortexRecord]` source generator and the analyzers VX1001 to VX1011, build time only |
 | `Vorticity.Dataset` | a versioned dataset over an object store ([13-dataset.md](13-dataset.md)), experimental under `VX0001` |
 | `Vorticity.RowEncoding` | the byte-sortable row encoding ([06-row-encoding.md](06-row-encoding.md)), experimental under `VX0002` because upstream reserves the right to change it |
-| `Vorticity.Zstd` | Zstandard compression and decompression in managed C#, which the core's `vortex.zstd` and `vortex.zstd_buffers` go through ([its README](../../src/Vorticity.Zstd/README.md)) |
 | `vxdump` | the inspection tool, written against the public API only |
 
 ## 3. What it reads

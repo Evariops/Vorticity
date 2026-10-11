@@ -13,8 +13,9 @@ Publish an application that uses this library ahead of time.
 dotnet publish -c Release -r linux-x64
 ```
 
-Nothing else is required. The four libraries (`Vorticity`, `Vorticity.Dataset`,
-`Vorticity.RowEncoding` and `Vorticity.Zstd`) are built with `IsAotCompatible` and `IsTrimmable`, so
+Nothing else is required. The three libraries (`Vorticity`, `Vorticity.Dataset` and
+`Vorticity.RowEncoding`) and the two codecs they depend on (`ManagedCompressions.Zstd` and
+`ManagedCompressions.Lz4`) are built with `IsAotCompatible` and `IsTrimmable`, so
 the trim and AOT analyzers run over your code when you publish, and an `IL2xxx` or `IL3xxx` warning
 points at the call of yours that causes the problem. `InvariantGlobalization` is the application's
 choice, not the library's. Set it if your application can do without culture data, as vxdump and

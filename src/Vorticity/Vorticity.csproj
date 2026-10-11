@@ -42,11 +42,13 @@
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 
-  <!-- vortex.zstd and vortex.zstd_buffers, read and written by this repository's own zstd rather
-       than by the libzstd the runtime ships: managed, so it allocates nothing native and runs
-       wherever .NET does, and faster than the runtime's at decompression. -->
+  <!-- vortex.zstd, vortex.zstd_buffers and Parquet's ZSTD, read and written by a managed zstd
+       rather than by the libzstd the runtime ships: it allocates nothing native, runs wherever .NET
+       does, and is faster than the runtime's at decompression. Parquet's LZ4_RAW goes through the
+       managed LZ4 of the same repository. -->
   <ItemGroup>
-    <ProjectReference Include="../Vorticity.Zstd/Vorticity.Zstd.csproj" />
+    <PackageReference Include="ManagedCompressions.Zstd" />
+    <PackageReference Include="ManagedCompressions.Lz4" />
   </ItemGroup>
 
   <!-- Compile-time enforcement of the bans in BannedSymbols.txt. Build-time only: PrivateAssets

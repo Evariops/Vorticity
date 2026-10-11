@@ -7,11 +7,11 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 
+using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
-using Vorticity.Zstd;
 
 namespace Vorticity.Writing;
 

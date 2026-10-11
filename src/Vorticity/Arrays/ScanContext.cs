@@ -4,11 +4,11 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Text;
+using ManagedCompressions.Zstd;
 using Vorticity.Buffers;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Types;
-using Vorticity.Zstd;
 
 namespace Vorticity.Arrays;
 

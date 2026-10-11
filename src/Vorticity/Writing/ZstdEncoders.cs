@@ -1,5 +1,5 @@
 using System.Threading;
-using Vorticity.Zstd;
+using ManagedCompressions.Zstd;
 
 namespace Vorticity.Writing;
 
