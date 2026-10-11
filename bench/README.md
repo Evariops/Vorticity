@@ -202,6 +202,7 @@ and six more behind `--explore`.
 | class | in the default run |
 |---|---|
 | `FastLanesKernelBenchmarks` | yes, at 17 bits, and `--full` adds 10 and 33 |
+| `RunEndKernelBenchmarks` | yes, on runs of 4 to 12 rows and of 200 to 1 000, and `--full` adds 1 to 8 and 16 to 64 |
 | `RowEncodingBenchmarks` | yes |
 | `CompressorBenchmarks` | yes |
 | `LanesBenchmarks` | yes |

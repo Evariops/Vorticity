@@ -414,266 +414,37 @@ internal ref struct ValueWriter
         where TEnd : unmanaged
     {
         ReadOnlySpan<TEnd> typed = MemoryMarshal.Cast<byte, TEnd>(ends)[..runCount];
-        return _width switch
+        int position = _width switch
         {
-            1 => Runs<TEnd, byte>(
-                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
-            2 => Runs<TEnd, ushort>(
-                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
-            4 => Runs<TEnd, uint>(
-                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
-            8 => Runs<TEnd, ulong>(
-                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
-            16 => Runs<TEnd, Vector128<byte>>(
-                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
+            1 => Expand<TEnd, byte>(typed, in source, firstRun, offset, length),
+            2 => Expand<TEnd, ushort>(typed, in source, firstRun, offset, length),
+            4 => Expand<TEnd, uint>(typed, in source, firstRun, offset, length),
+            8 => Expand<TEnd, ulong>(typed, in source, firstRun, offset, length),
+            16 => Expand<TEnd, Vector128<byte>>(typed, in source, firstRun, offset, length),
 
             // Width 32 is `i256`, and it has no 32-byte unmanaged type here the way `RowKernels`
             // has its own private one. A run-end column of i256 walks the caller's loop.
             _ => -1,
         };
-    }
 
-    /// <summary>The run loop with both types resolved: a compare, a widen and a typed fill.</summary>
-    private readonly int Runs<TEnd, TValue>(
-        ReadOnlySpan<TEnd> ends, in ValueReader source, int firstRun, ulong offset, int length,
-        in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
-        where TEnd : unmanaged
-        where TValue : unmanaged
-    {
-        // Without vectors of the value's width, a run is a span fill.
-        if (!(Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported)
-            && !(Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported))
+        // The rows' validity in a pass of its own over the runs, which are few beside the rows: kept
+        // out of the expansion, whose loop then holds nothing but the stores.
+        if (position >= 0 && tracked)
         {
-            return FilledRuns<TEnd, TValue>(ends, in source, firstRun, offset, length, in sourceValidity, in validity, tracked);
-        }
-
-        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(source.Bytes);
-        Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
-        ref TValue into = ref MemoryMarshal.GetReference(destination);
-        ulong unsignedLength = (ulong)(uint)length;
-
-        // A run is stores of the value in every lane, a vector at a time, the last written past the
-        // run's end into rows the next runs write again: a run holds few rows, and the call a fill
-        // makes outweighs them. The runs whose last vector would pass the rows are filled. With
-        // 128-bit vectors a step is four stores, whatever the run's length: on an Apple M4 Pro, one
-        // window of 2 048 runs of 64 `i32` rows took 5.1 µs where a fill a run took 9.3, and runs of
-        // 16 to 4 096 rows came out 1.4 to 2.3 times faster than the fill.
-        int lanes = Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported ? Vector256<TValue>.Count
-            : Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported ? Vector128<TValue>.Count
-            : 0;
-        int position = 0;
-        int run = firstRun;
-        if (!tracked && !(Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported))
-        {
-            (run, position) = StoredRuns(ends, values, ref into, run, offset, length);
-        }
-
-        for (; run < ends.Length && position < length; run++)
-        {
-            ulong end = WidenEnd(ends[run]) - offset;
-            if (end > unsignedLength)
-            {
-                end = unsignedLength;
-            }
-
-            int endRow = (int)end;
-            if (endRow <= position)
-            {
-                continue;
-            }
-
-            int rows = endRow - position;
-            if (lanes == Vector256<TValue>.Count && Vector256.IsHardwareAccelerated)
-            {
-                if (position + rows + lanes - 1 <= length)
-                {
-                    Vector256<TValue> repeated = Vector256.Create(values[run]);
-                    for (int k = 0; k < rows; k += lanes)
-                    {
-                        repeated.StoreUnsafe(ref into, (nuint)(position + k));
-                    }
-                }
-                else
-                {
-                    destination[position..endRow].Fill(values[run]);
-                }
-            }
-            else if (lanes != 0 && position + rows + (4 * lanes) - 1 <= length)
-            {
-                // The step walks a reference to a bound rather than an index from the run's
-                // start: the loop then holds the reference, the bound and the value, and Native AOT
-                // no longer spills the row it reached to the stack and reloads it every step.
-                Vector128<TValue> repeated = Vector128.Create(values[run]);
-                ref TValue at = ref Unsafe.Add(ref into, position);
-                ref TValue stop = ref Unsafe.Add(ref at, rows);
-                do
-                {
-                    repeated.StoreUnsafe(ref at);
-                    repeated.StoreUnsafe(ref at, (nuint)lanes);
-                    repeated.StoreUnsafe(ref at, (nuint)(2 * lanes));
-                    repeated.StoreUnsafe(ref at, (nuint)(3 * lanes));
-                    at = ref Unsafe.Add(ref at, 4 * lanes);
-                }
-                while (Unsafe.IsAddressLessThan(ref at, ref stop));
-            }
-            else
-            {
-                destination[position..endRow].Fill(values[run]);
-            }
-            if (tracked && sourceValidity.IsValid(run))
-            {
-                validity.SetValidRange(position, endRow - position);
-            }
-
-            position = endRow;
+            RunKernels.SetValidRuns(typed, firstRun, offset, length, in sourceValidity, validity.Bits);
         }
 
         return position;
     }
 
-    /// <summary>
-    /// The runs of a column with no validity to track, stored four 128-bit vectors a step until the
-    /// first run whose last step would pass the rows: the loop the general one leaves the rest to.
-    /// </summary>
-    /// <returns>The run it stopped at and the row it reached.</returns>
-    /// <remarks>
-    /// Apart from the general loop because that one calls out, a fill near the end and the
-    /// validity's writes, and every call costs a run the spills and reloads of what the loop holds:
-    /// this one calls nothing, and Native AOT keeps the run, the row and the bounds in registers.
-    /// </remarks>
-    private static (int Run, int Position) StoredRuns<TEnd, TValue>(
-        ReadOnlySpan<TEnd> ends, ReadOnlySpan<TValue> values, ref TValue into, int run, ulong offset, int length)
+    /// <summary>The runs expanded with both types resolved, by <see cref="RunKernels.Expand"/>.</summary>
+    private readonly int Expand<TEnd, TValue>(
+        ReadOnlySpan<TEnd> ends, in ValueReader source, int firstRun, ulong offset, int length)
         where TEnd : unmanaged
-        where TValue : unmanaged
-    {
-        int lanes = Vector128<TValue>.Count;
-        ulong unsignedLength = (ulong)(uint)length;
-        int position = 0;
-        for (; run < ends.Length && position < length; run++)
-        {
-            ulong end = WidenEnd(ends[run]) - offset;
-            if (end > unsignedLength)
-            {
-                end = unsignedLength;
-            }
-
-            int endRow = (int)end;
-            if (endRow <= position)
-            {
-                continue;
-            }
-
-            if (endRow + (4 * lanes) - 1 > length)
-            {
-                break;
-            }
-
-            Vector128<TValue> repeated = Vector128.Create(values[run]);
-            ref TValue at = ref Unsafe.Add(ref into, position);
-            ref TValue stop = ref Unsafe.Add(ref into, endRow);
-            do
-            {
-                repeated.StoreUnsafe(ref at);
-                repeated.StoreUnsafe(ref at, (nuint)lanes);
-                repeated.StoreUnsafe(ref at, (nuint)(2 * lanes));
-                repeated.StoreUnsafe(ref at, (nuint)(3 * lanes));
-                at = ref Unsafe.Add(ref at, 4 * lanes);
-            }
-            while (Unsafe.IsAddressLessThan(ref at, ref stop));
-
-            position = endRow;
-        }
-
-        return (run, position);
-    }
-
-    /// <summary>The run loop without vectors of the value's width: a span fill a run.</summary>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private readonly int FilledRuns<TEnd, TValue>(
-        ReadOnlySpan<TEnd> ends, in ValueReader source, int firstRun, ulong offset, int length,
-        in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
-        where TEnd : unmanaged
-        where TValue : unmanaged
-    {
-        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(source.Bytes);
-        Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
-        ulong unsignedLength = (ulong)(uint)length;
-        int position = 0;
-        for (int run = firstRun; run < ends.Length && position < length; run++)
-        {
-            ulong end = WidenEnd(ends[run]) - offset;
-            if (end > unsignedLength)
-            {
-                end = unsignedLength;
-            }
-
-            int endRow = (int)end;
-            if (endRow <= position)
-            {
-                continue;
-            }
-
-            destination[position..endRow].Fill(values[run]);
-            if (tracked && sourceValidity.IsValid(run))
-            {
-                validity.SetValidRange(position, endRow - position);
-            }
-
-            position = endRow;
-        }
-
-        return position;
-    }
-
-    /// <summary>Widens one run end to <see cref="ulong"/>, folded at instantiation.</summary>
-    /// <remarks>
-    /// Same shape as <c>RowKernels.WidenCode</c> and for the same reason: every branch but one is
-    /// a constant-false compare of two <c>typeof</c>s, which the JIT removes when it specializes.
-    /// A negative end is impossible here -- `ValidateEnds` has already walked them -- so the signed
-    /// types widen through <c>long</c> and cast. Inlined by demand, since Native AOT left it a call
-    /// a run, the branches being too many for its budget before they fold.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static ulong WidenEnd<TEnd>(TEnd end)
-        where TEnd : unmanaged
-    {
-        if (typeof(TEnd) == typeof(byte))
-        {
-            return Unsafe.As<TEnd, byte>(ref end);
-        }
-
-        if (typeof(TEnd) == typeof(ushort))
-        {
-            return Unsafe.As<TEnd, ushort>(ref end);
-        }
-
-        if (typeof(TEnd) == typeof(uint))
-        {
-            return Unsafe.As<TEnd, uint>(ref end);
-        }
-
-        if (typeof(TEnd) == typeof(ulong))
-        {
-            return Unsafe.As<TEnd, ulong>(ref end);
-        }
-
-        if (typeof(TEnd) == typeof(sbyte))
-        {
-            return (ulong)(long)Unsafe.As<TEnd, sbyte>(ref end);
-        }
-
-        if (typeof(TEnd) == typeof(short))
-        {
-            return (ulong)(long)Unsafe.As<TEnd, short>(ref end);
-        }
-
-        if (typeof(TEnd) == typeof(int))
-        {
-            return (ulong)(long)Unsafe.As<TEnd, int>(ref end);
-        }
-
-        return (ulong)Unsafe.As<TEnd, long>(ref end);
-    }
+        where TValue : unmanaged =>
+        RunKernels.Expand(
+            ends, MemoryMarshal.Cast<byte, TValue>(source.Bytes), firstRun, offset,
+            MemoryMarshal.Cast<byte, TValue>(_bytes)[..length]);
 
     /// <summary>Writes one row of raw bytes, already in the output's representation.</summary>
     /// <param name="row">The destination row.</param>
