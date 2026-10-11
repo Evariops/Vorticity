@@ -234,12 +234,12 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         ObjectHead head = await HeadAsync(key, cancellationToken).ConfigureAwait(false) ?? throw ObjectNotFoundException.For(key);
         if (ifToken is not null && !string.Equals(ifToken, head.Token, StringComparison.Ordinal))
         {
-            throw ObjectStoreExtensions.Changed(key, ifToken, head.Token);
+            throw StoreFailures.Changed(key, ifToken, head.Token);
         }
 
         if (offset >= head.Length && !(offset == 0 && head.Length == 0))
         {
-            throw ObjectStoreExtensions.PastEnd(key, offset, head.Length);
+            throw StoreFailures.PastEnd(key, offset, head.Length);
         }
 
         return new ObjectRead(0, head.Length, head.Token);
@@ -268,7 +268,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
                 return await ReadNothingAsync(s.Key, 0, s.IfToken, cancellationToken).ConfigureAwait(false);
             }
 
-            throw ObjectStoreExtensions.PastEnd(s.Key, s.Offset, size ?? -1);
+            throw StoreFailures.PastEnd(s.Key, s.Offset, size ?? -1);
         }
 
         if (status is not (HttpStatusCode.PartialContent or HttpStatusCode.OK))
@@ -409,7 +409,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
 
         if (status == HttpStatusCode.PreconditionFailed && ifToken is not null)
         {
-            return ObjectStoreExtensions.Changed(key, ifToken, "another object");
+            return StoreFailures.Changed(key, ifToken, "another object");
         }
 
         ServiceError error = await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);

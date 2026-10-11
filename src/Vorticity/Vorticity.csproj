@@ -12,12 +12,12 @@
 
   <!-- The satellites reach into the engine (arenas, the k-way merge, object sources, row encoding
        over decoded nodes, the scan source a Parquet file plugs into) and ship at the same version as
-       the core. vxdump does not: it is the proof that the public surface is enough for a tool. -->
+       the core. vxdump does not: it is the proof that the public surface is enough for a tool, and
+       Vorticity.ObjectStorage neither, which stores of the same shape written elsewhere can match. -->
   <ItemGroup>
     <InternalsVisibleTo Include="Vorticity.RowEncoding" />
     <InternalsVisibleTo Include="Vorticity.Dataset" />
     <InternalsVisibleTo Include="Vorticity.Parquet" />
-    <InternalsVisibleTo Include="Vorticity.ObjectStorage" />
     <InternalsVisibleTo Include="Vorticity.Tests" />
     <InternalsVisibleTo Include="Vorticity.Parquet.Tests" />
     <InternalsVisibleTo Include="Vorticity.Conformance" />

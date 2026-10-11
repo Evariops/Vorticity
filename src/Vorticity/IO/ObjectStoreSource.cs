@@ -61,9 +61,6 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _ownsStore = ownsStore;
     }
 
-    /// <summary>The store under a view, which says what the store is.</summary>
-    internal static IObjectStore Root(IObjectStore store) => store is PrefixedObjectStore view ? Root(view.Inner) : store;
-
     /// <summary>The object's key.</summary>
     internal string Key => _key;
 
