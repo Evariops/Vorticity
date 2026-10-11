@@ -415,11 +415,13 @@ public sealed partial class VortexFile : IAsyncDisposable
                     FileThrow.FooterRegionTooLarge(gap);
                 }
 
-                if (source.ReadsInPlace)
+                if (source.ReadsInPlace || source.TailReadSize < VortexFileFormat.InitialReadSize)
                 {
                     // A source that reads in place reads the region whole: a view of its memory, or
                     // one copy where its first read was a copy too, rather than the gap and a third
-                    // buffer the two are copied into.
+                    // buffer the two are copied into. So does a source whose read is a copy and no
+                    // round trip, which asked for less than the window: reading the tail again costs
+                    // it less than copying the gap and the tail into a third buffer.
                     int whole = (int)(fileLength - required);
                     SegmentOwner region = await source
                         .ReadRangeAsync(required, whole, alignment, cancellationToken)
