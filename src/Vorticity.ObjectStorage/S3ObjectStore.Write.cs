@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO.Hashing;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http;
@@ -12,7 +13,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
-using Vorticity.ObjectStorage.Hashing;
 using Vorticity.ObjectStorage.Http;
 using Vorticity.ObjectStorage.S3;
 using Vorticity.ObjectStorage.Xml;
@@ -213,6 +213,16 @@ public sealed partial class S3ObjectStore
             throw;
         }
 
+        // The whole object's CRC, kept as the parts fill in order: they go up in parallel, in any order.
+        Crc64? whole = null;
+        Action<ChunkedBuffer>? produced = null;
+        if (crc)
+        {
+            Crc64 running = new Crc64(Crc64ParameterSet.Nvme);
+            whole = running;
+            produced = part => part.AppendTo(running);
+        }
+
         List<Part> parts = [];
         try
         {
@@ -234,7 +244,8 @@ public sealed partial class S3ObjectStore
 
                     return UploadPartAsync(key, uploadId, part, body, crc, ct);
                 },
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                produced).ConfigureAwait(false);
         }
         catch
         {
@@ -246,7 +257,7 @@ public sealed partial class S3ObjectStore
         PutOutcome outcome;
         try
         {
-            outcome = await CompleteAsync(key, uploadId, putId, parts, crc, condition, cancellationToken).ConfigureAwait(false);
+            outcome = await CompleteAsync(key, uploadId, putId, parts, whole?.GetCurrentHashAsUInt64(), condition, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -296,29 +307,33 @@ public sealed partial class S3ObjectStore
         part.Crc = checksum;
     }
 
-    /// <summary>Completes an upload with its condition, learning its outcome from the head when the answer is lost.</summary>
-    private async ValueTask<PutOutcome> CompleteAsync(string key, string uploadId, string putId, List<Part> parts, bool crc, PutCondition condition, CancellationToken cancellationToken)
+    /// <summary>
+    /// Completes an upload with its condition and, when the parts carry theirs, the whole object's
+    /// CRC-64/NVME, learning its outcome from the head when the answer is lost.
+    /// </summary>
+    private async ValueTask<PutOutcome> CompleteAsync(string key, string uploadId, string putId, List<Part> parts, ulong? whole, PutCondition condition, CancellationToken cancellationToken)
     {
-        StringBuilder xml = new StringBuilder("<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
-        ulong whole = ulong.MaxValue;
-        bool first = true;
-        foreach (Part part in parts)
+        bool crc = whole is not null;
+        byte[] body = ServiceXml.Write((Parts: parts, Crc: crc), static (xml, s) =>
         {
-            xml.Append(CultureInfo.InvariantCulture, $"<Part><PartNumber>{part.Number}</PartNumber><ETag>").AppendEscaped(part.Etag!).Append("</ETag>");
-            if (crc)
+            xml.WriteStartElement("CompleteMultipartUpload", S3Answers.Namespace);
+            foreach (Part part in s.Parts)
             {
-                xml.Append("<ChecksumCRC64NVME>").Append(Base64(part.Crc)).Append("</ChecksumCRC64NVME>");
-                whole = first ? part.Crc : Crc64Nvme.Combine(whole, part.Crc, part.Length);
-                first = false;
+                xml.WriteStartElement("Part", S3Answers.Namespace);
+                xml.WriteElementString("PartNumber", S3Answers.Namespace, part.Number.ToString(CultureInfo.InvariantCulture));
+                xml.WriteElementString("ETag", S3Answers.Namespace, part.Etag);
+                if (s.Crc)
+                {
+                    xml.WriteElementString("ChecksumCRC64NVME", S3Answers.Namespace, Base64(part.Crc));
+                }
+
+                xml.WriteEndElement();
             }
 
-            xml.Append("</Part>");
-        }
-
-        xml.Append("</CompleteMultipartUpload>");
-        byte[] body = Encoding.UTF8.GetBytes(xml.ToString());
-        (string, string)[] extra = crc
-            ? [("x-amz-checksum-crc64nvme", Base64(whole)), ("x-amz-checksum-type", "FULL_OBJECT")]
+            xml.WriteEndElement();
+        });
+        (string, string)[] extra = whole is { } sum
+            ? [("x-amz-checksum-crc64nvme", Base64(sum)), ("x-amz-checksum-type", "FULL_OBJECT")]
             : [];
         for (int attempt = 1; ; attempt++)
         {
@@ -362,7 +377,7 @@ public sealed partial class S3ObjectStore
                 "HeadObject",
                 new Request(this, key),
                 static (s, ct) => s.Store.BuildAsync(HttpMethod.Head, s.Key, null, ct),
-                static async (response, s, ct) => (await s.Store.ConsumeHeadAsync(response, s.Key, ct).ConfigureAwait(false), S3Answers.Header(response, PutIdHeader)),
+                static async (response, s, ct) => (await s.Store.ConsumeHeadAsync(response, s.Key, ct).ConfigureAwait(false), HttpAnswers.Header(response, PutIdHeader)),
                 idempotent: true,
                 cancellationToken).ConfigureAwait(false);
         }
@@ -479,7 +494,7 @@ public sealed partial class S3ObjectStore
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
         try
         {
-            return S3Answers.ParseElement(bytes.AsSpan(0, length), "UploadId"u8)
+            return ServiceXml.ParseElement(bytes.AsMemory(0, length), "UploadId")
                 ?? throw new ObjectStoreException($"CreateMultipartUpload of '{key}' was answered without an upload id.");
         }
         finally
@@ -506,7 +521,7 @@ public sealed partial class S3ObjectStore
     {
         if (response.StatusCode == HttpStatusCode.OK)
         {
-            return S3Answers.Header(response, "ETag") ?? throw new ObjectStoreException($"UploadPart of '{key}' was answered without an ETag.");
+            return HttpAnswers.Header(response, "ETag") ?? throw new ObjectStoreException($"UploadPart of '{key}' was answered without an ETag.");
         }
 
         ServiceError error = await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
@@ -546,7 +561,7 @@ public sealed partial class S3ObjectStore
                 (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
                 try
                 {
-                    if (S3Answers.IsError(bytes.AsSpan(0, length), out string? code))
+                    if (ServiceXml.IsError(bytes.AsMemory(0, length), out string? code))
                     {
                         throw new StoreRetryException($"CompleteMultipartUpload of '{s.Key}' failed after its answer began: {code}", RetryBudget.RetryCost, notApplied: true);
                     }
@@ -559,7 +574,7 @@ public sealed partial class S3ObjectStore
                 return PutOutcome.Created;
             case HttpStatusCode.PreconditionFailed:
                 return s.Condition.Kind == PutConditionKind.IfAbsent ? PutOutcome.Exists : PutOutcome.Changed;
-            case HttpStatusCode.NotFound when s.Condition.Kind == PutConditionKind.IfMatch && S3Answers.Header(response, "x-amz-error-code") != "NoSuchUpload":
+            case HttpStatusCode.NotFound when s.Condition.Kind == PutConditionKind.IfMatch && HttpAnswers.Header(response, "x-amz-error-code") != "NoSuchUpload":
                 break;
         }
 
@@ -614,10 +629,10 @@ public sealed partial class S3ObjectStore
             throw await FailureAsync(response, "DeleteObjects", Bucket, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, S3Answers.MaxXmlBytes, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            return S3Answers.ParseDeleteErrors(bytes.AsSpan(0, length));
+            return S3Answers.ParseDeleteErrors(bytes.AsMemory(0, length));
         }
         finally
         {
@@ -649,16 +664,22 @@ public sealed partial class S3ObjectStore
         return ("x-amz-checksum-crc32", Convert.ToBase64String(crc));
     }
 
-    private static byte[] DeleteBody(IReadOnlyList<string> keys, int start, int count)
-    {
-        StringBuilder xml = new StringBuilder("<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Quiet>true</Quiet>");
-        for (int i = start; i < start + count; i++)
+    /// <summary>The body of a quiet <c>DeleteObjects</c> over <paramref name="count"/> keys from <paramref name="start"/>.</summary>
+    /// <exception cref="ArgumentException">A key holds a character XML cannot carry.</exception>
+    private static byte[] DeleteBody(IReadOnlyList<string> keys, int start, int count) =>
+        ServiceXml.Write((Keys: keys, Start: start, Count: count), static (xml, s) =>
         {
-            xml.Append("<Object><Key>").AppendEscaped(keys[i]).Append("</Key></Object>");
-        }
+            xml.WriteStartElement("Delete", S3Answers.Namespace);
+            xml.WriteElementString("Quiet", S3Answers.Namespace, "true");
+            for (int i = s.Start; i < s.Start + s.Count; i++)
+            {
+                xml.WriteStartElement("Object", S3Answers.Namespace);
+                xml.WriteElementString("Key", S3Answers.Namespace, s.Keys[i]);
+                xml.WriteEndElement();
+            }
 
-        return Encoding.UTF8.GetBytes(xml.Append("</Delete>").ToString());
-    }
+            xml.WriteEndElement();
+        });
 
     /// <summary>The checksum and the put id a put carries, signed with it.</summary>
     private (string Name, string Value)[] PutHeaders(ChunkedBuffer body, string? putId)

@@ -6,6 +6,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO.Hashing;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -14,7 +15,6 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using Vorticity.ObjectStorage.Hashing;
 
 namespace Vorticity.Tests.ObjectStorage;
 
@@ -412,7 +412,7 @@ internal sealed class GoogleEmulator : HttpMessageHandler
         }
 
         byte[] expected = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(expected, Crc32C.Hash(body));
+        BinaryPrimitives.WriteUInt32BigEndian(expected, Crc32.HashToUInt32(Crc32ParameterSet.Crc32C, body));
         return hash[7..] == Convert.ToBase64String(expected) ? null : XmlError(HttpStatusCode.BadRequest, "BadDigest");
     }
 

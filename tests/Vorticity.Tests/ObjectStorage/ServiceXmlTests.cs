@@ -1,5 +1,7 @@
-// The reader of the services' XML: what S3 writes in a listing and an error, its entities and CDATA,
-// and a fuzz that holds it to one promise, that no input escapes it but as an ObjectStoreException.
+// The services' XML, read and written by the platform's XmlReader and XmlWriter: what S3 writes in a
+// listing and an error, entities and CDATA, the whitespace a service sends before a late answer, values
+// that come back as they were written, and a fuzz that holds the reading to one promise, that no input
+// escapes it but as an ObjectStoreException.
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -10,7 +12,7 @@ using Xunit;
 
 namespace Vorticity.Tests.ObjectStorage;
 
-public sealed class XmlScannerTests
+public sealed class ServiceXmlTests
 {
     private const string Listing = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -46,11 +48,29 @@ public sealed class XmlScannerTests
     }
 
     [Fact]
+    public void AnErrorAnsweredForAListingIsRefusedRatherThanReadAsAnEmptyPage()
+    {
+        List<ObjectListing> page = [];
+        Assert.Throws<ObjectStoreException>(() => S3Answers.ParseListing(Encoding.UTF8.GetBytes("<Error><Code>InternalError</Code></Error>"), 0, false, page));
+        Assert.Empty(page);
+    }
+
+    [Fact]
     public void AnErrorGivesItsCodeMessageRequestIdAndSize()
     {
         const string error = "<Error><Code>InvalidRange</Code><Message>The requested range is not satisfiable</Message>" +
             "<RangeRequested>bytes=10-20</RangeRequested><ActualObjectSize>10</ActualObjectSize><RequestId>4442587FB7D0A2F9</RequestId></Error>";
-        Assert.Equal(("InvalidRange", "The requested range is not satisfiable", "4442587FB7D0A2F9", 10L), S3Answers.ParseError(Encoding.UTF8.GetBytes(error)));
+        Assert.Equal(("InvalidRange", "The requested range is not satisfiable", "4442587FB7D0A2F9", 10L), ServiceXml.ParseError(Encoding.UTF8.GetBytes(error)));
+    }
+
+    [Fact]
+    public void TheWhitespaceAServiceSendsBeforeALateAnswerIsPassedOver()
+    {
+        byte[] late = Encoding.UTF8.GetBytes("  \r\n   \n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>InternalError</Code></Error>");
+        Assert.True(ServiceXml.IsError(late, out string? code));
+        Assert.Equal("InternalError", code);
+        Assert.False(ServiceXml.IsError(Encoding.UTF8.GetBytes("   \n "), out _));
+        Assert.False(ServiceXml.IsError(Encoding.UTF8.GetBytes("<CompleteMultipartUploadResult><ETag>\"e\"</ETag></CompleteMultipartUploadResult>"), out _));
     }
 
     [Theory]
@@ -60,14 +80,10 @@ public sealed class XmlScannerTests
     [InlineData("<a>one<!-- skipped -->two</a>", "onetwo")]
     [InlineData("<a/>", "")]
     [InlineData("<a attr=\"x>y\" other='z'>v</a>", "v")]
+    [InlineData("<a>   </a>", "   ")]
     [InlineData("﻿<a>bom</a>", "bom")]
-    public void TextDecodesItsEntitiesAndKeepsCData(string xml, string text)
-    {
-        XmlScanner scanner = new XmlScanner(Encoding.UTF8.GetBytes(xml));
-        Assert.True(scanner.Read());
-        Assert.Equal(XmlToken.Start, scanner.Token);
-        Assert.Equal(text, scanner.ReadText());
-    }
+    public void TextDecodesItsEntitiesAndKeepsCData(string xml, string text) =>
+        Assert.Equal(text, ServiceXml.ParseElement(Encoding.UTF8.GetBytes(xml), "a"));
 
     [Theory]
     [InlineData("<!DOCTYPE a [<!ENTITY x \"boom\">]><a>&x;</a>")]
@@ -79,21 +95,16 @@ public sealed class XmlScannerTests
     [InlineData("<a>unterminated")]
     [InlineData("<a")]
     [InlineData("<![CDATA[open")]
-    [InlineData("<a>ÿþ</a>")]
-    public void WhatIsNotWellFormedIsRefusedAsTheStoresException(string xml)
+    public void WhatIsNotWellFormedIsRefusedAsTheStoresException(string xml) =>
+        Assert.Throws<ObjectStoreException>(() => ServiceXml.ParseElement(Encoding.UTF8.GetBytes(xml), "a"));
+
+    [Fact]
+    public void AValueWrittenComesBackAsItWasAndOneXmlCannotCarryIsRefused()
     {
-        byte[] bytes = xml.Contains('ÿ', StringComparison.Ordinal) ? [(byte)'<', (byte)'a', (byte)'>', 0xFF, 0xFE, (byte)'<', (byte)'/', (byte)'a', (byte)'>'] : Encoding.UTF8.GetBytes(xml);
-        Assert.Throws<ObjectStoreException>(() =>
-        {
-            XmlScanner scanner = new XmlScanner(bytes);
-            while (scanner.Read())
-            {
-                if (scanner.Token == XmlToken.Start)
-                {
-                    scanner.ReadText();
-                }
-            }
-        });
+        const string key = "a & <b> \r\n c\t\"d\"";
+        byte[] body = ServiceXml.Write(key, static (xml, value) => xml.WriteElementString("Key", value));
+        Assert.Equal(key, ServiceXml.ParseElement(body, "Key"));
+        Assert.Throws<ArgumentException>(() => ServiceXml.Write("bad\u0001key", static (xml, value) => xml.WriteElementString("Key", value)));
     }
 
     [Fact]
@@ -117,7 +128,7 @@ public sealed class XmlScannerTests
 
             try
             {
-                S3Answers.ParseError(input);
+                ServiceXml.ParseError(input);
             }
             catch (ObjectStoreException)
             {

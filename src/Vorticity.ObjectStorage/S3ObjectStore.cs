@@ -13,6 +13,7 @@ using Vorticity.IO;
 using Vorticity.ObjectStorage.Credentials;
 using Vorticity.ObjectStorage.Http;
 using Vorticity.ObjectStorage.S3;
+using Vorticity.ObjectStorage.Xml;
 
 namespace Vorticity.ObjectStorage;
 
@@ -322,7 +323,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
         if (status == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             (ServiceError _, long? actual) = await ReadErrorDetailAsync(response, cancellationToken).ConfigureAwait(false);
-            long? size = S3Answers.ContentRange(response)?.Total ?? actual;
+            long? size = HttpAnswers.ContentRange(response)?.Total ?? actual;
 
             // Only an empty object refuses a read from its start: its token then comes from a head.
             if (s.Offset <= 0 && size is null or 0)
@@ -344,7 +345,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
         long total;
         if (status == HttpStatusCode.PartialContent)
         {
-            (first, total) = S3Answers.ContentRange(response)
+            (first, total) = HttpAnswers.ContentRange(response)
                 ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with a partial body and no Content-Range.");
         }
         else if (s.Offset > 0 || (s.Offset < 0 && announced > s.Destination.Length))
@@ -386,11 +387,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
 
         long length = response.Content.Headers.ContentLength
             ?? throw new ObjectStoreException($"HeadObject on '{key}' was answered without a Content-Length.");
-        string? retain = S3Answers.Header(response, "x-amz-object-lock-retain-until-date");
-        return new ObjectHead(length, TokenOf(response, key, null), S3Answers.LastModified(response))
+        string? retain = HttpAnswers.Header(response, "x-amz-object-lock-retain-until-date");
+        return new ObjectHead(length, TokenOf(response, key, null), HttpAnswers.LastModified(response))
         {
             RetainUntil = retain is null ? null : S3Answers.IsoDate(retain),
-            LegalHold = string.Equals(S3Answers.Header(response, "x-amz-object-lock-legal-hold"), "ON", StringComparison.OrdinalIgnoreCase),
+            LegalHold = string.Equals(HttpAnswers.Header(response, "x-amz-object-lock-legal-hold"), "ON", StringComparison.OrdinalIgnoreCase),
         };
     }
 
@@ -401,11 +402,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
             throw await FailureAsync(response, "ListObjectsV2", s.Prefix, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, S3Answers.MaxXmlBytes, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             return S3Answers.ParseListing(
-                bytes.AsSpan(0, length), 0, (_capabilities & ObjectStoreCapabilities.ReportsLocksInListing) != 0, s.Page);
+                bytes.AsMemory(0, length), 0, (_capabilities & ObjectStoreCapabilities.ReportsLocksInListing) != 0, s.Page);
         }
         finally
         {
@@ -464,7 +465,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
 
         if (status is HttpStatusCode.MovedPermanently or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect)
         {
-            string region = S3Answers.Header(response, "x-amz-bucket-region") ?? "another region";
+            string region = HttpAnswers.Header(response, "x-amz-bucket-region") ?? "another region";
             return new ObjectStoreException(
                 $"{operation} on '{key}' was sent to the wrong region: the bucket '{Bucket}' is in {region}. Set S3StoreOptions.Region. {error}");
         }
@@ -498,17 +499,17 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     private async ValueTask<(ServiceError Error, long? ActualObjectSize)> ReadErrorDetailAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         int status = (int)response.StatusCode;
-        string? requestId = S3Answers.Header(response, "x-amz-request-id");
-        TimeSpan? retryAfter = S3Answers.RetryAfter(response);
+        string? requestId = HttpAnswers.Header(response, "x-amz-request-id");
+        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response);
         if (response.RequestMessage?.Method == HttpMethod.Head || response.Content.Headers.ContentLength == 0)
         {
-            return (new ServiceError(status, S3Answers.Header(response, "x-amz-error-code"), null, requestId, retryAfter), null);
+            return (new ServiceError(status, HttpAnswers.Header(response, "x-amz-error-code"), null, requestId, retryAfter), null);
         }
 
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
         try
         {
-            (string? code, string? message, string? id, long? size) = S3Answers.ParseError(bytes.AsSpan(0, length));
+            (string? code, string? message, string? id, long? size) = ServiceXml.ParseError(bytes.AsMemory(0, length));
             return (new ServiceError(status, code, message, id ?? requestId, retryAfter), size);
         }
         catch (ObjectStoreException)
@@ -528,7 +529,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
     /// <summary>The object's ETag; the caller's own string when it is the token it gave, so a read bound to it allocates none.</summary>
     private static string TokenOf(HttpResponseMessage response, string key, string? ifToken)
     {
-        string token = S3Answers.Header(response, "ETag")
+        string token = HttpAnswers.Header(response, "ETag")
             ?? throw new ObjectStoreException($"'{key}' was answered without an ETag.");
         return ifToken is not null && string.Equals(token, ifToken, StringComparison.Ordinal) ? ifToken : token;
     }
@@ -633,7 +634,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IWholeConditionalPuts
             "HeadBucket",
             (Store: this, Probe: probe),
             static (s, _) => new ValueTask<HttpRequestMessage>(new HttpRequestMessage(HttpMethod.Head, s.Probe)),
-            static (response, s, _) => new ValueTask<string>(S3Answers.Header(response, "x-amz-bucket-region")
+            static (response, s, _) => new ValueTask<string>(HttpAnswers.Header(response, "x-amz-bucket-region")
                 ?? throw new ObjectStoreException(
                     $"The region of the bucket '{s.Store.Bucket}' could not be learned ({(int)response.StatusCode}): set S3StoreOptions.Region or AWS_REGION.")),
             idempotent: true,

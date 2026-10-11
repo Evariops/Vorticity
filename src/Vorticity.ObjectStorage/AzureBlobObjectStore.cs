@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.Azure;
 using Vorticity.ObjectStorage.Http;
-using Vorticity.ObjectStorage.S3;
+using Vorticity.ObjectStorage.Xml;
 
 namespace Vorticity.ObjectStorage;
 
@@ -225,7 +225,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
         HttpStatusCode status = response.StatusCode;
         if (status == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
-            long? size = S3Answers.ContentRange(response)?.Total;
+            long? size = HttpAnswers.ContentRange(response)?.Total;
             await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
 
             // Only an empty blob refuses a read from its start: its token then comes from its properties.
@@ -243,7 +243,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
         }
 
         (long first, long total) = status == HttpStatusCode.PartialContent
-            ? S3Answers.ContentRange(response) ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with a partial body and no Content-Range.")
+            ? HttpAnswers.ContentRange(response) ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with a partial body and no Content-Range.")
             : (0, response.Content.Headers.ContentLength ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered without a length."));
         if (first != s.Offset)
         {
@@ -275,13 +275,13 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
 
         long length = response.Content.Headers.ContentLength
             ?? throw new ObjectStoreException($"GetBlobProperties on '{key}' was answered without a Content-Length.");
-        string? until = S3Answers.Header(response, "x-ms-immutability-policy-until-date");
-        ObjectHead head = new ObjectHead(length, TokenOf(response, key, null), S3Answers.LastModified(response))
+        string? until = HttpAnswers.Header(response, "x-ms-immutability-policy-until-date");
+        ObjectHead head = new ObjectHead(length, TokenOf(response, key, null), HttpAnswers.LastModified(response))
         {
             RetainUntil = until is null ? null : AzureAnswers.Date(until),
-            LegalHold = string.Equals(S3Answers.Header(response, "x-ms-legal-hold"), "true", StringComparison.OrdinalIgnoreCase),
+            LegalHold = string.Equals(HttpAnswers.Header(response, "x-ms-legal-hold"), "true", StringComparison.OrdinalIgnoreCase),
         };
-        return (head, S3Answers.Header(response, PutIdHeader));
+        return (head, HttpAnswers.Header(response, PutIdHeader));
     }
 
     private ValueTask<HttpRequestMessage> BuildListAsync(ListRequest s, CancellationToken cancellationToken)
@@ -302,10 +302,10 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
             throw await FailureAsync(response, "ListBlobs", s.Prefix, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, S3Answers.MaxXmlBytes, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            return AzureAnswers.ParseListing(bytes.AsSpan(0, length), s.StartAfter, s.Page);
+            return AzureAnswers.ParseListing(bytes.AsMemory(0, length), s.StartAfter, s.Page);
         }
         finally
         {
@@ -428,9 +428,9 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
     private async ValueTask<ServiceError> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         int status = (int)response.StatusCode;
-        string? requestId = S3Answers.Header(response, "x-ms-request-id");
-        string? code = S3Answers.Header(response, "x-ms-error-code");
-        TimeSpan? retryAfter = S3Answers.RetryAfter(response);
+        string? requestId = HttpAnswers.Header(response, "x-ms-request-id");
+        string? code = HttpAnswers.Header(response, "x-ms-error-code");
+        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response);
         if (response.RequestMessage?.Method == HttpMethod.Head || response.Content.Headers.ContentLength == 0)
         {
             return new ServiceError(status, code, null, requestId, retryAfter);
@@ -439,7 +439,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
         try
         {
-            (string? bodyCode, string? message, _, _) = S3Answers.ParseError(bytes.AsSpan(0, length));
+            (string? bodyCode, string? message, _, _) = ServiceXml.ParseError(bytes.AsMemory(0, length));
             return new ServiceError(status, code ?? bodyCode, message, requestId, retryAfter);
         }
         catch (ObjectStoreException)
@@ -454,7 +454,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore
 
     private static string TokenOf(HttpResponseMessage response, string key, string? ifToken)
     {
-        string token = S3Answers.Header(response, "ETag") ?? throw new ObjectStoreException($"'{key}' was answered without an ETag.");
+        string token = HttpAnswers.Header(response, "ETag") ?? throw new ObjectStoreException($"'{key}' was answered without an ETag.");
         return ifToken is not null && string.Equals(token, ifToken, StringComparison.Ordinal) ? ifToken : token;
     }
 

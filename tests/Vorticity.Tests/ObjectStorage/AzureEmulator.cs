@@ -9,6 +9,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO.Hashing;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -18,7 +19,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using Vorticity.ObjectStorage.Azure;
-using Vorticity.ObjectStorage.Hashing;
 
 namespace Vorticity.Tests.ObjectStorage;
 
@@ -485,7 +485,7 @@ internal sealed class AzureEmulator : HttpMessageHandler
         }
 
         byte[] expected = new byte[8];
-        BinaryPrimitives.WriteUInt64LittleEndian(expected, Crc64Nvme.Hash(body));
+        BinaryPrimitives.WriteUInt64LittleEndian(expected, Crc64.HashToUInt64(Crc64ParameterSet.Nvme, body));
         return crc == Convert.ToBase64String(expected)
             ? null
             : Error(HttpStatusCode.BadRequest, "Crc64Mismatch", "The CRC64 value specified in the request did not match with the CRC64 value calculated by the server.");

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using System.Xml;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.Http;
 using Vorticity.ObjectStorage.Xml;
@@ -16,101 +17,122 @@ internal static class AzureAnswers
     /// nothing, with its length, ETag, date and lock; and the marker of the next page, or null for the last.
     /// A blob named <paramref name="skip"/> is left out, since <c>startFrom</c> includes the key it names.
     /// </summary>
-    internal static string? ParseListing(ReadOnlySpan<byte> xml, string? skip, List<ObjectListing> into)
+    /// <exception cref="ObjectStoreException">The answer is not a listing, or a blob in it lacks its name, its ETag or its length.</exception>
+    internal static string? ParseListing(ReadOnlyMemory<byte> xml, string? skip, List<ObjectListing> into)
     {
         string? next = null;
-        XmlScanner scanner = new XmlScanner(xml);
-        while (scanner.Read())
+        try
         {
-            if (scanner.Token != XmlToken.Start)
+            using XmlReader reader = ServiceXml.Open(xml);
+            if (reader.MoveToContent() != XmlNodeType.Element || reader.LocalName != "EnumerationResults")
             {
-                continue;
+                throw new ObjectStoreException($"The service answered a listing with <{reader.LocalName}> rather than <EnumerationResults>.");
             }
 
-            if (XmlScanner.Is(scanner.Name, "Blob"u8))
+            if (ServiceXml.Enter(reader, out int depth))
             {
-                string? name = null, etag = null;
-                long length = -1;
-                DateTimeOffset modified = default;
-                DateTimeOffset? retainUntil = null;
-                bool legalHold = false;
-                while (scanner.Read() && scanner.Token != XmlToken.End)
+                while (ServiceXml.NextChild(reader, depth))
                 {
-                    if (scanner.Token != XmlToken.Start)
+                    if (reader.LocalName == "NextMarker")
                     {
-                        continue;
+                        string marker = reader.ReadElementContentAsString();
+                        next = marker.Length == 0 ? null : marker;
                     }
-
-                    if (XmlScanner.Is(scanner.Name, "Name"u8))
+                    else if (reader.LocalName != "Blobs")
                     {
-                        bool encoded = scanner.Attribute("Encoded"u8) == "true";
-                        string text = scanner.ReadText();
-                        name = encoded ? Uri.UnescapeDataString(text) : text;
+                        reader.Skip();
                     }
-                    else if (XmlScanner.Is(scanner.Name, "Properties"u8))
+                    else if (ServiceXml.Enter(reader, out int blobs))
                     {
-                        while (scanner.Read() && scanner.Token != XmlToken.End)
+                        while (ServiceXml.NextChild(reader, blobs))
                         {
-                            if (scanner.Token != XmlToken.Start)
+                            if (reader.LocalName != "Blob")
                             {
+                                reader.Skip();
                                 continue;
                             }
 
-                            if (XmlScanner.Is(scanner.Name, "Content-Length"u8))
+                            ObjectListing listed = Blob(reader);
+                            if (!string.Equals(listed.Key, skip, StringComparison.Ordinal))
                             {
-                                length = scanner.ReadInt64();
-                            }
-                            else if (XmlScanner.Is(scanner.Name, "Etag"u8))
-                            {
-                                etag = Quoted(scanner.ReadText());
-                            }
-                            else if (XmlScanner.Is(scanner.Name, "Last-Modified"u8))
-                            {
-                                modified = Date(scanner.ReadText());
-                            }
-                            else if (XmlScanner.Is(scanner.Name, "ImmutabilityPolicyUntilDate"u8))
-                            {
-                                string until = scanner.ReadText();
-                                retainUntil = until.Length == 0 ? null : Date(until);
-                            }
-                            else if (XmlScanner.Is(scanner.Name, "LegalHold"u8))
-                            {
-                                legalHold = scanner.ReadText() == "true";
-                            }
-                            else
-                            {
-                                scanner.Skip();
+                                into.Add(listed);
                             }
                         }
                     }
-                    else
-                    {
-                        scanner.Skip();
-                    }
-                }
-
-                if (name is null || etag is null || length < 0)
-                {
-                    throw new ObjectStoreException("The service listed a blob without its name, its ETag or its length.");
-                }
-
-                if (!string.Equals(name, skip, StringComparison.Ordinal))
-                {
-                    into.Add(new ObjectListing(name, new ObjectHead(length, etag, modified) { RetainUntil = retainUntil, LegalHold = legalHold }, true));
                 }
             }
-            else if (XmlScanner.Is(scanner.Name, "NextMarker"u8))
-            {
-                string marker = scanner.ReadText();
-                next = marker.Length == 0 ? null : marker;
-            }
-            else if (!XmlScanner.Is(scanner.Name, "EnumerationResults"u8) && !XmlScanner.Is(scanner.Name, "Blobs"u8))
-            {
-                scanner.Skip();
-            }
+        }
+        catch (Exception malformed) when (ServiceXml.IsMalformed(malformed))
+        {
+            throw ServiceXml.Malformed(malformed);
         }
 
         return next;
+    }
+
+    /// <summary>One blob of a listing, with its lock, the reader on its <c>Blob</c> and left past it.</summary>
+    private static ObjectListing Blob(XmlReader reader)
+    {
+        string? name = null, etag = null;
+        long length = -1;
+        DateTimeOffset modified = default;
+        DateTimeOffset? retainUntil = null;
+        bool legalHold = false;
+        if (ServiceXml.Enter(reader, out int depth))
+        {
+            while (ServiceXml.NextChild(reader, depth))
+            {
+                if (reader.LocalName == "Name")
+                {
+                    bool encoded = reader.GetAttribute("Encoded") == "true";
+                    string text = reader.ReadElementContentAsString();
+                    name = encoded ? Uri.UnescapeDataString(text) : text;
+                }
+                else if (reader.LocalName != "Properties")
+                {
+                    reader.Skip();
+                }
+                else if (ServiceXml.Enter(reader, out int properties))
+                {
+                    while (ServiceXml.NextChild(reader, properties))
+                    {
+                        switch (reader.LocalName)
+                        {
+                            case "Content-Length":
+                                length = reader.ReadElementContentAsLong();
+                                break;
+                            case "Etag":
+                                etag = Quoted(reader.ReadElementContentAsString());
+                                break;
+                            case "Last-Modified":
+                                modified = Date(reader.ReadElementContentAsString());
+                                break;
+                            case "ImmutabilityPolicyUntilDate":
+                                string until = reader.ReadElementContentAsString();
+                                retainUntil = until.Length == 0 ? null : Date(until);
+                                break;
+                            case "LegalHold":
+                                legalHold = reader.ReadElementContentAsString() == "true";
+                                break;
+                            default:
+                                reader.Skip();
+                                break;
+                        }
+                    }
+                }
+                else if (reader.LocalName != "Properties")
+                {
+                    reader.Skip();
+                }
+            }
+        }
+
+        if (name is null || etag is null || length < 0)
+        {
+            throw new ObjectStoreException("The service listed a blob without its name, its ETag or its length.");
+        }
+
+        return new ObjectListing(name, new ObjectHead(length, etag, modified) { RetainUntil = retainUntil, LegalHold = legalHold }, true);
     }
 
     /// <summary>

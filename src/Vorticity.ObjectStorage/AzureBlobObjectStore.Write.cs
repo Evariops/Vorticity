@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO.Hashing;
 using System.IO.Pipelines;
 using System.Net;
 using System.Net.Http;
@@ -14,8 +15,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.Azure;
-using Vorticity.ObjectStorage.Hashing;
 using Vorticity.ObjectStorage.Http;
+using Vorticity.ObjectStorage.Xml;
 
 namespace Vorticity.ObjectStorage;
 
@@ -188,18 +189,24 @@ public sealed partial class AzureBlobObjectStore
     /// <summary>Commits the first <paramref name="count"/> blocks of an upload, in order, with the condition and a put id.</summary>
     private async ValueTask<PutOutcome> CommitBlocksAsync(string key, string upload, int count, PutCondition condition, CancellationToken cancellationToken)
     {
-        StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"utf-8\"?><BlockList>");
-        for (int number = 1; number <= count; number++)
-        {
-            xml.Append("<Latest>").Append(BlockId(upload, number)).Append("</Latest>");
-        }
+        byte[] list = ServiceXml.Write(
+            (Upload: upload, Count: count),
+            static (xml, s) =>
+            {
+                xml.WriteStartElement("BlockList");
+                for (int number = 1; number <= s.Count; number++)
+                {
+                    xml.WriteElementString("Latest", BlockId(s.Upload, number));
+                }
 
-        byte[] list = Encoding.UTF8.GetBytes(xml.Append("</BlockList>").ToString());
+                xml.WriteEndElement();
+            },
+            declared: true);
         string putId = NewPutId();
         List<(string, string)> headers = [(PutIdHeader, putId)];
         if (_options.SendChecksums)
         {
-            headers.Add(("x-ms-content-crc64", Crc64Header(Crc64Nvme.Hash(list))));
+            headers.Add(("x-ms-content-crc64", Crc64Header(Crc64.HashToUInt64(Crc64ParameterSet.Nvme, list))));
         }
 
         AddCondition(headers, condition);

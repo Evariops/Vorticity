@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.S3;
+using Vorticity.ObjectStorage.Xml;
 
 namespace Vorticity.ObjectStorage.Credentials;
 
@@ -177,10 +178,10 @@ internal sealed class AwsChain : S3Credentials
             new("WebIdentityToken", token),
         ]);
         byte[] answer = await _host.SendAsync(request, local: false, "STS", cancellationToken).ConfigureAwait(false);
-        string id = S3Answers.ParseElement(answer, "AccessKeyId"u8) ?? throw new ObjectStoreException("STS answered without an access key id.");
-        string secret = S3Answers.ParseElement(answer, "SecretAccessKey"u8) ?? throw new ObjectStoreException("STS answered without a secret.");
-        string sessionToken = S3Answers.ParseElement(answer, "SessionToken"u8) ?? throw new ObjectStoreException("STS answered without a session token.");
-        DateTimeOffset? expiration = S3Answers.ParseElement(answer, "Expiration"u8) is { } text ? S3Answers.IsoDate(text) : null;
+        string id = ServiceXml.ParseElement(answer, "AccessKeyId") ?? throw new ObjectStoreException("STS answered without an access key id.");
+        string secret = ServiceXml.ParseElement(answer, "SecretAccessKey") ?? throw new ObjectStoreException("STS answered without a secret.");
+        string sessionToken = ServiceXml.ParseElement(answer, "SessionToken") ?? throw new ObjectStoreException("STS answered without a session token.");
+        DateTimeOffset? expiration = ServiceXml.ParseElement(answer, "Expiration") is { } text ? S3Answers.IsoDate(text) : null;
         return new AwsKeys(id, secret, sessionToken, expiration);
     }
 

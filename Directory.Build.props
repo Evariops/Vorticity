@@ -7,7 +7,10 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <WarningsNotAsErrors>NU1902;NU1903</WarningsNotAsErrors>
+    <!-- NU5104, a stable package depending on a prerelease one, stays a warning while
+         System.IO.Hashing is the release candidate of .NET 11 that the SDK is: a local pack takes the
+         SDK's stable default version. To be removed once 11.0.0 ships. -->
+    <WarningsNotAsErrors>NU1902;NU1903;NU5104</WarningsNotAsErrors>
     <!-- IDE rules run in the build only for what .editorconfig raises to `error`; every other IDE
          diagnostic defaults to `silent` and stays invisible. Turned on for IDE0072, which is the
          only thing that fails the build when a CanonicalKind is added and a switch forgets it. -->

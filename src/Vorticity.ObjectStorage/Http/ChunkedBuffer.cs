@@ -1,11 +1,11 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.IO.Hashing;
 using System.IO.Pipelines;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.ObjectStorage.Hashing;
 
 namespace Vorticity.ObjectStorage.Http;
 
@@ -108,16 +108,33 @@ internal sealed class ChunkedBuffer : IDisposable
         return new ReadOnlySequence<byte>(first, 0, last, last.Memory.Length);
     }
 
-    /// <summary>The CRC-64/NVME of the bytes.</summary>
+    /// <summary>The CRC-64/NVME of the bytes, by the platform's parameter set.</summary>
     internal ulong Crc64()
     {
-        ulong crc = ulong.MaxValue;
+        System.IO.Hashing.Crc64 crc = new System.IO.Hashing.Crc64(Crc64ParameterSet.Nvme);
+        AppendTo(crc);
+        return crc.GetCurrentHashAsUInt64();
+    }
+
+    /// <summary>The CRC-32C of the bytes, by the platform's parameter set.</summary>
+    internal uint Crc32C()
+    {
+        Crc32 crc = new Crc32(Crc32ParameterSet.Crc32C);
         foreach (ReadOnlyMemory<byte> segment in Sequence())
         {
-            crc = Crc64Nvme.Update(crc, segment.Span);
+            crc.Append(segment.Span);
         }
 
-        return ~crc;
+        return crc.GetCurrentHashAsUInt32();
+    }
+
+    /// <summary>Appends the bytes to <paramref name="crc"/>: what keeps a multipart upload's whole-object CRC as its parts fill, in order.</summary>
+    internal void AppendTo(System.IO.Hashing.Crc64 crc)
+    {
+        foreach (ReadOnlyMemory<byte> segment in Sequence())
+        {
+            crc.Append(segment.Span);
+        }
     }
 
     /// <summary>The MD5 of the bytes, for a <c>Content-MD5</c> a service asks for; never for security.</summary>

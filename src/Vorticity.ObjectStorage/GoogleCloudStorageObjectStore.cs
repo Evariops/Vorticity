@@ -14,7 +14,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
 using Vorticity.ObjectStorage.Google;
-using Vorticity.ObjectStorage.Hashing;
 using Vorticity.ObjectStorage.Http;
 using Vorticity.ObjectStorage.S3;
 using Vorticity.ObjectStorage.Xml;
@@ -303,7 +302,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         HttpStatusCode status = response.StatusCode;
         if (status == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
-            long? size = S3Answers.ContentRange(response)?.Total;
+            long? size = HttpAnswers.ContentRange(response)?.Total;
             await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
             if (s.Offset <= 0 && size is null or 0)
             {
@@ -321,7 +320,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         long announced = response.Content.Headers.ContentLength
             ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered without a Content-Length.");
         (long first, long total) = status == HttpStatusCode.PartialContent
-            ? S3Answers.ContentRange(response) ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with a partial body and no Content-Range.")
+            ? HttpAnswers.ContentRange(response) ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with a partial body and no Content-Range.")
             : (0, announced);
         if ((s.Offset >= 0 && first != s.Offset) || (status == HttpStatusCode.OK && s.Offset != 0 && !(s.Offset < 0 && announced <= s.Destination.Length)))
         {
@@ -335,7 +334,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             throw new StoreRetryException($"the body of GetObject on '{s.Key}' ended after {read} of {wanted} bytes", RetryBudget.RetryCost);
         }
 
-        string generation = S3Answers.Header(response, "x-goog-generation")
+        string generation = HttpAnswers.Header(response, "x-goog-generation")
             ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered without its generation.");
         return new ObjectRead(read, total, s.IfToken is not null && generation == s.IfToken ? s.IfToken : generation);
     }
@@ -381,7 +380,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
             throw await FailureAsync(response, "ListObjects", s.Prefix, null, cancellationToken).ConfigureAwait(false);
         }
 
-        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, S3Answers.MaxXmlBytes, cancellationToken).ConfigureAwait(false);
+        (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, HttpAnswers.MaxDocumentBytes, cancellationToken).ConfigureAwait(false);
         try
         {
             return GoogleAnswers.ParseListing(bytes.AsSpan(0, length), s.Skip, s.Page);
@@ -541,13 +540,19 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
                 },
                 cancellationToken).ConfigureAwait(false);
 
-            StringBuilder xml = new StringBuilder("<CompleteMultipartUpload>");
-            for (int number = 1; number <= parts.Count; number++)
+            byte[] body = ServiceXml.Write((Count: parts.Count, ETags: etags), static (xml, s) =>
             {
-                xml.Append(CultureInfo.InvariantCulture, $"<Part><PartNumber>{number}</PartNumber><ETag>").AppendEscaped(etags[number]).Append("</ETag></Part>");
-            }
+                xml.WriteStartElement("CompleteMultipartUpload");
+                for (int number = 1; number <= s.Count; number++)
+                {
+                    xml.WriteStartElement("Part");
+                    xml.WriteElementString("PartNumber", number.ToString(CultureInfo.InvariantCulture));
+                    xml.WriteElementString("ETag", s.ETags[number]);
+                    xml.WriteEndElement();
+                }
 
-            byte[] body = Encoding.UTF8.GetBytes(xml.Append("</CompleteMultipartUpload>").ToString());
+                xml.WriteEndElement();
+            });
             return await _transport.SendAsync(
                 "CompleteMultipartUpload",
                 new UploadRequest(this, key, uploadId, body),
@@ -574,7 +579,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
                 s.Headers,
                 ct),
             static async (response, s, ct) => response.StatusCode == HttpStatusCode.OK
-                ? S3Answers.Header(response, "ETag") ?? throw new ObjectStoreException($"UploadPart of '{s.Key}' was answered without an ETag.")
+                ? HttpAnswers.Header(response, "ETag") ?? throw new ObjectStoreException($"UploadPart of '{s.Key}' was answered without an ETag.")
                 : throw await s.Store.FailureAsync(response, "UploadPart", s.Key, null, ct).ConfigureAwait(false),
             idempotent: true,
             cancellationToken).ConfigureAwait(false);
@@ -669,7 +674,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
         try
         {
-            return S3Answers.ParseElement(bytes.AsSpan(0, length), "UploadId"u8)
+            return ServiceXml.ParseElement(bytes.AsMemory(0, length), "UploadId")
                 ?? throw new ObjectStoreException($"CreateMultipartUpload of '{key}' was answered without an upload id.");
         }
         finally
@@ -688,7 +693,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
         try
         {
-            if (S3Answers.IsError(bytes.AsSpan(0, length), out string? code))
+            if (ServiceXml.IsError(bytes.AsMemory(0, length), out string? code))
             {
                 throw new StoreRetryException($"CompleteMultipartUpload of '{key}' failed after its answer began: {code}", RetryBudget.RetryCost);
             }
@@ -864,8 +869,8 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     private async ValueTask<ServiceError> ReadErrorAsync(HttpResponseMessage response, CancellationToken cancellationToken)
     {
         int status = (int)response.StatusCode;
-        string? requestId = S3Answers.Header(response, "x-guploader-uploadid");
-        TimeSpan? retryAfter = S3Answers.RetryAfter(response);
+        string? requestId = HttpAnswers.Header(response, "x-guploader-uploadid");
+        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response);
         if (response.RequestMessage?.Method == HttpMethod.Head || response.Content.Headers.ContentLength == 0)
         {
             return new ServiceError(status, null, null, requestId, retryAfter);
@@ -874,14 +879,14 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
         (byte[] bytes, int length) = await _transport.ReadSmallBodyAsync(response, 64 << 10, cancellationToken).ConfigureAwait(false);
         try
         {
-            ReadOnlySpan<byte> body = bytes.AsSpan(0, length);
-            if (body.TrimStart(" \t\r\n"u8).StartsWith("{"u8))
+            ReadOnlyMemory<byte> body = bytes.AsMemory(0, length);
+            if (body.Span.TrimStart(" \t\r\n"u8).StartsWith("{"u8))
             {
-                (string? reason, string? message) = GoogleAnswers.ParseError(body);
+                (string? reason, string? message) = GoogleAnswers.ParseError(body.Span);
                 return new ServiceError(status, reason, message, requestId, retryAfter);
             }
 
-            (string? code, string? text, _, _) = S3Answers.ParseError(body);
+            (string? code, string? text, _, _) = ServiceXml.ParseError(body);
             return new ServiceError(status, code, text, requestId, retryAfter);
         }
         catch (ObjectStoreException)
@@ -897,14 +902,8 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IWhole
     /// <summary><c>x-goog-hash</c>'s CRC-32C: its four bytes, high byte first, in base64.</summary>
     private static string Crc32CHeader(ChunkedBuffer body)
     {
-        uint crc = uint.MaxValue;
-        foreach (ReadOnlyMemory<byte> segment in body.Sequence())
-        {
-            crc = Crc32C.Update(crc, segment.Span);
-        }
-
         Span<byte> bytes = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(bytes, ~crc);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, body.Crc32C());
         return Convert.ToBase64String(bytes);
     }
 

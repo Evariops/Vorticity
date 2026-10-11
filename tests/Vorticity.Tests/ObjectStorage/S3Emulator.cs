@@ -11,6 +11,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.IO.Hashing;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -20,7 +21,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using Vorticity.ObjectStorage.Credentials;
-using Vorticity.ObjectStorage.Hashing;
 using Vorticity.ObjectStorage.Http;
 
 namespace Vorticity.Tests.ObjectStorage;
@@ -613,7 +613,7 @@ internal sealed class S3Emulator : HttpMessageHandler
     private static string Crc(byte[] bytes)
     {
         byte[] crc = new byte[8];
-        BinaryPrimitives.WriteUInt64BigEndian(crc, Crc64Nvme.Hash(bytes));
+        BinaryPrimitives.WriteUInt64BigEndian(crc, Crc64.HashToUInt64(Crc64ParameterSet.Nvme, bytes));
         return Convert.ToBase64String(crc);
     }
 

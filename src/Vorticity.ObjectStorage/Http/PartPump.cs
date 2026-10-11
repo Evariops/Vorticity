@@ -70,6 +70,10 @@ internal static class PartPump
     /// <param name="carried">The parts read before the upload began, each disposed once sent.</param>
     /// <param name="send">Sends a part, by its number from 1; the part is disposed once it returns.</param>
     /// <param name="cancellationToken">Cancels the reading and the parts.</param>
+    /// <param name="produced">
+    /// Sees each part in order, before it is sent: what keeps a checksum of the whole object, which the
+    /// parts sent in parallel could not give.
+    /// </param>
     /// <returns>The length of every part, in order.</returns>
     internal static async ValueTask<List<long>> SendAsync(
         string key,
@@ -80,7 +84,8 @@ internal static class PartPump
         int inFlight,
         Queue<ChunkedBuffer> carried,
         Func<int, ChunkedBuffer, CancellationToken, Task> send,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<ChunkedBuffer>? produced = null)
     {
         List<long> parts = [];
         List<Task> sending = [];
@@ -123,6 +128,7 @@ internal static class PartPump
                 parts.Add(part.Length);
                 try
                 {
+                    produced?.Invoke(part);
                     await slots.WaitAsync(failed.Token).ConfigureAwait(false);
                 }
                 catch
