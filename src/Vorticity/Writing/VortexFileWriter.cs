@@ -247,6 +247,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The caller's pipe, which the writer completes when the file is whole and fails when it is abandoned.</summary>
     private System.IO.Pipelines.PipeWriter? _callerPipe;
 
+    /// <summary>
+    /// The store's put of what a writer to a location writes into its pipe: completing the file waits
+    /// for it, so that the object is there when the writer says the file is; abandoning the file fails
+    /// the pipe, which the put gives up on.
+    /// </summary>
+    private Task? _upload;
+
+    /// <summary>Cancels <see cref="_upload"/> when the file is abandoned, its requests in flight with it.</summary>
+    private CancellationTokenSource? _uploadAbandoned;
+
     /// <summary>Whether the sink has been closed, one way or the other.</summary>
     private bool _sinkClosed;
 
@@ -733,6 +743,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>The session the writer belongs to.</summary>
     internal VortexSession Session { get; private set; } = VortexSession.Default;
+
+    /// <summary>
+    /// Hands the writer the put that takes what it writes to a store, which completing the file awaits,
+    /// whose failure a flush that finds the pipe's reader gone throws, and which
+    /// <paramref name="abandoned"/> cancels when the file is given up. The writer disposes it.
+    /// </summary>
+    internal void UploadTo(Task upload, CancellationTokenSource abandoned)
+    {
+        _upload = upload;
+        _uploadAbandoned = abandoned;
+        switch (_sink)
+        {
+            case PipeSegmentSink pipe:
+                pipe.Upload = upload;
+                break;
+            case Sealing.SealingSegmentSink sealing:
+                sealing.Upload = upload;
+                break;
+        }
+    }
 
     /// <summary>The pipe over the file this writer opened, created or appended to; null over a caller's sink.</summary>
     internal FilePipeWriter? FilePipe => _filePipe;

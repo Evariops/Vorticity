@@ -25,61 +25,56 @@ internal static class ObjectStore
         ObjectHead? head = await memory.HeadAsync("files/readings.vortex", ct);
         Console.WriteLine($"head: {head?.Length} bytes, token {head?.Token}; a missing key: {(await memory.HeadAsync("files/nothing", ct) is null ? "null" : "found")}");
 
-        using (ObjectRange tail = await memory.GetRangeAsync("files/readings.vortex", file.Length - 8, 64, ct))
-        {
-            Console.WriteLine($"range: asked 64 bytes 8 before the end, got {tail.Length}, token {tail.Token}, contiguous {tail.IsContiguous}");
-        }
+        byte[] buffer = new byte[64];
+        ObjectRead near = await memory.ReadAsync("files/readings.vortex", file.Length - 8, buffer, null, ct);
+        Console.WriteLine($"read: asked 64 bytes 8 before the end, got {near.BytesRead} of an object of {near.ObjectLength}, token {near.Token}");
+        ObjectRead tail = await memory.ReadTailAsync("files/readings.vortex", buffer, ct);
+        Console.WriteLine($"tail: the last {tail.BytesRead} bytes, and the length with them, {tail.ObjectLength}");
+
+        PutOutcome stale = await memory.PutAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, PutCondition.IfMatch("0"), ct);
+        PutOutcome replaced = await memory.PutAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, PutCondition.IfMatch(head!.Value.Token), ct);
+        Console.WriteLine($"replace while the token is 0: {stale}; while it is {head.Value.Token}: {replaced}, the token now {(await memory.HeadAsync("files/readings.vortex", ct))?.Token}");
 
         for (int i = 0; i < 5; i++)
         {
             await memory.PutIfAbsentAsync($"logs/{i:D2}", PipeReader.Create(new ReadOnlySequence<byte>([(byte)i])), 1, ct);
         }
 
-        List<string> page = await memory.ListAsync("logs/", "logs/01", ct).Take(2).ToListAsync(ct);
-        Console.WriteLine($"list under logs/ after logs/01, first two: {string.Join(", ", page)}");
+        List<ObjectListing> page = await memory.ListAsync("logs/", "logs/01", ct).Take(2).ToListAsync(ct);
+        Console.WriteLine($"list under logs/ after logs/01, first two: {string.Join(", ", page.Select(o => $"{o.Key} ({o.Head.Length} byte)"))}");
 
         await memory.DeleteAsync(["logs/00", "logs/01", "logs/99"], ct);
         Console.WriteLine($"deleted a batch of three keys, one absent: {memory.Count} objects left");
 
         await using CountingObjectStore counting = new CountingObjectStore(memory);
-        ObjectHead known = (await counting.HeadAsync("files/readings.vortex", ct))!.Value;
-        await using (VortexFile opened = await VortexSession.Default.OpenAsync(new StoreSegmentSource(counting, "files/readings.vortex", known.Length)))
+
+        // A session that holds a store opens a location in it as it opens a path. A store registered
+        // with a session stays the caller's, never disposed by the session.
+        await using (VortexSession session = VortexSession.Create(o =>
         {
+            o.SegmentCache = new SegmentCache(64L * 1024 * 1024);
+            o.ObjectStores.Add("mem://lake", counting);
+        }))
+        {
+            await using VortexFile opened = await session.OpenAsync("mem://lake/files/readings.vortex");
             Console.WriteLine($"open from the store: {opened.RowCount} rows; {Cost(counting)}");
             counting.Reset();
             double? mean = await opened.Scan<Reading>().Where(r => r.Day >= 900).AverageAsync(r => r.Celsius);
             Console.WriteLine($"mean of Celsius for Day >= 900: {mean:F3}; {Cost(counting)}");
             counting.Reset();
-            long rows = 0;
-            await foreach (Columns<Reading> batch in opened.Scan<Reading>())
-            {
-                rows += batch.RowCount;
-            }
-
-            Console.WriteLine($"a full scan, {rows} rows: {Cost(counting)}");
-        }
-
-        await using (VortexSession cached = VortexSession.Create(o => o.SegmentCache = new SegmentCache(64L * 1024 * 1024)))
-        {
-            await using VortexFile opened = await cached.OpenAsync(new StoreSegmentSource(counting, "files/readings.vortex", known.Length));
+            Console.WriteLine($"a full scan, {await CountAsync(opened)} rows: {Cost(counting)}");
             counting.Reset();
-            long rows = 0;
-            await foreach (Columns<Reading> batch in opened.Scan<Reading>())
-            {
-                rows += batch.RowCount;
-            }
-
-            Console.WriteLine($"a full scan through a session with a segment cache, {rows} rows: {Cost(counting)}");
+            Console.WriteLine($"the same scan again, its segments in the session's cache, {await CountAsync(opened)} rows: {Cost(counting)}");
         }
 
         await using MemoryObjectStore failing = new MemoryObjectStore
         {
-            Fails = (operation, key) => operation == ObjectOperation.GetRange,
+            Fails = (operation, key) => operation == ObjectOperation.Read,
         };
         await failing.PutIfAbsentAsync("files/readings.vortex", PipeReader.Create(new ReadOnlySequence<byte>(file)), file.Length, ct);
         try
         {
-            await failing.GetRangeAsync("files/readings.vortex", 0, 16, ct);
+            await failing.ReadAsync("files/readings.vortex", 0, new byte[16], null, ct);
         }
         catch (ObjectStoreException e)
         {
@@ -88,7 +83,7 @@ internal static class ObjectStore
 
         try
         {
-            await memory.GetRangeAsync("files/nothing", 0, 16, ct);
+            await memory.ReadAsync("files/nothing", 0, new byte[16], null, ct);
         }
         catch (ObjectNotFoundException e)
         {
@@ -109,52 +104,18 @@ internal static class ObjectStore
     }
 
     private static string Cost(CountingObjectStore store) =>
-        $"{store.Requests} requests ({store.CountOf(ObjectOperation.GetRange)} get, {store.CountOf(ObjectOperation.Head)} head, " +
-        $"{store.CountOf(ObjectOperation.PutIfAbsent)} put, {store.CountOf(ObjectOperation.List)} list), " +
+        $"{store.Requests} requests ({store.CountOf(ObjectOperation.Read)} read, {store.CountOf(ObjectOperation.Head)} head, " +
+        $"{store.CountOf(ObjectOperation.Put)} put, {store.CountOf(ObjectOperation.List)} list), " +
         $"{store.DependentSteps} dependent steps, {store.BytesRead} bytes read, {store.BytesWritten} written";
 
-    /// <summary>One object of a store read as a file: one ranged get per segment, the gets of a batch issued together.</summary>
-    private sealed class StoreSegmentSource(IObjectStore store, string key, long length) : ISegmentSource
+    private static async Task<long> CountAsync(VortexFile file)
     {
-        public long Length => length;
-
-        public async ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken cancellationToken)
+        long rows = 0;
+        await foreach (Columns<Reading> batch in file.Scan<Reading>())
         {
-            ObjectRange bytes = await store.GetRangeAsync(key, range.Offset, range.Length, cancellationToken);
-            return new SegmentLease(bytes.Bytes, bytes);
+            rows += batch.RowCount;
         }
 
-        public async ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken cancellationToken)
-        {
-            Task<SegmentLease>[] reads = new Task<SegmentLease>[ranges.Length];
-            for (int i = 0; i < reads.Length; i++)
-            {
-                reads[i] = ReadAsync(ranges.Span[i], cancellationToken).AsTask();
-            }
-
-            try
-            {
-                await Task.WhenAll(reads);
-            }
-            catch
-            {
-                foreach (Task<SegmentLease> read in reads)
-                {
-                    if (read.IsCompletedSuccessfully)
-                    {
-                        read.Result.Dispose();
-                    }
-                }
-
-                throw;
-            }
-
-            for (int i = 0; i < reads.Length; i++)
-            {
-                leases.Span[i] = reads[i].Result;
-            }
-        }
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        return rows;
     }
 }

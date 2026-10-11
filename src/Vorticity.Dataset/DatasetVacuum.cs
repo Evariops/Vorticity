@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
@@ -67,12 +68,31 @@ public sealed record VacuumResult
 /// Deletes what no version inside the retention window references, and never runs by itself. Ages
 /// are the store's timestamps, not a header's, since writers' clocks need not agree; and nothing is
 /// deleted until every retained version is marked, because a missed mark would delete a live
-/// object. A writer or reader that outlives the window loses its objects.
+/// object. A writer or reader that outlives the window loses its objects. A listing that lags, as a
+/// store may let it, by less than the window costs a dataset freshness and never a version. A store
+/// may date an object written in parts by the start of its upload, as S3 does, so the window must also
+/// outlast the longest upload.
 /// </summary>
 internal static class DatasetVacuum
 {
     /// <summary>The retention window applied when the dataset sets none.</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// The exception a reader of <paramref name="version"/> throws for an object the store no longer
+    /// holds, the store's own as its cause.
+    /// </summary>
+    public static ObjectNotFoundException Lost(string key, ulong version, ObjectNotFoundException cause) =>
+        new ObjectNotFoundException(
+            $"Version {version} of the dataset names '{key}', which the store no longer holds. A reader that " +
+            "outlives the retention window loses its objects to vacuum: refresh to read the latest version.",
+            cause)
+        {
+            Key = key,
+        };
+
+    /// <summary>Whether <paramref name="missing"/> is one <see cref="Lost"/> made, which names its version already.</summary>
+    public static bool IsLost(ObjectNotFoundException missing) => missing.InnerException is ObjectNotFoundException;
 
     /// <summary>The window a header's retention sets: its seconds, or <see cref="DefaultWindow"/> when it sets none.</summary>
     public static TimeSpan WindowOf(RetentionSettings retention) =>
@@ -97,16 +117,17 @@ internal static class DatasetVacuum
         RetentionSettings retention = head.Header.Retention;
         TimeSpan window = WindowOf(retention);
 
-        // A commit newer than the one marked from is not this vacuum's to judge.
-        List<(ulong Version, string Key, ObjectHead Head)> commits = [];
+        // A commit newer than the one marked from is not this vacuum's to judge. The listing says each
+        // object's length, token and date, and on a store that reports them its lock, so no head is
+        // asked but for a lock the listing does not say, of an object about to be deleted.
+        List<(ulong Version, string Key, ObjectListing Listed)> commits = [];
         Dictionary<ulong, long> lengths = [];
-        foreach (string key in await store.ListAllAsync(CommitKey.Prefix, cancellationToken).ConfigureAwait(false))
+        foreach (ObjectListing listed in await store.ListEntriesAsync(CommitKey.Prefix, cancellationToken).ConfigureAwait(false))
         {
-            if (CommitKey.TryParse(key, out ulong version) && version <= latest
-                && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
+            if (CommitKey.TryParse(listed.Key, out ulong version) && version <= latest)
             {
-                commits.Add((version, key, found));
-                lengths[version] = found.Length;
+                commits.Add((version, listed.Key, listed));
+                lengths[version] = listed.Head.Length;
             }
         }
 
@@ -114,7 +135,7 @@ internal static class DatasetVacuum
         for (int i = 1; i < commits.Count; i++)
         {
             // Superseded when the next commit that survives was created.
-            DateTimeOffset superseded = commits[i - 1].Head.LastModified;
+            DateTimeOffset superseded = commits[i - 1].Listed.Head.LastModified;
             if (i <= retention.Versions || now - superseded < window)
             {
                 retained.Add(commits[i].Version);
@@ -145,43 +166,44 @@ internal static class DatasetVacuum
         List<string> locked = [];
         DateTimeOffset? unlock = null;
         List<string> batch = [];
+        bool lockedStore = head.Header.LockedStore;
         for (int i = commits.Count - 1; i >= 0; i--)
         {
-            (ulong version, string key, ObjectHead found) = commits[i];
-            if (!markedCommits.Contains(version))
+            (ulong version, string key, ObjectListing listed) = commits[i];
+            if (!markedCommits.Contains(version) && await HeadToSweepAsync(listed).ConfigureAwait(false) is { } found)
             {
                 Sweep(key, found);
             }
         }
 
         await DeleteAsync().ConfigureAwait(false);
-        foreach (string key in await store.ListAllAsync(CommitKey.DataPrefix, cancellationToken).ConfigureAwait(false))
+        foreach (ObjectListing listed in await store.ListEntriesAsync(CommitKey.DataPrefix, cancellationToken).ConfigureAwait(false))
         {
-            if (!markedData.Contains(key)
-                && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
+            if (!markedData.Contains(listed.Key) && await HeadToSweepAsync(listed).ConfigureAwait(false) is { } found)
             {
-                Sweep(key, found);
+                Sweep(listed.Key, found);
             }
         }
 
         await DeleteAsync().ConfigureAwait(false);
 
         // A compaction loop's leases, each named by when it ended: the key dates it, and one that
-        // ended a window ago holds nothing. Only a store that locks what it keeps is asked for the
-        // lock of each, which the head says.
-        foreach (string key in await store.ListAllAsync(CompactionLoop.LeasePrefix, cancellationToken).ConfigureAwait(false))
+        // ended a window ago holds nothing. Only a store that locks what it keeps needs the lock of
+        // each, which its listing says or else a head.
+        foreach (ObjectListing listed in await store.ListEntriesAsync(CompactionLoop.LeasePrefix, cancellationToken).ConfigureAwait(false))
         {
+            string key = listed.Key;
             if (!CompactionLoop.TryParseEnd(key, out long end) || now - DateTimeOffset.FromUnixTimeSeconds(end) < window)
             {
                 continue;
             }
 
-            if (!head.Header.LockedStore)
+            if (!lockedStore)
             {
                 batch.Add(key);
                 deleted.Add(key);
             }
-            else if (await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
+            else if ((listed.LockReported ? listed.Head : await store.HeadAsync(key, cancellationToken).ConfigureAwait(false)) is { } found)
             {
                 Sweep(key, found);
             }
@@ -264,6 +286,19 @@ internal static class DatasetVacuum
             {
                 await MarkAsync(child.Child, depth - 1).ConfigureAwait(false);
             }
+        }
+
+        // The head an unmarked object is judged by: the listing's, unless the store keeps locks the
+        // listing does not report and the object is old enough to go, when its head says the lock.
+        // Null when the object went meanwhile.
+        async ValueTask<ObjectHead?> HeadToSweepAsync(ObjectListing listed)
+        {
+            if (listed.LockReported || !lockedStore || now - listed.Head.LastModified < window)
+            {
+                return listed.Head;
+            }
+
+            return await store.HeadAsync(listed.Key, cancellationToken).ConfigureAwait(false);
         }
 
         void Sweep(string key, ObjectHead found)

@@ -395,6 +395,14 @@ public sealed partial class VortexFileWriter
             await pipe.CompleteAsync().ConfigureAwait(false);
         }
 
+        // A file written to a location is complete when the store holds it. The put's outcome is the
+        // completion's: a failure is thrown here, and not again by the disposal.
+        if (_upload is { } upload)
+        {
+            _upload = null;
+            await upload.ConfigureAwait(false);
+        }
+
         return BuildReport();
     }
 
@@ -429,6 +437,9 @@ public sealed partial class VortexFileWriter
             _sinkClosed = true;
             pipe.Complete(new OperationCanceledException("The Vortex file was abandoned; the bytes written so far are not a file."));
         }
+
+        // The put of a file at a location stops at once, its parts in flight with it, and aborts its upload.
+        _uploadAbandoned?.Cancel();
     }
 
     /// <summary>Releases what the writer holds; a file not completed is abandoned first.</summary>
@@ -521,6 +532,24 @@ public sealed partial class VortexFileWriter
                 TruncateAppended();
             }
         }
+
+        // The put of an abandoned file gives up once its pipe fails, an upload in parts aborted: it is
+        // awaited, so that nothing of the file is left in flight, and its failure, which the abandon
+        // caused, is not the caller's.
+        if (_upload is { IsCompletedSuccessfully: false } upload)
+        {
+            _upload = null;
+            try
+            {
+                await upload.ConfigureAwait(false);
+            }
+            catch (Exception) when (_abandoned)
+            {
+            }
+        }
+
+        _uploadAbandoned?.Dispose();
+        _uploadAbandoned = null;
     }
 
     /// <summary>Takes the rows appended to the writer's builder, and seals them once they fill a chunk.</summary>

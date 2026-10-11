@@ -1155,7 +1155,7 @@ internal sealed class DatasetScanBuilder
             projection = keyed.Build();
         }
 
-        ObjectRead read = columns.Read(_filter, projection);
+        ObjectReadPlan read = columns.Read(_filter, projection);
         string[]? source = columns.SourcePaths(paths);
         if (read.Fate == FilterFate.None || (source is null && paths.Length > 1))
         {
@@ -1206,7 +1206,7 @@ internal sealed class DatasetScanBuilder
             return new ObjectPart(_filter is null ? FilterFate.Every : FilterFate.Pushed, _filter, mask, null);
         }
 
-        ObjectRead read = columns.Read(_filter, mask ?? FieldMask.All);
+        ObjectReadPlan read = columns.Read(_filter, mask ?? FieldMask.All);
         return new ObjectPart(read.Fate, read.Pushed, read.Shape.Source, read);
     }
 
@@ -1237,7 +1237,7 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>An object of another schema read as the version's: its own scan, each batch reshaped and counted from <paramref name="baseRow"/>.</summary>
     private IAsyncEnumerable<RecordBatch> ReshapedAsync(
-        VortexFile file, PositionedObject held, ObjectRead read, long baseRow, bool compact, CancellationToken cancellationToken) =>
+        VortexFile file, PositionedObject held, ObjectReadPlan read, long baseRow, bool compact, CancellationToken cancellationToken) =>
         ObjectColumns.ReshapeAsync(
             held.Entry.HasDeletions
                 ? LiveAsync(file, held, read.Pushed, read.Shape.Source, 0, compact && read.Evaluated is null, reshaped: true, cancellationToken)
@@ -1322,7 +1322,7 @@ internal sealed class DatasetScanBuilder
     /// the filter its own scan takes, the fields that scan reads, and how its batches become the
     /// version's rows; none for an object of the version's own columns, whose batches already are.
     /// </summary>
-    private readonly record struct ObjectPart(FilterFate Fate, VortexExpr? Pushed, FieldMask? Source, ObjectRead? Mapped);
+    private readonly record struct ObjectPart(FilterFate Fate, VortexExpr? Pushed, FieldMask? Source, ObjectReadPlan? Mapped);
 
     /// <summary>
     /// The file's own scan under <paramref name="filter"/> and <paramref name="mask"/>, with this

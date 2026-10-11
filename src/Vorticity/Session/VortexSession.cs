@@ -250,6 +250,13 @@ public sealed class VortexSessionOptions
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>
     public VortexExtensionRegistry Extensions { get; } = new VortexExtensionRegistry();
 
+    /// <summary>
+    /// The object stores the session opens locations with, <c>s3://bucket/key</c> and the like. The
+    /// session disposes the stores it builds for a scheme, never the ones registered with it. None by
+    /// default: a library opens no connection and reads no credential on a host that did not ask.
+    /// </summary>
+    public ObjectStoreRegistry ObjectStores { get; } = new ObjectStoreRegistry();
+
     /// <summary>The engine's pool: the aligned pool's own, or the shared one.</summary>
     internal AlignedBufferPool EnginePool => _memoryPool is AlignedMemoryPool aligned ? aligned.Inner : AlignedBufferPool.Shared;
 
@@ -269,6 +276,7 @@ public sealed class VortexSessionOptions
 
         _frozen = true;
         Extensions.Freeze();
+        ObjectStores.Freeze();
     }
 
     private T Set<T>(T value)
@@ -342,17 +350,29 @@ public sealed class VortexSession : IAsyncDisposable
     /// Opens the file at <paramref name="path"/>: its tail read positionally, the file mapped into
     /// memory by the first scan that reads data, and kept mapped once closed for the next open of
     /// the same file, as <see cref="VortexSessionOptions.MappedFileCacheCount"/> says; or every read
-    /// positional, when <see cref="VortexSessionOptions.MapFiles"/> is false.
+    /// positional, when <see cref="VortexSessionOptions.MapFiles"/> is false. A location,
+    /// <c>s3://bucket/key</c> and the like, opens the object through the store the session's
+    /// <see cref="VortexSessionOptions.ObjectStores"/> resolve it with: its tail and its length in one
+    /// request on a store that reads suffixes.
     /// </summary>
-    /// <param name="path">A local file path.</param>
+    /// <param name="path">A local file path, or a location.</param>
     /// <param name="options">What the open reads, trusts and refuses; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the open.</param>
     /// <returns>The open file; the caller disposes it.</returns>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
+    /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
+    /// <exception cref="ObjectNotFoundException">The location names no object.</exception>
     public async ValueTask<VortexFile> OpenAsync(string path, VortexOpenOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();
+        if (ObjectStoreRegistry.IsLocation(path))
+        {
+            (IObjectStore store, string key) = Options.ObjectStores.Locate(path);
+            ObjectStoreSource source = new ObjectStoreSource(store, key);
+            return await OpenReaderAsync(source, path, options, cancellationToken, ownedHere: true).ConfigureAwait(false);
+        }
+
         VortexFile file = await VortexFile.OpenAsync(path, Effective(options), this, cancellationToken).ConfigureAwait(false);
         await AttachAsync(file, path).ConfigureAwait(false);
         return file;
@@ -364,12 +384,24 @@ public sealed class VortexSession : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the open.</param>
     /// <returns>The open file; disposing it disposes the source.</returns>
     /// <exception cref="VortexFormatException">The bytes are not a well-formed Vortex file.</exception>
-    public async ValueTask<VortexFile> OpenAsync(ISegmentSource source, VortexOpenOptions? options = null, CancellationToken cancellationToken = default)
+    public ValueTask<VortexFile> OpenAsync(ISegmentSource source, VortexOpenOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
         ThrowIfDisposed();
         ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true, Options.EnginePool);
+        return OpenReaderAsync(reader, source.GetType().Name, options, cancellationToken);
+    }
+
+    /// <summary>Opens a file over <paramref name="reader"/>, sealed or plain, which the file then owns unless the options leave it open.</summary>
+    private async ValueTask<VortexFile> OpenReaderAsync(ISegmentReader reader, string name, VortexOpenOptions? options, CancellationToken cancellationToken, bool ownedHere = false)
+    {
         VortexOpenOptions effective = Effective(options);
+        if (ownedHere && effective.LeaveSourceOpen)
+        {
+            // A reader the session made for a location is nobody else's to dispose.
+            effective = effective with { LeaveSourceOpen = false };
+        }
+
         VortexTornTail? torn = null;
         if (Keys is not null)
         {
@@ -378,7 +410,7 @@ public sealed class VortexSession : IAsyncDisposable
             try
             {
                 (opened, torn) = await Sealing.SealedFiles.ReaderAsync(
-                    reader, ownsSource, this, source.GetType().Name, effective.TornTail, cancellationToken).ConfigureAwait(false);
+                    reader, ownsSource, this, name, effective.TornTail, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
@@ -404,7 +436,7 @@ public sealed class VortexSession : IAsyncDisposable
             file.TornTail = torn;
         }
 
-        await AttachAsync(file, source.GetType().Name).ConfigureAwait(false);
+        await AttachAsync(file, name).ConfigureAwait(false);
         return file;
     }
 
@@ -477,9 +509,11 @@ public sealed class VortexSession : IAsyncDisposable
     /// The file is written beside the destination, as <c>.name.token.tmp</c>, and renamed over it,
     /// so its directory must be writable. A symbolic link is written through to its target, and a
     /// file replaced passes its Unix permissions on. A process that dies before completing leaves
-    /// that file behind.
+    /// that file behind. A location, <c>s3://bucket/key</c> and the like, is written to the store the
+    /// session's <see cref="VortexSessionOptions.ObjectStores"/> resolve it with: the object appears
+    /// whole when the writer completes, or not at all, and an upload in parts is aborted with the file.
     /// </remarks>
-    /// <param name="path">The destination.</param>
+    /// <param name="path">The destination: a path, or a location.</param>
     /// <param name="schema">The file's columns.</param>
     /// <param name="options">What the file looks like; null for the defaults.</param>
     /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes what it wrote and leaves the path as it was.</returns>
@@ -490,8 +524,31 @@ public sealed class VortexSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(schema);
         ThrowIfDisposed();
+        if (ObjectStoreRegistry.IsLocation(path))
+        {
+            return CreateLocationWriter(path, schema, options);
+        }
+
         VortexFileWriter writer = VortexFileWriter.Create(path, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
         writer.Declare(schema);
+        return writer;
+    }
+
+    /// <summary>
+    /// A writer into a pipe whose reader is the store's put of the object at <paramref name="location"/>:
+    /// held up to the store's part threshold and sent whole at completion, or sent in parts as they fill,
+    /// the pipe's backpressure slowing the writer when the link is the bottleneck. The put replaces the
+    /// object, as a path's file is replaced, and the writer's abandon cancels it, its parts in flight
+    /// included.
+    /// </summary>
+    private VortexFileWriter CreateLocationWriter(string location, VortexSchema schema, VortexWriteOptions? options)
+    {
+        (IObjectStore store, string key) = Options.ObjectStores.Locate(location);
+        Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 4 << 20, resumeWriterThreshold: 2 << 20, useSynchronizationContext: false));
+        VortexFileWriter writer = VortexFileWriter.Create(pipe.Writer, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
+        writer.Declare(schema);
+        CancellationTokenSource abandoned = new CancellationTokenSource();
+        writer.UploadTo(store.PutAsync(key, pipe.Reader, -1, PutCondition.None, abandoned.Token).AsTask(), abandoned);
         return writer;
     }
 
@@ -538,7 +595,7 @@ public sealed class VortexSession : IAsyncDisposable
     }
 
     /// <summary>Opens the file at <paramref name="path"/> to append rows to it.</summary>
-    /// <param name="path">A file this library wrote, or one of the same shape.</param>
+    /// <param name="path">A file this library wrote, or one of the same shape, on a local path.</param>
     /// <param name="options">What the new rows look like; null takes the file's own policy.</param>
     /// <param name="cancellationToken">Cancels the reads and the first writes.</param>
     /// <returns>
@@ -546,6 +603,10 @@ public sealed class VortexSession : IAsyncDisposable
     /// Abandoned, or disposed without completing, it truncates the file back to what it was.
     /// </returns>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can continue.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The path is a location: an object in a store cannot grow, so a file there is written again
+    /// rather than appended to, and rows that keep coming belong in a dataset.
+    /// </exception>
     public ValueTask<VortexFileWriter> OpenWriterAsync(string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
@@ -633,8 +694,11 @@ public sealed class VortexSession : IAsyncDisposable
     /// </summary>
     public void ReleaseMappedFiles() => Mappings?.Clear();
 
-    /// <summary>Clears the segment cache, lets the kept mappings go and trims the pool. A file of the session still open makes this throw.</summary>
-    /// <returns>A completed task.</returns>
+    /// <summary>
+    /// Clears the segment cache, lets the kept mappings go, trims the pool and disposes the object
+    /// stores the session built for a scheme. A file of the session still open makes this throw.
+    /// </summary>
+    /// <returns>A task that completes when the stores are disposed.</returns>
     /// <exception cref="InvalidOperationException">A file opened through the session is still open.</exception>
     public ValueTask DisposeAsync()
     {
@@ -667,7 +731,7 @@ public sealed class VortexSession : IAsyncDisposable
         }
 
         ReadGate.Dispose();
-        return ValueTask.CompletedTask;
+        return Options.ObjectStores.DisposeAsync();
     }
 
     internal void Detach(VortexFile file) => _open.TryRemove(file, out _);

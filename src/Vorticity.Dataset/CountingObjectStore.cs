@@ -1,9 +1,11 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
@@ -51,7 +53,7 @@ public sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Bytes handed back by <see cref="GetRangeAsync"/>.</summary>
+    /// <summary>Bytes handed back by <see cref="ReadAsync"/> and <see cref="ReadTailAsync"/>.</summary>
     public long BytesRead
     {
         get
@@ -63,7 +65,10 @@ public sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Bytes announced to <see cref="PutIfAbsentAsync"/>, whether or not the key was free.</summary>
+    /// <summary>
+    /// Bytes announced to a put, whether or not its condition held; for a put of unknown length, the
+    /// bytes the store read of its content, counted once the put is over.
+    /// </summary>
     public long BytesWritten
     {
         get
@@ -127,20 +132,42 @@ public sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async ValueTask<ObjectRange> GetRangeAsync(
-        string key, long offset, int length, CancellationToken cancellationToken)
+    public ObjectStoreCapabilities Capabilities => _inner.Capabilities;
+
+    /// <inheritdoc/>
+    public async ValueTask<ObjectRead> ReadAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
-        Enter(ObjectOperation.GetRange);
+        Enter(ObjectOperation.Read);
         try
         {
-            ObjectRange range = await _inner.GetRangeAsync(key, offset, length, cancellationToken)
-                .ConfigureAwait(false);
+            ObjectRead read = await _inner.ReadAsync(key, offset, destination, ifToken, cancellationToken).ConfigureAwait(false);
             lock (_gate)
             {
-                _bytesRead += range.Length;
+                _bytesRead += read.BytesRead;
             }
 
-            return range;
+            return read;
+        }
+        finally
+        {
+            Leave();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        Enter(ObjectOperation.Read);
+        try
+        {
+            ObjectRead read = await _inner.ReadTailAsync(key, destination, cancellationToken).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _bytesRead += read.BytesRead;
+            }
+
+            return read;
         }
         finally
         {
@@ -163,23 +190,92 @@ public sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async ValueTask<PutOutcome> PutIfAbsentAsync(
-        string key, PipeReader content, long length, CancellationToken cancellationToken)
+    public async ValueTask<PutOutcome> PutAsync(
+        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
-        Enter(ObjectOperation.PutIfAbsent);
+        Enter(ObjectOperation.Put);
         lock (_gate)
         {
-            // Counted even when the key turns out to be taken: the bytes were offered to the seam.
-            _bytesWritten += length;
+            // Counted even when the condition refuses it: the bytes were offered to the seam. A put of
+            // unknown length counts what the store read of its content, once the put is over.
+            _bytesWritten += Math.Max(length, 0);
+        }
+
+        CountingReader? counted = length < 0 ? new CountingReader(content) : null;
+        try
+        {
+            return await _inner.PutAsync(key, counted ?? content, length, condition, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (counted is not null)
+            {
+                lock (_gate)
+                {
+                    _bytesWritten += counted.Consumed;
+                }
+            }
+
+            Leave();
+        }
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
+    {
+        Enter(ObjectOperation.Put);
+        lock (_gate)
+        {
+            _bytesWritten += content.Length;
         }
 
         try
         {
-            return await _inner.PutIfAbsentAsync(key, content, length, cancellationToken).ConfigureAwait(false);
+            return await _inner.PutAsync(key, content, condition, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             Leave();
+        }
+    }
+
+    /// <summary>A put's content that counts the bytes its reader consumed.</summary>
+    private sealed class CountingReader(PipeReader inner) : PipeReader
+    {
+        private ReadOnlySequence<byte> _last;
+
+        internal long Consumed { get; private set; }
+
+        public override void AdvanceTo(SequencePosition consumed) => AdvanceTo(consumed, consumed);
+
+        public override void AdvanceTo(SequencePosition consumed, SequencePosition examined)
+        {
+            Consumed += _last.Slice(_last.Start, consumed).Length;
+            inner.AdvanceTo(consumed, examined);
+        }
+
+        public override void CancelPendingRead() => inner.CancelPendingRead();
+
+        public override void Complete(Exception? exception = null) => inner.Complete(exception);
+
+        public override ValueTask CompleteAsync(Exception? exception = null) => inner.CompleteAsync(exception);
+
+        public override async ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
+        {
+            ReadResult result = await inner.ReadAsync(cancellationToken).ConfigureAwait(false);
+            _last = result.Buffer;
+            return result;
+        }
+
+        public override bool TryRead(out ReadResult result)
+        {
+            if (!inner.TryRead(out result))
+            {
+                return false;
+            }
+
+            _last = result.Buffer;
+            return true;
         }
     }
 
@@ -198,12 +294,12 @@ public sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async IAsyncEnumerable<string> ListAsync(
+    public async IAsyncEnumerable<ObjectListing> ListAsync(
         string prefix, string? startAfter, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // One operation per listing, in flight while its first key is awaited: that is the request a
         // caller waits for, and the later keys of a page cost it nothing.
-        IAsyncEnumerator<string> keys = _inner.ListAsync(prefix, startAfter, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        IAsyncEnumerator<ObjectListing> keys = _inner.ListAsync(prefix, startAfter, cancellationToken).GetAsyncEnumerator(cancellationToken);
         await using (keys.ConfigureAwait(false))
         {
             bool first = true;

@@ -45,7 +45,7 @@ public sealed class MemoryObjectStore : IObjectStore
     public Func<ObjectOperation, string, bool>? Fails { get; set; }
 
     /// <summary>
-    /// Asked after a <see cref="PutIfAbsentAsync"/> has stored its bytes; when it returns true the
+    /// Asked after a <see cref="PutAsync"/> has stored its bytes; when it returns true the
     /// call throws anyway, so the object exists and its writer never learned it.
     /// </summary>
     public Func<string, bool>? CrashesAfterPut { get; set; }
@@ -109,35 +109,40 @@ public sealed class MemoryObjectStore : IObjectStore
         }
     }
 
+    /// <summary>Reads suffixes, lists in order, keeps locks, which each entry of its listing reports, and replaces on a token's match.</summary>
+    public ObjectStoreCapabilities Capabilities =>
+        ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder
+        | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
+
     /// <inheritdoc/>
-    public async ValueTask<ObjectRange> GetRangeAsync(
-        string key, long offset, int length, CancellationToken cancellationToken)
+    public async ValueTask<ObjectRead> ReadAsync(
+        string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
     {
         ObjectKey.Check(key);
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
-        ArgumentOutOfRangeException.ThrowIfNegative(length);
-        await StartAsync(ObjectOperation.GetRange, key, cancellationToken).ConfigureAwait(false);
+        await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
 
-        lock (_gate)
+        // An object's array is never written after it is stored, so it is copied out after the lock.
+        Entry entry = Find(key, ifToken);
+        if (offset >= entry.Bytes.Length && !(offset == 0 && entry.Bytes.Length == 0))
         {
-            if (!_objects.TryGetValue(key, out Entry entry))
-            {
-                throw ObjectNotFoundException.For(key);
-            }
-
-            if (offset >= entry.Bytes.Length && !(offset == 0 && entry.Bytes.Length == 0))
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(offset),
-                    offset,
-                    $"'{key}' holds {entry.Bytes.Length} bytes, so the range starts past its end.");
-            }
-
-            // An object's array is never written after it is stored, so a lease on it needs no copy
-            // and no owner: a delete drops the map's reference, and the lease keeps its own.
-            int available = (int)Math.Min(length, entry.Bytes.Length - offset);
-            return new ObjectRange(new SegmentLease(entry.Bytes.AsMemory((int)offset, available)), entry.Token, entry.Bytes.Length);
+            throw ObjectStoreExtensions.PastEnd(key, offset, entry.Bytes.Length);
         }
+
+        int available = (int)Math.Min(destination.Length, entry.Bytes.Length - offset);
+        entry.Bytes.AsSpan((int)offset, available).CopyTo(destination.Span);
+        return new ObjectRead(available, entry.Bytes.Length, entry.Token);
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+    {
+        ObjectKey.Check(key);
+        await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
+        Entry entry = Find(key, null);
+        int available = Math.Min(destination.Length, entry.Bytes.Length);
+        entry.Bytes.AsSpan(entry.Bytes.Length - available).CopyTo(destination.Span);
+        return new ObjectRead(available, entry.Bytes.Length, entry.Token);
     }
 
     /// <inheritdoc/>
@@ -148,21 +153,19 @@ public sealed class MemoryObjectStore : IObjectStore
 
         lock (_gate)
         {
-            return _objects.TryGetValue(key, out Entry entry)
-                ? new ObjectHead(entry.Bytes.Length, entry.Token, entry.Created) { RetainUntil = entry.RetainUntil, LegalHold = _holds.Contains(key) }
-                : null;
+            return _objects.TryGetValue(key, out Entry entry) ? HeadOf(key, entry) : null;
         }
     }
 
     /// <inheritdoc/>
-    public async ValueTask<PutOutcome> PutIfAbsentAsync(
-        string key, PipeReader content, long length, CancellationToken cancellationToken)
+    public async ValueTask<PutOutcome> PutAsync(
+        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(content);
         try
         {
             ObjectKey.Check(key);
-            await StartAsync(ObjectOperation.PutIfAbsent, key, cancellationToken).ConfigureAwait(false);
+            await StartAsync(ObjectOperation.Put, key, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception refused)
         {
@@ -175,14 +178,23 @@ public sealed class MemoryObjectStore : IObjectStore
         PutOutcome outcome;
         lock (_gate)
         {
-            if (_objects.ContainsKey(key))
+            bool found = _objects.TryGetValue(key, out Entry current);
+            DateTimeOffset now = TimeProvider.GetUtcNow();
+            if (condition.Kind == PutConditionKind.IfAbsent && found)
             {
                 outcome = PutOutcome.Exists;
             }
+            else if (condition.Kind == PutConditionKind.IfMatch && (!found || !string.Equals(current.Token, condition.Token, StringComparison.Ordinal)))
+            {
+                outcome = PutOutcome.Changed;
+            }
+            else if (found && (_holds.Contains(key) || current.RetainUntil > now))
+            {
+                throw new ObjectStoreException($"'{key}' is locked, and the store refuses to overwrite it.");
+            }
             else
             {
-                DateTimeOffset created = TimeProvider.GetUtcNow();
-                _objects[key] = new Entry(bytes, Token(), created, RetainFor is { } term ? created + term : null);
+                _objects[key] = new Entry(bytes, Token(), now, RetainFor is { } term ? now + term : null);
                 outcome = PutOutcome.Created;
             }
         }
@@ -233,7 +245,7 @@ public sealed class MemoryObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async IAsyncEnumerable<string> ListAsync(
+    public async IAsyncEnumerable<ObjectListing> ListAsync(
         string prefix, string? startAfter, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prefix);
@@ -243,10 +255,10 @@ public sealed class MemoryObjectStore : IObjectStore
             // One page per round trip, taken under the lock and handed out after it, so a caller
             // that stops early pays for one page and a slow consumer holds no lock.
             await StartAsync(ObjectOperation.List, prefix, cancellationToken).ConfigureAwait(false);
-            List<string> page = new List<string>(ListPage);
+            List<ObjectListing> page = new List<ObjectListing>(ListPage);
             lock (_gate)
             {
-                foreach (string key in _objects.Keys)
+                foreach ((string key, Entry entry) in _objects)
                 {
                     if (!key.StartsWith(prefix, StringComparison.Ordinal)
                         || (after is not null && string.CompareOrdinal(key, after) <= 0))
@@ -254,7 +266,7 @@ public sealed class MemoryObjectStore : IObjectStore
                         continue;
                     }
 
-                    page.Add(key);
+                    page.Add(new ObjectListing(key, HeadOf(key, entry), LockReported: true));
                     if (page.Count == ListPage)
                     {
                         break;
@@ -262,9 +274,9 @@ public sealed class MemoryObjectStore : IObjectStore
                 }
             }
 
-            foreach (string key in page)
+            foreach (ObjectListing listed in page)
             {
-                yield return key;
+                yield return listed;
             }
 
             if (page.Count < ListPage)
@@ -272,7 +284,7 @@ public sealed class MemoryObjectStore : IObjectStore
                 yield break;
             }
 
-            after = page[^1];
+            after = page[^1].Key;
         }
     }
 
@@ -316,19 +328,42 @@ public sealed class MemoryObjectStore : IObjectStore
     /// <summary>A token no other object of this store has had.</summary>
     private string Token() =>
         Interlocked.Increment(ref _tokens).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>The object at <paramref name="key"/>, which must still have <paramref name="ifToken"/> when one is given.</summary>
+    private Entry Find(string key, string? ifToken)
+    {
+        lock (_gate)
+        {
+            if (!_objects.TryGetValue(key, out Entry entry))
+            {
+                throw ObjectNotFoundException.For(key);
+            }
+
+            if (ifToken is not null && !string.Equals(ifToken, entry.Token, StringComparison.Ordinal))
+            {
+                throw ObjectStoreExtensions.Changed(key, ifToken, entry.Token);
+            }
+
+            return entry;
+        }
+    }
+
+    /// <summary>The head of an object, its lock included; under the gate.</summary>
+    private ObjectHead HeadOf(string key, Entry entry) =>
+        new ObjectHead(entry.Bytes.Length, entry.Token, entry.Created) { RetainUntil = entry.RetainUntil, LegalHold = _holds.Contains(key) };
 }
 
 /// <summary>The five operations of <see cref="IObjectStore"/>, for fault injection and counting.</summary>
 public enum ObjectOperation
 {
-    /// <summary><see cref="IObjectStore.GetRangeAsync"/>.</summary>
-    GetRange = 0,
+    /// <summary><see cref="IObjectStore.ReadAsync"/> and <see cref="IObjectStore.ReadTailAsync"/>.</summary>
+    Read = 0,
 
     /// <summary><see cref="IObjectStore.HeadAsync"/>.</summary>
     Head = 1,
 
-    /// <summary><see cref="IObjectStore.PutIfAbsentAsync"/>.</summary>
-    PutIfAbsent = 2,
+    /// <summary>A put, from a stream or from bytes in memory, whatever its condition.</summary>
+    Put = 2,
 
     /// <summary><see cref="IObjectStore.DeleteAsync"/>, once per batch.</summary>
     Delete = 3,

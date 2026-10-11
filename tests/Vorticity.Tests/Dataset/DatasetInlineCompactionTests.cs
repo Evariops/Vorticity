@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Vorticity.Tests.Scan;
 using Xunit;
 
@@ -107,7 +108,7 @@ public sealed class DatasetInlineCompactionTests
 
         // Writing and committing read no data object; the merge after the commit reads them all.
         Assert.Null(dataset.LastInlineCompactionFailure);
-        store.Fails = (operation, key) => operation == ObjectOperation.GetRange && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal);
+        store.Fails = (operation, key) => operation == ObjectOperation.Read && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal);
         ulong appended = await AppendAsync(dataset, DatasetLevels.DefaultLevelZeroCeiling, ct);
         Assert.Equal((appended, 1L), (dataset.Version, dataset.Lag));
 
@@ -150,7 +151,7 @@ public sealed class DatasetInlineCompactionTests
     }
 
     /// <summary>A store whose first read of a data object, once asked to, waits until the test releases it.</summary>
-    private sealed class HeldReads(IObjectStore inner) : IObjectStore
+    private sealed class HeldReads(IObjectStore inner) : ForwardingStore(inner)
     {
         internal bool Holding { get; set; }
 
@@ -158,7 +159,19 @@ public sealed class DatasetInlineCompactionTests
 
         internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public async ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken)
+        public override async ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            await HoldAsync(key, cancellationToken);
+            return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
+
+        public override async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
+        {
+            await HoldAsync(key, cancellationToken);
+            return await Inner.ReadTailAsync(key, destination, cancellationToken);
+        }
+
+        private async ValueTask HoldAsync(string key, CancellationToken cancellationToken)
         {
             if (Holding && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal))
             {
@@ -166,23 +179,7 @@ public sealed class DatasetInlineCompactionTests
                 Reached.SetResult();
                 await Release.Task.WaitAsync(cancellationToken);
             }
-
-            return await inner.GetRangeAsync(key, offset, length, cancellationToken);
         }
-
-        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
-            inner.HeadAsync(key, cancellationToken);
-
-        public ValueTask<PutOutcome> PutIfAbsentAsync(string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken) =>
-            inner.PutIfAbsentAsync(key, content, length, cancellationToken);
-
-        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(keys, cancellationToken);
-
-        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static DatasetOptions Options() => new DatasetOptions

@@ -8,9 +8,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Vorticity.Tests.Scan;
 using Xunit;
 
@@ -83,14 +85,17 @@ public sealed class DatasetLockedStoreTests
         }
     }
 
-    [Fact]
-    public async Task VacuumLeavesWhatTheLockKeepsAndSaysWhenItMayGo()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task VacuumLeavesWhatTheLockKeepsAndSaysWhenItMayGo(bool listsLocks)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
         await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock, RetainFor = TimeSpan.FromDays(30) };
+        await using CountingObjectStore counting = new CountingObjectStore(listsLocks ? store : new LocksInHeadsOnly(store));
         DatasetOptions options = Options() with { LockedStore = true, RetentionWindow = TimeSpan.FromHours(1), TimeProvider = clock };
-        await using VortexDataset dataset = await CreateAsync(store, options, 0, ct);
+        await using VortexDataset dataset = await CreateAsync(counting, options, 0, ct);
         DateTimeOffset first = clock.Now;
         for (int append = 0; append < 3; append++)
         {
@@ -105,8 +110,13 @@ public sealed class DatasetLockedStoreTests
 
         // Past the window, every superseded object and the lease are garbage, and every one is locked.
         clock.Advance(TimeSpan.FromHours(2));
+        counting.Reset();
         VacuumResult early = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
         Assert.Empty(early.Deleted);
+
+        // A listing that says each lock spares every head. One that does not, as S3's, costs a head
+        // per object old enough to go, and none for the others.
+        Assert.Equal(listsLocks ? 0 : early.Locked.Length, counting.CountOf(ObjectOperation.Head));
         Assert.Contains(CompactionLoop.LeaseKey(0, lease), early.Locked);
         Assert.Contains(early.Locked, key => key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal));
         Assert.Contains(early.Locked, key => key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal));
@@ -153,4 +163,17 @@ public sealed class DatasetLockedStoreTests
 
     private static async Task<long> RowsAsync(VortexDataset dataset, CancellationToken ct) =>
         (await dataset.Scan<ChangeRow>().ToRecordsAsync(ct).ToListAsync(ct)).Count;
+
+    /// <summary>A store whose listing says no lock, as S3's does not: only a head tells.</summary>
+    private sealed class LocksInHeadsOnly(IObjectStore inner) : ForwardingStore(inner)
+    {
+        public override async IAsyncEnumerable<ObjectListing> ListAsync(
+            string prefix, string? startAfter, [EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            await foreach (ObjectListing listed in Inner.ListAsync(prefix, startAfter, cancellationToken).ConfigureAwait(false))
+            {
+                yield return listed with { Head = listed.Head with { RetainUntil = null, LegalHold = false }, LockReported = false };
+            }
+        }
+    }
 }

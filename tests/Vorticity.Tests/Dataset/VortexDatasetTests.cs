@@ -193,7 +193,7 @@ public sealed class VortexDatasetTests
         Assert.Equal(head.Length, entry.Bytes);
 
         // The uid in the entry is the one the file's postscript carries.
-        await using ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, entry.Key);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         Assert.NotNull(file.StoredIdentity);
     }
@@ -392,14 +392,46 @@ public sealed class VortexDatasetTests
                 }
             }
 
-            return (store.DependentSteps, store.CountOf(ObjectOperation.GetRange));
+            return (store.DependentSteps, store.CountOf(ObjectOperation.Read));
         }
 
         (long alone, long aloneReads) = await OpenAsync(both: false, twice: false);
         (long together, _) = await OpenAsync(both: true, twice: false);
         (_, long twiceReads) = await OpenAsync(both: false, twice: true);
+
+        // The entry records the object's length, so an open is the read of its tail and nothing else.
+        Assert.Equal((1L, 1L), (alone, aloneReads));
         Assert.True(together < 2 * alone, $"{together} dependent steps for two opens, {alone} for one");
         Assert.Equal(aloneReads, twiceReads);
+    }
+
+    // The latest version is the first key a listing of commit/ yields, which a store whose listing is
+    // in no order, as an S3 directory bucket's, cannot give: such a store hosts files, never a dataset.
+    [Fact]
+    public async Task AStoreThatListsInNoOrderHostsNoDataset()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        DTypeArena types = new DTypeArena();
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using (VortexDataset _ = await VortexDataset.CreateAsync(inner, Schema(types), Options(), ct))
+        {
+        }
+
+        await using Unordered store = new Unordered(inner);
+        NotSupportedException opened = await Assert.ThrowsAsync<NotSupportedException>(
+            async () => await VortexDataset.OpenAsync(store, Options(), ct));
+        Assert.Contains("ListsInOrder", opened.Message, StringComparison.Ordinal);
+        await using MemoryObjectStore empty = new MemoryObjectStore();
+        await using Unordered fresh = new Unordered(empty);
+        await Assert.ThrowsAsync<NotSupportedException>(
+            async () => await VortexDataset.CreateAsync(fresh, Schema(types), Options(), ct));
+        Assert.Equal(0, empty.Count);
+    }
+
+    /// <summary>A store whose listing is in no order.</summary>
+    private sealed class Unordered(IObjectStore inner) : ForwardingStore(inner)
+    {
+        public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.ListsInOrder;
     }
 
     // A writer that stops before its last byte leaves a commit that is not whole under the next

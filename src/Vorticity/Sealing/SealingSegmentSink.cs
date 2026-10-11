@@ -151,9 +151,15 @@ internal sealed class SealingSegmentSink : ISegmentSink
 
         if (result.IsCompleted)
         {
-            throw new InvalidOperationException("The pipe's reader completed before the file did.");
+            await Writing.PipeSegmentSink.ThrowReaderGoneAsync(Upload).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// The put that reads the pipe, for a file written to a store: a reader that completes before the
+    /// file did has failed, and the put's own failure says why.
+    /// </summary>
+    internal Task? Upload { get; set; }
 
     /// <summary>Seals the last frame, writes the trailer, and lets go of the key: the object is whole once the pipe is flushed.</summary>
     public async ValueTask FinishAsync(CancellationToken cancellationToken)

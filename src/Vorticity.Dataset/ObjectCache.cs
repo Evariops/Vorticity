@@ -205,7 +205,7 @@ internal sealed class ObjectCache : IAsyncDisposable
         // Through the session, so the store sees at most its reads in flight and a segment read once
         // is served from its cache to every scan that asks again. An encrypted dataset's object is
         // opened through a sealed reader, its object id checked against the entry's uid.
-        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, cancellationToken).ConfigureAwait(false);
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         try
         {
             VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), OpenOptionsWith(fragments), cancellationToken).ConfigureAwait(false);

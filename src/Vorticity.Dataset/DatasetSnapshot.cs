@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
+using Vorticity.IO;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -192,9 +193,9 @@ internal sealed class DatasetSnapshot
 
             return await renting.ConfigureAwait(false);
         }
-        catch (ObjectNotFoundException missing) when (missing.Version == 0)
+        catch (ObjectNotFoundException missing) when (!DatasetVacuum.IsLost(missing))
         {
-            throw ObjectNotFoundException.InVersion(entry.Key, Version, missing);
+            throw DatasetVacuum.Lost(entry.Key, Version, missing);
         }
     }
 

@@ -5,6 +5,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -32,9 +33,9 @@ public sealed class CountingObjectStoreTests
         await store.DeleteAsync(["data/a"], ct);
         Assert.Null(await inner.HeadAsync("data/a", ct));
 
-        Assert.Equal(2, store.CountOf(ObjectOperation.PutIfAbsent));
+        Assert.Equal(2, store.CountOf(ObjectOperation.Put));
         Assert.Equal(1, store.CountOf(ObjectOperation.Head));
-        Assert.Equal(1, store.CountOf(ObjectOperation.GetRange));
+        Assert.Equal(1, store.CountOf(ObjectOperation.Read));
         Assert.Equal(1, store.CountOf(ObjectOperation.List));
         Assert.Equal(1, store.CountOf(ObjectOperation.Delete));
         Assert.Equal(6, store.Requests);
@@ -71,7 +72,7 @@ public sealed class CountingObjectStoreTests
         // would say a retrying reader was cheap.
         await using MemoryObjectStore inner = new MemoryObjectStore
         {
-            Fails = (operation, _) => operation == ObjectOperation.GetRange,
+            Fails = (operation, _) => operation == ObjectOperation.Read,
         };
         await using CountingObjectStore store = new CountingObjectStore(inner);
         await store.PutIfAbsentAsync("data/a", Bytes("x"), ct);
@@ -79,7 +80,7 @@ public sealed class CountingObjectStoreTests
 
         await Assert.ThrowsAsync<ObjectStoreException>(
             async () => await store.GetRangeAsync("data/a", 0, 1, ct));
-        Assert.Equal(1, store.CountOf(ObjectOperation.GetRange));
+        Assert.Equal(1, store.CountOf(ObjectOperation.Read));
         Assert.Equal(0, store.BytesRead);
         Assert.Equal(1, store.DependentSteps);
     }

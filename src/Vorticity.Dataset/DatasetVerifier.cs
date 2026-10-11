@@ -375,7 +375,7 @@ internal static class DatasetVerifier
             ISegmentReader source;
             try
             {
-                source = await SealedObjectStore.OpenDataAsync(store, entry.Key, entry.Uid, cancellationToken).ConfigureAwait(false);
+                source = await SealedObjectStore.OpenDataAsync(store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception unreadable) when (unreadable is VortexFormatException or VortexEncryptionException)
             {
@@ -530,7 +530,7 @@ internal static class DatasetVerifier
 
             try
             {
-                ISegmentReader plain = await SealedObjectStore.OpenDataAsync(store, entry.Key, entry.Uid, cancellationToken).ConfigureAwait(false);
+                ISegmentReader plain = await SealedObjectStore.OpenDataAsync(store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
                 await using (plain.ConfigureAwait(false))
                 {
                     long plainLength = await plain.GetLengthAsync(cancellationToken).ConfigureAwait(false);

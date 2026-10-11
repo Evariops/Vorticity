@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The stores for Amazon S3 and the clouds that speak its API, Azure Blob Storage and Google Cloud
+       Storage, written here over the platform's HTTP client. The core and the dataset know nothing of
+       it: a store is an IObjectStore, which the core defines. It ships at 0.x until it has run against
+       each of the services in production. -->
+  <PropertyGroup>
+    <RootNamespace>Vorticity.ObjectStorage</RootNamespace>
+    <AssemblyName>Vorticity.ObjectStorage</AssemblyName>
+    <PackageId>Vorticity.ObjectStorage</PackageId>
+    <IsPackable>true</IsPackable>
+    <PackageTags>$(PackageTags);object-store;s3;r2;azure-blob;google-cloud-storage</PackageTags>
+    <Description>Object stores for Vorticity's files and datasets on Amazon S3, Cloudflare R2, OVHcloud, Scaleway, Azure Blob Storage and Google Cloud Storage, over the platform's HTTP client and nothing else.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Vorticity/Vorticity.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+  </ItemGroup>
+
+  <!-- Build-time only, as in the core: the package stays dependency-free at runtime. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+    <AdditionalFiles Include="../../BannedSymbols.txt" />
+  </ItemGroup>
+
+</Project>

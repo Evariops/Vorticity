@@ -48,6 +48,9 @@ public sealed class VortexDataset : IAsyncDisposable
     // has nothing to add, since the running one takes the same job.
     private int _compactingInline;
 
+    // The store the handle made for a local directory it was given by location, which it disposes.
+    private IObjectStore? _ownedStore;
+
     private VortexDataset(IObjectStore store, DatasetOptions options, ulong version, CommitObject commit, DateTimeOffset knownAt)
     {
         _store = store;
@@ -141,6 +144,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
     /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
+    /// <exception cref="NotSupportedException">
+    /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), or the dataset is
+    /// created for a locked store and the store keeps no locks (<see cref="ObjectStoreCapabilities.KeepsLocks"/>).
+    /// </exception>
     public static ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
         VortexSchema schema,
@@ -152,6 +159,43 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Creates a dataset at <paramref name="location"/>: under a location of a store the options'
+    /// session holds, <c>s3://bucket/tables/readings/</c>, or in a local directory.
+    /// </summary>
+    /// <param name="location">A location, whose keys the dataset's are relative to, or a local directory.</param>
+    /// <param name="schema">The columns every object of the dataset holds.</param>
+    /// <param name="options">The clustering key, the retention, how objects are written and the session; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The handle, on version 1; the caller disposes it.</returns>
+    /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
+    /// <exception cref="ObjectStoreException">The location already holds a dataset.</exception>
+    public static ValueTask<VortexDataset> CreateAsync(
+        string location, VortexSchema schema, DatasetOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        options ??= new DatasetOptions();
+        (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
+        return OwningAsync(CreateAsync(store, schema, options, cancellationToken), owned);
+    }
+
+    /// <summary>
+    /// Opens the latest version of the dataset at <paramref name="location"/>: under a location of a store
+    /// the options' session holds, or in a local directory.
+    /// </summary>
+    /// <param name="location">A location, whose keys the dataset's are relative to, or a local directory.</param>
+    /// <param name="options">How this handle reads and writes, and its session; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The handle; the caller disposes it.</returns>
+    /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
+    /// <exception cref="ObjectNotFoundException">The location holds no dataset.</exception>
+    public static ValueTask<VortexDataset> OpenAsync(string location, DatasetOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        options ??= new DatasetOptions();
+        (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
+        return OwningAsync(OpenAsync(store, options, cancellationToken), owned);
+    }
+
+    /// <summary>
     /// Opens a dataset's latest version, found with one listing and read with one request.
     /// </summary>
     /// <param name="store">The store holding the dataset.</param>
@@ -160,10 +204,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The handle, pinned to the latest version until it commits or refreshes; the caller disposes it.</returns>
     /// <exception cref="ObjectNotFoundException">The store holds no dataset.</exception>
     /// <exception cref="TornCommitException">The newest commit is not whole; <see cref="RemoveTornCommitAsync"/> removes it.</exception>
+    /// <exception cref="NotSupportedException">The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>).</exception>
     public static async ValueTask<VortexDataset> OpenAsync(
         IObjectStore store, DatasetOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
+        RequireOrderedListing(store);
         options ??= new DatasetOptions();
         DateTimeOffset asked = options.TimeProvider.GetUtcNow();
         store = SealedObjectStore.Over(store, options.Session);
@@ -187,6 +233,20 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a store whose listing is not in ordinal order, as an S3 directory bucket's is not: the
+    /// latest version is the first key of <c>commit/</c>, which such a listing does not give.
+    /// </summary>
+    private static void RequireOrderedListing(IObjectStore store)
+    {
+        if ((store.Capabilities & ObjectStoreCapabilities.ListsInOrder) == 0)
+        {
+            throw new NotSupportedException(
+                $"A dataset needs a store whose listing is in ordinal order and resumes after a key, and {store.GetType().Name} " +
+                "does not declare one (ObjectStoreCapabilities.ListsInOrder): the latest version is the first key of commit/.");
         }
     }
 
@@ -447,7 +507,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ?? throw ObjectNotFoundException.For(objectKey);
 
         long end = await EndAsync(cancellationToken).ConfigureAwait(false);
-        ISegmentReader source = await ImportReaderAsync(objectKey, cancellationToken).ConfigureAwait(false);
+        ISegmentReader source = await ImportReaderAsync(objectKey, head.Length, cancellationToken).ConfigureAwait(false);
         ObjectEntry entry;
         ReadOnlyMemory<byte> treeKey;
         await using (source.ConfigureAwait(false))
@@ -499,14 +559,14 @@ public sealed class VortexDataset : IAsyncDisposable
     /// plain one, and plain into a plain one, which refuses a sealed one, as a dataset is sealed
     /// whole or not at all.
     /// </summary>
-    private async ValueTask<ISegmentReader> ImportReaderAsync(string objectKey, CancellationToken cancellationToken)
+    private async ValueTask<ISegmentReader> ImportReaderAsync(string objectKey, long length, CancellationToken cancellationToken)
     {
         if (_store is SealedObjectStore { Seals: true } sealedStore)
         {
-            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, cancellationToken).ConfigureAwait(false);
+            return await sealedStore.OpenDataAsync(objectKey, UInt128.Zero, length, cancellationToken).ConfigureAwait(false);
         }
 
-        ObjectSegmentSource plain = new ObjectSegmentSource(_store, objectKey);
+        ObjectStoreSource plain = new ObjectStoreSource(_store, objectKey, length);
         if (_store is SealedObjectStore && await Sealing.SealedFiles.EndsSealedAsync(plain, cancellationToken).ConfigureAwait(false))
         {
             await plain.DisposeAsync().ConfigureAwait(false);
@@ -846,6 +906,47 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             await sealedStore.DisposeAsync().ConfigureAwait(false);
         }
+
+        if (Interlocked.Exchange(ref _ownedStore, null) is { } owned)
+        {
+            await owned.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The store at <paramref name="location"/>: a view of the session's store for a location, which
+    /// the session owns, or a <see cref="FileObjectStore"/> over a local directory, which the handle owns.
+    /// </summary>
+    private static (IObjectStore Store, IObjectStore? Owned) StoreAt(string location, DatasetOptions options)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(location);
+        if (ObjectStoreRegistry.IsLocation(location))
+        {
+            return (options.Session.Options.ObjectStores.Resolve(location), null);
+        }
+
+        FileObjectStore directory = new FileObjectStore(location);
+        return (directory, directory);
+    }
+
+    /// <summary>Hands the handle the store it made, or disposes the store when no handle came of it.</summary>
+    private static async ValueTask<VortexDataset> OwningAsync(ValueTask<VortexDataset> opening, IObjectStore? owned)
+    {
+        try
+        {
+            VortexDataset dataset = await opening.ConfigureAwait(false);
+            dataset._ownedStore = owned;
+            return dataset;
+        }
+        catch
+        {
+            if (owned is not null)
+            {
+                await owned.DisposeAsync().ConfigureAwait(false);
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -859,7 +960,14 @@ public sealed class VortexDataset : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
+        RequireOrderedListing(store);
         options ??= new DatasetOptions();
+        if (options.LockedStore && (store.Capabilities & ObjectStoreCapabilities.KeepsLocks) == 0)
+        {
+            throw new NotSupportedException(
+                $"A dataset created for a locked store needs a store that keeps locks, and {store.GetType().Name} keeps none " +
+                "(ObjectStoreCapabilities.KeepsLocks): its objects would be deleted while it believes them kept.");
+        }
 
         // Encrypted when asked, and when the session seals what it writes or refuses plaintext, whose
         // own open would refuse a plain dataset.

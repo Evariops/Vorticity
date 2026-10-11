@@ -71,6 +71,21 @@ total vortex.write.bytes = 3020
 `vortex.scan.rows` counts rows delivered, so a count, which delivers none, adds requests and bytes
 but no rows.
 
+The stores of the package Vorticity.ObjectStorage add their own instruments to the same meter, once
+the package is loaded. Their tags name the operation, the provider and the status class, never a key,
+a bucket or a token.
+
+| instrument | what it says |
+|---|---|
+| `vortex.store.requests` | the requests sent, by operation as the service's API names it (`GetObject`, `PutObject`, `ListObjectsV2` on S3), provider and status class |
+| `vortex.store.bytes_read`, `vortex.store.bytes_written` | the bytes that crossed the network |
+| `vortex.store.retries`, `vortex.store.throttles` | how much the retries and the services' throttling cost |
+| `vortex.store.first_byte`, a histogram in milliseconds | the latency of the services' first byte, by which the deadlines are set |
+
+The connections themselves are the platform's: `System.Net.Http` reports the connections open and
+their durations, and the requests and their durations, which OpenTelemetry collects as it does for
+any other client.
+
 ## The activities
 
 Each scan gets one activity, named `vortex.scan.typed` or `vortex.scan.tool` after the path it took,

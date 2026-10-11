@@ -88,6 +88,15 @@ depth, and does not repeat it.
 | [write-without-a-record.md](write-without-a-record.md) | write from a schema built at run time, with builders asked for by name |
 | [vxdump.md](vxdump.md) | look inside a file: schema, layout tree, encodings, segments, statistics, indexes |
 
+## Object storage
+
+The `Vorticity.ObjectStorage` package ships at `0.x` until it has run against each service in
+production.
+
+| page | what you get |
+|---|---|
+| [object-storage.md](object-storage.md) | files and datasets on S3, R2, OVHcloud, Scaleway, the other services that speak the S3 API, Azure and Cloud Storage: locations, stores, credentials, retries |
+
 ## Experimental packages
 
 Both packages are marked `[Experimental]`. Using them reports VX0001 for the dataset and VX0002 for

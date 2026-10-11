@@ -15,6 +15,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;

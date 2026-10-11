@@ -28,6 +28,12 @@ internal sealed class PipeSegmentSink : ISegmentSink
     /// <summary>Bytes written into the pipe and not yet flushed.</summary>
     internal long UnflushedBytes => _unflushed;
 
+    /// <summary>
+    /// The put that reads the pipe, for a file written to a store: a reader that completes before the
+    /// file did has failed, and the put's own failure says why.
+    /// </summary>
+    internal Task? Upload { get; set; }
+
     public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -71,7 +77,24 @@ internal sealed class PipeSegmentSink : ISegmentSink
 
         if (result.IsCompleted)
         {
-            throw new InvalidOperationException("The pipe's reader completed before the file did.");
+            await ThrowReaderGoneAsync(Upload).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// The failure of a pipe whose reader completed before the file did: the put's that read it, when
+    /// a store read it and failed, the reader's early end otherwise.
+    /// </summary>
+    internal static async ValueTask ThrowReaderGoneAsync(Task? upload)
+    {
+        if (upload is not null)
+        {
+            // The put completed its reader on its way out: its failure follows at once.
+#pragma warning disable VSTHRD003
+            await upload.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+        }
+
+        throw new InvalidOperationException("The pipe's reader completed before the file did.");
     }
 }

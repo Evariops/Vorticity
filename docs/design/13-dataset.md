@@ -549,21 +549,27 @@ a scan that stops at its first batch opens a single object.
 
 ## 11. The store abstraction
 
-`IObjectStore`, in the dataset package, is what an S3 library implements:
+`IObjectStore`, in the core's `Vorticity.IO`, is what a store library implements. Its design, and the
+stores this repository ships for S3, Azure and Cloud Storage, are in
+[the object storage design](19-object-storage.md#4-the-store-interface-revised).
 
 | operation | used by |
 |---|---|
-| `GetRangeAsync(key, offset, length)` returns the bytes and the object's token in one answer | every read. A data object's segment source plans its reads with the core's coalescer and issues them together |
-| `HeadAsync(key)` returns the size, the token, the store's creation time, and the retention date and legal hold on a locked store | opening, vacuum's ages, and what a lock still keeps |
-| `PutIfAbsentAsync(key, pipe, length)` returns created or exists | every write, streamed |
+| `ReadAsync(key, offset, destination, ifToken)` reads into the caller's memory and returns the bytes read, the object's length and its token from one answer | every read. A data object's segment source plans its reads with the core's coalescer, issues them together, and reads each into the aligned block the scan decodes from |
+| `ReadTailAsync(key, destination)` reads the last bytes with the object's length | opening an object whose length nothing recorded. A data object's entry records it, so its open is one read of the tail |
+| `HeadAsync(key)` returns the size, the token, the store's creation time, and the retention date and legal hold on a locked store | the versions after a known one, and the lock of an object about to go when the listing does not say it |
+| `PutAsync(key, pipe, length, condition)` writes if the key is free, if the object still has a token, or always | every write, streamed. A dataset only creates, with the key free as its condition |
 | `DeleteAsync(keys)` | vacuum, a batch at a time, where an absent key is not an error |
-| `ListAsync(prefix, startAfter)` | the latest version, in one page ([the latest version](#83-the-latest-version-in-one-request)), and vacuum |
+| `ListAsync(prefix, startAfter)` yields each object with its head | the latest version, in one page ([the latest version](#83-the-latest-version-in-one-request)), and vacuum's ages, with no head per object |
 
-A store must document an atomic put-if-absent, a strongly consistent listing, a token that changes
-whenever the bytes under a key change, and ranged reads on objects of any size. Three behaviours are
-part of the interface: a put streams and creates nothing when its content ends early or runs long, a
-delete takes a batch and reports nothing, and a listing pages by itself as it is enumerated. Retries,
-hedging, connection pools and credentials belong to the store library, never to this one.
+A store must document an atomic creation, reads and heads that see every write that completed, a
+listing in ordinal order that lags by less than the retention window, a token that changes whenever
+the bytes under a key change, and ranged reads on objects of any size. A store declares what it does
+in one request (`Capabilities`), and a dataset refuses a store that does not list in order. Three
+behaviours are part of the interface: a put streams and writes nothing when its content ends early or
+runs long, a delete takes a batch and reports nothing, and a listing pages by itself as it is
+enumerated. Retries, hedging, connection pools and credentials belong to the store library, never to
+the dataset.
 
 Three stores ship. `FileObjectStore` uses the kernel's create-new for put-if-absent, and a crash may
 leave its content short, which the format detects. `MemoryObjectStore` has injectable latency,

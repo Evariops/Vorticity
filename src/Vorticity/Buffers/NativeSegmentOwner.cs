@@ -70,6 +70,10 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// </summary>
     internal bool InOwnedBatch;
 
+    // The block as memory an asynchronous read writes into, made on the first such read and kept for
+    // the block's life, pooled or not.
+    private NativeBlockMemory? _memory;
+
     private unsafe NativeSegmentOwner(
         void* pointer,
         int capacity,
@@ -140,6 +144,14 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         void* pointer = AllocRaw(length, alignment);
         return new NativeSegmentOwner(pointer, length, length, exponent, pool: null, bucketIndex: -1);
     }
+
+    /// <summary>
+    /// The bytes <c>[offset, offset + length)</c> of the block as <see cref="Memory{T}"/>, for an
+    /// asynchronous read to write into before the reader sees them. The wrapper is made once per block,
+    /// so a pooled block's reads allocate nothing after its first. Valid until the memory is released.
+    /// </summary>
+    internal Memory<byte> WritableMemory(int offset, int length) =>
+        (_memory ??= new NativeBlockMemory(this)).Slice(offset, length);
 
     /// <summary>
     /// A writable view over the owned memory, used by the I/O layer to fill the block before the

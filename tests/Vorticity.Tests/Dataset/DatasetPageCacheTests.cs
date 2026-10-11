@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -387,7 +388,7 @@ public sealed class DatasetPageCacheTests
         // The creation and nothing else: the handle knew its version to be the latest a moment ago,
         // so it builds on it as it holds it, and reads what it wrote as it wrote it.
         Assert.Equal(result.Version, dataset.Version);
-        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.PutIfAbsent)));
+        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.Put)));
         store.Reset();
         Assert.Equal(4, await CountAsync(dataset, ct));
         Assert.Equal(0, store.Requests);
@@ -470,11 +471,11 @@ public sealed class DatasetPageCacheTests
         // window once more, it lists first, and builds on the version it holds.
         store.Reset();
         await dataset.CommitAsync([Add(1)], ct);
-        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.PutIfAbsent)));
+        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.Put)));
         clock.Advance(TimeSpan.FromDays(4));
         store.Reset();
         await dataset.CommitAsync([Add(3)], ct);
-        Assert.Equal((2, 1, 1), (store.Requests, store.CountOf(ObjectOperation.List), store.CountOf(ObjectOperation.PutIfAbsent)));
+        Assert.Equal((2, 1, 1), (store.Requests, store.CountOf(ObjectOperation.List), store.CountOf(ObjectOperation.Put)));
         Assert.Equal(5, await CountAsync(dataset, ct));
     }
 
@@ -498,7 +499,7 @@ public sealed class DatasetPageCacheTests
         Assert.Equal((2, held + 2), (result.Attempts, result.Version));
         Assert.Equal(
             (1, 2, 1, 1),
-            (store.CountOf(ObjectOperation.List), store.CountOf(ObjectOperation.PutIfAbsent), store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.GetRange)));
+            (store.CountOf(ObjectOperation.List), store.CountOf(ObjectOperation.Put), store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.Read)));
         Assert.Equal(5, await CountAsync(dataset, ct));
     }
 
@@ -540,7 +541,7 @@ public sealed class DatasetPageCacheTests
         // was decided on.
         Assert.Equal(OperationOutcome.AlreadyThere, result.Outcomes[0]);
         Assert.Equal((held + 1, held + 1), (result.Version, dataset.Version));
-        Assert.Equal((1, 1, 1), (store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.GetRange), store.CountOf(ObjectOperation.PutIfAbsent)));
+        Assert.Equal((1, 1, 1), (store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.Read), store.CountOf(ObjectOperation.Put)));
         Assert.Equal(4, await CountAsync(dataset, ct));
     }
 
@@ -639,7 +640,7 @@ public sealed class DatasetPageCacheTests
     }
 
     /// <summary>A store that holds back the answer to one put, once the object is in: a writer not told yet.</summary>
-    private sealed class HeldStore(IObjectStore inner) : IObjectStore
+    private sealed class HeldStore(IObjectStore inner) : ForwardingStore(inner)
     {
         /// <summary>The key whose next put is held, once; null holds none.</summary>
         internal string? Holding { get; set; }
@@ -650,15 +651,9 @@ public sealed class DatasetPageCacheTests
         /// <summary>Set by the test to answer the held put.</summary>
         internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken) =>
-            inner.GetRangeAsync(key, offset, length, cancellationToken);
-
-        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
-            inner.HeadAsync(key, cancellationToken);
-
-        public async ValueTask<PutOutcome> PutIfAbsentAsync(string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken)
+        public override async ValueTask<PutOutcome> PutAsync(string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
         {
-            PutOutcome outcome = await inner.PutIfAbsentAsync(key, content, length, cancellationToken);
+            PutOutcome outcome = await Inner.PutAsync(key, content, length, condition, cancellationToken);
             if (key == Holding)
             {
                 Holding = null;
@@ -668,29 +663,15 @@ public sealed class DatasetPageCacheTests
 
             return outcome;
         }
-
-        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(keys, cancellationToken);
-
-        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     /// <summary>A store in which, once, another writer commits just before this one's creation reaches it.</summary>
-    private sealed class RacedStore(IObjectStore inner) : IObjectStore
+    private sealed class RacedStore(IObjectStore inner) : ForwardingStore(inner)
     {
         /// <summary>The other writer's commit, run before the next creation of a commit object; null runs none.</summary>
         internal Func<Task>? Racing { get; set; }
 
-        public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken) =>
-            inner.GetRangeAsync(key, offset, length, cancellationToken);
-
-        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
-            inner.HeadAsync(key, cancellationToken);
-
-        public async ValueTask<PutOutcome> PutIfAbsentAsync(string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken)
+        public override async ValueTask<PutOutcome> PutAsync(string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
         {
             if (key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal) && Racing is { } race)
             {
@@ -698,15 +679,7 @@ public sealed class DatasetPageCacheTests
                 await race();
             }
 
-            return await inner.PutIfAbsentAsync(key, content, length, cancellationToken);
+            return await Inner.PutAsync(key, content, length, condition, cancellationToken);
         }
-
-        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(keys, cancellationToken);
-
-        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, cancellationToken);
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

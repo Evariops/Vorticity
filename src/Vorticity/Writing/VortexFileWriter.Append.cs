@@ -82,6 +82,14 @@ public sealed partial class VortexFileWriter
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
+        if (wrap is null && Vorticity.IO.ObjectStoreRegistry.IsLocation(path))
+        {
+            // An object cannot grow: appending to one would write it again whole, which the caller
+            // does better knowingly, or avoids with a dataset, made for rows that keep coming.
+            throw new NotSupportedException(
+                $"'{path}' is a location, and an object in a store cannot be appended to: write the file again, or keep its rows in a dataset.");
+        }
+
         AppendPlan plan;
         ImmutableDictionary<string, ReadOnlyMemory<byte>> metadata;
         Sealing.SealedLayout? sealedLayout;

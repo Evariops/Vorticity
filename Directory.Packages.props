@@ -11,7 +11,9 @@
     <!-- The compiler API the generator and the analyzers build against: the oldest compiler they load into. -->
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
     <!-- The one runtime dependency, first-party: XxHash3-64 for the write path's distinct table and
-         the Bloom filters. dotnet/runtime, MIT, not carried by the shared framework. -->
-    <PackageVersion Include="System.IO.Hashing" Version="10.0.12" />
+         the Bloom filters, and the CRC-64/NVME and CRC-32C the object stores send, whose parameter
+         sets arrived in 11.0. dotnet/runtime, MIT, not carried by the shared framework. It follows
+         the SDK in global.json, a release candidate of .NET 11 until it ships. -->
+    <PackageVersion Include="System.IO.Hashing" Version="11.0.0-rc.1.26425.128" />
   </ItemGroup>
 </Project>

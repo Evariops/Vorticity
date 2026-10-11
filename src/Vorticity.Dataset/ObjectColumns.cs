@@ -53,7 +53,7 @@ internal enum FilterFate : byte
 /// <param name="Pushed">The filter the object's scan takes, when <paramref name="Fate"/> is <see cref="FilterFate.Pushed"/>.</param>
 /// <param name="Evaluated">The filter evaluated on the reshaped batches, when <paramref name="Fate"/> is <see cref="FilterFate.Reshaped"/>.</param>
 /// <param name="Shape">The fields the object's scan reads and how they become the dataset's columns.</param>
-internal readonly record struct ObjectRead(FilterFate Fate, VortexExpr? Pushed, VortexExpr? Evaluated, ObjectShape Shape);
+internal readonly record struct ObjectReadPlan(FilterFate Fate, VortexExpr? Pushed, VortexExpr? Evaluated, ObjectShape Shape);
 
 /// <summary>
 /// How a data object written under an earlier schema answers for the dataset's columns: per
@@ -249,20 +249,20 @@ internal sealed class ObjectColumns
     /// The object's part of a read of <paramref name="projection"/> filtered by
     /// <paramref name="filter"/>, both over the dataset's columns.
     /// </summary>
-    internal ObjectRead Read(VortexExpr? filter, in FieldMask projection)
+    internal ObjectReadPlan Read(VortexExpr? filter, in FieldMask projection)
     {
         if (filter is null)
         {
-            return new ObjectRead(FilterFate.Every, null, null, Shape(projection, null));
+            return new ObjectReadPlan(FilterFate.Every, null, null, Shape(projection, null));
         }
 
         (Truth truth, VortexExpr? folded) = Fold(filter, select: true);
         return truth switch
         {
-            Truth.Expression => new ObjectRead(FilterFate.Pushed, folded, null, Shape(projection, null)),
-            Truth.True => new ObjectRead(FilterFate.Every, null, null, Shape(projection, null)),
-            Truth.False or Truth.Unknown => new ObjectRead(FilterFate.None, null, null, Shape(projection, null)),
-            _ => new ObjectRead(FilterFate.Reshaped, null, filter, Shape(projection, filter)),
+            Truth.Expression => new ObjectReadPlan(FilterFate.Pushed, folded, null, Shape(projection, null)),
+            Truth.True => new ObjectReadPlan(FilterFate.Every, null, null, Shape(projection, null)),
+            Truth.False or Truth.Unknown => new ObjectReadPlan(FilterFate.None, null, null, Shape(projection, null)),
+            _ => new ObjectReadPlan(FilterFate.Reshaped, null, filter, Shape(projection, filter)),
         };
     }
 

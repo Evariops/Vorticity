@@ -262,7 +262,7 @@ internal static class DatasetCompactor
 
         // The clustering key keeps its columns under every schema, so a key-ordered read of an
         // earlier object names them as the dataset does.
-        ObjectRead read = columns.Read(null, FieldMask.All);
+        ObjectReadPlan read = columns.Read(null, FieldMask.All);
         return ObjectColumns.ReshapeAsync(
             LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, cancellationToken),
             read.Shape,

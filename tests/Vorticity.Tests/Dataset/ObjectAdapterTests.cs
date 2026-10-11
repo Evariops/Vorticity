@@ -20,6 +20,7 @@ using Vorticity.Dataset;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
+using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -42,7 +43,7 @@ public sealed class ObjectAdapterTests
 
         Assert.Equal(written, (await store.HeadAsync(Key, ct))!.Value.Length);
 
-        await using ObjectSegmentSource source = new ObjectSegmentSource(store, Key);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         Assert.Equal(Rows, file.RowCount);
 
@@ -71,7 +72,7 @@ public sealed class ObjectAdapterTests
         await WriteAsync(inner, Key);
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
-        await using ObjectSegmentSource source = new ObjectSegmentSource(store, Key);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), TestContext.Current.CancellationToken);
         store.Reset();
 
@@ -86,9 +87,78 @@ public sealed class ObjectAdapterTests
         // The file holds two columns over several chunks, so a source without coalescing would ask
         // for every segment of every chunk on its own. The bound is deliberately loose: what must
         // not happen is a request per segment, and a request per chunk is already the good case.
-        Assert.InRange(store.CountOf(ObjectOperation.GetRange), 1, 24);
-        Assert.Equal(0, store.CountOf(ObjectOperation.PutIfAbsent));
+        Assert.InRange(store.CountOf(ObjectOperation.Read), 1, 24);
+        Assert.Equal(0, store.CountOf(ObjectOperation.Put));
         Assert.True(store.BytesRead > 0);
+    }
+
+    [Theory]
+    [InlineData(true, false, 1, 0)]
+    [InlineData(false, false, 2, 1)]
+    [InlineData(false, true, 1, 0)]
+    public async Task AnOpenAsksForAHeadOnlyWhenNothingElseSaysTheLength(bool readsSuffix, bool lengthKnown, int requests, int heads)
+    {
+        // A store that reads suffixes learns the length from the tail's answer; another asks a head
+        // first, unless the caller knows the length, as a dataset's entry does.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        long written = await WriteAsync(inner, Key);
+        await using CountingObjectStore store = new CountingObjectStore(readsSuffix ? inner : new NoSuffix(inner));
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key, lengthKnown ? written : -1);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+
+        Assert.Equal(Rows, file.RowCount);
+        Assert.Equal((requests, heads), (store.Requests, store.CountOf(ObjectOperation.Head)));
+        Assert.Equal(requests, store.DependentSteps);
+    }
+
+    [Fact]
+    public async Task ABatchReadsEachRunIntoItsBlockAndAllocatesNothingOnceTheBlocksArePooled()
+    {
+        // Sixteen runs a gap apart, each read straight into a pooled block its segments are views of:
+        // what the source allocates per batch is nothing, the store's own cost aside.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        byte[] content = new byte[1 << 20];
+        new Random(0x0B_5_0C).NextBytes(content);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await store.PutIfAbsentAsync(Key, content, ct);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key, content.Length, new SegmentReadOptions { CoalesceGapBytes = 0 });
+        using SegmentRequestSet set = new SegmentRequestSet();
+
+        long allocated = 0;
+        for (int round = 0; round < 4; round++)
+        {
+            for (int slot = 0; slot < 16; slot++)
+            {
+                set.Add(new SegmentSpec((ulong)slot << 16, 1_000, 6, 0, 0));
+            }
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            await source.ReadManyAsync(set, ct);
+            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            for (int slot = 0; slot < 16; slot++)
+            {
+                Assert.True(set.GetBuffer(slot).Span.SequenceEqual(content.AsSpan(slot << 16, 1_000)));
+            }
+
+            set.Release();
+        }
+
+        Assert.Equal(0, allocated);
+    }
+
+    [Fact]
+    public async Task ASourceRefusesAnObjectOfAnotherLengthThanTheOneItWasTold()
+    {
+        // A dataset's entry records the object's length, and an object of another length under its
+        // key is not the one the entry names.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        long written = await WriteAsync(store, Key);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key, written + 10);
+        VortexFormatException refused = await Assert.ThrowsAsync<VortexFormatException>(
+            async () => await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct));
+        Assert.Contains($"{written} bytes where {written + 10} were recorded", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -174,7 +244,7 @@ public sealed class ObjectAdapterTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await WriteAsync(store, Key);
 
-        await using ObjectSegmentSource source = new ObjectSegmentSource(store, Key);
+        await using ObjectStoreSource source = new ObjectStoreSource(store, Key);
         Assert.True(await source.GetLengthAsync(ct) > 0);
         string? first = source.Token;
         Assert.NotNull(first);
@@ -245,5 +315,11 @@ public sealed class ObjectAdapterTests
         }
 
         return sum;
+    }
+
+    /// <summary>A store that reads no suffix, as Azure's does not, so that the length takes a head.</summary>
+    private sealed class NoSuffix(IObjectStore inner) : ForwardingStore(inner)
+    {
+        public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.ReadsSuffix;
     }
 }

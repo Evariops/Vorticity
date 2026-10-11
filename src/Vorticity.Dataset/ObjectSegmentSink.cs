@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -153,6 +152,12 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// <see cref="PutOutcome.Exists"/> when another writer got there first -- which for a commit
     /// object is the answer, not an error.
     /// </summary>
+    /// <remarks>
+    /// The bytes go from the buffer where they lie: a store that sends them takes them in place, whole or
+    /// in parts, and sends them again from there on a retry. A data object's key ends with a fresh uid,
+    /// which nobody else takes, so its put carries no condition, whole or in parts, on every service; any
+    /// other object is created only if its key is absent.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">It was already committed.</exception>
     public async ValueTask<PutOutcome> CommitAsync(CancellationToken cancellationToken)
     {
@@ -163,16 +168,15 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
 
         _closed = true;
+        PutCondition condition = SealedObjectStore.TryUid(_key, out _) ? PutCondition.None : PutCondition.IfAbsent;
         PutOutcome outcome;
         if (_store is SealedObjectStore sealedStore)
         {
-            (outcome, StoredLength) = await sealedStore
-                .PutAsync(_key, PipeReader.Create(Bytes()), _written, cancellationToken).ConfigureAwait(false);
+            (outcome, StoredLength) = await sealedStore.PutSealedAsync(_key, Bytes(), condition, cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            outcome = await _store
-                .PutIfAbsentAsync(_key, PipeReader.Create(Bytes()), _written, cancellationToken).ConfigureAwait(false);
+            outcome = await _store.PutAsync(_key, Bytes(), condition, cancellationToken).ConfigureAwait(false);
             StoredLength = _written;
         }
 

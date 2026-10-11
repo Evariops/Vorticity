@@ -74,7 +74,7 @@ public sealed class EncryptedDatasetTests
         }
 
         int objects = 0;
-        await foreach (string key in store.ListAsync(string.Empty, null, ct))
+        await foreach ((string key, _, _) in store.ListAsync(string.Empty, null, ct))
         {
             byte[] bytes = await AllAsync(store, key, ct);
             Assert.True(bytes.AsSpan().StartsWith("VXSEALED"u8), $"'{key}' is not sealed");
@@ -284,7 +284,7 @@ public sealed class EncryptedDatasetTests
         await dataset.VacuumAsync(cancellationToken: ct);
         Assert.Equal(9L * Rows, await dataset.Scan<Reading>().CountAsync(ct));
         Assert.Empty((await dataset.VerifyAsync(cancellationToken: ct)).Problems);
-        await foreach (string key in store.ListAsync(string.Empty, null, ct))
+        await foreach ((string key, _, _) in store.ListAsync(string.Empty, null, ct))
         {
             if (!key.StartsWith("leases/", StringComparison.Ordinal))
             {
@@ -362,7 +362,7 @@ public sealed class EncryptedDatasetTests
 
         // The fragment lies in a sealed commit, so the store holds no value of it; read back plain from
         // there, it is the dataset's own, and the session takes it.
-        await foreach (string key in store.ListAsync(string.Empty, null, ct))
+        await foreach ((string key, _, _) in store.ListAsync(string.Empty, null, ct))
         {
             Assert.True((await AllAsync(store, key, ct)).AsSpan().IndexOf("Nantes"u8) < 0, $"'{key}' holds a city's name in plain");
         }
@@ -488,7 +488,7 @@ public sealed class EncryptedDatasetTests
     private static async Task<List<string>> KeysAsync(IObjectStore store, string prefix, CancellationToken ct)
     {
         List<string> keys = [];
-        await foreach (string key in store.ListAsync(prefix, null, ct))
+        await foreach ((string key, _, _) in store.ListAsync(prefix, null, ct))
         {
             keys.Add(key);
         }

@@ -115,8 +115,8 @@ internal static class DatasetMaintenance
     }
 
     private static string Cost(CountingObjectStore store) =>
-        $"{store.Requests} requests ({store.CountOf(ObjectOperation.GetRange)} get, {store.CountOf(ObjectOperation.Head)} head, " +
-        $"{store.CountOf(ObjectOperation.PutIfAbsent)} put, {store.CountOf(ObjectOperation.Delete)} delete, {store.CountOf(ObjectOperation.List)} list), " +
+        $"{store.Requests} requests ({store.CountOf(ObjectOperation.Read)} read, {store.CountOf(ObjectOperation.Head)} head, " +
+        $"{store.CountOf(ObjectOperation.Put)} put, {store.CountOf(ObjectOperation.Delete)} delete, {store.CountOf(ObjectOperation.List)} list), " +
         $"{store.DependentSteps} dependent steps, {store.BytesRead} bytes read, {store.BytesWritten} written";
 
     private static Reading[] Rows(int first, int count)
