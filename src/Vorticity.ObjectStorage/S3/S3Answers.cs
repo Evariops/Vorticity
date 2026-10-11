@@ -131,6 +131,100 @@ internal static class S3Answers
         return truncated ? next : null;
     }
 
+    /// <summary>The text of the first element named <paramref name="name"/>, or null.</summary>
+    internal static string? ParseElement(ReadOnlySpan<byte> xml, ReadOnlySpan<byte> name)
+    {
+        XmlScanner scanner = new XmlScanner(xml);
+        while (scanner.Read())
+        {
+            if (scanner.Token == XmlToken.Start && XmlScanner.Is(scanner.Name, name))
+            {
+                return scanner.ReadText();
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether the document is an error, as a completion answered 200 may be, and its code.</summary>
+    internal static bool IsError(ReadOnlySpan<byte> xml, out string? code)
+    {
+        code = null;
+        XmlScanner scanner = new XmlScanner(xml);
+        while (scanner.Read())
+        {
+            if (scanner.Token == XmlToken.Start)
+            {
+                if (!XmlScanner.Is(scanner.Name, "Error"u8))
+                {
+                    return false;
+                }
+
+                code = ParseError(xml).Code;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The keys a batch delete left in place, each with its code, from a quiet <c>DeleteResult</c>; an
+    /// absent key is no failure. Empty when every key is gone.
+    /// </summary>
+    internal static string ParseDeleteErrors(ReadOnlySpan<byte> xml)
+    {
+        List<string> failures = [];
+        int count = 0;
+        XmlScanner scanner = new XmlScanner(xml);
+        while (scanner.Read())
+        {
+            if (scanner.Token != XmlToken.Start || !XmlScanner.Is(scanner.Name, "Error"u8))
+            {
+                continue;
+            }
+
+            string? key = null, code = null, message = null;
+            while (scanner.Read() && scanner.Token != XmlToken.End)
+            {
+                if (scanner.Token != XmlToken.Start)
+                {
+                    continue;
+                }
+
+                if (XmlScanner.Is(scanner.Name, "Key"u8))
+                {
+                    key = scanner.ReadText();
+                }
+                else if (XmlScanner.Is(scanner.Name, "Code"u8))
+                {
+                    code = scanner.ReadText();
+                }
+                else if (XmlScanner.Is(scanner.Name, "Message"u8))
+                {
+                    message = ServiceError.Clip(scanner.ReadText());
+                }
+                else
+                {
+                    scanner.Skip();
+                }
+            }
+
+            if (code == "NoSuchKey")
+            {
+                continue;
+            }
+
+            count++;
+            if (failures.Count < 3)
+            {
+                failures.Add($"'{key}' ({code}: {message})");
+            }
+        }
+
+        return count == 0 ? string.Empty : $"{count} key(s), among them {string.Join(", ", failures)}";
+    }
+
     /// <summary>A header's first value, or null; read without validation, as the service wrote it.</summary>
     internal static string? Header(HttpResponseMessage response, string name)
     {

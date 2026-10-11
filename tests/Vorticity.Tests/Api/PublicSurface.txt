@@ -2548,6 +2548,12 @@ Vorticity.RowEncoding:     property bool Descending { get; }
 Vorticity.RowEncoding:     property bool NullsFirst { get; }
 Vorticity.ObjectStorage: static class Vorticity.ObjectStorage.ObjectStoreRegistryExtensions
 Vorticity.ObjectStorage:     method ObjectStoreRegistry UseEnvironment(ObjectStoreRegistry)
+Vorticity.ObjectStorage: enum Vorticity.ObjectStorage.S3Checksum
+Vorticity.ObjectStorage:     const S3Checksum ContentMd5 = 2
+Vorticity.ObjectStorage:     const S3Checksum Crc64Nvme = 3
+Vorticity.ObjectStorage:     const S3Checksum Default = 0
+Vorticity.ObjectStorage:     const S3Checksum None = 1
+Vorticity.ObjectStorage:     field int value__
 Vorticity.ObjectStorage: abstract class Vorticity.ObjectStorage.S3Credentials : IDisposable
 Vorticity.ObjectStorage:     method S3Credentials FromEnvironment()
 Vorticity.ObjectStorage:     method S3Credentials Static(string, string, string = default)
@@ -2582,9 +2588,13 @@ Vorticity.ObjectStorage:     property Nullable<S3Profile> Profile { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ListsInOrder { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> PathStyle { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ReadsSuffix { get; init; }
+Vorticity.ObjectStorage:     property S3Checksum Checksum { get; init; }
 Vorticity.ObjectStorage:     property S3Credentials Credentials { get; init; }
 Vorticity.ObjectStorage:     property StoreTransportOptions Transport { get; init; }
 Vorticity.ObjectStorage:     property Uri Endpoint { get; init; }
+Vorticity.ObjectStorage:     property int PartSize { get; init; }
+Vorticity.ObjectStorage:     property int PartsInFlight { get; init; }
+Vorticity.ObjectStorage:     property long PartThreshold { get; init; }
 Vorticity.ObjectStorage:     property string Bucket { get; init; }
 Vorticity.ObjectStorage:     property string Region { get; init; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.StoreTransportOptions

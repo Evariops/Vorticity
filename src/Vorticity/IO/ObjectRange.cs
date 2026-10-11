@@ -202,14 +202,16 @@ public static class ObjectStoreExtensions
         PipeReader content, long length, string key, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(content);
-        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
         if (length > Array.MaxLength)
         {
             await content.CompleteAsync().ConfigureAwait(false);
             throw new ObjectStoreException($"'{key}' is {length} bytes, more than one array holds.");
         }
 
-        byte[] bytes = new byte[length];
+        // A length of -1 is unknown: the array grows with the content, and the content says the end.
+        bool known = length >= 0;
+        byte[] bytes = known ? new byte[length] : new byte[4_096];
         long read = 0;
         Exception? failure = null;
         try
@@ -218,10 +220,20 @@ public static class ObjectStoreExtensions
             {
                 ReadResult result = await content.ReadAsync(cancellationToken).ConfigureAwait(false);
                 ReadOnlySequence<byte> buffer = result.Buffer;
-                if (read + buffer.Length > length)
+                if (known && read + buffer.Length > length)
                 {
                     throw new ObjectStoreException(
                         $"'{key}' was announced as {length} bytes and its content runs past them.");
+                }
+
+                if (!known && read + buffer.Length > bytes.Length)
+                {
+                    if (read + buffer.Length > Array.MaxLength)
+                    {
+                        throw new ObjectStoreException($"'{key}' runs past what one array holds.");
+                    }
+
+                    Array.Resize(ref bytes, (int)Math.Min(Array.MaxLength, Math.Max(bytes.Length * 2L, read + buffer.Length)));
                 }
 
                 buffer.CopyTo(bytes.AsSpan((int)read));
@@ -238,7 +250,11 @@ public static class ObjectStoreExtensions
                 }
             }
 
-            if (read != length)
+            if (!known)
+            {
+                Array.Resize(ref bytes, (int)read);
+            }
+            else if (read != length)
             {
                 throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {read}.");
             }

@@ -78,7 +78,8 @@ public interface IObjectStore : IAsyncDisposable
     /// <param name="length">
     /// How many bytes <paramref name="content"/> holds, which a store uses to choose between one
     /// request and a multipart upload. Content that ends before or runs past it is refused, and
-    /// nothing is written.
+    /// nothing is written. -1 when the writer does not know it yet, as a file written to a location:
+    /// the content's end says it.
     /// </param>
     /// <param name="condition">When the put may write.</param>
     /// <param name="cancellationToken">Cancels the put, leaving the key as it was or holding the new bytes whole.</param>

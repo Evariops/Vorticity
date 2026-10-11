@@ -22,6 +22,25 @@ public enum S3Profile
     Other = 4,
 }
 
+/// <summary>The checksum a put carries, which the service verifies before it creates the object.</summary>
+public enum S3Checksum
+{
+    /// <summary>The profile's: CRC-64/NVME on Amazon S3, none on the clouds that share only <c>Content-MD5</c>, whose bytes TLS already protects.</summary>
+    Default = 0,
+
+    /// <summary>None: TLS protects the bytes on their way, and the format's own checks the rest.</summary>
+    None = 1,
+
+    /// <summary>
+    /// <c>Content-MD5</c>, the one checksum R2, OVHcloud and Scaleway share; a bucket under Object Lock
+    /// refuses a put without a checksum, so a locked dataset there needs it. Never for security.
+    /// </summary>
+    ContentMd5 = 2,
+
+    /// <summary>CRC-64/NVME, of a put sent whole or of the whole object of a multipart upload.</summary>
+    Crc64Nvme = 3,
+}
+
 /// <summary>An S3 store's bucket, endpoint, keys and connections.</summary>
 public sealed class S3StoreOptions
 {
@@ -69,6 +88,27 @@ public sealed class S3StoreOptions
     /// </summary>
     public bool? ListsInOrder { get; init; }
 
+    /// <summary>The checksum each put carries; <see cref="S3Checksum.Default"/> takes the profile's.</summary>
+    public S3Checksum Checksum { get; init; }
+
+    /// <summary>
+    /// The size past which a put goes up in parts sent in parallel rather than whole, 32 MiB by default.
+    /// A put whose condition the service takes on no part, on R2, goes whole whatever its size.
+    /// </summary>
+    public long PartThreshold { get; init; } = 32L << 20;
+
+    /// <summary>
+    /// The size of a part, 16 MiB by default and at least 5 MiB; larger when the object would otherwise
+    /// need more parts than the service takes.
+    /// </summary>
+    public int PartSize { get; init; } = 16 << 20;
+
+    /// <summary>The parts of one upload in flight at once, 4 by default, each held in memory until it is sent.</summary>
+    public int PartsInFlight { get; init; } = 4;
+
     /// <summary>A handler to send through instead of the platform's: an emulator, in tests.</summary>
     internal HttpMessageHandler? Handler { get; init; }
+
+    /// <summary>The smallest part a service takes, but the last: 5 MiB, which tests lower.</summary>
+    internal int MinimumPartSize { get; init; } = 5 << 20;
 }

@@ -129,53 +129,40 @@ same way.
 
 ## Opening one file out of a store
 
-A single file needs no dataset. `ISegmentSource`, the core library's I/O interface, is two reads and
-a length, and wrapping a store object takes a dozen lines:
+A single file needs no dataset. A session that holds a store opens a location in it as it opens a
+path. The scheme is yours to choose, and the first segment after it names the store's bucket:
 
 ```csharp
-private sealed class StoreSegmentSource(IObjectStore store, string key, long length) : ISegmentSource
+await using (VortexSession session = VortexSession.Create(o =>
 {
-    public long Length => length;
-
-    public async ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken cancellationToken)
-    {
-        ObjectRange bytes = await store.GetRangeAsync(key, range.Offset, range.Length, cancellationToken);
-        return new SegmentLease(bytes.Bytes, bytes);
-    }
-
-    public async ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken cancellationToken)
-    {
-        // one GetRangeAsync per range, issued together, and every lease disposed if one fails
-    }
-
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    o.SegmentCache = new SegmentCache(64L * 1024 * 1024);
+    o.ObjectStores.Add("mem://lake", counting);
+}))
+{
+    await using VortexFile opened = await session.OpenAsync("mem://lake/files/readings.vortex");
+    // ...
 }
 ```
 
-```csharp
-await using (VortexFile opened = await VortexSession.Default.OpenAsync(new StoreSegmentSource(counting, "files/readings.vortex", known.Length)))
+```
+open from the store: 1000000 rows; 1 requests (1 read, 0 head, 0 put, 0 list), 1 dependent steps, 65600 bytes read, 0 written
+mean of Celsius for Day >= 900: 30.000; 2 requests (2 read, 0 head, 0 put, 0 list), 2 dependent steps, 151432 bytes read, 0 written
+a full scan, 1000000 rows: 15 requests (15 read, 0 head, 0 put, 0 list), 9 dependent steps, 1315268 bytes read, 0 written
+the same scan again, its segments in the session's cache, 1000000 rows: 0 requests (0 read, 0 head, 0 put, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 
-```
-open from the store: 1000000 rows; 2 requests (1 read, 1 head, 0 put, 0 list), 2 dependent steps, 65564 bytes read, 0 written
-mean of Celsius for Day >= 900: 30.000; 4 requests (4 read, 0 head, 0 put, 0 list), 4 dependent steps, 151392 bytes read, 0 written
-a full scan, 1000000 rows: 45 requests (45 read, 0 head, 0 put, 0 list), 34 dependent steps, 1465556 bytes read, 0 written
-a full scan through a session with a segment cache, 1000000 rows: 45 requests (45 read, 0 head, 0 put, 0 list), 43 dependent steps, 1465556 bytes read, 0 written
-```
+The open costs one request, since the memory store reads a suffix: the last 64 KiB of the object and
+its length come back together, and the open finds its footer there. A store that cannot read a
+suffix asks for a head first. From there every projection and filter in the guide works, and each
+one saves requests as well as bytes. The reads of a batch are coalesced into ranges and issued
+together, each landing in the block the scan decodes from, so the filtered mean costs 2 requests and
+a full scan 15 for a 1.51 MB file. The session's segment cache keeps what was read, and the same scan
+again fetches nothing. Because the reads of a scan overlap, `DependentSteps` varies a little from one
+run to the next, while the request and byte counts do not.
 
-The open costs one ranged read of the tail, plus the head the sample uses to learn the length. From
-there every projection and filter in the guide works, and each one saves requests as well as bytes:
-the filtered mean fetches 4 of the file's 54 segments. The session's `MaxConcurrentReads` bounds the
-reads in flight across every file opened this way, and its segment cache applies too. A scan fetches
-each segment once, even a chunk that spans several blocks, and never one that sits in the tail the
-open already read. That gives 45 requests and 1.47 MB for a 1.51 MB file, with or without a cache.
-The cache pays off across scans: a second scan through the same session fetches nothing (see
-[open-a-file.md](open-a-file.md)).
-
-The source receives the ranges of a batch together, so a source over a network store can coalesce
-neighbouring ranges into one request. The sample's source does not, to stay short. Because the reads
-of a scan overlap, `DependentSteps` varies a little from one run to the next, while the request and
-byte counts do not.
+The session disposes the stores it holds, as it disposes its pool and its cache. This one does not
+own the memory store under it, which the sample goes on using. The stores for S3, R2, OVHcloud and
+Scaleway are in the `Vorticity.ObjectStorage` package (see [object-storage.md](object-storage.md)).
 
 ## Watch out
 

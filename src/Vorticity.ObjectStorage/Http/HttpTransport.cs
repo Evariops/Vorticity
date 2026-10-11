@@ -139,7 +139,18 @@ internal sealed class HttpTransport : IDisposable
                 failure = retry.Message;
                 cause = retry.InnerException ?? retry;
                 cost = retry.Cost;
-                idempotent |= retry.Cost == 0;
+                if (retry.NotApplied && !idempotent)
+                {
+                    // Refused without being applied: this attempt may be sent again, once more.
+                    if (attempt >= _options.MaxAttempts || (cost > 0 && !_budget.TrySpend(cost)))
+                    {
+                        throw new ObjectStoreException($"{operation} failed after {attempt} attempts: {failure}", cause);
+                    }
+
+                    StoreTelemetry.Retried();
+                    await DelayAsync(cost == 0 ? 0 : attempt, null, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
             }
             catch (OperationCanceledException timeout) when (!cancellationToken.IsCancellationRequested)
             {
@@ -160,23 +171,45 @@ internal sealed class HttpTransport : IDisposable
                 response?.Dispose();
             }
 
-            if (!idempotent || attempt >= _options.MaxAttempts || (cost > 0 && !_budget.TrySpend(cost)))
+            if (!idempotent)
             {
-                string why = !idempotent ? "it may have reached the service, so it is not sent again"
-                    : attempt >= _options.MaxAttempts ? $"after {attempt} attempts"
-                    : "the store's retry budget is spent";
-                throw new ObjectStoreException($"{operation} failed, {why}: {failure}", cause ?? new IOException(failure))
-                {
-                    OutcomeUnknown = false,
-                };
+                // The request may have been applied: its store asks the service what became of it.
+                throw new StoreAnswerLostException($"{operation} failed after it may have reached the service: {failure}", cause ?? new IOException(failure));
+            }
+
+            if (attempt >= _options.MaxAttempts || (cost > 0 && !_budget.TrySpend(cost)))
+            {
+                string why = attempt >= _options.MaxAttempts ? $"after {attempt} attempts" : "the store's retry budget is spent";
+                throw new ObjectStoreException($"{operation} failed {why}: {failure}", cause ?? new IOException(failure));
             }
 
             StoreTelemetry.Retried();
-            TimeSpan delay = cost == 0 ? TimeSpan.Zero : Backoff(attempt, refused);
-            if (delay > TimeSpan.Zero)
-            {
-                await Task.Delay(delay, _options.TimeProvider, cancellationToken).ConfigureAwait(false);
-            }
+            await DelayAsync(cost == 0 ? 0 : attempt, refused, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Waits before attempt <paramref name="attempt"/> + 1 of a request the store retries itself, a
+    /// conditional put whose outcome it learned; spends the budget's tokens and says whether it may.
+    /// </summary>
+    internal async ValueTask<bool> RetryAfterAsync(int attempt, CancellationToken cancellationToken)
+    {
+        if (attempt >= _options.MaxAttempts || !_budget.TrySpend(RetryBudget.RetryCost))
+        {
+            return false;
+        }
+
+        StoreTelemetry.Retried();
+        await DelayAsync(attempt, null, cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    private async ValueTask DelayAsync(int attempt, ServiceError? refused, CancellationToken cancellationToken)
+    {
+        TimeSpan delay = attempt == 0 ? TimeSpan.Zero : Backoff(attempt, refused);
+        if (delay > TimeSpan.Zero)
+        {
+            await Task.Delay(delay, _options.TimeProvider, cancellationToken).ConfigureAwait(false);
         }
     }
 

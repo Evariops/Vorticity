@@ -192,8 +192,9 @@ public sealed class CountingObjectStore : IObjectStore
         Enter(ObjectOperation.Put);
         lock (_gate)
         {
-            // Counted even when the condition refuses it: the bytes were offered to the seam.
-            _bytesWritten += length;
+            // Counted even when the condition refuses it: the bytes were offered to the seam. A put of
+            // unknown length counts none, its content telling its length only to the store.
+            _bytesWritten += Math.Max(length, 0);
         }
 
         try

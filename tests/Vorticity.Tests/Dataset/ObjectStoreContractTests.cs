@@ -25,15 +25,26 @@ namespace Vorticity.Tests.Dataset;
 public sealed class ObjectStoreContractTests : IDisposable
 {
     private readonly List<string> _directories = [];
+    private readonly List<IDisposable> _emulators = [];
 
     /// <summary>The stores under test, each with the name its failures are reported under.</summary>
-    public static TheoryData<string> Stores() => ["memory", "file"];
+    public static TheoryData<string> Stores() => ["memory", "file", "s3"];
+
+    /// <summary>The stores whose keys are paths, which refuse a key that could leave their root.</summary>
+    public static TheoryData<string> PathStores() => ["memory", "file"];
 
     private IObjectStore Open(string kind)
     {
         if (kind == "memory")
         {
             return new MemoryObjectStore();
+        }
+
+        if (kind == "s3")
+        {
+            Vorticity.Tests.ObjectStorage.S3Emulator emulator = new Vorticity.Tests.ObjectStorage.S3Emulator();
+            _emulators.Add(emulator);
+            return Vorticity.Tests.ObjectStorage.S3ReadTests.Store(emulator);
         }
 
         string root = Path.Combine(Path.GetTempPath(), $"vorticity-store-{Guid.NewGuid():N}");
@@ -49,6 +60,11 @@ public sealed class ObjectStoreContractTests : IDisposable
             {
                 Directory.Delete(directory, recursive: true);
             }
+        }
+
+        foreach (IDisposable emulator in _emulators)
+        {
+            emulator.Dispose();
         }
     }
 
@@ -371,12 +387,18 @@ public sealed class ObjectStoreContractTests : IDisposable
         Task<PutOutcome>[] puts = new Task<PutOutcome>[writers];
         for (int writer = 0; writer < writers; writer++)
         {
+            // A thread of its own each, since the barrier blocks it: sixteen pool threads blocked at once
+            // would wait for the pool to grow.
             byte[] content = Bytes($"writer {writer}");
-            puts[writer] = Task.Run(async () =>
-            {
-                barrier.SignalAndWait();
-                return await store.PutIfAbsentAsync("commit/00000000000000000001.vxc", content, default);
-            });
+            puts[writer] = Task.Factory.StartNew(
+                async () =>
+                {
+                    barrier.SignalAndWait();
+                    return await store.PutIfAbsentAsync("commit/00000000000000000001.vxc", content, default);
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default).Unwrap();
         }
 
         PutOutcome[] outcomes = await Task.WhenAll(puts);
@@ -389,7 +411,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     }
 
     [Theory]
-    [MemberData(nameof(Stores))]
+    [MemberData(nameof(PathStores))]
     public async Task AKeyThatCouldEscapeTheStoreIsRefused(string kind)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

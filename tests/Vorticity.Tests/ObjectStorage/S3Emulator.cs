@@ -2,10 +2,11 @@
 // would carry it, signed, and what it gets back is an answer as S3 writes one.
 //
 // IT CHECKS EVERY SIGNATURE against its own canonical form of the request it received, its path and
-// query re-encoded from the URI and its headers read from the message, so a store that signs one thing
-// and sends another fails here as it would against the service. The signer itself is held to AWS's
-// published vectors elsewhere.
+// query re-encoded from the URI and its headers read from the message, and every signed payload and
+// checksum against the body, so a store that signs or sums one thing and sends another fails here as it
+// would against the service. The signer itself is held to AWS's published vectors elsewhere.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
@@ -17,7 +18,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 using Vorticity.ObjectStorage.Credentials;
+using Vorticity.ObjectStorage.Hashing;
 using Vorticity.ObjectStorage.Http;
 
 namespace Vorticity.Tests.ObjectStorage;
@@ -27,8 +30,11 @@ internal sealed class S3Emulator : HttpMessageHandler
     internal const string AccessKey = "AKIDEMULATOR";
     internal const string Secret = "emulator/secret+key";
 
+    private static readonly XNamespace S3 = "http://s3.amazonaws.com/doc/2006-03-01/";
+
     private readonly object _gate = new object();
     private readonly Dictionary<string, SortedDictionary<string, StoredObject>> _buckets = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Upload> _uploads = new(StringComparer.Ordinal);
     private long _etags;
 
     /// <summary>The region the buckets are in, which a head of a bucket says.</summary>
@@ -43,17 +49,35 @@ internal sealed class S3Emulator : HttpMessageHandler
     /// <summary>Runs before each request is served: returns an answer to send instead, or throws to fail the connection.</summary>
     internal Func<HttpRequestMessage, int, HttpResponseMessage?>? Intercept { get; set; }
 
+    /// <summary>Runs after a write is applied: true loses its answer, the connection failing as the object lands.</summary>
+    internal Func<HttpRequestMessage, bool>? LoseAnswer { get; set; }
+
+    /// <summary>Whether a put must carry a checksum, as a bucket under Object Lock asks.</summary>
+    internal bool RequireChecksum { get; set; }
+
     /// <summary>Every request received, in order: its method, path and query, and the range it asked.</summary>
     internal ConcurrentQueue<string> Log { get; } = new ConcurrentQueue<string>();
 
     /// <summary>The requests received.</summary>
     internal int Requests => Log.Count;
 
+    /// <summary>The uploads started and neither completed nor aborted.</summary>
+    internal int OpenUploads
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _uploads.Count;
+            }
+        }
+    }
+
     internal void Seed(string bucket, string key, byte[] bytes, DateTimeOffset? retainUntil = null, bool legalHold = false)
     {
         lock (_gate)
         {
-            Bucket(bucket)[key] = new StoredObject(bytes, NextETag(), Now(), retainUntil, legalHold);
+            Bucket(bucket)[key] = new StoredObject(bytes, NextETag(), Stamp(), retainUntil, legalHold, []);
         }
     }
 
@@ -65,7 +89,31 @@ internal sealed class S3Emulator : HttpMessageHandler
         }
     }
 
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    internal byte[]? BytesOf(string bucket, string key)
+    {
+        lock (_gate)
+        {
+            return Bucket(bucket).TryGetValue(key, out StoredObject o) ? o.Bytes : null;
+        }
+    }
+
+    internal IReadOnlyDictionary<string, string> MetadataOf(string bucket, string key)
+    {
+        lock (_gate)
+        {
+            return Bucket(bucket)[key].Metadata;
+        }
+    }
+
+    internal int Count(string bucket)
+    {
+        lock (_gate)
+        {
+            return Bucket(bucket).Count;
+        }
+    }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         int index = Log.Count;
         Uri uri = request.RequestUri!;
@@ -73,17 +121,24 @@ internal sealed class S3Emulator : HttpMessageHandler
         if (Intercept?.Invoke(request, index) is { } intercepted)
         {
             intercepted.RequestMessage = request;
-            return Task.FromResult(intercepted);
+            return intercepted;
         }
 
-        HttpResponseMessage response = Serve(request);
+        byte[] body = request.Content is null ? [] : await request.Content.ReadAsByteArrayAsync(cancellationToken);
+        (HttpResponseMessage response, bool applied) = Serve(request, body);
+        if (applied && LoseAnswer?.Invoke(request) == true)
+        {
+            response.Dispose();
+            throw new HttpRequestException("The connection was reset after the request was served.");
+        }
+
         response.RequestMessage = request;
         response.Headers.TryAddWithoutValidation("x-amz-request-id", $"REQ{index:D6}");
         response.Headers.Date = Now();
-        return Task.FromResult(response);
+        return response;
     }
 
-    private HttpResponseMessage Serve(HttpRequestMessage request)
+    private (HttpResponseMessage Response, bool Applied) Serve(HttpRequestMessage request, byte[] body)
     {
         (string bucket, string key) = Address(request.RequestUri!, request.Headers.Host ?? request.RequestUri!.Authority);
         if (request.Method == HttpMethod.Head && key.Length == 0)
@@ -91,31 +146,262 @@ internal sealed class S3Emulator : HttpMessageHandler
             // A bucket's head, unsigned: S3 says the region whatever else it answers.
             HttpResponseMessage head = new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new ByteArrayContent([]) };
             head.Headers.TryAddWithoutValidation("x-amz-bucket-region", Region);
-            return head;
+            return (head, false);
         }
 
-        if (Verify(request) is { } refused)
+        if (Verify(request, body) is { } refused)
         {
-            return refused;
+            return (refused, false);
         }
 
         Dictionary<string, string> query = Query(request.RequestUri!);
-        if (request.Method == HttpMethod.Get && key.Length == 0 && query.TryGetValue("list-type", out string? listType) && listType == "2")
+        HttpMethod method = request.Method;
+        if (key.Length == 0)
         {
-            return List(bucket, query);
+            if (method == HttpMethod.Get && query.GetValueOrDefault("list-type") == "2")
+            {
+                return (List(bucket, query), false);
+            }
+
+            if (method == HttpMethod.Post && query.ContainsKey("delete"))
+            {
+                return Delete(request, bucket, body);
+            }
+        }
+        else if (method == HttpMethod.Get)
+        {
+            return (Get(request, bucket, key), false);
+        }
+        else if (method == HttpMethod.Head)
+        {
+            return (Head(bucket, key), false);
+        }
+        else if (method == HttpMethod.Put && query.TryGetValue("uploadId", out string? partOf))
+        {
+            return UploadPart(request, partOf, int.Parse(query["partNumber"], CultureInfo.InvariantCulture), body);
+        }
+        else if (method == HttpMethod.Put)
+        {
+            return Put(request, bucket, key, body);
+        }
+        else if (method == HttpMethod.Post && query.ContainsKey("uploads"))
+        {
+            return CreateUpload(request, bucket, key);
+        }
+        else if (method == HttpMethod.Post && query.TryGetValue("uploadId", out string? completed))
+        {
+            return Complete(request, bucket, key, completed, body);
+        }
+        else if (method == HttpMethod.Delete && query.TryGetValue("uploadId", out string? aborted))
+        {
+            lock (_gate)
+            {
+                return _uploads.Remove(aborted)
+                    ? (new HttpResponseMessage(HttpStatusCode.NoContent) { Content = new ByteArrayContent([]) }, true)
+                    : (Error(HttpStatusCode.NotFound, "NoSuchUpload", "The specified upload does not exist."), false);
+            }
         }
 
-        if (request.Method == HttpMethod.Get)
+        return (Error(HttpStatusCode.NotImplemented, "NotImplemented", "The emulator does not serve this request."), false);
+    }
+
+    private (HttpResponseMessage, bool) Put(HttpRequestMessage request, string bucket, string key, byte[] body)
+    {
+        if (Checksums(request, body) is { } damaged)
         {
-            return Get(request, bucket, key);
+            return (damaged, false);
         }
 
-        if (request.Method == HttpMethod.Head)
+        lock (_gate)
         {
-            return Head(bucket, key);
+            SortedDictionary<string, StoredObject> objects = Bucket(bucket);
+            if (Condition(request, objects, key) is { } failed)
+            {
+                return (failed, false);
+            }
+
+            StoredObject stored = new StoredObject(body, NextETag(), Stamp(), null, false, Metadata(request));
+            objects[key] = stored;
+            HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
+            response.Headers.TryAddWithoutValidation("ETag", stored.ETag);
+            return (response, true);
+        }
+    }
+
+    private (HttpResponseMessage, bool) CreateUpload(HttpRequestMessage request, string bucket, string key)
+    {
+        string id = $"upload-{Interlocked.Increment(ref _etags)}";
+        string? algorithm = Header(request, "x-amz-checksum-algorithm");
+        lock (_gate)
+        {
+            _uploads[id] = new Upload(bucket, key, Metadata(request), algorithm, new SortedDictionary<int, (byte[], string)>());
         }
 
-        return Error(HttpStatusCode.NotImplemented, "NotImplemented", "The emulator does not serve this request.");
+        string xml = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?><InitiateMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>{bucket}</Bucket><Key>{Escape(key)}</Key><UploadId>{id}</UploadId></InitiateMultipartUploadResult>";
+        return (new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml, Encoding.UTF8, "application/xml") }, true);
+    }
+
+    private (HttpResponseMessage, bool) UploadPart(HttpRequestMessage request, string uploadId, int number, byte[] body)
+    {
+        if (Checksums(request, body) is { } damaged)
+        {
+            return (damaged, false);
+        }
+
+        lock (_gate)
+        {
+            if (!_uploads.TryGetValue(uploadId, out Upload? upload))
+            {
+                return (Error(HttpStatusCode.NotFound, "NoSuchUpload", "The specified upload does not exist."), false);
+            }
+
+            string etag = NextETag();
+            upload.Parts[number] = (body, etag);
+            HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([]) };
+            response.Headers.TryAddWithoutValidation("ETag", etag);
+            return (response, true);
+        }
+    }
+
+    private (HttpResponseMessage, bool) Complete(HttpRequestMessage request, string bucket, string key, string uploadId, byte[] body)
+    {
+        XElement root = XDocument.Parse(Encoding.UTF8.GetString(body)).Root!;
+        List<(int Number, string ETag)> asked = [.. root.Elements(S3 + "Part").Select(p => (int.Parse(p.Element(S3 + "PartNumber")!.Value, CultureInfo.InvariantCulture), p.Element(S3 + "ETag")!.Value))];
+        lock (_gate)
+        {
+            if (!_uploads.TryGetValue(uploadId, out Upload? upload))
+            {
+                return (Error(HttpStatusCode.NotFound, "NoSuchUpload", "The specified upload does not exist."), false);
+            }
+
+            if (asked.Count == 0 || asked.Select(p => p.Number).Zip(asked.Skip(1).Select(p => p.Number)).Any(pair => pair.First >= pair.Second))
+            {
+                return (Error(HttpStatusCode.BadRequest, "InvalidPartOrder", "The parts are not in ascending order."), false);
+            }
+
+            List<byte> whole = [];
+            foreach ((int number, string etag) in asked)
+            {
+                if (!upload.Parts.TryGetValue(number, out (byte[] Bytes, string ETag) part) || part.ETag != etag)
+                {
+                    return (Error(HttpStatusCode.BadRequest, "InvalidPart", $"Part {number} is not the one uploaded."), false);
+                }
+
+                whole.AddRange(part.Bytes);
+            }
+
+            byte[] bytes = [.. whole];
+            if (Header(request, "x-amz-checksum-crc64nvme") is { } crc && crc != Crc(bytes))
+            {
+                return (Error(HttpStatusCode.BadRequest, "BadDigest", "The whole object's CRC64NVME does not match."), false);
+            }
+
+            SortedDictionary<string, StoredObject> objects = Bucket(bucket);
+            if (Condition(request, objects, key) is { } failed)
+            {
+                return (failed, false);
+            }
+
+            _uploads.Remove(uploadId);
+            StoredObject stored = new StoredObject(bytes, NextETag(), Stamp(), null, false, upload.Metadata);
+            objects[key] = stored;
+            string xml = $"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\n<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>{bucket}</Bucket><Key>{Escape(key)}</Key><ETag>{Escape(stored.ETag)}</ETag></CompleteMultipartUploadResult>";
+            return (new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml, Encoding.UTF8, "application/xml") }, true);
+        }
+    }
+
+    private (HttpResponseMessage, bool) Delete(HttpRequestMessage request, string bucket, byte[] body)
+    {
+        string? md5 = request.Content?.Headers.ContentMD5 is { } digest ? Convert.ToBase64String(digest) : null;
+        string? crc32 = Header(request, "x-amz-checksum-crc32");
+        if (md5 is null && crc32 is null)
+        {
+            return (Error(HttpStatusCode.BadRequest, "InvalidRequest", "Missing required header for this request: Content-MD5"), false);
+        }
+
+        if (md5 is not null && md5 != Convert.ToBase64String(MD5.HashData(body)))
+        {
+            return (Error(HttpStatusCode.BadRequest, "BadDigest", "The Content-MD5 you specified did not match what was received."), false);
+        }
+
+        XElement root = XDocument.Parse(Encoding.UTF8.GetString(body)).Root!;
+        List<string> keys = [.. root.Elements(S3 + "Object").Select(o => o.Element(S3 + "Key")!.Value)];
+        if (keys.Count > 1000)
+        {
+            return (Error(HttpStatusCode.BadRequest, "MalformedXML", "More than 1 000 keys."), false);
+        }
+
+        StringBuilder xml = new StringBuilder("<?xml version=\"1.0\" encoding=\"UTF-8\"?><DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
+        lock (_gate)
+        {
+            SortedDictionary<string, StoredObject> objects = Bucket(bucket);
+            foreach (string key in keys)
+            {
+                if (objects.TryGetValue(key, out StoredObject o) && (o.LegalHold || o.RetainUntil > Now()))
+                {
+                    xml.Append(CultureInfo.InvariantCulture, $"<Error><Key>{Escape(key)}</Key><Code>AccessDenied</Code><Message>Access Denied because object protected by object lock.</Message></Error>");
+                    continue;
+                }
+
+                objects.Remove(key);
+            }
+        }
+
+        xml.Append("</DeleteResult>");
+        return (new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml.ToString(), Encoding.UTF8, "application/xml") }, true);
+    }
+
+    /// <summary>The refusal of a write whose condition fails on the object under <paramref name="key"/>, or null.</summary>
+    private static HttpResponseMessage? Condition(HttpRequestMessage request, SortedDictionary<string, StoredObject> objects, string key)
+    {
+        bool exists = objects.TryGetValue(key, out StoredObject current);
+        if (Header(request, "If-None-Match") == "*" && exists)
+        {
+            return Error(HttpStatusCode.PreconditionFailed, "PreconditionFailed", "At least one of the pre-conditions you specified did not hold");
+        }
+
+        if (Header(request, "If-Match") is { } match)
+        {
+            if (!exists)
+            {
+                return Error(HttpStatusCode.NotFound, "NoSuchKey", "The specified key does not exist.");
+            }
+
+            if (match != current.ETag)
+            {
+                return Error(HttpStatusCode.PreconditionFailed, "PreconditionFailed", "At least one of the pre-conditions you specified did not hold");
+            }
+        }
+
+        if (exists && (current.LegalHold || current.RetainUntil > DateTimeOffset.UtcNow))
+        {
+            return Error(HttpStatusCode.Forbidden, "AccessDenied", "The object is protected by Object Lock.");
+        }
+
+        return null;
+    }
+
+    /// <summary>The refusal of a body whose checksum or payload hash does not match it, or null.</summary>
+    private HttpResponseMessage? Checksums(HttpRequestMessage request, byte[] body)
+    {
+        string? crc = Header(request, "x-amz-checksum-crc64nvme");
+        if (crc is not null && crc != Crc(body))
+        {
+            return Error(HttpStatusCode.BadRequest, "BadDigest", "The CRC64NVME you specified did not match the calculated checksum.");
+        }
+
+        byte[]? md5 = request.Content?.Headers.ContentMD5;
+        if (md5 is not null && !md5.AsSpan().SequenceEqual(MD5.HashData(body)))
+        {
+            return Error(HttpStatusCode.BadRequest, "BadDigest", "The Content-MD5 you specified did not match what was received.");
+        }
+
+        if (RequireChecksum && crc is null && md5 is null)
+        {
+            return Error(HttpStatusCode.BadRequest, "InvalidRequest", "Content-MD5 or x-amz-checksum- HTTP header is required for Put Object requests with Object Lock parameters");
+        }
+
+        return null;
     }
 
     private HttpResponseMessage Get(HttpRequestMessage request, string bucket, string key)
@@ -139,11 +425,6 @@ internal sealed class S3Emulator : HttpMessageHandler
         }
 
         string range = ranges.First();
-        if (!range.StartsWith("bytes=", StringComparison.Ordinal))
-        {
-            return Error(HttpStatusCode.BadRequest, "InvalidArgument", "Bad range.");
-        }
-
         string spec = range[6..];
         long first, last;
         if (spec.StartsWith('-'))
@@ -190,6 +471,11 @@ internal sealed class S3Emulator : HttpMessageHandler
         }
 
         response.Headers.TryAddWithoutValidation("x-amz-object-lock-legal-hold", found.Value.LegalHold ? "ON" : "OFF");
+        foreach ((string name, string value) in found.Value.Metadata)
+        {
+            response.Headers.TryAddWithoutValidation(name, value);
+        }
+
         return response;
     }
 
@@ -232,8 +518,8 @@ internal sealed class S3Emulator : HttpMessageHandler
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(xml.ToString(), Encoding.UTF8, "application/xml") };
     }
 
-    /// <summary>Checks the signature against the request as received; null when it holds.</summary>
-    private HttpResponseMessage? Verify(HttpRequestMessage request)
+    /// <summary>Checks the signature and the signed payload against the request as received; null when they hold.</summary>
+    private HttpResponseMessage? Verify(HttpRequestMessage request, byte[] body)
     {
         if (!request.Headers.TryGetValues("Authorization", out IEnumerable<string>? values))
         {
@@ -249,6 +535,11 @@ internal sealed class S3Emulator : HttpMessageHandler
             return Error(HttpStatusCode.Forbidden, "RequestTimeTooSkewed", "The difference between the request time and the current time is too large.");
         }
 
+        if (payload != SigV4Signer.UnsignedPayload && payload != Convert.ToHexStringLower(SHA256.HashData(body)))
+        {
+            return Error(HttpStatusCode.BadRequest, "XAmzContentSHA256Mismatch", "The provided 'x-amz-content-sha256' header does not match what was computed.");
+        }
+
         string credential = Field(authorization, "Credential=");
         string[] scope = credential.Split('/');
         if (scope[0] != AccessKey || scope[2] != Region || scope[3] != "s3")
@@ -262,9 +553,13 @@ internal sealed class S3Emulator : HttpMessageHandler
             return Error(HttpStatusCode.Forbidden, "AccessDenied", "The host, the date and the payload hash must be signed.");
         }
 
-        (string, string)[] headers = [.. signed.Select(name => (name, name == "host"
-            ? request.Headers.Host ?? request.RequestUri!.Authority
-            : string.Join(",", request.Headers.TryGetValues(name, out IEnumerable<string>? v) ? v : request.Content?.Headers.TryGetValues(name, out v) == true ? v : [])))];
+        IEnumerable<string> amz = request.Headers.Select(h => h.Key.ToLowerInvariant()).Where(name => name.StartsWith("x-amz-", StringComparison.Ordinal));
+        if (amz.FirstOrDefault(name => !signed.Contains(name)) is { } unsigned)
+        {
+            return Error(HttpStatusCode.Forbidden, "AccessDenied", $"The header {unsigned} is sent and not signed.");
+        }
+
+        (string, string)[] headers = [.. signed.Select(name => (name, name == "host" ? request.Headers.Host ?? request.RequestUri!.Authority : Header(request, name) ?? string.Empty))];
         string canonicalQuery = string.Join("&", Query(request.RequestUri!)
             .Select(pair => (Name: UriEncoding.Query(pair.Key), Value: UriEncoding.Query(pair.Value)))
             .OrderBy(pair => pair.Name, StringComparer.Ordinal)
@@ -275,6 +570,23 @@ internal sealed class S3Emulator : HttpMessageHandler
         return expected == authorization
             ? null
             : Error(HttpStatusCode.Forbidden, "SignatureDoesNotMatch", $"Expected {expected}, got {authorization}.");
+    }
+
+    private static string? Header(HttpRequestMessage request, string name) =>
+        request.Headers.TryGetValues(name, out IEnumerable<string>? values) || request.Content?.Headers.TryGetValues(name, out values) == true
+            ? string.Join(",", values!)
+            : null;
+
+    private static Dictionary<string, string> Metadata(HttpRequestMessage request) =>
+        request.Headers
+            .Where(h => h.Key.StartsWith("x-amz-meta-", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(h => h.Key.ToLowerInvariant(), h => h.Value.First(), StringComparer.Ordinal);
+
+    private static string Crc(byte[] bytes)
+    {
+        byte[] crc = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(crc, Crc64Nvme.Hash(bytes));
+        return Convert.ToBase64String(crc);
     }
 
     private static string Field(string authorization, string name)
@@ -316,19 +628,14 @@ internal sealed class S3Emulator : HttpMessageHandler
         {
             Content = new ByteArrayContent(o.Bytes, (int)first, (int)count),
         };
-        response.Headers.ETag = null;
         response.Headers.TryAddWithoutValidation("ETag", o.ETag);
         response.Content.Headers.LastModified = o.Modified;
         return response;
     }
 
-    private static HttpResponseMessage Unsatisfiable(long length)
-    {
-        HttpResponseMessage response = Error(
-            HttpStatusCode.RequestedRangeNotSatisfiable, "InvalidRange", "The requested range is not satisfiable",
-            $"<RangeRequested>bytes</RangeRequested><ActualObjectSize>{length}</ActualObjectSize>");
-        return response;
-    }
+    private static HttpResponseMessage Unsatisfiable(long length) => Error(
+        HttpStatusCode.RequestedRangeNotSatisfiable, "InvalidRange", "The requested range is not satisfiable",
+        $"<RangeRequested>bytes</RangeRequested><ActualObjectSize>{length}</ActualObjectSize>");
 
     internal static HttpResponseMessage Error(HttpStatusCode status, string code, string message, string extra = "") =>
         new HttpResponseMessage(status)
@@ -387,9 +694,18 @@ internal sealed class S3Emulator : HttpMessageHandler
         }
     }
 
+    /// <summary>The service's date for an object, to the second, as S3 keeps it.</summary>
+    private DateTimeOffset Stamp()
+    {
+        DateTimeOffset now = Now();
+        return now.AddTicks(-(now.Ticks % TimeSpan.TicksPerSecond));
+    }
+
     private string NextETag() => $"\"{Convert.ToHexStringLower(MD5.HashData(BitConverter.GetBytes(Interlocked.Increment(ref _etags))))}\"";
 
-    private readonly record struct StoredObject(byte[] Bytes, string ETag, DateTimeOffset Modified, DateTimeOffset? RetainUntil, bool LegalHold);
+    private readonly record struct StoredObject(byte[] Bytes, string ETag, DateTimeOffset Modified, DateTimeOffset? RetainUntil, bool LegalHold, Dictionary<string, string> Metadata);
+
+    private sealed record Upload(string Bucket, string Key, Dictionary<string, string> Metadata, string? Algorithm, SortedDictionary<int, (byte[] Bytes, string ETag)> Parts);
 }
 
 /// <summary>A body that sends some bytes, then stops: short, or stalled until cancelled.</summary>

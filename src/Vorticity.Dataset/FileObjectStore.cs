@@ -161,7 +161,7 @@ public sealed class FileObjectStore : IObjectStore
         try
         {
             ObjectKey.Check(key);
-            ArgumentOutOfRangeException.ThrowIfNegative(length);
+            ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
             ObjectDisposedException.ThrowIf(_disposed, this);
             cancellationToken.ThrowIfCancellationRequested();
             if (condition.Kind == PutConditionKind.IfMatch)
@@ -213,7 +213,7 @@ public sealed class FileObjectStore : IObjectStore
                 {
                     ReadResult result = await content.ReadAsync(cancellationToken).ConfigureAwait(false);
                     ReadOnlySequence<byte> buffer = result.Buffer;
-                    if (written + buffer.Length > length)
+                    if (length >= 0 && written + buffer.Length > length)
                     {
                         throw new ObjectStoreException(
                             $"'{key}' was announced as {length} bytes and its content runs past them.");
@@ -237,7 +237,7 @@ public sealed class FileObjectStore : IObjectStore
                     }
                 }
 
-                if (written != length)
+                if (length >= 0 && written != length)
                 {
                     throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {written}.");
                 }

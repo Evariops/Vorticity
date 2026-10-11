@@ -508,9 +508,11 @@ public sealed class VortexSession : IAsyncDisposable
     /// The file is written beside the destination, as <c>.name.token.tmp</c>, and renamed over it,
     /// so its directory must be writable. A symbolic link is written through to its target, and a
     /// file replaced passes its Unix permissions on. A process that dies before completing leaves
-    /// that file behind.
+    /// that file behind. A location, <c>s3://bucket/key</c> and the like, is written to the store the
+    /// session's <see cref="VortexSessionOptions.ObjectStores"/> resolve it with: the object appears
+    /// whole when the writer completes, or not at all, and an upload in parts is aborted with the file.
     /// </remarks>
-    /// <param name="path">The destination.</param>
+    /// <param name="path">The destination: a path, or a location.</param>
     /// <param name="schema">The file's columns.</param>
     /// <param name="options">What the file looks like; null for the defaults.</param>
     /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes what it wrote and leaves the path as it was.</returns>
@@ -521,8 +523,29 @@ public sealed class VortexSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(schema);
         ThrowIfDisposed();
+        if (ObjectStoreRegistry.IsLocation(path))
+        {
+            return CreateLocationWriter(path, schema, options);
+        }
+
         VortexFileWriter writer = VortexFileWriter.Create(path, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
         writer.Declare(schema);
+        return writer;
+    }
+
+    /// <summary>
+    /// A writer into a pipe whose reader is the store's put of the object at <paramref name="location"/>:
+    /// held up to the store's part threshold and sent whole at completion, or sent in parts as they fill,
+    /// the pipe's backpressure slowing the writer when the link is the bottleneck. The put replaces the
+    /// object, as a path's file is replaced.
+    /// </summary>
+    private VortexFileWriter CreateLocationWriter(string location, VortexSchema schema, VortexWriteOptions? options)
+    {
+        (IObjectStore store, string key) = Options.ObjectStores.Locate(location);
+        Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 4 << 20, resumeWriterThreshold: 2 << 20, useSynchronizationContext: false));
+        VortexFileWriter writer = VortexFileWriter.Create(pipe.Writer, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
+        writer.Declare(schema);
+        writer.UploadTo(store.PutAsync(key, pipe.Reader, -1, PutCondition.None, CancellationToken.None).AsTask());
         return writer;
     }
 

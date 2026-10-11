@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO.Pipelines;
 using System.Net;
@@ -32,7 +33,7 @@ namespace Vorticity.ObjectStorage;
 /// other. A session that holds it disposes it with itself.
 /// </para>
 /// </remarks>
-public sealed class S3ObjectStore : IObjectStore
+public sealed partial class S3ObjectStore : IObjectStore
 {
     private static readonly UriCreationOptions Verbatim = new UriCreationOptions { DangerousDisablePathAndQueryCanonicalization = true };
 
@@ -200,14 +201,6 @@ public sealed class S3ObjectStore : IObjectStore
             idempotent: true,
             cancellationToken);
     }
-
-    /// <inheritdoc/>
-    public ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("The S3 store's write path is not built yet.");
-
-    /// <inheritdoc/>
-    public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("The S3 store's write path is not built yet.");
 
     /// <inheritdoc/>
     public async IAsyncEnumerable<ObjectListing> ListAsync(string prefix, string? startAfter, [EnumeratorCancellation] CancellationToken cancellationToken)
@@ -424,6 +417,13 @@ public sealed class S3ObjectStore : IObjectStore
         }
 
         ServiceError error = await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
+        return MapFailure(response, error, operation, key);
+    }
+
+    /// <summary>What a refusal whose error was read becomes, as <see cref="FailureAsync"/> says.</summary>
+    private Exception MapFailure(HttpResponseMessage response, ServiceError error, string operation, string key)
+    {
+        HttpStatusCode status = response.StatusCode;
         if (status is HttpStatusCode.Forbidden or HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized)
         {
             if (error.Code is "RequestTimeTooSkewed" or "RequestExpired" || (status == HttpStatusCode.Forbidden && error.Code is null && Skewed(response)))
@@ -556,8 +556,13 @@ public sealed class S3ObjectStore : IObjectStore
         return request;
     }
 
-    /// <summary>Adds the date, the payload hash, the session token and the signature over them and the host.</summary>
-    private async ValueTask SignAsync(HttpRequestMessage request, Target target, string canonicalUri, string canonicalQuery, string payloadHash, CancellationToken cancellationToken)
+    /// <summary>
+    /// Adds the date, the payload hash, the session token and <paramref name="extra"/>, and the signature
+    /// over them and the host. An extra header named <c>content-…</c> goes on the body.
+    /// </summary>
+    private async ValueTask SignAsync(
+        HttpRequestMessage request, Target target, string canonicalUri, string canonicalQuery, string payloadHash, CancellationToken cancellationToken,
+        (string Name, string Value)[]? extra = null)
     {
         AwsKeys keys = await _options.Credentials.GetAsync(cancellationToken).ConfigureAwait(false);
         _lastKeys = keys;
@@ -574,6 +579,15 @@ public sealed class S3ObjectStore : IObjectStore
         {
             request.Headers.TryAddWithoutValidation("x-amz-security-token", token);
             headers[count++] = ("x-amz-security-token", token);
+        }
+
+        foreach ((string name, string value) in extra ?? [])
+        {
+            bool added = name.StartsWith("content-", StringComparison.Ordinal)
+                ? request.Content!.Headers.TryAddWithoutValidation(name, value)
+                : request.Headers.TryAddWithoutValidation(name, value);
+            Debug.Assert(added, $"The header {name} was refused.");
+            headers[count++] = (name, value);
         }
 
         string authorization = target.Signer.Authorization(keys, amzDate, request.Method.Method, canonicalUri, canonicalQuery, ((Span<(string, string)>)headers)[..count], payloadHash);
@@ -731,7 +745,7 @@ public sealed class S3ObjectStore : IObjectStore
     private readonly record struct ListRequest(S3ObjectStore Store, string Prefix, string? StartAfter, string? Continuation, List<ObjectListing> Page);
 
     /// <summary>The headers a request signs, held inline.</summary>
-    [InlineArray(6)]
+    [InlineArray(12)]
     private struct Signed
     {
         private (string, string) _first;

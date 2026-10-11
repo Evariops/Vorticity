@@ -395,6 +395,12 @@ public sealed partial class VortexFileWriter
             await pipe.CompleteAsync().ConfigureAwait(false);
         }
 
+        // A file written to a location is complete when the store holds it.
+        if (_upload is { } upload)
+        {
+            await upload.ConfigureAwait(false);
+        }
+
         return BuildReport();
     }
 
@@ -519,6 +525,21 @@ public sealed partial class VortexFileWriter
             if (_abandoned)
             {
                 TruncateAppended();
+            }
+        }
+
+        // The put of an abandoned file gives up once its pipe fails, an upload in parts aborted: it is
+        // awaited, so that nothing of the file is left in flight, and its failure, which the abandon
+        // caused, is not the caller's.
+        if (_upload is { IsCompletedSuccessfully: false } upload)
+        {
+            _upload = null;
+            try
+            {
+                await upload.ConfigureAwait(false);
+            }
+            catch (Exception) when (_abandoned)
+            {
             }
         }
     }
