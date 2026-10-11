@@ -945,6 +945,9 @@ internal struct LayoutNodeRecord
     internal ushort EncodingSpecIndex;
 
     internal LayoutEncodingId Encoding;
+
+    /// <summary>A <c>vortex.flat</c> whose inlined array tree declares no buffer; see <see cref="LayoutNode.Bufferless"/>.</summary>
+    internal bool Bufferless;
 }
 
 /// <summary>
@@ -982,6 +985,13 @@ internal readonly struct LayoutNode
 
     /// <summary>Rows this node covers, narrowed from the wire <c>u64</c> at parse time.</summary>
     public long RowCount => _tree.RecordRef(_index).RowCount;
+
+    /// <summary>
+    /// Whether this is a <c>vortex.flat</c> whose metadata inlines an array tree that declares no
+    /// buffer: a sequence, say, which its tree holds whole. A read of it needs no byte of its
+    /// segment, so a scan never asks for one.
+    /// </summary>
+    public bool Bufferless => _tree.RecordRef(_index).Bufferless;
 
     /// <summary>The layout-specific metadata, opaque at this layer.</summary>
     public ReadOnlySpan<byte> Metadata

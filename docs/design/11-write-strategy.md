@@ -204,6 +204,12 @@ upper filter levels, then the zone maps from the closed blocks' summaries, the f
 index directory, the file's identity (see [identity and
 integrity](13-dataset.md#7-identity-and-integrity)), and finally the footer and the postscript.
 
+A chunk whose array declares no buffer, a sequence for instance, also has its array tree inlined in
+its flat layout's metadata, so that a scan reads it from no segment at all. The blob stays whole in
+the segment, as the reference's writer leaves it, for a reader that ignores the field. Rust readers
+before 0.84 refuse a flat layout that carries any metadata, so a file that targets an edition before
+`core2026.08.0` inlines none.
+
 The file statistics are one `ArrayStats` per top-level column: the exact minimum and maximum of a
 numeric column, the null count, and whether the column ascends, in the reference's semantics (a null
 below every value, equal neighbours allowed by `is_sorted` and refused by `is_strict_sorted`, a NaN

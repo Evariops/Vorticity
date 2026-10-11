@@ -59,7 +59,7 @@ internal static class LayoutParser
         switch (record.Encoding)
         {
             case LayoutEncodingId.Flat:
-                ParseFlat(metadata, segments.Length, wireChildren);
+                record.Bufferless = ParseFlat(metadata, segments.Length, wireChildren);
                 break;
 
             case LayoutEncodingId.Chunked:
@@ -112,7 +112,8 @@ internal static class LayoutParser
 
     // ------------------------------------------------------------------------------ vortex.flat
 
-    private static void ParseFlat(ReadOnlySpan<byte> metadata, int segmentCount, int childCount)
+    /// <returns>Whether the metadata inlines an array tree that declares no buffer.</returns>
+    private static bool ParseFlat(ReadOnlySpan<byte> metadata, int segmentCount, int childCount)
     {
         // Exactly one segment, no children.
         if (segmentCount != 1)
@@ -125,9 +126,10 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.flat", "children", childCount, 0);
         }
 
-        // Parsed for validation only. Normally absent; when present it inlines the whole array
-        // flatbuffer.
-        FlatLayoutMetadata.Read(metadata);
+        // Normally absent; when present it inlines the whole array flatbuffer, and a tree that
+        // declares no buffer is the whole array, read without its segment.
+        FlatLayoutMetadata flat = FlatLayoutMetadata.Read(metadata);
+        return flat.HasArrayEncodingTree && FlatLayoutMetadata.DeclaresNoBuffer(flat.ArrayEncodingTree);
     }
 
     // --------------------------------------------------------------------------- vortex.chunked

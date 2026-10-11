@@ -246,7 +246,9 @@ public sealed class ZoneMapWritingTests
 
         counting.ResetCounters();
         await foreach (RecordBatch batch in file.ScanBuilder()
-            .Project("monotone")
+            // With the strings: the progression is written as a sequence, whose chunks their flats'
+            // inlined trees hold whole, read from no segment, pruned or not.
+            .Project("monotone", "strs")
             .Where(filter)
             .WithPruning(prune)
             .ExecuteAsync()

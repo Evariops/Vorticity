@@ -52,6 +52,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Per root field, the segment index of each batch's column.</summary>
     private readonly AppendList<int>[] _columnSegments;
 
+    /// <summary>
+    /// The metadata of the chunks' flat layouts that carry any, by root field and chunk: the array
+    /// tree inlined, for a tree that declares no buffer.
+    /// </summary>
+    private FlatMetadataTable _flatMetadata;
+
     /// <summary>Per root field, what each chunk's values were written as, for the report.</summary>
     private readonly AppendList<string>[] _written;
 
@@ -1585,6 +1591,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         using (blob)
         {
             _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+            // A tree that declares no buffer, a sequence's, is the chunk whole: inlined in the flat's
+            // metadata as well, it spares a read of the chunk its segment, which keeps the blob for
+            // a reader that ignores the field. A reader older than the editions of 2026 refuses a
+            // flat layout any metadata at all.
+            if (_target >= VortexEdition.Core20260800)
+            {
+                ReadOnlySpan<byte> tree = Arrays.Metadata.FlatLayoutMetadata.BufferlessTree(blob.Memory.Span);
+                if (!tree.IsEmpty)
+                {
+                    _flatMetadata.AddTree(field, _columnSegments[field].Count, tree);
+                }
+            }
+
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
             _columnSegments[field].Add(segment);
             _indexes?.AddColumnBytes(field, _segments[segment].Length);
@@ -2091,6 +2110,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             new Arrays.Metadata.ChunkedLayoutMetadata(false), chunkedMetadata);
 
         Span<uint> segmentIds = stackalloc uint[1];
+        _flatMetadata.Seal();
         int[] fieldLayouts = ArrayPool<int>.Shared.Rent(Math.Max(_fieldCount, 1));
         int[] chunks = ArrayPool<int>.Shared.Rent(Math.Max(_chunkRows.Count, 1));
         try
@@ -2103,7 +2123,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     segmentIds[0] = (uint)segments[chunk];
                     chunks[chunk] = LayoutWriter.Write(
-                        builder, flat, (ulong)chunkRows[chunk], default, [], segmentIds);
+                        builder, flat, (ulong)chunkRows[chunk], _flatMetadata.Take(field, chunk), [], segmentIds);
                 }
 
                 int data = LayoutWriter.Write(

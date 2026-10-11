@@ -13,7 +13,8 @@ namespace Vorticity.Layouts;
 /// <c>[padding][buffer 0]..[array flatbuffer][u32 flatbuffer length]</c> and the encoding tree is
 /// normally read off its tail; when the metadata carries an inline encoding tree the same tree is
 /// read from there instead, over byte-identical segment bytes, and the buffer walk simply never
-/// reaches the tail.
+/// reaches the tail. An inline tree that declares no buffer is the array whole, and its segment is
+/// never read (<see cref="LayoutNode.Bufferless"/>).
 /// </summary>
 internal sealed class FlatLayoutReader : LayoutReader
 {
@@ -44,8 +45,12 @@ internal sealed class FlatLayoutReader : LayoutReader
         CheckRange(in node, rows);
 
         // A flat layout is indivisible: whatever rows are wanted, the whole segment is read and the
-        // array decoded, then sliced. Upstream says the same with `is_indivisible() -> true`.
-        RegisterSegment(in node, 0, segments);
+        // array decoded, then sliced. Upstream says the same with `is_indivisible() -> true`. An
+        // inlined tree that declares no buffer is the array whole, and its segment is not read.
+        if (!node.Bufferless)
+        {
+            RegisterSegment(in node, 0, segments);
+        }
     }
 
     /// <inheritdoc/>
@@ -1062,7 +1067,9 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <returns>The root of the parsed blob.</returns>
     private ArrayNode LoadRoot(scoped in LayoutNode node, ScanContext context)
     {
-        VortexBuffer segment = SegmentBuffer(in node, 0, context);
+        // A bufferless tree is the array whole: no segment was asked for, and an empty one stands
+        // in, which the kept blob of this node matches as well as any.
+        VortexBuffer segment = node.Bufferless ? default : SegmentBuffer(in node, 0, context);
         if (context.TakeBlobArena(node.Index, segment))
         {
             return context.Nodes.Root;

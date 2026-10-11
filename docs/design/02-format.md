@@ -270,7 +270,7 @@ table Layout {
 
 | ID | Role | Children | Segments | Metadata |
 |---|---|---|---|---|
-| `vortex.flat` | one serialized array | 0 | exactly 1 | `optional bytes array_encoding_tree`. When present, the array FlatBuffer is inlined in the layout and the segment holds only buffers |
+| `vortex.flat` | one serialized array | 0 | exactly 1 | `optional bytes array_encoding_tree`. When present, the array FlatBuffer is inlined in the layout and the buffers are read from the start of the segment, which the reference's writer still fills with the whole blob. Readers before 0.84 refuse any metadata here |
 | `vortex.chunked` | row-wise partition | ≥ 1 | 0 | empty. Chunk offsets derive from the children's `row_count`s, whose sum must equal the parent's |
 | `vortex.struct` | one child per field (plus validity) | n fields | 0 | empty |
 | `vortex.dict` | dictionary shared with a child | codes + values | | `PType codes_ptype = 1; optional bool is_nullable_codes = 2; optional bool all_values_referenced = 3;` |

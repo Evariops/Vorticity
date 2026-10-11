@@ -56,7 +56,9 @@ public sealed class PlanMemoryTests
         // the progression of step zero it used to be: its scalar is a buffer, which moves the
         // segment past an alignment boundary, and its id is one more in the footer's list -- the
         // price of a chunk a scan keeps as one value, where the progression decodes to its rows.
-        Assert.Equal(19_252, size);
+        // Each progression's tree is in its flat's metadata as well, 84 bytes of footer apiece,
+        // so that a read of it asks for no segment.
+        Assert.Equal(19_420, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
@@ -80,7 +82,7 @@ public sealed class PlanMemoryTests
     public async Task AProgressionThatStartsAChunkAfterAJumpIsStillAProgression()
     {
         (long size, List<string> disagreements) = await Write(rowBlock: 1024);
-        Assert.Equal(19_924, size);
+        Assert.Equal(20_092, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "

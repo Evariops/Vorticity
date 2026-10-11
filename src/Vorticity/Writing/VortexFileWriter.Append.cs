@@ -258,6 +258,11 @@ public sealed partial class VortexFileWriter
                 _columnSegments[field].Add(segment);
             }
 
+            foreach ((int chunk, byte[] metadata) in plan.Columns[field].KeptFlatMetadata)
+            {
+                _flatMetadata.Add(field, chunk, metadata);
+            }
+
             IReadOnlyList<string> kept = plan.Columns[field].KeptEncodings;
             for (int chunk = 0; chunk < kept.Count; chunk++)
             {
@@ -951,6 +956,9 @@ public sealed partial class VortexFileWriter
 
         internal required List<int> KeptSegments { get; init; }
 
+        /// <summary>The metadata of each kept chunk's flat layout that has any, with its chunk, which the new layout keeps.</summary>
+        internal List<(int Chunk, byte[] Metadata)> KeptFlatMetadata { get; init; } = [];
+
         /// <summary>What each kept chunk's values were written as, for the report.</summary>
         internal IReadOnlyList<string> KeptEncodings { get; set; } = [];
 
@@ -975,9 +983,15 @@ public sealed partial class VortexFileWriter
             List<(LayoutNode Flat, long Start)> chunks, int keptChunks)
         {
             List<int> segments = new List<int>(keptChunks);
+            List<(int Chunk, byte[] Metadata)> flatMetadata = [];
             for (int c = 0; c < keptChunks; c++)
             {
                 segments.Add(checked((int)chunks[c].Flat.Segments[0]));
+                ReadOnlySpan<byte> metadata = chunks[c].Flat.Metadata;
+                if (!metadata.IsEmpty)
+                {
+                    flatMetadata.Add((c, metadata.ToArray()));
+                }
             }
 
             long nulls = -1;
@@ -1019,6 +1033,7 @@ public sealed partial class VortexFileWriter
             {
                 Blocks = blocks,
                 KeptSegments = segments,
+                KeptFlatMetadata = flatMetadata,
                 HasZones = hasZones,
                 Rows = rows,
                 NonNull = nulls < 0 ? -1 : rows - nulls,
