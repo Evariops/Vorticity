@@ -323,6 +323,11 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         (long first, long total) = status == HttpStatusCode.PartialContent
             ? HttpAnswers.ContentRange(response) ?? throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with a partial body and no Content-Range.")
             : (0, announced);
+        if (s.Offset >= 0)
+        {
+            StoreFailures.RefusePastEnd(s.Key, s.Offset, total);
+        }
+
         if ((s.Offset >= 0 && first != s.Offset) || (status == HttpStatusCode.OK && s.Offset != 0 && !(s.Offset < 0 && announced <= s.Destination.Length)))
         {
             throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with bytes from {first} where {s.Offset} was asked.");

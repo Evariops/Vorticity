@@ -261,6 +261,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         (long first, long total) = status == HttpStatusCode.PartialContent
             ? HttpAnswers.ContentRange(response) ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with a partial body and no Content-Range.")
             : (0, response.Content.Headers.ContentLength ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered without a length."));
+        StoreFailures.RefusePastEnd(s.Key, s.Offset, total);
         if (first != s.Offset)
         {
             throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with bytes from {first} where {s.Offset} was asked.");

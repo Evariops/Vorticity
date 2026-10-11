@@ -15,6 +15,18 @@ internal static class StoreFailures
     internal static ArgumentOutOfRangeException PastEnd(string key, long offset, long length) =>
         new ArgumentOutOfRangeException(nameof(offset), offset, $"'{key}' holds {length} bytes, so the range starts past its end.");
 
+    /// <summary>
+    /// Refuses a range that starts past the object's end although the service served it, as an emulator
+    /// may, the way a service that answers 416 is answered; 0 on an empty object is no such range.
+    /// </summary>
+    internal static void RefusePastEnd(string key, long offset, long length)
+    {
+        if (offset >= length && !(offset == 0 && length == 0))
+        {
+            throw PastEnd(key, offset, length);
+        }
+    }
+
     /// <summary>The refusal of a read whose token condition failed: the object changed under its reader.</summary>
     internal static VortexFormatException Changed(string key, string expected, string actual) =>
         new VortexFormatException($"'{key}' changed under this reader: it was {expected} and is now {actual}.");

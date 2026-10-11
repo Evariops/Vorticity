@@ -349,6 +349,11 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
             (first, total) = (0, announced);
         }
 
+        if (s.Offset >= 0)
+        {
+            StoreFailures.RefusePastEnd(s.Key, s.Offset, total);
+        }
+
         if ((s.Offset >= 0 && first != s.Offset) || first + announced > total)
         {
             throw new ObjectStoreException($"GetObject on '{s.Key}' was answered with bytes {first}+{announced} of {total} where {s.Offset} was asked.");

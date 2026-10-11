@@ -144,7 +144,10 @@ internal static class S3Answers
                         size = reader.ReadElementContentAsLong();
                         break;
                     case "LastModified":
-                        modified = IsoDate(reader.ReadElementContentAsString());
+                        // To the second, as a head says it: a service that lists milliseconds would
+                        // otherwise list another head than its own.
+                        DateTimeOffset listed = IsoDate(reader.ReadElementContentAsString());
+                        modified = listed.AddTicks(-(listed.Ticks % TimeSpan.TicksPerSecond));
                         break;
                     default:
                         reader.Skip();
