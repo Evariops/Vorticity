@@ -308,6 +308,25 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>What the pool keeps parked of one size class, which the guess puts all of a split's bytes in.</summary>
     private const double GuessedClassBytes = 64 << 20;
 
+    /// <summary>The decoded bytes a split is guessed to hold at most for the consumer to run the scan's first splits itself.</summary>
+    private const double InlineSplitBytes = 128 << 10;
+
+    /// <summary>
+    /// What a split the consumer runs may cost before the lanes take the splits after it: about what
+    /// the lanes add to a split of a projection, their hand-offs and the scan's lanes made and woken
+    /// (measured on 2026-10-11, a Ryzen 9 7950X: a 64 KiB column split from the page cache, 11 µs,
+    /// runs a fifth faster here than on 32 lanes, and a taxi trips split of 43 µs 2.5 times slower).
+    /// </summary>
+    private static readonly long InlineSplitTicks = Stopwatch.Frequency * 25 / 1_000_000;
+
+    /// <summary>
+    /// What lanes would run side by side of a split the consumer runs may cost before they take the
+    /// splits after it: past what two hand-offs on the thread pool add to a split, about 2.2 µs, lanes
+    /// gain more than they add (a mapped column's split of 3.0 µs runs a quarter faster on four
+    /// lanes, a sequence's of under 2 µs a third slower on 32).
+    /// </summary>
+    private static readonly long InlineSideBySideTicks = Stopwatch.Frequency * 25 / 10_000_000;
+
     // The first row of a caller's take at or past the split the cursor last reached: a take is
     // walked forward, split after split, so its rows are stepped over rather than searched.
     private int _takeAt;
@@ -388,7 +407,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // may be the one the open read whole, which is asked of its source.
         _extras = readAhead > 0 && window == 1 && !file.Source.ReadsInPlace
             ? new AheadReads(readAhead)
-            : window > 1 ? new LaneWindow(window, EstimatedRowBytes(schema) * Math.Min(plan.MaxRows, FlatLayoutReader.WindowRows)) : null;
+            : window > 1 ? NewWindow(file, schema, plan, window) : null;
         _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses
@@ -418,6 +437,19 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             reads.Lanes[0] = _lanes[0];
         }
+    }
+
+    /// <summary>
+    /// The lanes of a scan of several, the consumer running the first splits itself when the first
+    /// is guessed to hold no more than <see cref="InlineSplitBytes"/> decoded, over a source whose
+    /// read is no round trip.
+    /// </summary>
+    private LaneWindow NewWindow(VortexFile file, DType schema, SplitPlan plan, int window)
+    {
+        double rowBytes = EstimatedRowBytes(schema);
+        SplitCursor peek = _cursor;
+        bool inline = file.Source.CostsNoRoundTrip && peek.TryNext(out RowRange first) && rowBytes * first.Length <= InlineSplitBytes;
+        return new LaneWindow(window, rowBytes * Math.Min(plan.MaxRows, FlatLayoutReader.WindowRows), inline, readsCopies: !file.Source.ReadsInPlace);
     }
 
     /// <summary>A lane on a context of its own, bound to what outlives every batch of the scan.</summary>
@@ -469,7 +501,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         if (_lanes.Length > 1)
         {
-            return MoveNextPipelinedAsync();
+            // A split cheaper than a trip through the lanes is run here, on the caller's flow, once
+            // none is in flight.
+            return Window.Inline && _delivered == _started ? MoveNextInlineAsync() : MoveNextPipelinedAsync();
         }
 
         ReleaseCurrent();
@@ -744,13 +778,63 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         private double _splitShare;
         private int _measured;
 
+        // What a split run here cost, read and decode, smoothed over the splits so far; ticks.
+        private long _inlineRead;
+        private long _inlineDecode;
+        private int _inlineRuns;
+        private readonly bool _readsCopies;
+
         /// <param name="window">The splits the scan may have in flight at most, so the lanes it may make.</param>
         /// <param name="guessedSplitBytes">The bytes a split is guessed to hold until the first is delivered.</param>
-        internal LaneWindow(int window, double guessedSplitBytes)
+        /// <param name="inline">Whether the consumer runs the first splits itself.</param>
+        /// <param name="readsCopies">Whether a read copies the bytes out of the file rather than handing them out where they lie.</param>
+        internal LaneWindow(int window, double guessedSplitBytes, bool inline, bool readsCopies)
         {
             _made = new Lane[window];
             _splitBytes = Math.Max(1, guessedSplitBytes);
             _splitShare = _splitBytes / GuessedClassBytes;
+            Inline = inline;
+            _readsCopies = readsCopies;
+        }
+
+        /// <summary>
+        /// Whether the consumer runs the next split itself rather than the lanes: from the first split,
+        /// when it is guessed small and read without a round trip, until a split run so costs more
+        /// than a trip through the lanes saves.
+        /// </summary>
+        internal bool Inline { get; private set; }
+
+        /// <summary>When the decode of the split the consumer runs began, in <see cref="Stopwatch"/> ticks.</summary>
+        internal long Decoding;
+
+        /// <summary>
+        /// Takes in what a split run by the consumer cost: once the split as a whole costs more than
+        /// the lanes cost it, or what lanes would run of it side by side more than they add to it, the
+        /// splits after it go to the lanes. The first split pays for what the scan touches first, the
+        /// column's layout parsed and its buffers made, and decides alone only when it is far over.
+        /// </summary>
+        /// <remarks>
+        /// Lanes run side by side what a split costs but a copy out of the file: a local file is read
+        /// one read at a time whichever lane makes it, and on many lanes each waits for the others',
+        /// which costs them about half of it again. Over a source that copies, what lanes would gain is
+        /// therefore the decode less half the read; over one that hands the bytes out where they lie,
+        /// the whole split.
+        /// </remarks>
+        /// <param name="read">The ticks from the split's start to its bytes being in.</param>
+        /// <param name="decode">The ticks of its decode.</param>
+        internal void NoteInline(long read, long decode)
+        {
+            if (_inlineRuns++ == 0)
+            {
+                Inline = read + decode <= 4 * InlineSplitTicks;
+                return;
+            }
+
+            // A quarter of each new split: a handful of splits settle it, and one slow split does not.
+            _inlineRead = _inlineRuns == 2 ? read : _inlineRead + ((read - _inlineRead) / 4);
+            _inlineDecode = _inlineRuns == 2 ? decode : _inlineDecode + ((decode - _inlineDecode) / 4);
+            long sideBySide = _readsCopies ? _inlineDecode - (_inlineRead / 2) : _inlineRead + _inlineDecode;
+            Inline = _inlineRead + _inlineDecode <= InlineSplitTicks && sideBySide <= InlineSideBySideTicks;
         }
 
         /// <summary>The lanes made so far.</summary>
@@ -1672,6 +1756,59 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         lane.Running = false;
+        DeliverSplit(lane, root);
+        return true;
+    }
+
+    /// <summary>
+    /// The next batch of a scan of several lanes whose splits cost less than a trip through them:
+    /// the next split run here, on the caller's flow, as a scan of one lane runs it, what it cost
+    /// told to the window, which hands the splits after it to the lanes once one costs more.
+    /// </summary>
+    /// <remarks>
+    /// A trip through the lanes costs a split two hand-offs on the thread pool and, on a scan's first
+    /// splits, the threads woken and the lanes made; a split of a column's thousands of rows read
+    /// from the page cache costs a few microseconds, so the trip was most of what a projection of it
+    /// paid. Only once no split is in flight, so that the batches keep their order.
+    /// </remarks>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<bool> MoveNextInlineAsync()
+    {
+        ReleaseCurrent();
+        _token.ThrowIfCancellationRequested();
+        if (_drained || !TryNextSplit(out RowRange split))
+        {
+            _drained = true;
+            return false;
+        }
+
+        LaneWindow window = Window;
+        Lane lane = window.TakeIdle() ?? window.Add(NextLane());
+        _lanes[(int)(_started % _lanes.Length)] = lane;
+        lane.Rows = split;
+        lane.Sequence = _started++;
+        _delivered++;
+
+        long start = Stopwatch.GetTimestamp();
+        int root;
+        try
+        {
+            root = await RunLaneAsync(lane).ConfigureAwait(false);
+        }
+        catch
+        {
+            ReturnLane(lane);
+            throw;
+        }
+
+        window.NoteInline(window.Decoding - start, Stopwatch.GetTimestamp() - window.Decoding);
+        DeliverSplit(lane, root);
+        return true;
+    }
+
+    /// <summary>Makes the split <paramref name="lane"/> decoded the current batch, once every batch before it is delivered.</summary>
+    private void DeliverSplit(Lane lane, int root)
+    {
         _currentLane = lane;
         // What the lane holds once its split is decoded, its idle blocks with it, is what another
         // split in flight would hold: the largest of the splits measured bounds how many may be.
@@ -1698,8 +1835,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             lane.Context.ResetBatch();
             throw;
         }
-
-        return true;
     }
 
     /// <summary>The decoded bytes a row of <paramref name="dtype"/> is guessed to take before a split says.</summary>
@@ -1865,6 +2000,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             if (read)
             {
                 _segments.Publish(context.Segments, batch);
+            }
+
+            // A split the consumer runs, which no lane runs beside, says when its decode began.
+            if (_extras is LaneWindow { Inline: true } window)
+            {
+                window.Decoding = Stopwatch.GetTimestamp();
             }
 
             ScanCounters.Served(_metrics, context.Segments);

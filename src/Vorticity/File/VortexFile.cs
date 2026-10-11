@@ -419,7 +419,7 @@ public sealed partial class VortexFile : IAsyncDisposable
                     FileThrow.FooterRegionTooLarge(gap);
                 }
 
-                if (source.ReadsInPlace || source.TailReadSize < VortexFileFormat.InitialReadSize)
+                if (source.CostsNoRoundTrip)
                 {
                     // A source that reads in place reads the region whole: a view of its memory, or
                     // one copy where its first read was a copy too, rather than the gap and a third

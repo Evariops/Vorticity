@@ -35,7 +35,10 @@ fanning out. So:
 - A single call may override it: `ScanOptions.DegreeOfParallelism` for one scan and
   `VortexWriteOptions.DegreeOfParallelism` for one file, where 0 takes the session's.
 - A scan decodes its splits side by side, each on a context and arenas of its own with nothing
-  shared, and still delivers its batches in row order. A take, whose splits are many and small, keeps
+  shared, and still delivers its batches in row order. A split that costs less than the hand-offs
+  to a lane and back, a column of a few thousand values read from a local file, is decoded on the
+  caller's thread instead, from the first split when it looks small until one costs more, which a
+  lane would then take. A take, whose splits are many and small, keeps
   up to three per lane decoded ahead of its consumer, so the lanes that finish first do not wait for
   the slowest, and its degree still bounds how many decode at once.
 - A streaming query runs on that ordered stream of batches, with its decoding in parallel. A blocking

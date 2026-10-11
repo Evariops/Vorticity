@@ -125,6 +125,11 @@ pool thread beside yours, and `Prefetch = 0` keeps everything on your thread. On
 loop that works on every value it changed nothing measurable, about 3.1 ms at 0, 1 and 2. It pays
 off when the source has latency to hide, as a remote one does.
 
+A batch that costs less to decode than the trip to a pool thread and back is decoded on your thread
+instead, whatever the degree and the prefetch: a column of a few thousand values read from a local
+file costs a few microseconds, about what the trip adds. The scan starts that way when its first batch
+looks small, and hands the batches after it to the pool as soon as one costs more.
+
 ## Local and remote
 
 The loop is the same for every source, and there is no synchronous enumeration to choose. A read from

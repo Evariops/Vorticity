@@ -124,4 +124,10 @@ internal interface ISegmentReader : IAsyncDisposable
     /// itself reaches past it.
     /// </remarks>
     int TailReadSize => VortexFileFormat.InitialReadSize;
+
+    /// <summary>
+    /// Whether a read costs no round trip: the reader hands the bytes out where they lie, or copies
+    /// them out of a local file, which it says by asking an open for less than the tail window.
+    /// </summary>
+    bool CostsNoRoundTrip => ReadsInPlace || TailReadSize < VortexFileFormat.InitialReadSize;
 }
