@@ -881,7 +881,7 @@ internal sealed class ScanContext : IDisposable
             }
         }
 
-        return false;
+        return memory.More?.IsChecked(stored) == true;
     }
 
     /// <summary>Records that the walk named by <paramref name="key"/> ran and passed.</summary>
@@ -905,6 +905,8 @@ internal sealed class ScanContext : IDisposable
                 return;
             }
         }
+
+        (memory.More ??= new NodeFacts()).MarkChecked(key + 1);
     }
 
     /// <summary>
@@ -920,6 +922,11 @@ internal sealed class ScanContext : IDisposable
         {
             start = memory.RankStart;
             count = memory.RankCount;
+            return true;
+        }
+
+        if (_memory?.More is { } more && more.TryRank(key + 1, out start, out count))
+        {
             return true;
         }
 
@@ -939,6 +946,13 @@ internal sealed class ScanContext : IDisposable
     {
         if (_memory is { } memory)
         {
+            // The one count read first is the last node's; another node's, which a batch of many
+            // columns each spanning many batches leaves behind, is kept with the other facts.
+            if (memory.RankKey != 0 && memory.RankKey != key + 1)
+            {
+                (memory.More ??= new NodeFacts()).Remember(memory.RankKey, memory.RankStart, memory.RankCount);
+            }
+
             memory.RankKey = key + 1;
             memory.RankStart = start;
             memory.RankCount = count;
@@ -967,6 +981,110 @@ internal sealed class ScanContext : IDisposable
         internal int RankStart;
 
         internal int RankCount;
+
+        /// <summary>
+        /// The checks and counts past what the slots and the one count hold, made at the first that
+        /// overflows them: a batch of a wide table whose columns each span many batches, as the
+        /// reference writes them a megabyte of each, visits more nodes than the slots remember, and
+        /// would otherwise walk each of them again at every batch.
+        /// </summary>
+        internal NodeFacts? More;
+    }
+
+    /// <summary>
+    /// What a context remembers of more nodes than <see cref="BatchMemory"/>'s slots: per node key,
+    /// whether its O(n) checks passed and its last valid count, in an open-addressed table of a fixed
+    /// size; past three quarters of it, a node is simply checked and counted again.
+    /// </summary>
+    private sealed class NodeFacts
+    {
+        private const int Capacity = 512;
+        private const int MostEntries = Capacity * 3 / 4;
+
+        // Each node's key plus one, so that 0 is an empty entry.
+        private readonly long[] _keys = new long[Capacity];
+        private readonly bool[] _checked = new bool[Capacity];
+        private readonly int[] _rankStart = new int[Capacity];
+        private readonly int[] _rankCount = new int[Capacity];
+        private int _count;
+
+        internal bool IsChecked(long stored) => Find(stored, add: false) is int at and >= 0 && _checked[at];
+
+        internal void MarkChecked(long stored)
+        {
+            int at = Find(stored, add: true);
+            if (at >= 0)
+            {
+                _checked[at] = true;
+            }
+        }
+
+        internal bool TryRank(long stored, out int start, out int count)
+        {
+            int at = Find(stored, add: false);
+            if (at >= 0 && _rankStart[at] >= 0)
+            {
+                start = _rankStart[at];
+                count = _rankCount[at];
+                return true;
+            }
+
+            start = 0;
+            count = 0;
+            return false;
+        }
+
+        internal void Remember(long stored, int start, int count)
+        {
+            int at = Find(stored, add: true);
+            if (at >= 0)
+            {
+                _rankStart[at] = start;
+                _rankCount[at] = count;
+            }
+        }
+
+        internal void Clear()
+        {
+            if (_count == 0)
+            {
+                return;
+            }
+
+            Array.Clear(_keys);
+            Array.Clear(_checked);
+            _count = 0;
+        }
+
+        private int Find(long stored, bool add)
+        {
+            int at = (int)((ulong)stored * 0x9E3779B97F4A7C15UL >> 55);
+            for (int probe = 0; probe < Capacity; probe++)
+            {
+                long key = _keys[at];
+                if (key == stored)
+                {
+                    return at;
+                }
+
+                if (key == 0)
+                {
+                    if (!add || _count >= MostEntries)
+                    {
+                        return -1;
+                    }
+
+                    _keys[at] = stored;
+                    _rankStart[at] = -1;
+                    _count++;
+                    return at;
+                }
+
+                at = (at + 1) & (Capacity - 1);
+            }
+
+            return -1;
+        }
     }
 
     [InlineArray(CheckedNodeSlots + 1)]
@@ -1390,6 +1508,7 @@ internal sealed class ScanContext : IDisposable
             memory.Checks = default;
             memory.Blobs?.Forget();
             memory.RankKey = 0;
+            memory.More?.Clear();
         }
 
         if (_pushed is { } pushed)

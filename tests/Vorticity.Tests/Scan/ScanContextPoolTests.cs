@@ -29,6 +29,68 @@ public sealed class ScanContextPoolTests
     private const string Zoned = "containers/zoned_many_zones_nulls";
 
     [Fact]
+    public async Task AContextRemembersTheChecksAndCountsOfAWideBatchesNodes()
+    {
+        // A batch of a wide table whose columns each span many batches visits a node or two of each
+        // column, more than the context's eight slots: each must still be checked and counted once.
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        ScanContext context = ScanContexts.Shared.Rent(file);
+        try
+        {
+            uint? outer = context.BeginNodeCheckScope(7);
+            for (int node = 0; node < 300; node++)
+            {
+                long key = ScanContext.NodeCheckKey(7, node)!.Value;
+                context.MarkNodeChecked(key);
+                context.RememberValidBefore(key, node, node * 2);
+            }
+
+            context.EndNodeCheckScope(outer);
+            for (int node = 0; node < 300; node++)
+            {
+                long key = ScanContext.NodeCheckKey(7, node)!.Value;
+                Assert.True(context.IsNodeChecked(key), $"node {node} checked");
+                Assert.True(context.TryValidBefore(key, out int start, out int count), $"node {node} counted");
+                Assert.Equal(node, start);
+                Assert.Equal(node * 2, count);
+            }
+
+            Assert.False(context.IsNodeChecked(ScanContext.NodeCheckKey(7, 300)!.Value));
+            Assert.False(context.IsNodeChecked(ScanContext.NodeCheckKey(8, 0)!.Value));
+
+            // Past what the context holds, a node is checked and counted again, never an error.
+            for (int node = 300; node < 2_000; node++)
+            {
+                long key = ScanContext.NodeCheckKey(7, node)!.Value;
+                context.MarkNodeChecked(key);
+                context.RememberValidBefore(key, 1, 1);
+            }
+
+            Assert.True(context.IsNodeChecked(ScanContext.NodeCheckKey(7, 299)!.Value));
+        }
+        finally
+        {
+            ScanContexts.Shared.Return(context);
+        }
+
+        ScanContext again = ScanContexts.Shared.Rent(file);
+        try
+        {
+            if (ReferenceEquals(again, context))
+            {
+                long key = ScanContext.NodeCheckKey(7, 42)!.Value;
+                Assert.False(again.IsNodeChecked(key));
+                Assert.False(again.TryValidBefore(key, out _, out _));
+            }
+        }
+        finally
+        {
+            ScanContexts.Shared.Return(again);
+        }
+    }
+
+    [Fact]
     public async Task AContextComesBackHoldingNothingOfTheScanItServed()
     {
         Decoders.EnsureRegistered();
