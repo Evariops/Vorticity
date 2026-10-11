@@ -105,21 +105,34 @@ internal static class FormatCost
                 new("Parquet", parquet, async path => new ParquetSide(session, await session.OpenParquetAsync(path, null, CancellationToken.None).ConfigureAwait(false))),
             ];
 
-            // One action of one format in a bare loop, for dotnet-trace: --loop <format> <action> [seconds].
+            // One action of one format in a bare loop, for a profiler or an A/B of two builds:
+            // --loop <format> <action> [seconds]. --warm <seconds> runs it untimed first, past the
+            // JIT's recompilations and the pools' first fills, which a short loop would average in.
             int loop = Array.IndexOf(args, "--loop");
             if (loop >= 0 && loop + 2 < args.Length)
             {
                 Format looped = formats.Single(f => string.Equals(f.Name, args[loop + 1], StringComparison.OrdinalIgnoreCase));
                 double seconds = loop + 3 < args.Length && double.TryParse(args[loop + 3], CultureInfo.InvariantCulture, out double given) ? given : 10;
-                long calls = 0;
+                int degree = Count(args, "--degree", 1);
+                Stopwatch warming = Stopwatch.StartNew();
+                while (warming.Elapsed.TotalSeconds < Count(args, "--warm", 0))
+                {
+                    await RunAsync(looped, args[loop + 2], rows, degree).ConfigureAwait(false);
+                }
+
+                List<double> calls = [];
                 Stopwatch clock = Stopwatch.StartNew();
                 while (clock.Elapsed.TotalSeconds < seconds)
                 {
-                    await RunAsync(looped, args[loop + 2], rows, Count(args, "--degree", 1)).ConfigureAwait(false);
-                    calls++;
+                    long began = Stopwatch.GetTimestamp();
+                    await RunAsync(looped, args[loop + 2], rows, degree).ConfigureAwait(false);
+                    calls.Add(Stopwatch.GetElapsedTime(began).TotalMilliseconds);
                 }
 
-                Console.Out.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{calls} calls, {clock.Elapsed.TotalMilliseconds / calls:F3} ms a call"));
+                calls.Sort();
+                Console.Out.WriteLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{calls.Count} calls, {clock.Elapsed.TotalMilliseconds / calls.Count:F3} ms a call, median {calls[calls.Count / 2]:F3} ms"));
                 return 0;
             }
 
