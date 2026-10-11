@@ -108,7 +108,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     bool IChunkLedger.ElementsServe => _elementStatistics;
 
-    void IChunkLedger.ElementsUnserved() => _elementChunksWithoutStatistics++;
+    void IChunkLedger.ElementsUnserved() => Interlocked.Increment(ref _elementChunksWithoutStatistics);
 
     /// <summary>Whether the chooser prices each column by its bytes alone, as <see cref="CompressionProfile.Smallest"/> asks.</summary>
     private bool _sizeFirst;
@@ -873,8 +873,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 int whole = (int)chunk;
                 int piece = whole == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, offset, whole);
-                Ingest(arena, piece);
-                await EmitChunkAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
+                if (IngestsWithColumns(whole))
+                {
+                    await IngestAndEmitAcrossAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    Ingest(arena, piece);
+                    await EmitChunkAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
+                }
+
                 offset += whole;
                 continue;
             }
@@ -1175,7 +1183,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </remarks>
     private void IngestAcross(WorkFan fan, CanonicalArena arena, int rows)
     {
-        Span<int> items = fan.Items(_fieldCount * 3);
+        int count = IngestItems(arena, fan.Items(_fieldCount * 3));
+        fan.Run(this, count, arena, rows);
+        _blockFilled = (_blockFilled + rows) % _blockRows;
+        BatchesIngestedAcross++;
+    }
+
+    /// <summary>
+    /// The items of an ingest across the writer's threads, written into <paramref name="items"/>: an
+    /// item an accumulator, its field above three bits of <see cref="ColumnWriter.IngestParts"/>, the
+    /// bounds and the distinct table of a column that keeps them apart from its statistics.
+    /// </summary>
+    /// <returns>How many items there are.</returns>
+    private int IngestItems(CanonicalArena arena, Span<int> items)
+    {
         int count = 0;
         for (int field = 0; field < _fieldCount; field++)
         {
@@ -1192,21 +1213,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
         }
 
-        fan.Run(this, count, arena, rows);
-        _blockFilled = (_blockFilled + rows) % _blockRows;
-        BatchesIngestedAcross++;
+        return count;
     }
 
     /// <summary>Runs one accumulator of <see cref="IngestAcross"/> over the batch, block by block.</summary>
     void IFanWork.Run(WorkFan fan, int item)
     {
         int entry = fan.Item(item);
-        int field = entry >> 3;
-        ColumnWriter.IngestParts parts = (ColumnWriter.IngestParts)(entry & 7);
+        IngestPart(entry >> 3, (ColumnWriter.IngestParts)(entry & 7), (CanonicalArena)fan.State!, fan.Value);
+    }
+
+    /// <summary>Runs accumulator <paramref name="parts"/> of column <paramref name="field"/> over the batch's <paramref name="rows"/>, block by block.</summary>
+    private void IngestPart(int field, ColumnWriter.IngestParts parts, CanonicalArena arena, int rows)
+    {
         ColumnWriter column = _columns[field];
-        CanonicalArena arena = (CanonicalArena)fan.State!;
         int node = _fieldNodes[field];
-        int rows = fan.Value;
         int filled = _blockFilled;
         for (int offset = 0; offset < rows;)
         {
@@ -1489,6 +1510,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
         }
 
+        await CloseChunkAsync(rows, blocks, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Closes a chunk whose columns are written: its rows and blocks counted, its indexes closed and flushed.</summary>
+    private async ValueTask CloseChunkAsync(long rows, int blocks, CancellationToken cancellationToken)
+    {
         // The chunk's locating runs close with it and go out right behind it, and the builders are
         // judged before anything is written, so one `Auto` gives up on leaves no dead weight.
         if (_indexes is not null)
@@ -1528,7 +1555,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ChunkStats stats = new ChunkStats(_columns[field], firstBlock, blocks, this);
         if (stats.Stats.Rows != rows)
         {
-            _chunksWithoutStatistics++;
+            Interlocked.Increment(ref _chunksWithoutStatistics);
         }
 
         // A table plan memory turned off was never expected to serve, and is not a fallback; a
@@ -1537,11 +1564,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             if (stats.TableServes(checked((int)rows)))
             {
-                _chunksFromTable++;
+                Interlocked.Increment(ref _chunksFromTable);
             }
             else
             {
-                _chunksWithoutTable++;
+                Interlocked.Increment(ref _chunksWithoutTable);
             }
         }
 

@@ -69,15 +69,9 @@ public sealed partial class VortexFileWriter
         CanonicalNode root = arena.GetNode(rootIndex);
         for (int field = 0; field < _fieldCount; field++)
         {
+            // A list column is narrowed on its thread, in its own arena (see ChunkColumns.Compress):
+            // its statistics read only the node's kind and rows, which the narrowing keeps.
             int node = root.GetFieldIndex(field);
-
-            // A chunk cut from a batch shares that batch's list elements whole, and what the blob
-            // writer is handed is what lands in the file: the threads must see the narrowed node.
-            if (_mayShareChildren)
-            {
-                node = ChunkCompactor.Compact(arena, node);
-            }
-
             columns.Nodes[field] = node;
             columns.Stats[field] = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
         }
@@ -88,15 +82,75 @@ public sealed partial class VortexFileWriter
             columns.Order(fan.Items(_fieldCount));
             fan.Run(columns, _fieldCount, arena);
             ColumnChunksAcross += _fieldCount;
-            for (int field = 0; field < _fieldCount; field++)
-            {
-                ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
-                await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
-            }
+            await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             columns.Drop();
+        }
+    }
+
+    /// <summary>
+    /// Whether a chunk of <paramref name="rows"/> rows cut whole from a batch is ingested and its
+    /// columns compressed in one pass across the writer's threads: when its columns are compressed
+    /// side by side, and the batch would be ingested across the threads too.
+    /// </summary>
+    private bool IngestsWithColumns(int rows) =>
+        CompressesAcross && _indexes is null && _blockRows > 0 && rows >= _blockRows && Fan is not null;
+
+    /// <summary>
+    /// Ingests a chunk cut whole from a batch and compresses its columns in one pass across the
+    /// writer's threads: each accumulator of each column is an item, as the ingest across makes
+    /// them, and the thread that ends a column's last one compresses the column at once, while the
+    /// other columns still ingest.
+    /// </summary>
+    /// <remarks>
+    /// The ingest and the compression were two passes, each waiting for its slowest column: the
+    /// threads that had ingested the narrow columns waited for the widest one before any column was
+    /// compressed. A column's compression reads only its own statistics, done when its last
+    /// accumulator is, so it need not wait for the others. The blobs then go out in column order,
+    /// as they do from <see cref="EmitColumnsAcrossAsync"/>, and the file is the same bytes.
+    /// </remarks>
+    private async ValueTask IngestAndEmitAcrossAsync(
+        CanonicalArena arena, int rootIndex, int rows, CancellationToken cancellationToken)
+    {
+        int blocks = ChunkBlocks(rows, _blockRows);
+        int firstBlock = _emittedBlocks;
+        CanonicalNode root = arena.GetNode(rootIndex);
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            _fieldNodes[field] = root.GetFieldIndex(field);
+        }
+
+        ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
+        columns.Prepare(_fieldCount, _arrayEncodings);
+        WorkFan fan = Fan!;
+        try
+        {
+            Span<int> items = fan.Items(_fieldCount * 3);
+            int count = IngestItems(arena, items);
+            columns.Fuse(items[..count], rows, firstBlock, blocks);
+            fan.Run(columns, count, arena, rows);
+            _blockFilled = (_blockFilled + rows) % _blockRows;
+            BatchesIngestedAcross++;
+            ColumnChunksAcross += _fieldCount;
+            await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            columns.Drop();
+        }
+
+        await CloseChunkAsync(rows, blocks, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Writes the chunk's blobs in column order, each column's new ids made the file's.</summary>
+    private async ValueTask WriteColumnBlobsAsync(ChunkColumns columns, int firstBlock, int blocks, CancellationToken cancellationToken)
+    {
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
+            await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -133,6 +187,14 @@ public sealed partial class VortexFileWriter
 
         /// <summary>Per column, the ticks its compression took the last time it ran.</summary>
         private long[] _took = [];
+
+        // In an ingest across (see Fuse): per column, its accumulators still to run, and the chunk's
+        // rows and blocks its statistics are taken over.
+        private int[] _parts = [];
+        private bool _fused;
+        private int _rows;
+        private int _firstBlock;
+        private int _blocks;
 
         /// <summary>Per column, the chunk's node the column is read from.</summary>
         internal Span<int> Nodes => _nodes;
@@ -216,18 +278,86 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        /// <summary>Compresses one column on the thread that claimed it.</summary>
+        /// <summary>
+        /// Lays an ingest's items out for <see cref="IngestAndEmitAcrossAsync"/>: those of the column
+        /// that took longest the chunk before first, and counts each column's, the last of which
+        /// compresses it.
+        /// </summary>
+        internal void Fuse(Span<int> items, int rows, int firstBlock, int blocks)
+        {
+            if (_parts.Length < _nodes.Length)
+            {
+                _parts = new int[_nodes.Length];
+            }
+
+            for (int i = 0; i < items.Length; i++)
+            {
+                int entry = items[i];
+                _parts[entry >> 3]++;
+                int at = i;
+                while (at > 0 && _took[items[at - 1] >> 3] < _took[entry >> 3])
+                {
+                    items[at] = items[at - 1];
+                    at--;
+                }
+
+                items[at] = entry;
+            }
+
+            _fused = true;
+            _rows = rows;
+            _firstBlock = firstBlock;
+            _blocks = blocks;
+        }
+
+        /// <summary>
+        /// Compresses one column on the thread that claimed it; or, in an ingest across, runs one of
+        /// a column's accumulators and compresses the column when it was the last of them.
+        /// </summary>
         public void Run(WorkFan fan, int item)
         {
-            int field = fan.Item(item);
+            CanonicalArena chunk = (CanonicalArena)fan.State!;
+            if (!_fused)
+            {
+                Compress(fan.Item(item), chunk);
+                return;
+            }
+
+            int entry = fan.Item(item);
+            int field = entry >> 3;
+            VortexFileWriter writer = _writer!;
+            writer.IngestPart(field, (ColumnWriter.IngestParts)(entry & 7), chunk, _rows);
+
+            // The decrement orders every accumulator of the column before the compression that
+            // reads what they summed, whichever threads ran them.
+            if (Interlocked.Decrement(ref _parts[field]) == 0)
+            {
+                int node = writer._fieldNodes[field];
+                _nodes[field] = node;
+                _stats[field] = writer.ChunkStatsOf(field, chunk, node, _rows, _firstBlock, _blocks);
+                Compress(field, chunk);
+            }
+        }
+
+        /// <summary>
+        /// Compresses column <paramref name="field"/> of <paramref name="chunk"/> in a lane of its own:
+        /// through records of the lane's arena that view the chunk's, narrowed there when a list may
+        /// share a batch's elements, since what the blob writer is handed is what lands in the file.
+        /// </summary>
+        private void Compress(int field, CanonicalArena chunk)
+        {
             long began = Stopwatch.GetTimestamp();
             VortexFileWriter writer = _writer!;
             CompressionLane lane = CompressionLane.Take(writer);
             try
             {
                 lane.Encodings.Reset(_known.AsSpan(0, _knownCount));
-                CanonicalArena chunk = (CanonicalArena)fan.State!;
                 int local = lane.Arena.ReferenceFrom(chunk, _nodes[field]);
+                if (writer._mayShareChildren)
+                {
+                    local = ChunkCompactor.Compact(lane.Arena, local);
+                }
+
                 _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, _stats[field]);
                 KeepFresh(field, lane.Encodings);
             }
@@ -305,6 +435,10 @@ public sealed partial class VortexFileWriter
                 _blobs[field].Dispose();
                 _blobs[field] = default;
             }
+
+            // A failed ingest across leaves counts behind; the next chunk starts from none.
+            _fused = false;
+            Array.Clear(_parts);
         }
     }
 
