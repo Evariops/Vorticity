@@ -276,7 +276,8 @@ internal sealed partial class GroupCore
         }
 
         _scratchDirectory = directory;
-        _scratch = new RunScratch(memoryBudget: 0, directory);
+        _scratch = new RunScratch(
+            memoryBudget: 0, directory, sealFile: _source is { } source && SpillScope.SealsScratchOf(source.Session.Options));
         return _scratch;
     }
 

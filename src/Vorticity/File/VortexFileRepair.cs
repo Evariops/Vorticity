@@ -31,9 +31,15 @@ public sealed record VortexTornTail(long FileLength, long ValidLength, string Re
 /// torn directory that could not be read anyway.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The same walk backs <c>VortexFile.OpenAsync</c>, which reads the prefix it finds and records
 /// the tear in <see cref="VortexFile.TornTail"/> without writing anything; truncating stays the
 /// caller's decision.
+/// </para>
+/// <para>
+/// A sealed file is cut after the last trailer whose layout reads under the header's descriptor,
+/// which needs no key: the commitments that bind its epochs are checked by the open that follows.
+/// </para>
 /// </remarks>
 public static class VortexFileRepair
 {
@@ -89,6 +95,19 @@ public static class VortexFileRepair
         MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
         await using (source.ConfigureAwait(false))
         {
+            // A sealed file ends where its last whole trailer does, which its bytes say without the key.
+            (bool vortex, bool sealedHeader) = await BeginsAsync(source, length, cancellationToken).ConfigureAwait(false);
+            if (sealedHeader)
+            {
+                long sealedEnd = await Sealing.SealedFiles.WholeEndAsync(source, length, cancellationToken).ConfigureAwait(false);
+                if (sealedEnd > 0)
+                {
+                    return sealedEnd;
+                }
+
+                throw new VortexFormatException($"{path} is sealed and holds no whole trailer at any length: nothing to repair to.");
+            }
+
             if (await OpensAsync(source, length, cancellationToken).ConfigureAwait(false))
             {
                 return length;
@@ -99,9 +118,7 @@ public static class VortexFileRepair
                 FileThrow.UnsupportedVersion(version);
             }
 
-            long end = await BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false)
-                ? await PreviousEndAsync(source, length, cancellationToken).ConfigureAwait(false)
-                : -1;
+            long end = vortex ? await PreviousEndAsync(source, length, cancellationToken).ConfigureAwait(false) : -1;
             if (end > 0)
             {
                 return end;
@@ -174,20 +191,31 @@ public static class VortexFileRepair
         }
     }
 
-    /// <summary>Whether <paramref name="source"/> begins with the Vortex magic, as every file this format writes does.</summary>
+    /// <summary>
+    /// What the first bytes of <paramref name="source"/> say, in one read: whether it begins with the
+    /// Vortex magic, as every file this format writes does, and whether it begins with a sealed
+    /// object's, as a sealed file whose tail was torn still does.
+    /// </summary>
     /// <param name="source">The file.</param>
     /// <param name="length">Its length.</param>
     /// <param name="cancellationToken">Cancels the read.</param>
-    internal static async ValueTask<bool> BeginsAsVortexAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
+    internal static async ValueTask<(bool Vortex, bool Sealed)> BeginsAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
     {
         int magicLength = VortexFileFormat.MagicBytes.Length;
-        if (length < VortexFileFormat.EofSize + magicLength)
+        ReadOnlySpan<byte> sealedMagic = Sealing.SealedFormat.HeaderMagic;
+        bool vortexFits = length >= VortexFileFormat.EofSize + magicLength;
+        bool sealedFits = length >= Sealing.SealedFormat.HeaderPrefixBytes;
+        if (!vortexFits && !sealedFits)
         {
-            return false;
+            return (false, false);
         }
 
-        using SegmentOwner head = await source.ReadRangeAsync(0, magicLength, 1, cancellationToken).ConfigureAwait(false);
-        return head.Buffer.Span.SequenceEqual(VortexFileFormat.MagicBytes);
+        int read = sealedFits ? sealedMagic.Length : magicLength;
+        using SegmentOwner head = await source.ReadRangeAsync(0, read, 1, cancellationToken).ConfigureAwait(false);
+        ReadOnlySpan<byte> bytes = head.Buffer.Span;
+        return (
+            vortexFits && bytes.Length >= magicLength && bytes[..magicLength].SequenceEqual(VortexFileFormat.MagicBytes),
+            sealedFits && bytes.SequenceEqual(Sealing.SealedFormat.HeaderMagic));
     }
 
     /// <summary>

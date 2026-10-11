@@ -152,6 +152,54 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(options);
+        return session.Keys is null
+            ? OpenPlainAsync(path, options, session, cancellationToken)
+            : OpenWithKeysAsync(path, options, session, cancellationToken);
+    }
+
+    /// <summary>
+    /// Opens a file in a session that holds a keyring: a sealed file through a sealed reader over
+    /// positional reads, since its plaintext cannot be mapped; a plain one as any session opens it,
+    /// unless the session refuses plaintext. Telling them apart costs one read of the last four bytes.
+    /// </summary>
+    private static async ValueTask<VortexFile> OpenWithKeysAsync(
+        string path, VortexOpenOptions options, VortexSession session, CancellationToken cancellationToken)
+    {
+        FileSegmentSource file = new FileSegmentSource(path);
+        ISegmentReader reader;
+        VortexTornTail? torn;
+        try
+        {
+            (reader, torn) = await Sealing.SealedFiles.ReaderAsync(file, ownsReader: true, session, path, options.TornTail, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await file.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        if (ReferenceEquals(reader, file))
+        {
+            await file.DisposeAsync().ConfigureAwait(false);
+            return await OpenPlainAsync(path, options, session, cancellationToken).ConfigureAwait(false);
+        }
+
+        ValueTask<VortexFile> open = OpenCoreAsync(SessionReader.Wrap(reader, session), options, ownsSource: true, cancellationToken);
+        VortexFile opened = options.PreloadIndexes
+            ? await FinishOpenAsync(open, null, preload: true, cancellationToken).ConfigureAwait(false)
+            : await open.ConfigureAwait(false);
+        if (torn is not null)
+        {
+            opened.TornTail = torn;
+        }
+
+        return opened;
+    }
+
+    /// <summary>Opens a plain file from a path: mapped by its first scan, or read positionally.</summary>
+    private static ValueTask<VortexFile> OpenPlainAsync(
+        string path, VortexOpenOptions options, VortexSession session, CancellationToken cancellationToken)
+    {
         ISegmentReader source = session.Options.MapFiles
             ? LocalFileSource.Open(path, session.Mappings)
             : SessionReader.Wrap(new FileSegmentSource(path), session);
@@ -263,8 +311,22 @@ public sealed partial class VortexFile : IAsyncDisposable
         long length = options.FileLength >= 0
             ? options.FileLength
             : await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-        if (!await VortexFileRepair.BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false)
-            || await VortexFileRepair.ForeignVersionAsync(source, length, cancellationToken).ConfigureAwait(false) is not null)
+        (bool vortex, bool sealedHeader) = await VortexFileRepair.BeginsAsync(source, length, cancellationToken).ConfigureAwait(false);
+        if (!vortex)
+        {
+            // A sealed file whose last append was torn ends with neither magic: its header says what it is.
+            if (sealedHeader)
+            {
+                throw VortexEncryptionException.NoKey(
+                    string.Empty,
+                    "The file is sealed, and its tail is torn: open it in a session whose keyring holds its key (VortexSessionOptions.Keyring), which reads the version before the tear.",
+                    torn);
+            }
+
+            return null;
+        }
+
+        if (await VortexFileRepair.ForeignVersionAsync(source, length, cancellationToken).ConfigureAwait(false) is not null)
         {
             return null;
         }
@@ -1142,7 +1204,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     public VortexTornTail? TornTail
     {
         get => TornTails.TryGetValue(this, out VortexTornTail? torn) ? torn : null;
-        private set
+        internal set
         {
             if (value is not null)
             {
@@ -1165,6 +1227,9 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>The reader the file was opened over.</summary>
     internal ISegmentReader Source => _source;
+
+    /// <summary>What the envelope of a sealed file says, its descriptor and its epochs; null for a plain file.</summary>
+    internal Sealing.SealedLayout? SealedLayout => (SessionReader.Unwrap(_source) as Sealing.SealedSegmentReader)?.Layout;
 
     /// <summary>Read-time policy, copied into every scan context.</summary>
     internal VortexReadOptions ReadOptions { get; }

@@ -84,11 +84,21 @@ public sealed partial class VortexFileWriter
         ArgumentNullException.ThrowIfNull(path);
         AppendPlan plan;
         ImmutableDictionary<string, ReadOnlyMemory<byte>> metadata;
-        VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
+        Sealing.SealedLayout? sealedLayout;
+        VortexFile file = await session.OpenAsync(path, null, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
             VortexFileRepair.ThrowIfTorn(path, file, "An append");
-            plan = await AppendPlan.ReadAsync(file, options, cancellationToken).ConfigureAwait(false);
+
+            // A sealed file is continued with an epoch under the data key it names; a session that
+            // seals what it writes adds no plaintext to a plain one.
+            sealedLayout = file.SealedLayout;
+            if (sealedLayout is null && session.Seals)
+            {
+                throw RefusedPlainAppend(path, "an append");
+            }
+
+            plan = await AppendPlan.ReadAsync(file, options, sealedLayout is not null, cancellationToken).ConfigureAwait(false);
             metadata = await UserMetadata.ReadAsync(file, cancellationToken).ConfigureAwait(false);
         }
 
@@ -99,13 +109,14 @@ public sealed partial class VortexFileWriter
             options?.IndexBudgetPerMille ?? plan.BudgetPerMille);
 
         // The file's own metadata carries over; an entry the caller names again takes the new value.
-        effective = effective with { Metadata = metadata.SetItems(effective.Metadata) };
+        // What the writer of a sealed file moves to disk is sealed too.
+        effective = effective with { Metadata = metadata.SetItems(effective.Metadata), SealScratch = sealedLayout is not null };
 
         VortexFileWriter writer = wrap is null
-            ? OpenAppend(path, plan, effective, session)
+            ? OpenAppend(path, plan, effective, session, sealedLayout)
             : await OpenWrappedAsync(path, plan, effective, wrap).ConfigureAwait(false);
         writer._appendedPath = path;
-        writer._appendOrigin = plan.FileLength;
+        writer._appendOrigin = sealedLayout?.ObjectLength ?? plan.FileLength;
         writer.Session = session;
 
         try
@@ -136,16 +147,28 @@ public sealed partial class VortexFileWriter
         return writer;
     }
 
-    /// <summary>The append's writer over a pipe on the file's handle, positioned at its end.</summary>
+    /// <summary>The refusal of a session that seals what it writes to add plaintext to a plain file.</summary>
+    /// <param name="path">The file.</param>
+    /// <param name="what">What would have been written: "an append", "an index".</param>
+    internal static VortexEncryptionException RefusedPlainAppend(string path, string what) =>
+        VortexEncryptionException.Refused(
+            $"'{path}' is not sealed, and the session seals every file it writes (VortexSessionOptions.EncryptFiles): {what} would add plaintext to it. Write it again in the session instead.");
+
+    /// <summary>
+    /// The append's writer over a pipe on the file's handle, positioned at its end. A sealed file's
+    /// pipe starts after its last trailer, through a stage that seals the append as an epoch, while
+    /// the writer counts from the plaintext's end.
+    /// </summary>
     private static VortexFileWriter OpenAppend(
-        string path, AppendPlan plan, VortexWriteOptions options, VortexSession session)
+        string path, AppendPlan plan, VortexWriteOptions options, VortexSession session, Sealing.SealedLayout? sealedLayout)
     {
         Microsoft.Win32.SafeHandles.SafeFileHandle handle = System.IO.File.OpenHandle(
             path, FileMode.Open, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
         FilePipeWriter? pipe = null;
         try
         {
-            if (RandomAccess.GetLength(handle) != plan.FileLength)
+            long origin = sealedLayout?.ObjectLength ?? plan.FileLength;
+            if (RandomAccess.GetLength(handle) != origin)
             {
                 throw new IOException($"{path} changed while it was being opened for an append.");
             }
@@ -153,8 +176,11 @@ public sealed partial class VortexFileWriter
             // Planning the append read the file, and may have left it mapped: on Windows a mapping
             // would forbid the rewind an abandoned append cuts the file back with.
             Vorticity.IO.MappedFileCache.ReleaseEverywhere(handle);
-            pipe = new FilePipeWriter(handle, plan.FileLength, session.Options.MemoryPool) { Durable = options.Durable };
-            VortexFileWriter writer = Create(new PipeSegmentSink(pipe, plan.FileLength), plan.Schema, options, session);
+            pipe = new FilePipeWriter(handle, origin, session.Options.MemoryPool) { Durable = options.Durable };
+            ISegmentSink sink = sealedLayout is null
+                ? new PipeSegmentSink(pipe, plan.FileLength)
+                : new Sealing.SealingSegmentSink(pipe, sealedLayout, cancellationToken => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, cancellationToken));
+            VortexFileWriter writer = Create(sink, plan.Schema, options, session);
             writer._filePipe = pipe;
             return writer;
         }
@@ -477,8 +503,13 @@ public sealed partial class VortexFileWriter
         /// <summary>Where those runs lie, until the writer takes it; disposed with the writer.</summary>
         internal RunScratch? AbsorbedScratch { get; set; }
 
+        /// <summary>Reads what the append takes from <paramref name="file"/>.</summary>
+        /// <param name="file">The file, open.</param>
+        /// <param name="options">The append's options, or null.</param>
+        /// <param name="sealScratch">Whether the run tails read back for a merge go to a sealed scratch: those of a sealed file do.</param>
+        /// <param name="cancellationToken">Cancels the reads.</param>
         internal static async ValueTask<AppendPlan> ReadAsync(
-            VortexFile file, VortexWriteOptions? options, CancellationToken cancellationToken)
+            VortexFile file, VortexWriteOptions? options, bool sealScratch, CancellationToken cancellationToken)
         {
             DType schema = file.DType;
             if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -659,7 +690,7 @@ public sealed partial class VortexFileWriter
             if (directory is { Entries.Count: > 0 })
             {
                 scratch = new RunScratch(
-                    options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes, options?.ScratchDirectory);
+                    options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes, options?.ScratchDirectory, sealScratch);
                 try
                 {
                     absorbed = await RunAbsorb.ReadAsync(file, directory.Entries, boundary, scratch, cancellationToken).ConfigureAwait(false);

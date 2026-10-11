@@ -24,14 +24,32 @@ public struct ObjectRange : IDisposable
     /// <param name="bytes">The bytes, released when the range is disposed.</param>
     /// <param name="token">The object's token, as <see cref="ObjectHead.Token"/> defines it.</param>
     public ObjectRange(SegmentLease bytes, string token)
+        : this(bytes, token, -1)
+    {
+    }
+
+    /// <summary>A range over bytes a store holds, with the token and the length of the object they came from.</summary>
+    /// <param name="bytes">The bytes, released when the range is disposed.</param>
+    /// <param name="token">The object's token, as <see cref="ObjectHead.Token"/> defines it.</param>
+    /// <param name="objectLength">The whole object's length, as the same answer gave it, or -1 when the store does not say.</param>
+    public ObjectRange(SegmentLease bytes, string token, long objectLength)
     {
         ArgumentNullException.ThrowIfNull(token);
+        ArgumentOutOfRangeException.ThrowIfLessThan(objectLength, -1);
         _bytes = bytes;
         Token = token;
+        ObjectLength = objectLength;
     }
 
     /// <summary>The object's token, as <see cref="ObjectHead.Token"/> defines it.</summary>
     public string Token { get; }
+
+    /// <summary>
+    /// The whole object's length, as the answer that brought the bytes gave it (an S3 or Azure
+    /// <c>Content-Range</c>), or -1 when the store does not say. A sealed commit object is opened by
+    /// its head with one request when the store says it.
+    /// </summary>
+    public long ObjectLength { get; }
 
     /// <summary>The bytes, valid until <see cref="Dispose"/>.</summary>
     public readonly ReadOnlySequence<byte> Bytes => _bytes.Bytes;

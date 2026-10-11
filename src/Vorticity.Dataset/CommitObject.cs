@@ -67,6 +67,14 @@ internal sealed class CommitObject
 
         if (!bytes[..8].SequenceEqual(CommitFormat.Magic))
         {
+            if (bytes[..8].SequenceEqual(Sealing.SealedFormat.HeaderMagic))
+            {
+                // A sealed commit object reaches here only through a store that cannot open it.
+                throw VortexEncryptionException.NoKey(
+                    string.Empty,
+                    "The dataset is encrypted: open it in a session whose keyring holds its key (VortexSessionOptions.Keyring, DatasetOptions.Session).");
+            }
+
             throw new CommitFormatException("These bytes do not start with a commit object's magic.");
         }
 

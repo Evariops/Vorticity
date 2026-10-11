@@ -98,6 +98,12 @@ internal sealed class SpillScope : IDisposable
     /// <summary>The query's memory, which the spill's buffers are counted in.</summary>
     internal QueryMemory Memory { get; }
 
+    /// <summary>Whether the spill's files are sealed: a session that seals its files keeps no plaintext of them on a disk.</summary>
+    internal bool SealsScratch => SealsScratchOf(_options);
+
+    /// <summary>Whether a session of <paramref name="options"/> seals its scratch.</summary>
+    internal static bool SealsScratchOf(VortexSessionOptions options) => options.EncryptFiles && options.Keyring is not null;
+
     /// <summary>The lanes' tables written one at a time: what writing one takes past the budget is given back with it before the next.</summary>
     internal SemaphoreSlim Writing { get; } = new SemaphoreSlim(1, 1);
 
@@ -393,7 +399,7 @@ internal sealed class SpillFile : IDisposable
         _scope = scope;
         _directory = directory;
         _budget = budget;
-        _scratch = new RunScratch(memoryBudget: 0, directory);
+        _scratch = new RunScratch(memoryBudget: 0, directory, sealFile: scope.SealsScratch);
     }
 
     /// <summary>The bytes written.</summary>

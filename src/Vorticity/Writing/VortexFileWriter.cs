@@ -282,7 +282,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
-        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired)
+        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
+        bool sealScratch = false)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -329,7 +330,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes = IndexWriter.Asks(indexes)
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
-                scratchDirectory, scratchMemoryBytes, wideRowsAbove)
+                scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch)
             {
                 Fences = fences,
                 BudgetSparesRequired = budgetSparesRequired,
@@ -549,7 +550,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired)
+            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
+            options.SealScratch)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _metadata = UserMetadata.Ordered(options.Metadata),
@@ -679,10 +681,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         ArgumentNullException.ThrowIfNull(path);
         Validate(schema, options, session.Options.Extensions);
+        options = Identified(options, session);
         FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool, options.Durable);
         try
         {
-            VortexFileWriter writer = Create(new PipeSegmentSink(pipe), schema, options, session);
+            VortexFileWriter writer = Create(SinkOver(pipe, session, options), schema, options, session);
             writer._filePipe = pipe;
             writer.Session = session;
             return writer;
@@ -697,10 +700,35 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>A writer over <paramref name="sink"/>, in <paramref name="session"/>; the writer completes the pipe.</summary>
     internal static VortexFileWriter Create(System.IO.Pipelines.PipeWriter sink, DType schema, VortexWriteOptions options, VortexSession session)
     {
-        VortexFileWriter writer = Create(new PipeSegmentSink(sink), schema, options, session);
+        options = Identified(options, session);
+        VortexFileWriter writer = Create(SinkOver(sink, session, options), schema, options, session);
         writer._callerPipe = sink;
         writer.Session = session;
         return writer;
+    }
+
+    /// <summary>
+    /// The options of a file the session writes, its identity minted now when the file is sealed: a
+    /// sealed file's object id is its identity, so that a dataset importing it can check the one its
+    /// entry records against the one its envelope binds.
+    /// </summary>
+    private static VortexWriteOptions Identified(VortexWriteOptions options, VortexSession session) =>
+        !session.Seals
+            ? options
+            : (options.Identity is null ? options.WithIdentity(Guid.NewGuid()) : options) with { SealScratch = true };
+
+    /// <summary>The sink over <paramref name="pipe"/>: a sealing stage when the session seals its files, a plain one otherwise.</summary>
+    private static ISegmentSink SinkOver(System.IO.Pipelines.PipeWriter pipe, VortexSession session, VortexWriteOptions options)
+    {
+        if (!session.Seals)
+        {
+            return new PipeSegmentSink(pipe);
+        }
+
+        byte[] objectId = new byte[Sealing.SealedFormat.ObjectIdBytes];
+        options.Identity!.Value.TryWriteBytes(objectId);
+        Sealing.SealParameters parameters = Sealing.SealParameters.ForFile() with { ObjectId = objectId };
+        return new Sealing.SealingSegmentSink(pipe, parameters, session.Keys!.FileKeyAsync);
     }
 
     /// <summary>The session the writer belongs to.</summary>
@@ -709,10 +737,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The pipe over the file this writer opened, created or appended to; null over a caller's sink.</summary>
     internal FilePipeWriter? FilePipe => _filePipe;
 
-    /// <summary>An append to <paramref name="path"/>, in <paramref name="session"/>.</summary>
+    /// <summary>
+    /// An append to <paramref name="path"/>, in <paramref name="session"/>: a sealed file is continued
+    /// with an epoch of its own, under the data key it names, which the session's keyring unwraps.
+    /// </summary>
     internal static async ValueTask<VortexFileWriter> AppendInSessionAsync(
         string path, VortexWriteOptions? options, VortexSession session, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(path);
         VortexFileWriter writer = await AppendAsync(path, options, null, session, cancellationToken).ConfigureAwait(false);
         writer.Session = session;
         return writer;
@@ -1729,6 +1761,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             builder,
             _filePipe is { Durable: true } durable ? durable : null).ConfigureAwait(false);
 
+        await _sink.FinishAsync(cancellationToken).ConfigureAwait(false);
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
 
         // Runs written between chunks sit inside `dataEnd`, and are moved to the index count.

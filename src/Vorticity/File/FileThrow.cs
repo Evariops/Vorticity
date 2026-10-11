@@ -18,10 +18,20 @@ internal static class FileThrow
             $"A Vortex file is at least {VortexFileFormat.EofSize} bytes (the EOF marker); this one is {length}."));
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    internal static void BadTrailingMagic(byte b0, byte b1, byte b2, byte b3) =>
+    internal static void BadTrailingMagic(byte b0, byte b1, byte b2, byte b3)
+    {
+        // A sealed file ends with its own magic: the open went through a session without the keyring that reads it.
+        if (b0 == (byte)'V' && b1 == (byte)'X' && b2 == (byte)'S' && b3 == (byte)'E')
+        {
+            throw VortexEncryptionException.NoKey(
+                string.Empty,
+                "The file is sealed: open it in a session whose keyring holds its key (VortexSessionOptions.Keyring).");
+        }
+
         throw new VortexFormatException(string.Create(
             CultureInfo.InvariantCulture,
             $"Malformed file: the EOF marker's magic is 0x{b0:x2}{b1:x2}{b2:x2}{b3:x2}, expected 'VTXF'."));
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static void BadLeadingMagic(byte b0, byte b1, byte b2, byte b3) =>

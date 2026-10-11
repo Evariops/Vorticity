@@ -163,12 +163,29 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
 
         _closed = true;
-        PutOutcome outcome = await _store
-            .PutIfAbsentAsync(_key, PipeReader.Create(Bytes()), _written, cancellationToken).ConfigureAwait(false);
+        PutOutcome outcome;
+        if (_store is SealedObjectStore sealedStore)
+        {
+            (outcome, StoredLength) = await sealedStore
+                .PutAsync(_key, PipeReader.Create(Bytes()), _written, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            outcome = await _store
+                .PutIfAbsentAsync(_key, PipeReader.Create(Bytes()), _written, cancellationToken).ConfigureAwait(false);
+            StoredLength = _written;
+        }
+
         _committed = true;
         Release();
         return outcome;
     }
+
+    /// <summary>
+    /// The bytes the store holds once <see cref="CommitAsync"/> has run: what was written, or more for
+    /// an encrypted dataset's object, which the store holds sealed.
+    /// </summary>
+    public long StoredLength { get; private set; } = -1;
 
     /// <summary>Throws the buffered bytes away without creating the object.</summary>
     public void Discard()
