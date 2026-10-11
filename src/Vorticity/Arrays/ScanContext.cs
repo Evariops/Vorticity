@@ -765,6 +765,13 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// Whether contexts of this context's scan decode beside it into the table it retains into,
+    /// and the table holds a decode: whether a chunk this context reads may be one another context
+    /// is decoding.
+    /// </summary>
+    internal bool MeetsOtherLanes => !_ownsRetained && _retained is { Contended: true };
+
+    /// <summary>
     /// Makes this context retain into <paramref name="shared"/>, a table another context of the same
     /// scan may retain into too. The scan that shares it advances its floor and disposes it.
     /// </summary>
