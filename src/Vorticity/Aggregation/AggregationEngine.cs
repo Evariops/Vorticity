@@ -521,7 +521,7 @@ internal sealed class AggregationPlan
     /// </summary>
     private TupleLayout? TupleLayout(QueryMemory? run)
     {
-        _tuplesFit ??= Aggregating.TupleLayout.Of(Keys, memory: null) is not null;
+        _tuplesFit ??= Aggregating.TupleLayout.Fits(Keys);
         if (_tuplesFit != true)
         {
             return null;
