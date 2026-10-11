@@ -291,6 +291,43 @@ internal sealed class ArrayDecodeContext
         return DecodeNodeRange(in child, childDType, childLength, start, count);
     }
 
+    /// <summary>
+    /// Decodes rows <c>[start, start + count)</c> of child <paramref name="childIndex"/> with
+    /// <paramref name="reference"/> added to every value, wrapping, when its decoder adds it in the
+    /// pass that unpacks them -- <c>fastlanes.bitpacked</c>, a frame of reference's usual child --
+    /// and returns -1 when it does not, for the caller to add it itself.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType, an integer primitive.</param>
+    /// <param name="childLength">The child's whole row count.</param>
+    /// <param name="start">The first row; with <paramref name="count"/>, the child's every row or a range it decodes.</param>
+    /// <param name="count">How many rows.</param>
+    /// <param name="reference">The bits to add, the element width's low ones.</param>
+    /// <returns>The child's index in the batch's arena, holding <paramref name="count"/> rows; or -1.</returns>
+    internal int DecodeChildAdding(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, int start, int count, ulong reference)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        if (ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex) is not Decoders.Compressed.BitPackedDecoder)
+        {
+            return -1;
+        }
+
+        _keepHere = _keepNext;
+        _keepNext = false;
+        VortexLimits.CheckDepth(++_depth, VortexLimits.MaxArrayDepth, "Array");
+        if (childLength < 0 || start < 0 || count <= 0 || (long)start + count > childLength)
+        {
+            ArraysThrow.Format(
+                $"A range of [{start}, {(long)start + count}) escapes an array node of {childLength} rows.");
+        }
+
+        int result = Decoders.Compressed.BitPackedDecoder.DecodeAdding(this, in child, childDType, childLength, start, count, reference);
+        _depth--;
+        return result;
+    }
+
     /// <summary>Decodes rows <c>[start, start + count)</c> of a root, as <see cref="DecodeRoot(in ArrayNode, DType, int, bool)"/> decodes it whole.</summary>
     internal int DecodeRootRange(
         in ArrayNode node, DType dtype, int length, int start, int count, bool keepEncoding)

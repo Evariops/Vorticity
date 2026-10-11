@@ -148,8 +148,18 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         return Core(context, in node, dtype, length, start, count);
     }
 
+    /// <summary>
+    /// Rows <c>[start, start + count)</c> with <paramref name="reference"/> added to every value,
+    /// wrapping, in the pass that unpacks them: what a frame of reference asks of its encoded
+    /// child, which otherwise unpacks into one buffer for the reference to be added into another.
+    /// </summary>
+    internal static int DecodeAdding(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count, ulong reference) =>
+        Core(context, in node, dtype, length, start, count, reference);
+
     private static int Core(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
+        ulong reference = 0)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
 
@@ -194,14 +204,14 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             // Uninitialized: Unpack writes all `total` bytes, including at bit width 0 where it
             // clears the span itself rather than inheriting a cleared one. Patches only overwrite.
             output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
-            Unpack(packed.Span, bitWidth, offset + start, count, width, destination);
+            Unpack(packed.Span, bitWidth, offset + start, count, width, destination, reference);
         }
 
         // Patches are decoded and applied before the validity child only because the validity child
         // sits after them; the order of the two operations is otherwise independent.
         if (metadata.HasPatches)
         {
-            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, start, count);
+            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, start, count, reference);
         }
 
         bool whole = start == 0 && count == length;
@@ -272,36 +282,38 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         FastLanes.GatherRows(packed, bitWidth, offset, wanted, destination);
     }
 
+    /// <summary>Unpacks <paramref name="length"/> values from row <paramref name="offset"/>, <paramref name="reference"/> added to each, wrapping.</summary>
     private static void Unpack(
-        ReadOnlySpan<byte> packed, int bitWidth, int offset, int length, int width, Span<byte> destination)
+        ReadOnlySpan<byte> packed, int bitWidth, int offset, int length, int width, Span<byte> destination, ulong reference)
     {
         switch (width)
         {
             case 1:
-                Unpack<byte>(packed, bitWidth, offset, length, destination);
+                Unpack<byte>(packed, bitWidth, offset, length, destination, (byte)reference);
                 break;
             case 2:
-                Unpack<ushort>(packed, bitWidth, offset, length, destination);
+                Unpack<ushort>(packed, bitWidth, offset, length, destination, (ushort)reference);
                 break;
             case 4:
-                Unpack<uint>(packed, bitWidth, offset, length, destination);
+                Unpack<uint>(packed, bitWidth, offset, length, destination, (uint)reference);
                 break;
             default:
-                Unpack<ulong>(packed, bitWidth, offset, length, destination);
+                Unpack<ulong>(packed, bitWidth, offset, length, destination, reference);
                 break;
         }
     }
 
     private static void Unpack<T>(
-        ReadOnlySpan<byte> packedBytes, int bitWidth, int offset, int length, Span<byte> destinationBytes)
+        ReadOnlySpan<byte> packedBytes, int bitWidth, int offset, int length, Span<byte> destinationBytes, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         Span<T> destination = MemoryMarshal.Cast<byte, T>(destinationBytes);
 
-        // A zero bit width packs nothing at all; every value is zero and the buffer is empty.
+        // A zero bit width packs nothing at all; every value is zero and the buffer is empty: the
+        // reference itself, under a frame of reference.
         if (bitWidth == 0)
         {
-            destination.Clear();
+            destination.Fill(reference);
             return;
         }
 
@@ -333,14 +345,14 @@ internal sealed class BitPackedDecoder : ArrayDecoder
                 Span<T> scratch = scratchArray.AsSpan(0, FastLanes.BlockSize);
                 if (headPartial)
                 {
-                    CopyPartial(packed, bitWidth, elementsPerBlock, firstBlock, offset, end, scratch, destination);
+                    CopyPartial(packed, bitWidth, elementsPerBlock, firstBlock, offset, end, scratch, destination, reference);
                 }
 
                 // A window partial at both ends of one and the same block was already copied whole
                 // by the head: its clamp is [offset, end), which is all of it.
                 if (tailPartial && !(headPartial && lastBlock == firstBlock))
                 {
-                    CopyPartial(packed, bitWidth, elementsPerBlock, lastBlock, offset, end, scratch, destination);
+                    CopyPartial(packed, bitWidth, elementsPerBlock, lastBlock, offset, end, scratch, destination, reference);
                 }
             }
             finally
@@ -350,21 +362,47 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         int wholeBlocks = lastWhole - firstWhole + 1;
-        if (wholeBlocks > 0)
+        if (wholeBlocks <= 0)
         {
-            FastLanes.UnpackBlocks(
-                packed.Slice(firstWhole * elementsPerBlock, wholeBlocks * elementsPerBlock),
-                bitWidth,
-                destination.Slice(
-                    (firstWhole * FastLanes.BlockSize) - offset, wholeBlocks * FastLanes.BlockSize),
-                wholeBlocks);
+            return;
         }
+
+        ReadOnlySpan<T> words = packed.Slice(firstWhole * elementsPerBlock, wholeBlocks * elementsPerBlock);
+        Span<T> run = destination.Slice((firstWhole * FastLanes.BlockSize) - offset, wholeBlocks * FastLanes.BlockSize);
+        if (reference == T.Zero)
+        {
+            FastLanes.UnpackBlocks(words, bitWidth, run, wholeBlocks);
+            return;
+        }
+
+        // The reference is added to each group of blocks while the group is in the first-level
+        // cache, just unpacked: a second pass over the whole run would read it back from wherever
+        // the run has gone by then, and a frame of reference's own add read it into a buffer of its own.
+        int group = Math.Max(1, AddGroupBytes / (FastLanes.BlockSize * Unsafe.SizeOf<T>()));
+        for (int block = 0; block < wholeBlocks; block += group)
+        {
+            int blocks = Math.Min(group, wholeBlocks - block);
+            Span<T> values = run.Slice(block * FastLanes.BlockSize, blocks * FastLanes.BlockSize);
+            FastLanes.UnpackBlocks(words.Slice(block * elementsPerBlock, blocks * elementsPerBlock), bitWidth, values, blocks);
+            AddInPlace(values, reference);
+        }
+    }
+
+    /// <summary>The bytes of blocks a reference is added to at a time: half the first-level cache.</summary>
+    private const int AddGroupBytes = 16 * 1024;
+
+    /// <summary><paramref name="reference"/> added to every one of <paramref name="values"/>, wrapping.</summary>
+    private static void AddInPlace<T>(Span<T> values, T reference)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        Span<byte> bytes = MemoryMarshal.AsBytes(values);
+        IntegerKernels.AddWrapping(bytes, bytes, Unsafe.SizeOf<T>(), ulong.CreateTruncating(reference));
     }
 
     /// <summary>Unpacks one block into scratch and copies out only the part the window wants.</summary>
     private static void CopyPartial<T>(
         ReadOnlySpan<T> packed, int bitWidth, int elementsPerBlock, int block, int offset, int end,
-        Span<T> scratch, Span<T> destination)
+        Span<T> scratch, Span<T> destination, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         int encodedStart = block * FastLanes.BlockSize;
@@ -376,7 +414,12 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         FastLanes.UnpackBlock(packed.Slice(block * elementsPerBlock, elementsPerBlock), bitWidth, scratch);
-        scratch.Slice(from - encodedStart, to - from).CopyTo(destination[(from - offset)..]);
+        Span<T> copied = destination.Slice(from - offset, to - from);
+        scratch.Slice(from - encodedStart, to - from).CopyTo(copied);
+        if (reference != T.Zero)
+        {
+            AddInPlace(copied, reference);
+        }
     }
 
     /// <summary>
@@ -466,7 +509,8 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         int width,
         Span<byte> destination,
         int start,
-        int count)
+        int count,
+        ulong reference)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
         int patchCount = ArrayDecodeContext.CheckedLength(
@@ -528,12 +572,32 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         ReadOnlySpan<byte> source = values.Values.Span;
-        if (whole)
+        byte[]? added = null;
+        if (reference != 0)
         {
-            patches.ApplyAll(source, width, destination);
-            return;
+            // A patch is an encoded value as much as a packed one: under a frame of reference, its
+            // value is the patch plus the reference. Patches are few, so they are added on a copy.
+            added = ArrayPool<byte>.Shared.Rent(source.Length);
+            IntegerKernels.AddWrapping(source, added.AsSpan(0, source.Length), width, reference);
+            source = added.AsSpan(0, source.Length);
         }
 
-        Patches.ApplyRange(in patches, source, width, start, count, destination);
+        try
+        {
+            if (whole)
+            {
+                patches.ApplyAll(source, width, destination);
+                return;
+            }
+
+            Patches.ApplyRange(in patches, source, width, start, count, destination);
+        }
+        finally
+        {
+            if (added is not null)
+            {
+                ArrayPool<byte>.Shared.Return(added);
+            }
+        }
     }
 }
