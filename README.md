@@ -1,67 +1,29 @@
 # Vorticity
 
-Vorticity is a pure .NET implementation of the [Vortex](https://vortex.dev) columnar file format,
-with no third-party dependency. It reads and writes Vortex files faster than Vortex's own Rust
-implementation, and its group bys run faster than DuckDB's.
+[![NuGet](https://img.shields.io/nuget/v/Vorticity.svg)](https://www.nuget.org/packages/Vorticity)
+[![CI](https://github.com/Evariops/Vorticity/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/Evariops/Vorticity/actions/workflows/build.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Performance
+Vorticity reads, writes and queries columnar files in .NET. It speaks [Vortex](https://vortex.dev)
+and [Apache Parquet](https://parquet.apache.org), works on a local disk or straight against S3, Azure
+Blob Storage and Google Cloud Storage, and is written in C# from end to end, with no native library
+and no third-party dependency.
 
-Each figure below is a speedup: the other side's time divided by Vorticity's, so anything above
-1.00x means Vorticity is faster. Both sides run as separate processes on the same machine, an Apple
-M4 Pro, are compiled ahead of time, and do the same work.
+It is also built for speed: it reads and writes Vortex faster than Vortex's own Rust implementation,
+its group bys beat DuckDB's on every query we measured, and the managed Zstandard it relies on
+decompresses faster than the native libzstd. The figures are [at the end of this page](#performance).
 
-Against Vortex's Rust implementation, Vorticity wins every scenario, often by a factor of two. On a
-table of four columns and a million rows:
+## Quick start
 
-| scenario | speedup, one core | speedup, 14 cores |
-|---|---:|---:|
-| read every column | 1.99x | 2.48x |
-| read one column of four | 2.31x | 2.51x |
-| filter, 1 % of the rows | 1.45x | 3.01x |
-| filter, half the rows | 2.08x | 2.37x |
-| take 1,000 scattered rows | 1.64x | 1.11x |
-| write the table back out | 2.37x | 1.35x |
+The packages target .NET 11. The generator runs at build time only, and `PrivateAssets` keeps it out
+of whatever your project packs:
 
-Against DuckDB, Vorticity's group bys win all 13 queries we measured, on the same files and with the
-same number of threads:
+```xml
+<PackageReference Include="Vorticity" Version="0.6.0" />
+<PackageReference Include="Vorticity.Generators" Version="0.6.0" PrivateAssets="all" />
+```
 
-| DuckDB reading | speedup, one thread | speedup, 14 threads |
-|---|---:|---:|
-| its own table, loaded beforehand | 1.43x to 6.15x | 1.18x to 3.50x |
-| the file, through its Vortex extension | 1.58x to 5.65x | 1.39x to 4.47x |
-
-The way these numbers are produced is described [below](#how-performance-is-measured), and every
-figure is on the pages [against Rust](docs/guide/benchmarks.md),
-[against DuckDB](docs/guide/benchmarks-duckdb.md) and [on x64](docs/guide/benchmarks-x64.md).
-
-## Features
-
-* Columns are declared by a `[VortexRecord]` type, and filters and aggregates are plain C# lambdas
-  that the scan pushes down into the file. A filter that cannot be pushed down does not compile.
-* The core is built for throughput. It allocates next to nothing per batch on the hot paths, uses
-  SIMD through `System.Runtime.Intrinsics`, and never copies data before decoding it: a mapped file
-  is decoded where it lies, and an uncompressed column is a view of its bytes.
-* The API is async only. Every read and every write is awaited (`ValueTask`, `await foreach`),
-  whatever the source, so there is no synchronous path to pick by mistake.
-* Files follow the published spec, `VTXF` version 1 up to the `core2026.08.3` edition, and every
-  file Vorticity writes is read back by the Rust reference in CI.
-
-Beyond the base class library, the core references only `System.IO.Hashing`, a first-party package
-used for the write path's hashes and for Bloom filters, and two managed codecs from
-[ManagedCompressions](https://github.com/Evariops/ManagedCompressions), a sibling project:
-`ManagedCompressions.Zstd`, which handles `vortex.zstd` and Parquet's ZSTD, and
-`ManagedCompressions.Lz4`, which handles Parquet's LZ4_RAW.
-
-Parity with Rust means that Rust reads every file Vorticity writes and every value reads back equal.
-It does not mean byte parity. The two writers choose their encodings differently by design, so the
-same rows produce different bytes on each side.
-
-The project is developed with the help of LLMs, and its API may still change in breaking ways
-before v1.0.
-
-## A first look
-
-A record describes the columns of a file. It is a schema rather than a row: each member is a column,
+A record declares the columns of a file. It is a schema rather than a row: each member is a column,
 in declaration order and under its own name.
 
 ```csharp
@@ -71,26 +33,55 @@ using Vorticity;
 public partial record struct Reading(int Day, double? Celsius, string City);
 ```
 
-Writing records out and completing the file:
+Write the records, then ask the file a question:
 
 ```csharp
 await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>("readings.vortex"))
 {
-    await writer.WriteAsync<Reading>(readings);          // Reading[]: copied into the builder, column by column
-    await writer.CompleteAsync();                        // disposed without it, the file is deleted
+    await writer.WriteAsync<Reading>(readings);   // a Reading[], copied in column by column
+    await writer.CompleteAsync();                 // disposed without it, the file is deleted
 }
-```
 
-Reading the columns back, each batch is borrowed: its columns are `ref struct`s that stay valid until
-the next batch, and the loop allocates next to nothing per batch.
-
-```csharp
 await using VortexFile file = await VortexFile.OpenAsync("readings.vortex");
 
-long hot = 0;
-await foreach (var (_, celsius, _) in file.Scan<Reading>().Where(r => r.Day >= 900 && r.City == "Paris"))
+long hotDays = await file.Scan<Reading>()
+    .Where(r => r.Day >= 900 && r.City == "Paris" && r.Celsius > 30.0)
+    .CountAsync();
+```
+
+The lambda given to `Where` runs once, when the scan is built, and what it records becomes the plan.
+The file's statistics, zone maps and indexes then skip whatever they can before a block is decoded,
+and the count comes from the statistics when they settle it, from the encoded blocks otherwise, never
+from materialised rows. A filter the scan cannot push down, such as `r.Day % 2 == 0`, does not
+compile.
+
+A group by is a query too, written as a method chain or in LINQ's query syntax:
+
+```csharp
+var hottest =
+    from r in file.Scan<Reading>()
+    where r.Day >= 900
+    group r by r.City into g
+    orderby g.Average(x => x.Celsius) descending
+    select (g.Key, g.Count(), g.Average(x => x.Celsius));
+
+await foreach (CityHeat city in hottest.Take(3).As<CityHeat>().ToRecordsAsync())
 {
-    ReadOnlySpan<double> values = celsius.Values;        // the decoded buffer, no copy
+    Console.WriteLine($"{city.City}: {city.Mean:F1} °C over {city.Readings} readings");
+}
+
+[VortexRecord]
+public partial record struct CityHeat(string City, long Readings, double? Mean);
+```
+
+When the values themselves are what you need, a scan lends each batch's columns as spans over the
+decoded buffers, with no copy and next to no allocation per batch:
+
+```csharp
+long hot = 0;
+await foreach (var (_, celsius, _) in file.Scan<Reading>().Where(r => r.City == "Paris"))
+{
+    ReadOnlySpan<double> values = celsius.Values;   // the decoded buffer, valid until the next batch
     for (int i = 0; i < values.Length; i++)
     {
         if (celsius.IsValid(i) && values[i] > 30.0) hot++;
@@ -98,96 +89,168 @@ await foreach (var (_, celsius, _) in file.Scan<Reading>().Where(r => r.Day >= 9
 }
 ```
 
-The lambda given to `Where` runs once, when the scan is built, and what it records becomes the plan.
-The file statistics, the zone maps and the indexes then skip whatever they can before a block is
-decoded. Expressions such as `r.Day >= "900"` or `r.Day % 2 == 0` do not compile.
+`ToRecordsAsync()` yields one record per row when rows are what you need, and a file whose schema is
+only known at run time is read by column name, as in `file.Scan("Day", "City").Where($"Day >= {min}")`.
 
-The same question, and a few more, can be asked without a loop. The answer comes from the statistics
-when they settle it, from the encoded blocks otherwise, and never from a materialised batch.
+## Parquet
 
-```csharp
-long hotDays = await file.Scan<Reading>()
-    .Where(r => r.Day >= 900 && r.City == "Paris" && r.Celsius > 30.0)
-    .CountAsync();
-
-double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
-
-Spread spread = await file.Scan<Reading>()
-    .Where(r => r.Day >= 900)
-    .AggregateAsync<Spread>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.CountDistinct(r => r.City)));
-
-[VortexRecord]
-public partial record struct Spread(double? Min, double? Max, long Cities);   // several answers go into a record
-```
-
-A group by is a query too, and its result is a scan of a record, read in batches like a file:
+A Parquet file goes through the same engine, so the same records, filters, aggregates and group bys
+work on it, and one scan converts it to Vortex:
 
 ```csharp
-await foreach (var (city, readings, mean) in file.Scan<Reading>()
-    .GroupBy(r => r.City)
-    .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius)))
-    .As<CityMean>())
-{
-    ReadOnlySpan<long> counts = readings.Values;          // one value per city, no copy
-}
+using Vorticity.Parquet;
 
-[VortexRecord]
-public partial record struct CityMean(string City, long Readings, double? Mean);
+#pragma warning disable VX0003   // the Parquet API is experimental until its surface settles
+
+await using ParquetFile parquet = await ParquetFile.OpenAsync("readings.parquet");
+double? lyon = await parquet.Scan<Reading>().Where(r => r.City == "Lyon").AverageAsync(r => r.Celsius);
+
+await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>("readings.vortex");
+await writer.WriteAsync(parquet.Scan<Reading>());
+await writer.CompleteAsync();
 ```
 
-When rows are really what you need, ask for them and pay for them: `ToRecordsAsync()` yields one
-`Reading` per row, and LINQ takes over from there. A file whose schema is unknown at compile time is
-read by column name, `file.Scan("Day", "City").Where($"Day >= {min}")`, with each hole of the filter
-passed as a typed value. That is the surface `vxdump` is built on.
+`VortexSession.Default.CreateParquetWriter<Reading>(path)` writes Parquet the same way. Row group
+statistics, the page index, Bloom filters and dictionaries prune a scan before a page is read.
 
-## Requirements
+## Object storage
 
-The library targets `net11.0`, and `global.json` pins the SDK to a .NET 11 release candidate with
-`allowPrerelease`. Until .NET 11 is generally available you need that SDK installed: a machine with
-only .NET 10 is refused by `global.json` before anything builds. That SDK is all `dotnet build` and
-`dotnet test` need. Comparing against the Rust reference (the cross-check, the ratio gates of the
-bench and the corpus generator) also requires a Rust toolchain.
+With `Vorticity.ObjectStorage`, a location opens and writes like a path:
 
-The library ships on nuget.org for projects that target `net11.0`. The generator is a build-time
-dependency, and `PrivateAssets` keeps it out of whatever your project packs:
+```csharp
+using Vorticity.ObjectStorage;
 
-```xml
-<PackageReference Include="Vorticity" Version="0.5.1" />
-<PackageReference Include="Vorticity.Generators" Version="0.5.1" PrivateAssets="all" />
+await using VortexSession session = VortexSession.Create(o => o.ObjectStores.UseEnvironment());
+
+await using VortexFile file = await session.OpenAsync("s3://lake/readings/2026-10.vortex");
+double? mean = await file.Scan<Reading>().Where(r => r.Day >= 900).AverageAsync(r => r.Celsius);
 ```
 
-`Vorticity.Dataset` and `Vorticity.RowEncoding` are both experimental. They are referenced the same
-way, at the same version as the core.
+`UseEnvironment` serves every `s3://`, `az://` and `gs://` location from the environment, which it
+reads the way each cloud's own SDKs do, Kubernetes workload identities included.
+`AWS_ENDPOINT_URL_S3` points `s3://` at R2, OVHcloud, Scaleway or any other service that speaks the
+S3 API. Opening a file costs a single request on Amazon S3, a scan coalesces each batch's reads into
+ranges of up to 16 MiB issued together, and a large write uploads its parts in parallel as they fill.
+Parquet files open from a local path for now. [object-storage.md](docs/guide/object-storage.md)
+covers stores, credentials, retries and what each operation costs.
+
+## Building from source
+
+`global.json` pins a .NET 11 release candidate SDK, so until .NET 11 ships, a machine with only .NET 10
+is refused before anything builds. That SDK is all `dotnet build` and `dotnet test` need. A Rust
+toolchain is needed only to compare against the Rust reference: the cross-check, the bench's ratio
+gates and the corpus generator. [CONTRIBUTING.md](CONTRIBUTING.md) says what to run before a change
+is done.
 
 ## Documentation
 
-| document | contents |
+| where | what you find |
 |---|---|
-| [docs/guide/](docs/guide/README.md) | how to use the library: pages named after what you want to do, each backed by a program the samples project compiles and runs |
-| [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | every figure the bench publishes: Vorticity against the Rust implementation, and each kernel against its baseline |
-| [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | the same page measured on an x64 machine, a Zen 4 processor under Windows, against a Rust built there |
-| [docs/guide/benchmarks-duckdb.md](docs/guide/benchmarks-duckdb.md) | our group bys against DuckDB's on the same files, through its Vortex reader and from its own table, on one thread and on fourteen |
-| [docs/design/](docs/design/README.md) | why the library is shaped this way: scope, byte layout, engine, public API |
+| [docs/guide/](docs/guide/README.md) | how to use the library, one page per task, each backed by a program the samples project compiles and runs |
+| [docs/design/](docs/design/README.md) | why the library is shaped this way: scope, byte layout, engine, Parquet, object storage, encryption, public API |
+| [bench/README.md](bench/README.md) | how to run the bench, and the gates a change has to pass |
 
-## How performance is measured
+## Performance
 
-Vorticity is measured against Vortex's Rust implementation on the same files and the same machine,
-both built with Native AOT, on one core and on all of them. The bench covers a table read and
-written, every encoding decoded, taken from and written, and each hot loop against its baseline.
-Both sides do the same work: each maps the file and reads it where it lies, decodes every value it
-returns, and hands what it writes to a sink that keeps nothing. On one core, Rust is timed with the
-faster of its two ways of splitting a scan. The speedup is Rust's time over Vorticity's, so above
-1.00x Vorticity is faster. The table at the top of this page reads the file Vorticity writes.
+Where Vorticity is compared with another implementation, the figure is a speedup: the other side's
+time divided by Vorticity's, so anything above 1.00x means Vorticity took less time. The machines
+are an Apple M4 Pro (arm64, 14 cores, macOS) and an AMD Ryzen 9 7950X (x64, 16 cores and 32
+threads, Windows 11). The figures against Rust and for Parquet were measured on 2026-10-11, those
+against DuckDB on 2026-10-10, and [how it is measured](#how-it-is-measured) says what both sides do.
 
-Per encoding, Vorticity is well ahead on nested, text and compressed integer columns (`struct`
-6.92x, `varbin` 6.08x, `map` 3.28x, `pco` 3.06x). It is level with Rust or behind by at most a tenth
-on 10 files: plain booleans (0.90x), `onpair` (0.95x), `decimal` (0.96x), masked columns (0.96x to
-1.00x), patched bit-packed integers (0.98x), `alprd` and `sequence` (1.00x). Its files are at most
-5 % larger than Rust's, or smaller, on 44 of 56 encodings. With both readers warmed up in one
-process, Rust is faster on 1 case out of 19, a prefix filter on FSST strings (0.93x).
+### Against Vortex's Rust implementation
 
-Every figure is on [the benchmark page](docs/guide/benchmarks.md), each section with the machine
-and the commit it was measured on, and [its x64 twin](docs/guide/benchmarks-x64.md) holds the same
-sections measured on x64. [docs/design/05-benchmarks.md](docs/design/05-benchmarks.md) explains what
-is compared and how, and [bench/README.md](bench/README.md) how to run each instrument.
+Vortex Rust 0.86.1 and Vorticity, each in its own process, read and write a table of four columns
+and a million rows. On the file Vorticity writes:
+
+| scenario | M4 Pro, 1 core | M4 Pro, 14 cores | 7950X, 1 core | 7950X, 32 threads |
+|---|---:|---:|---:|---:|
+| read every column | 1.95x | 2.28x | 2.72x | 1.62x |
+| read one column of four | 2.37x | 2.58x | 2.21x | 2.16x |
+| filter, 1 % of the rows | 1.37x | 2.90x | 1.39x | 2.46x |
+| filter, half the rows | 2.03x | 2.13x | 2.63x | 2.01x |
+| take 1,000 scattered rows | 1.64x | 1.18x | 1.54x | 1.08x |
+| write the table back out | 2.32x | 1.77x | 2.42x | 1.61x |
+
+Rust keeps the lead in a few places. On the M4 Pro, it is a prefix filter over FSST strings (0.91x)
+and ten encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. On the
+Ryzen, the encodings that trail most are the ones stored plain: under Windows a session that keeps
+no mapping copies the segments it reads, where Rust reads its mapping in place, so such a column
+costs Vorticity the copy and Rust nothing. Pcodec's narrow and nullable files, which only that
+machine's corpus holds, decode in two to three times Rust's time, and with 32 threads on the same
+table at ten million rows, in the file Rust writes, the full scan is level (1.00x) and the wide
+filter behind (0.93x).
+
+### Against DuckDB
+
+DuckDB 1.5.2 answers the same group bys on the same files with the same number of threads, from a
+table of its own loaded beforehand and through its Vortex extension. Vorticity leads all 13 queries
+on both, from 40 million rows grouped by 10³ to 10⁷ keys to db-benchmark's group by on 10 million
+rows:
+
+| DuckDB reading | one thread | 14 threads |
+|---|---:|---:|
+| its own table, loaded beforehand | 1.43x to 6.15x | 1.18x to 3.50x |
+| the file, through its Vortex extension | 1.58x to 5.65x | 1.39x to 4.47x |
+
+The narrowest lead is db-benchmark's q10 on 14 threads, six keys and nearly a group per row, at
+1.18x. These figures come from the M4 Pro.
+
+### Parquet
+
+Parquet reads through the same engine as Vortex: a page decompresses straight into the buffer that
+becomes its column, plain values and dictionaries are read as views rather than copied, and a scan
+of the taxi trips below, 3 million rows, allocates 82 KiB. The table times a scan of every column of
+three real files on the Ryzen 9 7950X, against the same rows rewritten as Vortex:
+
+| scan of every column, in ms | Parquet, 1 thread | Parquet, 32 threads | Vortex, 32 threads |
+|---|---:|---:|---:|
+| New York's taxi trips, 3.1M rows of 19 columns, GZIP | 148 | 21.9 | 15.3 |
+| ClickBench's hits, 1M rows of 105 columns, Snappy | 121 | 33.6 | 28.9 |
+| a nested file, 2M rows of 22 columns, Snappy | 73.0 | 31.1 | 29.6 |
+
+On one thread the codec weighs most: inflating the taxi trips' GZIP pages takes 121 ms of the 148,
+even though Vorticity decodes GZIP with its own DEFLATE decoder, 19 % faster than .NET's
+`GZipStream`.
+
+### Zstandard and LZ4
+
+The codecs come from [ManagedCompressions](https://github.com/Evariops/ManagedCompressions), which
+writes the exact bytes of libzstd 1.5.7 and lz4 1.10.0. Against the native libraries, on
+silesia.tar in one call, at the levels in use:
+
+| managed against native | Apple M4 Pro | Ryzen 9 7950X |
+|---|---:|---:|
+| Zstandard, decompression | 1.30x to 1.49x | 1.01x to 1.11x |
+| Zstandard, compression | 0.94x to 1.03x | 0.92x to 1.09x |
+| LZ4, decompression | 1.03x to 1.04x | 0.99x to 1.08x |
+| LZ4, compression | 0.85x to 0.96x | 0.88x to 0.95x |
+
+On x64, native libzstd decodes with hand-written assembly that arm64 does not have, which is why the
+managed decoder's lead is smaller there.
+
+### How it is measured
+
+Against Rust, both sides are compiled ahead of time, run on the same machine and do the same work.
+Each opens the file anew at every call, decodes every value it returns to its plain form and must
+return the same rows, and a write hands its bytes to a sink that keeps none. On the M4 Pro both read
+the file mapped, where it lies. Under Windows, Rust maps the file while Vorticity copies the segments
+it reads, as a session that keeps no mapping does there. Rust is built the way upstream builds its
+own benchmarks, and on one core its figure is the faster of its two ways of splitting a scan.
+Against DuckDB, the two sides take turns in pairs and must give the same answer to every query. The
+page cache is warm, cores are not pinned, and your data and your machine will differ.
+
+Every figure is on [the arm64 page](docs/guide/benchmarks.md), [the x64
+page](docs/guide/benchmarks-x64.md), [the DuckDB page](docs/guide/benchmarks-duckdb.md) and [the
+Parquet page](docs/guide/benchmarks-parquet-x64.md), each with its machine, commit and date.
+[05-benchmarks.md](docs/design/05-benchmarks.md) explains what is compared and how, and
 `bench/gate.sh` runs everything that gates a change before it is pushed.
+
+## Status and license
+
+Vorticity is developed with the help of LLMs, and its API may still change in breaking ways before
+v1.0. It is licensed under Apache-2.0, as [LICENSE](LICENSE) and [NOTICE](NOTICE) say.
+
+Vortex™ is a trademark of LF Projects, LLC, DuckDB is a trademark of the DuckDB Foundation, and
+Apache Parquet is a trademark of The Apache Software Foundation. Vorticity is an independent
+implementation, not affiliated with or endorsed by any of them.
