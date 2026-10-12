@@ -41,6 +41,9 @@ internal sealed class KeyTop
     private readonly int _ceiling;
     private long _peak;
 
+    // The tightest edge a lane's trim has set (TopEdge), long.MaxValue before any: a key no row passes.
+    private long _sharedEdge = long.MaxValue;
+
     // Whether the order is a column's largest value, from the largest, or its smallest, from the smallest.
     private readonly bool _extreme;
 
@@ -69,6 +72,26 @@ internal sealed class KeyTop
 
     /// <summary>The groups the lanes held at most, summed: what the pass held at once at worst.</summary>
     internal long Peak => Interlocked.Read(ref _peak);
+
+    /// <summary>
+    /// The tightest edge any lane's trim has set on a column's extreme, which narrows the rows of every
+    /// lane; null before a lane held <c>k</c> groups.
+    /// </summary>
+    /// <remarks>
+    /// A lane that holds <c>k</c> groups whose values reach an edge holds <c>k</c> distinct keys whose
+    /// values, over every lane together, reach it as well, since a key's extreme only gets better as its
+    /// rows come. A row past the edge, on whichever lane, then changes no group of the top: were it its
+    /// key's best, <c>k</c> keys would beat that key. So every lane drops what the best of them drops,
+    /// where each used to wait for its own <c>k</c> groups and keep, on 32 lanes, most of its rows.
+    /// </remarks>
+    internal long? SharedEdge
+    {
+        get
+        {
+            long edge = Volatile.Read(ref _sharedEdge);
+            return edge == long.MaxValue ? null : edge;
+        }
+    }
 
     /// <summary>
     /// The top of <paramref name="query"/>, or null: its first operator orders the groups on their key
@@ -210,6 +233,10 @@ internal sealed class KeyTop
                 // its value, read before the groups are numbered again.
                 int worst = best[kept - 1];
                 partition.TopEdge = _extreme && kept == _keep ? Edge(outcome, worst) : null;
+                if (partition.TopEdge is long edge)
+                {
+                    Tighten(edge);
+                }
                 Array.Sort(best, 0, kept);
                 partition.Keep(best.AsSpan(0, kept));
                 partition.TopFrontier = _narrows && kept == _keep ? Array.BinarySearch(best, 0, kept, worst) : -1;
@@ -227,6 +254,22 @@ internal sealed class KeyTop
         {
             Interlocked.Add(ref _peak, partition.PeakGroups);
             partition.PeakGroups = 0;
+        }
+    }
+
+    /// <summary>Lowers <see cref="SharedEdge"/> to <paramref name="edge"/> when it is tighter: a smaller key reaches less.</summary>
+    private void Tighten(long edge)
+    {
+        long shared = Volatile.Read(ref _sharedEdge);
+        while (edge < shared)
+        {
+            long seen = Interlocked.CompareExchange(ref _sharedEdge, edge, shared);
+            if (seen == shared)
+            {
+                return;
+            }
+
+            shared = seen;
         }
     }
 

@@ -1754,11 +1754,14 @@ internal sealed class AggregationPartition
         Slots = [];
         Records = null;
         GiveBackRowGroups();
-        _narrowed = [];
-        _componentOf = [];
-        _componentRows = [];
-        _followMap = [];
-        _followComponents = [];
+
+        // The scratch of the folds, back to the process's shelf, which the next query's lanes take
+        // theirs from: dropped, each lane of a top on 32 lanes allocated its narrowed selection anew.
+        Scratch.Return(ref _narrowed);
+        Scratch.Return(ref _componentOf);
+        Scratch.Return(ref _componentRows);
+        Scratch.Return(ref _followMap);
+        Scratch.Return(ref _followComponents);
     }
 
     /// <summary>
@@ -2635,8 +2638,15 @@ internal sealed class AggregationPartition
         }
 
         // On a column's extreme, a row whose value falls short of the worst the top kept changes none
-        // of its groups, nor makes one: the extreme is the query's one aggregate.
-        if (TopEdge is long edge)
+        // of its groups, nor makes one: the extreme is the query's one aggregate. The edge is the
+        // tighter of this lane's and the one the lanes share, which a lane uses before its first trim.
+        long? edges = TopEdge;
+        if (Top?.SharedEdge is long shared && (edges is not long own || shared < own))
+        {
+            edges = shared;
+        }
+
+        if (edges is long edge)
         {
             int words = (rows + 63) >> 6;
             Scratch.Grow(ref _narrowed, words);
