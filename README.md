@@ -173,10 +173,9 @@ and a million rows. On the file Vorticity writes:
 | take 1,000 scattered rows | 1.64x | 1.18x | 1.47x | 1.16x |
 | write the table back out | 2.32x | 1.77x | 2.40x | 1.71x |
 
-Rust keeps the lead in a few places. On the M4 Pro, it is a prefix filter over FSST strings (0.91x)
-and ten encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. On the
-Ryzen, Vorticity decodes 59 of the 61 encodings in less time, and the two that trail are Pcodec
-files only that machine's corpus holds, `pco_i16` (0.87x) and `pco_u32` (0.93x).
+Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.91x) and ten
+encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. On the Ryzen,
+Vorticity decodes all 61 encodings in less time, Pcodec files included.
 
 ### Against DuckDB
 

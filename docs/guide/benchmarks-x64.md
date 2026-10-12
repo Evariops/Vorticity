@@ -241,77 +241,77 @@ Throughput is over the plain size, as above.
 
 | encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | speedup | Vorticity, GB/s | Vortex Rust, GB/s |
 |---|---:|---:|---:|---:|---:|---:|
-| `alp` | 1,000,000 | 0.95 | 2.63 | 2.77x | 8.4 | 3.0 |
-| `alp_no_patches` | 1,000,000 | 0.61 | 1.89 | 3.11x | 13.1 | 4.2 |
-| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.66 | 1.94 | 2.93x | 12.1 | 4.1 |
-| `alprd` | 1,000,000 | 0.81 | 1.62 | 1.99x | 9.8 | 4.9 |
-| `bool` | 1,000,000 | 0.15 | 0.19 | 1.27x | 0.8 | 0.7 |
-| `bool_bit_offset3` | 1,000,000 | 0.15 | 0.19 | 1.27x | 0.9 | 0.7 |
-| `bool_bit_offset7` | 1,000,000 | 0.14 | 0.19 | 1.31x | 0.9 | 0.7 |
-| `bool_bit_offset_straddle` | 1,000,000 | 0.15 | 0.19 | 1.25x | 0.8 | 0.7 |
-| `bytebool` | 1,000,000 | 0.18 | 0.33 | 1.88x | 0.7 | 0.4 |
-| `chunked` | 1,000,000 | 0.65 | 2.30 | 3.56x | 12.4 | 3.5 |
-| `chunked_bool` | 1,000,000 | 0.16 | 0.21 | 1.33x | 0.8 | 0.6 |
-| `chunked_decimal` | 1,000,000 | 0.68 | 2.21 | 3.27x | 11.8 | 3.6 |
-| `chunked_empty_chunks` | 1,000,000 | 0.67 | 2.30 | 3.42x | 11.9 | 3.5 |
-| `chunked_mixed_validity` | 1,000,000 | 0.70 | 2.10 | 2.98x | 11.5 | 3.9 |
-| `chunked_one_chunk` | 1,000,000 | 0.68 | 2.24 | 3.31x | 11.8 | 3.6 |
-| `chunked_varbinview` | 1,000,000 | 3.83 | 13.1 | 3.41x | 3.5 | 1.0 |
-| `constant` | 1,000,000 | 0.14 | 0.16 | 1.19x | 58.4 | 49.2 |
-| `datetimeparts` | 1,000,000 | 1.42 | 2.99 | 2.11x | 5.6 | 2.7 |
-| `decimal` | 1,000,000 | 0.65 | 2.11 | 3.24x | 12.3 | 3.8 |
-| `decimal_byte_parts` | 1,000,000 | 0.66 | 2.15 | 3.26x | 12.2 | 3.7 |
-| `dict` | 1,000,000 | 1.02 | 1.49 | 1.45x | 5.9 | 4.0 |
-| `dict_nullable_codes` | 1,000,000 | 1.30 | 2.30 | 1.77x | 4.3 | 2.4 |
-| `dict_nullable_values_nonnull_codes` | 1,000,000 | 1.14 | 1.37 | 1.21x | 5.0 | 4.2 |
-| `dict_u64_codes` | 1,000,000 | 1.31 | 2.17 | 1.65x | 4.6 | 2.8 |
-| `dict_u8_codes` | 1,000,000 | 0.90 | 0.98 | 1.09x | 8.9 | 8.2 |
-| `ext` | 1,000,000 | 0.68 | 2.13 | 3.12x | 11.7 | 3.8 |
-| `fastlanes_bitpacked` | 1,000,000 | 0.27 | 0.45 | 1.69x | 15.1 | 8.9 |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.29 | 0.47 | 1.64x | 14.0 | 8.5 |
-| `fastlanes_delta` | 1,000,000 | 0.80 | 2.01 | 2.53x | 10.1 | 4.0 |
-| `fastlanes_for` | 1,000,000 | 0.64 | 1.50 | 2.36x | 12.6 | 5.3 |
-| `fastlanes_rle` | 1,000,000 | 0.50 | 0.80 | 1.60x | 8.0 | 5.0 |
-| `fixed_size_list` | 1,000,000 | 1.05 | 3.11 | 2.96x | 11.4 | 3.9 |
-| `fsst` | 1,000,000 | 11.9 | 13.9 | 1.16x | 4.7 | 4.0 |
-| `list` | 1,000,000 | 1.45 | 3.52 | 2.43x | 6.9 | 2.8 |
-| `listview` | 1,000,000 | 2.37 | 5.35 | 2.26x | 4.2 | 1.9 |
-| `map` | 1,000,000 | 7.76 | 16.0 | 2.06x | 2.6 | 1.3 |
-| `masked` | 1,000,000 | 0.38 | 1.12 | 2.93x | 10.8 | 3.7 |
-| `masked_all_invalid` | 1,000,000 | 0.39 | 1.11 | 2.86x | 10.3 | 3.6 |
-| `masked_all_valid` | 1,000,000 | 0.38 | 1.11 | 2.94x | 10.6 | 3.6 |
-| `null` | 1,000,000 | 0.13 | 0.16 | 1.21x | — | — |
-| `onpair` | 1,000,000 | 6.23 | 9.20 | 1.48x | 3.5 | 2.4 |
-| `parquet_variant` | 1,000,000 | 3.39 | 16.6 | 4.91x | 3.5 | 0.7 |
-| `pco` | 1,000,000 | 0.49 | 1.30 | 2.65x | 16.3 | 6.1 |
-| `pco_f32` | 1,000,000 | 2.61 | 3.06 | 1.17x | 1.5 | 1.3 |
-| `pco_i16` | 1,000,000 | 3.06 | 2.67 | 0.87x | 0.7 | 0.8 |
-| `pco_nullable` | 1,000,000 | 3.47 | 4.40 | 1.27x | 2.3 | 1.8 |
-| `pco_u32` | 1,000,000 | 4.61 | 4.28 | 0.93x | 0.9 | 0.9 |
-| `primitive` | 1,000,000 | 0.66 | 2.12 | 3.22x | 12.2 | 3.8 |
-| `runend` | 1,000,000 | 0.20 | 0.28 | 1.41x | 20.0 | 14.2 |
-| `sequence` | 1,000,000 | 0.25 | 0.30 | 1.19x | 31.7 | 26.7 |
-| `sparse` | 1,000,000 | 0.23 | 0.28 | 1.23x | 17.3 | 14.1 |
-| `struct` | 1,000,000 | 2.08 | 10.2 | 4.91x | 7.1 | 1.5 |
-| `table_mixed` | 1,000,000 | 20.4 | 38.7 | 1.89x | 3.4 | 1.8 |
-| `table_wide` | 50,000 | 38.8 | 100.5 | 2.59x | 10.3 | 4.0 |
-| `varbin` | 1,000,000 | 2.57 | 16.5 | 6.41x | 6.2 | 1.0 |
-| `varbinview` | 1,000,000 | 3.56 | 11.5 | 3.23x | 3.8 | 1.2 |
-| `variant` | 1,000,000 | 0.14 | 0.17 | 1.19x | 112.7 | 95.0 |
-| `zigzag` | 1,000,000 | 0.38 | 1.02 | 2.70x | 10.6 | 3.9 |
-| `zstd` | 1,000,000 | 7.45 | 12.1 | 1.63x | 4.3 | 2.6 |
-| `zstd_buffers` | 1,000,000 | 0.50 | 0.53 | 1.06x | 16.0 | 15.2 |
-| `zstd_nullable` | 1,000,000 | 1.88 | 3.70 | 1.97x | 4.3 | 2.2 |
+| `alp` | 1,000,000 | 0.97 | 2.76 | 2.85x | 8.3 | 2.9 |
+| `alp_no_patches` | 1,000,000 | 0.60 | 1.93 | 3.20x | 13.3 | 4.1 |
+| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.62 | 1.91 | 3.08x | 12.9 | 4.2 |
+| `alprd` | 1,000,000 | 0.81 | 1.66 | 2.05x | 9.9 | 4.8 |
+| `bool` | 1,000,000 | 0.15 | 0.20 | 1.33x | 0.9 | 0.6 |
+| `bool_bit_offset3` | 1,000,000 | 0.15 | 0.19 | 1.23x | 0.8 | 0.7 |
+| `bool_bit_offset7` | 1,000,000 | 0.15 | 0.19 | 1.29x | 0.8 | 0.6 |
+| `bool_bit_offset_straddle` | 1,000,000 | 0.15 | 0.19 | 1.26x | 0.8 | 0.7 |
+| `bytebool` | 1,000,000 | 0.18 | 0.34 | 1.89x | 0.7 | 0.4 |
+| `chunked` | 1,000,000 | 0.64 | 2.31 | 3.59x | 12.5 | 3.5 |
+| `chunked_bool` | 1,000,000 | 0.17 | 0.21 | 1.30x | 0.8 | 0.6 |
+| `chunked_decimal` | 1,000,000 | 0.63 | 2.22 | 3.49x | 12.6 | 3.6 |
+| `chunked_empty_chunks` | 1,000,000 | 0.64 | 2.25 | 3.50x | 12.4 | 3.6 |
+| `chunked_mixed_validity` | 1,000,000 | 0.69 | 2.11 | 3.06x | 11.7 | 3.8 |
+| `chunked_one_chunk` | 1,000,000 | 0.66 | 2.20 | 3.33x | 12.1 | 3.6 |
+| `chunked_varbinview` | 1,000,000 | 3.98 | 14.4 | 3.61x | 3.4 | 0.9 |
+| `constant` | 1,000,000 | 0.14 | 0.17 | 1.22x | 58.6 | 48.2 |
+| `datetimeparts` | 1,000,000 | 1.42 | 3.28 | 2.31x | 5.6 | 2.4 |
+| `decimal` | 1,000,000 | 0.65 | 2.11 | 3.27x | 12.4 | 3.8 |
+| `decimal_byte_parts` | 1,000,000 | 0.65 | 2.11 | 3.27x | 12.4 | 3.8 |
+| `dict` | 1,000,000 | 1.02 | 1.41 | 1.39x | 5.9 | 4.2 |
+| `dict_nullable_codes` | 1,000,000 | 1.33 | 2.39 | 1.80x | 4.2 | 2.3 |
+| `dict_nullable_values_nonnull_codes` | 1,000,000 | 1.15 | 1.33 | 1.16x | 5.0 | 4.3 |
+| `dict_u64_codes` | 1,000,000 | 1.34 | 2.27 | 1.69x | 4.5 | 2.6 |
+| `dict_u8_codes` | 1,000,000 | 0.91 | 0.96 | 1.06x | 8.8 | 8.4 |
+| `ext` | 1,000,000 | 0.65 | 2.10 | 3.24x | 12.3 | 3.8 |
+| `fastlanes_bitpacked` | 1,000,000 | 0.28 | 0.44 | 1.55x | 14.2 | 9.1 |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.29 | 0.44 | 1.50x | 13.8 | 9.2 |
+| `fastlanes_delta` | 1,000,000 | 0.71 | 1.94 | 2.73x | 11.3 | 4.1 |
+| `fastlanes_for` | 1,000,000 | 0.62 | 1.51 | 2.45x | 13.0 | 5.3 |
+| `fastlanes_rle` | 1,000,000 | 0.49 | 0.79 | 1.62x | 8.1 | 5.0 |
+| `fixed_size_list` | 1,000,000 | 1.00 | 3.24 | 3.24x | 12.0 | 3.7 |
+| `fsst` | 1,000,000 | 12.1 | 14.1 | 1.17x | 4.6 | 4.0 |
+| `list` | 1,000,000 | 1.37 | 3.34 | 2.44x | 7.3 | 3.0 |
+| `listview` | 1,000,000 | 2.52 | 6.22 | 2.47x | 4.0 | 1.6 |
+| `map` | 1,000,000 | 5.36 | 16.7 | 3.12x | 3.7 | 1.2 |
+| `masked` | 1,000,000 | 0.38 | 1.20 | 3.12x | 10.7 | 3.4 |
+| `masked_all_invalid` | 1,000,000 | 0.38 | 1.13 | 2.94x | 10.4 | 3.6 |
+| `masked_all_valid` | 1,000,000 | 0.39 | 1.12 | 2.90x | 10.4 | 3.6 |
+| `null` | 1,000,000 | 0.14 | 0.16 | 1.20x | — | — |
+| `onpair` | 1,000,000 | 6.31 | 9.38 | 1.49x | 3.4 | 2.3 |
+| `parquet_variant` | 1,000,000 | 3.50 | 17.7 | 5.05x | 3.4 | 0.7 |
+| `pco` | 1,000,000 | 0.50 | 1.33 | 2.68x | 16.1 | 6.0 |
+| `pco_f32` | 1,000,000 | 2.49 | 3.10 | 1.24x | 1.6 | 1.3 |
+| `pco_i16` | 1,000,000 | 2.37 | 2.65 | 1.12x | 0.8 | 0.8 |
+| `pco_nullable` | 1,000,000 | 2.89 | 4.42 | 1.53x | 2.8 | 1.8 |
+| `pco_u32` | 1,000,000 | 3.11 | 4.30 | 1.38x | 1.3 | 0.9 |
+| `primitive` | 1,000,000 | 0.67 | 2.15 | 3.23x | 12.0 | 3.7 |
+| `runend` | 1,000,000 | 0.20 | 0.27 | 1.34x | 19.6 | 14.7 |
+| `sequence` | 1,000,000 | 0.25 | 0.29 | 1.13x | 31.6 | 27.9 |
+| `sparse` | 1,000,000 | 0.22 | 0.28 | 1.24x | 17.8 | 14.4 |
+| `struct` | 1,000,000 | 2.12 | 10.5 | 4.95x | 7.0 | 1.4 |
+| `table_mixed` | 1,000,000 | 15.3 | 39.9 | 2.62x | 4.6 | 1.8 |
+| `table_wide` | 50,000 | 40.8 | 107.5 | 2.64x | 9.8 | 3.7 |
+| `varbin` | 1,000,000 | 2.58 | 17.0 | 6.57x | 6.2 | 0.9 |
+| `varbinview` | 1,000,000 | 3.79 | 12.3 | 3.26x | 3.6 | 1.1 |
+| `variant` | 1,000,000 | 0.14 | 0.17 | 1.21x | 114.7 | 94.7 |
+| `zigzag` | 1,000,000 | 0.37 | 1.02 | 2.76x | 10.8 | 3.9 |
+| `zstd` | 1,000,000 | 7.39 | 12.3 | 1.66x | 4.3 | 2.6 |
+| `zstd_buffers` | 1,000,000 | 0.50 | 0.53 | 1.06x | 16.1 | 15.2 |
+| `zstd_nullable` | 1,000,000 | 1.91 | 3.76 | 1.97x | 4.3 | 2.2 |
 
 Rust is timed under each of its two ways of splitting a scan, three processes each, and its
 figure is the faster: its default cuts a chunk of more than 100,000 rows into splits of 100,000 and
 decodes the whole chunk again for each, which on these files of one chunk of a million rows is ten
 times; one split per chunk decodes it once, but builds a chunk made of smaller arrays in one
-piece. One split per chunk was the faster on 54 of 61 files, its default on `chunked`, `chunked_empty_chunks`, `chunked_mixed_validity`, `chunked_one_chunk`, `decimal_byte_parts`, `masked_all_invalid`, `primitive`.
+piece. One split per chunk was the faster on 49 of 61 files, its default on `alprd`, `chunked`, `chunked_decimal`, `chunked_empty_chunks`, `chunked_mixed_validity`, `chunked_one_chunk`, `decimal`, `dict_u64_codes`, `fastlanes_for`, `fixed_size_list`, `masked_all_invalid`, `masked_all_valid`.
 
-Vorticity decoded 59 of 61 files in less time than Rust; the median speedup is 1.99x. At 1.00x or below: `pco_i16` 0.87x, `pco_u32` 0.93x.
+Vorticity decoded 61 of 61 files in less time than Rust; the median speedup is 2.31x.
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01); commit e813ac54, 2026-10-12 08:14 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01); commit 9e6e3edf, 2026-10-12 16:55 UTC.*
 <!-- /results: decoding -->
 
 <!-- results: in-process -->
