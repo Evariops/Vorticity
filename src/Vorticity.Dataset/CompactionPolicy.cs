@@ -52,15 +52,16 @@ internal static class CompactionPolicy
     {
         ArgumentNullException.ThrowIfNull(dataset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
-        CompactionOptions settings = SettingsFor(dataset, options);
-        CompactionStyle style = settings.StyleFor(dataset.Key is not null);
-        bool descends = style == CompactionStyle.Leveled ? dataset.Key is not null : settings.PickFor(style) == CompactionPick.RoundRobin;
-        if (descends && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
+        PlannedVersion version = new PlannedVersion(dataset);
+        CompactionOptions settings = SettingsFor(version, options);
+        CompactionStyle style = settings.StyleFor(version.Key is not null);
+        bool descends = style == CompactionStyle.Leveled ? version.Key is not null : settings.PickFor(style) == CompactionPick.RoundRobin;
+        if (descends && await TalliesAsync(version, cancellationToken).ConfigureAwait(false) is { } tallies)
         {
-            return await DescendAsync(dataset, settings, style, tallies, jobs, cancellationToken).ConfigureAwait(false);
+            return await DescendAsync(version, settings, style, tallies, jobs, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ReadEveryLeafAsync(dataset, settings, style, jobs, cancellationToken).ConfigureAwait(false);
+        return await ReadEveryLeafAsync(version, settings, style, jobs, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -71,9 +72,44 @@ internal static class CompactionPolicy
         VortexDataset dataset, CompactionOptions? options, CancellationToken cancellationToken, int jobs = 1)
     {
         ArgumentNullException.ThrowIfNull(dataset);
-        CompactionOptions settings = SettingsFor(dataset, options);
-        return await ReadEveryLeafAsync(dataset, settings, settings.StyleFor(dataset.Key is not null), jobs, cancellationToken)
+        PlannedVersion version = new PlannedVersion(dataset);
+        CompactionOptions settings = SettingsFor(version, options);
+        return await ReadEveryLeafAsync(version, settings, settings.StyleFor(version.Key is not null), jobs, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The version a plan reads, taken from the handle once. Loops that share a handle commit and
+    /// refresh it while another plans, between two pages that one reads: a plan that asked the
+    /// handle at every step would count the levels of one version and the tallies of another.
+    /// </summary>
+    private readonly struct PlannedVersion(VortexDataset dataset)
+    {
+        private readonly DatasetSnapshot _snapshot = dataset.Snapshot;
+
+        /// <summary>The version.</summary>
+        internal ulong Version => _snapshot.Version;
+
+        /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
+        internal DatasetLevels Levels => _snapshot.Levels;
+
+        /// <summary>Where its tree pages are read from.</summary>
+        internal IPageSource Pages => _snapshot.Pages;
+
+        /// <summary>The objects its level 0 holds above its ceiling.</summary>
+        internal long Lag => _snapshot.Levels.LagAtLevelZero();
+
+        /// <summary>Its clustering key, null when objects are kept in the order they arrived.</summary>
+        internal ClusteringKey? Key => _snapshot.Schema.Key;
+
+        /// <summary>The compaction settings its header carries.</summary>
+        internal CompactionSettings Compaction => _snapshot.Header.Compaction;
+
+        /// <summary>Whether its header says the store locks what it keeps.</summary>
+        internal bool LockedStore => _snapshot.Header.LockedStore;
+
+        /// <summary>The handle's options, which no version changes.</summary>
+        internal DatasetOptions Options { get; } = dataset.Options;
     }
 
     /// <summary>
@@ -81,7 +117,7 @@ internal static class CompactionPolicy
     /// store that locks what it keeps no purge, which would add bytes for the lock's term and free none.
     /// </summary>
     /// <exception cref="ArgumentException">The options ask for tiered levels on a dataset with a clustering key.</exception>
-    private static CompactionOptions SettingsFor(VortexDataset dataset, CompactionOptions? options)
+    private static CompactionOptions SettingsFor(PlannedVersion dataset, CompactionOptions? options)
     {
         if (options is { Style: CompactionStyle.Tiered } && dataset.Key is not null)
         {
@@ -98,7 +134,7 @@ internal static class CompactionPolicy
     }
 
     private static async ValueTask<CompactionPlan> ReadEveryLeafAsync(
-        VortexDataset dataset, CompactionOptions settings, CompactionStyle style, int count, CancellationToken cancellationToken)
+        PlannedVersion dataset, CompactionOptions settings, CompactionStyle style, int count, CancellationToken cancellationToken)
     {
         bool clustered = dataset.Key is not null;
         List<List<CompactionInput>> levels = await ReadAsync(dataset, cancellationToken).ConfigureAwait(false);
@@ -154,7 +190,7 @@ internal static class CompactionPolicy
 
     /// <summary>The first trigger that fires on the levels no job ranked before took, in order of priority.</summary>
     private static CompactionJob? Choose(
-        VortexDataset dataset,
+        PlannedVersion dataset,
         List<List<CompactionInput>> levels,
         long[] objects,
         long[] bytes,
@@ -215,7 +251,7 @@ internal static class CompactionPolicy
     /// style, the first whose capacity holds it.
     /// </summary>
     private static CompactionJob? Build(
-        VortexDataset dataset,
+        PlannedVersion dataset,
         List<List<CompactionInput>> levels,
         int from,
         CompactionOptions settings,
@@ -380,7 +416,7 @@ internal static class CompactionPolicy
     /// them leaves them where the inputs were. A clustered dataset keys an output by its smallest key,
     /// and reads none.
     /// </summary>
-    private static long FirstRow(VortexDataset dataset, CompactionInput first) =>
+    private static long FirstRow(PlannedVersion dataset, CompactionInput first) =>
         dataset.Key is null ? VortexDataset.PositionAt(first.Key.Span) : 0;
 
     /// <summary>Every level's objects, merged into the one order a scan reads them in.</summary>
@@ -480,7 +516,7 @@ internal static class CompactionPolicy
     /// walks that skip what the summaries rule out.
     /// </summary>
     private static async ValueTask<CompactionPlan> DescendAsync(
-        VortexDataset dataset, CompactionOptions settings, CompactionStyle style, ObjectTally[] tallies, int count, CancellationToken cancellationToken)
+        PlannedVersion dataset, CompactionOptions settings, CompactionStyle style, ObjectTally[] tallies, int count, CancellationToken cancellationToken)
     {
         int levels = dataset.Levels.Count;
         long[] objects = new long[levels];
@@ -521,7 +557,7 @@ internal static class CompactionPolicy
     /// before took, found without reading a level's leaves.
     /// </summary>
     private static async ValueTask<CompactionJob?> ChooseAsync(
-        VortexDataset dataset,
+        PlannedVersion dataset,
         CompactionOptions settings,
         CompactionStyle style,
         ObjectTally[] tallies,
@@ -585,7 +621,7 @@ internal static class CompactionPolicy
 
     /// <summary>The tiered job that concatenates <paramref name="run"/> into the level above, and records where it stopped.</summary>
     private static CompactionJob Tiered(
-        VortexDataset dataset, List<CompactionInput> run, int from, CompactionOptions settings, CompactionTrigger trigger) =>
+        PlannedVersion dataset, List<CompactionInput> run, int from, CompactionOptions settings, CompactionTrigger trigger) =>
         new CompactionJob(from, from + 1, CompactionStyle.Tiered, trigger, run, settings.TargetBytes(from + 1), FirstRow(dataset, run[0]))
         {
             Stop = run[^1].Key,
@@ -597,7 +633,7 @@ internal static class CompactionPolicy
     /// finds, the levels side by side; a walk of the source level between the two reads the run's own
     /// leaves.
     /// </summary>
-    private static async ValueTask<List<CompactionInput>> RunAsync(VortexDataset dataset, int from, CancellationToken cancellationToken)
+    private static async ValueTask<List<CompactionInput>> RunAsync(PlannedVersion dataset, int from, CancellationToken cancellationToken)
     {
         DatasetLevels levels = dataset.Levels;
         TreeEntry first = await levels[from]
@@ -652,7 +688,7 @@ internal static class CompactionPolicy
     /// The object a round robin takes next from a level: the first past its pointer, or its first,
     /// at the end of one descent.
     /// </summary>
-    private static async ValueTask<CompactionInput> NextAsync(VortexDataset dataset, int level, CancellationToken cancellationToken)
+    private static async ValueTask<CompactionInput> NextAsync(PlannedVersion dataset, int level, CancellationToken cancellationToken)
     {
         TreeEntry next = await dataset.Levels[level]
             .NextAsync(dataset.Levels.PointerOf(level), wrap: true, dataset.Pages, cancellationToken).ConfigureAwait(false)
@@ -667,7 +703,7 @@ internal static class CompactionPolicy
     /// their smallest key, so the job's first row is not read.
     /// </summary>
     private static async ValueTask<CompactionJob> LeveledAsync(
-        VortexDataset dataset,
+        PlannedVersion dataset,
         List<CompactionInput> sources,
         int from,
         int to,
@@ -701,7 +737,7 @@ internal static class CompactionPolicy
     /// The largest object of a level, the first of equals in key order as a full read would find
     /// it: at each page, the first entry whose tally holds the largest object below.
     /// </summary>
-    private static async ValueTask<CompactionInput> LargestAsync(VortexDataset dataset, int level, CancellationToken cancellationToken)
+    private static async ValueTask<CompactionInput> LargestAsync(PlannedVersion dataset, int level, CancellationToken cancellationToken)
     {
         DatasetTree tree = dataset.Levels[level];
         PageReference reference = tree.Root;
@@ -746,7 +782,7 @@ internal static class CompactionPolicy
     /// order, found by walks that enter only the subtrees whose tally holds one.
     /// </summary>
     private static async ValueTask<List<CompactionInput>> FragmentedAsync(
-        VortexDataset dataset, ObjectTally[] tallies, int most, CancellationToken cancellationToken)
+        PlannedVersion dataset, ObjectTally[] tallies, int most, CancellationToken cancellationToken)
     {
         List<CompactionInput> found = [];
         for (int level = 0; level < tallies.Length; level++)
@@ -820,7 +856,7 @@ internal static class CompactionPolicy
     /// only the subtrees whose tally says an object under them may be due.
     /// </summary>
     private static async ValueTask<CompactionInput?> MostMarkedAsync(
-        VortexDataset dataset, ObjectTally[] tallies, Marking marking, HashSet<int> taken, CancellationToken cancellationToken)
+        PlannedVersion dataset, ObjectTally[] tallies, Marking marking, HashSet<int> taken, CancellationToken cancellationToken)
     {
         CompactionInput? best = null;
         double most = 0;
@@ -882,7 +918,7 @@ internal static class CompactionPolicy
     /// written before tallies, whose leaves the plan then reads. A page's tally is known only when
     /// every page below it carries one, so a top page whose entries all have one vouches for its tree.
     /// </summary>
-    private static async ValueTask<ObjectTally[]?> TalliesAsync(VortexDataset dataset, CancellationToken cancellationToken)
+    private static async ValueTask<ObjectTally[]?> TalliesAsync(PlannedVersion dataset, CancellationToken cancellationToken)
     {
         ObjectTally[] tallies = new ObjectTally[dataset.Levels.Count];
         for (int level = 0; level < tallies.Length; level++)
@@ -953,7 +989,7 @@ internal static class CompactionPolicy
 
     /// <summary>Every level's leaves, in key order, with the key each one sits at.</summary>
     private static async ValueTask<List<List<CompactionInput>>> ReadAsync(
-        VortexDataset dataset, CancellationToken cancellationToken)
+        PlannedVersion dataset, CancellationToken cancellationToken)
     {
         List<List<CompactionInput>> levels = [];
         for (int level = 0; level < dataset.Levels.Count; level++)
