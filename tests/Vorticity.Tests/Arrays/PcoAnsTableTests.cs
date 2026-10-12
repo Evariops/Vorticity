@@ -128,5 +128,21 @@ public sealed class PcoAnsTableTests
         Assert.Equal(0, table.Nodes[0].OffsetBits);
         Assert.Equal(0, table.Nodes[0].BitsToRead);
         Assert.Equal(0UL, table.StateLowers[0]);
+        Assert.Equal(0, table.MaxOffsetBits);
+    }
+
+    /// <summary>
+    /// The widest offset of a table's bins, which a batch reads offsets for only when it is not zero:
+    /// bins of one value each store none, refilled from wider ones and back.
+    /// </summary>
+    [Fact]
+    public void ATableKnowsTheWidestOffsetItsBinsStore()
+    {
+        PcoAnsTable table = PcoAnsTable.Build(4, [new PcoBin(1, 10, 0), new PcoBin(1, 11, 3), new PcoBin(3, 19, 0), new PcoBin(11, 30, 7)]);
+        Assert.Equal(7, table.MaxOffsetBits);
+
+        table.Refill(2, [new PcoBin(1, 5, 0), new PcoBin(3, 6, 0)]);
+        Assert.Equal(0, table.MaxOffsetBits);
+        Assert.All(table.Nodes.ToArray(), node => Assert.Equal(0, node.OffsetBits));
     }
 }

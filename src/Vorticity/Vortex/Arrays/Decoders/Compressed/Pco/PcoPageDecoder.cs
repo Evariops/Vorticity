@@ -839,6 +839,13 @@ internal sealed class PcoLatentState
 
                 _stateIndices[i % 4] = node.NextStateIndexBase + (int)ansValue;
             }
+
+            // Bins of one value each store no offset: the lower bounds the symbols wrote are the
+            // values, and the offsets' pass would add a zero to each, as upstream does not.
+            if (_table.MaxOffsetBits == 0)
+            {
+                return false;
+            }
         }
         else
         {

@@ -43,6 +43,9 @@ internal sealed class PcoAnsTable
     /// <summary>Table slots.</summary>
     internal int Size => 1 << SizeLog;
 
+    /// <summary>The widest offset a bin stores: 0 when every bin holds one value, and a batch reads no offset.</summary>
+    internal int MaxOffsetBits { get; private set; }
+
     /// <summary>Spreads the symbols across the table, upstream's order exactly.</summary>
     /// <param name="sizeLog">Log2 of the table size.</param>
     /// <param name="weights">Each symbol's weight; they must sum to the table size.</param>
@@ -132,6 +135,13 @@ internal sealed class PcoAnsTable
         SpreadInto(sizeLog, weights, stateSymbols);
         weights.CopyTo(running);
         SizeLog = sizeLog;
+        int widest = 0;
+        foreach (PcoBin bin in bins)
+        {
+            widest = Math.Max(widest, bin.OffsetBits);
+        }
+
+        MaxOffsetBits = widest;
 
         Span<PcoAnsNode> nodes = _nodes.AsSpan(0, tableSize);
         Span<ulong> lowers = _stateLowers.AsSpan(0, tableSize);
