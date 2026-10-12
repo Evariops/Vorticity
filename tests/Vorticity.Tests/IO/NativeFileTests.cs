@@ -1,6 +1,8 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 using Vorticity.IO;
 using Xunit;
@@ -48,6 +50,56 @@ public sealed class NativeFileTests
         byte[] past = new byte[100];
         Assert.Equal(10, NativeFile.Read(handle, past, FileLength - 10));
         Assert.Equal(0, NativeFile.Read(handle, past, FileLength));
+    }
+
+    [Fact]
+    public void AnOverlappedTwinReadsWhatItsHandleReads()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "only Windows runs a handle's reads one at a time");
+        byte[] content = Pattern(FileLength);
+        using TempFile file = new TempFile(content);
+        using SafeFileHandle handle = NativeFile.OpenRead(file.Path_, out _);
+        using SafeFileHandle twin = Assert.IsType<SafeFileHandle>(NativeFile.TryOpenOverlapped(handle));
+
+        Assert.True(twin.IsAsync);
+        foreach ((int offset, int length) in new[] { (0, 1), (17, 4_096), (FileLength - 1_000, 1_000), (FileLength / 2, 3) })
+        {
+            byte[] read = new byte[length];
+            Assert.Equal(length, NativeFile.ReadOverlapped(twin, read, offset));
+            Assert.True(read.AsSpan().SequenceEqual(content.AsSpan(offset, length)));
+        }
+
+        byte[] past = new byte[100];
+        Assert.Equal(10, NativeFile.ReadOverlapped(twin, past, FileLength - 10));
+        Assert.Equal(0, NativeFile.ReadOverlapped(twin, past, FileLength));
+    }
+
+    [Fact]
+    public void ThreadsReadingThroughATwinAtOnceEachGetTheirOwnBytes()
+    {
+        Assert.SkipUnless(OperatingSystem.IsWindows(), "only Windows runs a handle's reads one at a time");
+        // Every word its own offset, so that a read handed another's bytes shows.
+        byte[] content = new byte[4 << 20];
+        for (int at = 0; at < content.Length; at += sizeof(long))
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(content.AsSpan(at), at);
+        }
+
+        using TempFile file = new TempFile(content);
+        using SafeFileHandle handle = NativeFile.OpenRead(file.Path_, out _);
+        using SafeFileHandle twin = Assert.IsType<SafeFileHandle>(NativeFile.TryOpenOverlapped(handle));
+
+        // Each thread its own stride of the file, the events of the reads in flight taken and given
+        // back across threads all the while.
+        Parallel.For(0, 16, new ParallelOptions { MaxDegreeOfParallelism = 16 }, lane =>
+        {
+            byte[] read = new byte[64 * 1024];
+            for (int offset = lane * read.Length; offset < content.Length; offset += 16 * read.Length)
+            {
+                Assert.Equal(read.Length, NativeFile.ReadOverlapped(twin, read, offset));
+                Assert.True(read.AsSpan().SequenceEqual(content.AsSpan(offset, read.Length)));
+            }
+        });
     }
 
     [Fact]
