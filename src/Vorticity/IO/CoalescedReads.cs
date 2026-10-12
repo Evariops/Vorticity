@@ -158,9 +158,12 @@ internal static class CoalescedReads
         return false;
     }
 
-    /// <summary>A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling.</summary>
+    /// <summary>
+    /// A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling, and past
+    /// the shared pool's classes by the one block it keeps beyond them.
+    /// </summary>
     internal static NativeSegmentOwner RentBlock(int length, SegmentReadOptions options) =>
-        length <= options.MaxPooledBytes
+        length <= options.MaxPooledBytes || length > AlignedBufferPool.Shared.MaxPooledLength
             ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
             : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
 

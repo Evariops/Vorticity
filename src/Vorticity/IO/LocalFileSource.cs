@@ -514,9 +514,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     {
         // Only a disposed reader without a handle gets here: its mapping is gone with its dispose.
         SafeFileHandle handle = _handle ?? throw new ObjectDisposedException(nameof(LocalFileSource));
-        NativeSegmentOwner owner = length <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+        // The shared pool keeps a block past its classes as well, for the next read of a segment that large.
+        NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> destination = owner.WritableSpan[..length];
