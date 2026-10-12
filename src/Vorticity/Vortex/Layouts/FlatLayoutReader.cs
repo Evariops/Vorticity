@@ -478,10 +478,17 @@ internal sealed class FlatLayoutReader : LayoutReader
         in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total, int from, int spanned)
     {
         ReadOnlySpan<int> selection = context.Selection;
+
+        // Rows ClusterGap apart or more leave ClusterGap - 1 rows of the span unwanted between them:
+        // a span with fewer is one cluster, as a band's contiguous rows are, without a walk of its rows,
+        // which took a sixth of a narrow filter over ten million rows.
         int clusters = 1;
-        for (int i = 1; i < selection.Length; i++)
+        if (spanned - selection.Length >= ClusterGap - 1)
         {
-            clusters += selection[i] - selection[i - 1] >= ClusterGap ? 1 : 0;
+            for (int i = 1; i < selection.Length; i++)
+            {
+                clusters += selection[i] - selection[i - 1] >= ClusterGap ? 1 : 0;
+            }
         }
 
         if (clusters == 1)
