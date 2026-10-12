@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
@@ -58,6 +59,54 @@ internal ref struct PcoBitReader
     /// try/finally, which keeps the method out of line on the decoder's hottest loop.
     /// </remarks>
     internal readonly ulong ReadAt(long bitPosition, int width) => ReadCore(bitPosition, width);
+
+    /// <summary>
+    /// The bit position below which <see cref="Word"/> and <see cref="Peek"/> may read: both words a
+    /// read can load past the byte it starts in lie inside the source.
+    /// </summary>
+    internal readonly long WordLimit => Math.Max(0, (long)_source.Length - 15) * 8;
+
+    /// <summary>The source's first byte, which <see cref="Word"/> and <see cref="Peek"/> read from.</summary>
+    internal readonly ref byte Origin => ref MemoryMarshal.GetReference(_source);
+
+    /// <summary>
+    /// The 57 bits or more at <paramref name="bitPosition"/>, LSB first, with no check: the caller
+    /// reads below <see cref="WordLimit"/> only.
+    /// </summary>
+    /// <param name="origin">The source's <see cref="Origin"/>.</param>
+    /// <param name="bitPosition">The position, in bits from the origin.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Word(ref byte origin, long bitPosition) =>
+        LittleEndian(Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, (nint)(bitPosition >> 3)))) >> (int)(bitPosition & 7);
+
+    /// <summary>
+    /// <paramref name="width"/> bits, 0 to 64, at <paramref name="bitPosition"/>, LSB first, with no
+    /// check: the caller reads below <see cref="WordLimit"/> only.
+    /// </summary>
+    /// <param name="origin">The source's <see cref="Origin"/>.</param>
+    /// <param name="bitPosition">The position, in bits from the origin.</param>
+    /// <param name="width">Bits to read.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Peek(ref byte origin, long bitPosition, int width)
+    {
+        ulong value = Word(ref origin, bitPosition);
+        if (width > 57)
+        {
+            // As ReadCore: the second word seven bytes on, which keeps the shift below 64.
+            value |= LittleEndian(Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, (nint)(bitPosition >> 3) + 7)))
+                << (56 - (int)(bitPosition & 7));
+        }
+
+        return Low(value, width);
+    }
+
+    /// <summary>The low <paramref name="width"/> bits of <paramref name="value"/>, 0 to 64 of them.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Low(ulong value, int width) =>
+        Bmi2.X64.IsSupported ? Bmi2.X64.ZeroHighBits(value, (ulong)width) : value & Mask(width);
+
+    private static ulong LittleEndian(ulong word) =>
+        BitConverter.IsLittleEndian ? word : BinaryPrimitives.ReverseEndianness(word);
 
     private readonly ulong ReadCore(long bitPosition, int width)
     {
