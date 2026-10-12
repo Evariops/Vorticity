@@ -70,7 +70,7 @@ internal static class DatasetScenarios
         await foreach (Columns<Reading> batch in dataset.Scan<Reading>())
         {
             run.Answer();
-            return batch.RowCount;
+            return Vorticity.Bench.Scenarios.Consume.Typed(batch);
         }
 
         return 0;

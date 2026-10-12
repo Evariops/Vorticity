@@ -367,7 +367,7 @@ internal static class Scenarios
         await foreach (Columns<Reading> batch in file.Scan<Reading>())
         {
             run.Answer();
-            return batch.RowCount;
+            return Vorticity.Bench.Scenarios.Consume.Typed(batch);
         }
 
         return 0;
@@ -379,7 +379,7 @@ internal static class Scenarios
         await foreach (Columns<Reading> batch in file.Scan<Reading>().Where(r => r.Celsius > 49.0))
         {
             run.Answer();
-            return batch.RowCount;
+            return Vorticity.Bench.Scenarios.Consume.Typed(batch);
         }
 
         return 0;

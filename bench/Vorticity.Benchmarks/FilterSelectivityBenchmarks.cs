@@ -85,7 +85,7 @@ public class FilterSelectivityBenchmarks
             .ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;

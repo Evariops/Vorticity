@@ -161,31 +161,23 @@ internal static class RatioCheck
     /// one path with the caches to itself; this reports a path sharing a process with other work,
     /// which is the case a gate should defend. Neither figure should be quoted as the other.
     ///
-    /// THE SCAN AXES COME IN PAIRS, AND EACH PAIR MEASURES TWO DIFFERENT QUESTIONS. Upstream's scan
-    /// hands back arrays in the file's own encodings and `len()` answers from their metadata, so
-    /// nothing is decompressed; the scan this bench runs on our side decodes every column it
-    /// delivers but a constant one, which stays one value and a row count. "full scan" and
-    /// "projected scan, 1 of 5 columns" therefore drive the Rust side to the same form (`plain` in
-    /// `tools/vxbench-rs/src/lib.rs`: canonical, a constant kept), which is the comparison a decoder
-    /// ratio has to be built on. "full scan, upstream lazy" and "projected scan, upstream lazy" keep
-    /// the counting calls beside them, because "how long to get a stream of arrays you may never
-    /// fully read" is a real question about a real API -- it just is not the same question, and
-    /// quoting one as the other is what these pairs exist to prevent.
+    /// EVERY AXIS READS WHAT IT IS GIVEN. Upstream's scan hands back arrays in the file's own
+    /// encodings and `len()` answers from their metadata, so a scan that counts rows decompresses
+    /// nothing; the scan this bench runs on our side decodes every column it delivers but a
+    /// constant one, which stays one value and a row count. The scan axes therefore drive the Rust
+    /// side to the same form (`plain` in `tools/vxbench-rs/src/lib.rs`: canonical, a constant
+    /// kept), and both sides then read every value of every batch, the same bytes
+    /// (`Vorticity.Bench.Scenarios.Consume`, `consume` in the harness): a column stored plain is
+    /// otherwise a mapping no page of is touched on one side and a copy on the other. There is no
+    /// axis for upstream's scan without its decode: "how long to get a stream of arrays nobody
+    /// reads" is not a question a caller asks, and once read, those arrays are the axes above.
     /// </remarks>
     private static readonly Axis[] Axes =
     [
-        // THE FIRST FOUR COME FROM `Scenarios`, which is what makes `--profile fullscan` a
-        // statement about THIS axis and not about a scan that resembles it.
+        // THE AXES A SCENARIO NAMES COME FROM `Scenarios`, which is what makes `--profile
+        // fullscan` a statement about THIS axis and not about a scan that resembles it.
         FromScenario("fullscan"),
-        new Axis(
-            "full scan, upstream lazy",
-            ScanAll,
-            p => RustReader.Require(RustReader.ScanAll(p), "scan")),
         FromScenario("projected"),
-        new Axis(
-            "projected scan, upstream lazy",
-            Scenarios.ScanProjected,
-            p => RustReader.Require(RustReader.ScanProjected(p, Field), "projected scan")),
         new Axis(
             "open to first batch",
             FirstBatch,
@@ -225,12 +217,11 @@ internal static class RatioCheck
     internal static string? Page { get; set; }
 
     /// <summary>
-    /// The axes the page leaves out: Rust's scan without its decode, and a key-ordered read held to
-    /// a take of rows whose positions the reference is given, which ask another question than ours;
-    /// and the rewritten pairs, which judge a writer's choice rather than a reader.
+    /// The axes the page leaves out: a key-ordered read held to a take of rows whose positions the
+    /// reference is given, which asks another question than ours; and the rewritten pairs, which
+    /// judge a writer's choice rather than a reader.
     /// </summary>
     private static bool OnThePage(string axis) =>
-        !axis.Contains("upstream lazy", StringComparison.Ordinal) &&
         !axis.Contains("against a take", StringComparison.Ordinal) &&
         !axis.StartsWith("rewritten", StringComparison.Ordinal);
 
@@ -431,9 +422,7 @@ internal static class RatioCheck
     private static readonly Dictionary<string, Reference> References = new()
     {
         ["full scan"] = new(0.313, 2, 0.029),   // 3 passes, spread 0.304-0.313; was 0.318, -1.5%
-        ["full scan, upstream lazy"] = new(0.474, 2, 0.032),   // 3 passes, spread 0.459-0.474; was 0.477, -0.6%
         ["projected scan, 1 of 5 columns"] = new(0.513, 9, 0.044),   // 3 passes, spread 0.491-0.513; REBASED UP from 0.509 (k 11->9): +0.9%
-        ["projected scan, upstream lazy"] = new(0.597, 11, 0.125),   // 3 passes, spread 0.522-0.597; REBASED UP from 0.542 (k 12->11): +10.2%
         ["open to first batch"] = new(0.066, 10, 0.139),   // 3 passes, spread 0.057-0.066; was 0.071, -6.8%
         ["open, footer only"] = new(0.589, 30, 0.016),   // 3 passes, spread 0.580-0.589; was 0.632, -6.8%
         ["read and write back"] = new(0.324, 1, 0.040),   // 3 passes, spread 0.311-0.324; was 0.341, -4.9%
@@ -1417,7 +1406,7 @@ internal static class RatioCheck
         await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder(field).Where(Band(field, low, width)).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;
@@ -1635,7 +1624,7 @@ internal static class RatioCheck
         await foreach (RecordBatch batch in file.ScanBuilder().Where(predicate).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;
@@ -1651,7 +1640,7 @@ internal static class RatioCheck
         await foreach (RecordBatch batch in file.ScanBuilder().Where(predicate).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;
@@ -1801,7 +1790,7 @@ internal static class RatioCheck
         await foreach (RecordBatch batch in file.ScanBuilder().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;
@@ -2101,26 +2090,13 @@ internal static class RatioCheck
     private static Task<long> ScatteredTake(string path, long count, long stride) =>
         Scenarios.ScatteredTake(path, count, stride);
 
-    private static async Task<long> ScanProjected(string path)
-    {
-        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
-        long rows = 0;
-        await foreach (RecordBatch batch in file.ScanBuilder().Project(Field).ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
-        {
-            rows += batch.RowCount;
-        }
-
-        return rows;
-    }
-
     private static async Task<long> FirstBatch(string path)
     {
         await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            return batch.RowCount;
+            return Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return 0;

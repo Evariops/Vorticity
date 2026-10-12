@@ -297,24 +297,26 @@ internal static class FormatCost
         return action switch
         {
             "open" => file.RowCount,
-            "scan" => await CountAsync(file.Scan().With(options)).ConfigureAwait(false),
-            "project" => await CountAsync(file.Scan(Projected).With(options)).ConfigureAwait(false),
-            "filter-narrow" => await CountAsync(file.Scan().Where(Band(Set.BandLow, rows / 100)).With(options)).ConfigureAwait(false),
-            "filter-wide" => await CountAsync(file.Scan().Where(Band(Set.BandLow, rows / 2)).With(options)).ConfigureAwait(false),
-            "take" => await CountAsync(file.Scan().Rows(Spread(file.RowCount, Set.ReportTakeCount, rows / Set.ReportTakeCount)).With(options)).ConfigureAwait(false),
+            "scan" => await ReadAsync(file.Scan().With(options)).ConfigureAwait(false),
+            "project" => await ReadAsync(file.Scan(Projected).With(options)).ConfigureAwait(false),
+            "filter-narrow" => await ReadAsync(file.Scan().Where(Band(Set.BandLow, rows / 100)).With(options)).ConfigureAwait(false),
+            "filter-wide" => await ReadAsync(file.Scan().Where(Band(Set.BandLow, rows / 2)).With(options)).ConfigureAwait(false),
+            "take" => await ReadAsync(file.Scan().Rows(Spread(file.RowCount, Set.ReportTakeCount, rows / Set.ReportTakeCount)).With(options)).ConfigureAwait(false),
             "write" => await file.WriteBackAsync(options, degree).ConfigureAwait(false),
-            _ when action.StartsWith("column:", StringComparison.Ordinal) => await CountAsync(file.Scan(action["column:".Length..]).With(options)).ConfigureAwait(false),
+            _ when action.StartsWith("column:", StringComparison.Ordinal) => await ReadAsync(file.Scan(action["column:".Length..]).With(options)).ConfigureAwait(false),
             _ when action.StartsWith("take:", StringComparison.Ordinal) && long.TryParse(action["take:".Length..], CultureInfo.InvariantCulture, out long taken) && taken > 0 =>
-                await CountAsync(file.Scan().Rows(Spread(file.RowCount, taken, file.RowCount / taken)).With(options)).ConfigureAwait(false),
+                await ReadAsync(file.Scan().Rows(Spread(file.RowCount, taken, file.RowCount / taken)).With(options)).ConfigureAwait(false),
             _ => throw new ArgumentOutOfRangeException(nameof(action), action, "Not one of the report's actions."),
         };
     }
 
-    private static async Task<long> CountAsync(Scan scan)
+    /// <summary>The rows <paramref name="scan"/> keeps, every value of each batch read as it comes.</summary>
+    private static async Task<long> ReadAsync(Scan scan)
     {
         long rows = 0;
         await foreach (BatchView batch in scan)
         {
+            Vorticity.Bench.Scenarios.Consume.View(batch);
             rows += batch.Selection.Count;
         }
 

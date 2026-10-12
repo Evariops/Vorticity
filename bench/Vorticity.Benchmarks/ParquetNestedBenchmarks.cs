@@ -59,7 +59,7 @@ public class ParquetNestedBenchmarks
             await using VortexFile file = await VortexFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
             await foreach (BatchView batch in file.Scan())
             {
-                rows += batch.RowCount;
+                rows += Vorticity.Bench.Scenarios.Consume.View(batch);
             }
         }
         else
@@ -67,7 +67,7 @@ public class ParquetNestedBenchmarks
             await using ParquetFile file = await ParquetFile.OpenAsync(_path, CancellationToken.None).ConfigureAwait(false);
             await foreach (BatchView batch in file.Scan())
             {
-                rows += batch.RowCount;
+                rows += Vorticity.Bench.Scenarios.Consume.View(batch);
             }
         }
 

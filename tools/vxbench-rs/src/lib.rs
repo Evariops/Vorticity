@@ -25,6 +25,7 @@ use std::panic::catch_unwind;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -40,7 +41,10 @@ use vortex::array::IntoArray;
 use vortex::array::RecursiveCanonical;
 use vortex::array::VortexSessionExecute;
 use vortex::array::arrays::ConstantArray;
+use vortex::array::arrays::ListView;
 use vortex::array::arrays::StructArray;
+use vortex::array::arrays::VarBinView;
+use vortex::array::arrays::listview::ListViewArraySlotsExt;
 use vortex::array::arrays::struct_::StructDataParts;
 use vortex::buffer::Buffer;
 use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
@@ -267,23 +271,168 @@ fn kept_as_constant(constant: &ConstantArray) -> bool {
     )
 }
 
-/// The scan's splits, each in its plain form ([`plain`]) on its own task, as row counts.
+/// The scan's splits, each in its plain form ([`plain`]) on its own task, for the loop that drains
+/// the stream to read ([`total`]).
 ///
 /// Decoding on the split's task rather than in the loop that drains the stream is what lets a
 /// multi-threaded runtime decode on every core; on the single-threaded one it is the same work on
-/// the one thread. A context per split, as upstream's Arrow conversion makes one per chunk.
+/// the one thread. A context per split, as upstream's Arrow conversion makes one per chunk. The
+/// values are read where our side's caller reads them, in the one loop that takes the batches.
 fn decoded(
     scan: ScanBuilder<ArrayRef>,
     session: &VortexSession,
-) -> VortexResult<impl Stream<Item = VortexResult<i64>> + Send + 'static> {
+) -> VortexResult<impl Stream<Item = VortexResult<ArrayRef>> + Send + 'static> {
     let session = session.clone();
     scan.map(move |array: ArrayRef| {
         let mut ctx = session.create_execution_ctx();
-        let rows = array.len() as i64;
-        let _plain = plain(array, &mut ctx)?;
-        Ok(rows)
+        plain(array, &mut ctx)
     })
     .into_stream()
+}
+
+/// Where every value read is summed, so that no compiler can leave a read out.
+static READ: AtomicU64 = AtomicU64::new(0);
+
+/// What every read so far summed ([`consume`]): the evidence that the values were read, and, on a
+/// column both readers deliver alike, the sum our side's `Consume.Read` reaches.
+#[unsafe(no_mangle)]
+pub extern "C" fn vxbench_read_sum() -> u64 {
+    READ.load(Ordering::Relaxed)
+}
+
+/// Reads every value of `array`, its rows' bytes once, as a caller that uses the values does, and
+/// returns its rows.
+///
+/// A scan that counts rows and drops the arrays measures a reader that hands out values nobody
+/// reads: a column stored plain is then a view of the mapping that no page of is ever touched, and
+/// a decoded column is written and never read again. The contract with
+/// `bench/Vorticity.Benchmarks.Scenarios/Consume.cs`, which reads the same bytes of our side's batches:
+/// a string's 16-byte view and, out of line, the bytes it names; a list's offsets and sizes, and of
+/// its elements only the ranges its rows name; every other array its buffers, as sliced to its rows,
+/// and its children, validity included.
+fn consume(array: &ArrayRef) -> VortexResult<i64> {
+    let sum = read(array)?;
+    READ.fetch_add(sum, Ordering::Relaxed);
+    Ok(array.len() as i64)
+}
+
+/// The sum of every byte [`consume`] reads of `array`.
+fn read(array: &ArrayRef) -> VortexResult<u64> {
+    if let Some(strings) = array.as_opt::<VarBinView>() {
+        let views = strings.views();
+        // SAFETY: a view is 16 plain bytes, and the slice covers exactly the views.
+        let raw = unsafe { std::slice::from_raw_parts(views.as_ptr().cast::<u8>(), std::mem::size_of_val(views)) };
+        // The views as one run of words, then the bytes of the views that name them out of line.
+        let mut sum = words(raw);
+        for view in views {
+            if !view.is_inlined() {
+                let reference = view.as_view();
+                let bytes = strings.buffer(reference.buffer_index as usize).as_slice();
+                sum = sum.wrapping_add(words(&bytes[reference.as_range()]));
+            }
+        }
+
+        return Ok(sum.wrapping_add(validity(array)?));
+    }
+
+    if let Some(lists) = array.as_opt::<ListView>() {
+        let offsets = lists.offsets();
+        let sizes = lists.sizes();
+        let mut sum = read(offsets)?.wrapping_add(read(sizes)?).wrapping_add(validity(array)?);
+
+        // The elements the rows name, as runs: a list whose rows follow each other is one.
+        let (starts, start_width) = integers(offsets)?;
+        let (lengths, length_width) = integers(sizes)?;
+        let elements = lists.elements();
+        let (mut from, mut to) = (0u64, 0u64);
+        for row in 0..array.len() {
+            let (start, length) = (at(starts.as_slice(), start_width, row), at(lengths.as_slice(), length_width, row));
+            if length == 0 {
+                continue;
+            }
+
+            if start != to {
+                if to > from {
+                    sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
+                }
+
+                from = start;
+            }
+
+            to = start + length;
+        }
+
+        if to > from {
+            sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
+        }
+
+        return Ok(sum);
+    }
+
+    let mut sum = 0u64;
+    for buffer in array.buffers() {
+        sum = sum.wrapping_add(words(buffer.as_slice()));
+    }
+
+    for child in array.children() {
+        sum = sum.wrapping_add(read(&child)?);
+    }
+
+    Ok(sum)
+}
+
+/// The sum of the validity child of `array`, when it has one.
+fn validity(array: &ArrayRef) -> VortexResult<u64> {
+    let mut sum = 0u64;
+    for (name, child) in array.named_children() {
+        if name == "validity" {
+            sum = sum.wrapping_add(read(&child)?);
+        }
+    }
+
+    Ok(sum)
+}
+
+/// The values buffer of a canonical integer array, a list's offsets or sizes, and their width.
+fn integers(array: &ArrayRef) -> VortexResult<(vortex::buffer::ByteBuffer, usize)> {
+    let DType::Primitive(ptype, _) = array.dtype() else {
+        vortex_bail!("a list's offsets and sizes are integers, not {}", array.dtype());
+    };
+
+    let Some(bytes) = array.buffers().into_iter().next() else {
+        vortex_bail!("a list's offsets or sizes hold no buffer");
+    };
+
+    Ok((bytes, ptype.byte_width()))
+}
+
+/// Integer `index` of `bytes`, `width` bytes little-endian each: offsets and sizes never negative.
+#[inline]
+fn at(bytes: &[u8], width: usize, index: usize) -> u64 {
+    let at = index * width;
+    match width {
+        1 => u64::from(bytes[at]),
+        2 => u64::from(u16::from_le_bytes([bytes[at], bytes[at + 1]])),
+        4 => u64::from(u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])),
+        _ => u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap_or([0; 8])),
+    }
+}
+
+/// The sum of `bytes` as little-endian 64-bit words, the tail a byte at a time: a read of every
+/// byte at the speed memory gives. `Consume.Words` on our side.
+#[inline]
+fn words(bytes: &[u8]) -> u64 {
+    let mut chunks = bytes.chunks_exact(8);
+    let mut sum = 0u64;
+    for chunk in &mut chunks {
+        sum = sum.wrapping_add(u64::from_le_bytes(chunk.try_into().unwrap_or([0; 8])));
+    }
+
+    for &byte in chunks.remainder() {
+        sum = sum.wrapping_add(u64::from(byte));
+    }
+
+    sum
 }
 
 /// The scan's splits, each in its plain form on its own task, as arrays: what a writer is given to
@@ -296,12 +445,12 @@ fn canonical(scan: ScanBuilder<ArrayRef>, session: &VortexSession) -> ScanBuilde
     })
 }
 
-/// The rows a stream of decoded splits counted.
-async fn total(stream: impl Stream<Item = VortexResult<i64>>) -> VortexResult<i64> {
+/// The rows of a stream of decoded splits, every value of each read as it comes ([`consume`]).
+async fn total(stream: impl Stream<Item = VortexResult<ArrayRef>>) -> VortexResult<i64> {
     pin_mut!(stream);
     let mut rows: i64 = 0;
     while let Some(split) = stream.next().await {
-        rows += split?;
+        rows += consume(&split?)?;
     }
 
     Ok(rows)
@@ -317,6 +466,10 @@ pub extern "C" fn vxbench_noop() -> i64 {
 }
 
 /// Opens `path` and scans every column of every batch, returning the row count.
+///
+/// It reads nothing: the arrays stay in their stored encodings and `len()` answers from their
+/// metadata. It is the row count two readers are held to agree on before anything is timed; the
+/// timed scan is `vxbench_scan_canonical`.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -349,8 +502,8 @@ pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
 /// On the way, a constant array is expanded, as our reader expands it; were ours to keep constants
 /// as they are, this call would charge the reference for work ours no longer does.
 ///
-/// The decoded splits are dropped as they are counted: holding a million rows of them would
-/// measure the allocator.
+/// Each decoded split is read ([`consume`]) and dropped as it comes: holding a million rows of
+/// them would measure the allocator.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -393,41 +546,12 @@ pub unsafe extern "C" fn vxbench_scan_canonical_threads(path: *const c_char, thr
     })
 }
 
-/// Opens `path` and scans one field of every batch, returning the row count.
-///
-/// # Safety
-/// `path` and `field` must be valid NUL-terminated C strings for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn vxbench_scan_projected(path: *const c_char, field: *const c_char) -> i64 {
-    let Some(field) = (unsafe { text(field) }) else {
-        return ERR_BAD_PATH;
-    };
-
-    run(path, move |session, path| {
-        drive(session, |session| async move {
-            let file = open(&session, &path)?;
-            // Bound against the file's own dtype, the way the reference's own tests do it: an
-            // unbound expression is refused by the scan builder's signature.
-            let projection = select([field.as_str()], root())
-                .optimize_recursive(file.dtype())
-                .and_then(|expr| expr.bind(file.dtype()))?;
-            let stream = scan(&file)?.with_projection(projection).into_array_stream()?;
-            pin_mut!(stream);
-            let mut rows: i64 = 0;
-            while let Some(array) = stream.next().await {
-                rows += array?.len() as i64;
-            }
-
-            Ok(rows)
-        })
-    })
-}
-
 /// Opens `path`, scans one field of every batch and canonicalizes it, returning the row count.
 ///
 /// The like-for-like projected scan, for the same reason `vxbench_scan_canonical` is the
-/// like-for-like full scan: `vxbench_scan_projected` counts rows off metadata and decodes nothing,
-/// while our reader materializes every column it delivers.
+/// like-for-like full scan: a projection left in its stored encodings answers its row count from
+/// metadata and decodes nothing, while our reader materializes every column it delivers, and both
+/// sides read every value they deliver ([`consume`]).
 ///
 /// # Safety
 /// `path` and `field` must be valid NUL-terminated C strings for the duration of the call.
@@ -467,7 +591,7 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
             let stream = decoded(scan(&file)?, &session)?;
             pin_mut!(stream);
             match stream.next().await {
-                Some(rows) => rows,
+                Some(first) => consume(&first?),
                 None => Ok(0),
             }
         })

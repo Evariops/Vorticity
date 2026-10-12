@@ -985,14 +985,15 @@ internal static class Report
             text.AppendLine("  `open_buffer` over a `memmap2` mapping. Vorticity reads it as a session that keeps no mapping");
             text.AppendLine("  does on Windows: it copies the segments a scan reads, and maps the file only for many segments");
             text.AppendLine("  smaller than a page or for a large segment a decode touches little of. Both decode every value");
-            text.AppendLine("  they return to its plain form, a constant column kept as one value on both; a write hands its");
-            text.AppendLine("  bytes to a sink that keeps none,");
+            text.AppendLine("  they return to its plain form, a constant column kept as one value on both, and read every");
+            text.AppendLine("  value they return, the same bytes on both; a write hands its bytes to a sink that keeps none,");
         }
         else
         {
             text.AppendLine("* **The same work on both sides.** Both map the file and read it where it lies, Rust through");
             text.AppendLine("  `open_buffer` over a `memmap2` mapping; both decode every value they return to its plain form,");
-            text.AppendLine("  a constant column kept as one value on both; a write hands its bytes to a sink that keeps none,");
+            text.AppendLine("  a constant column kept as one value on both, and read every value they return, the same bytes");
+            text.AppendLine("  on both; a write hands its bytes to a sink that keeps none,");
         }
 
         text.AppendLine("  on both. On one core Rust is timed under each of its two ways of splitting a scan, its default");
@@ -1132,18 +1133,19 @@ internal static class Report
             $"one core; a figure is the median of the last {KernelRounds - KernelColdRounds} scans, and the median of {KernelProcesses} processes: what a"));
         if (ResultsPage.ReadsPositionally)
         {
-            text.AppendLine("decoder costs once warm. Each scan opens the file anew, on both sides. Rust maps it and reads it");
-            text.AppendLine("where it lies: a column stored in its plain form is a view of the mapping, nothing decoded, nothing");
-            text.AppendLine("copied and nothing read. Vorticity copies the segment of each file, as a session that keeps no");
-            text.AppendLine("mapping does on Windows: such a column costs it the copy, which a reader of the values pays on a");
-            text.AppendLine("mapping too, in page faults. Throughput is over the plain size, as above.");
+            text.AppendLine("decoder costs once warm, and every value each scan returns is read, the same bytes on both sides.");
+            text.AppendLine("Each scan opens the file anew, on both sides. Rust maps it and reads it where it lies: a column");
+            text.AppendLine("stored in its plain form is a view of the mapping, read where it lies. Vorticity copies the");
+            text.AppendLine("segment of each file, as a session that keeps no mapping does on Windows, and reads the copy.");
+            text.AppendLine("Throughput is over the plain size, as above.");
         }
         else
         {
-            text.AppendLine("decoder costs once warm. Each scan opens the file and maps it anew, on both sides, and reads it");
-            text.AppendLine("where it lies: a column stored in its plain form is a view of the mapping on both sides, nothing");
-            text.AppendLine("decoded and nothing copied, and its figure, past what memory can move, measures the walk of the");
-            text.AppendLine("layout. Throughput is over the plain size, as above.");
+            text.AppendLine("decoder costs once warm, and every value each scan returns is read, the same bytes on both sides.");
+            text.AppendLine("Each scan opens the file and maps it anew, on both sides, and reads it where it lies: a column");
+            text.AppendLine("stored in its plain form is a view of the mapping on both sides, nothing decoded and nothing");
+            text.AppendLine("copied, and its figure is the read of its values from the mapping. Throughput is over the plain");
+            text.AppendLine("size, as above.");
         }
         text.AppendLine();
         text.AppendLine("| encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | speedup | Vorticity, GB/s | Vortex Rust, GB/s |");

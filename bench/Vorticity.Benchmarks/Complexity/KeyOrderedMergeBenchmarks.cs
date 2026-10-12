@@ -90,7 +90,7 @@ public class KeyOrderedMergeBenchmarks
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
-                rows += merge.Current.RowCount;
+                rows += Vorticity.Bench.Scenarios.Consume.Batch(merge.Current);
             }
         }
 
@@ -107,7 +107,7 @@ public class KeyOrderedMergeBenchmarks
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
-                rows += merge.Current.RowCount;
+                rows += Vorticity.Bench.Scenarios.Consume.Batch(merge.Current);
             }
         }
 

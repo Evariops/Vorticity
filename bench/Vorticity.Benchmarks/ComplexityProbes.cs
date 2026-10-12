@@ -373,7 +373,7 @@ public class ComplexityProbes
             .WithCancellation(CancellationToken.None)
             .ConfigureAwait(false))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
             batch.Dispose();
         }
 
@@ -389,7 +389,7 @@ public class ComplexityProbes
             .WithCancellation(CancellationToken.None)
             .ConfigureAwait(false))
         {
-            taken += batch.RowCount;
+            taken += Vorticity.Bench.Scenarios.Consume.Batch(batch);
             batch.Dispose();
         }
 

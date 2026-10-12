@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -74,7 +73,7 @@ internal static class EncodingTradeoffs
             measured.Add((column, await MeasureAsync(column, rows, directory).ConfigureAwait(false)));
         }
 
-        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"checksum {s_checksum}"));
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"checksum {Vorticity.Bench.Scenarios.Consume.Read}"));
         if (page is not null)
         {
             if (only.Length > 0)
@@ -557,16 +556,13 @@ internal static class EncodingTradeoffs
             .OrderByDescending(g => g.Count())
             .Select(g => string.Create(CultureInfo.InvariantCulture, $"{g.Key} x{g.Count()}")));
 
-    private static long s_checksum;
-
     private static async Task ScanAsync(string path, long rows)
     {
         await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path).ConfigureAwait(false);
         long seen = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().ConfigureAwait(false))
         {
-            seen += batch.RowCount;
-            s_checksum += Consume(batch);
+            seen += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         if (seen != rows)
@@ -581,73 +577,13 @@ internal static class EncodingTradeoffs
         long seen = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Take(indices).ExecuteAsync().ConfigureAwait(false))
         {
-            seen += batch.RowCount;
-            s_checksum += Consume(batch);
+            seen += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         if (seen != indices.Length)
         {
             throw new InvalidOperationException($"took {seen} rows of {indices.Length}");
         }
-    }
-
-    /// <summary>
-    /// Reads every byte of the batch's decoded column once, as a consumer of the values does: a
-    /// column left in its plain form is otherwise a view of the mapped file that no one touches.
-    /// </summary>
-    private static long Consume(RecordBatch batch)
-    {
-        CanonicalArena arena = batch.Arena;
-        CanonicalNode node = arena.GetNode(arena.GetNode(batch.RootIndex).GetFieldIndex(0));
-        long sum = node.Kind switch
-        {
-            CanonicalKind.Primitive => Sum(node.Values.Span),
-            CanonicalKind.Bool => Sum(node.Bits.Span),
-            CanonicalKind.VarBinView => SumText(node),
-            _ => throw new InvalidOperationException($"a scan delivered a {node.Kind} column"),
-        };
-
-        if (node.Validity.Kind == ValidityKind.Bitmap)
-        {
-            sum += Sum(arena.GetNode(node.Validity.CanonicalNodeIndex).Bits.Span);
-        }
-
-        return sum;
-    }
-
-    private static long SumText(CanonicalNode node)
-    {
-        long sum = Sum(node.Views.Span);
-        for (int i = 0; i < node.DataBufferCount; i++)
-        {
-            sum += Sum(node.GetDataBuffer(i).Span);
-        }
-
-        return sum;
-    }
-
-    private static long Sum(ReadOnlySpan<byte> bytes)
-    {
-        ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(bytes);
-        Vector<ulong> total = Vector<ulong>.Zero;
-        int i = 0;
-        for (; i <= words.Length - Vector<ulong>.Count; i += Vector<ulong>.Count)
-        {
-            total += new Vector<ulong>(words[i..]);
-        }
-
-        ulong sum = Vector.Sum(total);
-        for (; i < words.Length; i++)
-        {
-            sum += words[i];
-        }
-
-        for (int b = words.Length * sizeof(ulong); b < bytes.Length; b++)
-        {
-            sum += bytes[b];
-        }
-
-        return (long)sum;
     }
 
     private static double Time(Action action)

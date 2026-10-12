@@ -339,7 +339,7 @@ public static class ScenarioSet
         return (bytes, column, probes);
     }
 
-    /// <summary>Every row of every column, canonicalized.</summary>
+    /// <summary>Every row of every column, canonicalized, and every value read (<see cref="Consume"/>).</summary>
     /// <param name="path">The file.</param>
     public static async Task<long> ScanAll(string path)
     {
@@ -348,13 +348,13 @@ public static class ScenarioSet
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
     }
 
-    /// <summary>Every row, canonicalized, with <paramref name="degree"/> lanes in flight.</summary>
+    /// <summary>Every row, canonicalized and read, with <paramref name="degree"/> lanes in flight.</summary>
     /// <param name="path">The file.</param>
     /// <param name="degree">Lanes; 1 is the default scan.</param>
     /// <remarks>
@@ -369,13 +369,13 @@ public static class ScenarioSet
         await foreach (RecordBatch batch in file.ScanBuilder().WithDegreeOfParallelism(degree)
             .ExecuteAsync().WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
     }
 
-    /// <summary>One column of five.</summary>
+    /// <summary>One column of five, every value of it read.</summary>
     /// <param name="path">The file.</param>
     public static async Task<long> ScanProjected(string path)
     {
@@ -384,13 +384,13 @@ public static class ScenarioSet
         await foreach (RecordBatch batch in file.ScanBuilder().Project(Field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
     }
 
-    /// <summary>One named column, whichever file it is in.</summary>
+    /// <summary>One named column, whichever file it is in, every value of it read.</summary>
     /// <param name="path">The file.</param>
     /// <param name="field">The column to keep.</param>
     public static async Task<long> ScanProjectedField(string path, string field)
@@ -400,13 +400,13 @@ public static class ScenarioSet
         await foreach (RecordBatch batch in file.ScanBuilder().Project(field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
     }
 
-    /// <summary>Rows spread through the file, one every <paramref name="stride"/>.</summary>
+    /// <summary>Rows spread through the file, one every <paramref name="stride"/>, every value of them read.</summary>
     /// <param name="path">The file.</param>
     /// <param name="count">How many rows.</param>
     /// <param name="stride">The gap between them; the row taken is the middle of each gap.</param>
@@ -444,13 +444,13 @@ public static class ScenarioSet
             .Take(indices.AsSpan(0, wanted).ToArray()).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
     }
 
-    /// <summary>A half-open band on <see cref="Field"/>.</summary>
+    /// <summary>A half-open band on <see cref="Field"/>, every value of the rows it keeps read.</summary>
     /// <param name="path">The file.</param>
     /// <param name="low">The band's low edge, inclusive.</param>
     /// <param name="width">Its width.</param>
@@ -465,7 +465,7 @@ public static class ScenarioSet
         await foreach (RecordBatch batch in file.ScanBuilder().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
@@ -512,7 +512,7 @@ public static class ScenarioSet
             .WithPruning(true).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Consume.Batch(batch);
         }
 
         return rows;
@@ -672,6 +672,7 @@ public static class ScenarioSet
         await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
+            // The writer is the reader of every value here, as the reference's is.
             rows += batch.RowCount;
             await writer.WriteAsync(batch, CancellationToken.None);
         }
