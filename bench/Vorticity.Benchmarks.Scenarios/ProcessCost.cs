@@ -48,10 +48,22 @@ public static class ProcessCost
     /// <remarks>
     /// <c>proc_pid_rusage</c> with <c>RUSAGE_INFO_V4</c>: the times at bytes 16 and 24 in Mach absolute
     /// units, the instructions at 248 and the cycles at 256 (<c>sys/resource.h</c>, checked against
-    /// <c>offsetof</c> on 2026-10-09). No allocation: a round reads it twice.
+    /// <c>offsetof</c> on 2026-10-09). <c>GetProcessTimes</c> on Windows. No allocation: a round reads
+    /// it twice.
     /// </remarks>
     public static unsafe ProcessCounters ReadCounters()
     {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // The process's pseudo-handle, in 100-ns units. Not Read(): its Process allocates 3 KB a
+            // call, and its peak working set enumerates every process of the machine, which made the
+            // warm round after it 0.1 to 0.5 ms slower.
+            long creation, exit, kernel, user;
+            return GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user) != 0
+                ? new ProcessCounters((kernel + user) * 100, 0, 0)
+                : default;
+        }
+
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
             (long cpuMs, _) = Read();
@@ -96,6 +108,12 @@ public static class ProcessCost
 
     [DllImport("libc", EntryPoint = "mach_timebase_info")]
     private static extern unsafe int mach_timebase_info(uint* timebase);
+
+    [DllImport("kernel32", EntryPoint = "GetCurrentProcess")]
+    private static extern nint GetCurrentProcess();
+
+    [DllImport("kernel32", EntryPoint = "GetProcessTimes")]
+    private static extern unsafe int GetProcessTimes(nint process, long* creation, long* exit, long* kernel, long* user);
 }
 
 /// <summary>A process's processor time in nanoseconds, and the instructions and cycles it ran, so far.</summary>
