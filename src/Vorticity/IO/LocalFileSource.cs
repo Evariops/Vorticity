@@ -72,7 +72,7 @@ internal interface IReadAnticipation
 /// Windows runs the reads of a handle opened for synchronous I/O one at a time, whatever their
 /// offsets, so the lanes of a scan copied from the system cache at one thread's pace: a group by
 /// over 48 MB of a file took the same 5.3 ms on one lane as on four. Once the reads that found
-/// another under way on the handle have waited on 4 MiB, the next opens a twin of it for
+/// another under way on the handle have waited on 2 MiB, the next opens a twin of it for
 /// overlapped I/O, whose reads run side by side, and every read that finds the handle busy reads
 /// through the twin from then on: that group by takes 3.5 ms on four lanes, 2.9 on eight, 4.2 rather
 /// than 7.0 on 32. A read through the twin costs 0.8 µs more, which a scan of small reads on one
@@ -119,10 +119,17 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
 
     /// <summary>
     /// The bytes of the reads that found another under way on the handle past which a read opens its
-    /// overlapped twin: what the system cache copies one read at a time in 400 µs, six times what the
-    /// open costs. At a megabyte, scans of a few megabytes on 32 lanes opened it for little.
+    /// overlapped twin: what the system cache copies one read at a time in 200 µs, about twice what
+    /// the open and the close cost.
     /// </summary>
-    private const long TwinAfterBytes = 4 << 20;
+    /// <remarks>
+    /// The lanes of a scan start together, and their first reads are the queue the twin takes away.
+    /// At 4 MiB it came as that queue drained: a take of 1,000 rows on 32 lanes from a file Vortex
+    /// Rust wrote, 6 MB read, paid its open and close for a dozen reads, 3.2 ms then 3.4 to 3.6. Opened
+    /// by the first read that found another, it served a projection of that file small reads it
+    /// costs more on than it saves, 2.4 ms then 3.3.
+    /// </remarks>
+    private const long TwinAfterBytes = 2 << 20;
 
     // The fields of _reads: the reads under way on the handle in the low bits, the KiB of those that
     // found one before them above, and the sign once a read opens the twin, or fails to.

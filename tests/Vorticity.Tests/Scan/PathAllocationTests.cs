@@ -216,7 +216,7 @@ public sealed class PathAllocationTests
         // Its reader counts the reads under way on its handle, and holds the twin it reads beside
         // the handle through once they wait on one another on Windows, where a handle runs its
         // reads one at a time: 16 bytes an open, on every axis. The twin itself, 72 bytes, only a
-        // scan whose reads waited on 4 MiB opens.
+        // scan whose reads waited on 2 MiB opens.
         ("open, footer only", File, 3_952, FooterOnly),
         // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
         // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
