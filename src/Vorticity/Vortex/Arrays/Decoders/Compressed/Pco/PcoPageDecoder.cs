@@ -24,9 +24,9 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// sequence that is wrong from the second value on.
 /// </para>
 /// <para>
-/// The offsets are not inline with the symbols: the symbol pass records each value's offset width
-/// and a running sum of those widths, and the offset pass then reads value i at that running sum
-/// past the base. Reading an offset inline would consume the stream in the wrong order.
+/// The offsets are not inline with the symbols: the symbol pass records each value's offset width,
+/// and the offset pass then reads the values' offsets one after the other from where the symbols
+/// end. Reading an offset inline would consume the stream in the wrong order.
 /// </para>
 /// <para>
 /// Latents are held as <c>ulong</c> whatever their width. Every operation on them wraps, as
@@ -587,7 +587,6 @@ internal readonly ref struct PcoBatchScratch
     /// <summary>Creates a view over caller-owned buffers, each at least a batch long.</summary>
     /// <param name="values">The batch's latents of a variable nothing keeps: a lookback's.</param>
     /// <param name="offsetBits">Per-value offset widths.</param>
-    /// <param name="offsetCumulative">Per-value offset positions.</param>
     /// <param name="states">
     /// <see cref="PcoPageDecoder.MaxLatentVars"/> reusable latent states, one per variable slot,
     /// built once for the node and reset by each page.
@@ -599,13 +598,11 @@ internal readonly ref struct PcoBatchScratch
     internal PcoBatchScratch(
         Span<ulong> values,
         Span<int> offsetBits,
-        Span<long> offsetCumulative,
         PcoLatentState[] states,
         Span<ulong> primary = default)
     {
         Values = values;
         OffsetBits = offsetBits;
-        OffsetCumulative = offsetCumulative;
         States = states;
         Primary = primary;
     }
@@ -615,9 +612,6 @@ internal readonly ref struct PcoBatchScratch
 
     /// <summary>Each value's offset width, when the variable has more than one bin.</summary>
     internal Span<int> OffsetBits { get; }
-
-    /// <summary>Each value's bit position within the offset stream.</summary>
-    internal Span<long> OffsetCumulative { get; }
 
     /// <summary>The page's three latent-state slots, reset per page rather than rebuilt.</summary>
     internal PcoLatentState[] States { get; }

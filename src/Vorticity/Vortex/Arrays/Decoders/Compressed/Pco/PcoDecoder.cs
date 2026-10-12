@@ -113,7 +113,6 @@ internal sealed class PcoDecoder : ArrayDecoder
         Scratch<ulong> secondaryScratch = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
-        Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
         Scratch<ulong> primaryScratch = new Scratch<ulong>(width == 8 ? 0 : PcoPageDecoder.BatchSize, default);
 
         // The latent states are reset by each page, and the chunk metadata with its tables refilled
@@ -124,7 +123,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         try
         {
             PcoBatchScratch batchScratch = new PcoBatchScratch(
-                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span, reused.States, primaryScratch.Span);
+                batchValues.Span, batchOffsetBits.Span, reused.States, primaryScratch.Span);
             int pageBuffer = wrapper.ChunkCount;
             int written = 0;
             int chunk = 0;
@@ -149,7 +148,6 @@ internal sealed class PcoDecoder : ArrayDecoder
             reused.Meta.Release();
             Volatile.Write(ref Spare, reused);
             primaryScratch.Dispose();
-            batchOffsetCumulative.Dispose();
             batchOffsetBits.Dispose();
             batchValues.Dispose();
             secondaryScratch.Dispose();

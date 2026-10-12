@@ -52,11 +52,11 @@ internal ref struct PcoBitReader
     /// <param name="width">Bits to read.</param>
     /// <returns>The value.</returns>
     /// <remarks>
-    /// pco's offsets are addressed rather than streamed: the symbol pass records each value's width
-    /// and a running sum, and the offset pass reads value <c>i</c> at <c>base + csum[i]</c>. That is
-    /// a random access into the same buffer, not a second cursor -- so this reads from an explicit
-    /// position rather than saving, moving and restoring one. Saving and restoring would need a
-    /// try/finally, which keeps the method out of line on the decoder's hottest loop.
+    /// pco's offsets start where the symbols end, which the symbol pass leaves the cursor past: the
+    /// offset pass reads them from a position of its own in the same buffer, not a second cursor --
+    /// so this reads from an explicit position rather than saving, moving and restoring one. Saving
+    /// and restoring would need a try/finally, which keeps the method out of line on the decoder's
+    /// hottest loop.
     /// </remarks>
     internal readonly ulong ReadAt(long bitPosition, int width) => ReadCore(bitPosition, width);
 

@@ -132,7 +132,7 @@ public sealed class PcoPlanTests
             PcoLatentState[] states = [new PcoLatentState(), new PcoLatentState(), new PcoLatentState()];
             PcoBatchScratch scratch = new PcoBatchScratch(
                 new ulong[PcoPageDecoder.BatchSize], new int[PcoPageDecoder.BatchSize],
-                new long[PcoPageDecoder.BatchSize], states, new ulong[PcoPageDecoder.BatchSize]);
+                states, new ulong[PcoPageDecoder.BatchSize]);
             ulong[] secondary = new ulong[PcoPageDecoder.BatchSize];
             int page = 0;
             for (int chunk = 0; chunk < plan.ChunkCount; chunk++)
