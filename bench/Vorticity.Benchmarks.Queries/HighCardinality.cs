@@ -149,6 +149,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -161,6 +162,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -173,6 +175,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -188,6 +191,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -203,6 +207,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -215,6 +220,7 @@ internal static class HighCardinality
         {
             run.Answer();
             values += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return values;
@@ -230,6 +236,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -242,6 +249,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -255,6 +263,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -267,6 +276,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -279,6 +289,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -291,6 +302,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -306,6 +318,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(2).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -320,7 +333,7 @@ internal static class HighCardinality
             .As<KeyTexts>())
         {
             run.Answer();
-            rows += groups.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -333,6 +346,7 @@ internal static class HighCardinality
         {
             run.Answer();
             users += Sum(days.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(days);
         }
 
         return users;
@@ -357,6 +371,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -374,6 +389,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -390,7 +406,7 @@ internal static class HighCardinality
             .As<KeyMost>())
         {
             run.Answer();
-            rows += groups.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -407,6 +423,7 @@ internal static class HighCardinality
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;

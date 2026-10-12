@@ -70,6 +70,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -152,6 +153,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -167,6 +169,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(2).Values) + (groups.Column<double?>(3).NullCount == 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -182,6 +185,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -201,6 +205,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -217,6 +222,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -292,6 +298,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + Sum(groups.Column<long>(2).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -309,6 +316,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -324,6 +332,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -340,6 +349,7 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (Sum(groups.Column<long>(2).Values) > 0 ? 0 : 1);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;

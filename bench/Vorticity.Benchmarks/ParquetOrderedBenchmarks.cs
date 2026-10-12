@@ -82,7 +82,7 @@ public partial class ParquetOrderedBenchmarks
         long groups = 0;
         await foreach (Columns<KeySum> batch in sums.As<KeySum>())
         {
-            groups += batch.RowCount;
+            groups += Vorticity.Bench.Scenarios.Consume.Typed(batch);
         }
 
         return groups;

@@ -45,6 +45,7 @@ internal static class DatasetScenarios
         {
             run.Answer();
             rows += Scenarios.Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -60,6 +61,7 @@ internal static class DatasetScenarios
         {
             run.Answer();
             rows += Scenarios.Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;

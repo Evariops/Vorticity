@@ -339,6 +339,7 @@ internal static class GroupScenarios
             .As<KeyFour>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -372,6 +373,7 @@ internal static class GroupScenarios
             .As<KeyMean>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -387,6 +389,7 @@ internal static class GroupScenarios
             .As<KeyDeviation>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -404,6 +407,7 @@ internal static class GroupScenarios
             .As<KeyCount>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -422,6 +426,7 @@ internal static class GroupScenarios
             .As<KeyCount>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -438,7 +443,7 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Max(s => s.Value))), configure)
             .As<KeyMost>())
         {
-            rows += groups.RowCount;
+            rows += Consume.Typed(groups);
         }
 
         return rows;
@@ -454,6 +459,7 @@ internal static class GroupScenarios
             .As<KeyCount>())
         {
             values += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return values;
@@ -483,6 +489,7 @@ internal static class GroupScenarios
             .As<NameCount>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -498,6 +505,7 @@ internal static class GroupScenarios
             .As<NameCount>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -521,6 +529,7 @@ internal static class GroupScenarios
             .As<DayUsers>())
         {
             users += Sum(days.Column<long>(1).Values);
+            Consume.Typed(days);
         }
 
         return users;
@@ -536,6 +545,7 @@ internal static class GroupScenarios
             .As<UrlSmallCount>())
         {
             rows += Sum(groups.Column<long>(2).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -550,7 +560,7 @@ internal static class GroupScenarios
             .Select(g => (g.Key, g.Min(p => p.Url), g.Max(p => p.Url))), configure)
             .As<KeyTexts>())
         {
-            groups += batch.RowCount;
+            groups += Consume.Typed(batch);
         }
 
         return groups;
@@ -566,6 +576,7 @@ internal static class GroupScenarios
             .As<IdCount>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -581,6 +592,7 @@ internal static class GroupScenarios
             .As<PairTotal>())
         {
             rows += Sum(groups.Column<long>(2).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -760,6 +772,7 @@ internal static class GroupScenarios
             .As<KeyTotal>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -776,6 +789,7 @@ internal static class GroupScenarios
             .As<LongKeyTotal>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -792,6 +806,7 @@ internal static class GroupScenarios
             .As<KeyTotal>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;
@@ -808,6 +823,7 @@ internal static class GroupScenarios
             .As<KeyTotal>())
         {
             rows += Sum(groups.Column<long>(1).Values);
+            Consume.Typed(groups);
         }
 
         return rows;

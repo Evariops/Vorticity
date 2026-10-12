@@ -24,9 +24,10 @@ dictionary's code and value for each row, and every other column's values and va
 only counted rows would time a reader whose values nobody reads: a column stored plain would be a
 mapping whose pages are never touched, or a copy, and a decoded column would be written and never
 read again. The runner and `vxbench` print the sum as `read_sum=`, and on a file both readers deliver
-alike, such as a primitive column, a struct of them or a plain string column, the two sums are equal. A count stays
-a count (`CountAsync`, the count axis), a write reads through its writer, and an aggregation reads its
-input.
+alike, such as a primitive column, a struct of them or a plain string column, the two sums are equal.
+A count stays a count (`CountAsync`, the count axis), a write reads through its writer, and an
+aggregation reads its input and every group it returns, or, against DuckDB, the columns DuckDB's
+outer query sums (`GroupScenarios.Checksum`).
 
 Every figure it publishes is on one page, [docs/guide/benchmarks.md](../docs/guide/benchmarks.md).
 With `--out docs/guide/benchmarks.md`, the report, `--ratio-check`, `--throughput --take`,
