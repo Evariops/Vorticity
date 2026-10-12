@@ -240,6 +240,33 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
 
     internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
 
+    /// <summary>The pages, the array listing them, and where each group's value lies, back to the shelf.</summary>
+    internal override void Release()
+    {
+        if (_shelf is { } shelf)
+        {
+            for (int p = 0; p < _pageCount; p++)
+            {
+                shelf.Give(_pages[p]);
+            }
+
+            shelf.Give(_pages);
+            shelf.Give(_at);
+            shelf.Give(_lengths);
+        }
+
+        _pages = [];
+        _pageCount = 0;
+        _fill = -1;
+        _used = 0;
+        _fillBytes = 0;
+        _paged = 0;
+        _held = 0;
+        _at = [];
+        _lengths = [];
+        _groups = 0;
+    }
+
     internal BytesExtremeSlot(ColumnShape shape, bool max)
     {
         _shape = shape;
@@ -248,6 +275,9 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
 
     /// <summary>The arrays of bytes the slot holds its values in: its pages, whatever its groups.</summary>
     internal int Pages => _pageCount;
+
+    /// <summary>The most pages it held at once, which its release leaves: what a test reads once the query is done.</summary>
+    internal int MostPages { get; private set; }
 
     /// <summary>The bytes of its pages, counted as it takes them.</summary>
     internal long PagedBytes => _paged;
@@ -540,6 +570,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
 
         _pages[_pageCount] = _shelf is null ? GC.AllocateUninitializedArray<byte>(bytes) : _shelf.Take<byte>(bytes, zeroed: false);
         _paged += bytes;
+        MostPages = Math.Max(MostPages, _pageCount + 1);
         return _pageCount++;
     }
 
@@ -579,6 +610,23 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     {
         _shelf = shelf;
         _seen = new ByteKeyTable(shelf);
+    }
+
+    /// <summary>The table of pairs, the counts and the chains, back to the shelf.</summary>
+    internal override void Release()
+    {
+        _seen.Release();
+        if (_shelf is { } shelf)
+        {
+            shelf.Give(_counts);
+            shelf.Give(_next);
+            shelf.Give(_first);
+        }
+
+        _counts = [];
+        _next = [];
+        _first = [];
+        _groups = 0;
     }
 
     internal override void EnsureGroups(int groups)

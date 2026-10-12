@@ -129,8 +129,17 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new CompositeKeys(_parts);
 
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new CompositeKeys(_parts, shelf);
+
     /// <summary>The table of the encoded tuples, the groups' keys.</summary>
     internal override long Footprint => _table.Footprint;
+
+    /// <summary>The table's pages and arrays back to the shelf, as a key of one text column gives its own.</summary>
+    internal override void Release()
+    {
+        _table.Release();
+        Count = 0;
+    }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {

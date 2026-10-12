@@ -1798,6 +1798,13 @@ internal sealed class AggregationPartition
         Keys?.Release();
         Records?.Release();
 
+        // The arrays of the slots that keep states of their own: texts' pages, distinct pairs. Left to
+        // the collector, every query took them new, 120 MB a text minimum over a million groups.
+        foreach (AggregateSlot slot in Slots)
+        {
+            slot.Release();
+        }
+
         // The lane's side of the core, its applier and the partition it bypassed its cache with, and a
         // shelf of the partition's own, which hands what it holds to the process's; a lane's holds nothing.
         _core?.Release();
@@ -2245,6 +2252,25 @@ internal sealed class AggregationPartition
     /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
     internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source) =>
         NewSlots(plan, settled, source, out _);
+
+    /// <summary>
+    /// The arrays of slots <see cref="NewSlots(AggregationPlan, AggregateSlot?[], ScanSource?, out GroupRecords?, ArrayShelf?, RecordLayout?)"/>
+    /// made on a shelf, back to it: the records they share, once, and what each keeps of its own.
+    /// </summary>
+    internal static void ReleaseSlots(AggregateSlot[] slots)
+    {
+        GroupRecords? released = null;
+        foreach (AggregateSlot slot in slots)
+        {
+            if (slot.Bound is { } records && !ReferenceEquals(records, released))
+            {
+                records.Release();
+                released = records;
+            }
+
+            slot.Release();
+        }
+    }
 
     /// <summary>
     /// A slot for each aggregate of the plan, the settled one or a new one, the new ones whose states
@@ -4275,7 +4301,10 @@ internal static class AggregationEngine
             {
                 keys.Parts(seed, shift, partOf.AsSpan(0, count));
             }
-            int[] starts = new int[parts + 1];
+            // The places and the starts lent by the process's shelf for as long as the merge reads them:
+            // given back with the lanes' tables (PartMerge.Release).
+            int[] starts = ArrayShelf.Rent<int>(parts + 1);
+            starts.AsSpan(0, parts + 1).Clear();
             for (int g = 0; g < count; g++)
             {
                 starts[partOf[g] + 1]++;
@@ -4286,8 +4315,9 @@ internal static class AggregationEngine
                 starts[part + 1] += starts[part];
             }
 
-            int[] next = starts[..^1];
-            int[] placed = new int[count];
+            Span<int> next = stackalloc int[parts];
+            starts.AsSpan(0, parts).CopyTo(next);
+            int[] placed = ArrayShelf.Rent<int>(count);
             for (int g = 0; g < count; g++)
             {
                 placed[next[partOf[g]]++] = g;

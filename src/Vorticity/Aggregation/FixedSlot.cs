@@ -646,6 +646,32 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         _set?.Govern(shelf);
     }
 
+    /// <summary>The pairs, the sets and the counts back to the shelf: every query took a lane's pairs new, 122 MB at a million groups.</summary>
+    internal override void Release()
+    {
+        _pairs.Release();
+        _set?.Release();
+        if (_sets is { } sets)
+        {
+            for (int g = 0; g < sets.Length; g++)
+            {
+                sets[g]?.Release();
+                sets[g] = null;
+            }
+        }
+
+        for (int s = 0; s < _spareCount; s++)
+        {
+            _spares[s].Release();
+            _spares[s] = null!;
+        }
+
+        _spareCount = 0;
+        _shelf?.Give(_counts);
+        _counts = [];
+        _groups = 0;
+    }
+
     internal override void Ungrouped()
     {
         _set = new DistinctValues<TValue>();

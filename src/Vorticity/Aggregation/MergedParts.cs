@@ -53,6 +53,9 @@ internal abstract class PartSource
     /// <summary>What every part reads let go, once: every part is merged, or none will be.</summary>
     internal abstract void Release();
 
+    /// <summary>A part's table let go once its batches are built: its keys' arrays back to the shelf they came from.</summary>
+    internal virtual void LetPartGo(GroupKeys keys, AggregateSlot[] slots) => keys.Release();
+
     /// <summary>The run's counts once every part is merged, with what the merge itself counted.</summary>
     internal virtual AggregationRun Finished(AggregationRun run) => run;
 }
@@ -111,9 +114,33 @@ internal sealed class PartMerge : PartSource
             partition.LetGo();
         }
 
+        // The places of the lanes' groups and where each part's begin, lent by the process's shelf (Cut).
+        for (int p = 0; p < _placed.Length; p++)
+        {
+            if (_placed[p] is { } placed)
+            {
+                ArrayShelf.Return(placed);
+            }
+
+            if (_starts[p] is { } starts)
+            {
+                ArrayShelf.Return(starts);
+            }
+        }
+
         Array.Clear(_keysOf);
         Array.Clear(_placed);
         Array.Clear(_starts);
+    }
+
+    /// <summary>
+    /// The part's keys, records and slots back to the process's shelf they came from: left to the
+    /// collector, every query at 32 lanes made its parts' tables again, 134 MB over two million names.
+    /// </summary>
+    internal override void LetPartGo(GroupKeys keys, AggregateSlot[] slots)
+    {
+        keys.Release();
+        AggregationPartition.ReleaseSlots(slots);
     }
 
     internal override ValueTask<(GroupKeys Keys, AggregateSlot[] Slots, long Reserved, long Measured)> MergeAsync(int part, CancellationToken cancellationToken) =>
@@ -176,47 +203,55 @@ internal sealed class PartMerge : PartSource
             throw _memory.Exceeded("merge of a group by", reserve, ahead);
         }
 
-        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits) : _keysOf[0].ForPart();
+        // The part's table from the process's shelf, which counts nothing, as the reservation above
+        // stands for it: given back once the part is built (LetPartGo), for the next part or query.
+        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, ArrayShelf.Retained) : _keysOf[0].ForPart(ArrayShelf.Retained);
         keys.Reserve(reserve);
-        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, ArrayShelf.Retained);
         foreach (AggregateSlot slot in slots)
         {
             slot.EnsureGroups(reserve);
         }
 
-        // Where each partition's groups land in the part, the largest partition's share at most: an array
-        // of the part's own, left to the next collection, never a shared pool's, whose retention no
-        // budget sees.
-        int[] map = GC.AllocateUninitializedArray<int>(Math.Max(1, most));
+        // Where each partition's groups land in the part, the largest partition's share at most, lent by
+        // the process's shelf, which budgets what it keeps, until the part is merged.
+        int[] map = ArrayShelf.Rent<int>(Math.Max(1, most));
         int merged = 0;
         int sending = 0;
-        for (int p = 0; p < _partitions.Length; p++)
+        try
         {
-            int from = _starts[p][part];
-            int count = _starts[p][part + 1] - from;
-            if (count == 0)
+            for (int p = 0; p < _partitions.Length; p++)
             {
-                continue;
-            }
-
-            ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
-            Span<int> into = map.AsSpan(0, count);
-            int before = keys.Count;
-            _keysOf[p].MergeInto(keys, groups, into);
-            for (int s = 0; s < slots.Length; s++)
-            {
-                slots[s].EnsureGroups(keys.Count);
-                if (_inputs[s] != AggregationPartition.Settled)
+                int from = _starts[p][part];
+                int count = _starts[p][part + 1] - from;
+                if (count == 0)
                 {
-                    slots[s].MergeFrom(_partitions[p].Slots[s], groups, into);
+                    continue;
+                }
+
+                ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
+                Span<int> into = map.AsSpan(0, count);
+                int before = keys.Count;
+                _keysOf[p].MergeInto(keys, groups, into);
+                for (int s = 0; s < slots.Length; s++)
+                {
+                    slots[s].EnsureGroups(keys.Count);
+                    if (_inputs[s] != AggregationPartition.Settled)
+                    {
+                        slots[s].MergeFrom(_partitions[p].Slots[s], groups, into);
+                    }
+                }
+
+                merged += count;
+                if (++sending == 2 && merged < entries)
+                {
+                    SizeFor(keys, slots, keys.Count + ((long)(entries - merged) * (keys.Count - before) / count), entries);
                 }
             }
-
-            merged += count;
-            if (++sending == 2 && merged < entries)
-            {
-                SizeFor(keys, slots, keys.Count + ((long)(entries - merged) * (keys.Count - before) / count), entries);
-            }
+        }
+        finally
+        {
+            ArrayShelf.Return(map);
         }
 
         // Twice what the part's table came to, beside the lanes', which live until the merge is done.
@@ -443,7 +478,7 @@ internal sealed class MergedParts : ResultParts
         }
         finally
         {
-            keys.Release();
+            _merge.LetPartGo(keys, slots);
         }
     }
 

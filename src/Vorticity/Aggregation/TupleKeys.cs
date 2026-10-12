@@ -507,7 +507,7 @@ internal sealed class TupleKeys : GroupKeys
 
     internal override GroupKeys Fresh() => Wrap(_tuples.Fresh());
 
-    internal override GroupKeys ForPart() => Wrap(_tuples.ForPart());
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => Wrap(_tuples.ForPart(shelf));
 
     internal override GroupKeys ForTable(ArrayShelf shelf) => Wrap(_tuples.ForTable(shelf));
 

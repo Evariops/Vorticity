@@ -57,9 +57,10 @@ public sealed partial class TextExtremePagesTests
             }
 
             // Twenty thousand groups' values in a few pages a slot, the long values' own included,
-            // in every lane that read rows.
-            Assert.Contains(slots, slot => slot.Pages > 0);
-            Assert.All(slots, slot => Assert.InRange(slot.Pages, 0, 200));
+            // in every lane that read rows; every page back on the shelf once the query is done.
+            Assert.Contains(slots, slot => slot.MostPages > 0);
+            Assert.All(slots, slot => Assert.InRange(slot.MostPages, 0, 200));
+            Assert.All(slots, slot => Assert.Equal(0, slot.Pages));
         }
         finally
         {

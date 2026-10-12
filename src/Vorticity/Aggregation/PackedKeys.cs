@@ -646,7 +646,7 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
-    internal override GroupKeys ForPart() => new PackedKeys<TKey>(_shapes, _facts, _parts);
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new PackedKeys<TKey>(_shapes, _facts, _parts);
 
     internal override bool Spills => Array.TrueForAll(_parts, part => part.Spills);
 
