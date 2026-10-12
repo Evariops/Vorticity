@@ -26,7 +26,8 @@ target/release/vxbench open <file.vortex>
 target/release/vxbench rewrite <file.vortex> <out.vortex>
 ```
 
-Each prints `rows=<n>` and exits 0, or prints a reason on standard error and exits 1. `filter` wants
+Each prints `rows=<n>` and exits 0, or prints a reason on standard error and exits 1. A scenario
+that returns values prints `read_sum=<n>` before it, the sum of every value it read. `filter` wants
 an `i64` field, because the predicate's literal is one, and an `i32` column is refused rather than
 coerced. `--threads <n>` or `--threads all` runs any of them on a multi-threaded runtime of that many
 workers, or of one per processor, and without it they run on the single-threaded runtime.
@@ -45,9 +46,10 @@ the way the reference's writer makes them, so the read scenarios can run on a fi
   the measurement
 
 This shim is built against the same crates.io pin the corpus was generated with
-(`vortex = "=0.86.1"`), exposes one entry point per benchmark axis, and returns a row count. There are
-no handles, no allocation across the boundary and no object lifetime to manage, so there is nothing in
-the interface to measure except the scan. The empty-call floor is 2.5 ns.
+(`vortex = "=0.86.1"`), exposes one entry point per benchmark axis, and returns a row count once every
+value it returns has been read. There are no handles, no allocation across the boundary and no object
+lifetime to manage, so there is nothing in the interface to measure except the scan. The empty-call
+floor is 2.5 ns.
 
 ## Fairness, item by item
 
@@ -75,13 +77,22 @@ the interface to measure except the scan. The empty-call floor is 2.5 ns.
   asserts that both readers return the same rows and the same checksum of every decoded value, in
   file order, on seven corpus files, and the per-encoding gates check the rows of every file before
   timing it.
+* Every value returned is read, as a caller that uses the values reads them. `consume` reads each
+  decoded split in the loop that drains the stream: a string's view and the bytes it names, a
+  list's offsets and sizes and the elements its rows name, every other array's buffers and children,
+  validity included, summed as 64-bit words. Our side's `Consume`
+  (`bench/Vorticity.Benchmarks.Scenarios/Consume.cs`) reads the same bytes of our batches, and the
+  two sums, printed as `read_sum=` by this binary and by our runner, are equal on the files both
+  readers deliver alike. A scan that counted rows would time a reader whose values nobody reads: a
+  column stored plain would be a mapping never touched here, and a decoded one an array built and
+  dropped.
 * The file is mapped anew at every call, on both sides, with `open_buffer` over a `memmap2` mapping,
   which reads the file where it lies, as our reader reads every file it opens from a path. The bench
   opens ours through a session that keeps no mapping once a file is closed
   (`MappedFileCacheCount = 0`). Upstream's `open_path` would instead read every segment it needs into
   buffers of its own. Measured against our mapping, a column stored in plain form then cost this side
-  a copy and ours a view of pages nothing touched, and the decoding tables printed that I/O as
-  decoding, up to twelve times on `table_wide`. Neither side keeps a segment cache.
+  a copy that ours did not pay, and the decoding tables printed that I/O as decoding, up to twelve
+  times on `table_wide`. Neither side keeps a segment cache.
 * On one core, the reference gets the faster of its two ways to split. Upstream's default cuts a
   chunk of more than 100 000 rows into splits of 100 000, and its flat reader decodes the whole chunk
   again for each one, so on the per-encoding corpus (files of one chunk of a million rows) every

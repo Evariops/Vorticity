@@ -155,8 +155,9 @@ is done.
 Where Vorticity is compared with another implementation, the figure is a speedup: the other side's
 time divided by Vorticity's, so anything above 1.00x means Vorticity took less time. The machines
 are an Apple M4 Pro (arm64, 14 cores, macOS) and an AMD Ryzen 9 7950X (x64, 16 cores and 32
-threads, Windows 11). The figures against Rust and for Parquet were measured on 2026-10-11, those
-against DuckDB on 2026-10-10, and [how it is measured](#how-it-is-measured) says what both sides do.
+threads, Windows 11). The figures against Rust were measured on 2026-10-11 on the M4 Pro and on
+2026-10-12 on the Ryzen, those for Parquet on 2026-10-12 and those against DuckDB on 2026-10-10, and
+[how it is measured](#how-it-is-measured) says what both sides do.
 
 ### Against Vortex's Rust implementation
 
@@ -165,21 +166,17 @@ and a million rows. On the file Vorticity writes:
 
 | scenario | M4 Pro, 1 core | M4 Pro, 14 cores | 7950X, 1 core | 7950X, 32 threads |
 |---|---:|---:|---:|---:|
-| read every column | 1.95x | 2.28x | 2.72x | 1.62x |
-| read one column of four | 2.37x | 2.58x | 2.21x | 2.16x |
-| filter, 1 % of the rows | 1.37x | 2.90x | 1.39x | 2.46x |
-| filter, half the rows | 2.03x | 2.13x | 2.63x | 2.01x |
-| take 1,000 scattered rows | 1.64x | 1.18x | 1.54x | 1.08x |
-| write the table back out | 2.32x | 1.77x | 2.42x | 1.61x |
+| read every column | 1.95x | 2.28x | 2.91x | 1.63x |
+| read one column of four | 2.37x | 2.58x | 2.74x | 2.08x |
+| filter, 1 % of the rows | 1.37x | 2.90x | 1.27x | 2.40x |
+| filter, half the rows | 2.03x | 2.13x | 2.69x | 1.77x |
+| take 1,000 scattered rows | 1.64x | 1.18x | 1.47x | 1.16x |
+| write the table back out | 2.32x | 1.77x | 2.40x | 1.71x |
 
 Rust keeps the lead in a few places. On the M4 Pro, it is a prefix filter over FSST strings (0.91x)
 and ten encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. On the
-Ryzen, the encodings that trail most are the ones stored plain: under Windows a session that keeps
-no mapping copies the segments it reads, where Rust reads its mapping in place, so such a column
-costs Vorticity the copy and Rust nothing. Pcodec's narrow and nullable files, which only that
-machine's corpus holds, decode in two to three times Rust's time, and with 32 threads on the same
-table at ten million rows, in the file Rust writes, the full scan is level (1.00x) and the wide
-filter behind (0.93x).
+Ryzen, Vorticity decodes 59 of the 61 encodings in less time, and the two that trail are Pcodec
+files only that machine's corpus holds, `pco_i16` (0.87x) and `pco_u32` (0.93x).
 
 ### Against DuckDB
 
@@ -205,11 +202,11 @@ three real files on the Ryzen 9 7950X, against the same rows rewritten as Vortex
 
 | scan of every column, in ms | Parquet, 1 thread | Parquet, 32 threads | Vortex, 32 threads |
 |---|---:|---:|---:|
-| New York's taxi trips, 3.1M rows of 19 columns, GZIP | 148 | 21.9 | 15.3 |
-| ClickBench's hits, 1M rows of 105 columns, Snappy | 121 | 33.6 | 28.9 |
-| a nested file, 2M rows of 22 columns, Snappy | 73.0 | 31.1 | 29.6 |
+| New York's taxi trips, 3.1M rows of 19 columns, GZIP | 158 | 37.7 | 22.2 |
+| ClickBench's hits, 1M rows of 105 columns, Snappy | 174 | 74.3 | 67.5 |
+| a nested file, 2M rows of 22 columns, Snappy | 119 | 76.3 | 62.0 |
 
-On one thread the codec weighs most: inflating the taxi trips' GZIP pages takes 121 ms of the 148,
+On one thread the codec weighs most: inflating the taxi trips' GZIP pages takes 121 ms of the 158,
 even though Vorticity decodes GZIP with its own DEFLATE decoder, 19 % faster than .NET's
 `GZipStream`.
 
@@ -235,8 +232,10 @@ Against Rust, both sides are compiled ahead of time, run on the same machine and
 Each opens the file anew at every call, decodes every value it returns to its plain form and must
 return the same rows, and a write hands its bytes to a sink that keeps none. On the M4 Pro both read
 the file mapped, where it lies. Under Windows, Rust maps the file while Vorticity copies the segments
-it reads, as a session that keeps no mapping does there. Rust is built the way upstream builds its
-own benchmarks, and on one core its figure is the faster of its two ways of splitting a scan.
+it reads, as a session that keeps no mapping does there. On the Ryzen both sides also read every
+value they return, the same bytes, as the Parquet figures read theirs on the caller's thread. Rust
+is built the way upstream builds its own benchmarks, and on one core its figure is the faster of its
+two ways of splitting a scan.
 Against DuckDB, the two sides take turns in pairs and must give the same answer to every query. The
 page cache is warm, cores are not pinned, and your data and your machine will differ.
 

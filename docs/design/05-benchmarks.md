@@ -108,17 +108,18 @@ band axes read files of 65 536 rows that our writer makes for them, and the last
 tables of a million rows with six columns, and of fifty columns.
 [In one process](../guide/benchmarks.md#in-one-process-after-warm-up) has the figures.
 
-* `open to first batch` is a latency. Both sides decode their first batch. Rust's first batch costs
-  most of what its whole scan does on this file, 1.4 ms of 1.6, where ours costs a fifth of our full
-  scan. The speedup is about the time to the first row, and nothing more.
+* `open to first batch` is a latency. Both sides decode and read their first batch. On the x64
+  machine Rust's first batch costs what its whole scan does on this file, 2.9 ms of 3.0, where ours
+  costs a quarter of our full scan, 0.22 ms of 0.86. The speedup is about the time to the first row,
+  and nothing more.
 * Where the reference has no counterpart, it answers the same question its own way. A key-ordered
   read of a band is compared with Rust's filtered scan of that band, which returns the same rows in
   file order, and an exact count from the index with Rust's count of the band with no column decoded.
   The speedup then prices the index, which is what a caller would weigh.
-* The gate has seven more axes that the page leaves out. Two time Rust's scan without decoding, which
-  asks a different question. One holds the uncorrelated key-order read against a take of 64 rows
-  whose positions the reference is given, the floor that read cannot go under. Four read one file as
-  each writer wrote it. [bench/README.md](../../bench/README.md) describes them.
+* The gate has five more axes that the page leaves out. One holds the uncorrelated key-order read
+  against a take of 64 rows whose positions the reference is given, the floor that read cannot go
+  under. Four read one file as each writer wrote it. [bench/README.md](../../bench/README.md)
+  describes them.
 
 ## 4. Decoders, per encoding
 
