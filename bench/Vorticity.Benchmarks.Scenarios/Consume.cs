@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -275,17 +276,46 @@ public static class Consume
         ReadOnlySpan<byte> sizes = node.Sizes.Span.Slice(start * sizeWidth, count * sizeWidth);
         int elements = node.ElementsIndex;
         ulong sum = Words(offsets) + Words(sizes);
+
+        // The widths chosen once, outside the loop over the rows, as the reference's `at` is inlined.
+        return sum + offsetWidth switch
+        {
+            1 => Elements<byte>(arena, elements, offsets, sizes, sizeWidth),
+            2 => Elements<ushort>(arena, elements, offsets, sizes, sizeWidth),
+            4 => Elements<uint>(arena, elements, offsets, sizes, sizeWidth),
+            _ => Elements<ulong>(arena, elements, offsets, sizes, sizeWidth),
+        };
+    }
+
+    /// <summary><see cref="Elements{TOffset, TSize}"/> at the width of the sizes.</summary>
+    private static ulong Elements<TOffset>(CanonicalArena arena, int elements, ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> sizes, int sizeWidth)
+        where TOffset : unmanaged, IBinaryInteger<TOffset> => sizeWidth switch
+    {
+        1 => Elements<TOffset, byte>(arena, elements, offsets, sizes),
+        2 => Elements<TOffset, ushort>(arena, elements, offsets, sizes),
+        4 => Elements<TOffset, uint>(arena, elements, offsets, sizes),
+        _ => Elements<TOffset, ulong>(arena, elements, offsets, sizes),
+    };
+
+    /// <summary>
+    /// The elements the rows name, as runs: rows that follow each other in the elements are one run.
+    /// Offsets and sizes are never negative, so they are read unsigned. An empty row is not singled
+    /// out: where it lies at the end of the run it changes nothing, and elsewhere it ends the run
+    /// and starts an empty one, at no byte read twice.
+    /// </summary>
+    private static ulong Elements<TOffset, TSize>(CanonicalArena arena, int elements, ReadOnlySpan<byte> offsetBytes, ReadOnlySpan<byte> sizeBytes)
+        where TOffset : unmanaged, IBinaryInteger<TOffset>
+        where TSize : unmanaged, IBinaryInteger<TSize>
+    {
+        ReadOnlySpan<TOffset> offsets = MemoryMarshal.Cast<byte, TOffset>(offsetBytes);
+        ReadOnlySpan<TSize> sizes = MemoryMarshal.Cast<byte, TSize>(sizeBytes);
+        ulong sum = 0;
         long from = 0;
         long to = 0;
-        for (int row = 0; row < count; row++)
+        for (int row = 0; row < sizes.Length && row < offsets.Length; row++)
         {
-            long length = Integer(sizes, sizeWidth, row);
-            if (length == 0)
-            {
-                continue;
-            }
-
-            long first = Integer(offsets, offsetWidth, row);
+            long length = long.CreateTruncating(sizes[row]);
+            long first = long.CreateTruncating(offsets[row]);
             if (first != to)
             {
                 if (to > from)
@@ -306,15 +336,6 @@ public static class Consume
 
         return sum;
     }
-
-    /// <summary>Integer <paramref name="index"/> of <paramref name="bytes"/>, little-endian: offsets and sizes never negative.</summary>
-    private static long Integer(ReadOnlySpan<byte> bytes, int width, int index) => width switch
-    {
-        1 => bytes[index],
-        2 => BinaryPrimitives.ReadUInt16LittleEndian(bytes[(index * 2)..]),
-        4 => BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index * 4)..]),
-        _ => (long)BinaryPrimitives.ReadUInt64LittleEndian(bytes[(index * 8)..]),
-    };
 
     /// <summary>
     /// <see cref="Words"/> for the bytes of one value, a string's mostly: inlined where it is read,

@@ -340,33 +340,20 @@ fn read(array: &ArrayRef) -> VortexResult<u64> {
         let sizes = lists.sizes();
         let mut sum = read(offsets)?.wrapping_add(read(sizes)?).wrapping_add(validity(array)?);
 
-        // The elements the rows name, as runs: a list whose rows follow each other is one.
+        // The elements the rows name, the widths chosen once, outside the loop over the rows, as
+        // our side's `Elements` is generic over them.
         let (starts, start_width) = integers(offsets)?;
         let (lengths, length_width) = integers(sizes)?;
+        let (starts, lengths, rows) = (starts.as_slice(), lengths.as_slice(), array.len());
         let elements = lists.elements();
-        let (mut from, mut to) = (0u64, 0u64);
-        for row in 0..array.len() {
-            let (start, length) = (at(starts.as_slice(), start_width, row), at(lengths.as_slice(), length_width, row));
-            if length == 0 {
-                continue;
-            }
-
-            if start != to {
-                if to > from {
-                    sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
-                }
-
-                from = start;
-            }
-
-            to = start + length;
-        }
-
-        if to > from {
-            sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
-        }
-
-        return Ok(sum);
+        let runs = match (start_width, length_width) {
+            (4, 4) => runs::<4, 4>(starts, lengths, rows, elements),
+            (8, 8) => runs::<8, 8>(starts, lengths, rows, elements),
+            (4, 8) => runs::<4, 8>(starts, lengths, rows, elements),
+            (8, 4) => runs::<8, 4>(starts, lengths, rows, elements),
+            _ => runs_any(starts, start_width, lengths, length_width, rows, elements),
+        }?;
+        return Ok(sum.wrapping_add(runs));
     }
 
     let mut sum = 0u64;
@@ -404,6 +391,68 @@ fn integers(array: &ArrayRef) -> VortexResult<(vortex::buffer::ByteBuffer, usize
     };
 
     Ok((bytes, ptype.byte_width()))
+}
+
+/// The elements the rows of a list name, as runs: rows that follow each other in the elements are
+/// one run. `O` and `S` are the widths of the offsets and the sizes, in bytes. An empty row is not
+/// singled out: at the end of the run it changes nothing, and elsewhere it ends the run and starts
+/// an empty one, at no byte read twice.
+fn runs<const O: usize, const S: usize>(starts: &[u8], lengths: &[u8], rows: usize, elements: &ArrayRef) -> VortexResult<u64> {
+    let mut sum = 0u64;
+    let (mut from, mut to) = (0u64, 0u64);
+    for row in 0..rows {
+        let length = le::<S>(lengths, row);
+        let start = le::<O>(starts, row);
+        if start != to {
+            if to > from {
+                sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
+            }
+
+            from = start;
+        }
+
+        to = start + length;
+    }
+
+    if to > from {
+        sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
+    }
+
+    Ok(sum)
+}
+
+/// [`runs`] for the narrow widths, a width looked at each row.
+fn runs_any(starts: &[u8], start_width: usize, lengths: &[u8], length_width: usize, rows: usize, elements: &ArrayRef) -> VortexResult<u64> {
+    let mut sum = 0u64;
+    let (mut from, mut to) = (0u64, 0u64);
+    for row in 0..rows {
+        let length = at(lengths, length_width, row);
+        let start = at(starts, start_width, row);
+        if start != to {
+            if to > from {
+                sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
+            }
+
+            from = start;
+        }
+
+        to = start + length;
+    }
+
+    if to > from {
+        sum = sum.wrapping_add(read(&elements.slice(from as usize..to as usize)?)?);
+    }
+
+    Ok(sum)
+}
+
+/// Integer `index` of `bytes`, `W` bytes little-endian each.
+#[inline(always)]
+fn le<const W: usize>(bytes: &[u8], index: usize) -> u64 {
+    let at = index * W;
+    let mut word = [0u8; 8];
+    word[..W].copy_from_slice(&bytes[at..at + W]);
+    u64::from_le_bytes(word)
 }
 
 /// Integer `index` of `bytes`, `width` bytes little-endian each: offsets and sizes never negative.
