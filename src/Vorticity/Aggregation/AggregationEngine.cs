@@ -2461,10 +2461,11 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void DropUnmet()
     {
-        if (Keys?.Met() is { } met)
+        if (Keys?.Met(out int count) is { } met)
         {
-            Keep(met);
-            GroupsAtEnd = met.Length;
+            Keep(met.AsSpan(0, count));
+            GroupsAtEnd = count;
+            ArrayShelf.Return(met);
         }
     }
 
@@ -4334,24 +4335,27 @@ internal static class AggregationEngine
     /// <summary>The parts read as one, the empty ones left out.</summary>
     internal static (GroupKeys Keys, AggregateSlot[] Slots, int Parts) Joined(GroupKeys[] partKeys, AggregateSlot[][] partSlots, int parts)
     {
-        List<int> kept = [];
+        // The parts that hold groups, counted first, their numbers on the stack: a list grown a part
+        // at a time was made again for every part a core built.
+        Span<int> kept = parts <= MostParts ? stackalloc int[Math.Max(1, parts)] : new int[parts];
+        int count = 0;
         for (int part = 0; part < parts; part++)
         {
             if (partKeys[part].Count > 0)
             {
-                kept.Add(part);
+                kept[count++] = part;
             }
         }
 
-        if (kept.Count == 0)
+        if (count == 0)
         {
-            kept.Add(0);
+            kept[count++] = 0;
         }
 
-        GroupKeys[] keys = new GroupKeys[kept.Count];
-        int[] offsets = new int[kept.Count];
+        GroupKeys[] keys = new GroupKeys[count];
+        int[] offsets = new int[count];
         int total = 0;
-        for (int k = 0; k < kept.Count; k++)
+        for (int k = 0; k < count; k++)
         {
             keys[k] = partKeys[kept[k]];
             offsets[k] = total;
@@ -4361,8 +4365,8 @@ internal static class AggregationEngine
         AggregateSlot[] slots = new AggregateSlot[partSlots[0].Length];
         for (int s = 0; s < slots.Length; s++)
         {
-            AggregateSlot[] ofSlot = new AggregateSlot[kept.Count];
-            for (int k = 0; k < kept.Count; k++)
+            AggregateSlot[] ofSlot = new AggregateSlot[count];
+            for (int k = 0; k < count; k++)
             {
                 ofSlot[k] = partSlots[kept[k]][s];
             }

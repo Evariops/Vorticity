@@ -53,12 +53,13 @@ public sealed partial class DirectGroupKeysTests
         AssertGroupedAs(keys, [9, 0], [11, 5]);
         Assert.Equal(12, keys.Count);
 
-        int[] met = keys.Met()!;
-        Assert.Equal([0, 5, 8, 10, 11], met);
-        keys.Keep(met);
+        int[] met = keys.Met(out int count)!;
+        Assert.Equal([0, 5, 8, 10, 11], met.AsSpan(0, count).ToArray());
+        keys.Keep(met.AsSpan(0, count));
+        ArrayShelf.Return(met);
         AssertGroupedAs(keys, [5, 1, -5, 9], [3, 5, 0, 4]);
         Assert.Equal(6, keys.Count);
-        Assert.Null(keys.Met());
+        Assert.Null(keys.Met(out _));
     }
 
     // Every value of a span numbered whole met, a row's group is its number with no page read, a value past
@@ -72,7 +73,7 @@ public sealed partial class DirectGroupKeysTests
         AssertGroupedAs(keys, [.. Enumerable.Range(100, 64)], [.. Enumerable.Range(0, 64)]);
         int[] values = [.. Enumerable.Range(0, 37).Select(i => i == 20 ? 99 : i == 33 ? 500 : 100 + (i * 7 % 64))];
         AssertGroupedAs(keys, values, [.. values.Select(value => value == 99 ? 64 : value == 500 ? 65 : value - 100)]);
-        Assert.Null(keys.Met());
+        Assert.Null(keys.Met(out _));
 
         GroupKeys wide = new FixedKeys<int>(Shape(VortexType.Int32), sorted: false, new KeyBounds(0, (1 << 16) - 1));
         Assert.True(((FixedKeys<int>)wide).ByValue);

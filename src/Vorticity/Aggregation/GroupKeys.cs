@@ -164,9 +164,15 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// The groups an index that numbered its span whole keeps once the rows are folded, the values no
-    /// row met left out; null when it keeps them all. It numbers values as they first come from then on.
+    /// row met left out: the first <paramref name="count"/> of an array the process's shelf lends, which
+    /// the caller gives back (<see cref="ArrayShelf.Return{T}"/>); null when it keeps them all. It
+    /// numbers values as they first come from then on.
     /// </summary>
-    internal virtual int[]? Met() => null;
+    internal virtual int[]? Met(out int count)
+    {
+        count = 0;
+        return null;
+    }
 
     /// <summary>
     /// For an index that numbers its groups by value over a span of <paramref name="least"/> values or
@@ -1525,10 +1531,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// order, then a null's group and the values past the bounds; null when every value was met, or the
     /// span is not numbered whole. The keys number values as they first come from then on.
     /// </summary>
-    internal override int[]? Met()
+    internal override int[]? Met(out int count)
     {
         int unmet = _unmet;
         _unmet = -1;
+        count = 0;
         if (unmet <= 0)
         {
             return null;
@@ -1537,7 +1544,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         // The groups are still the span's numbers in order, which the keep that follows reads once (KeepNumbered).
         _numbered = true;
 
-        int[] met = new int[Count - unmet];
+        // Lent by the process's shelf: read once by the keep that follows, a new list a sub-table was a
+        // quarter of what a core of 20M rows allocated at 32 lanes.
+        int[] met = ArrayShelf.Rent<int>(Count - unmet);
         int kept = 0;
         int span = (int)_span;
         if (_metBits is { } bits)
@@ -1579,6 +1588,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             met[kept++] = group;
         }
 
+        count = kept;
         return met;
     }
 
