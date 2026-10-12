@@ -399,6 +399,24 @@ public static class Consume
 
             sum = Vector256.Sum(even + odd);
         }
+        else if (Vector128.IsHardwareAccelerated && words.Length >= 8)
+        {
+            // Arm64 has 128-bit vectors only. Four sums, two words each, as LLVM unrolls the
+            // reference's loop there: one would wait on its own add at every load.
+            Vector128<ulong> first = Vector128<ulong>.Zero;
+            Vector128<ulong> second = Vector128<ulong>.Zero;
+            Vector128<ulong> third = Vector128<ulong>.Zero;
+            Vector128<ulong> fourth = Vector128<ulong>.Zero;
+            for (; i <= words.Length - 8; i += 8)
+            {
+                first += Vector128.LoadUnsafe(ref at, (nuint)i);
+                second += Vector128.LoadUnsafe(ref at, (nuint)(i + 2));
+                third += Vector128.LoadUnsafe(ref at, (nuint)(i + 4));
+                fourth += Vector128.LoadUnsafe(ref at, (nuint)(i + 6));
+            }
+
+            sum = Vector128.Sum(first + second + third + fourth);
+        }
 
         for (; i < words.Length; i++)
         {
