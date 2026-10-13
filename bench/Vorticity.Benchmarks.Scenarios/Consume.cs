@@ -1,5 +1,4 @@
 using System;
-using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -190,19 +189,25 @@ public static class Consume
         ReadOnlySpan<byte> bytes = default;
         int current = -1;
         ulong sum = Words(views);
-        for (int at = 0; at < views.Length; at += 16)
+
+        // Each view as two words, its length the low half of the first: a slice and a checked read a
+        // row cost a column of short strings, all inside their views, 2.3 cycles a row on arm64.
+        ref ulong at = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(views));
+        for (int row = 0; row < count; row++)
         {
-            int length = BinaryPrimitives.ReadInt32LittleEndian(views[at..]);
+            ulong head = Unsafe.Add(ref at, row * 2);
+            int length = (int)(uint)head;
             if (length > 12)
             {
-                int buffer = BinaryPrimitives.ReadInt32LittleEndian(views[(at + 8)..]);
+                ulong tail = Unsafe.Add(ref at, (row * 2) + 1);
+                int buffer = (int)(uint)tail;
                 if (buffer != current)
                 {
                     bytes = data[buffer].Span;
                     current = buffer;
                 }
 
-                sum += Short(bytes.Slice(BinaryPrimitives.ReadInt32LittleEndian(views[(at + 12)..]), length));
+                sum += Short(bytes.Slice((int)(tail >> 32), length));
             }
         }
 
@@ -213,54 +218,181 @@ public static class Consume
     /// Each row's code and the value it names, read as that row of the values would be: a dictionary
     /// spares the reader its values' materialization, not the caller its values.
     /// </summary>
+    /// <remarks>
+    /// The values are read through the codes as a typed span, with no slice and no call a row: a
+    /// million codes read a slice and a call at a time into one sum took 0.62 ms on arm64, where the
+    /// reference reads the values it materialized in 0.40.
+    /// </remarks>
     private static ulong Entries(CanonicalArena arena, CanonicalNode node, int start, int count)
     {
         ReadOnlySpan<uint> codes = MemoryMarshal.Cast<byte, uint>(node.Codes.Span.Slice(start * sizeof(uint), count * sizeof(uint)));
         int index = node.EncodedValuesIndex;
         CanonicalNode values = arena.GetNode(index);
-        ulong sum = 0;
-        if (values.Validity.Kind != ValidityKind.Bitmap && values.Kind == CanonicalKind.Primitive)
+        bool nulls = values.Validity.Kind == ValidityKind.Bitmap;
+        if (values.Kind == CanonicalKind.Primitive)
         {
-            int width = values.PType.ByteWidth();
             ReadOnlySpan<byte> bytes = values.Values.Span;
-            foreach (uint code in codes)
+            if (nulls)
             {
-                sum += code + Short(bytes.Slice((int)code * width, width));
-            }
-        }
-        else if (values.Validity.Kind != ValidityKind.Bitmap && values.Kind == CanonicalKind.VarBinView)
-        {
-            ReadOnlySpan<byte> views = values.Views.Span;
-            ReadOnlySpan<VortexBuffer> data = values.DataBuffers;
-            ReadOnlySpan<byte> bytes = default;
-            int current = -1;
-            foreach (uint code in codes)
-            {
-                // The row's view, length and prefix then buffer and offset, and the bytes it names.
-                ReadOnlySpan<byte> view = views.Slice((int)code * 16, 16);
-                ulong head = BinaryPrimitives.ReadUInt64LittleEndian(view);
-                ulong tail = BinaryPrimitives.ReadUInt64LittleEndian(view[8..]);
-                sum += code + head + tail;
-                int length = (int)(uint)head;
-                if (length > 12)
+                CanonicalNode validity = arena.GetNode(values.Validity.CanonicalNodeIndex);
+                ReadOnlySpan<byte> bits = validity.Bits.Span;
+                int offset = validity.BitOffset;
+                switch (values.PType.ByteWidth())
                 {
-                    int buffer = (int)(uint)tail;
-                    if (buffer != current)
-                    {
-                        bytes = data[buffer].Span;
-                        current = buffer;
-                    }
-
-                    sum += Short(bytes.Slice((int)(tail >> 32), length));
+                    case 1: return Gather<byte>(codes, bytes, bits, offset);
+                    case 2: return Gather<ushort>(codes, bytes, bits, offset);
+                    case 4: return Gather<uint>(codes, bytes, bits, offset);
+                    case 8: return Gather<ulong>(codes, bytes, bits, offset);
+                }
+            }
+            else
+            {
+                switch (values.PType.ByteWidth())
+                {
+                    case 1: return Gather<byte>(codes, bytes);
+                    case 2: return Gather<ushort>(codes, bytes);
+                    case 4: return Gather<uint>(codes, bytes);
+                    case 8: return Gather<ulong>(codes, bytes);
                 }
             }
         }
-        else
+        else if (values.Kind == CanonicalKind.VarBinView && !nulls)
         {
-            // Values of any other kind, or with nulls of their own, a row at a time.
-            foreach (uint code in codes)
+            return Views(codes, values);
+        }
+
+        // Values of any other kind, or text with nulls of its own, a row at a time.
+        ulong sum = 0;
+        foreach (uint code in codes)
+        {
+            sum += code + Rows(arena, index, (int)code, 1);
+        }
+
+        return sum;
+    }
+
+    /// <summary>
+    /// Each row's code and the value it names, four rows at a time into four sums, as
+    /// <see cref="Words"/> keeps several: one sum would wait on its own add at every row.
+    /// </summary>
+    private static ulong Gather<T>(ReadOnlySpan<uint> codes, ReadOnlySpan<byte> bytes)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
+        ref uint at = ref MemoryMarshal.GetReference(codes);
+        ulong first = 0;
+        ulong second = 0;
+        ulong third = 0;
+        ulong fourth = 0;
+        int i = 0;
+        for (; i <= codes.Length - 4; i += 4)
+        {
+            uint a = Unsafe.Add(ref at, i);
+            uint b = Unsafe.Add(ref at, i + 1);
+            uint c = Unsafe.Add(ref at, i + 2);
+            uint d = Unsafe.Add(ref at, i + 3);
+            first += a + Bytes(values[(int)a]);
+            second += b + Bytes(values[(int)b]);
+            third += c + Bytes(values[(int)c]);
+            fourth += d + Bytes(values[(int)d]);
+        }
+
+        for (; i < codes.Length; i++)
+        {
+            uint code = codes[i];
+            first += code + Bytes(values[(int)code]);
+        }
+
+        return first + second + third + fourth;
+    }
+
+    /// <summary>
+    /// <see cref="Gather{T}(ReadOnlySpan{uint}, ReadOnlySpan{byte})"/> for values with nulls of their
+    /// own: each row's value and, as <see cref="Rows"/> reads one row, the byte that holds its bit.
+    /// </summary>
+    private static ulong Gather<T>(ReadOnlySpan<uint> codes, ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> bits, int offset)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
+        ref uint at = ref MemoryMarshal.GetReference(codes);
+        ulong first = 0;
+        ulong second = 0;
+        ulong third = 0;
+        ulong fourth = 0;
+        int i = 0;
+        for (; i <= codes.Length - 4; i += 4)
+        {
+            uint a = Unsafe.Add(ref at, i);
+            uint b = Unsafe.Add(ref at, i + 1);
+            uint c = Unsafe.Add(ref at, i + 2);
+            uint d = Unsafe.Add(ref at, i + 3);
+            first += a + bits[(offset + (int)a) >> 3] + Bytes(values[(int)a]);
+            second += b + bits[(offset + (int)b) >> 3] + Bytes(values[(int)b]);
+            third += c + bits[(offset + (int)c) >> 3] + Bytes(values[(int)c]);
+            fourth += d + bits[(offset + (int)d) >> 3] + Bytes(values[(int)d]);
+        }
+
+        for (; i < codes.Length; i++)
+        {
+            uint code = codes[i];
+            first += code + bits[(offset + (int)code) >> 3] + Bytes(values[(int)code]);
+        }
+
+        return first + second + third + fourth;
+    }
+
+    /// <summary>
+    /// The bytes of one value, summed as <see cref="Short"/> sums them: a byte or a word whole, and the
+    /// bytes of a narrower value one by one, folded in the register.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Bytes<T>(T value)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ulong word = ulong.CreateTruncating(value);
+        if (Unsafe.SizeOf<T>() == 2)
+        {
+            return (word & 0xFF) + (word >> 8);
+        }
+
+        if (Unsafe.SizeOf<T>() == 4)
+        {
+            ulong pairs = (word & 0x00FF00FF) + ((word >> 8) & 0x00FF00FF);
+            return (pairs & 0xFFFF) + (pairs >> 16);
+        }
+
+        return word;
+    }
+
+    /// <summary>
+    /// Each row's code, the view it names and, out of line, the view's bytes: the views read as two
+    /// words each, with no slice a row.
+    /// </summary>
+    private static ulong Views(ReadOnlySpan<uint> codes, CanonicalNode values)
+    {
+        ReadOnlySpan<ulong> views = MemoryMarshal.Cast<byte, ulong>(values.Views.Span);
+        ReadOnlySpan<VortexBuffer> data = values.DataBuffers;
+        ReadOnlySpan<byte> bytes = default;
+        int current = -1;
+        ulong sum = 0;
+        foreach (uint code in codes)
+        {
+            // The row's view, length and prefix then buffer and offset, and the bytes it names.
+            int at = (int)code << 1;
+            ulong head = views[at];
+            ulong tail = views[at + 1];
+            sum += code + head + tail;
+            int length = (int)(uint)head;
+            if (length > 12)
             {
-                sum += code + Rows(arena, index, (int)code, 1);
+                int buffer = (int)(uint)tail;
+                if (buffer != current)
+                {
+                    bytes = data[buffer].Span;
+                    current = buffer;
+                }
+
+                sum += Short(bytes.Slice((int)(tail >> 32), length));
             }
         }
 
@@ -349,16 +481,19 @@ public static class Consume
             return Words(bytes);
         }
 
+        // Read through a reference, as the reference's loop is compiled: a slice a word, and a checked
+        // read of it, made a short string cost more than its bytes.
+        ref byte at = ref MemoryMarshal.GetReference(bytes);
         ulong sum = 0;
         int i = 0;
         for (; i <= bytes.Length - sizeof(ulong); i += sizeof(ulong))
         {
-            sum += BinaryPrimitives.ReadUInt64LittleEndian(bytes[i..]);
+            sum += Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref at, i));
         }
 
         for (; i < bytes.Length; i++)
         {
-            sum += bytes[i];
+            sum += Unsafe.Add(ref at, i);
         }
 
         return sum;
