@@ -892,6 +892,18 @@ internal sealed class PcoLatentState
         long wordLimit = reader.WordLimit;
         ref byte offsets = ref reader.Origin;
         int at = 0;
+        if (_table.MaxOffsetBits <= MaxWordBits)
+        {
+            // Every offset inside the one word a read loads: no second word, and no test for a
+            // width of 64, the branch a value `PcoBitReader.Peek` takes for the widest latents.
+            for (; at < count && position < wordLimit; at++)
+            {
+                int width = offsetBits[at];
+                scratch[at] = unchecked(scratch[at] + PcoBitReader.LowUnder64(PcoBitReader.Word(ref offsets, position), width));
+                position += width;
+            }
+        }
+
         for (; at < count && position < wordLimit; at++)
         {
             int width = offsetBits[at];
@@ -920,6 +932,9 @@ internal sealed class PcoLatentState
     /// </summary>
     private const int MaxSymbolBits = 14;
 
+    /// <summary>The widest read one word serves: 64 bits less the seven a position past its byte can skip.</summary>
+    private const int MaxWordBits = 57;
+
     /// <summary>
     /// A batch's symbols four at a time, for as long as the four lie inside the page with their
     /// word: the four interleaved states held in registers, and the four symbols of a step read out
@@ -936,15 +951,19 @@ internal sealed class PcoLatentState
         ref PcoBitReader reader, int count, ReadOnlySpan<PcoAnsNode> nodes, ReadOnlySpan<ulong> lowers,
         Span<ulong> scratch, Span<int> offsetBits)
     {
+        ReadOnlySpan<ulong> packed = _table.Packed;
         if ((uint)count > (uint)scratch.Length || (uint)count > (uint)offsetBits.Length
-            || lowers.Length != nodes.Length || !BitOperations.IsPow2(nodes.Length))
+            || lowers.Length != nodes.Length || packed.Length != nodes.Length || !BitOperations.IsPow2(nodes.Length))
         {
             return 0;
         }
 
-        // Native-sized indices, which address the tables without a sign extension each.
+        // Native-sized indices, which address the tables without a sign extension each. Each node
+        // is one word (`PcoAnsTable.Packed`), and a symbol reads at most MaxSymbolBits, so its bits
+        // are kept without the test for a width of 64 that `PcoBitReader.Low` makes, a taken branch
+        // a symbol on arm64.
         nint mask = nodes.Length - 1;
-        ref PcoAnsNode table = ref MemoryMarshal.GetReference(nodes);
+        ref ulong table = ref MemoryMarshal.GetReference(packed);
         ref ulong bounds = ref MemoryMarshal.GetReference(lowers);
         ref ulong values = ref MemoryMarshal.GetReference(scratch);
         ref int widths = ref MemoryMarshal.GetReference(offsetBits);
@@ -967,34 +986,34 @@ internal sealed class PcoLatentState
             {
                 ulong word = PcoBitReader.Word(ref origin, position);
 
-                ref PcoAnsNode node = ref Unsafe.Add(ref table, state0);
+                ulong node = Unsafe.Add(ref table, state0);
                 Unsafe.Add(ref values, i) = Unsafe.Add(ref bounds, state0);
-                Unsafe.Add(ref widths, i) = node.OffsetBits;
-                int read = node.BitsToRead;
-                state0 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, read)) & mask;
+                Unsafe.Add(ref widths, i) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
+                int read = (byte)(node >> PcoAnsTable.PackedReadShift);
+                state0 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, read)) & mask;
                 word >>= read;
 
-                node = ref Unsafe.Add(ref table, state1);
+                node = Unsafe.Add(ref table, state1);
                 Unsafe.Add(ref values, i + 1) = Unsafe.Add(ref bounds, state1);
-                Unsafe.Add(ref widths, i + 1) = node.OffsetBits;
-                int bits = node.BitsToRead;
-                state1 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, bits)) & mask;
+                Unsafe.Add(ref widths, i + 1) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
+                int bits = (byte)(node >> PcoAnsTable.PackedReadShift);
+                state1 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
                 word >>= bits;
                 read += bits;
 
-                node = ref Unsafe.Add(ref table, state2);
+                node = Unsafe.Add(ref table, state2);
                 Unsafe.Add(ref values, i + 2) = Unsafe.Add(ref bounds, state2);
-                Unsafe.Add(ref widths, i + 2) = node.OffsetBits;
-                bits = node.BitsToRead;
-                state2 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, bits)) & mask;
+                Unsafe.Add(ref widths, i + 2) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
+                bits = (byte)(node >> PcoAnsTable.PackedReadShift);
+                state2 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
                 word >>= bits;
                 read += bits;
 
-                node = ref Unsafe.Add(ref table, state3);
+                node = Unsafe.Add(ref table, state3);
                 Unsafe.Add(ref values, i + 3) = Unsafe.Add(ref bounds, state3);
-                Unsafe.Add(ref widths, i + 3) = node.OffsetBits;
-                bits = node.BitsToRead;
-                state3 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, bits)) & mask;
+                Unsafe.Add(ref widths, i + 3) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
+                bits = (byte)(node >> PcoAnsTable.PackedReadShift);
+                state3 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
                 position += read + bits;
             }
         }

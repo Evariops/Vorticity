@@ -27,6 +27,7 @@ internal sealed class PcoAnsTable
     private uint[] _stateSymbols = [];
     private PcoAnsNode[] _nodes = [];
     private ulong[] _stateLowers = [];
+    private ulong[] _packed = [];
 
     /// <summary>Log2 of the table size.</summary>
     internal int SizeLog { get; private set; }
@@ -39,6 +40,22 @@ internal sealed class PcoAnsTable
 
     /// <summary>The bin lower bound at each table slot, hoisted out of the bin list.</summary>
     internal ReadOnlySpan<ulong> StateLowers => _stateLowers.AsSpan(0, Size);
+
+    /// <summary>
+    /// Each slot's node as one word: the next state's base in the low 32 bits, the bits to read at
+    /// <see cref="PackedReadShift"/> and the offset's bits at <see cref="PackedOffsetShift"/>.
+    /// </summary>
+    /// <remarks>
+    /// The symbol loop's form of <see cref="Nodes"/>: one load a symbol and a few shifts, where a
+    /// node of three ints cost a multiply by twelve and three loads on arm64.
+    /// </remarks>
+    internal ReadOnlySpan<ulong> Packed => _packed.AsSpan(0, Size);
+
+    /// <summary>Where a packed node keeps the bits to read.</summary>
+    internal const int PackedReadShift = 32;
+
+    /// <summary>Where a packed node keeps the offset's bits.</summary>
+    internal const int PackedOffsetShift = 40;
 
     /// <summary>Table slots.</summary>
     internal int Size => 1 << SizeLog;
@@ -108,6 +125,7 @@ internal sealed class PcoAnsTable
             _stateSymbols = new uint[tableSize];
             _nodes = new PcoAnsNode[tableSize];
             _stateLowers = new ulong[tableSize];
+            _packed = new ulong[tableSize];
         }
 
         // A latent with no bins still gets a one-slot table: upstream's degenerate case, where the
@@ -145,6 +163,7 @@ internal sealed class PcoAnsTable
 
         Span<PcoAnsNode> nodes = _nodes.AsSpan(0, tableSize);
         Span<ulong> lowers = _stateLowers.AsSpan(0, tableSize);
+        Span<ulong> packed = _packed.AsSpan(0, tableSize);
         for (int slot = 0; slot < tableSize; slot++)
         {
             uint symbol = stateSymbols[slot];
@@ -158,6 +177,8 @@ internal sealed class PcoAnsTable
 
             int offsetBits = symbol < (uint)bins.Length ? bins[(int)symbol].OffsetBits : 0;
             nodes[slot] = new PcoAnsNode((int)(shifted - tableSize), offsetBits, bitsToRead);
+            packed[slot] = (uint)(shifted - tableSize) | ((ulong)(uint)bitsToRead << PackedReadShift)
+                | ((ulong)(uint)offsetBits << PackedOffsetShift);
             lowers[slot] = symbol < (uint)bins.Length ? bins[(int)symbol].Lower : 0;
             running[(int)symbol]++;
         }
