@@ -1,10 +1,12 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 using Vorticity.Types;
@@ -1303,16 +1305,7 @@ internal sealed class PcoLatentState
             // The recentring folded into the highest order's prefix sum, which reads each value
             // once anyway: a pass of its own over the batch was a seventh of a 16-bit pco decode on
             // arm64, where a vector holds two of these 64-bit latents.
-            ulong mid = _mid;
-            ulong moment = _deltaMoments[order];
-            for (int i = 0; i < values.Length; i++)
-            {
-                ulong previous = unchecked(ulong.CreateTruncating(values[i]) + mid);
-                values[i] = T.CreateTruncating(moment);
-                moment = unchecked(moment + previous);
-            }
-
-            _deltaMoments[order] = moment;
+            _deltaMoments[order] = PrefixSums(values, _deltaMoments[order], _mid);
             order--;
         }
         else
@@ -1323,16 +1316,113 @@ internal sealed class PcoLatentState
 
         for (; order >= 0; order--)
         {
-            ulong moment = _deltaMoments[order];
-            for (int i = 0; i < values.Length; i++)
+            _deltaMoments[order] = PrefixSums(values, _deltaMoments[order], 0);
+        }
+    }
+
+    /// <summary>
+    /// One order of a consecutive delta undone: each value replaced by <paramref name="moment"/>
+    /// plus the values before it, each first moved by <paramref name="bias"/>.
+    /// </summary>
+    /// <returns>The moment past the batch, for the next one.</returns>
+    /// <remarks>
+    /// <para>
+    /// A prefix sum is a chain of dependent adds, one a value. At 16 and 32 bits it is taken a
+    /// 128-bit vector at a time instead: within the vector by adding it to itself shifted up one,
+    /// two and four lanes, then moved by the moment, which the vector's last sum carries to the
+    /// next with one broadcast and one add. The chain is then one step a vector of eight or four
+    /// values, where the scalar loop took two cycles a value on arm64.
+    /// </para>
+    /// <para>
+    /// The running moment is a 64-bit word and only its low bits are stored, which a store of the
+    /// value's width does by itself: a moment summed as a ushort zero-extended itself after every
+    /// add, a second cycle a value in a chain of one.
+    /// </para>
+    /// </remarks>
+    internal static ulong PrefixSums<T>(Span<T> values, ulong moment, ulong bias)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        int i = 0;
+        if ((typeof(T) == typeof(ushort) || typeof(T) == typeof(uint)) && (AdvSimd.IsSupported || Sse2.IsSupported)
+            && values.Length >= Vector128<T>.Count)
+        {
+            int lanes = Vector128<T>.Count;
+            ref T at = ref MemoryMarshal.GetReference(values);
+            Vector128<T> biases = Vector128.Create(T.CreateTruncating(bias));
+            Vector128<T> carry = Vector128.Create(T.CreateTruncating(moment));
+            for (; i <= values.Length - lanes; i += lanes)
             {
-                ulong previous = ulong.CreateTruncating(values[i]);
-                values[i] = T.CreateTruncating(moment);
-                moment = unchecked(moment + previous);
+                Vector128<T> value = Vector128.LoadUnsafe(ref at, (nuint)i) + biases;
+                Vector128<T> sums;
+                if (typeof(T) == typeof(ushort))
+                {
+                    sums = value + LanesUp(value, 2);
+                    sums += LanesUp(sums, 4);
+                    sums += LanesUp(sums, 8);
+                }
+                else
+                {
+                    sums = value + LanesUp(value, 4);
+                    sums += LanesUp(sums, 8);
+                }
+
+                // Each value's sum less itself is the sum of the values before it.
+                (carry + sums - value).StoreUnsafe(ref at, (nuint)i);
+                carry += Last(sums);
             }
 
-            _deltaMoments[order] = moment;
+            moment = ulong.CreateTruncating(carry.ToScalar());
         }
+
+        for (; i < values.Length; i++)
+        {
+            ulong previous = unchecked(ulong.CreateTruncating(values[i]) + bias);
+            values[i] = T.CreateTruncating(moment);
+            moment = unchecked(moment + previous);
+        }
+
+        return moment;
+    }
+
+    /// <summary>The vector's lanes moved up by <paramref name="bytes"/>, zeros shifted in at the bottom.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<T> LanesUp<T>(Vector128<T> value, [ConstantExpected(Min = 2, Max = 8)] int bytes)
+        where T : unmanaged
+    {
+        Vector128<byte> lanes = value.AsByte();
+        if (AdvSimd.IsSupported)
+        {
+            // The bottom 16 - bytes bytes of the value, above bytes zeros.
+            Vector128<byte> zero = Vector128<byte>.Zero;
+            return (bytes switch
+            {
+                2 => AdvSimd.ExtractVector128(zero, lanes, 14),
+                4 => AdvSimd.ExtractVector128(zero, lanes, 12),
+                _ => AdvSimd.ExtractVector128(zero, lanes, 8),
+            }).As<byte, T>();
+        }
+
+        return (bytes switch
+        {
+            2 => Sse2.ShiftLeftLogical128BitLane(lanes, 2),
+            4 => Sse2.ShiftLeftLogical128BitLane(lanes, 4),
+            _ => Sse2.ShiftLeftLogical128BitLane(lanes, 8),
+        }).As<byte, T>();
+    }
+
+    /// <summary>The vector's last lane in every lane.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<T> Last<T>(Vector128<T> value)
+        where T : unmanaged
+    {
+        if (AdvSimd.IsSupported)
+        {
+            return typeof(T) == typeof(ushort)
+                ? AdvSimd.DuplicateSelectedScalarToVector128(value.AsUInt16(), 7).As<ushort, T>()
+                : AdvSimd.DuplicateSelectedScalarToVector128(value.AsUInt32(), 3).As<uint, T>();
+        }
+
+        return Vector128.Create(value.GetElement(Vector128<T>.Count - 1));
     }
 
     /// <summary>
