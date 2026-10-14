@@ -56,9 +56,15 @@ Three costs remain, and this document is about them:
 
 A job is always the same thing: one plan's inputs read in key order, the outputs written, and one
 `ReplaceObjects` committed. That commit names the entries it read, and is abandoned when one of them
-changed (see [rebase](13-dataset.md#82-rebase-by-re-applying-operations)). Correctness never depends
-on who runs the job, so every driver below is safe against every other one and against every writer.
-What they differ in is who waits for the work, and how much of it is wasted.
+changed (see [rebase](13-dataset.md#82-rebase-by-re-applying-operations)). A leveled job also names
+the part of the level it writes that its outputs fill, the range of the clustering key its sources
+span, and the commit looks at that part of the level again: an object there that the job did not read
+abandons it. Another compaction moved that object in after the plan, from another level, and the
+outputs would overlap it. Two jobs that start from the same level always share such an object, but a
+job that empties level 0 into the first level that can hold it and one that pushes an object of
+level 1 into the same level may share none, and only that look keeps the level key-disjoint.
+Correctness never depends on who runs the job, so every driver below is safe against every other one
+and against every writer. What they differ in is who waits for the work, and how much of it is wasted.
 
 | driver | who pays | the bounds | what goes wrong |
 |---|---|---|---|

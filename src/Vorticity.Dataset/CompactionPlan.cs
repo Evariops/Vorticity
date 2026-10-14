@@ -342,6 +342,13 @@ public sealed record CompactionJob
     /// job starts past under a round robin; empty for a job that moves no pointer.
     /// </summary>
     internal ReadOnlyMemory<byte> Stop { get; init; }
+
+    /// <summary>
+    /// The part of the destination level a leveled job takes over, which its commit checks no object
+    /// it did not read has moved into; null for a job that rewrites objects inside their own level,
+    /// or concatenates.
+    /// </summary>
+    internal LevelRange? Range { get; init; }
 }
 
 /// <summary>

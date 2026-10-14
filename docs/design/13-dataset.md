@@ -248,7 +248,8 @@ or below the smallest key the others hold, which is a contiguous window of its c
 cost is `k` comparisons per window. Rows are compared by their row encoding, the order the tree, the
 runs and the seeks already use. An output is sealed at the first key change past its target, never
 inside a key, since two outputs sharing a boundary value would overlap, and the destination inputs
-are chosen against the union of the source range. Rows with a null key come last. A composite key
+are chosen against the union of the source range. The commit looks for them again in that range, and
+abandons the job when it finds one the plan did not take ([rebase](#82-rebase-by-re-applying-operations)). Rows with a null key come last. A composite key
 merges on its tuple, and a composite key whose columns hold nulls is refused, since its run holds no
 such tuple. The rows written are checked against the inputs' count, because a rewrite that loses rows
 is the one failure it must not have. Measured on four interleaved level 0 objects: 42 808 bytes in,
@@ -450,6 +451,7 @@ outputs), and never merges two trees. Each operation carries its own answer to a
 | indexer, indexer on the same range | the second finds the same fragment already there and writes nothing |
 | indexer, compaction of that object | the object is gone, so the fragment is dropped and never written |
 | compaction, compaction on overlapping inputs | the second finds an input missing and abandons, and its outputs are garbage |
+| compaction, compaction into the same level from another one, on inputs they do not share | the second finds, inside the range of the clustering key its sources span, an object of the level it writes that it did not read, and abandons, since its outputs would overlap it |
 | vacuum, anything | vacuum only deletes what no retained version references and what is older than the window ([lifecycle](#10-lifecycle)) |
 | delete or update, append | the appended object is not among those the change read, so it stays and its rows are not touched |
 | delete or update, anything that rewrites or marks an object it read | an input is gone or its entry changed, so the replacement is abandoned and the change is worked out again on the version that won ([deleting rows](#12-deleting-and-updating-rows)) |
@@ -732,7 +734,10 @@ other than by widening a number or making it nullable ([schema evolution](#13-sc
 - An interleaving fuzzer over the in-memory store: readers, writers, indexers, compactions and vacuums
   in seeded schedules, with commits prepared on a stale version and crashes after a put. Every read
   must equal a scan with indexes and summaries off on the same version, and every version a vacuum
-  retains must verify whole.
+  retains must verify whole. A third schedule holds compactions planned on one version and commits
+  them after others, from three handles that plan with different options: after every step each level
+  above 0 is key-disjoint and a walk of the key cursor meets every row. Two compactions that write one
+  level from two others are also replayed step by step, the second abandoned.
 - The rebase matrix, covering every row of the [rebase table](#82-rebase-by-re-applying-operations).
 - [The invariant](#52-the-invariant), checked after every step of a randomized append stream drained
   at random moments.

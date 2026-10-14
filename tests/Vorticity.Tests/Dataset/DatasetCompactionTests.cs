@@ -507,6 +507,82 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task TwoCompactionsIntoOneLevelFromTwoLevelsLeaveItKeyDisjoint()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Two compactions write into level 2 and share no input. B plans, on one version, to move an
+        // object of level 1 into level 2, where nothing holds its keys yet. Before B commits, level 0
+        // fills past what level 1 may hold and empties straight into level 2, inside B's range, through
+        // A, in another process. B's input is still where B read it, unchanged: what moved is the level
+        // B writes into, which its commit has to look at again.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset first = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await first.AppendAsync(Ordered(types, schema, 0, 200), ct);
+        await first.AppendAsync(Ordered(types, schema, 1_000, 50), ct);
+        await MoveAsync(first, from: 0, to: 1);
+        List<long> appended = [.. Enumerable.Range(0, 200).Select(key => (long)key), .. Enumerable.Range(1_000, 50).Select(key => (long)key)];
+
+        // Three levels at most, so that a level 0 over level 1's size empties into level 2, and a level
+        // 1 of a few bytes, so that both are over their size at once.
+        CompactionOptions options = new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1, MaxLevels = 3 };
+
+        // B, planned on this version: level 1 over its size, its largest object into an empty level 2.
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, Clustered(), ct);
+        CompactionJob moving = Assert.IsType<CompactionJob>((await second.PlanCompactionAsync(options, ct)).Job);
+        Assert.Equal((CompactionTrigger.LevelSize, 1, 2), (moving.Trigger, moving.FromLevel, moving.ToLevel));
+        ObjectEntry source = Assert.Single(moving.Inputs).Entry;
+        Assert.True(source.Summaries.TryGet("key", out ColumnSummary range));
+        long low = range.Min.SignedValue;
+
+        // A: level 0 fills inside B's range, and empties into level 2.
+        for (int i = 0; i < 3; i++)
+        {
+            await first.AppendAsync(Ordered(types, schema, low + 10 + (i * 10), 10), ct);
+            appended.AddRange(Enumerable.Range((int)low + 10 + (i * 10), 10).Select(key => (long)key));
+        }
+
+        CompactionResult drained = Assert.IsType<CompactionResult>(await first.CompactAsync(options, ct));
+        Assert.Equal((0, 2, OperationOutcome.Applied), (drained.FromLevel, drained.ToLevel, drained.Outcome));
+
+        // B commits now. Its input is in level 1 as it read it, and level 2 holds A's rows inside the
+        // range B writes: B's outputs would overlap them, so B is abandoned, as a compaction whose input
+        // went is, and leaves its outputs to vacuum.
+        CompactionResult late = await DatasetCompactor.RunAsync(second, moving, ct);
+        Assert.Equal(OperationOutcome.Abandoned, late.Outcome);
+        await second.RefreshAsync(ct);
+        await AssertInvariantAsync(second, options, appended);
+
+        // The next plan takes A's outputs as inputs of the same move, and the levels stay disjoint.
+        while (await second.CompactAsync(options, ct) is { } step)
+        {
+            Assert.Equal(OperationOutcome.Applied, step.Outcome);
+            await AssertInvariantAsync(second, options, appended);
+        }
+
+        // A walk of the key meets both copies of a key A appended inside B's range. Over two objects
+        // of one level that overlap, it met one: a level is walked one object at a time, so the step
+        // past the first object's rows of a key passed over the other's, and the count at the key
+        // said 1, silently.
+        List<long> sorted = [.. appended.Order()];
+        Assert.Equal(sorted, await KeysAsync(second.ScanBuilder().InKeyOrder("key")));
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(second, ct);
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(low + 20), SeekMode.AtOrAfter, ct));
+        Assert.Equal(2, await cursor.CountAtKeyAsync(ct));
+        List<long> walked = [cursor.Key.SignedValue];
+        while (await cursor.NextAsync(ct))
+        {
+            walked.Add(cursor.Key.SignedValue);
+        }
+
+        Assert.Equal(sorted.Where(key => key >= low + 20), walked);
+    }
+
+    [Fact]
     public async Task TheTopLevelOfACappedDatasetHasNoSize()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -899,6 +975,25 @@ public sealed class DatasetCompactionTests
         List<long> held = await KeysAsync(dataset.ScanBuilder());
         held.Sort();
         Assert.Equal(sorted, held);
+    }
+
+    /// <summary>
+    /// Moves every object of one level into another by hand, through the replacement a compaction
+    /// commits, each under the tree key it had.
+    /// </summary>
+    private static async Task MoveAsync(VortexDataset dataset, int from, int to)
+    {
+        List<(int Level, ReadOnlyMemory<byte> Key)> inputs = [];
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = [];
+        await foreach (TreeEntry entry in dataset.Levels[from].EnumerateAsync(dataset.Pages, default))
+        {
+            byte[] key = entry.Key.ToArray();
+            inputs.Add((from, key));
+            outputs.Add((to, key, ObjectEntry.FromBytes(entry.Value.Span)));
+        }
+
+        CommitResult moved = await dataset.CommitAsync([new DatasetOperation.ReplaceObjects(inputs, outputs)], default);
+        Assert.Equal([OperationOutcome.Applied], moved.Outcomes);
     }
 
     /// <summary>The key range of every object of one level, in the tree's order.</summary>
