@@ -190,28 +190,56 @@ public static class Consume
         int current = -1;
         ulong sum = Words(views);
 
-        // Each view as two words, its length the low half of the first: a slice and a checked read a
-        // row cost a column of short strings, all inside their views, 2.3 cycles a row on arm64.
+        // Each view as two words, its length the low half of the first. A row inside its view goes on
+        // to the next by the loop's own branch alone, and a row out of line leaves the loop for its
+        // bytes, as the reference's loop is compiled. A branch over the out-of-line read and another
+        // back to the top took two taken branches a row, 2.3 cycles on arm64 for a column of short
+        // strings, where the reference takes one.
         ref ulong at = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(views));
-        for (int row = 0; row < count; row++)
+        int row = 0;
+        while (row < count)
         {
-            ulong head = Unsafe.Add(ref at, row * 2);
-            int length = (int)(uint)head;
-            if (length > 12)
+            int length;
+            do
             {
-                ulong tail = Unsafe.Add(ref at, (row * 2) + 1);
-                int buffer = (int)(uint)tail;
-                if (buffer != current)
+                length = (int)(uint)Unsafe.Add(ref at, row * 2);
+                row++;
+                if (length > 12)
                 {
-                    bytes = data[buffer].Span;
-                    current = buffer;
+                    goto OutOfLine;
                 }
-
-                sum += Short(bytes.Slice((int)(tail >> 32), length));
             }
+            while (row < count);
+
+            break;
+
+        OutOfLine:
+            sum += Named(length, Unsafe.Add(ref at, (row * 2) - 1), data, ref bytes, ref current);
         }
 
         return sum;
+    }
+
+    /// <summary>
+    /// The bytes a view names out of line, its buffer looked up again only when it is another one
+    /// than the last view's.
+    /// </summary>
+    /// <param name="length">The string's length, from the view's first word.</param>
+    /// <param name="tail">The view's second word: its buffer, then its offset in it.</param>
+    /// <param name="data">The column's buffers.</param>
+    /// <param name="bytes">The last buffer looked up.</param>
+    /// <param name="current">The index of <paramref name="bytes"/>, -1 before the first.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Named(int length, ulong tail, ReadOnlySpan<VortexBuffer> data, ref ReadOnlySpan<byte> bytes, ref int current)
+    {
+        int buffer = (int)(uint)tail;
+        if (buffer != current)
+        {
+            bytes = data[buffer].Span;
+            current = buffer;
+        }
+
+        return Short(bytes.Slice((int)(tail >> 32), length));
     }
 
     /// <summary>
