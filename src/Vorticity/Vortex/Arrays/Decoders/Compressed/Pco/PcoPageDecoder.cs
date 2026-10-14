@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -74,6 +75,24 @@ internal static class PcoPageDecoder
         in PcoBatchScratch scratch, Span<byte> target)
     {
         PcoNumber number = chunk.Number;
+        if (Native(chunk))
+        {
+            if (number.LatentBits == 32)
+            {
+                DecodeNative(
+                    chunk, page, valueCount, MemoryMarshal.Cast<ulong, uint>(secondaryBatch), in scratch,
+                    MemoryMarshal.Cast<byte, uint>(target)[..valueCount]);
+            }
+            else
+            {
+                DecodeNative(
+                    chunk, page, valueCount, MemoryMarshal.Cast<ulong, ushort>(secondaryBatch), in scratch,
+                    MemoryMarshal.Cast<byte, ushort>(target)[..valueCount]);
+            }
+
+            return;
+        }
+
         PcoBitReader reader = new PcoBitReader(page);
 
         // The latent states are the caller's and are reset, not built. Each one owns a few small
@@ -153,6 +172,121 @@ internal static class PcoPageDecoder
         }
     }
 
+    /// <summary>
+    /// Whether a chunk's page decodes at its numbers' own width (<see cref="DecodeNative{T}"/>):
+    /// numbers of 16 or 32 bits whose latents are all as wide, no delta but a consecutive one, and
+    /// a mode whose join stays within that width, which a dictionary's does not.
+    /// </summary>
+    /// <remarks>
+    /// Wrapping arithmetic at the latent's width gives the low bits that wrapping arithmetic modulo
+    /// 2^64 gives, which are all a number keeps: the two paths decode the same numbers. The narrow
+    /// one holds four or eight latents to a 128-bit vector where the wide one holds two, and NEON
+    /// multiplies 16- and 32-bit lanes where it has no 64-bit multiply at all; and it decodes into
+    /// the output, where the wide one joins in a buffer and truncates into it.
+    /// </remarks>
+    private static bool Native(PcoChunkMeta chunk)
+    {
+        int bits = chunk.Number.LatentBits;
+        return bits < 64
+            && chunk.DeltaLatent is null
+            && chunk.Delta is PcoDeltaKind.NoOp or PcoDeltaKind.Consecutive
+            && chunk.Mode is not PcoModeKind.Dict
+            && chunk.Primary.LatentBits == bits
+            && (chunk.Secondary is not { } secondary || secondary.LatentBits == bits);
+    }
+
+    /// <summary>
+    /// <see cref="DecodeJoined"/> for a chunk <see cref="Native"/> accepts: each batch decoded and
+    /// joined at the numbers' width <typeparamref name="T"/>, straight into <paramref name="target"/>.
+    /// </summary>
+    private static void DecodeNative<T>(
+        PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount, Span<T> secondaryBatch,
+        in PcoBatchScratch scratch, Span<T> target)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        PcoBitReader reader = new PcoBitReader(page);
+        try
+        {
+            PcoDeltaKind secondaryDelta = chunk.SecondaryStateCount > 0 ? chunk.Delta : PcoDeltaKind.NoOp;
+            PcoLatentState primary = scratch.States[1].Reset(
+                ref reader, chunk.Primary, chunk, chunk.Delta, chunk.PrimaryStateCount, chunk.PrimaryStateCount);
+            PcoLatentState? secondary = chunk.Secondary is { } secondaryVar
+                ? scratch.States[2].Reset(
+                    ref reader, secondaryVar, chunk, secondaryDelta, chunk.SecondaryStateCount, chunk.SecondaryStateCount)
+                : null;
+
+            reader.DrainEmptyByte("page metadata");
+
+            int done = 0;
+            while (done < valueCount)
+            {
+                int remaining = valueCount - done;
+                int batch = Math.Min(BatchSize, remaining);
+                Span<T> values = target.Slice(done, batch);
+                PcoBatchShape primaryShape = primary.ReadBatch(
+                    ref reader, remaining, batch, values, default, in scratch, out ulong primaryFirst, out ulong primaryStep);
+
+                Span<T> second = secondary is null ? default : secondaryBatch[..batch];
+                PcoBatchShape secondaryShape = PcoBatchShape.Written;
+                ulong secondaryFirst = 0;
+                if (secondary is not null)
+                {
+                    secondaryShape = secondary.ReadBatch(
+                        ref reader, remaining, batch, second, default, in scratch, out secondaryFirst, out ulong secondaryStep);
+                    if (secondaryShape == PcoBatchShape.Ramp)
+                    {
+                        Progression.Fill(second, T.CreateTruncating(secondaryFirst), T.CreateTruncating(secondaryStep));
+                        secondaryShape = PcoBatchShape.Written;
+                    }
+                }
+
+                JoinNative(chunk, values, primaryShape, primaryFirst, primaryStep, second, secondaryShape, secondaryFirst);
+                done += batch;
+            }
+
+            reader.DrainEmptyByte("page");
+        }
+        finally
+        {
+            scratch.States[1].EndPage();
+            scratch.States[2].EndPage();
+        }
+    }
+
+    /// <summary><see cref="JoinBatch"/> at the numbers' width, for a chunk <see cref="Native"/> accepts.</summary>
+    private static void JoinNative<T>(
+        PcoChunkMeta chunk, Span<T> values, PcoBatchShape primaryShape, ulong primaryFirst, ulong primaryStep,
+        Span<T> second, PcoBatchShape secondaryShape, ulong secondaryFirst)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        PcoNumber number = chunk.Number;
+        switch (chunk.Mode)
+        {
+            case PcoModeKind.Classic when number.Kind != PcoNumberKind.Float:
+                Shift(values, primaryShape, primaryFirst, primaryStep, number.Kind == PcoNumberKind.Signed ? number.Mid : 0);
+                break;
+            case PcoModeKind.Classic:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                FloatsFromLatents(values, number);
+                break;
+            case PcoModeKind.IntMult:
+                Join(
+                    values, primaryShape, primaryFirst, primaryStep, second, secondaryShape, secondaryFirst,
+                    chunk.ModeBase, number.Kind == PcoNumberKind.Signed ? number.Mid : 0);
+                break;
+            case PcoModeKind.FloatMult:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                Materialize(second, secondaryShape, secondaryFirst, 0);
+                FloatMult(values, second, chunk);
+                break;
+            default:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                Materialize(second, secondaryShape, secondaryFirst, 0);
+                FloatQuant(values, second, number, (int)chunk.ModeBase);
+                break;
+        }
+    }
+
     /// <summary>One batch's latents joined into numbers, in place, as the chunk's mode says.</summary>
     private static void JoinBatch(
         PcoChunkMeta chunk, Span<ulong> values, PcoBatchShape primaryShape, ulong primaryFirst, ulong primaryStep,
@@ -194,15 +328,16 @@ internal static class PcoPageDecoder
     }
 
     /// <summary>A described batch written out: its one value, or its ramp.</summary>
-    private static void Materialize(Span<ulong> values, PcoBatchShape shape, ulong first, ulong step)
+    private static void Materialize<T>(Span<T> values, PcoBatchShape shape, ulong first, ulong step)
+        where T : unmanaged, IBinaryInteger<T>
     {
         if (shape == PcoBatchShape.Constant)
         {
-            values.Fill(first);
+            values.Fill(T.CreateTruncating(first));
         }
         else if (shape == PcoBatchShape.Ramp)
         {
-            Progression.Fill(values, first, step);
+            Progression.Fill(values, T.CreateTruncating(first), T.CreateTruncating(step));
         }
     }
 
@@ -210,18 +345,19 @@ internal static class PcoPageDecoder
     /// A classic batch: the primary, as its shape describes it, plus <paramref name="shift"/>, into
     /// <paramref name="values"/>, which hold the primary when it is written.
     /// </summary>
-    internal static void Shift(Span<ulong> values, PcoBatchShape shape, ulong first, ulong step, ulong shift)
+    internal static void Shift<T>(Span<T> values, PcoBatchShape shape, ulong first, ulong step, ulong shift)
+        where T : unmanaged, IBinaryInteger<T>
     {
         switch (shape)
         {
             case PcoBatchShape.Constant:
-                values.Fill(unchecked(first + shift));
+                values.Fill(T.CreateTruncating(unchecked(first + shift)));
                 break;
             case PcoBatchShape.Ramp:
-                Progression.Fill(values, unchecked(first + shift), step);
+                Progression.Fill(values, T.CreateTruncating(unchecked(first + shift)), T.CreateTruncating(step));
                 break;
             default:
-                Add(values, shift);
+                Add(values, T.CreateTruncating(shift));
                 break;
         }
     }
@@ -231,27 +367,28 @@ internal static class PcoPageDecoder
     /// is a positive float with that bit cleared, one without it a negative float with every bit
     /// flipped -- one exclusive or either way, of the sign bit or of every bit, as the top bit says.
     /// </summary>
-    private static void FloatsFromLatents(Span<ulong> values, PcoNumber number)
+    private static void FloatsFromLatents<T>(Span<T> values, PcoNumber number)
+        where T : unmanaged, IBinaryInteger<T>
     {
         int top = number.LatentBits - 1;
-        ulong sign = number.Mid;
+        T sign = T.CreateTruncating(number.Mid);
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<T>.Count)
         {
-            int lanes = Vector<ulong>.Count;
-            Vector<ulong> signs = new Vector<ulong>(sign);
+            int lanes = Vector<T>.Count;
+            Vector<T> signs = new Vector<T>(sign);
             for (; i <= values.Length - lanes; i += lanes)
             {
-                Vector<ulong> latent = Vector.LoadUnsafe(in values[i]);
-                Vector<ulong> flip = signs | ((Vector.ShiftRightLogical(latent, top) & Vector<ulong>.One) - Vector<ulong>.One);
+                Vector<T> latent = Vector.LoadUnsafe(in values[i]);
+                Vector<T> flip = signs | (((latent >>> top) & Vector<T>.One) - Vector<T>.One);
                 (latent ^ flip).StoreUnsafe(ref values[i]);
             }
         }
 
         for (; i < values.Length; i++)
         {
-            ulong latent = values[i];
-            values[i] = latent ^ (sign | unchecked(((latent >> top) & 1) - 1));
+            T latent = values[i];
+            values[i] = latent ^ (sign | unchecked(((latent >>> top) & T.One) - T.One));
         }
     }
 
@@ -263,7 +400,8 @@ internal static class PcoPageDecoder
     /// The product is taken in the numbers' own type, so each width has its loop: it is what the
     /// encoder took, and the adjustment is what makes it exact.
     /// </remarks>
-    private static void FloatMult(Span<ulong> values, ReadOnlySpan<ulong> adjustments, PcoChunkMeta chunk)
+    private static void FloatMult<T>(Span<T> values, ReadOnlySpan<T> adjustments, PcoChunkMeta chunk)
+        where T : unmanaged, IBinaryInteger<T>
     {
         PcoNumber number = chunk.Number;
         ulong mask = number.Mask;
@@ -278,9 +416,10 @@ internal static class PcoPageDecoder
                 double factor = BitConverter.UInt64BitsToDouble(baseBits);
                 for (int i = 0; i < values.Length; i++)
                 {
-                    double unadjusted = BitConverter.UInt64BitsToDouble(floats.Bits(values[i], 64)) * factor;
-                    ulong latent = unchecked(FloatToLatent(BitConverter.DoubleToUInt64Bits(unadjusted), mid, mask) + adjustments[i] + mid);
-                    values[i] = FloatFromLatent(latent, mid, mask);
+                    double unadjusted = BitConverter.UInt64BitsToDouble(floats.Bits(ulong.CreateTruncating(values[i]), 64)) * factor;
+                    ulong latent = unchecked(FloatToLatent(BitConverter.DoubleToUInt64Bits(unadjusted), mid, mask)
+                        + ulong.CreateTruncating(adjustments[i]) + mid);
+                    values[i] = T.CreateTruncating(FloatFromLatent(latent, mid, mask));
                 }
 
                 break;
@@ -291,9 +430,10 @@ internal static class PcoPageDecoder
                 float factor = BitConverter.UInt32BitsToSingle((uint)baseBits);
                 for (int i = 0; i < values.Length; i++)
                 {
-                    float unadjusted = BitConverter.UInt32BitsToSingle((uint)floats.Bits(values[i] & mask, 32)) * factor;
-                    ulong latent = unchecked(FloatToLatent(BitConverter.SingleToUInt32Bits(unadjusted), mid, mask) + adjustments[i] + mid);
-                    values[i] = FloatFromLatent(latent, mid, mask);
+                    float unadjusted = BitConverter.UInt32BitsToSingle((uint)floats.Bits(ulong.CreateTruncating(values[i]) & mask, 32)) * factor;
+                    ulong latent = unchecked(FloatToLatent(BitConverter.SingleToUInt32Bits(unadjusted), mid, mask)
+                        + ulong.CreateTruncating(adjustments[i]) + mid);
+                    values[i] = T.CreateTruncating(FloatFromLatent(latent, mid, mask));
                 }
 
                 break;
@@ -304,9 +444,10 @@ internal static class PcoPageDecoder
                 Half factor = BitConverter.UInt16BitsToHalf((ushort)baseBits);
                 for (int i = 0; i < values.Length; i++)
                 {
-                    Half unadjusted = BitConverter.UInt16BitsToHalf((ushort)floats.Bits(values[i] & mask, 16)) * factor;
-                    ulong latent = unchecked(FloatToLatent(BitConverter.HalfToUInt16Bits(unadjusted), mid, mask) + adjustments[i] + mid);
-                    values[i] = FloatFromLatent(latent, mid, mask);
+                    Half unadjusted = BitConverter.UInt16BitsToHalf((ushort)floats.Bits(ulong.CreateTruncating(values[i]) & mask, 16)) * factor;
+                    ulong latent = unchecked(FloatToLatent(BitConverter.HalfToUInt16Bits(unadjusted), mid, mask)
+                        + ulong.CreateTruncating(adjustments[i]) + mid);
+                    values[i] = T.CreateTruncating(FloatFromLatent(latent, mid, mask));
                 }
 
                 break;
@@ -385,7 +526,8 @@ internal static class PcoPageDecoder
     /// bits, the secondary its lowest <paramref name="k"/>, flipped for a negative float so that an
     /// exactly quantized one has a secondary of zero either way.
     /// </summary>
-    private static void FloatQuant(Span<ulong> values, ReadOnlySpan<ulong> lowest, PcoNumber number, int k)
+    private static void FloatQuant<T>(Span<T> values, ReadOnlySpan<T> lowest, PcoNumber number, int k)
+        where T : unmanaged, IBinaryInteger<T>
     {
         ulong mask = number.Mask;
         ulong mid = number.Mid;
@@ -394,10 +536,10 @@ internal static class PcoPageDecoder
         lowest = lowest[..values.Length];
         for (int i = 0; i < values.Length; i++)
         {
-            ulong y = values[i] & mask;
-            ulong m = lowest[i];
+            ulong y = ulong.CreateTruncating(values[i]) & mask;
+            ulong m = ulong.CreateTruncating(lowest[i]);
             ulong low = y >= signCutoff ? m : unchecked(lowestMax - m);
-            values[i] = FloatFromLatent(unchecked((y << k) + low), mid, mask);
+            values[i] = T.CreateTruncating(FloatFromLatent(unchecked((y << k) + low), mid, mask));
         }
     }
 
@@ -427,27 +569,29 @@ internal static class PcoPageDecoder
     /// Every operand comes off the wire, so every operation wraps, exactly as upstream's do; a ramp
     /// times the base is then the ramp of the first value and the step, each times the base.
     /// </remarks>
-    internal static void Join(
-        Span<ulong> values, PcoBatchShape primary, ulong primaryFirst, ulong primaryStep,
-        ReadOnlySpan<ulong> secondary, PcoBatchShape secondaryShape, ulong secondaryValue, ulong modeBase, ulong shift)
+    internal static void Join<T>(
+        Span<T> values, PcoBatchShape primary, ulong primaryFirst, ulong primaryStep,
+        ReadOnlySpan<T> secondary, PcoBatchShape secondaryShape, ulong secondaryValue, ulong modeBase, ulong shift)
+        where T : unmanaged, IBinaryInteger<T>
     {
         unchecked
         {
+            T factor = T.CreateTruncating(modeBase);
             if (secondaryShape == PcoBatchShape.Constant)
             {
-                ulong added = secondaryValue + shift;
+                T added = T.CreateTruncating(secondaryValue + shift);
                 switch (primary)
                 {
                     case PcoBatchShape.Constant:
-                        values.Fill((primaryFirst * modeBase) + added);
+                        values.Fill(T.CreateTruncating(primaryFirst * modeBase) + added);
                         break;
                     case PcoBatchShape.Ramp:
-                        Progression.Fill(values, (primaryFirst * modeBase) + added, primaryStep * modeBase);
+                        Progression.Fill(values, T.CreateTruncating(primaryFirst * modeBase) + added, T.CreateTruncating(primaryStep * modeBase));
                         break;
                     default:
-                        for (int i = Multiplied(values, default, modeBase, added); i < values.Length; i++)
+                        for (int i = Multiplied(values, default, factor, added); i < values.Length; i++)
                         {
-                            values[i] = (values[i] * modeBase) + added;
+                            values[i] = (values[i] * factor) + added;
                         }
 
                         break;
@@ -456,21 +600,22 @@ internal static class PcoPageDecoder
                 return;
             }
 
+            T plus = T.CreateTruncating(shift);
             secondary = secondary[..values.Length];
             switch (primary)
             {
                 case PcoBatchShape.Constant:
-                    values.Fill((primaryFirst * modeBase) + shift);
+                    values.Fill(T.CreateTruncating((primaryFirst * modeBase) + shift));
                     Add(values, secondary);
                     break;
                 case PcoBatchShape.Ramp:
-                    Progression.Fill(values, (primaryFirst * modeBase) + shift, primaryStep * modeBase);
+                    Progression.Fill(values, T.CreateTruncating((primaryFirst * modeBase) + shift), T.CreateTruncating(primaryStep * modeBase));
                     Add(values, secondary);
                     break;
                 default:
-                    for (int i = Multiplied(values, secondary, modeBase, shift); i < values.Length; i++)
+                    for (int i = Multiplied(values, secondary, factor, plus); i < values.Length; i++)
                     {
-                        values[i] = (values[i] * modeBase) + secondary[i] + shift;
+                        values[i] = (values[i] * factor) + secondary[i] + plus;
                     }
 
                     break;
@@ -479,15 +624,54 @@ internal static class PcoPageDecoder
     }
 
     /// <summary>
-    /// <c>values[i] * modeBase + secondary[i] + added</c>, eight values a step, where 512-bit vectors
-    /// multiply 64-bit lanes in one instruction; <paramref name="secondary"/> empty adds nothing.
+    /// <c>values[i] * modeBase + secondary[i] + added</c>, a vector at a time where the vector unit
+    /// multiplies lanes of <typeparamref name="T"/>; <paramref name="secondary"/> empty adds nothing.
     /// </summary>
-    /// <returns>The values done, a multiple of eight; the rest are the caller's.</returns>
+    /// <returns>The values done, a whole number of vectors; the rest are the caller's.</returns>
     /// <remarks>
-    /// AVX-512DQ's <c>vpmullq</c> is the multiply the loop needs, and wraps as the scalar one does.
-    /// NEON has no 64-bit vector multiply, which is why the loop was scalar, and it stays so there.
+    /// Lanes of 16 and 32 bits multiply everywhere. 64-bit lanes take AVX-512DQ's <c>vpmullq</c>,
+    /// eight at a time, which wraps as the scalar multiply does; NEON has no 64-bit vector multiply,
+    /// so 64-bit latents stay scalar there, which is what decoding at the numbers' width is for.
     /// </remarks>
-    private static int Multiplied(Span<ulong> values, ReadOnlySpan<ulong> secondary, ulong modeBase, ulong added)
+    private static int Multiplied<T>(Span<T> values, ReadOnlySpan<T> secondary, T modeBase, T added)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        if (typeof(T) == typeof(ulong))
+        {
+            return MultipliedWide(
+                MemoryMarshal.Cast<T, ulong>(values), MemoryMarshal.Cast<T, ulong>(secondary),
+                ulong.CreateTruncating(modeBase), ulong.CreateTruncating(added));
+        }
+
+        // Lanes of 16 or 32 bits, which every vector unit multiplies, NEON included.
+        if (!Vector.IsHardwareAccelerated || values.Length < Vector<T>.Count)
+        {
+            return 0;
+        }
+
+        int lanes = Vector<T>.Count;
+        ref T at = ref MemoryMarshal.GetReference(values);
+        ref T other = ref MemoryMarshal.GetReference(secondary);
+        bool paired = !secondary.IsEmpty;
+        Vector<T> factor = new Vector<T>(modeBase);
+        Vector<T> plus = new Vector<T>(added);
+        int i = 0;
+        for (; i <= values.Length - lanes; i += lanes)
+        {
+            Vector<T> joined = (Vector.LoadUnsafe(ref at, (nuint)i) * factor) + plus;
+            if (paired)
+            {
+                joined += Vector.LoadUnsafe(ref other, (nuint)i);
+            }
+
+            joined.StoreUnsafe(ref at, (nuint)i);
+        }
+
+        return i;
+    }
+
+    /// <summary><see cref="Multiplied{T}"/> for 64-bit latents.</summary>
+    private static int MultipliedWide(Span<ulong> values, ReadOnlySpan<ulong> secondary, ulong modeBase, ulong added)
     {
         if (!Vector512.IsHardwareAccelerated || !Avx512DQ.IsSupported)
         {
@@ -515,13 +699,14 @@ internal static class PcoPageDecoder
     }
 
     /// <summary>Adds <paramref name="by"/> to every value, one vector add per lane group.</summary>
-    internal static void Add(Span<ulong> values, ulong by)
+    internal static void Add<T>(Span<T> values, T by)
+        where T : unmanaged, IBinaryInteger<T>
     {
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<T>.Count)
         {
-            Vector<ulong> added = new Vector<ulong>(by);
-            int lanes = Vector<ulong>.Count;
+            Vector<T> added = new Vector<T>(by);
+            int lanes = Vector<T>.Count;
             for (; i <= values.Length - lanes; i += lanes)
             {
                 (Vector.LoadUnsafe(in values[i]) + added).StoreUnsafe(ref values[i]);
@@ -535,12 +720,13 @@ internal static class PcoPageDecoder
     }
 
     /// <summary>Adds <paramref name="other"/> to <paramref name="values"/> slot by slot, a vector at a time.</summary>
-    private static void Add(Span<ulong> values, ReadOnlySpan<ulong> other)
+    private static void Add<T>(Span<T> values, ReadOnlySpan<T> other)
+        where T : unmanaged, IBinaryInteger<T>
     {
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<T>.Count)
         {
-            int lanes = Vector<ulong>.Count;
+            int lanes = Vector<T>.Count;
             for (; i <= values.Length - lanes; i += lanes)
             {
                 (Vector.LoadUnsafe(in values[i]) + Vector.LoadUnsafe(in other[i])).StoreUnsafe(ref values[i]);
@@ -761,11 +947,12 @@ internal sealed class PcoLatentState
     /// value <paramref name="first"/>, or as the ramp from <paramref name="first"/> by
     /// <paramref name="step"/> that a first-order delta makes of one.
     /// </returns>
-    internal PcoBatchShape ReadBatch(
-        ref PcoBitReader reader, int remaining, int batch, Span<ulong> destination, scoped ReadOnlySpan<ulong> lookbacks,
+    internal PcoBatchShape ReadBatch<T>(
+        ref PcoBitReader reader, int remaining, int batch, Span<T> destination, scoped ReadOnlySpan<ulong> lookbacks,
         in PcoBatchScratch scratchBuffers, out ulong first, out ulong step)
+        where T : unmanaged, IBinaryInteger<T>
     {
-        Span<ulong> values = destination[..batch];
+        Span<T> values = destination[..batch];
 
         // The values that come from the delta state are not on the wire, so the symbol pass is
         // shorter than the batch by the state's count - but only at the end of the page.
@@ -788,30 +975,53 @@ internal sealed class PcoLatentState
                 UndoConsecutiveDelta(values, constant, lower);
                 return PcoBatchShape.Written;
             case PcoDeltaKind.Lookback:
+            {
+                Span<ulong> wide = Wide(values);
                 if (constant)
                 {
-                    values[..preDelta].Fill(lower);
+                    wide[..preDelta].Fill(lower);
                 }
 
-                UndoLookback(values, preDelta, lookbacks);
+                UndoLookback(wide, preDelta, lookbacks);
                 return PcoBatchShape.Written;
+            }
+
             default:
+            {
+                Span<ulong> wide = Wide(values);
                 if (constant)
                 {
-                    values[..preDelta].Fill(lower);
+                    wide[..preDelta].Fill(lower);
                 }
 
-                UndoConv1(values, preDelta);
+                UndoConv1(wide, preDelta);
                 return PcoBatchShape.Written;
+            }
         }
+    }
+
+    /// <summary>
+    /// A batch of 64-bit latents as such: a lookback and a convolution are decoded at 64 bits only,
+    /// <c>PcoPageDecoder.Native</c> sending their chunks down the wide path.
+    /// </summary>
+    private static Span<ulong> Wide<T>(Span<T> values)
+        where T : unmanaged
+    {
+        if (typeof(T) != typeof(ulong))
+        {
+            throw new UnreachableException("A lookback or a convolution delta is decoded at 64 bits only.");
+        }
+
+        return MemoryMarshal.Cast<T, ulong>(values);
     }
 
     /// <summary>
     /// Reads <paramref name="count"/> values before their delta is undone; true, with nothing
     /// written, when every one of them is <paramref name="lower"/>.
     /// </summary>
-    private bool ReadPreDelta(
-        ref PcoBitReader reader, int count, Span<ulong> scratch, in PcoBatchScratch scratchBuffers, out ulong lower)
+    private bool ReadPreDelta<T>(
+        ref PcoBitReader reader, int count, Span<T> scratch, in PcoBatchScratch scratchBuffers, out ulong lower)
+        where T : unmanaged, IBinaryInteger<T>
     {
         lower = 0;
         if (count == 0)
@@ -834,7 +1044,7 @@ internal sealed class PcoLatentState
                 PcoAnsNode node = nodes[slot];
                 ulong ansValue = reader.ReadUInt(node.BitsToRead);
 
-                scratch[i] = lowers[slot];
+                scratch[i] = T.CreateTruncating(lowers[slot]);
                 offsetBits[i] = node.OffsetBits;
 
                 _stateIndices[i % 4] = node.NextStateIndexBase + (int)ansValue;
@@ -872,13 +1082,13 @@ internal sealed class PcoLatentState
             ref byte origin = ref reader.Origin;
             for (int i = 0; i < quick; i++)
             {
-                scratch[i] = unchecked(lower + PcoBitReader.Peek(ref origin, uniformBase + ((long)i * uniformBits), uniformBits));
+                scratch[i] = T.CreateTruncating(unchecked(lower + PcoBitReader.Peek(ref origin, uniformBase + ((long)i * uniformBits), uniformBits)));
             }
 
             for (int i = quick; i < count; i++)
             {
-                scratch[i] = unchecked(
-                    lower + reader.ReadAt(uniformBase + ((long)i * uniformBits), uniformBits));
+                scratch[i] = T.CreateTruncating(unchecked(
+                    lower + reader.ReadAt(uniformBase + ((long)i * uniformBits), uniformBits)));
             }
 
             reader.SeekBits(uniformBase + ((long)count * uniformBits));
@@ -899,7 +1109,7 @@ internal sealed class PcoLatentState
             for (; at < count && position < wordLimit; at++)
             {
                 int width = offsetBits[at];
-                scratch[at] = unchecked(scratch[at] + PcoBitReader.LowUnder64(PcoBitReader.Word(ref offsets, position), width));
+                scratch[at] = unchecked(scratch[at] + T.CreateTruncating(PcoBitReader.LowUnder64(PcoBitReader.Word(ref offsets, position), width)));
                 position += width;
             }
         }
@@ -907,7 +1117,7 @@ internal sealed class PcoLatentState
         for (; at < count && position < wordLimit; at++)
         {
             int width = offsetBits[at];
-            scratch[at] = unchecked(scratch[at] + PcoBitReader.Peek(ref offsets, position, width));
+            scratch[at] = unchecked(scratch[at] + T.CreateTruncating(PcoBitReader.Peek(ref offsets, position, width)));
             position += width;
         }
 
@@ -916,7 +1126,7 @@ internal sealed class PcoLatentState
             int width = offsetBits[at];
             if (width != 0)
             {
-                scratch[at] = unchecked(scratch[at] + reader.ReadAt(position, width));
+                scratch[at] = unchecked(scratch[at] + T.CreateTruncating(reader.ReadAt(position, width)));
                 position += width;
             }
         }
@@ -947,9 +1157,10 @@ internal sealed class PcoLatentState
     /// a node's next state base plus the most it reads stays below the size, so a corrupt page
     /// decodes to the same values the checked loop gives, and never reads past the tables.
     /// </remarks>
-    private int ReadSymbols(
+    private int ReadSymbols<T>(
         ref PcoBitReader reader, int count, ReadOnlySpan<PcoAnsNode> nodes, ReadOnlySpan<ulong> lowers,
-        Span<ulong> scratch, Span<int> offsetBits)
+        Span<T> scratch, Span<int> offsetBits)
+        where T : unmanaged, IBinaryInteger<T>
     {
         ReadOnlySpan<ulong> packed = _table.Packed;
         if ((uint)count > (uint)scratch.Length || (uint)count > (uint)offsetBits.Length
@@ -965,7 +1176,7 @@ internal sealed class PcoLatentState
         nint mask = nodes.Length - 1;
         ref ulong table = ref MemoryMarshal.GetReference(packed);
         ref ulong bounds = ref MemoryMarshal.GetReference(lowers);
-        ref ulong values = ref MemoryMarshal.GetReference(scratch);
+        ref T values = ref MemoryMarshal.GetReference(scratch);
         ref int widths = ref MemoryMarshal.GetReference(offsetBits);
         ref byte origin = ref reader.Origin;
         long limit = reader.WordLimit;
@@ -987,14 +1198,14 @@ internal sealed class PcoLatentState
                 ulong word = PcoBitReader.Word(ref origin, position);
 
                 ulong node = Unsafe.Add(ref table, state0);
-                Unsafe.Add(ref values, i) = Unsafe.Add(ref bounds, state0);
+                Unsafe.Add(ref values, i) = T.CreateTruncating(Unsafe.Add(ref bounds, state0));
                 Unsafe.Add(ref widths, i) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
                 int read = (byte)(node >> PcoAnsTable.PackedReadShift);
                 state0 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, read)) & mask;
                 word >>= read;
 
                 node = Unsafe.Add(ref table, state1);
-                Unsafe.Add(ref values, i + 1) = Unsafe.Add(ref bounds, state1);
+                Unsafe.Add(ref values, i + 1) = T.CreateTruncating(Unsafe.Add(ref bounds, state1));
                 Unsafe.Add(ref widths, i + 1) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
                 int bits = (byte)(node >> PcoAnsTable.PackedReadShift);
                 state1 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
@@ -1002,7 +1213,7 @@ internal sealed class PcoLatentState
                 read += bits;
 
                 node = Unsafe.Add(ref table, state2);
-                Unsafe.Add(ref values, i + 2) = Unsafe.Add(ref bounds, state2);
+                Unsafe.Add(ref values, i + 2) = T.CreateTruncating(Unsafe.Add(ref bounds, state2));
                 Unsafe.Add(ref widths, i + 2) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
                 bits = (byte)(node >> PcoAnsTable.PackedReadShift);
                 state2 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
@@ -1010,7 +1221,7 @@ internal sealed class PcoLatentState
                 read += bits;
 
                 node = Unsafe.Add(ref table, state3);
-                Unsafe.Add(ref values, i + 3) = Unsafe.Add(ref bounds, state3);
+                Unsafe.Add(ref values, i + 3) = T.CreateTruncating(Unsafe.Add(ref bounds, state3));
                 Unsafe.Add(ref widths, i + 3) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
                 bits = (byte)(node >> PcoAnsTable.PackedReadShift);
                 state3 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
@@ -1047,15 +1258,20 @@ internal sealed class PcoLatentState
     /// whatever the buffer held; either way they reach only the moment, which the page ends with.
     /// </para>
     /// </remarks>
-    private void UndoConsecutiveDelta(Span<ulong> values, bool constant, ulong lower)
+    private void UndoConsecutiveDelta<T>(Span<T> values, bool constant, ulong lower)
+        where T : unmanaged, IBinaryInteger<T>
     {
+        // The moments are kept as 64-bit words, and the running one stays one through the sums: at a
+        // narrower width only its low bits are stored, which a store of that width does by itself,
+        // where a running moment of 16 bits zero-extended itself after every add, a second cycle a
+        // value in a chain of one on arm64.
         int order = _stateCount - 1;
         if (constant)
         {
             // The recentring of the delta, on the one value.
             ulong step = unchecked(lower + _mid);
             ulong moment = _deltaMoments[order];
-            Progression.Fill(values, moment, step);
+            Progression.Fill(values, T.CreateTruncating(moment), T.CreateTruncating(step));
             _deltaMoments[order] = unchecked(moment + ((ulong)values.Length * step));
             order--;
         }
@@ -1068,8 +1284,8 @@ internal sealed class PcoLatentState
             ulong moment = _deltaMoments[order];
             for (int i = 0; i < values.Length; i++)
             {
-                ulong previous = unchecked(values[i] + mid);
-                values[i] = moment;
+                ulong previous = unchecked(ulong.CreateTruncating(values[i]) + mid);
+                values[i] = T.CreateTruncating(moment);
                 moment = unchecked(moment + previous);
             }
 
@@ -1079,7 +1295,7 @@ internal sealed class PcoLatentState
         else
         {
             // The recentring is pointwise and contiguous, so it is one vector add per lane group.
-            PcoPageDecoder.Add(values, _mid);
+            PcoPageDecoder.Add(values, T.CreateTruncating(_mid));
         }
 
         for (; order >= 0; order--)
@@ -1087,8 +1303,8 @@ internal sealed class PcoLatentState
             ulong moment = _deltaMoments[order];
             for (int i = 0; i < values.Length; i++)
             {
-                ulong previous = values[i];
-                values[i] = moment;
+                ulong previous = ulong.CreateTruncating(values[i]);
+                values[i] = T.CreateTruncating(moment);
                 moment = unchecked(moment + previous);
             }
 
