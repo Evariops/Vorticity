@@ -123,4 +123,54 @@ public sealed class PcoPageDecoderTests
             }
         }
     }
+
+    /// <summary>
+    /// An order of a consecutive delta undone a vector at a time gives, at 16 and 32 bits, what the
+    /// value-by-value sum gives: every value, wrapping included, and the moment past the batch, over
+    /// lengths short of a vector, on one and between them.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(8)]
+    [InlineData(13)]
+    [InlineData(PcoPageDecoder.BatchSize)]
+    public void PrefixSumsMatchTheValueByValueSum(int length)
+    {
+        Random random = new Random(length);
+        foreach (ulong bias in (ulong[])[0, 1UL << 15, 1UL << 31])
+        {
+            ushort[] shorts = new ushort[length];
+            uint[] words = new uint[length];
+            for (int i = 0; i < length; i++)
+            {
+                shorts[i] = (ushort)random.Next();
+                words[i] = (uint)random.NextInt64();
+            }
+
+            ulong moment = (ulong)random.NextInt64();
+            ushort[] expectedShorts = (ushort[])shorts.Clone();
+            uint[] expectedWords = (uint[])words.Clone();
+            ulong shortsMoment = Reference(expectedShorts, moment, bias);
+            ulong wordsMoment = Reference(expectedWords, moment, bias);
+
+            Assert.Equal((ushort)shortsMoment, (ushort)PcoLatentState.PrefixSums<ushort>(shorts, moment, bias));
+            Assert.Equal(expectedShorts, shorts);
+            Assert.Equal((uint)wordsMoment, (uint)PcoLatentState.PrefixSums<uint>(words, moment, bias));
+            Assert.Equal(expectedWords, words);
+        }
+
+        static ulong Reference<T>(T[] values, ulong moment, ulong bias)
+            where T : unmanaged, System.Numerics.IBinaryInteger<T>
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                ulong previous = unchecked(ulong.CreateTruncating(values[i]) + bias);
+                values[i] = T.CreateTruncating(moment);
+                moment = unchecked(moment + previous);
+            }
+
+            return moment;
+        }
+    }
 }

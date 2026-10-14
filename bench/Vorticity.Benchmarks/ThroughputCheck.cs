@@ -775,11 +775,11 @@ internal static class ThroughputCheck
         new("null", 0.79, 0.026),   // 3 passes, spread 0.76-0.79; REBASED UP from 0.77 (a new reference binary): +2.0%
         new("onpair", 0.92, 0.029),   // 3 passes, spread 0.89-0.92; was 1.00, -8.0%
         new("parquet_variant", 0.53, 0.006),   // 3 passes, spread 0.52-0.53; REBASED UP from 0.46 (a new reference binary): +14.5%
-        new("pco", 0.27, 0.015),   // 3 passes, spread 0.26-0.27; was 0.30, -10.5%
-        new("pco_f32", 1.22, 0.015),   // 3 passes, spread 1.20-1.22; first calibration
-        new("pco_i16", 1.26, 0.005),   // 3 passes, spread 1.26-1.26; first calibration
-        new("pco_nullable", 0.78, 0.045),   // 3 passes, spread 0.75-0.78; first calibration
-        new("pco_u32", 1.19, 0.016),   // 3 passes, spread 1.17-1.19; first calibration
+        new("pco", 0.26, 0.033),   // 3 passes, spread 0.26-0.26; was 0.27, -2.1%
+        new("pco_f32", 0.81, 0.004),   // 3 passes, spread 0.81-0.81; was 1.22, -33.8%
+        new("pco_i16", 0.70, 0.033),   // 3 passes, spread 0.67-0.70; was 1.26, -44.8%
+        new("pco_nullable", 0.68, 0.057),   // 3 passes, spread 0.64-0.68; was 0.78, -12.7%
+        new("pco_u32", 0.81, 0.055),   // 3 passes, spread 0.77-0.81; was 1.19, -31.9%
         new("primitive", 1.02, 0.007),   // 3 passes, spread 1.01-1.02; REBASED UP from 0.94 (a new reference binary): +8.1%
         new("runend", 0.85, 0.029),   // 3 passes, spread 0.83-0.85; REBASED UP from 0.68 (a new reference binary): +25.2%
         new("sequence", 1.01, 0.005),   // 3 passes, spread 1.00-1.01; REBASED UP from 0.92 (a new reference binary): +9.5%
@@ -1028,10 +1028,10 @@ internal static class ThroughputCheck
         new("listview", 0.23, 0.028),   // 3 passes, spread 0.22-0.23; was 0.23, -1.0%
         new("map", 0.28, 0.041),   // 3 passes, spread 0.27-0.28; REBASED UP from 0.27 (a new reference binary): +2.7%
         new("zstd_nullable", 0.52, 0.057),   // 3 passes, spread 0.49-0.52; REBASED UP from 0.51 (a new reference binary): +2.2%
-        new("pco_f32", 0.36, 0.033),   // 3 passes, spread 0.35-0.36; first calibration
-        new("pco_i16", 0.60, 0.013),   // 3 passes, spread 0.59-0.60; first calibration
+        new("pco_f32", 0.30, 0.029),   // 3 passes, spread 0.29-0.30; was 0.36, -16.3%
+        new("pco_i16", 0.40, 0.026),   // 3 passes, spread 0.39-0.40; was 0.60, -32.8%
         new("pco_nullable", 0.45, 0.020),   // 3 passes, spread 0.44-0.45; first calibration
-        new("pco_u32", 1.28, 0.042),   // 3 passes, spread 1.22-1.28; first calibration
+        new("pco_u32", 1.07, 0.034),   // 3 passes, spread 1.03-1.07; was 1.28, -16.3%
     ];
 
     private static readonly Reference[] TakeReferences =
@@ -1094,9 +1094,9 @@ internal static class ThroughputCheck
         new("table_wide", 0.73, 0.054),   // 3 passes, spread 0.69-0.73; REBASED UP from 0.72 (a new reference binary): +1.1%
         new("zstd_nullable", 0.076, 0.017),   // 3 passes, spread 0.075-0.076; was 0.090, -15.0%
         new("pco_f32", 0.17, 0.018),   // 3 passes, spread 0.17-0.17; first calibration
-        new("pco_i16", 0.17, 0.021),   // 3 passes, spread 0.17-0.17; first calibration
+        new("pco_i16", 0.14, 0.133),   // 3 passes, spread 0.12-0.14; was 0.17, -17.1%
         new("pco_nullable", 1.39, 0.022),   // 3 passes, spread 1.35-1.39; first calibration
-        new("pco_u32", 0.15, 0.023),   // 3 passes, spread 0.14-0.15; first calibration
+        new("pco_u32", 0.14, 0.089),   // 3 passes, spread 0.13-0.14; was 0.15, -4.2%
     ];
 
     private const double StaleBelow = 0.70;

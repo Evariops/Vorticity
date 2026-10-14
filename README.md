@@ -166,17 +166,17 @@ and a million rows. On the file Vorticity writes:
 
 | scenario | M4 Pro, 1 core | M4 Pro, 14 cores | 7950X, 1 core | 7950X, 32 threads |
 |---|---:|---:|---:|---:|
-| read every column | 1.95x | 2.42x | 2.91x | 1.63x |
-| read one column of four | 2.68x | 2.38x | 2.74x | 2.08x |
-| filter, 1 % of the rows | 1.33x | 2.61x | 1.27x | 2.40x |
-| filter, half the rows | 1.97x | 2.26x | 2.69x | 1.77x |
-| take 1,000 scattered rows | 1.60x | 1.10x | 1.47x | 1.16x |
-| write the table back out | 2.29x | 1.84x | 2.40x | 1.71x |
+| read every column | 2.22x | 2.35x | 2.91x | 1.63x |
+| read one column of four | 2.89x | 2.59x | 2.74x | 2.08x |
+| filter, 1 % of the rows | 1.38x | 2.72x | 1.27x | 2.40x |
+| filter, half the rows | 2.14x | 2.05x | 2.69x | 1.77x |
+| take 1,000 scattered rows | 1.73x | 1.06x | 1.47x | 1.16x |
+| write the table back out | 2.32x | 1.94x | 2.40x | 1.71x |
 
-Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.95x) and 14
-of the 61 encodings decoded alone. Three of the four Pcodec shapes decode at 0.75x to 0.81x, and the
-others, mostly columns stored plain, masked or bit-packed, sit between 0.78x and 1.00x. On the
-Ryzen, Vorticity decodes all 61 encodings in less time, Pcodec files included.
+Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.94x) and 10
+of the 61 encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. The
+Pcodec files decode in less time there, from 1.07x to 3.59x. On the Ryzen, Vorticity decodes all 61
+encodings in less time, Pcodec files included.
 
 ### Against DuckDB
 
