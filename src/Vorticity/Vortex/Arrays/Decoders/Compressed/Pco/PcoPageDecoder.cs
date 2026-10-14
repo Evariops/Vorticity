@@ -1170,9 +1170,9 @@ internal sealed class PcoLatentState
         }
 
         // Native-sized indices, which address the tables without a sign extension each. Each node
-        // is one word (`PcoAnsTable.Packed`), and a symbol reads at most MaxSymbolBits, so its bits
-        // are kept without the test for a width of 64 that `PcoBitReader.Low` makes, a taken branch
-        // a symbol on arm64.
+        // is one word (`PcoAnsTable.Packed`) holding the mask of the bits it reads, a table no wider
+        // than MaxSymbolBits: neither the test for a width of 64 that `PcoBitReader.Low` makes, a
+        // taken branch a symbol on arm64, nor the mask made from the count is on a state's chain.
         nint mask = nodes.Length - 1;
         ref ulong table = ref MemoryMarshal.GetReference(packed);
         ref ulong bounds = ref MemoryMarshal.GetReference(lowers);
@@ -1199,32 +1199,32 @@ internal sealed class PcoLatentState
 
                 ulong node = Unsafe.Add(ref table, state0);
                 Unsafe.Add(ref values, i) = T.CreateTruncating(Unsafe.Add(ref bounds, state0));
-                Unsafe.Add(ref widths, i) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
-                int read = (byte)(node >> PcoAnsTable.PackedReadShift);
-                state0 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, read)) & mask;
+                Unsafe.Add(ref widths, i) = (int)((node >> PcoAnsTable.PackedOffsetShift) & 0xFF);
+                int read = (int)((node >> PcoAnsTable.PackedReadShift) & 0xFF);
+                state0 = ((nint)(ushort)node + (nint)(word & (node >> PcoAnsTable.PackedMaskShift))) & mask;
                 word >>= read;
 
                 node = Unsafe.Add(ref table, state1);
                 Unsafe.Add(ref values, i + 1) = T.CreateTruncating(Unsafe.Add(ref bounds, state1));
-                Unsafe.Add(ref widths, i + 1) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
-                int bits = (byte)(node >> PcoAnsTable.PackedReadShift);
-                state1 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
+                Unsafe.Add(ref widths, i + 1) = (int)((node >> PcoAnsTable.PackedOffsetShift) & 0xFF);
+                int bits = (int)((node >> PcoAnsTable.PackedReadShift) & 0xFF);
+                state1 = ((nint)(ushort)node + (nint)(word & (node >> PcoAnsTable.PackedMaskShift))) & mask;
                 word >>= bits;
                 read += bits;
 
                 node = Unsafe.Add(ref table, state2);
                 Unsafe.Add(ref values, i + 2) = T.CreateTruncating(Unsafe.Add(ref bounds, state2));
-                Unsafe.Add(ref widths, i + 2) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
-                bits = (byte)(node >> PcoAnsTable.PackedReadShift);
-                state2 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
+                Unsafe.Add(ref widths, i + 2) = (int)((node >> PcoAnsTable.PackedOffsetShift) & 0xFF);
+                bits = (int)((node >> PcoAnsTable.PackedReadShift) & 0xFF);
+                state2 = ((nint)(ushort)node + (nint)(word & (node >> PcoAnsTable.PackedMaskShift))) & mask;
                 word >>= bits;
                 read += bits;
 
                 node = Unsafe.Add(ref table, state3);
                 Unsafe.Add(ref values, i + 3) = T.CreateTruncating(Unsafe.Add(ref bounds, state3));
-                Unsafe.Add(ref widths, i + 3) = (byte)(node >> PcoAnsTable.PackedOffsetShift);
-                bits = (byte)(node >> PcoAnsTable.PackedReadShift);
-                state3 = ((nint)(uint)node + (nint)PcoBitReader.LowUnder64(word, bits)) & mask;
+                Unsafe.Add(ref widths, i + 3) = (int)((node >> PcoAnsTable.PackedOffsetShift) & 0xFF);
+                bits = (int)((node >> PcoAnsTable.PackedReadShift) & 0xFF);
+                state3 = ((nint)(ushort)node + (nint)(word & (node >> PcoAnsTable.PackedMaskShift))) & mask;
                 position += read + bits;
             }
         }

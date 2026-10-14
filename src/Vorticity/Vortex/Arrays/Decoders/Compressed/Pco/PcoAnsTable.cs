@@ -42,20 +42,28 @@ internal sealed class PcoAnsTable
     internal ReadOnlySpan<ulong> StateLowers => _stateLowers.AsSpan(0, Size);
 
     /// <summary>
-    /// Each slot's node as one word: the next state's base in the low 32 bits, the bits to read at
-    /// <see cref="PackedReadShift"/> and the offset's bits at <see cref="PackedOffsetShift"/>.
+    /// Each slot's node as one word: the next state's base in the low 16 bits, the offset's bits at
+    /// <see cref="PackedOffsetShift"/>, the count of bits to read at <see cref="PackedReadShift"/>
+    /// and their mask in the top 16 bits, from <see cref="PackedMaskShift"/>. Only a table of at
+    /// most 2^14 slots fits it, the widest pco writes and the widest the symbol loop reads.
     /// </summary>
     /// <remarks>
     /// The symbol loop's form of <see cref="Nodes"/>: one load a symbol and a few shifts, where a
-    /// node of three ints cost a multiply by twelve and three loads on arm64.
+    /// node of three ints cost a multiply by twelve and three loads on arm64. The mask is stored
+    /// rather than made from the count, which took four instructions a symbol on the chain each
+    /// interleaved state waits on, and stored on top, where one shift extracts it with nothing to
+    /// clear above it.
     /// </remarks>
     internal ReadOnlySpan<ulong> Packed => _packed.AsSpan(0, Size);
 
-    /// <summary>Where a packed node keeps the bits to read.</summary>
-    internal const int PackedReadShift = 32;
-
     /// <summary>Where a packed node keeps the offset's bits.</summary>
-    internal const int PackedOffsetShift = 40;
+    internal const int PackedOffsetShift = 32;
+
+    /// <summary>Where a packed node keeps the bits to read.</summary>
+    internal const int PackedReadShift = 40;
+
+    /// <summary>Where a packed node keeps the mask of the bits to read: its top 16 bits.</summary>
+    internal const int PackedMaskShift = 48;
 
     /// <summary>Table slots.</summary>
     internal int Size => 1 << SizeLog;
@@ -177,8 +185,8 @@ internal sealed class PcoAnsTable
 
             int offsetBits = symbol < (uint)bins.Length ? bins[(int)symbol].OffsetBits : 0;
             nodes[slot] = new PcoAnsNode((int)(shifted - tableSize), offsetBits, bitsToRead);
-            packed[slot] = (uint)(shifted - tableSize) | ((ulong)(uint)bitsToRead << PackedReadShift)
-                | ((ulong)(uint)offsetBits << PackedOffsetShift);
+            packed[slot] = (ushort)(shifted - tableSize) | ((ulong)(ushort)((1 << bitsToRead) - 1) << PackedMaskShift)
+                | ((ulong)(byte)bitsToRead << PackedReadShift) | ((ulong)(byte)offsetBits << PackedOffsetShift);
             lowers[slot] = symbol < (uint)bins.Length ? bins[(int)symbol].Lower : 0;
             running[(int)symbol]++;
         }
