@@ -13,8 +13,10 @@ namespace Vorticity.Buffers;
 /// <para>
 /// Requests round up to the next power of two with a floor of 4 KiB, so a scan that reads
 /// segments of slightly different sizes still hits the same bucket. Requests above
-/// <see cref="MaxPooledLength"/> bypass the pool: they are allocated and freed directly, which
-/// keeps a single outsized read from evicting the whole steady-state working set.
+/// <see cref="MaxPooledLength"/> bypass the classes: they are allocated and freed directly, which
+/// keeps a single outsized read from evicting the whole steady-state working set. A graded pool,
+/// <see cref="Shared"/>, keeps one of them up to 256 MiB in a slot of its own, which the next
+/// outsized read it is long enough for takes, and which the sweeps free as they free an idle class.
 /// </para>
 /// <para>
 /// A rented block returns to the pool when its reference count reaches zero, so a
@@ -94,7 +96,28 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
     /// <summary>The sweeps of each watched pool, counted; null until a pool is watched, so that a pool nobody watches does not look.</summary>
     private static ConditionalWeakTable<AlignedBufferPool, StrongBox<int>>? SweepCounts;
 
+    /// <summary>The longest block past <see cref="MaxPooledLength"/> a graded pool keeps parked, in its one slot for them.</summary>
+    /// <remarks>
+    /// A segment that large is a whole column of a file another writer chunked in millions of rows,
+    /// read positionally on Windows when the session keeps no mapping: freed after each scan, the next
+    /// one asked the system for it again, which hands out every page anew, zeroed, as the read copies
+    /// into it, and a scan of an 82 MB segment took 22 ms where it takes 17 into a block kept.
+    /// </remarks>
+    private const int MaxOutsizedLength = 256 * 1024 * 1024;
+
+    /// <summary>The bucket index of a block of the outsized slot, which <see cref="TryPark"/> parks there rather than in a class.</summary>
+    private const int OutsizedBucket = -2;
+
     private readonly Bucket[] _buckets;
+
+    /// <summary>Whether blocks past <see cref="MaxPooledLength"/> are kept, one at a time: the graded pool's policy.</summary>
+    private readonly bool _keepsOutsized;
+
+    /// <summary>The block past <see cref="MaxPooledLength"/> kept parked, or null.</summary>
+    private NativeSegmentOwner? _outsized;
+
+    /// <summary>When a block past <see cref="MaxPooledLength"/> was last asked for, in the milliseconds of <see cref="Environment.TickCount64"/>.</summary>
+    private long _outsizedAsked;
 
     /// <summary>The bytes parked across every class, base retention included, under which a class may keep more than its base retention.</summary>
     private readonly long _demandBudget;
@@ -154,6 +177,7 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
         int top = (int)BitOperations.RoundUpToPowerOf2((uint)maxPooledLength);
         MaxPooledLength = top;
         MaxPerBucket = maxPerBucket;
+        _keepsOutsized = graded;
 
         int bucketCount = BitOperations.Log2((uint)top) - MinBlockShift + 1;
         Bucket[] buckets = new Bucket[bucketCount];
@@ -235,6 +259,25 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
 
         if (length > MaxPooledLength)
         {
+            if (_keepsOutsized && length <= MaxOutsizedLength)
+            {
+                // The one block kept past the classes, when it is long enough; a shorter one is freed,
+                // and the block the read gets parks in its place once given back.
+                Volatile.Write(ref _outsizedAsked, Environment.TickCount64);
+                if (Interlocked.Exchange(ref _outsized, null) is { } kept)
+                {
+                    if (kept.Capacity >= length)
+                    {
+                        kept.ResetForRent(length);
+                        return kept;
+                    }
+
+                    kept.FreeParked();
+                }
+
+                return NativeSegmentOwner.AllocatePooled(this, OutsizedBucket, capacity: length, length: length);
+            }
+
             // Tagged with this pool but bucket -1, so Return() still accepts it and the block is
             // freed rather than retained.
             return NativeSegmentOwner.AllocatePooled(this, bucketIndex: -1, capacity: length, length: length);
@@ -287,6 +330,8 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
         {
             Free(i);
         }
+
+        FreeOutsized();
     }
 
     /// <summary>This pool, swept after each collection of the oldest generation for as long as it lives.</summary>
@@ -324,6 +369,11 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
                 Free(i);
             }
         }
+
+        if (everything || now - Volatile.Read(ref _outsizedAsked) >= IdleMilliseconds)
+        {
+            FreeOutsized();
+        }
     }
 
     /// <summary>Retains a released block, or refuses it when its bucket is full.</summary>
@@ -336,6 +386,12 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
     internal bool TryPark(NativeSegmentOwner owner)
     {
         int index = owner.BucketIndex;
+        if (index == OutsizedBucket)
+        {
+            // The slot keeps one block; a second given back while it is taken is freed.
+            return Interlocked.CompareExchange(ref _outsized, owner, null) is null;
+        }
+
         if ((uint)index >= (uint)_buckets.Length)
         {
             return false;
@@ -382,6 +438,12 @@ internal sealed class AlignedBufferPool : ISweptAfterCollections
 
         return _buckets[BucketIndexOf(RoundedSize(length))].Count;
     }
+
+    /// <summary>Frees the block the outsized slot keeps, if any.</summary>
+    private void FreeOutsized() => Interlocked.Exchange(ref _outsized, null)?.FreeParked();
+
+    /// <summary>Whether the outsized slot keeps a block: for tests, as <see cref="ParkedCount"/> is.</summary>
+    internal bool KeepsOutsized => Volatile.Read(ref _outsized) is not null;
 
     /// <summary>Frees every block class <paramref name="index"/> keeps parked.</summary>
     private void Free(int index)

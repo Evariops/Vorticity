@@ -230,6 +230,36 @@ internal sealed class ByteKeyTable
         Array.Clear(_slots);
     }
 
+    /// <summary>
+    /// Gives the pages, the places, the hashes and the slots back to the shelf they grew from: the keys
+    /// let go, read no more. Nothing for a table nothing counts, whose arrays the collector takes.
+    /// </summary>
+    internal void Release()
+    {
+        if (_shelf is not { } shelf)
+        {
+            return;
+        }
+
+        for (int p = 0; p < _pages.Length; p++)
+        {
+            if (_pages[p] is { } page)
+            {
+                shelf.Give(page);
+                _pages[p] = null;
+            }
+        }
+
+        shelf.Give(_places);
+        shelf.Give(_hashes);
+        shelf.Give(_slots);
+        _places = [];
+        _hashes = [];
+        _slots = [];
+        Count = 0;
+        _used = 0;
+    }
+
     /// <summary>The bytes of key <paramref name="index"/>.</summary>
     internal ReadOnlySpan<byte> KeyOf(int index) => Stored(_places[index]);
 

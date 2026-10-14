@@ -360,6 +360,22 @@ internal abstract class RecordSlot<TState, TResult> : AggregateSlot<TResult>
 
     internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
 
+    /// <summary>The array of states with references, and the records of a slot made alone, back to the shelf; records a partition shares are its to give.</summary>
+    internal sealed override void Release()
+    {
+        if (_alone)
+        {
+            _records!.Release();
+        }
+
+        if (_array.Length > 0)
+        {
+            _shelf?.Give(_array);
+            _array = [];
+            _groups = 0;
+        }
+    }
+
     internal sealed override int StateBytes => RuntimeHelpers.IsReferenceOrContainsReferences<TState>() ? 0 : Unsafe.SizeOf<TState>();
 
     internal sealed override void WriteSeed(Span<byte> state)

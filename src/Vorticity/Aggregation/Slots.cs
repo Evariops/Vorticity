@@ -169,6 +169,15 @@ internal abstract class AggregateSlot
     }
 
     /// <summary>
+    /// Gives the slot's own arrays back to the shelf they grew from (<see cref="Govern"/>), which hands
+    /// them to the process's for the next query: the partition's groups delivered, or held by another.
+    /// The slot is read no more. Nothing for a slot whose states all lie in records its partition shares.
+    /// </summary>
+    internal virtual void Release()
+    {
+    }
+
+    /// <summary>
     /// Tells the slot, as its partition makes it and before it steps a row, that it holds group 0
     /// alone: an aggregate over the whole scan, with no key. Nothing for a slot whose states take no
     /// shape of their own for one group.

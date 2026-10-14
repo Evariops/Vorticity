@@ -1754,11 +1754,14 @@ internal sealed class AggregationPartition
         Slots = [];
         Records = null;
         GiveBackRowGroups();
-        _narrowed = [];
-        _componentOf = [];
-        _componentRows = [];
-        _followMap = [];
-        _followComponents = [];
+
+        // The scratch of the folds, back to the process's shelf, which the next query's lanes take
+        // theirs from: dropped, each lane of a top on 32 lanes allocated its narrowed selection anew.
+        Scratch.Return(ref _narrowed);
+        Scratch.Return(ref _componentOf);
+        Scratch.Return(ref _componentRows);
+        Scratch.Return(ref _followMap);
+        Scratch.Return(ref _followComponents);
     }
 
     /// <summary>
@@ -1794,6 +1797,13 @@ internal sealed class AggregationPartition
     {
         Keys?.Release();
         Records?.Release();
+
+        // The arrays of the slots that keep states of their own: texts' pages, distinct pairs. Left to
+        // the collector, every query took them new, 120 MB a text minimum over a million groups.
+        foreach (AggregateSlot slot in Slots)
+        {
+            slot.Release();
+        }
 
         // The lane's side of the core, its applier and the partition it bypassed its cache with, and a
         // shelf of the partition's own, which hands what it holds to the process's; a lane's holds nothing.
@@ -2244,6 +2254,25 @@ internal sealed class AggregationPartition
         NewSlots(plan, settled, source, out _);
 
     /// <summary>
+    /// The arrays of slots <see cref="NewSlots(AggregationPlan, AggregateSlot?[], ScanSource?, out GroupRecords?, ArrayShelf?, RecordLayout?)"/>
+    /// made on a shelf, back to it: the records they share, once, and what each keeps of its own.
+    /// </summary>
+    internal static void ReleaseSlots(AggregateSlot[] slots)
+    {
+        GroupRecords? released = null;
+        foreach (AggregateSlot slot in slots)
+        {
+            if (slot.Bound is { } records && !ReferenceEquals(records, released))
+            {
+                records.Release();
+                released = records;
+            }
+
+            slot.Release();
+        }
+    }
+
+    /// <summary>
     /// A slot for each aggregate of the plan, the settled one or a new one, the new ones whose states
     /// hold no reference sharing <paramref name="records"/>, a record a group, laid out as
     /// <paramref name="layout"/> says when the caller knows it already: a core's, the same for each of
@@ -2432,10 +2461,11 @@ internal sealed class AggregationPartition
     /// </summary>
     internal void DropUnmet()
     {
-        if (Keys?.Met() is { } met)
+        if (Keys?.Met(out int count) is { } met)
         {
-            Keep(met);
-            GroupsAtEnd = met.Length;
+            Keep(met.AsSpan(0, count));
+            GroupsAtEnd = count;
+            ArrayShelf.Return(met);
         }
     }
 
@@ -2453,8 +2483,9 @@ internal sealed class AggregationPartition
     internal int TopFrontier { get; set; } = -1;
 
     /// <summary>
-    /// The key of the worst value a top on a column's extreme kept at its last trim, which a row's value
-    /// must reach to join it (<see cref="ValueFrontier"/>); null before.
+    /// The key a row's value must reach to join a top on a column's extreme (<see cref="ValueFrontier"/>):
+    /// that of the worst value the top kept at the lane's last trim, or the tighter edge the lanes share,
+    /// taken before each fold; null before either.
     /// </summary>
     internal long? TopEdge { get; set; }
 
@@ -2487,6 +2518,7 @@ internal sealed class AggregationPartition
         }
 
         int before = Keys?.Count ?? 0;
+        TakeSharedEdge();
         Fold(batch);
         Top?.Trim(this, final: false);
         Core?.Fold(this, batch.SelectedRows, before);
@@ -2591,7 +2623,25 @@ internal sealed class AggregationPartition
         while (settling is not null && _settledNext < _settledEnd && settling.Start(_settledNext) < before)
         {
             _settledScratch ??= settling.NewScratch();
+            TakeSharedEdge();
             Fold(settling.Batch(_settledNext++, _settledScratch));
+        }
+    }
+
+    /// <summary>
+    /// Narrows the next fold by the edge the lanes share where it is tighter than this lane's, before
+    /// the lane's first trim too; the trim sets the lane's own again.
+    /// </summary>
+    /// <remarks>
+    /// Taken before the fold rather than in it: there, the two nullable edges took registers from the
+    /// fold's whole loop, and a group by with no top lost 5 % to them on one lane, a count by a pair of
+    /// integers 7.35 to 7.78 ms.
+    /// </remarks>
+    private void TakeSharedEdge()
+    {
+        if (Top?.SharedEdge is long shared && (TopEdge is not long own || shared < own))
+        {
+            TopEdge = shared;
         }
     }
 
@@ -4265,7 +4315,10 @@ internal static class AggregationEngine
             {
                 keys.Parts(seed, shift, partOf.AsSpan(0, count));
             }
-            int[] starts = new int[parts + 1];
+            // The places and the starts lent by the process's shelf for as long as the merge reads them:
+            // given back with the lanes' tables (PartMerge.Release).
+            int[] starts = ArrayShelf.Rent<int>(parts + 1);
+            starts.AsSpan(0, parts + 1).Clear();
             for (int g = 0; g < count; g++)
             {
                 starts[partOf[g] + 1]++;
@@ -4276,8 +4329,9 @@ internal static class AggregationEngine
                 starts[part + 1] += starts[part];
             }
 
-            int[] next = starts[..^1];
-            int[] placed = new int[count];
+            Span<int> next = stackalloc int[parts];
+            starts.AsSpan(0, parts).CopyTo(next);
+            int[] placed = ArrayShelf.Rent<int>(count);
             for (int g = 0; g < count; g++)
             {
                 placed[next[partOf[g]]++] = g;
@@ -4294,24 +4348,27 @@ internal static class AggregationEngine
     /// <summary>The parts read as one, the empty ones left out.</summary>
     internal static (GroupKeys Keys, AggregateSlot[] Slots, int Parts) Joined(GroupKeys[] partKeys, AggregateSlot[][] partSlots, int parts)
     {
-        List<int> kept = [];
+        // The parts that hold groups, counted first, their numbers on the stack: a list grown a part
+        // at a time was made again for every part a core built.
+        Span<int> kept = parts <= MostParts ? stackalloc int[Math.Max(1, parts)] : new int[parts];
+        int count = 0;
         for (int part = 0; part < parts; part++)
         {
             if (partKeys[part].Count > 0)
             {
-                kept.Add(part);
+                kept[count++] = part;
             }
         }
 
-        if (kept.Count == 0)
+        if (count == 0)
         {
-            kept.Add(0);
+            kept[count++] = 0;
         }
 
-        GroupKeys[] keys = new GroupKeys[kept.Count];
-        int[] offsets = new int[kept.Count];
+        GroupKeys[] keys = new GroupKeys[count];
+        int[] offsets = new int[count];
         int total = 0;
-        for (int k = 0; k < kept.Count; k++)
+        for (int k = 0; k < count; k++)
         {
             keys[k] = partKeys[kept[k]];
             offsets[k] = total;
@@ -4321,8 +4378,8 @@ internal static class AggregationEngine
         AggregateSlot[] slots = new AggregateSlot[partSlots[0].Length];
         for (int s = 0; s < slots.Length; s++)
         {
-            AggregateSlot[] ofSlot = new AggregateSlot[kept.Count];
-            for (int k = 0; k < kept.Count; k++)
+            AggregateSlot[] ofSlot = new AggregateSlot[count];
+            for (int k = 0; k < count; k++)
             {
                 ofSlot[k] = partSlots[kept[k]][s];
             }

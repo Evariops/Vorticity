@@ -286,6 +286,41 @@ public sealed class LocalFileSourceTests
     }
 
     [Fact]
+    public async Task LanesReadingAtOnceReadBesideEachOtherOnWindows()
+    {
+        // Every word its own offset, so that a read handed another's bytes shows.
+        const int length = 32 << 20;
+        const int range = 1 << 20;
+        byte[] content = new byte[length];
+        for (int at = 0; at < length; at += sizeof(long))
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(content.AsSpan(at), at);
+        }
+
+        using TempFile file = new TempFile(content);
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        source.AnticipateData();
+        ISegmentReader reader = source;
+
+        // Rounds of lanes reading a megabyte each at once, until reads that waited on another opened
+        // the twin, and some more through it.
+        int beside = 0;
+        for (int round = 0; round < 40 && beside < 4; round++)
+        {
+            await Parallel.ForAsync(0, 16, new ParallelOptions { MaxDegreeOfParallelism = 16 }, async (lane, ct) =>
+            {
+                long offset = ((round * 16L) + lane) * range % length;
+                using SegmentOwner owner = await reader.ReadRangeAsync(offset, range, 64, ct);
+                Assert.True(owner.Buffer.Span.SequenceEqual(content.AsSpan((int)offset, range)), $"{offset}");
+            });
+
+            beside += source.ReadsBeside ? 1 : 0;
+        }
+
+        Assert.Equal(OperatingSystem.IsWindows() && Environment.ProcessorCount > 1, source.ReadsBeside);
+    }
+
+    [Fact]
     public async Task APositionalReadServesALargeSegmentItTouchesLittleOfFromAMapping()
     {
         // Two MiB: a large segment the decode touches half of and a small one it touches a page of,

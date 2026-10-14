@@ -1229,23 +1229,27 @@ internal sealed partial class GroupCore
     /// <summary>A part's sub-tables read as one, once it is back in memory: its keys and its slots.</summary>
     internal (GroupKeys Keys, AggregateSlot[] Slots) Joined(CorePart part)
     {
-        List<GroupKeys> keys = [];
-        List<AggregateSlot[]> slots = [];
-        foreach (SubTable table in part.Tables)
-        {
-            table.DropUnmet();
-            keys.Add(table.Keys);
-            slots.Add(table.Slots);
-        }
-
-        if (keys.Count == 0)
+        // Arrays of the tables' count, where lists grew, then were copied to arrays: a part's keys and
+        // slots made four times.
+        int count = Math.Max(1, part.Tables.Count);
+        GroupKeys[] keys = new GroupKeys[count];
+        AggregateSlot[][] slots = new AggregateSlot[count][];
+        if (part.Tables.Count == 0)
         {
             SubTable empty = NewTable(0);
-            keys.Add(empty.Keys);
-            slots.Add(empty.Slots);
+            keys[0] = empty.Keys;
+            slots[0] = empty.Slots;
         }
 
-        (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined([.. keys], [.. slots], keys.Count);
+        for (int t = 0; t < part.Tables.Count; t++)
+        {
+            SubTable table = part.Tables[t];
+            table.DropUnmet();
+            keys[t] = table.Keys;
+            slots[t] = table.Slots;
+        }
+
+        (GroupKeys joined, AggregateSlot[] joinedSlots, _) = AggregationEngine.Joined(keys, slots, count);
         return (joined, joinedSlots);
     }
 
@@ -1683,17 +1687,20 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
     /// </summary>
     internal void DropUnmet()
     {
-        if (Keys.Met() is not { } met)
+        if (Keys.Met(out int count) is not { } met)
         {
             return;
         }
 
-        Keys.Keep(met);
-        records?.Keep(met);
+        ReadOnlySpan<int> kept = met.AsSpan(0, count);
+        Keys.Keep(kept);
+        records?.Keep(kept);
         foreach (AggregateSlot slot in Slots)
         {
-            slot.Keep(met);
+            slot.Keep(kept);
         }
+
+        ArrayShelf.Return(met);
     }
 
     /// <summary>Makes room for <paramref name="groups"/> groups at once: keys and records.</summary>

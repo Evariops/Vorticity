@@ -315,6 +315,52 @@ public sealed class DatasetPlanTests
         Assert.Equal(CompactionTrigger.LevelSize, plan.Job?.Trigger);
     }
 
+    [Fact]
+    public async Task APlanReadsTheVersionItBeganOnWhileItsHandleMovesOn()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        HeldPageReads store = new HeldPageReads(inner);
+
+        // Level 2 over its size and level 3 beneath it, deep enough that the descent reads leaves of
+        // both from the store: a header inlines only the top pages.
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> objects = [];
+        for (int i = 0; i < 625; i++)
+        {
+            objects.Add(Entry(2, (i * 400L) + 1, (i * 400L) + 390, (4L << 20) + (i % 7 == 3 ? i : 0), 0, 0, keyed: true));
+        }
+
+        for (int i = 0; i < 2_500; i++)
+        {
+            objects.Add(Entry(3, (i * 100L) + 5, (i * 100L) + 95, 1L << 20, 0, 0, keyed: true));
+        }
+
+        await using (VortexDataset created = await CreateAsync(inner, null, objects, ct))
+        {
+        }
+
+        CompactionPlan expected;
+        await using (VortexDataset other = await VortexDataset.OpenAsync(inner, Options(null), ct))
+        {
+            expected = await CompactionPolicy.PlanAsync(other, null, 4, ct);
+        }
+
+        // The plan waits on a page while its handle moves to a version with a level more, as a loop
+        // sharing the handle moves it with each job it commits.
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(null), ct);
+        ulong began = dataset.Version;
+        store.Holding = true;
+        Task<CompactionPlan> planning = CompactionPolicy.PlanAsync(dataset, null, 4, ct).AsTask();
+        Assert.Same(store.Reached.Task, await Task.WhenAny(store.Reached.Task, planning));
+        (int level, ReadOnlyMemory<byte> key, ObjectEntry entry) = Entry(4, 1, 2, 1L << 20, 0, 0, keyed: true);
+        await DatasetCommitter.CommitAsync(inner, [new DatasetOperation.AddObject(key, entry) { Level = level }], new CommitOptions { Seed = Seed }, ct);
+        Assert.NotEqual(began, await dataset.RefreshAsync(ct));
+        store.Release.SetResult();
+
+        Assert.Equal(began, expected.Version);
+        Same(expected, await planning, seed: -1);
+    }
+
     /// <summary>
     /// The tally under a page, counted here from its leaves -- sums and maxima written out, the share
     /// and the vector read off the decoded entry, not the tally's own arithmetic -- and held against
@@ -376,6 +422,28 @@ public sealed class DatasetPlanTests
 
         public ReadOnlyMemory<byte> Union(IReadOnlyList<ReadOnlyMemory<byte>> parts, bool leaves) =>
             ObjectSummaryFold.SummariesOf(ObjectSummaryFold.Instance.Union(parts, leaves).Span, out _).ToArray();
+    }
+
+    /// <summary>A store whose first ranged read of a commit object, once asked to, waits until the test releases it.</summary>
+    private sealed class HeldPageReads(IObjectStore inner) : ForwardingStore(inner)
+    {
+        internal bool Holding { get; set; }
+
+        internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override async ValueTask<ObjectRead> ReadAsync(string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            if (Holding && key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal))
+            {
+                Holding = false;
+                Reached.SetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+
+            return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+        }
     }
 
     /// <summary>

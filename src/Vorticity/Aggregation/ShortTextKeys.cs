@@ -466,6 +466,8 @@ internal sealed class ShortTextKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead, aheadBytes: _aheadBytes);
 
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new ShortTextKeys(_shape, _sorted, _probeAhead, shelf, _aheadBytes);
+
     internal override GroupKeys ForTable(ArrayShelf shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
 
     internal override GroupKeys ForSpill(ArrayShelf? shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);

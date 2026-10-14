@@ -69,6 +69,16 @@ internal interface IReadAnticipation
 /// its segments are read one by one, without coalescing.
 /// </para>
 /// <para>
+/// Windows runs the reads of a handle opened for synchronous I/O one at a time, whatever their
+/// offsets, so the lanes of a scan copied from the system cache at one thread's pace: a group by
+/// over 48 MB of a file took the same 5.3 ms on one lane as on four. Once the reads that found
+/// another under way on the handle have waited on 2 MiB, the next opens a twin of it for
+/// overlapped I/O, whose reads run side by side, and every read that finds the handle busy reads
+/// through the twin from then on: that group by takes 3.5 ms on four lanes, 2.9 on eight, 4.2 rather
+/// than 7.0 on 32. A read through the twin costs 0.8 µs more, which a scan of small reads on one
+/// lane lost 3 to 7 % to when every read took it: such a scan never opens it.
+/// </para>
+/// <para>
 /// With the session's <see cref="MappedFileCache"/>, the mapping outlives the reader: the next open
 /// of the same file takes it over with every page already mapped in it, so a file scanned again
 /// pays neither the mapping nor a fault per page nor the unmapping. Where the platform reads a
@@ -82,7 +92,7 @@ internal interface IReadAnticipation
 /// reader's reference on the mapping, which lives on for as long as a lease reads from it.
 /// </para>
 /// </remarks>
-internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
+internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPositionalReader
 {
     /// <summary>
     /// The runs a scan reads positionally: segments less than 16 KiB apart are read as one, the
@@ -107,8 +117,32 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     /// <summary>The segments smaller than a page a positional reader maps the file for, rather than read.</summary>
     private const long MappedSegmentsAtLeast = 64;
 
+    /// <summary>
+    /// The bytes of the reads that found another under way on the handle past which a read opens its
+    /// overlapped twin: what the system cache copies one read at a time in 200 µs, about twice what
+    /// the open and the close cost.
+    /// </summary>
+    /// <remarks>
+    /// The lanes of a scan start together, and their first reads are the queue the twin takes away.
+    /// At 4 MiB it came as that queue drained: a take of 1,000 rows on 32 lanes from a file Vortex
+    /// Rust wrote, 6 MB read, paid its open and close for a dozen reads, 3.2 ms then 3.4 to 3.6. Opened
+    /// by the first read that found another, it served a projection of that file small reads it
+    /// costs more on than it saves, 2.4 ms then 3.3.
+    /// </remarks>
+    private const long TwinAfterBytes = 2 << 20;
+
+    // The fields of _reads: the reads under way on the handle in the low bits, the KiB of those that
+    // found one before them above, and the sign once a read opens the twin, or fails to.
+    private const long UnderWay = 0xFFFF;
+    private const int WaitedShift = 16;
+
     // Null when the open took over a kept mapping without opening the file.
     private readonly SafeFileHandle? _handle;
+
+    // The handle's twin opened for overlapped I/O, null until reads that waited on another passed
+    // TwinAfterBytes, and the reads of the handle, one field: 16 bytes an open.
+    private SafeFileHandle? _twin;
+    private long _reads;
     private readonly string _path;
     private readonly MappedFileCache? _mappings;
 
@@ -172,6 +206,9 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
 
     /// <summary>Whether a positional read served a large segment it touched little of from a mapping.</summary>
     internal bool MapsSparseSegments => _positional && IsMapped;
+
+    /// <summary>Whether reads that find another under way on the handle read beside it, through its overlapped twin.</summary>
+    internal bool ReadsBeside => Volatile.Read(ref _twin) is not null;
 
     /// <inheritdoc/>
     public void AnticipateData() => AnticipateData(0, 0);
@@ -270,7 +307,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             else if (_positional)
             {
                 ServeSparse(requests);
-                CoalescedReads.ReadMany(requests, _handle!, Length, Runs);
+                CoalescedReads.ReadMany(requests, this, Length, Runs);
             }
             else
             {
@@ -333,7 +370,74 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
 
         Interlocked.Exchange(ref _mapping, null)?.Release();
         _handle?.Dispose();
+        Interlocked.Exchange(ref _twin, null)?.Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc/>
+    int IPositionalReader.Read(Span<byte> destination, long offset) => ReadAt(destination, offset);
+
+    /// <summary>
+    /// Reads at <paramref name="offset"/> on the caller's thread: through the handle, or, where another
+    /// read is under way on it, through its overlapped twin, which reads beside it.
+    /// </summary>
+    private int ReadAt(Span<byte> destination, long offset)
+    {
+        // Only a disposed reader without a handle gets here: its mapping is gone with its dispose.
+        SafeFileHandle handle = _handle ?? throw new ObjectDisposedException(nameof(LocalFileSource));
+        if ((Interlocked.Increment(ref _reads) & UnderWay) > 1 && Twin(destination.Length) is { } twin)
+        {
+            Interlocked.Decrement(ref _reads);
+            int read = NativeFile.ReadOverlapped(twin, destination, offset);
+            if (read >= 0)
+            {
+                return read;
+            }
+
+            // A failure is the handle's read to report, with the exception it throws.
+            Interlocked.Increment(ref _reads);
+        }
+
+        try
+        {
+            return NativeFile.Read(handle, destination, offset);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _reads);
+        }
+    }
+
+    /// <summary>
+    /// The twin a read that found another under way on the handle reads through: opened by the read
+    /// whose bytes take those that waited past <see cref="TwinAfterBytes"/>; null before, where the
+    /// platform has none, and while that read opens it.
+    /// </summary>
+    private SafeFileHandle? Twin(int length)
+    {
+        if (Volatile.Read(ref _twin) is { } twin)
+        {
+            return twin;
+        }
+
+        // The KiB waited counted above the reads under way; once the sign is set, a read took the open.
+        if (!OperatingSystem.IsWindows()
+            || Interlocked.Add(ref _reads, (long)(length >> 10) << WaitedShift) >> WaitedShift < TwinAfterBytes >> 10
+            || Interlocked.Or(ref _reads, long.MinValue) < 0)
+        {
+            return null;
+        }
+
+        SafeFileHandle? opened = NativeFile.TryOpenOverlapped(_handle!);
+        Volatile.Write(ref _twin, opened);
+        if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref _twin, null) is { } late)
+        {
+            // A dispose ran between the open and the publication and found nothing to close.
+            late.Dispose();
+            return null;
+        }
+
+        return opened;
     }
 
     /// <summary>
@@ -513,10 +617,13 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     private NativeSegmentOwner ReadPositionally(long offset, int length)
     {
         // Only a disposed reader without a handle gets here: its mapping is gone with its dispose.
-        SafeFileHandle handle = _handle ?? throw new ObjectDisposedException(nameof(LocalFileSource));
-        NativeSegmentOwner owner = length <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+        if (_handle is null)
+        {
+            throw new ObjectDisposedException(nameof(LocalFileSource));
+        }
+
+        // The shared pool keeps a block past its classes as well, for the next read of a segment that large.
+        NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> destination = owner.WritableSpan[..length];
@@ -525,7 +632,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             {
                 // A short count is legal and not the end; none at all is a file shorter than its
                 // footer says.
-                int read = NativeFile.Read(handle, destination[done..], offset + done);
+                int read = ReadAt(destination[done..], offset + done);
                 if (read <= 0)
                 {
                     SegmentIo.ThrowTruncatedRead(offset, length, done);

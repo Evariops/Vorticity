@@ -219,6 +219,8 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     internal override GroupKeys Fresh() => new RawKeys<TWord>(_layout);
 
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new RawKeys<TWord>(_layout, shelf: shelf);
+
     /// <summary>The words of the groups, the slots that find them, and a batch's words.</summary>
     internal override long Footprint =>
         ((long)(_keys.Length + _words.Length) * Unsafe.SizeOf<TWord>()) + ((long)_slots.Length * sizeof(uint))

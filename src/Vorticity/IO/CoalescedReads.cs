@@ -2,11 +2,18 @@ using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using Microsoft.Win32.SafeHandles;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.IO;
+
+/// <summary>A file read at offsets, on the caller's thread, as <see cref="CoalescedReads"/> reads its runs.</summary>
+internal interface IPositionalReader
+{
+    /// <summary>Reads into <paramref name="destination"/> from <paramref name="offset"/>.</summary>
+    /// <returns>The bytes read, fewer than asked at the end of the file.</returns>
+    int Read(Span<byte> destination, long offset);
+}
 
 /// <summary>
 /// The reads of a batch of segments planned as coalesced runs: the pending slots sorted by offset,
@@ -43,10 +50,10 @@ internal static class CoalescedReads
     /// this throws.
     /// </summary>
     /// <param name="requests">The batch.</param>
-    /// <param name="handle">A readable handle on the file.</param>
+    /// <param name="reader">The file, read at offsets.</param>
     /// <param name="fileLength">The file's length, which every segment must lie within.</param>
     /// <param name="options">The gap and size budgets the runs are planned with.</param>
-    internal static void ReadMany(SegmentRequestSet requests, SafeFileHandle handle, long fileLength, SegmentReadOptions options)
+    internal static void ReadMany(SegmentRequestSet requests, IPositionalReader reader, long fileLength, SegmentReadOptions options)
     {
         int registered = requests.Count;
         if (registered == 0)
@@ -68,7 +75,7 @@ internal static class CoalescedReads
                 NativeSegmentOwner block = RentBlock(run.Length, options);
                 try
                 {
-                    ReadExact(handle, block.WritableSpan[..run.Length], run.Start);
+                    ReadExact(reader, block.WritableSpan[..run.Length], run.Start);
                     Publish(requests, block, in run, sorted, order, options);
                 }
                 finally
@@ -158,9 +165,12 @@ internal static class CoalescedReads
         return false;
     }
 
-    /// <summary>A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling.</summary>
+    /// <summary>
+    /// A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling, and past
+    /// the shared pool's classes by the one block it keeps beyond them.
+    /// </summary>
     internal static NativeSegmentOwner RentBlock(int length, SegmentReadOptions options) =>
-        length <= options.MaxPooledBytes
+        length <= options.MaxPooledBytes || length > AlignedBufferPool.Shared.MaxPooledLength
             ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
             : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
 
@@ -269,14 +279,14 @@ internal static class CoalescedReads
     }
 
     /// <summary>Reads exactly the destination's bytes at <paramref name="offset"/>, on the caller's thread.</summary>
-    private static void ReadExact(SafeFileHandle handle, Span<byte> destination, long offset)
+    private static void ReadExact(IPositionalReader reader, Span<byte> destination, long offset)
     {
         int done = 0;
         while (done < destination.Length)
         {
             // A short count is legal and not the end; none at all is a file shorter than its
             // footer says.
-            int read = NativeFile.Read(handle, destination[done..], offset + done);
+            int read = reader.Read(destination[done..], offset + done);
             if (read <= 0)
             {
                 SegmentIo.ThrowTruncatedRead(offset, destination.Length, done);

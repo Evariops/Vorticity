@@ -142,8 +142,12 @@ internal abstract class GroupKeys
     /// </summary>
     internal abstract void Parts(ulong seed, int shift, Span<byte> parts);
 
-    /// <summary>An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what the partitions were rebased on.</summary>
-    internal virtual GroupKeys ForPart() => Fresh();
+    /// <summary>
+    /// An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what
+    /// the partitions were rebased on; its arrays taken from and given back to <paramref name="shelf"/>,
+    /// where the index keeps any, or new ones when null.
+    /// </summary>
+    internal virtual GroupKeys ForPart(ArrayShelf? shelf = null) => Fresh();
 
     /// <summary>
     /// The span of values the index numbers its groups by, its least value and its width; null when it
@@ -160,9 +164,15 @@ internal abstract class GroupKeys
 
     /// <summary>
     /// The groups an index that numbered its span whole keeps once the rows are folded, the values no
-    /// row met left out; null when it keeps them all. It numbers values as they first come from then on.
+    /// row met left out: the first <paramref name="count"/> of an array the process's shelf lends, which
+    /// the caller gives back (<see cref="ArrayShelf.Return{T}"/>); null when it keeps them all. It
+    /// numbers values as they first come from then on.
     /// </summary>
-    internal virtual int[]? Met() => null;
+    internal virtual int[]? Met(out int count)
+    {
+        count = 0;
+        return null;
+    }
 
     /// <summary>
     /// For an index that numbers its groups by value over a span of <paramref name="least"/> values or
@@ -178,7 +188,7 @@ internal abstract class GroupKeys
     internal virtual void PartsByValue(int partBits, Span<byte> parts) => throw new NotSupportedException("Only keys numbered by value are cut by value.");
 
     /// <summary>An empty index the part <paramref name="part"/> of a merge by value is merged into: numbered by value over its run of the span.</summary>
-    internal virtual GroupKeys ForValuePart(int part, int partBits) => ForPart();
+    internal virtual GroupKeys ForValuePart(int part, int partBits, ArrayShelf? shelf = null) => ForPart(shelf);
 
     /// <summary>An empty index a sub-table of the core holds its groups in, its arrays taken from and given back to <paramref name="shelf"/>.</summary>
     internal virtual GroupKeys ForTable(ArrayShelf shelf) => ForPart();
@@ -1521,10 +1531,11 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// order, then a null's group and the values past the bounds; null when every value was met, or the
     /// span is not numbered whole. The keys number values as they first come from then on.
     /// </summary>
-    internal override int[]? Met()
+    internal override int[]? Met(out int count)
     {
         int unmet = _unmet;
         _unmet = -1;
+        count = 0;
         if (unmet <= 0)
         {
             return null;
@@ -1533,7 +1544,9 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         // The groups are still the span's numbers in order, which the keep that follows reads once (KeepNumbered).
         _numbered = true;
 
-        int[] met = new int[Count - unmet];
+        // Lent by the process's shelf: read once by the keep that follows, a new list a sub-table was a
+        // quarter of what a core of 20M rows allocated at 32 lanes.
+        int[] met = ArrayShelf.Rent<int>(Count - unmet);
         int kept = 0;
         int span = (int)_span;
         if (_metBits is { } bits)
@@ -1575,6 +1588,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             met[kept++] = group;
         }
 
+        count = kept;
         return met;
     }
 
@@ -1740,7 +1754,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         + ((long)(_homes.Length + _left.Length) * sizeof(int)) + ((long)(_metBits?.Length ?? 0) * sizeof(ulong));
 
     /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
-    internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new FixedKeys<TValue>(_shape, _sorted, shelf: shelf);
 
     internal override (long Least, ulong Span)? ValueSpan => _pages is null || _mapSlots is not null ? null : (_directMin, _span);
 
@@ -1761,12 +1775,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     /// A part of a merge by value numbers its run of the span whatever its entries: the lanes numbered
     /// all of it, and its pages come as its values meet them.
     /// </summary>
-    internal override GroupKeys ForValuePart(int part, int partBits)
+    internal override GroupKeys ForValuePart(int part, int partBits, ArrayShelf? shelf = null)
     {
         int shift = ValuePartShift(partBits);
         long least = _directMin + ((long)part << shift);
         long most = Math.Min(_directMin + (long)(_span - 1), least + ((1L << shift) - 1));
-        return new FixedKeys<TValue>(_shape, _sorted, new KeyBounds(least, most), _probeAhead, rows: 1L << shift);
+        return new FixedKeys<TValue>(_shape, _sorted, new KeyBounds(least, most), _probeAhead, rows: 1L << shift, shelf: shelf);
     }
 
     internal override void Reserve(int groups)
@@ -2602,7 +2616,17 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new BytesKeys(_shape, _sorted);
 
+    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new BytesKeys(_shape, _sorted, shelf);
+
     internal override long Footprint => _table.Footprint;
+
+    /// <summary>The table's pages and arrays back to the shelf: left to the collector, every query took a lane's keys new.</summary>
+    internal override void Release()
+    {
+        _table.Release();
+        _null = -1;
+        Count = 0;
+    }
 
     internal override int NullNumber => _null;
 

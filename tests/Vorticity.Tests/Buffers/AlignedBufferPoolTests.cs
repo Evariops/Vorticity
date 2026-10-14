@@ -660,6 +660,53 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
+    public void A_graded_pool_keeps_one_outsized_block_for_the_next_read_it_fits()
+    {
+        AlignedBufferPool pool = AlignedBufferPool.Graded(64 * 1024, 8, demandBudget: 1L << 20);
+        try
+        {
+            // Past the classes, the block a read gets parks in the pool's one slot once given back.
+            NativeSegmentOwner first = pool.Rent(1_000_000, 64);
+            Assert.Equal(1_000_000, first.Capacity);
+            pool.Return(first);
+            Assert.True(pool.KeepsOutsized);
+
+            // A shorter outsized read takes it, as long as it asked; a second block given back while
+            // the slot holds one is freed.
+            NativeSegmentOwner again = pool.Rent(900_000, 64);
+            Assert.Equal(900_000, again.Length);
+            Assert.Equal(1_000_000, again.Capacity);
+            Assert.False(pool.KeepsOutsized);
+            NativeSegmentOwner other = pool.Rent(500_000, 64);
+            Assert.Equal(500_000, other.Capacity);
+            pool.Return(again);
+            pool.Return(other);
+            Assert.True(pool.KeepsOutsized);
+
+            // A longer read frees the block kept and gets one of its own length.
+            NativeSegmentOwner longer = pool.Rent(2_000_000, 64);
+            Assert.Equal(2_000_000, longer.Capacity);
+            Assert.False(pool.KeepsOutsized);
+            pool.Return(longer);
+            Assert.True(pool.KeepsOutsized);
+
+            // A sweep frees it once no outsized read has asked for a minute, or at once under a high
+            // memory load.
+            pool.TrimIdle(Environment.TickCount64, everything: false);
+            Assert.True(pool.KeepsOutsized);
+            pool.TrimIdle(Environment.TickCount64 + 60_000, everything: false);
+            Assert.False(pool.KeepsOutsized);
+            pool.Return(pool.Rent(1_000_000, 64));
+            pool.TrimIdle(Environment.TickCount64, everything: true);
+            Assert.False(pool.KeepsOutsized);
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
+    [Fact]
     public void A_graded_class_widens_within_the_pools_budget_and_its_own_ceiling()
     {
         const int block = 128 * 1024;
