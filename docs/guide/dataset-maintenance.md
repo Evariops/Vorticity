@@ -25,7 +25,7 @@ CompactionPlan plan = await dataset.PlanCompactionAsync();
 after 10 appends: version 11, 50000 rows, 10 objects, lag 2
 plan: work True, style Leveled, clustered True, lag 2, objects by level [10], bytes by level [128862]
   job: level 0 to 1, LevelZeroCeiling, 10 objects, 50000 rows, 128862 bytes, target 131072
-  cost: 0 requests (0 get, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
+  cost: 0 requests (0 read, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 
 Appending is cheap, but it leaves a dataset in poor shape: many small objects, and every old version
@@ -51,7 +51,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 22 requests (10 get, 10 head, 2 put, 0 delete, 0 list), 22 dependent steps, 128862 bytes read, 79429 written
+  cost: 12 requests (10 read, 0 head, 2 put, 0 delete, 0 list), 12 dependent steps, 128862 bytes read, 79429 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -97,8 +97,8 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 9 requests (6 get, 3 head, 0 put, 0 delete, 0 list), 9 dependent steps, 145609 bytes read, 0 written
-verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28178 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 8 requests (6 read, 2 head, 0 put, 0 delete, 0 list), 8 dependent steps, 145609 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 11 requests (9 read, 2 head, 0 put, 0 delete, 0 list), 11 dependent steps, 28178 bytes read, 0 written
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
@@ -122,9 +122,9 @@ VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
 ```
 
 ```
-vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 30 requests (13 get, 13 head, 0 put, 0 delete, 4 list), 30 dependent steps, 12649 bytes read, 0 written
-vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 29 requests (2 get, 23 head, 0 put, 0 delete, 4 list), 29 dependent steps, 672 bytes read, 0 written
-vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 31 requests (2 get, 23 head, 0 put, 2 delete, 4 list), 31 dependent steps, 672 bytes read, 0 written
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 16 requests (13 read, 0 head, 0 put, 0 delete, 3 list), 16 dependent steps, 12649 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 5 requests (2 read, 0 head, 0 put, 0 delete, 3 list), 5 dependent steps, 672 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 7 requests (2 read, 0 head, 0 put, 2 delete, 3 list), 7 dependent steps, 672 bytes read, 0 written
 and the data: 55000 rows, 2 objects
 ```
 
@@ -137,8 +137,8 @@ twelve superseded commit objects. The twelfth still holds pages the latest versi
 `VacuumOptions.TimeProvider` is the clock vacuum measures ages against. That is how the sample
 jumps past the window, and how you can test your own retention. It must agree with the store's
 clock, since the ages it compares are the store's timestamps. Deletes go out in batches, two
-requests for twenty-one keys here. The fourth listing covers the leases a compaction loop may have
-left behind (see below), and since each lease's key says when it ended, none needs a head request.
+requests for twenty-one keys here, and the listings say when each object was written, so none needs
+a head request.
 
 Run a dry run first. `Deleted` lists what would go, commit objects first. `Young` lists the
 unreferenced objects kept because they may belong to a writer still in flight, and `Retained` the
@@ -171,14 +171,12 @@ the exception a job raised, which the host catches before starting the loop agai
 
 A loop runs the same jobs as `CompactAsync`, so it is safe against every writer and every other
 loop. What several loops on one dataset can waste is a job that two of them run at once, which one
-commit then abandons. Loops that know about one another say so with `Loops` and `Loop`: each takes
-the due job ranked at its index, and no two ranked jobs read or write the same level. Loops that
-cannot coordinate set `UseLeases` instead. Before a job, a loop creates `leases/<level>/<end>` for each
-of its levels with put-if-absent, holds them until the end of the current `LeaseSpan` (a minute by
-default), and moves to the next job when another loop holds one. A loop remembers the leases it
-created, so it can run the next job on the same levels within the span without asking the store
-again. Nothing releases a lease, so a store that refuses deletes still works, and vacuum deletes the
-leases that ended a window ago.
+commit then abandons. When several processes write one dataset, give its compaction to a process of
+its own that runs the dataset's only loop, and leave inline compaction off in the writers
+(`InlineCompactionBytes` is 0 by default). Two compactions then never run at once on the dataset.
+Loops that know about one another can share a dataset all the same, and say so with `Loops` and
+`Loop`: each takes the due job ranked at its index, and no two ranked jobs read or write the same
+level.
 
 ## In the writer's commit
 
@@ -196,10 +194,10 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | | requests | what they are |
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
-| `CompactAsync` | 22 | every input object read, one object written, one commit |
-| `VerifyAsync` | 9 | every object hashed, every page read |
-| `VerifyAsync(since)` | 12 | what the earlier version does not share |
-| `VacuumAsync` | 29 to 31 | a listing, a head per commit object, the retained trees, the leases' listing, the deletes in batches |
+| `CompactAsync` | 12 | every input object read, one object written, one commit |
+| `VerifyAsync` | 8 | every object hashed, every page read |
+| `VerifyAsync(since)` | 11 | what the earlier version does not share |
+| `VacuumAsync` | 5 to 16 | the listings, the commit object of each retained version and the trees they name, the deletes in batches |
 
 `DependentSteps` is the number that sets latency: the round trips that had to wait for the previous
 one. On a store where a request costs 30 ms, it is what a job takes. See

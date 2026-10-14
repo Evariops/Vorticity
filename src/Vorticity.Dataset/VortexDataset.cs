@@ -868,11 +868,14 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </returns>
     /// <remarks>
     /// A job is the one <see cref="CompactAsync"/> runs, so a loop is safe against every writer and
-    /// every other loop. Loops that know one another spread over the due jobs by
-    /// <see cref="CompactionSchedule.Loops"/>; loops that cannot count one another lease a job's
-    /// levels (<see cref="CompactionSchedule.UseLeases"/>).
+    /// every other loop. Two loops that do not know each other waste work, though: both plan the
+    /// same job, and the commit of one abandons the other. A dataset with several writers is
+    /// compacted by one loop, in a process of its own, while the writers leave inline compaction off
+    /// (<see cref="DatasetOptions.InlineCompactionBytes"/>, 0 by default). Loops that know one another
+    /// spread over the due jobs by <see cref="CompactionSchedule.Loops"/> and
+    /// <see cref="CompactionSchedule.Loop"/>.
     /// </remarks>
-    /// <exception cref="ArgumentOutOfRangeException">The schedule's loop index, rate, sleep or lease span is out of range.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The schedule's loop index, rate or sleep is out of range.</exception>
     public Task RunCompactionAsync(CompactionSchedule? schedule = null, CancellationToken cancellationToken = default) =>
         CompactionLoop.RunAsync(this, schedule ?? new CompactionSchedule(), cancellationToken);
 

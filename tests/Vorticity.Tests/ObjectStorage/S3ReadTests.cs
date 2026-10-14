@@ -129,7 +129,7 @@ public sealed class S3ReadTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         using S3Emulator emulator = new S3Emulator { PageSize = 2 };
-        string[] keys = ["commit/00000000000000000097.vxc", "commit/00000000000000000098.vxc", "data/a b.vortex", "data/a+b.vortex", "data/été", "data/x%y", "leases/z"];
+        string[] keys = ["commit/00000000000000000097.vxc", "commit/00000000000000000098.vxc", "data/a b.vortex", "data/a+b.vortex", "data/été", "data/x%y", "imports/z"];
         foreach (string key in keys)
         {
             emulator.Seed(Bucket, key, Encoding.UTF8.GetBytes(key));

@@ -105,10 +105,8 @@ public sealed class DatasetLockedStoreTests
         }
 
         Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1 << 20 }, ct));
-        long lease = CompactionLoop.LeaseEnd(clock.Now, TimeSpan.FromMinutes(1));
-        Assert.True(await CompactionLoop.TryLeaseAsync(store, new CompactionJob(0, 1, CompactionStyle.Leveled, CompactionTrigger.LevelSize, [], 0, 0), lease, dataset.Version, null, ct));
 
-        // Past the window, every superseded object and the lease are garbage, and every one is locked.
+        // Past the window, every superseded object is garbage, and every one is locked.
         clock.Advance(TimeSpan.FromHours(2));
         counting.Reset();
         VacuumResult early = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
@@ -117,7 +115,6 @@ public sealed class DatasetLockedStoreTests
         // A listing that says each lock spares every head. One that does not, as S3's, costs a head
         // per object old enough to go, and none for the others.
         Assert.Equal(listsLocks ? 0 : early.Locked.Length, counting.CountOf(ObjectOperation.Head));
-        Assert.Contains(CompactionLoop.LeaseKey(0, lease), early.Locked);
         Assert.Contains(early.Locked, key => key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal));
         Assert.Contains(early.Locked, key => key.StartsWith(CommitKey.Prefix, StringComparison.Ordinal));
         Assert.Equal(first + TimeSpan.FromDays(30), early.NextUnlock);

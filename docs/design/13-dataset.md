@@ -530,8 +530,7 @@ a scan that stops at its first batch opens a single object.
   default (`DatasetOptions.RetentionWindow`), always keeping the latest version. What ages is the
   moment a version was superseded, by the store's own clock. An unreferenced object younger than the
   window may belong to a writer in flight and is kept, which means a writer must commit within the
-  window. Only `commit/`, `data/` and the compaction loops' `leases/` are swept, and an imported file
-  belongs to its owner. On a store with retention locks, whatever the lock or a legal hold still keeps
+  window. Only `commit/` and `data/` are swept, and an imported file belongs to its owner. On a store with retention locks, whatever the lock or a legal hold still keeps
   is left and reported with the date the first of it may go (`DatasetOptions.LockedStore`, see
   [stores that cannot delete](15-compaction.md#5-stores-that-cannot-delete)). A reader that outlives
   the window gets an `ObjectNotFoundException` naming the version it was reading, never a partial

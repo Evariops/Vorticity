@@ -303,10 +303,7 @@ public sealed class EncryptedDatasetTests
         Assert.Empty((await dataset.VerifyAsync(cancellationToken: ct)).Problems);
         await foreach ((string key, _, _) in store.ListAsync(string.Empty, null, ct))
         {
-            if (!key.StartsWith("leases/", StringComparison.Ordinal))
-            {
-                Assert.True((await AllAsync(store, key, ct)).AsSpan().StartsWith("VXSEALED"u8), $"'{key}' is not sealed");
-            }
+            Assert.True((await AllAsync(store, key, ct)).AsSpan().StartsWith("VXSEALED"u8), $"'{key}' is not sealed");
         }
 
         // A file sealed by a session of the same keys joins it; a plain one does not.
