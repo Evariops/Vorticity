@@ -100,8 +100,11 @@ internal static class SplitExecution
             return reader.Execute(in root, split, in mask, context);
         }
 
+        // As many indices as the take wants of the split, not one a row: a scattered take wants a
+        // few rows of a split of tens of thousands, and an array of the split's length missed the
+        // pool's buckets on every lane that rented one.
         int rows = (int)(split.End - split.Start);
-        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(take.CountIn(split), 1));
         try
         {
             int count = take.LocalIndices(split, indices);

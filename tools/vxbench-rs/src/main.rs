@@ -98,6 +98,12 @@ fn main() -> ExitCode {
         }
     }
 
+    // What the rounds read of their arrays, as our runner prints it.
+    let read = vxbench::vxbench_read_sum();
+    if read != 0 {
+        println!("read_sum={read}");
+    }
+
     let (rows, work_us) = rounds[rounds.len() - 1];
     let (cpu_ms, rss_bytes) = cost();
     println!("rows={rows} work_us={work_us} cpu_ms={cpu_ms} rss_bytes={rss_bytes} threads={threads}");

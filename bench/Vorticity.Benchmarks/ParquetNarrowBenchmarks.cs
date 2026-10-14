@@ -62,7 +62,7 @@ public class ParquetNarrowBenchmarks
         long rows = 0;
         await foreach (BatchView batch in file.Scan(Column).WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.View(batch);
         }
 
         return rows;

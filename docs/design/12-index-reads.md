@@ -231,10 +231,11 @@ What it costs should be read before using it. A window of `W` entries touches as
 rows are scattered over. On a sorted column, the rows of consecutive keys are consecutive, so the
 walk is a plain scan. On sorted runs over a column uncorrelated with file order, a window can touch
 one split per row, and a scattered take costs what it costs. Reading 64 rows of an uncorrelated
-column in key order takes longer than Rust's reader takes for 64 rows scattered the same way whose
-positions it is given, a take over 64 splits (the `against a take` axis of `--ratio-check`, a gate
-the benchmark page leaves out). It takes less than Rust's filtered scan of the same band, which is
-what a reader without the index has to do (the key-order axes [in one
+column in key order takes about what Rust's reader takes for 64 rows scattered the same way whose
+positions it is given, a take over 64 splits: 0.9 of its time on the x64 machine, both sides reading
+the rows they return (the `against a take` axis of `--ratio-check`, a gate the benchmark page leaves
+out). It takes less than Rust's filtered scan of the same band, which is what a reader without the
+index has to do (the key-order axes [in one
 process](05-benchmarks.md#3-in-one-process-after-warm-up), measured on [the benchmark
 page](../guide/benchmarks.md#in-one-process-after-warm-up)). So it is the tool for a selective range,
 a top-k or a merge, not for a whole uncorrelated column, where sorting the scan's output costs less.

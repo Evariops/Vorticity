@@ -45,6 +45,7 @@ internal static class DatasetScenarios
         {
             run.Answer();
             rows += Scenarios.Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -60,6 +61,7 @@ internal static class DatasetScenarios
         {
             run.Answer();
             rows += Scenarios.Sum(groups.Column<long>(1).Values);
+            Vorticity.Bench.Scenarios.Consume.Typed(groups);
         }
 
         return rows;
@@ -70,7 +72,7 @@ internal static class DatasetScenarios
         await foreach (Columns<Reading> batch in dataset.Scan<Reading>())
         {
             run.Answer();
-            return batch.RowCount;
+            return Vorticity.Bench.Scenarios.Consume.Typed(batch);
         }
 
         return 0;

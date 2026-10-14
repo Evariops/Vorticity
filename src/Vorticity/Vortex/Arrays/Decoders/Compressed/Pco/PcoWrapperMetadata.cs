@@ -85,6 +85,29 @@ internal readonly ref struct PcoWrapperMetadata
     /// <summary>The chunks, in order, each as the value counts of its pages.</summary>
     internal ChunkEnumerator GetChunks() => new ChunkEnumerator(_metadata);
 
+    /// <summary>
+    /// The values the first page holds, which every page of a chunk but its last holds too, read
+    /// without a pass over the others; zero when there is no page.
+    /// </summary>
+    /// <param name="metadata">The node's metadata bytes.</param>
+    internal static int FirstPageValues(ReadOnlySpan<byte> metadata)
+    {
+        ProtoReader reader = new ProtoReader(metadata);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            if (field == 2)
+            {
+                MetadataProto.Expect(wire, ProtoWireType.LengthDelimited, MessageName, "chunks");
+                ProtoReader chunk = reader.ReadMessage();
+                return NextPage(ref chunk, out int values) ? values : 0;
+            }
+
+            reader.SkipField(wire);
+        }
+
+        return 0;
+    }
+
     /// <summary>The next page of <paramref name="chunk"/>, and how many values it holds.</summary>
     private static bool NextPage(ref ProtoReader chunk, out int values)
     {

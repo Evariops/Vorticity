@@ -117,7 +117,7 @@ public class SealedScanBenchmarks
         long rows = 0;
         await foreach (RecordBatch batch in _file!.ScanBuilder().ExecuteAsync().WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;
@@ -129,7 +129,7 @@ public class SealedScanBenchmarks
         long rows = 0;
         await foreach (RecordBatch batch in _file!.ScanBuilder().Where(_band).ExecuteAsync().WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;
@@ -149,7 +149,7 @@ public class SealedScanBenchmarks
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Take([_middle]).ExecuteAsync().WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;

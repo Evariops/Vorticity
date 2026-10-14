@@ -25,12 +25,14 @@ The ground rules:
   codegen unit, no LTO), through [tools/vxbench-rs](../../tools/vxbench-rs). `target-cpu=native`
   gives its compiler this machine's instruction set, AVX-512 included, just as .NET's JIT has it.
   Both sides decode every value they return to its plain form (a constant column kept as one
-  value on both), and must return the same rows or the run fails.
+  value on both), read every value they return, the same bytes on both, and must return the
+  same rows or the run fails.
 * Rust maps the file and reads it where it lies. Vorticity reads it as a session that keeps no
   mapping does on Windows: it copies the segments a scan reads, which costs less than mapping the
   file for one scan and dropping it, and maps the file only for a scan of many segments smaller
   than a page or for a large segment a decode touches little of. A column stored in its plain form
-  is then a copy on our side, where Rust hands out a view of its mapping that its scan never reads.
+  is then a copy on our side and a view of the mapping on Rust's, and each side reads its values
+  from there.
 * Rust gets its faster setting. On one core, every Rust figure is the faster of its two ways of
   splitting a scan (its default, and one split per chunk), measured file by file. On all cores it
   keeps its default, as on [the benchmark page](benchmarks.md).
@@ -73,8 +75,8 @@ Release bench/Vorticity.Benchmarks.Runner`), since an older runner times older c
   `open_buffer` over a `memmap2` mapping. Vorticity reads it as a session that keeps no mapping
   does on Windows: it copies the segments a scan reads, and maps the file only for many segments
   smaller than a page or for a large segment a decode touches little of. Both decode every value
-  they return to its plain form, a constant column kept as one value on both; a write hands its
-  bytes to a sink that keeps none,
+  they return to its plain form, a constant column kept as one value on both, and read every
+  value they return, the same bytes on both; a write hands its bytes to a sink that keeps none,
   on both. On one core Rust is timed under each of its two ways of splitting a scan, its default
   and one split per chunk, and its figure is the faster; on all cores it keeps its default.
 * **A figure** is the time a fresh process takes for its action, from opening the file to its
@@ -100,41 +102,41 @@ Release bench/Vorticity.Benchmarks.Runner`), since an older runner times older c
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | speedup | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.4 (0.4-0.4) | 1.0 (1.0-1.1) | 2.47x | — | — | 8.7 KiB | 12 / 9 MiB |
-| `open` | Vortex Rust's | 0.4 (0.4-0.5) | 1.0 (0.9-1.0) | 2.49x | — | — | 9.5 KiB | 12 / 9 MiB |
-| `scan` | Vorticity's | 6.1 (6.0-6.2) | 16.6 (16.6-16.8) | 2.72x | 4.4 | 1.6 | 25.7 KiB | 15 / 15 MiB |
-| `scan` | Vortex Rust's | 2.9 (2.9-3.5) | 5.0 (4.9-5.1) | 1.70x | 9.2 | 5.4 | 21.9 KiB | 21 / 22 MiB |
-| `project` | Vorticity's | 0.7 (0.7-0.8) | 1.6 (1.5-1.7) | 2.21x | 11.9 | 5.4 | 19.4 KiB | 13 / 11 MiB |
-| `project` | Vortex Rust's | 0.8 (0.8-0.8) | 1.6 (1.5-1.6) | 2.00x | 10.6 | 5.3 | 17.2 KiB | 13 / 11 MiB |
-| `filter-narrow` | Vorticity's | 1.7 (1.6-1.7) | 2.3 (2.2-2.4) | 1.39x | 0.2 | 0.1 | 52.3 KiB | 16 / 13 MiB |
-| `filter-narrow` | Vortex Rust's | 1.6 (1.6-1.7) | 2.2 (2.2-2.4) | 1.37x | 0.2 | 0.1 | 32.0 KiB | 18 / 13 MiB |
-| `filter-wide` | Vorticity's | 3.7 (3.6-3.7) | 9.6 (9.5-9.8) | 2.63x | 3.6 | 1.4 | 34.8 KiB | 15 / 15 MiB |
-| `filter-wide` | Vortex Rust's | 2.4 (2.4-2.5) | 3.9 (3.9-4.2) | 1.63x | 5.5 | 3.4 | 32.0 KiB | 21 / 18 MiB |
-| `take` | Vorticity's | 5.6 (5.5-5.7) | 8.7 (8.6-8.8) | 1.54x | — | — | 49.3 KiB | 13 / 14 MiB |
-| `take` | Vortex Rust's | 1.7 (1.7-1.8) | 3.0 (2.9-3.1) | 1.72x | — | — | 45.6 KiB | 16 / 16 MiB |
-| `write` | Vorticity's | 30.8 (30.6-32.0) | 74.5 (74.0-76.1) | 2.42x | 0.9 | 0.4 | 42.0 KiB | 20 / 75 MiB |
-| `write` | Vortex Rust's | 27.6 (27.4-30.9) | 61.9 (61.7-62.5) | 2.24x | 1.0 | 0.4 | 38.2 KiB | 26 / 80 MiB |
-| `append` | Vorticity's | 10.8 (10.6-12.2) | not asked | n/a | — | — | 2.5 MiB | 21 / — MiB |
+| `open` | Vorticity's | 0.6 (0.5-0.6) | 1.0 (1.0-1.0) | 1.79x | — | — | 2.9 KiB | 11 / 9 MiB |
+| `open` | Vortex Rust's | 0.6 (0.5-0.6) | 1.0 (0.9-1.1) | 1.81x | — | — | 3.6 KiB | 12 / 9 MiB |
+| `scan` | Vorticity's | 7.1 (6.8-7.2) | 20.7 (20.5-21.5) | 2.91x | 3.8 | 1.3 | 19.8 KiB | 15 / 45 MiB |
+| `scan` | Vortex Rust's | 3.8 (3.7-4.4) | 8.5 (8.3-8.7) | 2.24x | 7.1 | 3.1 | 16.1 KiB | 22 / 51 MiB |
+| `project` | Vorticity's | 0.9 (0.9-0.9) | 2.4 (2.3-2.4) | 2.74x | 9.6 | 3.5 | 13.6 KiB | 13 / 18 MiB |
+| `project` | Vortex Rust's | 1.0 (1.0-1.1) | 2.4 (2.2-2.6) | 2.38x | 8.3 | 3.5 | 11.4 KiB | 13 / 18 MiB |
+| `filter-narrow` | Vorticity's | 1.8 (1.8-1.9) | 2.3 (2.3-2.4) | 1.27x | 0.1 | 0.1 | 46.5 KiB | 16 / 13 MiB |
+| `filter-narrow` | Vortex Rust's | 1.9 (1.8-1.9) | 2.2 (2.2-2.3) | 1.21x | 0.1 | 0.1 | 26.2 KiB | 18 / 13 MiB |
+| `filter-wide` | Vorticity's | 4.3 (4.2-4.3) | 11.4 (11.3-11.7) | 2.69x | 3.1 | 1.2 | 29.0 KiB | 15 / 29 MiB |
+| `filter-wide` | Vortex Rust's | 3.1 (2.9-3.9) | 5.3 (5.2-5.5) | 1.72x | 4.3 | 2.5 | 26.2 KiB | 22 / 32 MiB |
+| `take` | Vorticity's | 5.8 (5.7-6.0) | 8.5 (8.4-8.8) | 1.47x | — | — | 43.5 KiB | 14 / 14 MiB |
+| `take` | Vortex Rust's | 2.1 (2.0-2.3) | 3.1 (3.1-3.3) | 1.49x | — | — | 39.8 KiB | 16 / 16 MiB |
+| `write` | Vorticity's | 31.1 (30.8-31.2) | 74.8 (74.3-75.2) | 2.40x | 0.9 | 0.4 | 36.1 KiB | 20 / 75 MiB |
+| `write` | Vortex Rust's | 27.9 (27.8-28.5) | 62.4 (62.2-63.7) | 2.23x | 1.0 | 0.4 | 32.4 KiB | 27 / 80 MiB |
+| `append` | Vorticity's | 11.0 (10.7-11.3) | not asked | n/a | — | — | 1.3 MiB | 21 / — MiB |
 
 #### All 32 cores
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | speedup | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.4 (0.4-0.4) | 2.4 (2.4-2.5) | 6.54x | — | — | 8.7 KiB | 12 / 10 MiB |
-| `open` | Vortex Rust's | 0.4 (0.4-0.4) | 2.4 (2.3-2.7) | 6.02x | — | — | 9.5 KiB | 12 / 10 MiB |
-| `scan` | Vorticity's | 3.3 (3.1-3.4) | 5.4 (5.3-6.1) | 1.62x | 8.0 | 5.0 | 51.2 KiB | 47 / 48 MiB |
-| `scan` | Vortex Rust's | 3.5 (3.4-3.6) | 5.6 (5.4-5.8) | 1.59x | 7.6 | 4.7 | 34.6 KiB | 56 / 48 MiB |
-| `project` | Vorticity's | 1.5 (1.5-1.6) | 3.3 (3.1-3.5) | 2.16x | 5.4 | 2.5 | 38.3 KiB | 21 / 17 MiB |
-| `project` | Vortex Rust's | 1.6 (1.6-1.9) | 3.4 (3.2-4.4) | 2.10x | 5.2 | 2.5 | 27.6 KiB | 21 / 18 MiB |
-| `filter-narrow` | Vorticity's | 1.6 (1.4-1.7) | 3.9 (3.9-4.0) | 2.46x | 0.2 | 0.1 | 84.4 KiB | 14 / 15 MiB |
-| `filter-narrow` | Vortex Rust's | 1.6 (1.5-1.8) | 3.8 (3.7-3.9) | 2.30x | 0.2 | 0.1 | 36.0 KiB | 15 / 15 MiB |
-| `filter-wide` | Vorticity's | 2.9 (2.9-3.1) | 5.9 (5.0-6.2) | 2.01x | 4.6 | 2.3 | 53.4 KiB | 31 / 32 MiB |
-| `filter-wide` | Vortex Rust's | 2.8 (2.8-3.0) | 4.7 (4.5-4.8) | 1.70x | 4.8 | 2.8 | 38.9 KiB | 39 / 36 MiB |
-| `take` | Vorticity's | 4.3 (4.3-4.4) | 4.6 (4.5-4.8) | 1.08x | — | — | 552.0 KiB | 29 / 24 MiB |
-| `take` | Vortex Rust's | 2.6 (2.5-2.6) | 4.4 (4.3-4.4) | 1.70x | — | — | 104.8 KiB | 21 / 19 MiB |
-| `write` | Vorticity's | 12.7 (12.3-13.0) | 20.4 (20.1-20.6) | 1.61x | 2.1 | 1.3 | 3.2 MiB | 59 / 121 MiB |
-| `write` | Vortex Rust's | 12.7 (12.5-13.1) | 20.9 (20.7-21.3) | 1.65x | 2.1 | 1.3 | 2.5 MiB | 71 / 126 MiB |
-| `append` | Vorticity's | 10.7 (10.3-11.0) | not asked | n/a | — | — | 1.4 MiB | 23 / — MiB |
+| `open` | Vorticity's | 0.5 (0.5-0.6) | 2.5 (2.4-2.6) | 4.53x | — | — | 2.9 KiB | 11 / 10 MiB |
+| `open` | Vortex Rust's | 0.6 (0.6-0.6) | 2.5 (2.4-2.6) | 4.35x | — | — | 3.6 KiB | 12 / 10 MiB |
+| `scan` | Vorticity's | 3.9 (3.7-4.1) | 6.3 (6.2-6.7) | 1.63x | 6.9 | 4.2 | 46.9 KiB | 47 / 49 MiB |
+| `scan` | Vortex Rust's | 3.8 (3.8-4.0) | 6.4 (6.3-6.6) | 1.66x | 7.0 | 4.2 | 27.4 KiB | 57 / 54 MiB |
+| `project` | Vorticity's | 1.6 (1.6-1.7) | 3.3 (3.3-3.4) | 2.08x | 5.3 | 2.5 | 31.0 KiB | 21 / 19 MiB |
+| `project` | Vortex Rust's | 1.6 (1.6-1.8) | 3.4 (3.3-3.4) | 2.06x | 5.1 | 2.5 | 24.4 KiB | 21 / 20 MiB |
+| `filter-narrow` | Vorticity's | 1.7 (1.6-1.8) | 4.0 (3.9-4.1) | 2.40x | 0.2 | 0.1 | 48.6 KiB | 14 / 15 MiB |
+| `filter-narrow` | Vortex Rust's | 1.7 (1.6-1.9) | 3.9 (3.7-4.0) | 2.26x | 0.2 | 0.1 | 31.0 KiB | 15 / 15 MiB |
+| `filter-wide` | Vorticity's | 3.1 (3.1-3.4) | 5.6 (5.2-6.2) | 1.77x | 4.2 | 2.4 | 40.5 KiB | 31 / 33 MiB |
+| `filter-wide` | Vortex Rust's | 3.0 (3.0-3.3) | 4.9 (4.7-5.2) | 1.64x | 4.5 | 2.7 | 32.9 KiB | 39 / 36 MiB |
+| `take` | Vorticity's | 4.1 (4.0-4.4) | 4.8 (4.3-4.9) | 1.16x | — | — | 121.0 KiB | 28 / 24 MiB |
+| `take` | Vortex Rust's | 2.6 (2.5-2.7) | 4.4 (4.3-4.9) | 1.67x | — | — | 100.2 KiB | 20 / 19 MiB |
+| `write` | Vorticity's | 12.8 (12.4-13.2) | 21.9 (20.6-22.4) | 1.71x | 2.1 | 1.2 | 2.6 MiB | 60 / 121 MiB |
+| `write` | Vortex Rust's | 13.1 (12.8-13.2) | 21.0 (20.1-29.7) | 1.60x | 2.0 | 1.3 | 2.3 MiB | 72 / 124 MiB |
+| `append` | Vorticity's | 10.4 (10.3-10.6) | not asked | n/a | — | — | 2.4 MiB | 23 / — MiB |
 
 ### 10,485,760 rows
 
@@ -149,56 +151,56 @@ Release bench/Vorticity.Benchmarks.Runner`), since an older runner times older c
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | speedup | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.4 (0.4-0.4) | 1.1 (1.1-1.1) | 2.67x | — | — | 8.7 KiB | 12 / 9 MiB |
-| `open` | Vortex Rust's | 0.4 (0.4-0.4) | 1.0 (1.0-1.0) | 2.41x | — | — | 9.5 KiB | 12 / 9 MiB |
-| `scan` | Vorticity's | 52.4 (52.2-52.7) | 149.6 (149.0-150.9) | 2.85x | 5.1 | 1.8 | 95.4 KiB | 15 / 35 MiB |
-| `scan` | Vortex Rust's | 17.5 (17.4-17.6) | 37.9 (37.1-41.3) | 2.17x | 15.3 | 7.0 | 39.3 KiB | 24 / 89 MiB |
-| `project` | Vorticity's | 1.3 (1.3-1.4) | 2.6 (2.6-2.8) | 1.96x | 62.8 | 32.1 | 57.1 KiB | 12 / 11 MiB |
-| `project` | Vortex Rust's | 1.7 (1.6-1.7) | 2.5 (2.5-2.6) | 1.54x | 50.6 | 32.9 | 27.6 KiB | 13 / 11 MiB |
-| `filter-narrow` | Vorticity's | 2.3 (2.3-2.3) | 4.6 (4.5-4.7) | 2.03x | 1.2 | 0.6 | 128.2 KiB | 16 / 15 MiB |
-| `filter-narrow` | Vortex Rust's | 2.5 (2.4-2.6) | 3.2 (3.2-3.4) | 1.32x | 1.1 | 0.8 | 73.0 KiB | 21 / 18 MiB |
-| `filter-wide` | Vorticity's | 27.2 (26.9-27.7) | 77.9 (77.3-78.2) | 2.87x | 4.9 | 1.7 | 128.2 KiB | 15 / 25 MiB |
-| `filter-wide` | Vortex Rust's | 11.9 (11.8-12.0) | 21.5 (21.2-21.8) | 1.81x | 11.2 | 6.2 | 73.0 KiB | 24 / 53 MiB |
-| `take` | Vorticity's | 22.9 (22.7-23.1) | 70.0 (69.6-70.6) | 3.06x | — | — | 119.1 KiB | 13 / 37 MiB |
-| `take` | Vortex Rust's | 4.9 (4.9-5.1) | 8.2 (8.2-8.3) | 1.66x | — | — | 67.0 KiB | 23 / 27 MiB |
-| `write` | Vorticity's | 276.2 (273.7-278.0) | 671.0 (667.6-682.1) | 2.43x | 1.0 | 0.4 | 116.8 KiB | 21 / 384 MiB |
-| `write` | Vortex Rust's | 238.9 (237.4-241.2) | 556.5 (546.5-565.4) | 2.33x | 1.1 | 0.5 | 60.6 KiB | 30 / 456 MiB |
-| `append` | Vorticity's | 47.3 (46.9-48.0) | not asked | n/a | — | — | 2.5 MiB | 27 / — MiB |
+| `open` | Vorticity's | 0.6 (0.6-0.6) | 1.1 (1.1-1.1) | 1.74x | — | — | 2.9 KiB | 12 / 9 MiB |
+| `open` | Vortex Rust's | 0.6 (0.5-0.6) | 1.0 (1.0-1.1) | 1.77x | — | — | 3.6 KiB | 12 / 9 MiB |
+| `scan` | Vorticity's | 59.1 (58.8-59.5) | 186.0 (184.4-188.7) | 3.15x | 4.5 | 1.4 | 89.6 KiB | 15 / 296 MiB |
+| `scan` | Vortex Rust's | 24.7 (24.4-26.6) | 75.6 (75.2-76.6) | 3.06x | 10.8 | 3.5 | 33.5 KiB | 24 / 408 MiB |
+| `project` | Vorticity's | 2.0 (2.0-2.0) | 11.5 (11.5-11.6) | 5.84x | 42.5 | 7.3 | 51.2 KiB | 13 / 75 MiB |
+| `project` | Vortex Rust's | 2.4 (2.3-2.5) | 11.6 (11.5-12.3) | 4.84x | 34.9 | 7.2 | 21.8 KiB | 13 / 75 MiB |
+| `filter-narrow` | Vorticity's | 2.5 (2.5-3.1) | 4.8 (4.8-4.9) | 1.91x | 1.0 | 0.6 | 122.3 KiB | 16 / 17 MiB |
+| `filter-narrow` | Vortex Rust's | 2.6 (2.6-3.0) | 3.3 (3.2-3.3) | 1.26x | 1.0 | 0.8 | 67.2 KiB | 21 / 18 MiB |
+| `filter-wide` | Vorticity's | 30.7 (30.3-32.4) | 98.9 (98.4-99.6) | 3.23x | 4.4 | 1.3 | 122.3 KiB | 15 / 185 MiB |
+| `filter-wide` | Vortex Rust's | 15.4 (15.3-16.2) | 40.4 (40.1-42.4) | 2.61x | 8.6 | 3.3 | 67.2 KiB | 24 / 211 MiB |
+| `take` | Vorticity's | 23.7 (23.2-23.8) | 69.0 (68.4-70.0) | 2.91x | — | — | 113.3 KiB | 13 / 38 MiB |
+| `take` | Vortex Rust's | 5.4 (5.2-5.6) | 8.5 (8.3-9.2) | 1.59x | — | — | 61.2 KiB | 22 / 28 MiB |
+| `write` | Vorticity's | 274.9 (272.2-277.7) | 670.3 (667.5-685.2) | 2.44x | 1.0 | 0.4 | 110.9 KiB | 21 / 378 MiB |
+| `write` | Vortex Rust's | 239.0 (238.2-247.5) | 559.2 (552.3-568.3) | 2.34x | 1.1 | 0.5 | 54.8 KiB | 30 / 457 MiB |
+| `append` | Vorticity's | 47.5 (47.0-48.1) | not asked | n/a | — | — | 3.2 MiB | 27 / — MiB |
 
 #### All 32 cores
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | speedup | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.4 (0.4-0.4) | 2.5 (2.4-2.6) | 6.20x | — | — | 8.7 KiB | 12 / 10 MiB |
-| `open` | Vortex Rust's | 0.4 (0.4-0.4) | 2.5 (2.4-2.6) | 6.22x | — | — | 9.5 KiB | 12 / 10 MiB |
-| `scan` | Vorticity's | 12.8 (12.5-13.2) | 16.7 (16.4-17.4) | 1.30x | 20.8 | 16.0 | 164.2 KiB | 89 / 109 MiB |
-| `scan` | Vortex Rust's | 20.5 (20.2-20.9) | 20.4 (19.5-21.0) | 1.00x | 13.0 | 13.1 | 71.3 KiB | 121 / 148 MiB |
-| `project` | Vorticity's | 2.6 (2.4-3.2) | 4.7 (4.6-4.9) | 1.83x | 32.7 | 17.9 | 95.6 KiB | 29 / 39 MiB |
-| `project` | Vortex Rust's | 3.1 (2.9-3.6) | 4.8 (4.5-4.9) | 1.52x | 26.8 | 17.6 | 80.0 KiB | 46 / 40 MiB |
-| `filter-narrow` | Vorticity's | 2.1 (1.9-2.3) | 5.9 (5.8-6.0) | 2.82x | 1.3 | 0.4 | 140.4 KiB | 18 / 21 MiB |
-| `filter-narrow` | Vortex Rust's | 2.6 (2.5-2.9) | 5.0 (4.7-5.7) | 1.89x | 1.0 | 0.5 | 77.0 KiB | 21 / 22 MiB |
-| `filter-wide` | Vorticity's | 8.7 (8.4-9.0) | 12.4 (11.7-12.8) | 1.42x | 15.3 | 10.8 | 201.7 KiB | 89 / 106 MiB |
-| `filter-wide` | Vortex Rust's | 14.7 (13.7-15.1) | 13.7 (13.1-14.3) | 0.93x | 9.0 | 9.8 | 661.8 KiB | 214 / 115 MiB |
-| `take` | Vorticity's | 11.2 (10.9-12.2) | 12.5 (12.3-12.9) | 1.11x | — | — | 267.1 KiB | 62 / 63 MiB |
-| `take` | Vortex Rust's | 5.3 (5.0-5.7) | 7.6 (7.3-10.2) | 1.43x | — | — | 1.2 MiB | 31 / 32 MiB |
-| `write` | Vorticity's | 75.4 (74.8-77.7) | 123.6 (120.4-128.5) | 1.64x | 3.5 | 2.2 | 2.5 MiB | 103 / 482 MiB |
-| `write` | Vortex Rust's | 79.2 (78.9-79.6) | 127.7 (127.1-139.4) | 1.61x | 3.4 | 2.1 | 2.7 MiB | 134 / 550 MiB |
-| `append` | Vorticity's | 43.6 (43.3-44.3) | not asked | n/a | — | — | 3.4 MiB | 59 / — MiB |
+| `open` | Vorticity's | 0.6 (0.6-0.6) | 2.6 (2.5-2.8) | 4.52x | — | — | 2.9 KiB | 11 / 10 MiB |
+| `open` | Vortex Rust's | 0.6 (0.6-0.6) | 2.6 (2.4-2.6) | 4.48x | — | — | 3.6 KiB | 11 / 10 MiB |
+| `scan` | Vorticity's | 19.6 (19.0-20.1) | 24.8 (24.7-26.2) | 1.27x | 13.6 | 10.8 | 157.2 KiB | 88 / 300 MiB |
+| `scan` | Vortex Rust's | 25.0 (24.8-25.2) | 33.2 (32.9-33.2) | 1.33x | 10.7 | 8.0 | 57.6 KiB | 120 / 354 MiB |
+| `project` | Vorticity's | 3.1 (3.0-3.3) | 7.5 (7.3-7.6) | 2.44x | 27.5 | 11.3 | 88.2 KiB | 30 / 82 MiB |
+| `project` | Vortex Rust's | 3.6 (3.5-4.1) | 7.4 (7.3-7.5) | 2.03x | 23.0 | 11.3 | 68.3 KiB | 46 / 83 MiB |
+| `filter-narrow` | Vorticity's | 2.1 (2.0-2.3) | 5.9 (5.5-6.2) | 2.77x | 1.2 | 0.4 | 126.3 KiB | 18 / 21 MiB |
+| `filter-narrow` | Vortex Rust's | 2.6 (2.6-2.9) | 5.0 (4.8-5.6) | 1.91x | 1.0 | 0.5 | 75.1 KiB | 21 / 22 MiB |
+| `filter-wide` | Vorticity's | 12.0 (11.5-12.6) | 16.6 (16.4-17.0) | 1.39x | 11.2 | 8.0 | 191.2 KiB | 89 / 190 MiB |
+| `filter-wide` | Vortex Rust's | 17.0 (16.3-17.7) | 20.2 (19.9-20.5) | 1.19x | 7.8 | 6.6 | 650.9 KiB | 213 / 219 MiB |
+| `take` | Vorticity's | 10.2 (9.9-10.4) | 12.0 (11.6-13.7) | 1.17x | — | — | 274.7 KiB | 62 / 62 MiB |
+| `take` | Vortex Rust's | 5.0 (4.0-5.2) | 7.5 (7.4-8.0) | 1.50x | — | — | 169.9 KiB | 29 / 33 MiB |
+| `write` | Vorticity's | 75.5 (75.1-79.1) | 122.1 (119.6-124.5) | 1.62x | 3.5 | 2.2 | 3.8 MiB | 103 / 473 MiB |
+| `write` | Vortex Rust's | 80.0 (78.4-80.1) | 128.8 (127.6-138.5) | 1.61x | 3.3 | 2.1 | 2.1 MiB | 134 / 554 MiB |
+| `append` | Vorticity's | 43.7 (43.5-44.5) | not asked | n/a | — | — | 2.5 MiB | 60 / — MiB |
 
 `open`: open the file and read no rows. `scan`: read every column of every row. `project`: read one column of four. `filter-narrow`: read the rows of a band holding about one in a hundred. `filter-wide`: read the rows of a band holding about half. `take`: take a thousand rows spread across the file. `write`: read the file and encode it back out. `append`: append a tenth of the rows to a copy of the file.
 
 **On one core.** Vorticity took less time than Rust on 28 of 28 compared rows.
-The highest speedup is `take` at 10,485,760 rows on Vorticity's file (3.06x), the lowest
-`filter-narrow` at 10,485,760 rows on Vortex Rust's file (1.32x).
+The highest speedup is `project` at 10,485,760 rows on Vorticity's file (5.84x), the lowest
+`filter-narrow` at 1,048,576 rows on Vortex Rust's file (1.21x).
 
-**On all 32 cores.** Vorticity took less time than Rust on 26 of 28 compared rows.
-The highest speedup is `open` at 1,048,576 rows on Vorticity's file (6.54x), the lowest
-`filter-wide` at 10,485,760 rows on Vortex Rust's file (0.93x).
+**On all 32 cores.** Vorticity took less time than Rust on 28 of 28 compared rows.
+The highest speedup is `open` at 1,048,576 rows on Vorticity's file (4.53x), the lowest
+`take` at 1,048,576 rows on Vorticity's file (1.16x).
 
-**The process start** is not in the figures: 54 ms for Vorticity's native binary and 30 ms for Rust's,
-most of it the operating system starting a binary, and 106 ms for the managed runtime on the JIT.
+**The process start** is not in the figures: 44 ms for Vorticity's native binary and 29 ms for Rust's,
+most of it the operating system starting a binary, and 104 ms for the managed runtime on the JIT.
 
-**Rust's splits.** On one core, one split per chunk was the faster of its two on 9 of 14 rows on Vorticity's file and 12 of 14 rows on Vortex Rust's file;
+**Rust's splits.** On one core, one split per chunk was the faster of its two on 8 of 14 rows on Vorticity's file and 12 of 14 rows on Vortex Rust's file;
 the two differ only where a chunk holds more than 100,000 rows.
 
 **Not asked of Rust**: `append`, which its harness has no entry point for; those figures
@@ -212,16 +214,16 @@ Milliseconds, the median of the same runs.
 
 | scenario | 1,048,576 rows, Vorticity's file | 1,048,576 rows, Vortex Rust's file | 10,485,760 rows, Vorticity's file | 10,485,760 rows, Vortex Rust's file |
 |---|---:|---:|---:|---:|
-| `open` | 20.1 | 20.1 | 19.9 | 20.1 |
-| `scan` | 116.8 | 106.1 | 222.7 | 131.2 |
-| `project` | 66.2 | 73.6 | 69.5 | 76.8 |
-| `filter-narrow` | 160.0 | 142.4 | 158.1 | 153.3 |
-| `filter-wide` | 133.9 | 132.5 | 191.0 | 156.5 |
-| `take` | 129.0 | 104.1 | 181.0 | 110.3 |
-| `write` | 328.5 | 323.3 | 881.7 | 802.8 |
-| `append` | 327.1 | — | 410.2 | — |
+| `open` | 20.3 | 20.1 | 19.9 | 20.4 |
+| `scan` | 120.6 | 110.8 | 235.5 | 143.9 |
+| `project` | 69.4 | 77.4 | 73.1 | 80.0 |
+| `filter-narrow` | 164.3 | 142.9 | 162.6 | 157.0 |
+| `filter-wide` | 138.7 | 135.7 | 200.9 | 162.3 |
+| `take` | 128.6 | 104.6 | 181.7 | 112.8 |
+| `write` | 327.6 | 328.7 | 885.0 | 816.6 |
+| `append` | 325.9 | — | 409.6 | — |
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01); commit 0c1aa9bf, 2026-10-11 22:20 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01); commit e813ac54, 2026-10-12 08:14 UTC.*
 <!-- /results: scenarios -->
 
 <!-- results: decoding -->
@@ -231,85 +233,85 @@ One file per encoding, and per notable shape of one, written by Rust's writer
 (`bench/gen-throughput.sh`): a million rows each, `table_wide` fifty columns of fifty thousand.
 Each side scans the file, every value decoded to its plain form, 12 times in a process of its own on
 one core; a figure is the median of the last 10 scans, and the median of 3 processes: what a
-decoder costs once warm. Each scan opens the file anew, on both sides. Rust maps it and reads it
-where it lies: a column stored in its plain form is a view of the mapping, nothing decoded, nothing
-copied and nothing read. Vorticity copies the segment of each file, as a session that keeps no
-mapping does on Windows: such a column costs it the copy, which a reader of the values pays on a
-mapping too, in page faults. Throughput is over the plain size, as above.
+decoder costs once warm, and every value each scan returns is read, the same bytes on both sides.
+Each scan opens the file anew, on both sides. Rust maps it and reads it where it lies: a column
+stored in its plain form is a view of the mapping, read where it lies. Vorticity copies the
+segment of each file, as a session that keeps no mapping does on Windows, and reads the copy.
+Throughput is over the plain size, as above.
 
 | encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | speedup | Vorticity, GB/s | Vortex Rust, GB/s |
 |---|---:|---:|---:|---:|---:|---:|
-| `alp` | 1,000,000 | 1.57 | 2.74 | 1.74x | 5.1 | 2.9 |
-| `alp_no_patches` | 1,000,000 | 0.99 | 1.83 | 1.84x | 8.1 | 4.4 |
-| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.97 | 1.84 | 1.89x | 8.2 | 4.4 |
-| `alprd` | 1,000,000 | 1.27 | 1.55 | 1.22x | 6.3 | 5.2 |
-| `bool` | 1,000,000 | 0.24 | 0.16 | 0.70x | 0.5 | 0.8 |
-| `bool_bit_offset3` | 1,000,000 | 0.25 | 0.17 | 0.65x | 0.5 | 0.8 |
-| `bool_bit_offset7` | 1,000,000 | 0.24 | 0.16 | 0.67x | 0.5 | 0.8 |
-| `bool_bit_offset_straddle` | 1,000,000 | 0.24 | 0.17 | 0.69x | 0.5 | 0.8 |
-| `bytebool` | 1,000,000 | 0.30 | 0.34 | 1.15x | 0.4 | 0.4 |
-| `chunked` | 1,000,000 | 1.13 | 0.73 | 0.64x | 7.1 | 11.0 |
-| `chunked_bool` | 1,000,000 | 0.23 | 0.21 | 0.89x | 0.5 | 0.6 |
-| `chunked_decimal` | 1,000,000 | 1.13 | 0.64 | 0.56x | 7.1 | 12.6 |
-| `chunked_empty_chunks` | 1,000,000 | 1.18 | 0.51 | 0.43x | 6.8 | 15.7 |
-| `chunked_mixed_validity` | 1,000,000 | 1.19 | 0.72 | 0.61x | 6.8 | 11.3 |
-| `chunked_one_chunk` | 1,000,000 | 1.25 | 0.23 | 0.19x | 6.4 | 34.6 |
-| `chunked_varbinview` | 1,000,000 | 2.87 | 11.6 | 4.03x | 4.7 | 1.2 |
-| `constant` | 1,000,000 | 0.23 | 0.16 | 0.70x | 34.6 | 49.2 |
-| `datetimeparts` | 1,000,000 | 1.74 | 2.79 | 1.60x | 4.6 | 2.9 |
-| `decimal` | 1,000,000 | 1.11 | 0.17 | 0.16x | 7.2 | 45.7 |
-| `decimal_byte_parts` | 1,000,000 | 1.25 | 0.18 | 0.14x | 6.4 | 44.8 |
-| `dict` | 1,000,000 | 0.84 | 1.09 | 1.29x | 7.1 | 5.5 |
-| `dict_nullable_codes` | 1,000,000 | 0.99 | 1.95 | 1.97x | 5.6 | 2.9 |
-| `dict_nullable_values_nonnull_codes` | 1,000,000 | 0.82 | 1.01 | 1.24x | 7.0 | 5.6 |
-| `dict_u64_codes` | 1,000,000 | 1.26 | 1.67 | 1.32x | 4.8 | 3.6 |
-| `dict_u8_codes` | 1,000,000 | 0.59 | 0.65 | 1.10x | 13.5 | 12.3 |
-| `ext` | 1,000,000 | 1.10 | 0.18 | 0.17x | 7.3 | 43.6 |
-| `fastlanes_bitpacked` | 1,000,000 | 0.42 | 0.39 | 0.93x | 9.5 | 10.2 |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.42 | 0.41 | 0.99x | 9.6 | 9.7 |
-| `fastlanes_delta` | 1,000,000 | 1.49 | 1.87 | 1.26x | 5.4 | 4.3 |
-| `fastlanes_for` | 1,000,000 | 0.96 | 1.41 | 1.47x | 8.3 | 5.7 |
-| `fastlanes_rle` | 1,000,000 | 0.62 | 0.76 | 1.23x | 6.5 | 5.2 |
-| `fixed_size_list` | 1,000,000 | 1.56 | 0.18 | 0.12x | 7.7 | 66.1 |
-| `fsst` | 1,000,000 | 7.91 | 9.81 | 1.24x | 7.1 | 5.7 |
-| `list` | 1,000,000 | 1.40 | 1.29 | 0.93x | 7.2 | 7.7 |
-| `listview` | 1,000,000 | 2.27 | 3.18 | 1.40x | 4.4 | 3.1 |
-| `map` | 1,000,000 | 6.49 | 11.0 | 1.69x | 3.1 | 1.8 |
-| `masked` | 1,000,000 | 0.65 | 0.19 | 0.29x | 6.4 | 21.9 |
-| `masked_all_invalid` | 1,000,000 | 0.68 | 0.18 | 0.27x | 5.9 | 21.7 |
-| `masked_all_valid` | 1,000,000 | 0.61 | 0.18 | 0.30x | 6.5 | 21.8 |
-| `null` | 1,000,000 | 0.23 | 0.16 | 0.69x | — | — |
-| `onpair` | 1,000,000 | 4.15 | 6.46 | 1.56x | 5.2 | 3.4 |
-| `parquet_variant` | 1,000,000 | 2.36 | 15.4 | 6.53x | 5.1 | 0.8 |
-| `pco` | 1,000,000 | 0.53 | 1.19 | 2.23x | 15.0 | 6.7 |
-| `pco_f32` | 1,000,000 | 7.85 | 3.03 | 0.39x | 0.5 | 1.3 |
-| `pco_i16` | 1,000,000 | 7.11 | 2.61 | 0.37x | 0.3 | 0.8 |
-| `pco_nullable` | 1,000,000 | 8.92 | 4.33 | 0.48x | 0.9 | 1.9 |
-| `pco_u32` | 1,000,000 | 13.3 | 4.26 | 0.32x | 0.3 | 0.9 |
-| `primitive` | 1,000,000 | 1.18 | 0.17 | 0.15x | 6.8 | 45.8 |
-| `runend` | 1,000,000 | 0.28 | 0.25 | 0.88x | 14.3 | 16.2 |
-| `sequence` | 1,000,000 | 0.35 | 0.23 | 0.64x | 22.6 | 35.1 |
-| `sparse` | 1,000,000 | 0.34 | 0.24 | 0.71x | 11.6 | 16.4 |
-| `struct` | 1,000,000 | 2.21 | 7.65 | 3.45x | 6.7 | 1.9 |
-| `table_mixed` | 1,000,000 | 15.1 | 23.2 | 1.54x | 4.6 | 3.0 |
-| `table_wide` | 50,000 | 48.1 | 4.41 | 0.09x | 8.3 | 90.7 |
-| `varbin` | 1,000,000 | 2.27 | 14.6 | 6.45x | 7.0 | 1.1 |
-| `varbinview` | 1,000,000 | 2.53 | 9.59 | 3.79x | 5.3 | 1.4 |
-| `variant` | 1,000,000 | 0.24 | 0.17 | 0.69x | 66.8 | 96.7 |
-| `zigzag` | 1,000,000 | 0.59 | 0.99 | 1.67x | 6.8 | 4.0 |
-| `zstd` | 1,000,000 | 4.31 | 9.77 | 2.27x | 7.4 | 3.3 |
-| `zstd_buffers` | 1,000,000 | 0.61 | 0.47 | 0.77x | 13.2 | 17.1 |
-| `zstd_nullable` | 1,000,000 | 1.94 | 3.90 | 2.01x | 4.2 | 2.1 |
+| `alp` | 1,000,000 | 0.95 | 2.63 | 2.77x | 8.4 | 3.0 |
+| `alp_no_patches` | 1,000,000 | 0.61 | 1.89 | 3.11x | 13.1 | 4.2 |
+| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.66 | 1.94 | 2.93x | 12.1 | 4.1 |
+| `alprd` | 1,000,000 | 0.81 | 1.62 | 1.99x | 9.8 | 4.9 |
+| `bool` | 1,000,000 | 0.15 | 0.19 | 1.27x | 0.8 | 0.7 |
+| `bool_bit_offset3` | 1,000,000 | 0.15 | 0.19 | 1.27x | 0.9 | 0.7 |
+| `bool_bit_offset7` | 1,000,000 | 0.14 | 0.19 | 1.31x | 0.9 | 0.7 |
+| `bool_bit_offset_straddle` | 1,000,000 | 0.15 | 0.19 | 1.25x | 0.8 | 0.7 |
+| `bytebool` | 1,000,000 | 0.18 | 0.33 | 1.88x | 0.7 | 0.4 |
+| `chunked` | 1,000,000 | 0.65 | 2.30 | 3.56x | 12.4 | 3.5 |
+| `chunked_bool` | 1,000,000 | 0.16 | 0.21 | 1.33x | 0.8 | 0.6 |
+| `chunked_decimal` | 1,000,000 | 0.68 | 2.21 | 3.27x | 11.8 | 3.6 |
+| `chunked_empty_chunks` | 1,000,000 | 0.67 | 2.30 | 3.42x | 11.9 | 3.5 |
+| `chunked_mixed_validity` | 1,000,000 | 0.70 | 2.10 | 2.98x | 11.5 | 3.9 |
+| `chunked_one_chunk` | 1,000,000 | 0.68 | 2.24 | 3.31x | 11.8 | 3.6 |
+| `chunked_varbinview` | 1,000,000 | 3.83 | 13.1 | 3.41x | 3.5 | 1.0 |
+| `constant` | 1,000,000 | 0.14 | 0.16 | 1.19x | 58.4 | 49.2 |
+| `datetimeparts` | 1,000,000 | 1.42 | 2.99 | 2.11x | 5.6 | 2.7 |
+| `decimal` | 1,000,000 | 0.65 | 2.11 | 3.24x | 12.3 | 3.8 |
+| `decimal_byte_parts` | 1,000,000 | 0.66 | 2.15 | 3.26x | 12.2 | 3.7 |
+| `dict` | 1,000,000 | 1.02 | 1.49 | 1.45x | 5.9 | 4.0 |
+| `dict_nullable_codes` | 1,000,000 | 1.30 | 2.30 | 1.77x | 4.3 | 2.4 |
+| `dict_nullable_values_nonnull_codes` | 1,000,000 | 1.14 | 1.37 | 1.21x | 5.0 | 4.2 |
+| `dict_u64_codes` | 1,000,000 | 1.31 | 2.17 | 1.65x | 4.6 | 2.8 |
+| `dict_u8_codes` | 1,000,000 | 0.90 | 0.98 | 1.09x | 8.9 | 8.2 |
+| `ext` | 1,000,000 | 0.68 | 2.13 | 3.12x | 11.7 | 3.8 |
+| `fastlanes_bitpacked` | 1,000,000 | 0.27 | 0.45 | 1.69x | 15.1 | 8.9 |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.29 | 0.47 | 1.64x | 14.0 | 8.5 |
+| `fastlanes_delta` | 1,000,000 | 0.80 | 2.01 | 2.53x | 10.1 | 4.0 |
+| `fastlanes_for` | 1,000,000 | 0.64 | 1.50 | 2.36x | 12.6 | 5.3 |
+| `fastlanes_rle` | 1,000,000 | 0.50 | 0.80 | 1.60x | 8.0 | 5.0 |
+| `fixed_size_list` | 1,000,000 | 1.05 | 3.11 | 2.96x | 11.4 | 3.9 |
+| `fsst` | 1,000,000 | 11.9 | 13.9 | 1.16x | 4.7 | 4.0 |
+| `list` | 1,000,000 | 1.45 | 3.52 | 2.43x | 6.9 | 2.8 |
+| `listview` | 1,000,000 | 2.37 | 5.35 | 2.26x | 4.2 | 1.9 |
+| `map` | 1,000,000 | 7.76 | 16.0 | 2.06x | 2.6 | 1.3 |
+| `masked` | 1,000,000 | 0.38 | 1.12 | 2.93x | 10.8 | 3.7 |
+| `masked_all_invalid` | 1,000,000 | 0.39 | 1.11 | 2.86x | 10.3 | 3.6 |
+| `masked_all_valid` | 1,000,000 | 0.38 | 1.11 | 2.94x | 10.6 | 3.6 |
+| `null` | 1,000,000 | 0.13 | 0.16 | 1.21x | — | — |
+| `onpair` | 1,000,000 | 6.23 | 9.20 | 1.48x | 3.5 | 2.4 |
+| `parquet_variant` | 1,000,000 | 3.39 | 16.6 | 4.91x | 3.5 | 0.7 |
+| `pco` | 1,000,000 | 0.49 | 1.30 | 2.65x | 16.3 | 6.1 |
+| `pco_f32` | 1,000,000 | 2.61 | 3.06 | 1.17x | 1.5 | 1.3 |
+| `pco_i16` | 1,000,000 | 3.06 | 2.67 | 0.87x | 0.7 | 0.8 |
+| `pco_nullable` | 1,000,000 | 3.47 | 4.40 | 1.27x | 2.3 | 1.8 |
+| `pco_u32` | 1,000,000 | 4.61 | 4.28 | 0.93x | 0.9 | 0.9 |
+| `primitive` | 1,000,000 | 0.66 | 2.12 | 3.22x | 12.2 | 3.8 |
+| `runend` | 1,000,000 | 0.20 | 0.28 | 1.41x | 20.0 | 14.2 |
+| `sequence` | 1,000,000 | 0.25 | 0.30 | 1.19x | 31.7 | 26.7 |
+| `sparse` | 1,000,000 | 0.23 | 0.28 | 1.23x | 17.3 | 14.1 |
+| `struct` | 1,000,000 | 2.08 | 10.2 | 4.91x | 7.1 | 1.5 |
+| `table_mixed` | 1,000,000 | 20.4 | 38.7 | 1.89x | 3.4 | 1.8 |
+| `table_wide` | 50,000 | 38.8 | 100.5 | 2.59x | 10.3 | 4.0 |
+| `varbin` | 1,000,000 | 2.57 | 16.5 | 6.41x | 6.2 | 1.0 |
+| `varbinview` | 1,000,000 | 3.56 | 11.5 | 3.23x | 3.8 | 1.2 |
+| `variant` | 1,000,000 | 0.14 | 0.17 | 1.19x | 112.7 | 95.0 |
+| `zigzag` | 1,000,000 | 0.38 | 1.02 | 2.70x | 10.6 | 3.9 |
+| `zstd` | 1,000,000 | 7.45 | 12.1 | 1.63x | 4.3 | 2.6 |
+| `zstd_buffers` | 1,000,000 | 0.50 | 0.53 | 1.06x | 16.0 | 15.2 |
+| `zstd_nullable` | 1,000,000 | 1.88 | 3.70 | 1.97x | 4.3 | 2.2 |
 
 Rust is timed under each of its two ways of splitting a scan, three processes each, and its
 figure is the faster: its default cuts a chunk of more than 100,000 rows into splits of 100,000 and
 decodes the whole chunk again for each, which on these files of one chunk of a million rows is ten
 times; one split per chunk decodes it once, but builds a chunk made of smaller arrays in one
-piece. One split per chunk was the faster on 49 of 61 files, its default on `bytebool`, `chunked`, `chunked_decimal`, `chunked_empty_chunks`, `chunked_mixed_validity`, `chunked_one_chunk`, `datetimeparts`, `dict_u64_codes`, `fastlanes_delta`, `fsst`, `onpair`, `parquet_variant`.
+piece. One split per chunk was the faster on 54 of 61 files, its default on `chunked`, `chunked_empty_chunks`, `chunked_mixed_validity`, `chunked_one_chunk`, `decimal_byte_parts`, `masked_all_invalid`, `primitive`.
 
-Vorticity decoded 28 of 61 files in less time than Rust; the median speedup is 0.93x. At 1.00x or below: `table_wide` 0.09x, `fixed_size_list` 0.12x, `decimal_byte_parts` 0.14x, `primitive` 0.15x, `decimal` 0.16x, `ext` 0.17x, `chunked_one_chunk` 0.19x, `masked_all_invalid` 0.27x, `masked` 0.29x, `masked_all_valid` 0.30x, `pco_u32` 0.32x, `pco_i16` 0.37x, `pco_f32` 0.39x, `chunked_empty_chunks` 0.43x, `pco_nullable` 0.48x, `chunked_decimal` 0.56x, `chunked_mixed_validity` 0.61x, `chunked` 0.64x, `sequence` 0.64x, `bool_bit_offset3` 0.65x, `bool_bit_offset7` 0.67x, `bool_bit_offset_straddle` 0.69x, `variant` 0.69x, `null` 0.69x, `bool` 0.70x, `constant` 0.70x, `sparse` 0.71x, `zstd_buffers` 0.77x, `runend` 0.88x, `chunked_bool` 0.89x, `fastlanes_bitpacked` 0.93x, `list` 0.93x, `fastlanes_bitpacked_patched_no_chunk_offsets` 0.99x.
+Vorticity decoded 59 of 61 files in less time than Rust; the median speedup is 1.99x. At 1.00x or below: `pco_i16` 0.87x, `pco_u32` 0.93x.
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01); commit 0c1aa9bf, 2026-10-11 22:20 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01); commit e813ac54, 2026-10-12 08:14 UTC.*
 <!-- /results: decoding -->
 
 <!-- results: in-process -->
@@ -325,30 +327,30 @@ one the `--ratio-check` gate holds to a ceiling; what each one reads and asks is
 
 | axis | Vorticity, µs | Vortex Rust, µs | speedup | 95 % interval |
 |---|---:|---:|---:|---|
-| full scan | 813.1 | 2,864.5 | 3.52x | 3.47 to 3.56 |
-| projected scan, 1 of 5 columns | 238.2 | 474.6 | 1.98x | 1.97 to 2.00 |
-| open to first batch | 239.5 | 2,898.7 | 12.2x | 11.9 to 12.3 |
-| open, footer only | 128.4 | 209.5 | 1.63x | 1.61 to 1.64 |
-| read and write back | 5,620.8 | 18,334.8 | 3.23x | 3.17 to 3.46 |
-| filtered scan, 1% band | 223.3 | 656.2 | 2.97x | 2.87 to 3.03 |
-| filtered scan, half the rows | 348.6 | 1,113.6 | 3.20x | 3.14 to 3.22 |
-| scattered take, 64 of 64 splits | 667.6 | 2,583.8 | 3.88x | 3.86 to 3.91 |
-| key order, sorted column, 1% band | 199.3 | 321.8 | 1.60x | 1.59 to 1.64 |
-| key order, uncorrelated, 64 rows | 355.1 | 481.4 | 1.39x | 1.35 to 1.49 |
-| count, exact cover, 1% band | 268.9 | 379.8 | 1.50x | 1.44 to 1.59 |
-| filtered scan, string equality, fsst | 393.9 | 692.2 | 1.78x | 1.70 to 1.83 |
-| filtered scan, string prefix, fsst | 888.0 | 1,120.1 | 1.26x | 1.25 to 1.27 |
-| filtered scan, string equality, dict | 189.5 | 307.6 | 1.62x | 1.60 to 1.65 |
-| filtered scan, string prefix, dict | 204.2 | 415.2 | 2.03x | 2.01 to 2.04 |
-| filtered scan, band, runend | 187.1 | 274.0 | 1.46x | 1.44 to 1.48 |
-| filtered scan, band, bitpacked | 203.1 | 282.5 | 1.39x | 1.37 to 1.40 |
-| full scan, 1M table | 17,450.9 | 31,234.4 | 1.77x | 1.75 to 1.79 |
-| projected scan, 1 of 50 columns | 168.0 | 218.7 | 1.32x | 1.30 to 1.33 |
+| full scan | 860.8 | 2,986.3 | 3.46x | 3.35 to 3.51 |
+| projected scan, 1 of 5 columns | 260.4 | 516.4 | 1.98x | 1.97 to 2.01 |
+| open to first batch | 220.0 | 2,886.4 | 13.1x | 12.9 to 13.4 |
+| open, footer only | 125.0 | 204.3 | 1.64x | 1.60 to 1.64 |
+| read and write back | 5,642.8 | 18,501.2 | 3.26x | 3.22 to 3.46 |
+| filtered scan, 1% band | 204.1 | 630.3 | 3.09x | 3.05 to 3.12 |
+| filtered scan, half the rows | 353.1 | 1,104.1 | 3.12x | 3.11 to 3.18 |
+| scattered take, 64 of 64 splits | 654.4 | 2,615.1 | 4.00x | 3.96 to 4.08 |
+| key order, sorted column, 1% band | 202.0 | 320.2 | 1.58x | 1.56 to 1.58 |
+| key order, uncorrelated, 64 rows | 339.9 | 471.8 | 1.44x | 1.37 to 1.51 |
+| count, exact cover, 1% band | 281.1 | 366.9 | 1.38x | 1.33 to 1.47 |
+| filtered scan, string equality, fsst | 388.0 | 678.4 | 1.76x | 1.73 to 1.82 |
+| filtered scan, string prefix, fsst | 954.9 | 1,183.5 | 1.23x | 1.23 to 1.25 |
+| filtered scan, string equality, dict | 211.2 | 332.8 | 1.60x | 1.57 to 1.62 |
+| filtered scan, string prefix, dict | 221.3 | 422.5 | 1.92x | 1.86 to 1.94 |
+| filtered scan, band, runend | 193.0 | 286.3 | 1.48x | 1.44 to 1.49 |
+| filtered scan, band, bitpacked | 195.8 | 269.5 | 1.37x | 1.34 to 1.39 |
+| full scan, 1M table | 22,736.6 | 45,329.2 | 1.98x | 1.91 to 2.00 |
+| projected scan, 1 of 50 columns | 284.7 | 330.2 | 1.16x | 1.13 to 1.17 |
 
 Vorticity took less time on 19 of 19 axes.
-Rust is timed under the faster of its two splits, axis by axis: one split per chunk on 9 of 19, its default on the other 10, one split per chunk on full scan; open, footer only; filtered scan, half the rows; scattered take, 64 of 64 splits; key order, uncorrelated, 64 rows; filtered scan, string equality, fsst; filtered scan, string equality, dict; full scan, 1M table; projected scan, 1 of 50 columns.
+Rust is timed under the faster of its two splits, axis by axis: one split per chunk on 12 of 19, its default on full scan; open, footer only; filtered scan, half the rows; filtered scan, string equality, fsst; filtered scan, string prefix, dict; filtered scan, band, runend; filtered scan, band, bitpacked.
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 7527e2b5d861; commit 0c1aa9bf, 2026-10-11 22:21 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 1464d38db0f3; commit e813ac54, 2026-10-12 08:15 UTC.*
 <!-- /results: in-process -->
 
 <!-- results: take -->
@@ -363,72 +365,72 @@ at least 9 rounds after a 1-second warm-up per file, our side on the JIT, warmed
 
 | encoding | Vorticity, µs | Vortex Rust, µs | speedup |
 |---|---:|---:|---:|
-| `alp` | 744 | 734 | 0.98x |
-| `alp_no_patches` | 239 | 270 | 1.13x |
-| `alp_patched_no_chunk_offsets` | 259 | 290 | 1.12x |
-| `alprd` | 280 | 303 | 1.09x |
-| `bool` | 128 | 191 | 1.51x |
-| `bool_bit_offset3` | 129 | 196 | 1.51x |
-| `bool_bit_offset7` | 127 | 191 | 1.49x |
-| `bool_bit_offset_straddle` | 128 | 191 | 1.48x |
-| `bytebool` | 158 | 342 | 2.16x |
-| `chunked` | 251 | 287 | 1.15x |
-| `chunked_bool` | 133 | 211 | 1.62x |
-| `chunked_decimal` | 251 | 287 | 1.15x |
-| `chunked_empty_chunks` | 248 | 287 | 1.16x |
-| `chunked_mixed_validity` | 281 | 334 | 1.18x |
-| `chunked_one_chunk` | 249 | 271 | 1.09x |
-| `chunked_varbinview` | 392 | 12,655 | 32.2x |
-| `constant` | 123 | 177 | 1.45x |
-| `datetimeparts` | 403 | 442 | 1.09x |
-| `decimal` | 247 | 269 | 1.10x |
-| `decimal_byte_parts` | 241 | 274 | 1.13x |
-| `dict` | 239 | 260 | 1.11x |
-| `dict_nullable_codes` | 257 | 293 | 1.14x |
-| `dict_nullable_values_nonnull_codes` | 173 | 234 | 1.37x |
-| `dict_u64_codes` | 256 | 280 | 1.09x |
-| `dict_u8_codes` | 151 | 232 | 1.51x |
-| `ext` | 248 | 268 | 1.09x |
+| `alp` | 750 | 746 | 1.00x |
+| `alp_no_patches` | 246 | 272 | 1.11x |
+| `alp_patched_no_chunk_offsets` | 256 | 280 | 1.09x |
+| `alprd` | 273 | 301 | 1.10x |
+| `bool` | 123 | 192 | 1.50x |
+| `bool_bit_offset3` | 129 | 193 | 1.51x |
+| `bool_bit_offset7` | 127 | 194 | 1.50x |
+| `bool_bit_offset_straddle` | 131 | 197 | 1.52x |
+| `bytebool` | 150 | 338 | 2.20x |
+| `chunked` | 251 | 285 | 1.15x |
+| `chunked_bool` | 133 | 208 | 1.58x |
+| `chunked_decimal` | 257 | 288 | 1.14x |
+| `chunked_empty_chunks` | 259 | 296 | 1.14x |
+| `chunked_mixed_validity` | 277 | 326 | 1.18x |
+| `chunked_one_chunk` | 260 | 286 | 1.11x |
+| `chunked_varbinview` | 389 | 13,048 | 33.3x |
+| `constant` | 122 | 176 | 1.43x |
+| `datetimeparts` | 406 | 447 | 1.11x |
+| `decimal` | 249 | 274 | 1.10x |
+| `decimal_byte_parts` | 249 | 274 | 1.09x |
+| `dict` | 236 | 260 | 1.11x |
+| `dict_nullable_codes` | 262 | 302 | 1.18x |
+| `dict_nullable_values_nonnull_codes` | 177 | 238 | 1.35x |
+| `dict_u64_codes` | 250 | 273 | 1.09x |
+| `dict_u8_codes` | 157 | 239 | 1.51x |
+| `ext` | 243 | 269 | 1.11x |
 | `fastlanes_bitpacked` | 154 | 225 | 1.46x |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 161 | 236 | 1.48x |
-| `fastlanes_delta` | 440 | 2,681 | 6.04x |
-| `fastlanes_for` | 240 | 267 | 1.12x |
-| `fastlanes_rle` | 908 | 968 | 1.07x |
-| `fixed_size_list` | 259 | 300 | 1.16x |
-| `fsst` | 417 | 440 | 1.06x |
-| `list` | 262 | 1,220 | 4.70x |
-| `listview` | 3,901 | 4,408 | 1.12x |
-| `map` | 8,833 | 15,228 | 1.76x |
-| `masked` | 195 | 223 | 1.14x |
-| `masked_all_invalid` | 200 | 224 | 1.14x |
-| `masked_all_valid` | 259 | 289 | 1.13x |
-| `null` | 120 | 169 | 1.42x |
-| `onpair` | 392 | 423 | 1.09x |
-| `parquet_variant` | 447 | 460 | 1.03x |
-| `pco` | 298 | 1,207 | 4.02x |
-| `pco_f32` | 6,641 | 3,220 | 0.48x |
-| `pco_i16` | 5,914 | 2,673 | 0.45x |
-| `pco_nullable` | 5,703 | 263 | 0.05x |
-| `pco_u32` | 10,938 | 4,256 | 0.39x |
-| `primitive` | 241 | 269 | 1.13x |
-| `runend` | 144 | 221 | 1.54x |
-| `sequence` | 118 | 174 | 1.47x |
-| `sparse` | 136 | 207 | 1.51x |
-| `struct` | 4,170 | 10,424 | 2.49x |
-| `table_mixed` | 16,008 | 30,358 | 1.89x |
-| `table_wide` | 366 | 464 | 1.29x |
-| `varbin` | 352 | 11,521 | 33.8x |
-| `varbinview` | 5,762 | 12,075 | 2.09x |
-| `variant` | 120 | 175 | 1.46x |
-| `zigzag` | 226 | 264 | 1.14x |
-| `zstd` | 566 | 10,161 | 17.9x |
-| `zstd_buffers` | 441 | 498 | 1.12x |
-| `zstd_nullable` | 341 | 3,602 | 10.6x |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 162 | 233 | 1.46x |
+| `fastlanes_delta` | 423 | 2,583 | 6.03x |
+| `fastlanes_for` | 249 | 279 | 1.12x |
+| `fastlanes_rle` | 915 | 970 | 1.08x |
+| `fixed_size_list` | 262 | 298 | 1.14x |
+| `fsst` | 404 | 433 | 1.08x |
+| `list` | 308 | 1,191 | 3.94x |
+| `listview` | 4,586 | 5,411 | 1.18x |
+| `map` | 8,563 | 15,536 | 1.79x |
+| `masked` | 201 | 227 | 1.13x |
+| `masked_all_invalid` | 201 | 226 | 1.13x |
+| `masked_all_valid` | 263 | 288 | 1.10x |
+| `null` | 129 | 176 | 1.39x |
+| `onpair` | 401 | 427 | 1.07x |
+| `parquet_variant` | 457 | 474 | 1.05x |
+| `pco` | 222 | 1,202 | 5.45x |
+| `pco_f32` | 428 | 3,028 | 7.07x |
+| `pco_i16` | 448 | 2,624 | 5.90x |
+| `pco_nullable` | 226 | 249 | 1.10x |
+| `pco_u32` | 542 | 4,194 | 7.85x |
+| `primitive` | 238 | 269 | 1.11x |
+| `runend` | 135 | 206 | 1.52x |
+| `sequence` | 124 | 180 | 1.44x |
+| `sparse` | 138 | 208 | 1.52x |
+| `struct` | 4,147 | 10,417 | 2.53x |
+| `table_mixed` | 18,546 | 31,883 | 1.73x |
+| `table_wide` | 370 | 482 | 1.29x |
+| `varbin` | 357 | 11,800 | 32.8x |
+| `varbinview` | 6,211 | 12,742 | 2.03x |
+| `variant` | 123 | 179 | 1.46x |
+| `zigzag` | 229 | 256 | 1.13x |
+| `zstd` | 558 | 10,007 | 17.8x |
+| `zstd_buffers` | 528 | 486 | 0.92x |
+| `zstd_nullable` | 346 | 3,748 | 10.7x |
 
-Vorticity took less time on 56 of 61 files; the median speedup is 1.16x. At 1.00x or below: `pco_nullable` 0.05x, `pco_u32` 0.39x, `pco_i16` 0.45x, `pco_f32` 0.48x, `alp` 0.98x.
-Rust is timed under the faster of its two splits, file by file: one split per chunk on 60 of 61 files, its default on `fastlanes_delta`.
+Vorticity took less time on 59 of 61 files; the median speedup is 1.29x. At 1.00x or below: `zstd_buffers` 0.92x, `alp` 1.00x.
+Rust is timed under the faster of its two splits, file by file: one split per chunk on 61 of 61 files, its default on none.
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 7527e2b5d861; commit 0c1aa9bf, 2026-10-11 22:22 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 317c6a6d1f2d; commit 9eea1796, 2026-10-12 07:44 UTC.*
 <!-- /results: take -->
 
 <!-- results: write -->
@@ -957,12 +959,12 @@ run the reference profile on that class with `--full` before its name.
 <!-- results: kernel:LanesBenchmarks -->
 ### `LanesBenchmarks`
 
-| Method                 | Lanes | Mean       | Error     | StdDev   | Speedup | MannWhitney(5%) | Completed Work Items | Lock Contentions | Allocated | Alloc Ratio |
-|----------------------- |------ |-----------:|----------:|---------:|--------:|---------------- |---------------------:|-----------------:|----------:|------------:|
-| &#39;ours, n lanes&#39;        | 4     |   565.7 μs |  48.43 μs | 12.58 μs |   1.00x | Baseline        |              97.9318 |                - |   52581 B |        1.00 |
-| &#39;reference, n workers&#39; | 4     | 1,292.1 μs | 118.31 μs | 30.72 μs |   0.44x | Slower          |                    - |                - |         - |        0.00 |
+| Method                 | Lanes | Mean       | Error    | StdDev   | Speedup | MannWhitney(5%) | Completed Work Items | Lock Contentions | Allocated | Alloc Ratio |
+|----------------------- |------ |-----------:|---------:|---------:|--------:|---------------- |---------------------:|-----------------:|----------:|------------:|
+| &#39;ours, n lanes&#39;        | 4     |   588.1 μs | 89.91 μs | 13.91 μs |   1.00x | Baseline        |              99.2102 |                - |   52597 B |        1.00 |
+| &#39;reference, n workers&#39; | 4     | 1,374.6 μs | 72.64 μs | 18.86 μs |   0.43x | Slower          |                    - |                - |         - |        0.00 |
 
-*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.2, the fast profile; commit 0c1aa9bf, 2026-10-11 22:42 UTC.*
+*Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.2, the fast profile; commit 9eea1796, 2026-10-12 07:45 UTC.*
 <!-- /results: kernel:LanesBenchmarks -->
 
 ## What this does not measure

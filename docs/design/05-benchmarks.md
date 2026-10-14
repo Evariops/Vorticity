@@ -16,7 +16,10 @@ it, and [bench/README.md](../../bench/README.md) explains how to run each one.
   fails. Every call opens its file and maps it anew, on both sides, and reads it where it lies: Rust
   through `open_buffer` over a `memmap2` mapping, ours through a session that keeps no mapping once a
   file is closed. Both decode every value they return to its plain form, except a constant column,
-  which both keep as one value and a length (our reader's form, and upstream's `Columnar`). A write
+  which both keep as one value and a length (our reader's form, and upstream's `Columnar`). Both
+  then read every value they return, the same bytes (`Consume` on ours, `consume` in the
+  reference's harness), since a scan that only counts rows times values nobody reads: a column stored
+  plain would be a mapping never touched, and a decoded one a buffer written and never read. A write
   hands its bytes to a sink that counts them and keeps none, on both sides. A count is a count on
   both sides, and a read the reference has no index for is asked of it as the rows it would have to
   find. Neither side keeps a segment cache.
@@ -105,17 +108,18 @@ band axes read files of 65 536 rows that our writer makes for them, and the last
 tables of a million rows with six columns, and of fifty columns.
 [In one process](../guide/benchmarks.md#in-one-process-after-warm-up) has the figures.
 
-* `open to first batch` is a latency. Both sides decode their first batch. Rust's first batch costs
-  most of what its whole scan does on this file, 1.4 ms of 1.6, where ours costs a fifth of our full
-  scan. The speedup is about the time to the first row, and nothing more.
+* `open to first batch` is a latency. Both sides decode and read their first batch. On the x64
+  machine Rust's first batch costs what its whole scan does on this file, 2.9 ms of 3.0, where ours
+  costs a quarter of our full scan, 0.22 ms of 0.86. The speedup is about the time to the first row,
+  and nothing more.
 * Where the reference has no counterpart, it answers the same question its own way. A key-ordered
   read of a band is compared with Rust's filtered scan of that band, which returns the same rows in
   file order, and an exact count from the index with Rust's count of the band with no column decoded.
   The speedup then prices the index, which is what a caller would weigh.
-* The gate has seven more axes that the page leaves out. Two time Rust's scan without decoding, which
-  asks a different question. One holds the uncorrelated key-order read against a take of 64 rows
-  whose positions the reference is given, the floor that read cannot go under. Four read one file as
-  each writer wrote it. [bench/README.md](../../bench/README.md) describes them.
+* The gate has five more axes that the page leaves out. One holds the uncorrelated key-order read
+  against a take of 64 rows whose positions the reference is given, the floor that read cannot go
+  under. Four read one file as each writer wrote it. [bench/README.md](../../bench/README.md)
+  describes them.
 
 ## 4. Decoders, per encoding
 
@@ -127,9 +131,9 @@ value decoded to its plain form. A figure is the median of the last 10 scans and
 Native AOT against Rust's `vxbench` binary, which is what a decoder costs once warm. [Decoding, per
 encoding](../guide/benchmarks.md#decoding-per-encoding) has every file.
 
-* A column stored in plain form is not decoding at all. It is handed out as a view of the mapped file
-  on both sides, with nothing copied, so the figure measures the walk of the layout and the speedup
-  compares two walks.
+* A column stored in plain form is not decoding at all. It is handed out as it lies, a view of the
+  mapped file, or a copy of its segment where our session reads positionally, and its figure is the
+  read of its values from there.
 * The widest gaps are UTF-8 validation. In `varbin`, `varbinview`, `struct` and the tables, the
   stored arrays are already in plain form, and the time goes to checking that every string is UTF-8,
   which both sides do. A sampled profile of Rust's scan of `varbinview` spends it in `from_utf8` and

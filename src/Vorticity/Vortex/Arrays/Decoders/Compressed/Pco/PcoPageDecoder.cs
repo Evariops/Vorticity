@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
@@ -23,9 +24,9 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// sequence that is wrong from the second value on.
 /// </para>
 /// <para>
-/// The offsets are not inline with the symbols: the symbol pass records each value's offset width
-/// and a running sum of those widths, and the offset pass then reads value i at that running sum
-/// past the base. Reading an offset inline would consume the stream in the wrong order.
+/// The offsets are not inline with the symbols: the symbol pass records each value's offset width,
+/// and the offset pass then reads the values' offsets one after the other from where the symbols
+/// end. Reading an offset inline would consume the stream in the wrong order.
 /// </para>
 /// <para>
 /// Latents are held as <c>ulong</c> whatever their width. Every operation on them wraps, as
@@ -268,6 +269,7 @@ internal static class PcoPageDecoder
         ulong mask = number.Mask;
         ulong mid = number.Mid;
         ulong baseBits = number.FromLatentOrdered(chunk.ModeBase);
+        IntFloats floats = new IntFloats(number);
         adjustments = adjustments[..values.Length];
         switch (number.LatentBits)
         {
@@ -276,9 +278,9 @@ internal static class PcoPageDecoder
                 double factor = BitConverter.UInt64BitsToDouble(baseBits);
                 for (int i = 0; i < values.Length; i++)
                 {
-                    double unadjusted = BitConverter.UInt64BitsToDouble(IntFloat(values[i], number)) * factor;
-                    ulong latent = unchecked(number.FloatToLatentOrdered(BitConverter.DoubleToUInt64Bits(unadjusted)) + adjustments[i] + mid);
-                    values[i] = number.FromLatentOrdered(latent);
+                    double unadjusted = BitConverter.UInt64BitsToDouble(floats.Bits(values[i], 64)) * factor;
+                    ulong latent = unchecked(FloatToLatent(BitConverter.DoubleToUInt64Bits(unadjusted), mid, mask) + adjustments[i] + mid);
+                    values[i] = FloatFromLatent(latent, mid, mask);
                 }
 
                 break;
@@ -289,9 +291,9 @@ internal static class PcoPageDecoder
                 float factor = BitConverter.UInt32BitsToSingle((uint)baseBits);
                 for (int i = 0; i < values.Length; i++)
                 {
-                    float unadjusted = BitConverter.UInt32BitsToSingle((uint)IntFloat(values[i] & mask, number)) * factor;
-                    ulong latent = unchecked(number.FloatToLatentOrdered(BitConverter.SingleToUInt32Bits(unadjusted)) + adjustments[i] + mid);
-                    values[i] = number.FromLatentOrdered(latent);
+                    float unadjusted = BitConverter.UInt32BitsToSingle((uint)floats.Bits(values[i] & mask, 32)) * factor;
+                    ulong latent = unchecked(FloatToLatent(BitConverter.SingleToUInt32Bits(unadjusted), mid, mask) + adjustments[i] + mid);
+                    values[i] = FloatFromLatent(latent, mid, mask);
                 }
 
                 break;
@@ -302,9 +304,9 @@ internal static class PcoPageDecoder
                 Half factor = BitConverter.UInt16BitsToHalf((ushort)baseBits);
                 for (int i = 0; i < values.Length; i++)
                 {
-                    Half unadjusted = BitConverter.UInt16BitsToHalf((ushort)IntFloat(values[i] & mask, number)) * factor;
-                    ulong latent = unchecked(number.FloatToLatentOrdered(BitConverter.HalfToUInt16Bits(unadjusted)) + adjustments[i] + mid);
-                    values[i] = number.FromLatentOrdered(latent);
+                    Half unadjusted = BitConverter.UInt16BitsToHalf((ushort)floats.Bits(values[i] & mask, 16)) * factor;
+                    ulong latent = unchecked(FloatToLatent(BitConverter.HalfToUInt16Bits(unadjusted), mid, mask) + adjustments[i] + mid);
+                    values[i] = FloatFromLatent(latent, mid, mask);
                 }
 
                 break;
@@ -319,37 +321,64 @@ internal static class PcoPageDecoder
     /// </summary>
     /// <param name="latent">The latent, no wider than the number.</param>
     /// <param name="number">The float type.</param>
-    internal static ulong IntFloat(ulong latent, PcoNumber number)
-    {
-        unchecked
-        {
-            ulong mid = number.Mid;
-            bool negative = latent < mid;
-            ulong magnitude = negative ? mid - 1 - latent : latent - mid;
-            int digits = number.PrecisionBits + 1;
-            ulong exact = 1UL << digits;
-            ulong bits;
-            if (magnitude < exact)
-            {
-                bits = number.LatentBits switch
-                {
-                    64 => BitConverter.DoubleToUInt64Bits(magnitude),
-                    32 => BitConverter.SingleToUInt32Bits(magnitude),
-                    _ => BitConverter.HalfToUInt16Bits((Half)(float)magnitude),
-                };
-            }
-            else
-            {
-                // The float 2^digits, then one step of its precision per unit past it: its biased
-                // exponent is the bias plus the digits, which is the midpoint's bits minus one past.
-                ulong bias = (mid >> (number.PrecisionBits + 1)) - 1;
-                ulong exactBits = (bias + (ulong)digits) << number.PrecisionBits;
-                bits = (exactBits + (magnitude - exact)) & number.Mask;
-            }
+    internal static ulong IntFloat(ulong latent, PcoNumber number) => new IntFloats(number).Bits(latent, number.LatentBits);
 
-            return negative ? bits ^ mid : bits;
+    /// <summary>
+    /// What <see cref="IntFloat"/> works out of the float type alone, once for a batch rather than
+    /// once a value: the midpoint, the magnitudes a float holds exactly, and the bits of the first
+    /// one it does not.
+    /// </summary>
+    private readonly struct IntFloats
+    {
+        private readonly ulong _mid;
+        private readonly ulong _mask;
+        private readonly ulong _exact;
+        private readonly ulong _exactBits;
+
+        internal IntFloats(PcoNumber number)
+        {
+            int precision = number.PrecisionBits;
+            int digits = precision + 1;
+            _mid = number.Mid;
+            _mask = number.Mask;
+            _exact = 1UL << digits;
+
+            // The float 2^digits, then one step of its precision per unit past it: its biased
+            // exponent is the bias plus the digits, which is the midpoint's bits minus one past.
+            ulong bias = (_mid >> (precision + 1)) - 1;
+            _exactBits = (bias + (ulong)digits) << precision;
+        }
+
+        /// <summary>The bits of the float <paramref name="latent"/> stands for, the type <paramref name="latentBits"/> wide.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal ulong Bits(ulong latent, int latentBits)
+        {
+            unchecked
+            {
+                bool negative = latent < _mid;
+                ulong magnitude = negative ? _mid - 1 - latent : latent - _mid;
+                ulong bits = magnitude < _exact
+                    ? latentBits switch
+                    {
+                        64 => BitConverter.DoubleToUInt64Bits(magnitude),
+                        32 => BitConverter.SingleToUInt32Bits(magnitude),
+                        _ => BitConverter.HalfToUInt16Bits((Half)(float)magnitude),
+                    }
+                    : (_exactBits + (magnitude - _exact)) & _mask;
+                return negative ? bits ^ _mid : bits;
+            }
         }
     }
+
+    /// <summary>A float's ordered latent as its bits, <see cref="PcoNumber.FromLatentOrdered"/> for a float.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong FloatFromLatent(ulong latent, ulong mid, ulong mask) =>
+        ((latent & mid) != 0 ? latent ^ mid : ~latent) & mask;
+
+    /// <summary>A float's bits as its ordered latent, <see cref="PcoNumber.FloatToLatentOrdered"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong FloatToLatent(ulong bits, ulong mid, ulong mask) =>
+        ((bits & mid) != 0 ? ~bits : bits ^ mid) & mask;
 
     /// <summary>
     /// A FloatQuant batch, <c>float_quant::join_latents</c>: the primary is the ordered latent's top
@@ -359,7 +388,8 @@ internal static class PcoPageDecoder
     private static void FloatQuant(Span<ulong> values, ReadOnlySpan<ulong> lowest, PcoNumber number, int k)
     {
         ulong mask = number.Mask;
-        ulong signCutoff = number.Mid >> k;
+        ulong mid = number.Mid;
+        ulong signCutoff = mid >> k;
         ulong lowestMax = (1UL << k) - 1;
         lowest = lowest[..values.Length];
         for (int i = 0; i < values.Length; i++)
@@ -367,7 +397,7 @@ internal static class PcoPageDecoder
             ulong y = values[i] & mask;
             ulong m = lowest[i];
             ulong low = y >= signCutoff ? m : unchecked(lowestMax - m);
-            values[i] = number.FromLatentOrdered(unchecked((y << k) + low));
+            values[i] = FloatFromLatent(unchecked((y << k) + low), mid, mask);
         }
     }
 
@@ -557,7 +587,6 @@ internal readonly ref struct PcoBatchScratch
     /// <summary>Creates a view over caller-owned buffers, each at least a batch long.</summary>
     /// <param name="values">The batch's latents of a variable nothing keeps: a lookback's.</param>
     /// <param name="offsetBits">Per-value offset widths.</param>
-    /// <param name="offsetCumulative">Per-value offset positions.</param>
     /// <param name="states">
     /// <see cref="PcoPageDecoder.MaxLatentVars"/> reusable latent states, one per variable slot,
     /// built once for the node and reset by each page.
@@ -569,13 +598,11 @@ internal readonly ref struct PcoBatchScratch
     internal PcoBatchScratch(
         Span<ulong> values,
         Span<int> offsetBits,
-        Span<long> offsetCumulative,
         PcoLatentState[] states,
         Span<ulong> primary = default)
     {
         Values = values;
         OffsetBits = offsetBits;
-        OffsetCumulative = offsetCumulative;
         States = states;
         Primary = primary;
     }
@@ -585,9 +612,6 @@ internal readonly ref struct PcoBatchScratch
 
     /// <summary>Each value's offset width, when the variable has more than one bin.</summary>
     internal Span<int> OffsetBits { get; }
-
-    /// <summary>Each value's bit position within the offset stream.</summary>
-    internal Span<long> OffsetCumulative { get; }
 
     /// <summary>The page's three latent-state slots, reset per page rather than rebuilt.</summary>
     internal PcoLatentState[] States { get; }
@@ -796,13 +820,15 @@ internal sealed class PcoLatentState
         }
 
         Span<int> offsetBits = scratchBuffers.OffsetBits;
-        Span<long> offsetCumulative = scratchBuffers.OffsetCumulative;
-        long offsetBitTotal = 0;
         if (_binCount > 1)
         {
             ReadOnlySpan<PcoAnsNode> nodes = _table.Nodes;
             ReadOnlySpan<ulong> lowers = _table.StateLowers;
-            for (int i = 0; i < count; i++)
+
+            // Four symbols at a time while their word lies inside the page, the few past the last
+            // such step one by one, each read checked.
+            int i = _table.SizeLog <= MaxSymbolBits ? ReadSymbols(ref reader, count, nodes, lowers, scratch, offsetBits) : 0;
+            for (; i < count; i++)
             {
                 int slot = _stateIndices[i % 4];
                 PcoAnsNode node = nodes[slot];
@@ -810,8 +836,6 @@ internal sealed class PcoLatentState
 
                 scratch[i] = lowers[slot];
                 offsetBits[i] = node.OffsetBits;
-                offsetCumulative[i] = offsetBitTotal;
-                offsetBitTotal += node.OffsetBits;
 
                 _stateIndices[i % 4] = node.NextStateIndexBase + (int)ansValue;
             }
@@ -820,8 +844,8 @@ internal sealed class PcoLatentState
         {
             // A single bin means every value is that bin, and the ANS stream is skipped entirely
             // rather than read as zero-width symbols. Every value then has the same width, so the
-            // per-value width and cumulative-position arrays describe nothing -- the position of
-            // value i is `base + i * offsetBits`.
+            // per-value width array describes nothing -- the position of value i is
+            // `base + i * offsetBits`.
             int uniformBits = _table.Nodes[0].OffsetBits;
             lower = _table.StateLowers[0];
 
@@ -834,8 +858,17 @@ internal sealed class PcoLatentState
                 return true;
             }
 
+            // The values whose words lie inside the page unchecked, the rest checked.
             long uniformBase = reader.BitPosition;
-            for (int i = 0; i < count; i++)
+            long limit = reader.WordLimit;
+            int quick = uniformBase >= limit ? 0 : (int)Math.Min(count, ((limit - uniformBase - 1) / uniformBits) + 1);
+            ref byte origin = ref reader.Origin;
+            for (int i = 0; i < quick; i++)
+            {
+                scratch[i] = unchecked(lower + PcoBitReader.Peek(ref origin, uniformBase + ((long)i * uniformBits), uniformBits));
+            }
+
+            for (int i = quick; i < count; i++)
             {
                 scratch[i] = unchecked(
                     lower + reader.ReadAt(uniformBase + ((long)i * uniformBits), uniformBits));
@@ -845,21 +878,117 @@ internal sealed class PcoLatentState
             return false;
         }
 
-        // The offsets live in their own stream starting where the symbols ended.
-        long basePosition = reader.BitPosition;
-        for (int i = 0; i < count; i++)
+        // The offsets live in their own stream starting where the symbols ended, each value's
+        // right after the one before it: read unchecked while their words lie inside the page, a
+        // width of zero keeping none of the word it loads, and the few past them checked.
+        long position = reader.BitPosition;
+        long wordLimit = reader.WordLimit;
+        ref byte offsets = ref reader.Origin;
+        int at = 0;
+        for (; at < count && position < wordLimit; at++)
         {
-            if (offsetBits[i] == 0)
-            {
-                continue;
-            }
-
-            ulong offset = reader.ReadAt(basePosition + offsetCumulative[i], offsetBits[i]);
-            scratch[i] = unchecked(scratch[i] + offset);
+            int width = offsetBits[at];
+            scratch[at] = unchecked(scratch[at] + PcoBitReader.Peek(ref offsets, position, width));
+            position += width;
         }
 
-        reader.SeekBits(basePosition + offsetBitTotal);
+        for (; at < count; at++)
+        {
+            int width = offsetBits[at];
+            if (width != 0)
+            {
+                scratch[at] = unchecked(scratch[at] + reader.ReadAt(position, width));
+                position += width;
+            }
+        }
+
+        reader.SeekBits(position);
         return false;
+    }
+
+    /// <summary>
+    /// The widest table <see cref="ReadSymbols"/> reads four symbols of out of one word: four reads
+    /// of 14 bits take no more than the 57 a word holds past its byte, and pco's size log is 14 at
+    /// most.
+    /// </summary>
+    private const int MaxSymbolBits = 14;
+
+    /// <summary>
+    /// A batch's symbols four at a time, for as long as the four lie inside the page with their
+    /// word: the four interleaved states held in registers, and the four symbols of a step read out
+    /// of one word unchecked, the table no wider than <see cref="MaxSymbolBits"/>.
+    /// </summary>
+    /// <returns>The symbols read, a multiple of four: the caller reads the rest one by one.</returns>
+    /// <remarks>
+    /// The buffers and the tables are checked once rather than per symbol, and a state indexes the
+    /// tables masked to their size, a power of two. The mask changes no state a table produces:
+    /// a node's next state base plus the most it reads stays below the size, so a corrupt page
+    /// decodes to the same values the checked loop gives, and never reads past the tables.
+    /// </remarks>
+    private int ReadSymbols(
+        ref PcoBitReader reader, int count, ReadOnlySpan<PcoAnsNode> nodes, ReadOnlySpan<ulong> lowers,
+        Span<ulong> scratch, Span<int> offsetBits)
+    {
+        if ((uint)count > (uint)scratch.Length || (uint)count > (uint)offsetBits.Length
+            || lowers.Length != nodes.Length || !BitOperations.IsPow2(nodes.Length))
+        {
+            return 0;
+        }
+
+        int mask = nodes.Length - 1;
+        ref PcoAnsNode table = ref MemoryMarshal.GetReference(nodes);
+        ref ulong bounds = ref MemoryMarshal.GetReference(lowers);
+        ref ulong values = ref MemoryMarshal.GetReference(scratch);
+        ref int widths = ref MemoryMarshal.GetReference(offsetBits);
+        ref byte origin = ref reader.Origin;
+        long limit = reader.WordLimit;
+        long position = reader.BitPosition;
+        int state0 = _stateIndices[0] & mask;
+        int state1 = _stateIndices[1] & mask;
+        int state2 = _stateIndices[2] & mask;
+        int state3 = _stateIndices[3] & mask;
+        int i = 0;
+        for (; i <= count - 4 && position < limit; i += 4)
+        {
+            ulong word = PcoBitReader.Word(ref origin, position);
+
+            ref PcoAnsNode node = ref Unsafe.Add(ref table, state0);
+            Unsafe.Add(ref values, i) = Unsafe.Add(ref bounds, state0);
+            Unsafe.Add(ref widths, i) = node.OffsetBits;
+            int read = node.BitsToRead;
+            state0 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, read)) & mask;
+            word >>= read;
+
+            node = ref Unsafe.Add(ref table, state1);
+            Unsafe.Add(ref values, i + 1) = Unsafe.Add(ref bounds, state1);
+            Unsafe.Add(ref widths, i + 1) = node.OffsetBits;
+            int bits = node.BitsToRead;
+            state1 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, bits)) & mask;
+            word >>= bits;
+            read += bits;
+
+            node = ref Unsafe.Add(ref table, state2);
+            Unsafe.Add(ref values, i + 2) = Unsafe.Add(ref bounds, state2);
+            Unsafe.Add(ref widths, i + 2) = node.OffsetBits;
+            bits = node.BitsToRead;
+            state2 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, bits)) & mask;
+            word >>= bits;
+            read += bits;
+
+            node = ref Unsafe.Add(ref table, state3);
+            Unsafe.Add(ref values, i + 3) = Unsafe.Add(ref bounds, state3);
+            Unsafe.Add(ref widths, i + 3) = node.OffsetBits;
+            bits = node.BitsToRead;
+            state3 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, bits)) & mask;
+            position += read + bits;
+        }
+
+        _stateIndices[0] = state0;
+        _stateIndices[1] = state1;
+        _stateIndices[2] = state2;
+        _stateIndices[3] = state3;
+        reader.SeekBits(position);
+        return i;
     }
 
     /// <summary>Undoes a consecutive delta over the batch, consuming the page's moments.</summary>

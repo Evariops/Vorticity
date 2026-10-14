@@ -91,7 +91,7 @@ public class MergeProbes
         await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key").ExecuteAsync()
             .WithCancellation(CancellationToken.None).ConfigureAwait(false))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
             batch.Dispose();
         }
 

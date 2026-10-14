@@ -97,9 +97,9 @@ internal static partial class RustReader
     /// <returns>The row count, or negative on failure.</returns>
     /// <remarks>
     /// Upstream's scan hands back arrays in the file's own encodings -- an FsstArray, a DictArray,
-    /// a RunEndArray -- and <c>len()</c> answers from their metadata. So this measures layout
-    /// reading and array deserialization, and NOT the decoders. Use <see cref="ScanCanonical"/> for
-    /// any ratio against a .NET scan, whose <c>RecordBatch</c> is canonical by construction.
+    /// a RunEndArray -- and <c>len()</c> answers from their metadata, so nothing is decoded or read.
+    /// It counts the rows two readers are held to agree on before anything is timed, and times
+    /// nothing: a timed scan reads its values, <see cref="ScanCanonical"/> on this side.
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_all", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanAll(string path);
@@ -244,19 +244,6 @@ internal static partial class RustReader
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical_threads", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanCanonicalThreads(string path, long threads);
-
-    /// <summary>Opens a file and scans one field of every batch, without decoding it.</summary>
-    /// <param name="path">The file to scan, as a UTF-8 C string.</param>
-    /// <param name="field">The root field to project.</param>
-    /// <returns>The row count, or negative on failure.</returns>
-    /// <remarks>
-    /// The projected twin of <see cref="ScanAll"/>: the row count comes off the arrays' metadata
-    /// and the column stays in its file encoding. It answers "how long to get a stream of arrays
-    /// you may never fully read", which is a real question about a real API and not the question a
-    /// decoder ratio is built on -- that one is <see cref="ScanProjectedCanonical"/>.
-    /// </remarks>
-    [LibraryImport(Library, EntryPoint = "vxbench_scan_projected", StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial long ScanProjected(string path, string field);
 
     /// <summary>Opens a file, scans one field of every batch and canonicalizes it.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>

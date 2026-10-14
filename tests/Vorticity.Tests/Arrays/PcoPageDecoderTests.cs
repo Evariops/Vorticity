@@ -46,7 +46,6 @@ public sealed class PcoPageDecoderTests
         PcoBatchScratch scratch = new PcoBatchScratch(
             new ulong[PcoPageDecoder.BatchSize],
             new int[PcoPageDecoder.BatchSize],
-            new long[PcoPageDecoder.BatchSize],
             states,
             new ulong[PcoPageDecoder.BatchSize]);
         ulong[] secondary = new ulong[PcoPageDecoder.BatchSize];

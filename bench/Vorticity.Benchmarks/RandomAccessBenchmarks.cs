@@ -73,7 +73,7 @@ public class RandomAccessBenchmarks
         await foreach (RecordBatch batch in file.ScanBuilder().Take(_rows).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.Batch(batch);
         }
 
         return rows;

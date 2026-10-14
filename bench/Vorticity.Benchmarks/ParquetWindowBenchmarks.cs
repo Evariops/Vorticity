@@ -64,7 +64,7 @@ public class ParquetWindowBenchmarks
         await using ParquetFile file = await _session.OpenParquetAsync(_path, null, CancellationToken.None).ConfigureAwait(false);
         await using IAsyncEnumerator<RecordBatch> batches = file.Scan().ToBatchesAsync(CancellationToken.None).GetAsyncEnumerator();
         await batches.MoveNextAsync().ConfigureAwait(false);
-        long rows = batches.Current.RowCount;
+        long rows = Vorticity.Bench.Scenarios.Consume.Batch(batches.Current);
         batches.Current.Dispose();
         return rows;
     }
@@ -76,7 +76,7 @@ public class ParquetWindowBenchmarks
         long rows = 0;
         await foreach (BatchView batch in file.Scan().WithCancellation(CancellationToken.None))
         {
-            rows += batch.RowCount;
+            rows += Vorticity.Bench.Scenarios.Consume.View(batch);
         }
 
         return rows;

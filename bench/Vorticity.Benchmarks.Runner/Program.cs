@@ -149,6 +149,13 @@ internal static class Program
             Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"checksum={GroupScenarios.Checksum / repeat:R}"));
         }
 
+        // What the scenario read of its batches over every round (Consume): the same on any
+        // instruction set and at any lane count, and the evidence that the values were read.
+        if (Consume.Read != 0)
+        {
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"read_sum={Consume.Read}"));
+        }
+
         (long cpuMs, long rssBytes) = ProcessCost.Read();
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,

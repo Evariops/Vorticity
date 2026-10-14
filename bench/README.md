@@ -16,6 +16,19 @@ less. The gates and `ab.sh` hold and print the inverse, the measured side's time
 side it is compared with (ours over the reference's, the later build's over the earlier one's), so
 under 1.00 the measured side took less, and a ceiling bounds it from above.
 
+Every timed read reads the values it is given, on both sides. Our scenarios, gates and classes hand
+each batch to `Consume` (`bench/Vorticity.Benchmarks.Scenarios/Consume.cs`), and the reference's
+harness hands each array to `consume` (`tools/vxbench-rs/src/lib.rs`). Both read the same bytes: a
+string's view and the bytes it names, a list's offsets and sizes and the elements its rows name, a
+dictionary's code and value for each row, and every other column's values and validity. A scan that
+only counted rows would time a reader whose values nobody reads: a column stored plain would be a
+mapping whose pages are never touched, or a copy, and a decoded column would be written and never
+read again. The runner and `vxbench` print the sum as `read_sum=`, and on a file both readers deliver
+alike, such as a primitive column, a struct of them or a plain string column, the two sums are equal.
+A count stays a count (`CountAsync`, the count axis), a write reads through its writer, and an
+aggregation reads its input and every group it returns, or, against DuckDB, the columns DuckDB's
+outer query sums (`GroupScenarios.Checksum`).
+
 Every figure it publishes is on one page, [docs/guide/benchmarks.md](../docs/guide/benchmarks.md).
 With `--out docs/guide/benchmarks.md`, the report, `--ratio-check`, `--throughput --take`,
 `--throughput --write`, `--tradeoffs`, `--tradeoffs --advise` and a BenchmarkDotNet run each write
@@ -32,7 +45,7 @@ there. Publish the Native AOT runner first, since the report times the one it fi
 | a kernel | `-- fastlanes` (its class) | 1–8 s | whether the kernel moved, against the ported arm on the same clock |
 | anything, and you want a direction | no argument at all | 1 min | the four default classes, 17 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the one class concerned |
-| a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-six axes against Rust, interleaved, each held to a ceiling |
+| a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-four axes against Rust, interleaved, each held to a ceiling |
 | whether your change moved anything | `bench/compare.sh --record before <filter>`, then `--record after`, then `bench/compare.sh before after` | 2x the class | Mann-Whitney per case: Faster, Same or Slower |
 | a decoder | `-- --throughput <family>` | ~30 s | ns per value per encoding at a million rows, against Rust. It reports and never gates, since a run of one file reads +32 % on our side, the JIT not being finished with it |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over the whole per-encoding corpus |
@@ -225,10 +238,9 @@ estimator. Our own bytes read by both readers, for instance, are the four `rewri
 
 ### `--ratio-check`
 
-Twenty-six axes compare ours against Rust, interleaved against one clock so that drift is common to
-both arms. Ten run on the dataset (full scan, full scan upstream-lazy, projected, projected
-upstream-lazy, first batch, footer only, read-and-write-back, filtered 1 %, filtered half, scattered
-take). Four `rewritten` axes read a file our writer produced next to the reference's, the only place
+Twenty-four axes compare ours against Rust, interleaved against one clock so that drift is common to
+both arms. Eight run on the dataset (full scan, projected, first batch, footer only,
+read-and-write-back, filtered 1 %, filtered half, scattered take). Four `rewritten` axes read a file our writer produced next to the reference's, the only place
 our own encoding choices are measured at all. Three are on key order, one of them held to a take of
 rows whose positions the reference is given, and one is the exact count. Six are predicates pushed
 into a string or a packed column (equality and prefix over `fsst` and over `dict`, a band over
@@ -238,7 +250,7 @@ non-zero exit. It takes 56 s.
 
 A bare word narrows it to the axes whose name contains it (`-- --ratio-check write`,
 `-- --ratio-check rewritten`, `-- --ratio-check string`), which is the difference between checking
-one change and waiting for twenty-six axes.
+one change and waiting for twenty-four axes.
 
 Do not pin tiered compilation for this gate. `DOTNET_TieredCompilation=0` costs our side dynamic
 profile-guided optimization, while the reference, being native, loses nothing, so the same command
