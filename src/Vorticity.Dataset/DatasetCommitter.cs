@@ -294,23 +294,13 @@ internal static class DatasetCommitter
         held = held is not null && held.Header.Version == known ? held : null;
         if (known > 0 && trusted)
         {
-            ulong newest = await NewestFromAsync(store, known, cancellationToken).ConfigureAwait(false);
-            if (newest == known && held is not null)
-            {
-                return (known, held);
-            }
-
             try
             {
-                return (newest, await CommitObject.OpenAsync(store, CommitKey.For(newest), cancellationToken).ConfigureAwait(false));
+                return await AfterAsync(store, known, held, cancellationToken).ConfigureAwait(false);
             }
             catch (ObjectNotFoundException)
             {
                 // Vacuumed since it was seen: the listing finds what is there now.
-            }
-            catch (CommitFormatException torn)
-            {
-                throw TornCommitException.Of(newest, torn);
             }
         }
 
@@ -321,6 +311,55 @@ internal static class DatasetCommitter
         }
 
         return listed == 0 ? (0, null) : (listed, await OpenAsync(store, listed, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The latest version from <paramref name="known"/>, a version every one after which is still in
+    /// the store, and its commit object. The first version not in hand is read while a head asks for the
+    /// one after it, both in one round trip: the version after <paramref name="known"/> when
+    /// <paramref name="held"/> is its commit object, <paramref name="known"/> itself otherwise. Nothing
+    /// after the one read, and it is the latest, read already, or <paramref name="known"/> when it is
+    /// absent. Something after it, and versions came in whatever the read found, since the two answers
+    /// may come back in either order: the search goes on from there.
+    /// </summary>
+    /// <remarks>
+    /// A refresh then sees no commit or one in a round trip, where heads alone took one and four, and
+    /// a rebase onto the version it lost to reads that version in the same round trip. The price is a
+    /// request more when nothing is new, a read of an absent key, which stores bill as a head.
+    /// </remarks>
+    /// <exception cref="ObjectNotFoundException">The version read is gone, which vacuum may do to one it superseded long ago.</exception>
+    private static async ValueTask<(ulong Version, CommitObject? Commit)> AfterAsync(
+        IObjectStore store, ulong known, CommitObject? held, CancellationToken cancellationToken)
+    {
+        ulong first = held is null ? known : known + 1;
+        Task<CommitObject?> read = ReadIfThereAsync(store, first, cancellationToken);
+        Task<ObjectHead?> next = store.HeadAsync(CommitKey.For(first + 1), cancellationToken).AsTask();
+        await Task.WhenAll(read, next).ConfigureAwait(false);
+        if (await next.ConfigureAwait(false) is not null)
+        {
+            ulong newest = await NewestFromAsync(store, first + 1, cancellationToken).ConfigureAwait(false);
+            return (newest, await OpenAsync(store, newest, cancellationToken).ConfigureAwait(false));
+        }
+
+        if (await read.ConfigureAwait(false) is { } commit)
+        {
+            return (first, commit);
+        }
+
+        return held is not null ? (known, held) : throw ObjectNotFoundException.For(CommitKey.For(known));
+    }
+
+    /// <summary>The commit object of <paramref name="version"/>, or null when the store holds none; a torn one reported against it.</summary>
+    private static async Task<CommitObject?> ReadIfThereAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await OpenAsync(store, version, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectNotFoundException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

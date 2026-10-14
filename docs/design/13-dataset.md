@@ -432,8 +432,9 @@ Uncontended, a commit is three dependent requests: the listing, the read of `N`'
 creation. The data objects add nothing to the commit itself. A handle that knows its version was the
 latest less than half a retention window ago (see [the latest
 version](#83-the-latest-version-in-one-request)) builds on that version directly, so its commit is a
-single request, the creation. A refusal tells it another writer went first, and it then asks for the
-versions after the number it lost and rebases. Past that half window it lists first. Either way, it
+single request, the creation. A refusal tells it another writer went first, and it then reads the
+version that won while a head asks whether another followed, both at once, and rebases. Past that
+half window it lists first. Either way, it
 reads the version it created as it wrote it, with nothing read back. A handle whose commit found
 nothing to change reads the version that decision was made on, which is fetched first when the batch
 was decided on the version it held, since a no-op names the latest version.
@@ -481,9 +482,18 @@ reader that wants to read its own writes is handed the version by its writer. Th
 object.
 
 A handle that knows its version was the latest less than half a retention window ago asks for the
-versions after it instead, with a head request each. Every one of them was created after that moment,
-and vacuum only takes a commit a full window after the next one superseded it, so they are all still
-there and the first missing one ends the run. Past that half window, the handle lists. Below the
+versions after it instead. Every one of them was created after that moment, and vacuum only takes a
+commit a full window after the next one superseded it, so they are all still there and the first
+missing one ends the run. The first request reads the next version's commit object while a head
+asks for the one after it, both at once. Nothing after the one read, and it is the latest, read
+already, or there is no new version when the read found nothing: no commit or one costs a round
+trip, where heads alone took one round trip and four. Something after it, and versions came in,
+whatever the read found, since the store may answer the two in either order and a version never
+exists without the one before it: heads then go on from there in doubling steps, bisect, and the
+latest is read. The answer is a version that was the latest at some moment during the call, which
+is all a refresh can promise, since a commit may land just after. The price is a request more when
+nothing is new, the read of an absent key, which the stores bill as a head. Past that half window,
+the handle lists. Below the
 window the commits are not contiguous: vacuum keeps an old commit object whose pages a retained
 version still names and removes the unnamed ones after it, so a handle that took the gap above its
 own version for the end would read it as the latest and commit on it. The handle's clock therefore

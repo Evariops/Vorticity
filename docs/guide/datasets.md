@@ -133,9 +133,11 @@ after another append: the handle reads version 5, 130000 rows; a scan built befo
 version 2 opened by its number: 50000 rows, 1 object
 ```
 
-A handle is pinned to one version. It moves only when it commits or when you call `RefreshAsync`. A
-scan is pinned to the version its handle held when the scan was built, so a commit in the middle of
-a query does not change the answer. `Version`, `RowCount`, `ObjectCount` and `Lag` describe the
+A handle is pinned to one version. It moves only when it commits or when you call `RefreshAsync`,
+which takes a single round trip to the store when no commit or one came in since, and lands on a
+version that was the latest at some moment during the call. A scan is pinned to the version its
+handle held when the scan was built, so a commit in the middle of a query does not change the
+answer. `Version`, `RowCount`, `ObjectCount` and `Lag` describe the
 version the handle holds. `Lag` is how many objects level 0 holds beyond its ceiling of eight, and
 compaction brings it back to 0 ([dataset-maintenance.md](dataset-maintenance.md)).
 

@@ -403,7 +403,16 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>Moves this handle to the latest version.</summary>
     /// <param name="cancellationToken">Cancels the requests.</param>
-    /// <returns>The version the handle now reads.</returns>
+    /// <returns>
+    /// The version the handle now reads: one that was the latest at some moment during the call,
+    /// since another writer may commit the next just after.
+    /// </returns>
+    /// <remarks>
+    /// A handle that knew its version to be the latest less than half the retention window ago reads
+    /// the next version while it asks whether the one after exists, both at once: a refresh that finds
+    /// no commit or one takes a round trip, and one that finds more goes on from the last it saw. Past
+    /// that half window, or on a handle opened at a version given by number, it lists the commits.
+    /// </remarks>
     /// <exception cref="TornCommitException">The newest commit is not whole; <see cref="RemoveTornCommitAsync"/> removes it.</exception>
     public async ValueTask<ulong> RefreshAsync(CancellationToken cancellationToken = default)
     {
