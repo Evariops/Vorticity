@@ -1102,14 +1102,23 @@ internal sealed class PcoLatentState
         long wordLimit = reader.WordLimit;
         ref byte offsets = ref reader.Origin;
         int at = 0;
-        if (_table.MaxOffsetBits <= MaxWordBits)
+        if (_table.MaxOffsetBits <= MaxWordBits && (uint)count <= (uint)scratch.Length && (uint)count <= (uint)offsetBits.Length)
         {
             // Every offset inside the one word a read loads: no second word, and no test for a
             // width of 64, the branch a value `PcoBitReader.Peek` takes for the widest latents.
+            // Each slot addressed once through a reference, and its mask loaded from a table where
+            // no bzhi keeps the low bits: indexed reads made the address twice and the mask from the
+            // width, nineteen instructions a value on arm64.
+            ref T value = ref MemoryMarshal.GetReference(scratch);
+            ref int widths = ref MemoryMarshal.GetReference(offsetBits);
+            ref ulong masks = ref MemoryMarshal.GetArrayDataReference(LowMasks);
             for (; at < count && position < wordLimit; at++)
             {
-                int width = offsetBits[at];
-                scratch[at] = unchecked(scratch[at] + T.CreateTruncating(PcoBitReader.LowUnder64(PcoBitReader.Word(ref offsets, position), width)));
+                int width = Unsafe.Add(ref widths, at);
+                ulong word = PcoBitReader.Word(ref offsets, position);
+                ulong bits = Bmi2.X64.IsSupported ? Bmi2.X64.ZeroHighBits(word, (ulong)width) : word & Unsafe.Add(ref masks, width);
+                ref T slot = ref Unsafe.Add(ref value, at);
+                slot = unchecked(slot + T.CreateTruncating(bits));
                 position += width;
             }
         }
@@ -1144,6 +1153,20 @@ internal sealed class PcoLatentState
 
     /// <summary>The widest read one word serves: 64 bits less the seven a position past its byte can skip.</summary>
     private const int MaxWordBits = 57;
+
+    /// <summary>The low <c>i</c> bits set, for every width a word serves: an offset's mask.</summary>
+    private static readonly ulong[] LowMasks = BuildLowMasks();
+
+    private static ulong[] BuildLowMasks()
+    {
+        ulong[] masks = new ulong[MaxWordBits + 1];
+        for (int width = 0; width <= MaxWordBits; width++)
+        {
+            masks[width] = (1UL << width) - 1;
+        }
+
+        return masks;
+    }
 
     /// <summary>
     /// A batch's symbols four at a time, for as long as the four lie inside the page with their
