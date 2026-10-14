@@ -475,6 +475,68 @@ public sealed class VortexDatasetTests
         Assert.Equal(0, empty.Count);
     }
 
+    // A creation is exclusive. Sixteen at once, of two schemas, on one store: one creates the dataset,
+    // and every other is told the store holds one, rather than rebasing onto the winner's first version
+    // and coming back with a handle on a schema it never asked for.
+    [Fact]
+    public async Task OfManyCreationsAtOnceOneCreatesAndTheOthersAreTold()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType[] schemas =
+        [
+            Schema(types),
+            types.Struct(
+                ["key", "label"],
+                [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.I32, Nullability.Nullable)],
+                Nullability.NonNullable),
+        ];
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        TaskCompletionSource go = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<VortexDataset?>[] creations = [.. Enumerable.Range(0, 16).Select(i => Task.Run(async () =>
+        {
+            await go.Task;
+            try
+            {
+                return await VortexDataset.CreateAsync(store, schemas[i % 2], Options(), ct);
+            }
+            catch (ObjectStoreException told)
+            {
+                Assert.Contains("already holds a dataset", told.Message, StringComparison.Ordinal);
+                return null;
+            }
+        }))];
+        go.SetResult();
+        VortexDataset?[] made = await Task.WhenAll(creations);
+
+        int winner = Assert.Single(Enumerable.Range(0, 16), i => made[i] is not null);
+        await using VortexDataset dataset = made[winner]!;
+        Assert.Equal(1UL, dataset.Version);
+        Assert.Equal(schemas[winner % 2].GetFieldName(1), dataset.Schema[1].Name);
+        await using VortexDataset opened = await VortexDataset.OpenAsync(store, Options(), ct);
+        Assert.Equal(dataset.Schema[1].Name, opened.Schema[1].Name);
+    }
+
+    // A creation is a listing that finds no version and the creation of the first, and the handle reads
+    // what it wrote without asking for it again.
+    [Fact]
+    public async Task ACreationIsAListingAndAPut()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Schema(types), Options(), ct);
+        Assert.Equal((2L, 2L, 1L, 1L), (store.Requests, store.DependentSteps, store.CountOf(ObjectOperation.List), store.CountOf(ObjectOperation.Put)));
+
+        // And the handle on what it wrote takes appends like one that opened it.
+        store.Reset();
+        Assert.Equal(2UL, await dataset.AppendAsync(Batches(types, Schema(types), 0, 100), ct));
+        Assert.Equal(100, dataset.RowCount);
+    }
+
     /// <summary>A store that does not declare that it creates a key only while it is free.</summary>
     private sealed class Unconditional(IObjectStore inner) : ForwardingStore(inner)
     {

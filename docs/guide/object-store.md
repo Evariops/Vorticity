@@ -120,7 +120,7 @@ a lower bound on the round trips that had to wait one after another, and it is w
 a store where each request costs tens of milliseconds. `Reset` starts the counts again.
 
 ```
-creating a dataset: 5 requests (1 read, 0 head, 1 put, 3 list), 5 dependent steps, 123 bytes read, 123 written
+creating a dataset: 2 requests (0 read, 0 head, 1 put, 1 list), 2 dependent steps, 0 bytes read, 123 written
 opening it: 2 requests (1 read, 0 head, 0 put, 1 list), 2 dependent steps, 123 bytes read, 0 written
 ```
 

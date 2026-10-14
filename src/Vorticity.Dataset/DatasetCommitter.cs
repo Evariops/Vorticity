@@ -21,6 +21,13 @@ internal sealed record CommitOptions
     public int MaxAttempts { get; init; } = 8;
 
     /// <summary>
+    /// Whether the commit may only create the dataset's first version, as a creation does: one that
+    /// finds a version there throws rather than rebasing onto it, since a creation that took up another
+    /// writer's header would hand its caller a schema and settings it did not ask for.
+    /// </summary>
+    public bool OnlyFirst { get; init; }
+
+    /// <summary>
     /// A version the writer has seen, from which the latest is found by asking for the ones after
     /// it while <see cref="KnownAt"/> is recent enough; 0 lists the commits instead.
     /// </summary>
@@ -102,7 +109,10 @@ internal sealed record CommitResult(
 internal static class DatasetCommitter
 {
     /// <summary>Applies the operations to the dataset's latest version, rebasing until it wins.</summary>
-    /// <exception cref="ObjectStoreException">The writer lost <see cref="CommitOptions.MaxAttempts"/> times.</exception>
+    /// <exception cref="ObjectStoreException">
+    /// The writer lost <see cref="CommitOptions.MaxAttempts"/> times, or a commit that may only create
+    /// the first version (<see cref="CommitOptions.OnlyFirst"/>) found one there.
+    /// </exception>
     public static async ValueTask<CommitResult> CommitAsync(
         IObjectStore store,
         IReadOnlyList<DatasetOperation> operations,
@@ -122,6 +132,13 @@ internal static class DatasetCommitter
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // A creation that lost its put to another one knows a first version is there, without
+            // asking: it is told so rather than handed the other's dataset.
+            if (options.OnlyFirst && known > 0)
+            {
+                throw AlreadyThere(known);
+            }
+
             // 1. The latest version: the one the writer holds, taken as it is while every version
             // after it is surely in the store, since the creation tells a writer that another went
             // first; otherwise asked for from the one the writer last saw, which a lost attempt moves
@@ -136,6 +153,11 @@ internal static class DatasetCommitter
             if (!outright)
             {
                 knownAt = asked;
+            }
+
+            if (options.OnlyFirst && parent != 0)
+            {
+                throw AlreadyThere(parent);
             }
 
             known = parent;
@@ -251,6 +273,10 @@ internal static class DatasetCommitter
             $"The commit lost {options.MaxAttempts} times; a coordinator that batches commits is the " +
             "answer to contention, not more attempts.");
     }
+
+    /// <summary>What a creation is told when the store holds a dataset already.</summary>
+    private static ObjectStoreException AlreadyThere(ulong version) =>
+        new ObjectStoreException($"This store already holds a dataset at version {version}; open it rather than creating it.");
 
     /// <summary>
     /// The latest version and its commit object; (0, null) when the dataset has none. From

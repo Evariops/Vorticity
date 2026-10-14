@@ -438,6 +438,11 @@ reads the version it created as it wrote it, with nothing read back. A handle wh
 nothing to change reads the version that decision was made on, which is fetched first when the batch
 was decided on the version it held, since a no-op names the latest version.
 
+A creation is the one commit that does not rebase. It is two requests, the listing that finds no
+version and the creation of the first, and one that finds a version there, or loses the creation to
+another, throws rather than taking up the winner's header: two processes that create one dataset
+with two schemas get one dataset and one error, never two handles on one schema.
+
 ### 8.2 Rebase by re-applying operations
 
 If `N+1` already exists, the writer reads it and applies its logical operations again on that

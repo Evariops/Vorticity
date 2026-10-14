@@ -144,7 +144,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="options">The clustering key, the retention and how objects are written; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
-    /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
+    /// <remarks>
+    /// Two requests: a listing that finds no version, and the conditional creation of the first. A
+    /// creation is exclusive: of several that race for one store, one creates the dataset and every
+    /// other throws, rather than handing its caller a dataset of another's schema and settings.
+    /// </remarks>
+    /// <exception cref="ObjectStoreException">The store already holds a dataset, or another creation made it first.</exception>
     /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
     /// <exception cref="NotSupportedException">
     /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), the store does
@@ -171,7 +176,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
-    /// <exception cref="ObjectStoreException">The location already holds a dataset.</exception>
+    /// <exception cref="ObjectStoreException">The location already holds a dataset, or another creation made it first.</exception>
     public static ValueTask<VortexDataset> CreateAsync(
         string location, VortexSchema schema, DatasetOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -1007,13 +1012,6 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         store = SealedObjectStore.Over(store, options.Session);
-        (ulong existing, _) = await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false);
-        if (existing != 0)
-        {
-            throw new ObjectStoreException(
-                $"This store already holds a dataset at version {existing}; open it rather than creating it.");
-        }
-
         if (encrypted)
         {
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
@@ -1038,8 +1036,13 @@ public sealed class VortexDataset : IAsyncDisposable
                 ProllyBoundaryRule.DefaultMaxBytes),
         };
 
-        await DatasetCommitter.CommitAsync(store, [], Commit(options, template), cancellationToken).ConfigureAwait(false);
-        return await OpenAsync(store, options, cancellationToken).ConfigureAwait(false);
+        // One listing, which finds no version, and one creation, which another creation may beat to
+        // the number: the loser is told so, rather than rebased onto the winner's dataset. The handle
+        // reads the version as its commit wrote it, with nothing read back.
+        CommitResult created = await DatasetCommitter
+            .CommitAsync(store, [], Commit(options, template) with { OnlyFirst = true }, cancellationToken).ConfigureAwait(false);
+        RequireEncryption(store, options);
+        return new VortexDataset(store, options.For(created.Commit.Header), created.Version, created.Commit, created.KnownAt);
     }
 
     /// <summary>Applies operations, moves this handle to the version they created, and returns it.</summary>

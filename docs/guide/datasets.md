@@ -256,8 +256,12 @@ never lend its values to an unrelated column.
   group the rows you change into few calls: two one-row deletes in a small object rewrite it twice.
 * Two writers changing the schema at the same time do not both succeed. The second gets an
   `InvalidOperationException`, and once it has refreshed it sees the schema the first one set.
-* The store must create objects atomically and list them consistently. A store that cannot promise
-  `PutIfAbsent` cannot host a dataset safely. See [object-store.md](object-store.md).
+* Two processes creating the same dataset at the same time do not both succeed either. One creates
+  it, and the other gets an `ObjectStoreException` saying the store already holds a dataset. Open it
+  then, and check that its schema is the one you need.
+* The store must create objects atomically and list them consistently. A dataset writes only to a
+  store that declares `ObjectStoreCapabilities.CreatesConditionally`, and only reads from one that
+  does not. See [object-store.md](object-store.md).
 * Every version keeps its objects alive until a vacuum removes them, and a handle that outlives the
   retention window can lose its objects to vacuum. See
   [dataset-maintenance.md](dataset-maintenance.md).
