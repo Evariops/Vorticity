@@ -30,7 +30,9 @@ internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<
 /// A handle is pinned to one version: it reads that version until it commits, which moves it to the
 /// version its commit created, or refreshes. Commits are conditional creations, so concurrent
 /// writers need no lock: the one that loses re-applies its changes to the winner's version.
-/// A handle is thread-safe for reads; its commits are serialised by the store.
+/// A handle is thread-safe for reads; its commits are serialised by the store. On a store that does
+/// not declare <see cref="ObjectStoreCapabilities.CreatesConditionally"/>, a handle reads, and every
+/// write throws <see cref="NotSupportedException"/> before it writes anything.
 /// </remarks>
 public sealed class VortexDataset : IAsyncDisposable
 {
@@ -145,8 +147,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
     /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
     /// <exception cref="NotSupportedException">
-    /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), or the dataset is
-    /// created for a locked store and the store keeps no locks (<see cref="ObjectStoreCapabilities.KeepsLocks"/>).
+    /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), the store does
+    /// not create a key only while it is free (<see cref="ObjectStoreCapabilities.CreatesConditionally"/>), or the
+    /// dataset is created for a locked store and the store keeps no locks (<see cref="ObjectStoreCapabilities.KeepsLocks"/>).
     /// </exception>
     public static ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
@@ -251,6 +254,24 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Refuses to write to a store that cannot create a key only while it is free: a commit is that
+    /// creation, and on such a store two writers of one version would both believe they had committed,
+    /// the second's commit object over the first's. A reader needs no such creation, so a handle on
+    /// the store reads and refuses only what writes, before it writes anything.
+    /// </summary>
+    private static void RequireConditionalCreation(IObjectStore store)
+    {
+        if ((store.Capabilities & ObjectStoreCapabilities.CreatesConditionally) == 0)
+        {
+            string name = (store is SealedObjectStore sealedStore ? sealedStore.Inner : store).GetType().Name;
+            throw new NotSupportedException(
+                $"A dataset commits by creating a key only while it is free, and {name} does not declare that it can " +
+                "(ObjectStoreCapabilities.CreatesConditionally). Run the store contract tests against the service, many times " +
+                "over, then declare it: on an S3 store, set S3StoreOptions.CreatesConditionally.");
+        }
+    }
+
+    /// <summary>
     /// Refuses a plain dataset to a handle that asks for an encrypted one, or whose session refuses
     /// plaintext: a reader that expects sealed data is not handed plain data in its place.
     /// </summary>
@@ -279,6 +300,7 @@ public sealed class VortexDataset : IAsyncDisposable
             throw new InvalidOperationException("The dataset is not encrypted, so it has no data key to change.");
         }
 
+        RequireConditionalCreation(_store);
         await sealedStore.RekeyAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -403,6 +425,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal ObjectDraft StartObjectUnder(DatasetSchema schema, bool inKeyOrder = false)
     {
+        RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
@@ -503,6 +526,7 @@ public sealed class VortexDataset : IAsyncDisposable
     public async ValueTask<ulong> ImportAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         ObjectKey.Check(objectKey);
+        RequireConditionalCreation(_store);
         ObjectHead head = await _store.HeadAsync(objectKey, cancellationToken).ConfigureAwait(false)
             ?? throw ObjectNotFoundException.For(objectKey);
 
@@ -964,6 +988,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(store);
         RequireOrderedListing(store);
+        RequireConditionalCreation(store);
         options ??= new DatasetOptions();
         if (options.LockedStore && (store.Capabilities & ObjectStoreCapabilities.KeepsLocks) == 0)
         {
@@ -1071,6 +1096,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal async ValueTask<CommitResult> CommitAsync(
         IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken)
     {
+        RequireConditionalCreation(_store);
         DatasetSnapshot held = Snapshot;
         CommitResult result = await DatasetCommitter
             .CommitAsync(

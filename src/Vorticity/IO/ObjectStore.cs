@@ -143,6 +143,15 @@ public enum ObjectStoreCapabilities
     /// Object Lock does, refuses to delete or overwrite it until then, and reports the lock in a head.
     /// </summary>
     KeepsLocks = 16,
+
+    /// <summary>
+    /// A put with <see cref="PutCondition.IfAbsent"/> creates the key only while it is free, in one
+    /// step: of callers racing to create one key, one hears <see cref="PutOutcome.Created"/> and every
+    /// other <see cref="PutOutcome.Exists"/>. A dataset commits by such a put, so it writes only to a
+    /// store that declares this; a store that checked and then wrote would let two commits of one
+    /// version both believe they had landed.
+    /// </summary>
+    CreatesConditionally = 32,
 }
 
 /// <summary>What one read brought: the bytes written into the caller's memory, the object's length and its token.</summary>

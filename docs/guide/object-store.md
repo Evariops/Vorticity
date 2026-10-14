@@ -59,15 +59,16 @@ public interface IObjectStore : IAsyncDisposable
 | `HeadAsync` | Length, token and creation time, or `null` for a missing key (not an exception). On a store with retention locks, it also gives the date before which a delete is refused (`RetainUntil`) and whether a legal hold applies (`LegalHold`) |
 | `ListAsync` | The objects under a prefix, in ordinal order of their keys, after `startAfter`, each with its head. The implementation fetches pages as the enumeration advances, so a caller that stops early pays for one page. `LockReported` says whether the listing gives the lock too, or whether only a head does |
 | `DeleteAsync` | A batch of keys, in any order. An absent key is not an error, and a store whose service caps batch sizes splits the batch. It reports nothing, since a store cannot always say which keys existed |
-| `Capabilities` | What the store does in one request: a tail read that says the length (`ReadsSuffix`), a listing in order that resumes after a key (`ListsInOrder`), a replacement on a token's match (`ReplacesOnTokenMatch`), locks kept as S3 Object Lock keeps them (`KeepsLocks`). A caller takes the cheaper path without trying the other |
+| `Capabilities` | What the store does in one request: a tail read that says the length (`ReadsSuffix`), a listing in order that resumes after a key (`ListsInOrder`), a replacement on a token's match (`ReplacesOnTokenMatch`), locks kept as S3 Object Lock keeps them (`KeepsLocks`), a creation only while the key is free, in one step (`CreatesConditionally`). A caller takes the cheaper path without trying the other, and a dataset writes only to a store that declares the last |
 
 An object's token changes whenever the bytes under its key change. A dataset puts each of its
 objects once, with `IfAbsent`, and never replaces one. Implementations must be thread-safe, and
 their reads and heads must see every write that completed. A listing may lag, by less than the
 retention window of a dataset the store serves, since a lagging listing costs a dataset freshness and
 never a version. S3, Azure Blob Storage and Google Cloud Storage all offer the conditional put that
-`IfAbsent` needs. A store that cannot promise it cannot host a dataset, because two writers would
-both believe they had committed.
+`IfAbsent` needs. A store that cannot promise it cannot host a dataset's writers, because two writers
+would both believe they had committed, so a dataset writes only to a store that declares
+`CreatesConditionally`, and only reads from one that does not.
 
 `PutIfAbsentAsync` is an extension method over these members, for a plain creation. A read has one
 result, `ObjectRead`, and lands in memory the caller owns.
@@ -89,7 +90,8 @@ await using CountingObjectStore counting = new CountingObjectStore(memory);   //
 
 `FileObjectStore` maps keys to files under a root directory. Its `Durable` option flushes every put
 to the device before returning, for a store that is the system of record. Claiming a key is atomic
-there, but writing the content is not, so a process that dies mid-put leaves a short object under a
+there, by the kernel's exclusive creation, so the store declares `CreatesConditionally`. Writing the
+content is not atomic, so a process that dies mid-put leaves a short object under a
 taken key, which the format detects when the object is read. A read that meets a put still in
 progress waits for it. A commit left short throws `TornCommitException`, which names its version,
 and `VortexDataset.RemoveTornCommitAsync` removes it. A put without a condition writes a temporary
@@ -174,6 +176,10 @@ clouds that speak its API, Azure and Cloud Storage are in the `Vorticity.ObjectS
 * A store that declares `ListsInOrder` must honour `startAfter` and ordinal order, or a dataset's
   listing of its commits goes wrong. Test an implementation against `MemoryObjectStore`, which is the
   reference behaviour.
+* A store that declares `CreatesConditionally` must decide the creation and make it in one step. One
+  that checked whether the key exists and then wrote would pass a test of two puts made one after the
+  other, and would let two commits of one version land when they meet. The contract tests' sixteen
+  concurrent creations, run many times over, are the check.
 * `ReadAsync` writes into the caller's memory until it returns, so that memory must stay alive and
   untouched until the read completes, even when the caller gives up on it.
 

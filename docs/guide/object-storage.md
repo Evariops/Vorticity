@@ -172,6 +172,7 @@ on OVHcloud or Scaleway refuses a put that carries no `Content-MD5`: set the opt
 |---|---|---|---|---|---|
 | opens a file in one request (`ReadsSuffix`) | yes | once proven | once proven | once proven | once proven |
 | hosts a dataset (`ListsInOrder`) | yes | yes | once its listing order is proven | yes | yes |
+| hosts a dataset's writers (`CreatesConditionally`) | yes | yes | yes | yes | once proven |
 | hosts a locked dataset (`KeepsLocks`) | yes | no, it keeps no Object Lock | once proven, never in a Local Zone | once proven | once proven |
 | parts of an upload | 10 000 | 10 000, a conditional put whole | 10 000 | 1 000 | 10 000 |
 
@@ -239,6 +240,11 @@ upload, and the file deleted when the put ends. The upload then starts once the 
 * The listings of OVHcloud are not documented to be in order and to honour `start-after`, which a
   dataset needs to find its latest version. A dataset refuses such a store until
   `S3StoreOptions.ListsInOrder` says the bucket does, once you have checked it.
+* A dataset commits by a put that creates its key only while it is free, in one step. Amazon S3,
+  R2, OVHcloud and Scaleway document it. Another service is taken not to: a dataset there reads, and
+  refuses to write until `S3StoreOptions.CreatesConditionally` says the service does. Check it first
+  with the store contract tests, the concurrent creation many times over, since a service that
+  checked whether the key exists and then wrote would pass it once and fail when two puts meet.
 * R2 and Cloud Storage take no condition on the parts of an upload, so a conditional put to them goes
   in one request, 5 GiB at most on R2. Read from a stream, it is held in memory up to
   `StoreTransportOptions.MaxHeldBytes`, 256 MiB by default, and refused past it, unless

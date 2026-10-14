@@ -1097,6 +1097,7 @@ Vorticity:     property int BytesRead { get; init; }
 Vorticity:     property long ObjectLength { get; init; }
 Vorticity:     property string Token { get; init; }
 Vorticity: enum Vorticity.IO.ObjectStoreCapabilities
+Vorticity:     const ObjectStoreCapabilities CreatesConditionally = 32
 Vorticity:     const ObjectStoreCapabilities KeepsLocks = 16
 Vorticity:     const ObjectStoreCapabilities ListsInOrder = 2
 Vorticity:     const ObjectStoreCapabilities None = 0
@@ -2991,6 +2992,7 @@ Vorticity.ObjectStorage:     field int value__
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.S3StoreOptions
 Vorticity.ObjectStorage:     ctor S3StoreOptions()
 Vorticity.ObjectStorage:     property Nullable<S3Profile> Profile { get; init; }
+Vorticity.ObjectStorage:     property Nullable<bool> CreatesConditionally { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> KeepsLocks { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> ListsInOrder { get; init; }
 Vorticity.ObjectStorage:     property Nullable<bool> PathStyle { get; init; }

@@ -136,9 +136,13 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
     /// <summary>The container.</summary>
     public string Container => _options.Container;
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Lists in order, replaces on a token's match, keeps locks, and creates a key only while it is
+    /// free, by <c>If-None-Match: *</c>, which Azure documents for a put and the commit of a block list.
+    /// </summary>
     public ObjectStoreCapabilities Capabilities =>
-        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
+        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
+        | ObjectStoreCapabilities.CreatesConditionally;
 
     /// <summary>The transport, for tests.</summary>
     internal HttpTransport Transport => _transport;

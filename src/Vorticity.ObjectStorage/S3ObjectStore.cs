@@ -698,18 +698,21 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     /// <summary>
     /// What the service does, each capability taken as absent until a test against the service proves
     /// it: suffix reads and locks on Amazon S3 alone, listings in order everywhere but on OVHcloud, whose
-    /// order is to check, and replacement on a token's match everywhere. The store's options set each one
-    /// once its service is checked.
+    /// order is to check, creation only while a key is free on the four services that document it, and
+    /// replacement on a token's match everywhere. The store's options set each one once its service is
+    /// checked.
     /// </summary>
     private static ObjectStoreCapabilities CapabilitiesOf(S3Profile profile, S3StoreOptions options)
     {
         bool suffix = options.ReadsSuffix ?? profile == S3Profile.Amazon;
         bool ordered = options.ListsInOrder ?? profile != S3Profile.Ovhcloud;
         bool locks = options.KeepsLocks ?? profile == S3Profile.Amazon;
+        bool creates = options.CreatesConditionally ?? profile != S3Profile.Other;
         return ObjectStoreCapabilities.ReplacesOnTokenMatch
             | (suffix ? ObjectStoreCapabilities.ReadsSuffix : 0)
             | (ordered ? ObjectStoreCapabilities.ListsInOrder : 0)
-            | (locks ? ObjectStoreCapabilities.KeepsLocks : 0);
+            | (locks ? ObjectStoreCapabilities.KeepsLocks : 0)
+            | (creates ? ObjectStoreCapabilities.CreatesConditionally : 0);
     }
 
     private static string ProviderName(S3Profile profile) => profile switch

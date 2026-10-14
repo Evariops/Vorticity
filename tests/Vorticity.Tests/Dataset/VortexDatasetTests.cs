@@ -434,6 +434,53 @@ public sealed class VortexDatasetTests
         public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.ListsInOrder;
     }
 
+    // A commit is a put that creates its key only while it is free, which a store has to declare it does
+    // in one step. A store that does not hosts readers: every write is refused before it writes anything.
+    [Fact]
+    public async Task AStoreThatCannotCreateConditionallyHostsReadersOnly()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using (VortexDataset written = await VortexDataset.CreateAsync(inner, schema, Options(), ct))
+        {
+            for (int i = 0; i < 9; i++)
+            {
+                await written.AppendAsync(Batches(types, schema, i * 100, 100), ct);
+            }
+        }
+
+        int held = inner.Count;
+        await using Unconditional store = new Unconditional(inner);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), ct);
+        ulong version = dataset.Version;
+        Assert.Equal(900, await dataset.ScanBuilder().CountAsync(ct));
+        List<DataObject> objects = await dataset.ListObjectsAsync(ct).ToListAsync(ct);
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => dataset.StartObject());
+        Assert.Contains("CreatesConditionally", refused.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(Unconditional), refused.Message, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.AppendAsync(Batches(types, schema, 900, 100), ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.CompactAsync(cancellationToken: ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.DeleteAsync(VortexExpr.Parse("key < 10"), ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.RemoveObjectsAsync([objects[0]], ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.ImportAsync(objects[0].Key, ct));
+        Assert.Equal((held, version), (inner.Count, dataset.Version));
+
+        await using MemoryObjectStore empty = new MemoryObjectStore();
+        await using Unconditional fresh = new Unconditional(empty);
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await VortexDataset.CreateAsync(fresh, schema, Options(), ct));
+        Assert.Equal(0, empty.Count);
+    }
+
+    /// <summary>A store that does not declare that it creates a key only while it is free.</summary>
+    private sealed class Unconditional(IObjectStore inner) : ForwardingStore(inner)
+    {
+        public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.CreatesConditionally;
+    }
+
     // A writer that stops before its last byte leaves a commit that is not whole under the next
     // version's key. Every reader and writer that meets it names it, and removing it on request gives
     // the dataset back its previous version and the number to the next commit.

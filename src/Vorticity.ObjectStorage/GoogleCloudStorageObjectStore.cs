@@ -118,9 +118,13 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     /// <summary>The bucket.</summary>
     public string Bucket => _options.Bucket;
 
-    /// <inheritdoc/>
+    /// <summary>
+    /// Lists in order, replaces on a token's match, keeps locks, creates a key only while it is free,
+    /// by a generation match of 0, which Google documents, and reads suffixes once its options say so.
+    /// </summary>
     public ObjectStoreCapabilities Capabilities =>
         ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
+        | ObjectStoreCapabilities.CreatesConditionally
         | (_options.ReadsSuffix == true ? ObjectStoreCapabilities.ReadsSuffix : 0);
 
     /// <summary>The transport, for tests.</summary>

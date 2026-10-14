@@ -566,7 +566,11 @@ stores this repository ships for S3, Azure and Cloud Storage, are in
 A store must document an atomic creation, reads and heads that see every write that completed, a
 listing in ordinal order that lags by less than the retention window, a token that changes whenever
 the bytes under a key change, and ranged reads on objects of any size. A store declares what it does
-in one request (`Capabilities`), and a dataset refuses a store that does not list in order. Three
+in one request (`Capabilities`), and a dataset refuses a store that does not list in order. It also
+refuses to write to a store that does not declare an atomic creation (`CreatesConditionally`), since
+two commits of one version would both land there, the second's object over the first's. A reader
+needs no such creation, so a handle on that store reads, and each of its writes throws before it
+writes anything. Three
 behaviours are part of the interface: a put streams and writes nothing when its content ends early or
 runs long, a delete takes a batch and reports nothing, and a listing pages by itself as it is
 enumerated. Retries, hedging, connection pools and credentials belong to the store library, never to
