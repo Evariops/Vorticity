@@ -232,5 +232,11 @@ internal ref struct PcoBitReader
         return word;
     }
 
+    /// <summary>The low <paramref name="width"/> bits set, where no <c>bzhi</c> keeps them.</summary>
+    /// <remarks>
+    /// Inlined: arm64 has no <c>bzhi</c>, and left to the inliner, the four-symbol ANS loop called this
+    /// once a symbol, 36 % of a pco decode's cycles on an Apple M4 Pro.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong Mask(int width) => width == 64 ? ulong.MaxValue : (1UL << width) - 1;
 }
