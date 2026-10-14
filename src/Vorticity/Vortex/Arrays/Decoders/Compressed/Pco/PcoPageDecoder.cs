@@ -1040,6 +1040,23 @@ internal sealed class PcoLatentState
             _deltaMoments[order] = unchecked(moment + ((ulong)values.Length * step));
             order--;
         }
+        else if (order >= 0)
+        {
+            // The recentring folded into the highest order's prefix sum, which reads each value
+            // once anyway: a pass of its own over the batch was a seventh of a 16-bit pco decode on
+            // arm64, where a vector holds two of these 64-bit latents.
+            ulong mid = _mid;
+            ulong moment = _deltaMoments[order];
+            for (int i = 0; i < values.Length; i++)
+            {
+                ulong previous = unchecked(values[i] + mid);
+                values[i] = moment;
+                moment = unchecked(moment + previous);
+            }
+
+            _deltaMoments[order] = moment;
+            order--;
+        }
         else
         {
             // The recentring is pointwise and contiguous, so it is one vector add per lane group.
