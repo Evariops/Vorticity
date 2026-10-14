@@ -483,13 +483,13 @@ page cache (`SealedScanBenchmarks`, a curve of the benchmark host):
 
 | read | plain, mapped | plain, positional | sealed, 64 KiB frames |
 |---|---|---|---|
-| a scan that decodes every column | 6.7 ms | 7.0 ms | 8.4 ms |
-| an open | 39 µs | 44 µs | 79 µs |
-| an open and one row | 81 µs | 98 µs | 214 µs |
+| a scan that decodes and reads every column | 7.7 ms | 7.9 ms | 9.2 ms |
+| an open | 38 µs | 42 µs | 78 µs |
+| an open and one row | 80 µs | 96 µs | 261 µs |
 
-The cipher costs about a fifth of a scan, and the lost mapping about a twentieth. Frames of 16 and
-256 KiB scan a few percent slower than frames of 64 KiB, and frames of 4 KiB and 1 MiB about half as
-slow again: the first for their calls, the second for the bytes a read decrypts beyond those it wants.
+The cipher costs about a sixth of a scan, and the lost mapping about a thirtieth. Frames of 16 and
+256 KiB scan within 2 % of frames of 64 KiB, and frames of 4 KiB and 1 MiB a fifth slower: the first
+for their calls, the second for the bytes a read decrypts beyond those it wants.
 A point read pays the most, since it decrypts whole frames around the few segments it needs. The same
 figures on x64, and under Linux and Windows, whose libraries differ, are still to be taken.
 

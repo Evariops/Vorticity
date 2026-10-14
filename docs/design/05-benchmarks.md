@@ -124,11 +124,10 @@ tables of a million rows with six columns, and of fifty columns.
 ## 4. Decoders, per encoding
 
 There is one file per encoding, and per notable shape of one: 61 files of a million rows
-(`bench/gen-throughput.sh`), written by Rust's writer. The arm64 page was measured on the earlier set
-of 57, and the four `pco` shapes added since (`pco_f32`, `pco_i16`, `pco_u32`, `pco_nullable`) are on
-the x64 page only. Each side scans each file 12 times in a process of its own, on one core, every
-value decoded to its plain form. A figure is the median of the last 10 scans and of 3 processes,
-Native AOT against Rust's `vxbench` binary, which is what a decoder costs once warm. [Decoding, per
+(`bench/gen-throughput.sh`), written by Rust's writer, the same set on both machines' pages. Each
+side scans each file 12 times in a process of its own, on one core, every value decoded to its plain
+form. A figure is the median of the last 10 scans and of 3 processes, Native AOT against Rust's
+`vxbench` binary, which is what a decoder costs once warm. [Decoding, per
 encoding](../guide/benchmarks.md#decoding-per-encoding) has every file.
 
 * A column stored in plain form is not decoding at all. It is handed out as it lies, a view of the

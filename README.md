@@ -155,8 +155,8 @@ is done.
 Where Vorticity is compared with another implementation, the figure is a speedup: the other side's
 time divided by Vorticity's, so anything above 1.00x means Vorticity took less time. The machines
 are an Apple M4 Pro (arm64, 14 cores, macOS) and an AMD Ryzen 9 7950X (x64, 16 cores and 32
-threads, Windows 11). The figures against Rust were measured on 2026-10-11 on the M4 Pro and on
-2026-10-12 on the Ryzen, those for Parquet on 2026-10-12 and those against DuckDB on 2026-10-10, and
+threads, Windows 11). The figures against Rust were measured on 2026-10-14 on the M4 Pro and on
+2026-10-12 on the Ryzen, those for Parquet on 2026-10-12 and those against DuckDB on 2026-10-14, and
 [how it is measured](#how-it-is-measured) says what both sides do.
 
 ### Against Vortex's Rust implementation
@@ -166,16 +166,17 @@ and a million rows. On the file Vorticity writes:
 
 | scenario | M4 Pro, 1 core | M4 Pro, 14 cores | 7950X, 1 core | 7950X, 32 threads |
 |---|---:|---:|---:|---:|
-| read every column | 1.95x | 2.28x | 2.91x | 1.63x |
-| read one column of four | 2.37x | 2.58x | 2.74x | 2.08x |
-| filter, 1 % of the rows | 1.37x | 2.90x | 1.27x | 2.40x |
-| filter, half the rows | 2.03x | 2.13x | 2.69x | 1.77x |
-| take 1,000 scattered rows | 1.64x | 1.18x | 1.47x | 1.16x |
-| write the table back out | 2.32x | 1.77x | 2.40x | 1.71x |
+| read every column | 1.95x | 2.42x | 2.91x | 1.63x |
+| read one column of four | 2.68x | 2.38x | 2.74x | 2.08x |
+| filter, 1 % of the rows | 1.33x | 2.61x | 1.27x | 2.40x |
+| filter, half the rows | 1.97x | 2.26x | 2.69x | 1.77x |
+| take 1,000 scattered rows | 1.60x | 1.10x | 1.47x | 1.16x |
+| write the table back out | 2.29x | 1.84x | 2.40x | 1.71x |
 
-Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.91x) and ten
-encodings decoded alone, from 0.86x to 1.00x, mostly columns stored plain or masked. On the Ryzen,
-Vorticity decodes all 61 encodings in less time, Pcodec files included.
+Rust keeps the lead in a few places on the M4 Pro: a prefix filter over FSST strings (0.95x) and 14
+of the 61 encodings decoded alone. Three of the four Pcodec shapes decode at 0.75x to 0.81x, and the
+others, mostly columns stored plain, masked or bit-packed, sit between 0.78x and 1.00x. On the
+Ryzen, Vorticity decodes all 61 encodings in less time, Pcodec files included.
 
 ### Against DuckDB
 
@@ -186,8 +187,8 @@ rows:
 
 | DuckDB reading | one thread | 14 threads |
 |---|---:|---:|
-| its own table, loaded beforehand | 1.43x to 6.15x | 1.18x to 3.50x |
-| the file, through its Vortex extension | 1.58x to 5.65x | 1.39x to 4.47x |
+| its own table, loaded beforehand | 1.43x to 6.14x | 1.18x to 3.61x |
+| the file, through its Vortex extension | 1.57x to 5.81x | 1.38x to 4.44x |
 
 The narrowest lead is db-benchmark's q10 on 14 threads, six keys and nearly a group per row, at
 1.18x. These figures come from the M4 Pro.
@@ -231,10 +232,10 @@ Against Rust, both sides are compiled ahead of time, run on the same machine and
 Each opens the file anew at every call, decodes every value it returns to its plain form and must
 return the same rows, and a write hands its bytes to a sink that keeps none. On the M4 Pro both read
 the file mapped, where it lies. Under Windows, Rust maps the file while Vorticity copies the segments
-it reads, as a session that keeps no mapping does there. On the Ryzen both sides also read every
-value they return, the same bytes, as the Parquet figures read theirs on the caller's thread. Rust
-is built the way upstream builds its own benchmarks, and on one core its figure is the faster of its
-two ways of splitting a scan.
+it reads, as a session that keeps no mapping does there. On both machines both sides also read
+every value they return, the same bytes, as the Parquet figures read theirs on the caller's thread.
+Rust is built the way upstream builds its own benchmarks, and on one core its figure is the faster
+of its two ways of splitting a scan.
 Against DuckDB, the two sides take turns in pairs and must give the same answer to every query. The
 page cache is warm, cores are not pinned, and your data and your machine will differ.
 

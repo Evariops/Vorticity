@@ -13,9 +13,8 @@ not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
 Rust's ratios on this page belong to this machine. Its `vxbench` is built here, while the ceilings
 that `--ratio-check` and `--throughput --check` enforce are set on the arm64 machine against its own
 build, so the in-process axes, the takes and the writes on this page are measured but held to no
-ceiling. The per-encoding corpus is the generator's current one, with 61 files where the arm64 page
-has 57: `pco_f32`, `pco_i16`, `pco_u32` and `pco_nullable` appear on this page only. The kernel
-tables' speedups are computed from the Mean column of their run.
+ceiling. The per-encoding corpus is the generator's current one, the same 61 files as on the arm64
+page. The kernel tables' speedups are computed from the Mean column of their run.
 
 The ground rules:
 
