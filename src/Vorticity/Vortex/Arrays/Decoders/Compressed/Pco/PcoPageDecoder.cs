@@ -839,6 +839,13 @@ internal sealed class PcoLatentState
 
                 _stateIndices[i % 4] = node.NextStateIndexBase + (int)ansValue;
             }
+
+            // Bins of one value each store no offset: the lower bounds the symbols wrote are the
+            // values, and the offsets' pass would add a zero to each, as upstream does not.
+            if (_table.MaxOffsetBits == 0)
+            {
+                return false;
+            }
         }
         else
         {
@@ -935,7 +942,8 @@ internal sealed class PcoLatentState
             return 0;
         }
 
-        int mask = nodes.Length - 1;
+        // Native-sized indices, which address the tables without a sign extension each.
+        nint mask = nodes.Length - 1;
         ref PcoAnsNode table = ref MemoryMarshal.GetReference(nodes);
         ref ulong bounds = ref MemoryMarshal.GetReference(lowers);
         ref ulong values = ref MemoryMarshal.GetReference(scratch);
@@ -943,52 +951,60 @@ internal sealed class PcoLatentState
         ref byte origin = ref reader.Origin;
         long limit = reader.WordLimit;
         long position = reader.BitPosition;
-        int state0 = _stateIndices[0] & mask;
-        int state1 = _stateIndices[1] & mask;
-        int state2 = _stateIndices[2] & mask;
-        int state3 = _stateIndices[3] & mask;
-        int i = 0;
-        for (; i <= count - 4 && position < limit; i += 4)
+        nint state0 = _stateIndices[0] & mask;
+        nint state1 = _stateIndices[1] & mask;
+        nint state2 = _stateIndices[2] & mask;
+        nint state3 = _stateIndices[3] & mask;
+        nint i = 0;
+        nint end = count & ~3;
+        while (i < end && position < limit)
         {
-            ulong word = PcoBitReader.Word(ref origin, position);
+            // The steps that surely start inside the page, a step reading at most four symbols of
+            // MaxSymbolBits: the loop over them checks no position, and the bound and the count
+            // the JIT reloaded from the stack at every step are read once for them all.
+            nint stop = (nint)Math.Min(end, i + (4 * (((limit - position - 1) / (4 * MaxSymbolBits)) + 1)));
+            for (; i < stop; i += 4)
+            {
+                ulong word = PcoBitReader.Word(ref origin, position);
 
-            ref PcoAnsNode node = ref Unsafe.Add(ref table, state0);
-            Unsafe.Add(ref values, i) = Unsafe.Add(ref bounds, state0);
-            Unsafe.Add(ref widths, i) = node.OffsetBits;
-            int read = node.BitsToRead;
-            state0 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, read)) & mask;
-            word >>= read;
+                ref PcoAnsNode node = ref Unsafe.Add(ref table, state0);
+                Unsafe.Add(ref values, i) = Unsafe.Add(ref bounds, state0);
+                Unsafe.Add(ref widths, i) = node.OffsetBits;
+                int read = node.BitsToRead;
+                state0 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, read)) & mask;
+                word >>= read;
 
-            node = ref Unsafe.Add(ref table, state1);
-            Unsafe.Add(ref values, i + 1) = Unsafe.Add(ref bounds, state1);
-            Unsafe.Add(ref widths, i + 1) = node.OffsetBits;
-            int bits = node.BitsToRead;
-            state1 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, bits)) & mask;
-            word >>= bits;
-            read += bits;
+                node = ref Unsafe.Add(ref table, state1);
+                Unsafe.Add(ref values, i + 1) = Unsafe.Add(ref bounds, state1);
+                Unsafe.Add(ref widths, i + 1) = node.OffsetBits;
+                int bits = node.BitsToRead;
+                state1 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, bits)) & mask;
+                word >>= bits;
+                read += bits;
 
-            node = ref Unsafe.Add(ref table, state2);
-            Unsafe.Add(ref values, i + 2) = Unsafe.Add(ref bounds, state2);
-            Unsafe.Add(ref widths, i + 2) = node.OffsetBits;
-            bits = node.BitsToRead;
-            state2 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, bits)) & mask;
-            word >>= bits;
-            read += bits;
+                node = ref Unsafe.Add(ref table, state2);
+                Unsafe.Add(ref values, i + 2) = Unsafe.Add(ref bounds, state2);
+                Unsafe.Add(ref widths, i + 2) = node.OffsetBits;
+                bits = node.BitsToRead;
+                state2 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, bits)) & mask;
+                word >>= bits;
+                read += bits;
 
-            node = ref Unsafe.Add(ref table, state3);
-            Unsafe.Add(ref values, i + 3) = Unsafe.Add(ref bounds, state3);
-            Unsafe.Add(ref widths, i + 3) = node.OffsetBits;
-            bits = node.BitsToRead;
-            state3 = (node.NextStateIndexBase + (int)PcoBitReader.Low(word, bits)) & mask;
-            position += read + bits;
+                node = ref Unsafe.Add(ref table, state3);
+                Unsafe.Add(ref values, i + 3) = Unsafe.Add(ref bounds, state3);
+                Unsafe.Add(ref widths, i + 3) = node.OffsetBits;
+                bits = node.BitsToRead;
+                state3 = ((nint)node.NextStateIndexBase + (nint)PcoBitReader.Low(word, bits)) & mask;
+                position += read + bits;
+            }
         }
 
-        _stateIndices[0] = state0;
-        _stateIndices[1] = state1;
-        _stateIndices[2] = state2;
-        _stateIndices[3] = state3;
+        _stateIndices[0] = (int)state0;
+        _stateIndices[1] = (int)state1;
+        _stateIndices[2] = (int)state2;
+        _stateIndices[3] = (int)state3;
         reader.SeekBits(position);
-        return i;
+        return (int)i;
     }
 
     /// <summary>Undoes a consecutive delta over the batch, consuming the page's moments.</summary>
