@@ -124,8 +124,13 @@ function of it, a group by streams, because the dataset delivers its rows in key
 
 ## Versions
 
+```csharp
+await using VortexDataset past = await VortexDataset.OpenAsync(store, version: 2);
+```
+
 ```
 after another append: the handle reads version 5, 130000 rows; a scan built before it counts 120000; another handle reads version 4 until it refreshes to 5
+version 2 opened by its number: 50000 rows, 1 object
 ```
 
 A handle is pinned to one version. It moves only when it commits or when you call `RefreshAsync`. A
@@ -133,6 +138,15 @@ scan is pinned to the version its handle held when the scan was built, so a comm
 a query does not change the answer. `Version`, `RowCount`, `ObjectCount` and `Lag` describe the
 version the handle holds. `Lag` is how many objects level 0 holds beyond its ceiling of eight, and
 compaction brings it back to 0 ([dataset-maintenance.md](dataset-maintenance.md)).
+
+`OpenAsync(store, version)` opens a version whose number you know, in one request, where opening the
+latest takes a listing and a read. A writer can hand the number of the version it committed to its
+readers, which then read exactly that version. Such a handle does not take its version for the
+latest: its first refresh or commit lists the commits, and a commit from it applies its changes to
+the latest version, as any commit does. A version superseded for longer than the retention window
+may have lost its objects to vacuum, and then fails to open, or to read, with
+`ObjectNotFoundException`, never with a part of its rows. So a version number handed around has to
+be used well inside the window.
 
 ## Removing and replacing objects
 

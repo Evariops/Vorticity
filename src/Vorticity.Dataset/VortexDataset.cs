@@ -245,6 +245,86 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Opens <paramref name="version"/> of the dataset at <paramref name="location"/>: under a location
+    /// of a store the options' session holds, or in a local directory.
+    /// </summary>
+    /// <param name="location">A location, whose keys the dataset's are relative to, or a local directory.</param>
+    /// <param name="version">The version to read, one the dataset has created.</param>
+    /// <param name="options">How this handle reads and writes, and its session; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The handle, pinned to that version until it commits or refreshes; the caller disposes it.</returns>
+    /// <exception cref="InvalidOperationException">No store of the session serves the location.</exception>
+    /// <exception cref="ObjectNotFoundException">The dataset has no such version: it never created it, or vacuum took it.</exception>
+    public static ValueTask<VortexDataset> OpenAsync(
+        string location, ulong version, DatasetOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        options ??= new DatasetOptions();
+        (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
+        return OwningAsync(OpenAsync(store, version, options, cancellationToken), owned);
+    }
+
+    /// <summary>
+    /// Opens one version of a dataset, known by its number, in one request: the version's commit
+    /// object names its own key, so no listing has to find it.
+    /// </summary>
+    /// <param name="store">The store holding the dataset.</param>
+    /// <param name="version">The version to read, one the dataset has created.</param>
+    /// <param name="options">How this handle reads and writes; the settings fixed at creation come from the dataset itself.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>The handle, pinned to that version until it commits or refreshes; the caller disposes it.</returns>
+    /// <remarks>
+    /// The version may not be the latest, and the handle does not take it to be: its first commit or
+    /// refresh looks for the latest version with a listing. A commit from it applies its changes to the
+    /// latest version, as any commit's rebase does, whatever versions came after this one. A version
+    /// superseded for longer than the retention window may lose its objects to vacuum while it is
+    /// read, and its reads then throw <see cref="ObjectNotFoundException"/>, never a partial answer.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="version"/> is 0, which no dataset creates.</exception>
+    /// <exception cref="ObjectNotFoundException">The dataset has no such version: it never created it, or vacuum took it.</exception>
+    /// <exception cref="TornCommitException">The version's commit is not whole; <see cref="RemoveTornCommitAsync"/> removes it.</exception>
+    /// <exception cref="NotSupportedException">The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>).</exception>
+    public static async ValueTask<VortexDataset> OpenAsync(
+        IObjectStore store, ulong version, DatasetOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentOutOfRangeException.ThrowIfZero(version);
+        RequireOrderedListing(store);
+        options ??= new DatasetOptions();
+        store = SealedObjectStore.Over(store, options.Session);
+        try
+        {
+            CommitObject commit;
+            try
+            {
+                commit = await DatasetCommitter.OpenAsync(store, version, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ObjectNotFoundException missing)
+            {
+                throw new ObjectNotFoundException(
+                    $"The dataset has no version {version}: it never created it, or vacuum took it once it was past the retention window.",
+                    missing)
+                {
+                    Key = missing.Key,
+                };
+            }
+
+            RequireEncryption(store, options);
+
+            // Not known to be the latest: the handle's first commit or refresh lists the commits.
+            return new VortexDataset(store, options.For(commit.Header), version, commit, DateTimeOffset.MinValue);
+        }
+        catch
+        {
+            if (store is SealedObjectStore sealedStore)
+            {
+                await sealedStore.DisposeAsync().ConfigureAwait(false);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Refuses a store whose listing is not in ordinal order, as an S3 directory bucket's is not: the
     /// latest version is the first key of <c>commit/</c>, which such a listing does not give.
     /// </summary>

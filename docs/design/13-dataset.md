@@ -489,6 +489,14 @@ version still names and removes the unnamed ones after it, so a handle that took
 own version for the end would read it as the latest and commit on it. The handle's clock therefore
 has to agree with the store's to within the other half window, as a vacuum's already must.
 
+A version whose number a reader already knows, because a writer handed it over, needs no listing at
+all. A commit object's key is a function of its version, so `OpenAsync(store, version)` is the one
+read of that key. The handle it returns does not take its version for the latest: its first refresh
+or commit lists, as a handle past the half window does. A version vacuum took no longer opens, and a
+version superseded for longer than the window may lose objects while it is read, in both cases with
+`ObjectNotFoundException` naming what is gone, so a version number is good for well under the
+window.
+
 ## 9. The read-path budget
 
 ### 9.1 Dependent round trips, not bytes
@@ -499,7 +507,7 @@ costs:
 
 | step | dependent requests | cached by |
 |---|---|---|
-| list the latest commit, read its header | 2 | version |
+| list the latest commit, read its header | 2, or 1 for a version known by its number | version |
 | descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, across versions, since pages are immutable |
 | open the object's tail | 1, in parallel across the ≤ 8 + L objects touched | object |
 | its fences, then the two payload segments | 1 + 1 | run |

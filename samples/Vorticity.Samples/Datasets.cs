@@ -96,6 +96,12 @@ internal static class Datasets
             $"a scan built before it counts {await pinned.CountAsync()}; another handle reads version {reader.Version} " +
             $"until it refreshes to {await reader.RefreshAsync()}");
 
+        // A version known by its number opens in one request, without a listing.
+        await using (VortexDataset past = await VortexDataset.OpenAsync(store, version: 2))
+        {
+            Console.WriteLine($"version 2 opened by its number: {past.RowCount} rows, {past.ObjectCount} object");
+        }
+
         DataObject first = objects[0];
         await using (ObjectDraft rewritten = dataset.StartObject())
         {

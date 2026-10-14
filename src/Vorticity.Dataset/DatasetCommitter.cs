@@ -374,7 +374,8 @@ internal static class DatasetCommitter
     }
 
     /// <summary>The commit object of <paramref name="version"/>, a torn one reported against it.</summary>
-    private static async ValueTask<CommitObject> OpenAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
+    /// <exception cref="ObjectNotFoundException">The version has no commit object.</exception>
+    internal static async ValueTask<CommitObject> OpenAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
     {
         try
         {

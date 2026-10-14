@@ -537,6 +537,87 @@ public sealed class VortexDatasetTests
         Assert.Equal(100, dataset.RowCount);
     }
 
+    // A version known by its number opens in one request, its commit object's key computed from the
+    // number, and reads as a handle that stayed on it does. The handle does not take it for the latest:
+    // its refresh lists, and its commit lands on the latest version.
+    [Fact]
+    public async Task AVersionKnownByItsNumberOpensInOneRequestAndReadsAsAHandleThatStayedOnIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        List<(ulong Version, List<long> Keys)> kept = [(writer.Version, [])];
+        for (int i = 0; i < 4; i++)
+        {
+            await writer.AppendAsync(Batches(types, schema, i * 1_000, 1_000), ct);
+            await using VortexDataset stayed = await VortexDataset.OpenAsync(store, Options(), ct);
+            kept.Add((stayed.Version, await KeysAsync(stayed.ScanBuilder())));
+        }
+
+        foreach ((ulong version, List<long> keys) in kept)
+        {
+            store.Reset();
+            await using VortexDataset opened = await VortexDataset.OpenAsync(store, version, Options(), ct);
+            Assert.Equal((1L, 1L, 1L), (store.Requests, store.DependentSteps, store.CountOf(ObjectOperation.Read)));
+            Assert.Equal(version, opened.Version);
+            Assert.Equal(keys, await KeysAsync(opened.ScanBuilder()));
+        }
+
+        ulong latest = writer.Version;
+        ObjectNotFoundException missing = await Assert.ThrowsAsync<ObjectNotFoundException>(
+            async () => await VortexDataset.OpenAsync(store, latest + 1, Options(), ct));
+        Assert.Contains($"no version {latest + 1}", missing.Message, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await VortexDataset.OpenAsync(store, 0UL, Options(), ct));
+
+        await using (VortexDataset old = await VortexDataset.OpenAsync(store, kept[1].Version, Options(), ct))
+        {
+            store.Reset();
+            Assert.Equal(latest, await old.RefreshAsync(ct));
+            Assert.Equal(1, store.CountOf(ObjectOperation.List));
+        }
+
+        await using VortexDataset behind = await VortexDataset.OpenAsync(store, kept[1].Version, Options(), ct);
+        Assert.Equal(latest + 1, await behind.AppendAsync(Batches(types, schema, 4_000, 10), ct));
+        Assert.Equal(4_010, behind.RowCount);
+    }
+
+    // A version superseded for longer than the retention window loses what no later version shares
+    // to vacuum. Opened by its number, or read by a handle that held it all along, it fails with
+    // ObjectNotFoundException, never with a part of its rows.
+    [Fact]
+    public async Task AVersionVacuumTookFailsToOpenAndToReadRatherThanAnsweringInPart()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 15, 0, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
+        DatasetOptions options = Options() with { RetentionWindow = TimeSpan.FromHours(1), TimeProvider = clock };
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct);
+        for (int i = 0; i < 9; i++)
+        {
+            await writer.AppendAsync(Batches(types, schema, i * 100, 100), ct);
+        }
+
+        ulong before = writer.Version;
+        await using VortexDataset held = await VortexDataset.OpenAsync(store, before, options, ct);
+        Assert.NotNull(await writer.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, ct));
+        clock.Advance(TimeSpan.FromHours(2));
+        VacuumResult vacuumed = await writer.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.DoesNotContain(before, vacuumed.Retained);
+
+        // A count is answered by the entries the handle holds, which no vacuum takes from it; reading
+        // the rows needs the objects.
+        Assert.Equal(900, await held.ScanBuilder().CountAsync(ct));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await KeysAsync(held.ScanBuilder()));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await VortexDataset.OpenAsync(store, before, options, ct));
+        Assert.Equal(900, (await KeysAsync(writer.ScanBuilder())).Count);
+    }
+
     /// <summary>A store that does not declare that it creates a key only while it is free.</summary>
     private sealed class Unconditional(IObjectStore inner) : ForwardingStore(inner)
     {
