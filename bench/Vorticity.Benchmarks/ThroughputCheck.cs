@@ -702,6 +702,14 @@ internal static class ThroughputCheck
     /// down.
     /// </para>
     /// <para>
+    /// REBASED AGAIN ON 2026-10-14, on the Apple M4 Pro, under the binary that reads every value it
+    /// returns (916afe970968): both sides now read the same bytes, which our side's reads of plain,
+    /// chunked and string columns pay as the reference's do. `--recalibrate 3 --rebase`, the machine
+    /// held awake, over the generator's 61 files: 43 read, 27 take and 22 write lines rose, `chunked`
+    /// and `chunked_decimal` reads tripling, a mapping no page of was touched until now, and the
+    /// others came down. `pco_f32`, `pco_i16`, `pco_nullable` and `pco_u32` have their first lines.
+    /// </para>
+    /// <para>
     /// Two numbers on a line are called a spread, and only one of them gates. The third field is
     /// the dispersion between the passes of the calibration that wrote the line, and it widens the
     /// ceiling once it exceeds the flat margin; the `spread a-b` in the comment is the range of the
@@ -725,63 +733,67 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly Reference[] References =
     [
-        new("alp", 0.96, 0.081),   // 3 passes, spread 0.88-0.96; REBASED UP from 0.93 (a new reference binary): +3.0%
-        new("alp_no_patches", 0.92, 0.168),   // 3 passes, spread 0.76-0.92; REBASED UP from 0.80 (a new reference binary): +14.6%
-        new("alp_patched_no_chunk_offsets", 0.89, 0.117),   // 3 passes, spread 0.78-0.89; REBASED UP from 0.82 (a new reference binary): +8.1%
-        new("alprd", 0.95, 0.052),   // 3 passes, spread 0.90-0.95; was 0.96, -1.4%
-        new("bool", 0.93, 0.010),   // 3 passes, spread 0.92-0.93; was 1.05, -11.9%
-        new("bool_bit_offset3", 0.94, 0.013),   // 3 passes, spread 0.92-0.94; was 1.06, -11.6%
-        new("bool_bit_offset7", 0.94, 0.025),   // 3 passes, spread 0.92-0.94; was 1.05, -10.5%
-        new("bool_bit_offset_straddle", 0.94, 0.007),   // 3 passes, spread 0.93-0.94; was 1.05, -10.7%
-        new("bytebool", 0.89, 0.016),   // 3 passes, spread 0.87-0.89; was 1.22, -27.2%
-        new("chunked", 0.28, 0.061),   // 3 passes, spread 0.26-0.28; was 0.31, -9.3%
-        new("chunked_bool", 0.86, 0.032),   // 3 passes, spread 0.83-0.86; was 0.97, -11.2%
-        new("chunked_decimal", 0.30, 0.086),   // 3 passes, spread 0.27-0.30; was 0.32, -6.3%
-        new("chunked_empty_chunks", 0.37, 0.088),   // 3 passes, spread 0.34-0.37; was 0.39, -4.9%
-        new("chunked_mixed_validity", 0.78, 0.022),   // 3 passes, spread 0.77-0.78; was 2.57, -69.5%
-        new("chunked_one_chunk", 0.61, 0.054),   // 3 passes, spread 0.58-0.61; was 0.65, -5.6%
-        new("chunked_varbinview", 0.28, 0.087),   // 3 passes, spread 0.25-0.28; was 0.30, -7.2%
-        new("constant", 0.79, 0.049),   // 3 passes, spread 0.75-0.79; was 0.98, -19.3%
-        new("datetimeparts", 0.82, 0.040),   // 3 passes, spread 0.78-0.82; REBASED UP from 0.81 (a new reference binary): +0.9%
-        new("decimal", 0.93, 0.040),   // 3 passes, spread 0.90-0.93; was 1.04, -10.3%
-        new("decimal_byte_parts", 0.95, 0.031),   // 3 passes, spread 0.92-0.95; was 1.02, -7.2%
-        new("dict", 0.74, 0.070),   // 3 passes, spread 0.68-0.74; was 0.95, -22.5%
-        new("dict_nullable_codes", 0.32, 0.007),   // 3 passes, spread 0.32-0.32; was 0.32, -0.4%
-        new("dict_nullable_values_nonnull_codes", 0.65, 0.051),   // 3 passes, spread 0.62-0.65; was 0.79, -17.4%
-        new("dict_u64_codes", 0.84, 0.040),   // 3 passes, spread 0.81-0.84; was 0.96, -12.2%
-        new("dict_u8_codes", 0.74, 0.019),   // 3 passes, spread 0.73-0.74; was 1.03, -27.9%
-        new("ext", 0.97, 0.042),   // 3 passes, spread 0.93-0.97; was 1.05, -7.4%
-        new("fastlanes_bitpacked", 0.91, 0.019),   // 3 passes, spread 0.89-0.91; was 0.92, -1.4%
-        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.91, 0.023),   // 3 passes, spread 0.88-0.91; was 0.94, -3.7%
-        new("fastlanes_delta", 0.55, 0.020),   // 3 passes, spread 0.54-0.55; REBASED UP from 0.55 (a new reference binary): +0.5%
-        new("fastlanes_for", 0.95, 0.094),   // 3 passes, spread 0.86-0.95; was 1.00, -4.6%
-        new("fastlanes_rle", 0.74, 0.031),   // 3 passes, spread 0.72-0.74; was 0.80, -7.2%
-        new("fixed_size_list", 0.93, 0.023),   // 3 passes, spread 0.91-0.93; was 1.02, -8.8%
-        new("fsst", 0.82, 0.042),   // 3 passes, spread 0.78-0.82; was 0.87, -6.1%
-        new("list", 0.42, 0.078),   // 3 passes, spread 0.39-0.42; REBASED UP from 0.41 (a new reference binary): +2.4%
-        new("listview", 0.78, 0.100),   // 3 passes, spread 0.70-0.78; REBASED UP from 0.71 (a new reference binary): +9.3%
-        new("map", 0.47, 0.203),   // 3 passes, spread 0.37-0.47; REBASED UP from 0.38 (a new reference binary): +22.7%
-        new("masked", 1.00, 0.078),   // 3 passes, spread 0.92-1.00; was 1.02, -1.9%
-        new("masked_all_invalid", 1.06, 0.032),   // 3 passes, spread 1.02-1.06; was 1.19, -11.0%
-        new("masked_all_valid", 1.06, 0.040),   // 3 passes, spread 1.02-1.06; was 1.19, -10.8%
-        new("null", 0.77, 0.020),   // 3 passes, spread 0.75-0.77; was 0.98, -21.5%
-        new("onpair", 1.00, 0.062),   // 3 passes, spread 0.94-1.00; was 1.01, -0.5%
-        new("parquet_variant", 0.46, 0.046),   // 3 passes, spread 0.44-0.46; REBASED UP from 0.46 (a new reference binary): +0.9%
-        new("pco", 0.30, 0.011),   // 3 passes, spread 0.30-0.30; was 0.31, -1.6%
-        new("primitive", 0.94, 0.023),   // 3 passes, spread 0.92-0.94; was 1.03, -8.7%
-        new("runend", 0.68, 0.024),   // 3 passes, spread 0.66-0.68; was 1.08, -37.3%
-        new("sequence", 0.92, 0.035),   // 3 passes, spread 0.89-0.92; was 0.99, -7.2%
-        new("sparse", 0.96, 0.011),   // 3 passes, spread 0.95-0.96; was 1.02, -5.4%
-        new("struct", 0.19, 0.079),   // 3 passes, spread 0.18-0.19; REBASED UP from 0.17 (a new reference binary): +13.2%
-        new("table_mixed", 0.36, 0.042),   // 3 passes, spread 0.35-0.36; REBASED UP from 0.35 (a new reference binary): +4.2%
-        new("table_wide", 0.69, 0.066),   // 3 passes, spread 0.65-0.69; was 0.74, -6.3%
-        new("varbin", 0.22, 0.158),   // 3 passes, spread 0.18-0.22; REBASED UP from 0.19 (a new reference binary): +13.9%
-        new("varbinview", 0.28, 0.139),   // 3 passes, spread 0.24-0.28; REBASED UP from 0.23 (a new reference binary): +20.1%
-        new("variant", 0.79, 0.021),   // 3 passes, spread 0.77-0.79; was 1.00, -21.1%
-        new("zigzag", 0.81, 0.035),   // 3 passes, spread 0.78-0.81; was 0.83, -2.7%
-        new("zstd", 0.49, 0.033),   // 3 passes, spread 0.47-0.49; was 0.50, -2.2%
-        new("zstd_buffers", 0.69, 0.074),   // 3 passes, spread 0.64-0.69; REBASED UP from 0.66 (a new reference binary): +4.6%
-        new("zstd_nullable", 0.52, 0.005),   // 3 passes, spread 0.52-0.52; REBASED UP from 0.51 (a new reference binary): +1.6%
+        new("alp", 0.95, 0.026),   // 3 passes, spread 0.92-0.95; was 0.96, -1.1%
+        new("alp_no_patches", 0.82, 0.026),   // 3 passes, spread 0.80-0.82; was 0.92, -11.0%
+        new("alp_patched_no_chunk_offsets", 0.83, 0.023),   // 3 passes, spread 0.81-0.83; was 0.89, -6.7%
+        new("alprd", 1.00, 0.038),   // 3 passes, spread 0.96-1.00; REBASED UP from 0.95 (a new reference binary): +4.8%
+        new("bool", 0.94, 0.013),   // 3 passes, spread 0.93-0.94; REBASED UP from 0.93 (a new reference binary): +1.1%
+        new("bool_bit_offset3", 0.93, 0.023),   // 3 passes, spread 0.90-0.93; was 0.94, -1.5%
+        new("bool_bit_offset7", 0.93, 0.038),   // 3 passes, spread 0.90-0.93; was 0.94, -0.8%
+        new("bool_bit_offset_straddle", 0.92, 0.026),   // 3 passes, spread 0.90-0.92; was 0.94, -1.7%
+        new("bytebool", 0.89, 0.024),   // 3 passes, spread 0.86-0.89; was 0.89, -0.5%
+        new("chunked", 0.84, 0.183),   // 3 passes, spread 0.69-0.84; REBASED UP from 0.28 (a new reference binary): +201.2%
+        new("chunked_bool", 0.89, 0.018),   // 3 passes, spread 0.88-0.89; REBASED UP from 0.86 (a new reference binary): +3.7%
+        new("chunked_decimal", 0.84, 0.185),   // 3 passes, spread 0.69-0.84; REBASED UP from 0.30 (a new reference binary): +180.1%
+        new("chunked_empty_chunks", 0.73, 0.008),   // 3 passes, spread 0.72-0.73; REBASED UP from 0.37 (a new reference binary): +96.0%
+        new("chunked_mixed_validity", 0.80, 0.045),   // 3 passes, spread 0.77-0.80; REBASED UP from 0.78 (a new reference binary): +3.2%
+        new("chunked_one_chunk", 0.94, 0.004),   // 3 passes, spread 0.94-0.94; REBASED UP from 0.61 (a new reference binary): +54.3%
+        new("chunked_varbinview", 0.33, 0.024),   // 3 passes, spread 0.32-0.33; REBASED UP from 0.28 (a new reference binary): +18.5%
+        new("constant", 0.80, 0.023),   // 3 passes, spread 0.78-0.80; REBASED UP from 0.79 (a new reference binary): +1.0%
+        new("datetimeparts", 0.81, 0.039),   // 3 passes, spread 0.78-0.81; was 0.82, -0.9%
+        new("decimal", 1.03, 0.024),   // 3 passes, spread 1.00-1.03; REBASED UP from 0.93 (a new reference binary): +10.4%
+        new("decimal_byte_parts", 1.02, 0.012),   // 3 passes, spread 1.01-1.02; REBASED UP from 0.95 (a new reference binary): +7.2%
+        new("dict", 0.91, 0.027),   // 3 passes, spread 0.89-0.91; REBASED UP from 0.74 (a new reference binary): +23.5%
+        new("dict_nullable_codes", 0.45, 0.009),   // 3 passes, spread 0.45-0.45; REBASED UP from 0.32 (a new reference binary): +42.1%
+        new("dict_nullable_values_nonnull_codes", 0.80, 0.065),   // 3 passes, spread 0.75-0.80; REBASED UP from 0.65 (a new reference binary): +23.3%
+        new("dict_u64_codes", 0.95, 0.012),   // 3 passes, spread 0.93-0.95; REBASED UP from 0.84 (a new reference binary): +12.5%
+        new("dict_u8_codes", 0.91, 0.021),   // 3 passes, spread 0.89-0.91; REBASED UP from 0.74 (a new reference binary): +23.2%
+        new("ext", 1.02, 0.020),   // 3 passes, spread 1.00-1.02; REBASED UP from 0.97 (a new reference binary): +5.3%
+        new("fastlanes_bitpacked", 0.96, 0.116),   // 3 passes, spread 0.85-0.96; REBASED UP from 0.91 (a new reference binary): +5.5%
+        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.97, 0.012),   // 3 passes, spread 0.96-0.97; REBASED UP from 0.91 (a new reference binary): +6.3%
+        new("fastlanes_delta", 0.58, 0.028),   // 3 passes, spread 0.57-0.58; REBASED UP from 0.55 (a new reference binary): +5.8%
+        new("fastlanes_for", 0.92, 0.007),   // 3 passes, spread 0.91-0.92; was 0.95, -3.6%
+        new("fastlanes_rle", 0.78, 0.009),   // 3 passes, spread 0.77-0.78; REBASED UP from 0.74 (a new reference binary): +4.9%
+        new("fixed_size_list", 1.03, 0.032),   // 3 passes, spread 0.99-1.03; REBASED UP from 0.93 (a new reference binary): +10.3%
+        new("fsst", 0.83, 0.028),   // 3 passes, spread 0.81-0.83; REBASED UP from 0.82 (a new reference binary): +1.2%
+        new("list", 0.73, 0.029),   // 3 passes, spread 0.71-0.73; REBASED UP from 0.42 (a new reference binary): +74.9%
+        new("listview", 0.85, 0.006),   // 3 passes, spread 0.84-0.85; REBASED UP from 0.78 (a new reference binary): +8.4%
+        new("map", 0.50, 0.033),   // 3 passes, spread 0.49-0.50; REBASED UP from 0.47 (a new reference binary): +7.0%
+        new("masked", 1.01, 0.007),   // 3 passes, spread 1.01-1.01; REBASED UP from 1.00 (a new reference binary): +1.5%
+        new("masked_all_invalid", 1.01, 0.005),   // 3 passes, spread 1.01-1.01; was 1.06, -4.4%
+        new("masked_all_valid", 1.02, 0.018),   // 3 passes, spread 1.00-1.02; was 1.06, -4.1%
+        new("null", 0.79, 0.026),   // 3 passes, spread 0.76-0.79; REBASED UP from 0.77 (a new reference binary): +2.0%
+        new("onpair", 0.92, 0.029),   // 3 passes, spread 0.89-0.92; was 1.00, -8.0%
+        new("parquet_variant", 0.53, 0.006),   // 3 passes, spread 0.52-0.53; REBASED UP from 0.46 (a new reference binary): +14.5%
+        new("pco", 0.27, 0.015),   // 3 passes, spread 0.26-0.27; was 0.30, -10.5%
+        new("pco_f32", 1.22, 0.015),   // 3 passes, spread 1.20-1.22; first calibration
+        new("pco_i16", 1.26, 0.005),   // 3 passes, spread 1.26-1.26; first calibration
+        new("pco_nullable", 0.78, 0.045),   // 3 passes, spread 0.75-0.78; first calibration
+        new("pco_u32", 1.19, 0.016),   // 3 passes, spread 1.17-1.19; first calibration
+        new("primitive", 1.02, 0.007),   // 3 passes, spread 1.01-1.02; REBASED UP from 0.94 (a new reference binary): +8.1%
+        new("runend", 0.85, 0.029),   // 3 passes, spread 0.83-0.85; REBASED UP from 0.68 (a new reference binary): +25.2%
+        new("sequence", 1.01, 0.005),   // 3 passes, spread 1.00-1.01; REBASED UP from 0.92 (a new reference binary): +9.5%
+        new("sparse", 1.00, 0.019),   // 3 passes, spread 0.98-1.00; REBASED UP from 0.96 (a new reference binary): +3.8%
+        new("struct", 0.25, 0.040),   // 3 passes, spread 0.24-0.25; REBASED UP from 0.19 (a new reference binary): +32.8%
+        new("table_mixed", 0.54, 0.061),   // 3 passes, spread 0.51-0.54; REBASED UP from 0.36 (a new reference binary): +50.4%
+        new("table_wide", 0.99, 0.023),   // 3 passes, spread 0.96-0.99; REBASED UP from 0.69 (a new reference binary): +43.0%
+        new("varbin", 0.22, 0.068),   // 3 passes, spread 0.21-0.22; REBASED UP from 0.22 (a new reference binary): +0.9%
+        new("varbinview", 0.31, 0.039),   // 3 passes, spread 0.29-0.31; REBASED UP from 0.28 (a new reference binary): +9.6%
+        new("variant", 0.77, 0.000),   // 3 passes, spread 0.77-0.77; was 0.79, -3.1%
+        new("zigzag", 0.86, 0.035),   // 3 passes, spread 0.83-0.86; REBASED UP from 0.81 (a new reference binary): +5.9%
+        new("zstd", 0.61, 0.006),   // 3 passes, spread 0.60-0.61; REBASED UP from 0.49 (a new reference binary): +23.8%
+        new("zstd_buffers", 0.75, 0.021),   // 3 passes, spread 0.73-0.75; REBASED UP from 0.69 (a new reference binary): +8.6%
+        new("zstd_nullable", 0.54, 0.018),   // 3 passes, spread 0.53-0.54; REBASED UP from 0.52 (a new reference binary): +4.1%
     ];
 
     /// <summary>
@@ -960,123 +972,131 @@ internal static class ThroughputCheck
     /// </remarks>
     private static readonly Reference[] WriteReferences =
     [
-        new("alp", 0.25, 0.027),   // 3 passes, spread 0.24-0.25; REBASED UP from 0.25 (a new reference binary): +0.7%
-        new("alp_no_patches", 0.32, 0.033),   // 3 passes, spread 0.30-0.32; was 0.32, -1.5%
-        new("alp_patched_no_chunk_offsets", 0.27, 0.020),   // 3 passes, spread 0.26-0.27; REBASED UP from 0.26 (a new reference binary): +3.2%
-        new("alprd", 0.36, 0.009),   // 3 passes, spread 0.35-0.36; was 0.36, -0.7%
-        new("bool", 0.42, 0.143),   // 3 passes, spread 0.36-0.42; REBASED UP from 0.40 (a new reference binary): +5.9%
-        new("bool_bit_offset3", 0.36, 0.041),   // 3 passes, spread 0.34-0.36; was 0.36, -1.1%
-        new("bool_bit_offset7", 0.34, 0.066),   // 3 passes, spread 0.32-0.34; was 0.36, -4.8%
-        new("bool_bit_offset_straddle", 0.37, 0.065),   // 3 passes, spread 0.35-0.37; REBASED UP from 0.37 (a new reference binary): +0.1%
-        new("bytebool", 0.47, 0.074),   // 3 passes, spread 0.44-0.47; was 0.51, -6.9%
-        new("chunked", 0.15, 0.058),   // 3 passes, spread 0.14-0.15; REBASED UP from 0.14 (a new reference binary): +5.2%
-        new("chunked_bool", 0.44, 0.172),   // 3 passes, spread 0.36-0.44; REBASED UP from 0.40 (a new reference binary): +10.2%
-        new("chunked_decimal", 0.25, 0.039),   // 3 passes, spread 0.24-0.25; REBASED UP from 0.24 (a new reference binary): +2.5%
-        new("chunked_empty_chunks", 0.13, 0.113),   // 3 passes, spread 0.11-0.13; REBASED UP from 0.11 (a new reference binary): +14.3%
-        new("chunked_mixed_validity", 0.29, 0.057),   // 3 passes, spread 0.27-0.29; was 0.34, -14.9%
-        new("chunked_one_chunk", 0.098, 0.029),   // 3 passes, spread 0.096-0.098; REBASED UP from 0.090 (a new reference binary): +9.4%
-        new("chunked_varbinview", 0.51, 0.023),   // 3 passes, spread 0.50-0.51; was 0.52, -2.0%
-        new("constant", 0.036, 0.041),   // 3 passes, spread 0.034-0.036; was 0.042, -15.3%
-        new("datetimeparts", 0.16, 0.023),   // 3 passes, spread 0.15-0.16; was 0.16, -2.8%
-        new("decimal", 0.14, 0.013),   // 3 passes, spread 0.14-0.14; REBASED UP from 0.13 (a new reference binary): +6.3%
-        new("decimal_byte_parts", 0.14, 0.047),   // 3 passes, spread 0.13-0.14; REBASED UP from 0.13 (a new reference binary): +6.4%
-        new("dict", 0.32, 0.040),   // 3 passes, spread 0.31-0.32; was 0.33, -2.5%
-        new("dict_nullable_codes", 0.53, 0.033),   // 3 passes, spread 0.51-0.53; was 0.56, -6.0%
-        new("dict_nullable_values_nonnull_codes", 0.54, 0.006),   // 3 passes, spread 0.54-0.54; was 0.58, -7.0%
-        new("dict_u64_codes", 0.34, 0.058),   // 3 passes, spread 0.32-0.34; REBASED UP from 0.33 (a new reference binary): +2.0%
-        new("dict_u8_codes", 0.54, 0.021),   // 3 passes, spread 0.53-0.54; REBASED UP from 0.53 (a new reference binary): +1.4%
-        new("ext", 0.060, 0.104),   // 3 passes, spread 0.053-0.060; REBASED UP from 0.047 (a new reference binary): +26.6%
-        new("fastlanes_bitpacked", 0.34, 0.011),   // 3 passes, spread 0.33-0.34; was 0.34, -0.6%
-        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.25, 0.004),   // 3 passes, spread 0.25-0.25; REBASED UP from 0.25 (a new reference binary): +0.7%
-        new("fastlanes_delta", 0.13, 0.003),   // 3 passes, spread 0.13-0.13; REBASED UP from 0.12 (a new reference binary): +10.7%
-        new("fastlanes_for", 0.44, 0.028),   // 3 passes, spread 0.43-0.44; was 0.45, -1.2%
-        new("fastlanes_rle", 0.27, 0.028),   // 3 passes, spread 0.26-0.27; REBASED UP from 0.26 (a new reference binary): +2.6%
-        new("fixed_size_list", 0.063, 0.065),   // 3 passes, spread 0.059-0.063; REBASED UP from 0.053 (a new reference binary): +18.7%
-        new("fsst", 0.12, 0.003),   // 3 passes, spread 0.12-0.12; was 0.13, -8.9%
-        new("masked", 0.31, 0.051),   // 3 passes, spread 0.29-0.31; REBASED UP from 0.30 (a new reference binary): +2.3%
-        new("masked_all_invalid", 0.43, 0.025),   // 3 passes, spread 0.42-0.43; REBASED UP from 0.43 (a new reference binary): +0.7%
-        new("masked_all_valid", 0.074, 0.100),   // 3 passes, spread 0.067-0.074; REBASED UP from 0.061 (a new reference binary): +21.2%
-        new("null", 0.23, 0.243),   // 3 passes, spread 0.18-0.23; was 0.30, -22.3%
-        new("onpair", 0.72, 0.029),   // 3 passes, spread 0.70-0.72; REBASED UP from 0.72 (a new reference binary): +0.6%
-        new("pco", 0.080, 0.039),   // 3 passes, spread 0.077-0.080; was 0.080, -0.2%
-        new("primitive", 0.10, 0.048),   // 3 passes, spread 0.097-0.10; REBASED UP from 0.093 (a new reference binary): +10.0%
-        new("runend", 0.16, 0.055),   // 3 passes, spread 0.15-0.16; REBASED UP from 0.15 (a new reference binary): +4.3%
-        new("sequence", 0.066, 0.020),   // 3 passes, spread 0.065-0.066; was 0.067, -1.2%
-        new("sparse", 0.30, 0.042),   // 3 passes, spread 0.29-0.30; REBASED UP from 0.29 (a new reference binary): +2.7%
-        new("struct", 0.30, 0.016),   // 3 passes, spread 0.29-0.30; was 0.33, -10.6%
-        new("table_mixed", 0.18, 0.002),   // 3 passes, spread 0.18-0.18; was 0.18, -1.7%
-        new("table_wide", 0.19, 0.026),   // 3 passes, spread 0.19-0.19; REBASED UP from 0.19 (a new reference binary): +0.4%
-        new("varbin", 0.17, 0.022),   // 3 passes, spread 0.16-0.17; was 0.18, -7.0%
-        new("varbinview", 0.51, 0.003),   // 3 passes, spread 0.51-0.51; was 0.51, -0.1%
-        new("variant", 0.17, 0.023),   // 3 passes, spread 0.17-0.17; was 0.19, -9.5%
-        new("zigzag", 0.17, 0.035),   // 3 passes, spread 0.17-0.17; REBASED UP from 0.17 (a new reference binary): +1.6%
-        new("zstd", 0.79, 0.024),   // 3 passes, spread 0.77-0.79; was 0.83, -5.4%
-        new("zstd_buffers", 0.48, 0.040),   // 3 passes, spread 0.46-0.48; was 0.52, -7.4%
-        new("list", 0.32, 0.031),   // 3 passes, spread 0.31-0.32; was 0.33, -2.7%
-        new("listview", 0.23, 0.027),   // 3 passes, spread 0.23-0.23; REBASED UP from 0.23 (a new reference binary): +1.9%
-        new("map", 0.27, 0.005),   // 3 passes, spread 0.27-0.27; REBASED UP from 0.27 (a new reference binary): +1.2%
-        new("zstd_nullable", 0.51, 0.033),   // 3 passes, spread 0.50-0.51; was 0.57, -10.0%
+        new("alp", 0.24, 0.008),   // 3 passes, spread 0.24-0.24; was 0.25, -2.9%
+        new("alp_no_patches", 0.32, 0.059),   // 3 passes, spread 0.30-0.32; REBASED UP from 0.32 (a new reference binary): +0.4%
+        new("alp_patched_no_chunk_offsets", 0.26, 0.035),   // 3 passes, spread 0.25-0.26; was 0.27, -2.3%
+        new("alprd", 0.36, 0.031),   // 3 passes, spread 0.35-0.36; was 0.36, -0.3%
+        new("bool", 0.39, 0.090),   // 3 passes, spread 0.35-0.39; was 0.42, -8.2%
+        new("bool_bit_offset3", 0.34, 0.004),   // 3 passes, spread 0.34-0.34; was 0.36, -4.2%
+        new("bool_bit_offset7", 0.35, 0.015),   // 3 passes, spread 0.34-0.35; REBASED UP from 0.34 (a new reference binary): +2.8%
+        new("bool_bit_offset_straddle", 0.35, 0.016),   // 3 passes, spread 0.34-0.35; was 0.37, -5.6%
+        new("bytebool", 0.43, 0.022),   // 3 passes, spread 0.42-0.43; was 0.47, -9.1%
+        new("chunked", 0.14, 0.025),   // 3 passes, spread 0.13-0.14; was 0.15, -9.8%
+        new("chunked_bool", 0.41, 0.059),   // 3 passes, spread 0.38-0.41; was 0.44, -7.8%
+        new("chunked_decimal", 0.23, 0.011),   // 3 passes, spread 0.23-0.23; was 0.25, -6.8%
+        new("chunked_empty_chunks", 0.11, 0.062),   // 3 passes, spread 0.10-0.11; was 0.13, -16.5%
+        new("chunked_mixed_validity", 0.29, 0.053),   // 3 passes, spread 0.28-0.29; REBASED UP from 0.29 (a new reference binary): +0.5%
+        new("chunked_one_chunk", 0.085, 0.022),   // 3 passes, spread 0.084-0.085; was 0.098, -12.8%
+        new("chunked_varbinview", 0.53, 0.025),   // 3 passes, spread 0.52-0.53; REBASED UP from 0.51 (a new reference binary): +4.2%
+        new("constant", 0.035, 0.027),   // 3 passes, spread 0.034-0.035; was 0.036, -1.8%
+        new("datetimeparts", 0.15, 0.038),   // 3 passes, spread 0.14-0.15; was 0.16, -6.0%
+        new("decimal", 0.13, 0.019),   // 3 passes, spread 0.13-0.13; was 0.14, -6.5%
+        new("decimal_byte_parts", 0.13, 0.020),   // 3 passes, spread 0.13-0.13; was 0.14, -7.2%
+        new("dict", 0.33, 0.017),   // 3 passes, spread 0.32-0.33; REBASED UP from 0.32 (a new reference binary): +2.4%
+        new("dict_nullable_codes", 0.57, 0.052),   // 3 passes, spread 0.54-0.57; REBASED UP from 0.53 (a new reference binary): +7.0%
+        new("dict_nullable_values_nonnull_codes", 0.56, 0.025),   // 3 passes, spread 0.55-0.56; REBASED UP from 0.54 (a new reference binary): +4.5%
+        new("dict_u64_codes", 0.33, 0.027),   // 3 passes, spread 0.33-0.33; was 0.34, -1.7%
+        new("dict_u8_codes", 0.54, 0.014),   // 3 passes, spread 0.54-0.54; REBASED UP from 0.54 (a new reference binary): +0.7%
+        new("ext", 0.045, 0.033),   // 3 passes, spread 0.044-0.045; was 0.060, -24.7%
+        new("fastlanes_bitpacked", 0.34, 0.006),   // 3 passes, spread 0.34-0.34; was 0.34, -0.4%
+        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.25, 0.014),   // 3 passes, spread 0.24-0.25; was 0.25, -1.8%
+        new("fastlanes_delta", 0.12, 0.057),   // 3 passes, spread 0.11-0.12; was 0.13, -11.3%
+        new("fastlanes_for", 0.45, 0.031),   // 3 passes, spread 0.44-0.45; REBASED UP from 0.44 (a new reference binary): +3.3%
+        new("fastlanes_rle", 0.25, 0.020),   // 3 passes, spread 0.25-0.25; was 0.27, -6.8%
+        new("fixed_size_list", 0.052, 0.022),   // 3 passes, spread 0.051-0.052; was 0.063, -17.3%
+        new("fsst", 0.12, 0.020),   // 3 passes, spread 0.12-0.12; REBASED UP from 0.12 (a new reference binary): +1.9%
+        new("masked", 0.30, 0.005),   // 3 passes, spread 0.29-0.30; was 0.31, -4.5%
+        new("masked_all_invalid", 0.44, 0.018),   // 3 passes, spread 0.43-0.44; REBASED UP from 0.43 (a new reference binary): +1.6%
+        new("masked_all_valid", 0.058, 0.037),   // 3 passes, spread 0.056-0.058; was 0.074, -21.3%
+        new("null", 0.24, 0.015),   // 3 passes, spread 0.24-0.24; REBASED UP from 0.23 (a new reference binary): +5.5%
+        new("onpair", 0.73, 0.014),   // 3 passes, spread 0.72-0.73; REBASED UP from 0.72 (a new reference binary): +1.0%
+        new("pco", 0.072, 0.057),   // 3 passes, spread 0.067-0.072; was 0.080, -10.6%
+        new("primitive", 0.088, 0.022),   // 3 passes, spread 0.086-0.088; was 0.10, -11.8%
+        new("runend", 0.14, 0.010),   // 3 passes, spread 0.14-0.14; was 0.16, -10.0%
+        new("sequence", 0.066, 0.077),   // 3 passes, spread 0.061-0.066; was 0.066, -0.6%
+        new("sparse", 0.29, 0.013),   // 3 passes, spread 0.28-0.29; was 0.30, -4.6%
+        new("struct", 0.30, 0.017),   // 3 passes, spread 0.30-0.30; REBASED UP from 0.30 (a new reference binary): +1.6%
+        new("table_mixed", 0.18, 0.007),   // 3 passes, spread 0.18-0.18; was 0.18, -0.2%
+        new("table_wide", 0.19, 0.012),   // 3 passes, spread 0.19-0.19; was 0.19, -0.9%
+        new("varbin", 0.17, 0.030),   // 3 passes, spread 0.17-0.17; REBASED UP from 0.17 (a new reference binary): +1.5%
+        new("varbinview", 0.53, 0.053),   // 3 passes, spread 0.50-0.53; REBASED UP from 0.51 (a new reference binary): +4.1%
+        new("variant", 0.18, 0.013),   // 3 passes, spread 0.18-0.18; REBASED UP from 0.17 (a new reference binary): +5.1%
+        new("zigzag", 0.17, 0.031),   // 3 passes, spread 0.17-0.17; REBASED UP from 0.17 (a new reference binary): +2.5%
+        new("zstd", 0.71, 0.007),   // 3 passes, spread 0.71-0.71; was 0.79, -10.1%
+        new("zstd_buffers", 0.49, 0.011),   // 3 passes, spread 0.49-0.49; REBASED UP from 0.48 (a new reference binary): +2.8%
+        new("list", 0.33, 0.015),   // 3 passes, spread 0.33-0.33; REBASED UP from 0.32 (a new reference binary): +3.9%
+        new("listview", 0.23, 0.028),   // 3 passes, spread 0.22-0.23; was 0.23, -1.0%
+        new("map", 0.28, 0.041),   // 3 passes, spread 0.27-0.28; REBASED UP from 0.27 (a new reference binary): +2.7%
+        new("zstd_nullable", 0.52, 0.057),   // 3 passes, spread 0.49-0.52; REBASED UP from 0.51 (a new reference binary): +2.2%
+        new("pco_f32", 0.36, 0.033),   // 3 passes, spread 0.35-0.36; first calibration
+        new("pco_i16", 0.60, 0.013),   // 3 passes, spread 0.59-0.60; first calibration
+        new("pco_nullable", 0.45, 0.020),   // 3 passes, spread 0.44-0.45; first calibration
+        new("pco_u32", 1.28, 0.042),   // 3 passes, spread 1.22-1.28; first calibration
     ];
 
     private static readonly Reference[] TakeReferences =
     [
-        new("alp", 0.95, 0.017),   // 3 passes, spread 0.94-0.95; was 1.07, -10.9%
-        new("alp_no_patches", 0.92, 0.009),   // 3 passes, spread 0.91-0.92; was 1.19, -22.9%
-        new("alp_patched_no_chunk_offsets", 0.94, 0.029),   // 3 passes, spread 0.91-0.94; was 1.28, -26.5%
-        new("alprd", 0.94, 0.014),   // 3 passes, spread 0.92-0.94; was 1.28, -26.9%
-        new("bool", 0.88, 0.030),   // 3 passes, spread 0.86-0.88; was 1.15, -23.3%
-        new("bool_bit_offset3", 0.89, 0.017),   // 3 passes, spread 0.87-0.89; was 1.15, -23.0%
-        new("bool_bit_offset7", 0.90, 0.030),   // 3 passes, spread 0.87-0.90; was 1.14, -21.2%
-        new("bool_bit_offset_straddle", 0.90, 0.048),   // 3 passes, spread 0.86-0.90; was 1.21, -25.4%
-        new("bytebool", 0.67, 0.090),   // 3 passes, spread 0.61-0.67; was 1.21, -44.4%
-        new("chunked", 0.90, 0.015),   // 3 passes, spread 0.88-0.90; REBASED UP from 0.82 (a new reference binary): +9.2%
-        new("chunked_empty_chunks", 0.91, 0.027),   // 3 passes, spread 0.88-0.91; REBASED UP from 0.82 (a new reference binary): +10.4%
-        new("chunked_one_chunk", 0.98, 0.073),   // 3 passes, spread 0.91-0.98; REBASED UP from 0.87 (a new reference binary): +13.2%
-        new("constant", 0.76, 0.041),   // 3 passes, spread 0.73-0.76; was 1.22, -37.5%
-        new("datetimeparts", 0.98, 0.040),   // 3 passes, spread 0.94-0.98; was 1.19, -18.0%
-        new("decimal", 0.94, 0.034),   // 3 passes, spread 0.91-0.94; REBASED UP from 0.85 (a new reference binary): +11.1%
-        new("decimal_byte_parts", 0.93, 0.028),   // 3 passes, spread 0.91-0.93; REBASED UP from 0.85 (a new reference binary): +10.0%
-        new("dict", 0.96, 0.031),   // 3 passes, spread 0.93-0.96; was 1.29, -26.0%
-        new("dict_nullable_codes", 0.88, 0.035),   // 3 passes, spread 0.85-0.88; was 1.25, -29.5%
-        new("dict_nullable_values_nonnull_codes", 0.95, 0.040),   // 3 passes, spread 0.91-0.95; was 1.31, -27.3%
-        new("dict_u64_codes", 0.93, 0.019),   // 3 passes, spread 0.91-0.93; was 1.28, -27.2%
-        new("dict_u8_codes", 0.91, 0.014),   // 3 passes, spread 0.90-0.91; was 1.29, -29.1%
-        new("ext", 0.95, 0.046),   // 3 passes, spread 0.91-0.95; REBASED UP from 0.87 (a new reference binary): +9.4%
-        new("fastlanes_bitpacked", 0.97, 0.069),   // 3 passes, spread 0.90-0.97; was 1.15, -15.6%
-        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.95, 0.029),   // 3 passes, spread 0.92-0.95; was 1.28, -25.7%
-        new("fastlanes_delta", 0.14, 0.116),   // 3 passes, spread 0.13-0.14; was 0.16, -9.6%
-        new("fastlanes_for", 0.94, 0.036),   // 3 passes, spread 0.91-0.94; was 1.20, -21.3%
-        new("fastlanes_rle", 0.75, 0.020),   // 3 passes, spread 0.73-0.75; was 0.83, -9.7%
-        new("fixed_size_list", 0.72, 0.030),   // 3 passes, spread 0.70-0.72; REBASED UP from 0.64 (a new reference binary): +12.5%
-        new("fsst", 1.00, 0.038),   // 3 passes, spread 0.96-1.00; was 1.28, -22.2%
-        new("list", 0.39, 0.219),   // 3 passes, spread 0.30-0.39; was 1.28, -69.9%
-        new("listview", 0.72, 0.028),   // 3 passes, spread 0.70-0.72; REBASED UP from 0.68 (a new reference binary): +5.3%
-        new("map", 0.37, 0.033),   // 3 passes, spread 0.36-0.37; REBASED UP from 0.35 (a new reference binary): +6.0%
-        new("masked", 0.89, 0.034),   // 3 passes, spread 0.86-0.89; was 1.26, -29.7%
-        new("masked_all_invalid", 0.88, 0.004),   // 3 passes, spread 0.88-0.88; was 1.32, -33.0%
-        new("masked_all_valid", 0.94, 0.022),   // 3 passes, spread 0.92-0.94; REBASED UP from 0.87 (a new reference binary): +8.1%
-        new("null", 0.76, 0.044),   // 3 passes, spread 0.73-0.76; was 1.16, -34.4%
-        new("onpair", 0.83, 0.020),   // 3 passes, spread 0.81-0.83; was 1.08, -23.1%
-        new("parquet_variant", 0.99, 0.026),   // 3 passes, spread 0.97-0.99; was 1.21, -18.0%
-        new("pco", 0.31, 0.033),   // 3 passes, spread 0.30-0.31; was 0.32, -3.8%
-        new("primitive", 0.94, 0.033),   // 3 passes, spread 0.91-0.94; REBASED UP from 0.85 (a new reference binary): +11.1%
-        new("runend", 0.91, 0.020),   // 3 passes, spread 0.89-0.91; was 1.76, -48.3%
-        new("sequence", 0.76, 0.016),   // 3 passes, spread 0.75-0.76; was 1.27, -40.3%
-        new("sparse", 0.89, 0.005),   // 3 passes, spread 0.89-0.89; was 1.33, -32.7%
-        new("struct", 0.21, 0.208),   // 3 passes, spread 0.16-0.21; REBASED UP from 0.16 (a new reference binary): +30.0%
-        new("varbin", 0.032, 0.339),   // 3 passes, spread 0.021-0.032; REBASED UP from 0.023 (a new reference binary): +38.7%
-        new("varbinview", 0.24, 0.051),   // 3 passes, spread 0.23-0.24; REBASED UP from 0.20 (a new reference binary): +21.5%
-        new("variant", 0.77, 0.022),   // 3 passes, spread 0.75-0.77; was 1.37, -43.9%
-        new("zigzag", 0.94, 0.031),   // 3 passes, spread 0.91-0.94; was 1.21, -22.3%
-        new("zstd", 0.065, 0.012),   // 3 passes, spread 0.065-0.065; was 0.066, -1.1%
-        new("zstd_buffers", 0.66, 0.045),   // 3 passes, spread 0.63-0.66; REBASED UP from 0.65 (a new reference binary): +1.1%
-        new("chunked_bool", 0.81, 0.008),   // 3 passes, spread 0.80-0.81; was 1.12, -28.0%
-        new("chunked_decimal", 0.89, 0.046),   // 3 passes, spread 0.85-0.89; REBASED UP from 0.84 (a new reference binary): +6.4%
-        new("chunked_mixed_validity", 0.83, 0.040),   // 3 passes, spread 0.79-0.83; was 4.64, -82.2%
-        new("chunked_varbinview", 0.028, 0.103),   // 3 passes, spread 0.025-0.028; was 0.27, -89.6%
-        new("table_mixed", 0.37, 0.020),   // 3 passes, spread 0.36-0.37; REBASED UP from 0.32 (a new reference binary): +15.2%
-        new("table_wide", 0.72, 0.042),   // 3 passes, spread 0.69-0.72; REBASED UP from 0.66 (a new reference binary): +9.1%
-        new("zstd_nullable", 0.090, 0.176),   // 3 passes, spread 0.074-0.090; REBASED UP from 0.089 (a new reference binary): +1.5%
+        new("alp", 0.96, 0.061),   // 3 passes, spread 0.90-0.96; REBASED UP from 0.95 (a new reference binary): +1.0%
+        new("alp_no_patches", 0.93, 0.027),   // 3 passes, spread 0.91-0.93; REBASED UP from 0.92 (a new reference binary): +1.5%
+        new("alp_patched_no_chunk_offsets", 0.94, 0.021),   // 3 passes, spread 0.92-0.94; was 0.94, -0.4%
+        new("alprd", 0.93, 0.017),   // 3 passes, spread 0.92-0.93; was 0.94, -0.7%
+        new("bool", 0.89, 0.014),   // 3 passes, spread 0.87-0.89; REBASED UP from 0.88 (a new reference binary): +0.7%
+        new("bool_bit_offset3", 0.89, 0.024),   // 3 passes, spread 0.87-0.89; REBASED UP from 0.89 (a new reference binary): +0.3%
+        new("bool_bit_offset7", 0.91, 0.027),   // 3 passes, spread 0.88-0.91; REBASED UP from 0.90 (a new reference binary): +1.0%
+        new("bool_bit_offset_straddle", 0.91, 0.017),   // 3 passes, spread 0.89-0.91; REBASED UP from 0.90 (a new reference binary): +0.7%
+        new("bytebool", 0.66, 0.011),   // 3 passes, spread 0.65-0.66; was 0.67, -1.5%
+        new("chunked", 0.88, 0.010),   // 3 passes, spread 0.87-0.88; was 0.90, -2.3%
+        new("chunked_empty_chunks", 0.90, 0.010),   // 3 passes, spread 0.89-0.90; was 0.91, -0.9%
+        new("chunked_one_chunk", 0.94, 0.021),   // 3 passes, spread 0.92-0.94; was 0.98, -4.6%
+        new("constant", 0.76, 0.014),   // 3 passes, spread 0.75-0.76; was 0.76, 0.0%
+        new("datetimeparts", 1.00, 0.037),   // 3 passes, spread 0.96-1.00; REBASED UP from 0.98 (a new reference binary): +1.7%
+        new("decimal", 0.93, 0.015),   // 3 passes, spread 0.92-0.93; was 0.94, -1.1%
+        new("decimal_byte_parts", 0.95, 0.035),   // 3 passes, spread 0.92-0.95; REBASED UP from 0.93 (a new reference binary): +2.4%
+        new("dict", 0.95, 0.021),   // 3 passes, spread 0.93-0.95; was 0.96, -0.5%
+        new("dict_nullable_codes", 0.88, 0.023),   // 3 passes, spread 0.86-0.88; REBASED UP from 0.88 (a new reference binary): +0.1%
+        new("dict_nullable_values_nonnull_codes", 0.93, 0.033),   // 3 passes, spread 0.90-0.93; was 0.95, -1.7%
+        new("dict_u64_codes", 0.95, 0.033),   // 3 passes, spread 0.92-0.95; REBASED UP from 0.93 (a new reference binary): +1.9%
+        new("dict_u8_codes", 0.92, 0.001),   // 3 passes, spread 0.92-0.92; REBASED UP from 0.91 (a new reference binary): +1.4%
+        new("ext", 0.95, 0.027),   // 3 passes, spread 0.92-0.95; was 0.95, -0.1%
+        new("fastlanes_bitpacked", 0.94, 0.026),   // 3 passes, spread 0.92-0.94; was 0.97, -2.8%
+        new("fastlanes_bitpacked_patched_no_chunk_offsets", 0.94, 0.020),   // 3 passes, spread 0.92-0.94; was 0.95, -1.0%
+        new("fastlanes_delta", 0.15, 0.039),   // 3 passes, spread 0.15-0.15; REBASED UP from 0.14 (a new reference binary): +10.1%
+        new("fastlanes_for", 0.95, 0.035),   // 3 passes, spread 0.92-0.95; REBASED UP from 0.94 (a new reference binary): +1.2%
+        new("fastlanes_rle", 0.77, 0.022),   // 3 passes, spread 0.75-0.77; REBASED UP from 0.75 (a new reference binary): +2.1%
+        new("fixed_size_list", 0.71, 0.026),   // 3 passes, spread 0.70-0.71; was 0.72, -0.7%
+        new("fsst", 1.04, 0.051),   // 3 passes, spread 0.99-1.04; REBASED UP from 1.00 (a new reference binary): +4.0%
+        new("list", 0.46, 0.021),   // 3 passes, spread 0.45-0.46; REBASED UP from 0.39 (a new reference binary): +17.2%
+        new("listview", 0.68, 0.015),   // 3 passes, spread 0.67-0.68; was 0.72, -6.1%
+        new("map", 0.33, 0.100),   // 3 passes, spread 0.30-0.33; was 0.37, -10.5%
+        new("masked", 0.91, 0.031),   // 3 passes, spread 0.88-0.91; REBASED UP from 0.89 (a new reference binary): +2.2%
+        new("masked_all_invalid", 0.92, 0.014),   // 3 passes, spread 0.90-0.92; REBASED UP from 0.88 (a new reference binary): +4.0%
+        new("masked_all_valid", 0.94, 0.029),   // 3 passes, spread 0.92-0.94; REBASED UP from 0.94 (a new reference binary): +0.5%
+        new("null", 0.75, 0.021),   // 3 passes, spread 0.74-0.75; was 0.76, -1.0%
+        new("onpair", 0.84, 0.011),   // 3 passes, spread 0.83-0.84; REBASED UP from 0.83 (a new reference binary): +1.3%
+        new("parquet_variant", 0.99, 0.014),   // 3 passes, spread 0.97-0.99; was 0.99, -0.4%
+        new("pco", 0.13, 0.067),   // 3 passes, spread 0.13-0.13; was 0.31, -56.6%
+        new("primitive", 0.94, 0.014),   // 3 passes, spread 0.93-0.94; was 0.94, 0.0%
+        new("runend", 0.92, 0.016),   // 3 passes, spread 0.91-0.92; REBASED UP from 0.91 (a new reference binary): +1.2%
+        new("sequence", 0.76, 0.024),   // 3 passes, spread 0.74-0.76; was 0.76, -0.2%
+        new("sparse", 0.91, 0.042),   // 3 passes, spread 0.87-0.91; REBASED UP from 0.89 (a new reference binary): +2.4%
+        new("struct", 0.16, 0.060),   // 3 passes, spread 0.15-0.16; was 0.21, -24.8%
+        new("varbin", 0.020, 0.008),   // 3 passes, spread 0.020-0.020; was 0.032, -37.4%
+        new("varbinview", 0.22, 0.035),   // 3 passes, spread 0.21-0.22; was 0.24, -10.1%
+        new("variant", 0.80, 0.055),   // 3 passes, spread 0.76-0.80; REBASED UP from 0.77 (a new reference binary): +4.2%
+        new("zigzag", 0.95, 0.010),   // 3 passes, spread 0.94-0.95; REBASED UP from 0.94 (a new reference binary): +0.7%
+        new("zstd", 0.065, 0.044),   // 3 passes, spread 0.062-0.065; was 0.065, -0.4%
+        new("zstd_buffers", 0.67, 0.019),   // 3 passes, spread 0.66-0.67; REBASED UP from 0.66 (a new reference binary): +1.3%
+        new("chunked_bool", 0.84, 0.011),   // 3 passes, spread 0.83-0.84; REBASED UP from 0.81 (a new reference binary): +3.7%
+        new("chunked_decimal", 0.88, 0.004),   // 3 passes, spread 0.87-0.88; was 0.89, -1.4%
+        new("chunked_mixed_validity", 0.83, 0.030),   // 3 passes, spread 0.80-0.83; was 0.83, -0.1%
+        new("chunked_varbinview", 0.026, 0.052),   // 3 passes, spread 0.025-0.026; was 0.028, -5.5%
+        new("table_mixed", 0.34, 0.084),   // 3 passes, spread 0.31-0.34; was 0.37, -7.4%
+        new("table_wide", 0.73, 0.054),   // 3 passes, spread 0.69-0.73; REBASED UP from 0.72 (a new reference binary): +1.1%
+        new("zstd_nullable", 0.076, 0.017),   // 3 passes, spread 0.075-0.076; was 0.090, -15.0%
+        new("pco_f32", 0.17, 0.018),   // 3 passes, spread 0.17-0.17; first calibration
+        new("pco_i16", 0.17, 0.021),   // 3 passes, spread 0.17-0.17; first calibration
+        new("pco_nullable", 1.39, 0.022),   // 3 passes, spread 1.35-1.39; first calibration
+        new("pco_u32", 0.15, 0.023),   // 3 passes, spread 0.14-0.15; first calibration
     ];
 
     private const double StaleBelow = 0.70;
@@ -1096,7 +1116,7 @@ internal static class ThroughputCheck
     /// Once it holds a value, `--check` refuses to gate against a different binary rather than
     /// report differences it cannot attribute.
     /// </remarks>
-    private static readonly string? CalibratedShim = "1be9345d4816";
+    private static readonly string? CalibratedShim = "916afe970968";
 
     /// <summary>Measures every generated file and reports ns/value for both readers.</summary>
     /// <param name="check">Whether to hold each ratio to its ceiling and exit non-zero when over.</param>
