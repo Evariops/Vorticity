@@ -45,8 +45,9 @@ public sealed record IndexingResult
 
     /// <summary>
     /// The objects the last walk left without one of the indexes: an object that carries no identity
-    /// to bind a fragment to, being written by another writer, or one whose index the budget refused.
-    /// A compaction that rewrites them builds the indexes into them.
+    /// to bind a fragment to, being written by another writer, or one none of whose blocks the index
+    /// can be built for, such as one whose column holds only nulls. A compaction that rewrites the
+    /// first kind builds the indexes into them.
     /// </summary>
     public long ObjectsLeft { get; init; }
 
@@ -189,7 +190,8 @@ internal static class DatasetIndexing
 
     /// <summary>
     /// The fragment that gives <paramref name="held"/> the indexes it lacks: null when it has them all,
-    /// and an empty one when it cannot take them, carrying no identity or refused by the budget.
+    /// and an empty one when it cannot take them, carrying no identity or holding no block an index
+    /// can be built for.
     /// </summary>
     private static async ValueTask<IndexFragment?> FragmentAsync(
         VortexDataset dataset, PositionedObject held, WritePolicy wanted, VortexWriteOptions build, CancellationToken cancellationToken)

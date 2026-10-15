@@ -1045,10 +1045,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </para>
     /// <para>
     /// Every version in between answers as the dataset without the indexes does: an object partly
-    /// indexed prunes the blocks its indexes cover. An object that carries no identity, written by
-    /// another writer, cannot take a fragment, and one whose index the policy's budget refuses is not
-    /// asked again; <see cref="IndexingResult.ObjectsLeft"/> counts them, and a compaction that
-    /// rewrites them builds the indexes. A writer builds them under its own options' budget.
+    /// indexed prunes the blocks its indexes cover. The indexes are asked for by name, so no budget
+    /// refuses them, neither a writer's nor the policy's. An object that carries no identity, written
+    /// by another writer, cannot take a fragment, and one with no block an index can be built for is
+    /// not asked again. <see cref="IndexingResult.ObjectsLeft"/> counts both, and a compaction that
+    /// rewrites the first builds the indexes into it.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="policy"/> is null.</exception>
