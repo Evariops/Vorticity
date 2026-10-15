@@ -105,7 +105,8 @@ the row encoding, which a project acknowledges once before it builds.
 | page | what you get |
 |---|---|
 | [datasets.md](datasets.md) | a versioned dataset over an object store: append, import, scan, delete and update rows, change the schema |
-| [dataset-maintenance.md](dataset-maintenance.md) | compaction, vacuum and verification, and what each costs in requests |
+| [dataset-maintenance.md](dataset-maintenance.md) | compaction, vacuum, verification and indexing after the fact, and what each costs in requests |
+| [concurrent-writers.md](concurrent-writers.md) | several writers of the same input, each entry counted once, without a lease |
 | [object-store.md](object-store.md) | implement the store interface for your service, and open a single file from a store |
 | [row-keys.md](row-keys.md) | encode a tuple into bytes whose `memcmp` order is the tuple's order |
 

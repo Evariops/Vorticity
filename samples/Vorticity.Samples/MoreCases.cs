@@ -15,6 +15,7 @@ internal static class MoreCases
         samples["observability"] = Observability.RunAsync;
         samples["datasets"] = Datasets.RunAsync;
         samples["dataset-maintenance"] = DatasetMaintenance.RunAsync;
+        samples["concurrent-writers"] = ConcurrentWriters.RunAsync;
         samples["object-store"] = ObjectStore.RunAsync;
         samples["row-keys"] = RowKeys.RunAsync;
         samples["how-it-works"] = HowItWorks.RunAsync;

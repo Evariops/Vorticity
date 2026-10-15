@@ -65,14 +65,17 @@ The commit object opens by its head, where a Vortex file opens by its tail: magi
 version, the header's length, the header (Protobuf), then pages and fragments in the order they were
 added, the table, and a 32-byte trailer. The trailer holds the table's offset and length, the
 object's own length, an XXH3-64 over the header and the table, and magic `VXCT`. Recording the length
-turns any truncation into a stated error rather than a shorter object.
+turns any truncation into a stated error rather than a shorter object. The format version is 2, or 3
+when the header counts a source, so that a reader that predates the offsets refuses the object
+rather than drop them (see [sources and offsets](#84-sources-and-offsets)).
 
 The header holds the version, its parent, the schema and the names its columns gave up (see [schema
 evolution](#13-schema-evolution)), the clustering key, the indexes every writer builds into the
 objects it writes (see [fragments](#64-fragments-in-commit-objects-transient)), the tree's chunking
-parameters and seed, the compaction and retention settings, the last version that changed rows, and,
-per level, where its last round-robin compaction stopped and its top page inlined, with the pages
-below it as long as the header stays within 192 KiB.
+parameters and seed, the compaction and retention settings, the last version that changed rows, the
+offset up to which each source's entries are counted, and, per level, where its last round-robin
+compaction stopped and its top page inlined, with the pages below it as long as the header stays
+within 192 KiB.
 
 The last version that changed rows is set by a commit of rows or of the schema one of whose
 operations applied, to its own version, and copied from the parent by every other commit, a
@@ -508,6 +511,10 @@ outputs), and never merges two trees. Each operation carries its own answer to a
 | append, schema change | the object lands as it was written, and reads as the new schema like any earlier one ([schema evolution](#13-schema-evolution)) |
 | indexing, indexing of another column | the second's indexes join the policy the first committed, and the header keeps both ([fragments](#64-fragments-in-commit-objects-transient)) |
 | indexing, compaction that read a version from before it | the compaction's output holds no index and replaces objects that had fragments, and the indexing's next walk gives it one |
+| source range, the same range | the first applies and moves the offset, and the second finds its range counted and adds nothing ([sources and offsets](#84-sources-and-offsets)) |
+| source range, a range of the same source that overlaps it or leaves a gap | the second's range no longer starts at the offset, so it throws with the offset recorded, from which its writer takes up |
+| source range, the range that follows it | the second starts where the first moved the offset, and applies |
+| source range, anything that declares none | the table is carried on, whatever the other commit changed |
 | reader, anything | the reader holds a version, and everything it references is immutable |
 
 An object's key ends with its uid, which makes it unique and a function of the object. Without it,
@@ -550,6 +557,42 @@ or commit lists, as a handle past the half window does. A version vacuum took no
 version superseded for longer than the window may lose objects while it is read, in both cases with
 `ObjectNotFoundException` naming what is gone, so a version number is good for well under the
 window.
+
+### 8.4 Sources and offsets
+
+Put-if-absent orders the commits, and a rebase applies two appends both, which is right for two
+writers of different rows and wrong for two writers of the same input. An aggregator that turns the
+entries of a source into rows, a shard of raw data or a partition of a log, can always meet another
+on the same entries, after a garbage collection pause or a rebalance, and both would count them.
+
+The header records, for each source, the offset up to which its entries are counted: a name and a
+number the application chooses, which the dataset does not interpret. A commit may declare, per
+source, the range `(from, to]` it consumed, and every attempt judges the ranges against the offsets
+of the version it lands on, before its operations:
+
+| the source's offset r in that version | the attempt |
+|---|---|
+| r = from, for every range | applies its operations, and the offsets move to the ranges' ends |
+| r ≥ to, for every range | publishes nothing and names that version: the ranges are counted |
+| anything else | throws `SourceOffsetConflictException` with the offsets, a gap or an overlap |
+
+An offset moves only by a commit whose range starts exactly at it, and the store orders the commits,
+so the ranges applied tile `(0, r]` without a gap or an overlap: each entry counted once, however
+many writers took it. A verdict other than applying stands only on a version the store said was the
+latest. On a version the writer held, another writer may have filled the gap since, so the attempt
+asks for the latest and is decided again there. A batch that
+consumes ranges publishes even with no operation, so that entries a writer filtered out are counted,
+and publishes nothing when one of its operations did not apply, so that an offset never moves
+without its rows. A replay after a lost answer finds its ranges counted, which makes the commit
+idempotent with no identifier the caller chooses, and the commit that applied is the one writer that
+may act outside the dataset on them. Compactions, indexings and vacuums declare nothing and carry
+the table on, as they carry the rest of the header.
+
+A writer that predates the table would rebuild the header without it and forget every offset at its
+first commit. So a header that carries an offset is written in commit format 3, which such a writer
+refuses, and a dataset whose table is empty, never used or emptied by `ForgetSourcesAsync`, is
+written in format 2 still. Every header carries the whole table, about 30 bytes a source: 256
+sources take 7.5 KiB of the 192 KiB a header keeps for itself and its pages.
 
 ## 9. The read-path budget
 
@@ -791,6 +834,7 @@ after the change, and its object reads as the new schema like any other.
 | prolly or B+tree | prolly | the same lookup and commit costs, but the prolly tree adds history independence, deduplication across writers, a one-hash equality of datasets, an incremental diff across lineages, and a rebuild-from-scratch oracle, for a chunker of about a hundred lines |
 | the latest version | newest-first keys and one listing | a hint object and probes (O(lag), and a mutable object), a pointer updated by compare-and-swap (one more mutable thing) |
 | concurrency | put-if-absent, rebase by operations | leases and lock files, three-way merges of trees |
+| counting an input once | source offsets in the header, judged at every attempt | fencing by epoch (it repairs a lease without doing away with it, and the lease's exclusion, timeouts and pauses stay outside the dataset), object identifiers the caller chooses (an append becomes idempotent, but a gap or an overlap between two writers' ranges goes unseen, and rows derived from several entries have no single identity) |
 | data across objects | leveled on a clustering key, tiered without | no compaction (O(appends)), a global secondary index (rewritten at every compaction) |
 | index placement | in the file, with transient external fragments | in-file only (adding an index rewrites data), external only (the index no longer travels with the file) |
 | deleting rows | a bounded deletion vector in the leaf entry, folded by compaction | copy-on-write of every object a row is taken from (an object per delete, 3 MiB per commit of ten rows, each kept through the retention window), positional delete files as in Iceberg (a read joins them, and they pile up until a rewrite), equality deletes (a read evaluates each of them against every row) |
@@ -813,6 +857,16 @@ other than by widening a number or making it nullable ([schema evolution](#13-sc
   above 0 is key-disjoint and a walk of the key cursor meets every row. Two compactions that write one
   level from two others are also replayed step by step, the second abandoned.
 - The rebase matrix, covering every row of the [rebase table](#82-rebase-by-re-applying-operations).
+- Sources: four writers take the entries of three sources in any order, through handles many versions
+  behind, with commits of two sources at once, replays of a commit whose answer was lost, and
+  compactions between them. For each source the ranges applied tile `(0, r]`, and the rows are the
+  entries of that span once each. Apart from the fuzzer: the two-writer table of
+  [sources and offsets](#84-sources-and-offsets), an overlap and a gap with the offsets recorded, the
+  ranges of one commit applied together or not at all, an update, a delete and a replacement replayed
+  from a handle that missed them (the update adds to a measure once), the format a header is written
+  in, and a ratchet on a header of 256 sources.
+- The last change of rows: each kind of commit records its own version or its parent's, and the
+  lifecycle fuzzer checks the value of every version it opens against its model.
 - [The invariant](#52-the-invariant), checked after every step of a randomized append stream drained
   at random moments.
 - Progressive indexing: at every intermediate commit, the answers equal those without indexes.
