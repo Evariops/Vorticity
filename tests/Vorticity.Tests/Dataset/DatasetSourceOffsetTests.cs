@@ -166,6 +166,51 @@ public sealed class DatasetSourceOffsetTests
     }
 
     [Fact]
+    public async Task AnUpdateADeleteAndAReplacementCountTheirRangesOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await CreateAsync(store, ct);
+        await AppendPlainAsync(dataset, 0, 100, ct);
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, Options(), ct);
+
+        // An update that adds to a measure, replayed by a handle that missed the first: the second
+        // finds its range counted, and the measure moves once.
+        RowChangeResult updated = await dataset.UpdateAsync<ChangeRow>(r => r.Key == 7, r => r with { Measure = r.Measure + 1.0 }, [new SourceRange("edits", 0, 1)], ct);
+        RowChangeResult replayed = await stale.UpdateAsync<ChangeRow>(r => r.Key == 7, r => r with { Measure = r.Measure + 1.0 }, [new SourceRange("edits", 0, 1)], ct);
+        Assert.Equal((OperationOutcome.Applied, 1L), (updated.Outcome, updated.Rows));
+        Assert.Equal((OperationOutcome.AlreadyThere, 0L, updated.Version), (replayed.Outcome, replayed.Rows, replayed.Version));
+        ChangeRow seven = await dataset.Scan<ChangeRow>().Where(r => r.Key == 7).ToRecordsAsync(ct).FirstAsync(ct);
+        Assert.Equal(3.5 + 1.0, seven.Measure);
+
+        // A delete that matches no row counts its range all the same, and one of a counted range
+        // deletes nothing.
+        RowChangeResult none = await dataset.DeleteAsync<ChangeRow>(r => r.Key > 1_000, [new SourceRange("edits", 1, 2)], ct);
+        Assert.Equal((OperationOutcome.Applied, 0L, 2UL), (none.Outcome, none.Rows, dataset.SourceOffset("edits")));
+        RowChangeResult counted = await dataset.DeleteAsync(VortexExpr.Parse("Key < 50"), [new SourceRange("edits", 0, 2)], ct);
+        Assert.Equal((OperationOutcome.AlreadyThere, 100), (counted.Outcome, (await KeysAsync(dataset, ct)).Count));
+
+        // A replacement, replayed from a handle that missed it.
+        await stale.RefreshAsync(ct);
+        DataObject[] objects = [.. await dataset.ListObjectsAsync(ct).ToListAsync(ct)];
+        await using (ObjectDraft rewritten = dataset.StartObject())
+        {
+            await rewritten.Writer.WriteAsync<ChangeRow>(Rows(1_000, 5), ct);
+            ReplaceResult replaced = await dataset.ReplaceObjectsAsync(objects, [rewritten], [new SourceRange("rewrites", 0, 1)], ct);
+            Assert.Equal(OperationOutcome.Applied, replaced.Outcome);
+        }
+
+        await using (ObjectDraft again = stale.StartObject())
+        {
+            await again.Writer.WriteAsync<ChangeRow>(Rows(1_000, 5), ct);
+            ReplaceResult late = await stale.ReplaceObjectsAsync(objects, [again], [new SourceRange("rewrites", 0, 1)], ct);
+            Assert.Equal(OperationOutcome.AlreadyThere, late.Outcome);
+        }
+
+        Assert.Equal(5, (await KeysAsync(dataset, ct)).Count);
+    }
+
+    [Fact]
     public async Task ADatasetThatCountsSourcesIsWrittenInFormatThree()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
