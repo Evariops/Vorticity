@@ -38,6 +38,21 @@ that holds it and is written once (see [the invariant](13-dataset.md#52-the-inva
 grow by `F`. With level 1 at 1.25 MiB, a tebibyte of data needs seven levels, so a byte that came in
 with a small commit is written about 35 times before it settles.
 
+An object that overlaps nothing in the level above is not rewritten at all: the job that pushes it up
+takes its entry out of one tree and puts it, byte for byte, into the other, as RocksDB's trivial move
+does. A merge of that object alone would have written its rows again as one object of the same
+bounds, so a move changes the bytes written and nothing of the levels' shape. It applies to an object
+of a level above 0, sorted on the key as a merge leaves every object there, with no marks and no
+fragments to fold, no larger than what an object written into the level above targets, and of the
+current schema, which only a rewrite brings an older object to. Its commit makes the checks a merge's
+makes: the entry is still the one planned, and nothing came into the part of the level above that its
+bounds cover ([three drivers](#2-three-drivers-for-one-job)). With keys that arrive in order, as when
+time leads the clustering key, nothing ever overlaps, and every row is rewritten once, by the merge
+that takes it out of level 0. Measured on 96 appends of 100 rows over five levels, compaction rewrote
+9 600 rows and 204 408 bytes with the moves and 25 200 rows and 536 584 bytes without, and on the
+churn bench, a thousand appends of 2 000 rows at the tail, 22.0 MiB against 42.8 MiB. With keys that
+arrive at random, a move is rare and the bytes barely move: 770 620 against 796 300.
+
 Three costs remain, and this document is about them:
 
 1. Who pays, and when. On demand, whoever calls `CompactAsync` pays, when they call it. Until then a
@@ -142,6 +157,7 @@ Everything the planner needs comes from where a commit already writes:
 | the object past where the level's last job stopped | not applicable | one descent along the keys, past the pointer the header records with the level |
 | where a tiered run ends | every leaf of every level | one descent per other level, to its first object past the run's start |
 | the objects of the next level a job meets | every leaf of that level | a walk that skips each subtree whose bounds lie outside the job's range |
+| whether the job moves its object rather than merging it | the same walk, which finds none, and the object's own entry | the same |
 | the objects with too many fragments | every leaf | a walk into the subtrees whose tally holds one |
 | which objects hold the most marks | not applicable | the share of marked rows in every tally, for the [purges](#4-folding-marks-where-no-merge-goes) |
 

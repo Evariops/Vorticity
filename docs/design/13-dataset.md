@@ -243,6 +243,13 @@ and is written once rather than once per level on its way up. Nothing orders the
 themselves except their sizes: a row in any level is a row of the dataset, and each level above 0
 only has to stay key-disjoint.
 
+A job that pushes one object up from a level above 0, where nothing in the level above overlaps it,
+moves its entry from one tree to the other and rewrites nothing, when the object holds no marks, no
+fragments and the current schema, and fits what the level above targets
+([what compaction buys](15-compaction.md#1-what-compaction-buys-and-what-it-costs)).
+`CompactionResult.ObjectsMoved` counts such objects, and their bytes are in neither `BytesIn` nor
+`BytesOut`.
+
 The merge emits windows, not rows. At each step the input holding the smallest key emits every row at
 or below the smallest key the others hold, which is a contiguous window of its current batch, so the
 cost is `k` comparisons per window. Rows are compared by their row encoding, the order the tree, the
@@ -288,7 +295,11 @@ Leveled compaction with `F` = 10 rewrites each row about `F/2` times per level i
 those above the one it lands in. Tiered compaction rewrites each row about once per level, about L×.
 The default is leveled when a clustering key is declared and tiered otherwise. A dataset that appends
 1 TiB a day, leveled, writes about 25 TiB a day in compaction. That is the honest cost of the
-one-object-per-level read bound, and every LSM store pays it.
+one-object-per-level read bound, and every LSM store pays it. Keys that arrive in order are the
+exception: nothing overlaps there, so past level 0 every crossing moves an object up rather than
+rewriting it ([what compaction buys](15-compaction.md#1-what-compaction-buys-and-what-it-costs)), and
+a row is rewritten once, by the merge that takes it out of level 0. A clustering key that leads with
+time puts most of a dataset's rows on that path.
 
 Who pays it, and when, is the caller's decision. Compaction runs when `CompactAsync` is called, in a
 loop any host runs (`RunCompactionAsync`, which plans, runs the job that is due at the rate it is

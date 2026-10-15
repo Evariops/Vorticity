@@ -33,16 +33,22 @@ public sealed record CompactionResult
     /// <summary>The objects it read.</summary>
     public long ObjectsIn { get; init; }
 
-    /// <summary>The objects it wrote.</summary>
+    /// <summary>The objects it put into the level it wrote, those it moved included.</summary>
     public long ObjectsOut { get; init; }
 
-    /// <summary>The rows it rewrote.</summary>
+    /// <summary>
+    /// The objects it moved into the level above whole, without rewriting them: an object that
+    /// overlapped nothing there, whose entry changes level and whose bytes stay where they are.
+    /// </summary>
+    public long ObjectsMoved { get; init; }
+
+    /// <summary>The rows it rewrote; none for an object it moved.</summary>
     public long Rows { get; init; }
 
-    /// <summary>The bytes it read, the denominator of write amplification.</summary>
+    /// <summary>The bytes it read, the denominator of write amplification; none for an object it moved.</summary>
     public long BytesIn { get; init; }
 
-    /// <summary>The bytes it wrote.</summary>
+    /// <summary>The bytes it wrote; none for an object it moved.</summary>
     public long BytesOut { get; init; }
 
     /// <summary>
@@ -98,6 +104,11 @@ internal static class DatasetCompactor
     private static async ValueTask<CompactionResult> RewriteAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
+        if (job.Moves && await MoveAsync(dataset, job, cancellationToken).ConfigureAwait(false) is { } moved)
+        {
+            return moved;
+        }
+
         bool merge = job.Style == CompactionStyle.Leveled;
         ClusteringKey? key = dataset.Key;
         if (merge)
@@ -172,6 +183,51 @@ internal static class DatasetCompactor
             BytesIn = job.Bytes,
             BytesOut = outputs.Bytes,
             Outcome = commit.Outcomes.Count == 1 ? commit.Outcomes[0] : OperationOutcome.Applied,
+        };
+    }
+
+    /// <summary>
+    /// A trivial move: the one input's entry taken out of its level and put, byte for byte, into the
+    /// level above, where nothing overlaps it, so that no row is read or written. Null when the object
+    /// holds an earlier schema, which only a rewrite brings to the current one; its tail, which the
+    /// open reads to say so, is the move's one request.
+    /// </summary>
+    /// <remarks>
+    /// The commit checks what a merge's does: the entry is still the one planned, and nothing came into
+    /// the part of the level above that its bounds cover. An index fragment attached to the object in
+    /// between goes up with it, since the object is not rewritten to fold it.
+    /// </remarks>
+    private static async ValueTask<CompactionResult?> MoveAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+    {
+        CompactionInput input = job.Inputs[0];
+        ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            if (dataset.Snapshot.Schema.ColumnsOf(lease.File.DType, input.Entry.Key) is not null)
+            {
+                return null;
+            }
+        }
+
+        DatasetOperation.ReplaceObjects move = new DatasetOperation.ReplaceObjects(
+            [(input.Level, input.Key)], [(job.ToLevel, input.Key, input.Entry)])
+        {
+            Expected = [input.Entry],
+            Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
+            Range = job.Range,
+        };
+        CommitResult commit = await dataset.CommitAsync([move], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
+        return new CompactionResult
+        {
+            Version = commit.Version,
+            FromLevel = job.FromLevel,
+            ToLevel = job.ToLevel,
+            Trigger = job.Trigger,
+            Style = job.Style,
+            ObjectsIn = 1,
+            ObjectsOut = 1,
+            ObjectsMoved = 1,
+            Outcome = commit.Outcomes[0],
         };
     }
 
