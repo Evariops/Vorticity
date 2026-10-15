@@ -18,12 +18,27 @@ internal static class CommitFormat
     public static ReadOnlySpan<byte> TrailerMagic => "VXCT"u8;
 
     /// <summary>
-    /// The format this library writes. Format 2 headers may retire column names, lock the store and
-    /// say where earlier versions' pages start, and its pages carry tallies and deletion vectors: a
-    /// reader of format 1 would read such a dataset wrongly where it did not fail, a renamed column as
-    /// missing and a locked store as one it may rewrite, and refuses it by this number instead.
+    /// The format this library writes for a header without source offsets. Format 2 headers may
+    /// retire column names, lock the store and say where earlier versions' pages start, and its pages
+    /// carry tallies and deletion vectors: a reader of format 1 would read such a dataset wrongly
+    /// where it did not fail, a renamed column as missing and a locked store as one it may rewrite,
+    /// and refuses it by this number instead.
     /// </summary>
     public const uint Version = 2;
+
+    /// <summary>
+    /// The format of a header that counts source offsets, and the newest this library reads. A writer
+    /// of format 2 would rebuild such a header without the field it does not know, and so forget
+    /// every offset at its first commit: the entries it counted would be counted again. It refuses the
+    /// dataset by this number instead.
+    /// </summary>
+    public const uint WithSources = 3;
+
+    /// <summary>The newest format this library reads.</summary>
+    public const uint Newest = WithSources;
+
+    /// <summary>The format a commit object of <paramref name="header"/> is written in.</summary>
+    public static uint For(CommitHeader header) => header.Sources.Count > 0 ? WithSources : Version;
 
     /// <summary>
     /// The oldest format this library reads: format 1 holds nothing format 2 does not read the same,
@@ -47,10 +62,10 @@ internal static class CommitFormat
     public const int MinimumBytes = PreambleBytes + TrailerBytes;
 
     /// <summary>Writes the preamble into at least <see cref="PreambleBytes"/> bytes.</summary>
-    public static void WritePreamble(Span<byte> destination, int headerLength)
+    public static void WritePreamble(Span<byte> destination, int headerLength, uint format)
     {
         Magic.CopyTo(destination);
-        BinaryPrimitives.WriteUInt32LittleEndian(destination[8..], Version);
+        BinaryPrimitives.WriteUInt32LittleEndian(destination[8..], format);
         BinaryPrimitives.WriteUInt32LittleEndian(destination[12..], (uint)headerLength);
     }
 

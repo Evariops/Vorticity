@@ -80,10 +80,10 @@ internal sealed class CommitObject
         }
 
         uint format = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
-        if (format < CommitFormat.OldestRead || format > CommitFormat.Version)
+        if (format < CommitFormat.OldestRead || format > CommitFormat.Newest)
         {
             throw new CommitFormatException(
-                $"This library reads commit formats {CommitFormat.OldestRead} to {CommitFormat.Version} and the object is format {format}.");
+                $"This library reads commit formats {CommitFormat.OldestRead} to {CommitFormat.Newest} and the object is format {format}.");
         }
 
         uint headerLength = BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]);

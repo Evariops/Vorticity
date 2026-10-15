@@ -75,6 +75,18 @@ internal sealed record CommitOptions
     /// </summary>
     public int InlineVectorBytes { get; init; }
 
+    /// <summary>
+    /// The source ranges the commit's rows take into account, judged at every attempt against the
+    /// offsets of the attempt's parent; null for a commit that declares none.
+    /// </summary>
+    public IReadOnlyList<SourceRange>? Consumed { get; init; }
+
+    /// <summary>
+    /// The sources whose offsets the commit forgets, every other offset kept; null for none. A
+    /// writer that took one of them again would count its entries anew.
+    /// </summary>
+    public IReadOnlyCollection<string>? Forgotten { get; init; }
+
     /// <summary>A rule in its starting state.</summary>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
 
@@ -109,6 +121,9 @@ internal sealed record CommitResult(
 
     /// <summary>Whether the commit created <see cref="Version"/>, rather than finding nothing to apply on it.</summary>
     public bool Created { get; init; }
+
+    /// <summary>Whether the commit's source ranges were counted already, by <see cref="Version"/>, so that it added nothing.</summary>
+    public bool Counted { get; init; }
 }
 
 /// <summary>
@@ -220,6 +235,43 @@ internal static class DatasetCommitter
                 levels = DatasetLevels.Of(commit.Header);
             }
 
+            // The source ranges, judged against the offsets this attempt builds on: the commit applies
+            // only where each range starts at its source's offset. A verdict that adds nothing is final
+            // only on a version the store said was the latest, since one taken as held may have been
+            // passed: a gap there may be filled since, and a range counted there is counted since too.
+            IReadOnlyList<SourceOffset> sources = options.Forgotten is { Count: > 0 } forgotten
+                ? SourceTable.Without(template.Sources, forgotten)
+                : template.Sources;
+            if (options.Consumed is { Count: > 0 } consumed)
+            {
+                SourceVerdict verdict = SourceTable.Judge(template.Sources, consumed);
+                if (verdict != SourceVerdict.Applied && outright)
+                {
+                    askFirst = true;
+                    attempt--;
+                    continue;
+                }
+
+                if (verdict == SourceVerdict.Conflict)
+                {
+                    throw SourceTable.Conflict(template.Sources, consumed, parent, commit, knownAt);
+                }
+
+                if (verdict == SourceVerdict.AlreadyThere)
+                {
+                    OperationOutcome[] counted = new OperationOutcome[operations.Count];
+                    Array.Fill(counted, OperationOutcome.AlreadyThere);
+                    return new CommitResult(
+                        parent, CommitKey.For(parent), levels, counted, attempt, pages,
+                        commit ?? throw new InvalidOperationException("Ranges counted on a dataset with no version."), knownAt)
+                    {
+                        Counted = true,
+                    };
+                }
+
+                sources = SourceTable.Advanced(sources, consumed, options.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds());
+            }
+
             // 2. The operations, re-applied to whatever is there now, a batch per level. The commit
             // object exists before they are applied, because an indexer's fragment is written into
             // it and its entry names it there; a lost attempt throws both away.
@@ -274,8 +326,14 @@ internal static class DatasetCommitter
 
             // A batch in which nothing applied would publish a copy of its parent under a new
             // number; it publishes nothing, and names the version it was decided against, which has
-            // to be the latest: one taken as held is asked for first, and the batch decided again.
-            if (operations.Count > 0 && commit is not null && !outcomes.Contains(OperationOutcome.Applied))
+            // to be the latest: one taken as held is asked for first, and the batch decided again. A
+            // batch that consumes source ranges publishes even with no operation, since its offsets
+            // move, and nothing when one of its operations did not apply, since they would move
+            // without its rows.
+            bool consumes = options.Consumed is { Count: > 0 };
+            bool idle = !consumes && operations.Count > 0 && !outcomes.Contains(OperationOutcome.Applied);
+            bool partial = consumes && outcomes.Exists(outcome => outcome is not (OperationOutcome.Applied or OperationOutcome.AlreadyThere));
+            if ((idle || partial) && commit is not null)
             {
                 if (outright)
                 {
@@ -300,6 +358,7 @@ internal static class DatasetCommitter
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
+                Sources = sources,
                 Starts = starts,
             };
             header = Fitted(WithoutHeld(header));

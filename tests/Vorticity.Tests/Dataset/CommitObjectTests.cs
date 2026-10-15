@@ -284,8 +284,16 @@ public sealed class CommitObjectTests
         Assert.Equal(header.Version, CommitObject.Open(earlier, earlier.Length).Header.Version);
 
         byte[] later = [.. bytes];
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(later.AsSpan(8), CommitFormat.Version + 1);
-        Assert.Throws<CommitFormatException>(() => CommitObject.Open(later, later.Length));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(later.AsSpan(8), CommitFormat.Newest + 1);
+        CommitFormatException refused = Assert.Throws<CommitFormatException>(() => CommitObject.Open(later, later.Length));
+        Assert.Contains($"format {CommitFormat.Newest + 1}", refused.Message, StringComparison.Ordinal);
+
+        // A header that counts source offsets is written in format 3, which a writer of format 2
+        // refuses as this one refuses format 4, and which this one reads back whole.
+        CommitHeader counting = header with { Sources = [new SourceOffset("raw/spans/17", 41_200, 1_700_000_000_000)] };
+        byte[] written = new CommitObjectBuilder(counting.Version).Build(counting);
+        Assert.Equal(CommitFormat.WithSources, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(written.AsSpan(8)));
+        Assert.Equal(counting.Sources, CommitObject.Open(written, written.Length).Header.Sources);
     }
 
     [Fact]
