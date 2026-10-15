@@ -323,25 +323,7 @@ public ref struct FilterHandler
         else
         {
             ClrShape shape = ClrShape.For<T>.Value;
-            if (shape.Kind is ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float)
-            {
-                // A number is a value, not a span over the column's storage: any numeric column
-                // takes it, and the check of the whole filter places it against the column's width
-                // and type as it places a number typed inline. Only a column that is not numeric
-                // refuses it, and says why in the words a member's binding would use.
-                VortexType numeric = column.Type.Kind == VortexTypeKind.Extension && column.Type.StorageType is { Kind: VortexTypeKind.Primitive } storage
-                    ? storage
-                    : column.Type;
-                if (numeric.Kind != VortexTypeKind.Primitive)
-                {
-                    ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
-                }
-            }
-            else
-            {
-                ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
-            }
-
+            ToolPaths.RequireValue<T>(column);
             ColumnSym target = new ColumnSym(new FieldExpr(column.Name), column.Type, null, null, -1, []);
             if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal or ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger)
             {

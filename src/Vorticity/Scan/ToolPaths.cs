@@ -140,6 +140,11 @@ internal static class ToolPaths
                     : Expr.In(membership.Field, [.. literals]);
             }
 
+            case TypedInExpr typed:
+                // Typed values, bound as the typed scan binds its own: each placed against the
+                // column, without the text a set of any size would otherwise be written in.
+                return Expression(typed.Field, typed.Bind(new VortexField(typed.Field.Path, Column(schema, typed.Field))));
+
             case StringMatchExpr match:
             {
                 VortexType type = Column(schema, match.Field);
@@ -170,6 +175,30 @@ internal static class ToolPaths
 
             default:
                 throw new VortexSchemaException($"'{filter}' is not a predicate.");
+        }
+    }
+
+    /// <summary>Refuses a value of <typeparamref name="T"/> for a column that does not take one, as a hole of an interpolated filter is refused.</summary>
+    /// <exception cref="VortexSchemaException">The column does not take a <typeparamref name="T"/>.</exception>
+    internal static void RequireValue<T>(VortexField column)
+    {
+        if (ClrShape.For<T>.Value.Kind is ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float)
+        {
+            // A number is a value, not a span over the column's storage: any numeric column
+            // takes it, and the check of the whole filter places it against the column's width
+            // and type as it places a number typed inline. Only a column that is not numeric
+            // refuses it, and says why in the words a member's binding would use.
+            VortexType numeric = column.Type.Kind == VortexTypeKind.Extension && column.Type.StorageType is { Kind: VortexTypeKind.Primitive } storage
+                ? storage
+                : column.Type;
+            if (numeric.Kind != VortexTypeKind.Primitive)
+            {
+                ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
+            }
+        }
+        else
+        {
+            ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
         }
     }
 

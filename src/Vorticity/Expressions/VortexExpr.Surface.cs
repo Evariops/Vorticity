@@ -32,6 +32,27 @@ public abstract class VortexExpr
     /// <exception cref="FormatException">The text is not in the grammar.</exception>
     public static VortexExpr Parse(ReadOnlySpan<char> text) => ExprText.Parse(text);
 
+    /// <summary>
+    /// The rows whose value in <paramref name="column"/> is one of <paramref name="values"/>: a set of
+    /// any size, which a filter in text would have to write out and parse.
+    /// </summary>
+    /// <remarks>
+    /// The values are copied, so the caller may reuse its buffer at once. A scan checks them against
+    /// the column when it takes the filter, as it checks a hole of an interpolated filter: a number
+    /// goes to any numeric column, a value of another type to a column of that type. A null, or a
+    /// value the column cannot hold exactly, matches no row.
+    /// </remarks>
+    /// <typeparam name="T">The values' type.</typeparam>
+    /// <param name="column">The column: its name, or a <c>.</c>-separated path to a nested one.</param>
+    /// <param name="values">The values.</param>
+    /// <returns>The filter.</returns>
+    /// <exception cref="ArgumentException"><paramref name="column"/> is null or empty.</exception>
+    public static VortexExpr In<T>(string column, params ReadOnlySpan<T> values)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(column);
+        return new TypedInExpr<T>(new FieldExpr(column), values.ToArray());
+    }
+
     /// <summary>The rows both filters keep.</summary>
     public static VortexExpr operator &(VortexExpr left, VortexExpr right) => Expr.And(left, right);
 

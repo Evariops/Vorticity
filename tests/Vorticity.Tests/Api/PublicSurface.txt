@@ -2121,6 +2121,7 @@ Vorticity:     ctor VortexException()
 Vorticity:     ctor VortexException(string)
 Vorticity:     ctor VortexException(string, Exception)
 Vorticity: abstract class Vorticity.VortexExpr
+Vorticity:     method VortexExpr In<T>(string, ReadOnlySpan<T>)
 Vorticity:     method VortexExpr Parse(ReadOnlySpan<char>)
 Vorticity:     method VortexExpr op_BitwiseAnd(VortexExpr, VortexExpr)
 Vorticity:     method VortexExpr op_BitwiseOr(VortexExpr, VortexExpr)
