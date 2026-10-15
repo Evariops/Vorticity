@@ -13,10 +13,9 @@ It is built, in the core's store interface and in the package `Vorticity.ObjectS
 the published vectors of each protocol, by emulators of each service under the HTTP client, and by
 the store contract run against a service's own bucket when the environment names one. Where the code
 departs from this design, [the last section](#19-where-the-code-departs-from-this-design) says so, and where the design changes
-a rule that another document states, it says so. [The scope](01-scope.md#6-what-it-leaves-out) leaves out an S3
-client, and [the dataset](13-dataset.md) says that this library never names S3 in code. Both stay
-true of the core and of the dataset package, since the clients live in a package of their own, which
-neither references. Two rules of [the store abstraction](13-dataset.md#11-the-store-abstraction) do
+a rule that another document states, it says so. The clients live in a package of their own, which
+neither the core nor the dataset package references, so both talk to a store through its interface
+alone. Two rules of [the store abstraction](13-dataset.md#11-the-store-abstraction) do
 change: a store may now replace an object when a put asks it to, which a dataset never does, and a
 listing may lag, by less than the retention window
 ([the store interface, revised](#4-the-store-interface-revised) explains both). Encrypting what is

@@ -15,9 +15,10 @@ Some things do not bend. Every data object is a plain Vortex file that a strict 
 opens, with this library's structures invisible to it. The core takes no third-party dependency. An
 index is a hint unless it is proven complete (see [indexing after the
 fact](10-indexes.md#7-building-appending-and-indexing-after-the-fact)). No interleaving of readers,
-writers, indexers, compactions and vacuums produces a wrong answer. And the S3 client is not this
-library's: another library implements the store interface ([the store
-abstraction](#11-the-store-abstraction)), and this one never names S3 in code.
+writers, indexers, compactions and vacuums produces a wrong answer. And the dataset depends on no
+service: it talks to a store interface ([the store abstraction](#11-the-store-abstraction)), which
+`Vorticity.ObjectStorage` implements for S3, Azure and Cloud Storage without the dataset package
+referencing it, and which any other library can implement.
 
 ## 1. Where the N's hide, and the bound that replaces each
 

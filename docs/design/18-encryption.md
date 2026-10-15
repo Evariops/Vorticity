@@ -7,13 +7,12 @@ and a dataset created encrypted stays encrypted whoever writes to it. This docum
 what it protects and from whom, where the encryption sits, the format of a sealed object, the keys
 and their life, how the platform's cipher is used, and what all of it costs.
 
-It is a design to build, and nothing in it exists in the code yet. Two statements of other documents
-change once it does. [The scope](01-scope.md#6-what-it-leaves-out) leaves encryption out because the
-format's slot for it is an empty reserved table, and that slot stays empty, as
-[where it sits](#2-where-it-sits) explains. [The threat model](09-contracts.md#4-threat-model)
-claims no confidentiality, and a sealed file gets the confidentiality and the integrity described
-below. Stores are the subject of [19-object-storage.md](19-object-storage.md), and this document
-relies on it for the key services' clients.
+It is built, apart from the keyrings of the key services (AWS KMS, Azure Key Vault and Cloud KMS, in
+[the keyring](#43-the-keyring)), which are still to come. The format's own slot for encryption, an
+empty reserved table, stays empty, as [where it sits](#2-where-it-sits) explains, and
+[the threat model](09-contracts.md#4-threat-model) claims for a sealed object the confidentiality and
+the integrity described below. Stores are the subject of [19-object-storage.md](19-object-storage.md),
+and this document relies on it for the key services' clients.
 
 In this document, to seal is to encrypt and authenticate, a sealed object is what sealing produces,
 and the Vortex file or commit object inside is its plaintext. The format's own "encryption" slot is

@@ -36,6 +36,7 @@ AOT and trimming.
 | `Vorticity` | the session, files, the typed scan and its columns, aggregates, the key cursor, the tool path for schemas known only at run time, the writer and its builders, the I/O interface |
 | `Vorticity.Generators` | the `[VortexRecord]` source generator and the analyzers VX1001 to VX1011, build time only |
 | `Vorticity.Dataset` | a versioned dataset over an object store ([13-dataset.md](13-dataset.md)), experimental under `VX0001` |
+| `Vorticity.ObjectStorage` | files and datasets on Amazon S3 and the services that speak its API, Azure Blob Storage and Google Cloud Storage, through clients written here over the platform's HTTP client ([19-object-storage.md](19-object-storage.md)), at `0.x` until each service has run it in production |
 | `Vorticity.RowEncoding` | the byte-sortable row encoding ([06-row-encoding.md](06-row-encoding.md)), experimental under `VX0002` because upstream reserves the right to change it |
 | `vxdump` | the inspection tool, written against the public API only |
 
@@ -88,12 +89,11 @@ top of that:
 |---|---|
 | the IPC format | unstable and incomplete upstream |
 | the `tensor`, `spatial` and `json` editions | plugins outside `core` |
-| encryption | the format's slot is an empty reserved table |
+| the format's own encryption slot | it is an empty reserved table. Vorticity seals each object whole instead, and the file inside reads in any Vortex reader once decrypted ([18-encryption.md](18-encryption.md)) |
 | engine integrations (DataFusion, DuckDB, Spark, CUDA) | not a format library's job |
 | Apache Arrow interoperability | it would break the zero-dependency rule. An owned `RecordBatch` is where a bridge package would attach |
 | a DataFrame, SQL, joins | the plan a scan builds is what such a layer would target |
 | deleting or updating rows inside a file | a file is immutable and an append only adds blocks. Row deletes and updates live one level up, in the dataset ([deleting and updating rows](13-dataset.md#12-deleting-and-updating-rows)) |
-| an S3 client | the dataset's store is an interface another library implements ([the store abstraction](13-dataset.md#11-the-store-abstraction)) |
 | preserving unknown nodes byte for byte through a rewrite | a separate feature, with its own invariants |
 
 ## 7. Guarantees, and what holds each
