@@ -24,6 +24,7 @@
 // is the levels': each one above 0 key-disjoint, which a walk of the key relies on.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -352,6 +353,153 @@ public sealed class DatasetFuzzTests
         Assert.True(outcomes.GetValueOrDefault(OperationOutcome.Applied) > 3, "the schedule must index something");
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET FUZZ INDEXERS: {dataset.ObjectCount} objects, {outcomes.GetValueOrDefault(OperationOutcome.Applied)} fragments applied, {outcomes.GetValueOrDefault(OperationOutcome.AlreadyThere)} already there, {outcomes.GetValueOrDefault(OperationOutcome.Dropped)} dropped.\n"));
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(19)]
+    [InlineData(42)]
+    public async Task WritersThatTakeTheSameSourcesCountEachEntryOnce(int seed)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Four writers take entries of three sources in any order, each through a handle that may
+        // be many versions behind, which is what a pause or a rebalance makes of a writer: it read an
+        // offset long ago and commits now. One commit in five takes two sources at once, one writer
+        // in eight replays the commit it made last as if its answer was lost, and a compaction
+        // runs between them now and then. Entry n of source s is the row of key s * 1 000 000 + n.
+        Decoders.EnsureRegistered();
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions { Seed = Seed, ClusteringKey = ["Key"] };
+        await using VortexDataset first = await VortexDataset.CreateAsync(store, ChangeRow.Schema, options, ct);
+        VortexDataset[] writers = [first, .. await Task.WhenAll(Enumerable.Range(1, Writers - 1).Select(_ => VortexDataset.OpenAsync(store, options, ct).AsTask()))];
+        string[] sources = ["s0", "s1", "s2"];
+        const ulong Entries = 400;
+        Random random = new Random(seed);
+        Dictionary<string, List<(ulong From, ulong To)>> applied = sources.ToDictionary(source => source, _ => new List<(ulong, ulong)>());
+        (VortexDataset Writer, SourceRange[] Ranges)? last = null;
+        int conflicts = 0;
+        int counted = 0;
+        int replays = 0;
+        try
+        {
+            for (int step = 0; step < 160 && sources.Any(source => first.SourceOffset(source) < Entries); step++)
+            {
+                VortexDataset writer = writers[random.Next(writers.Length)];
+                if (random.Next(3) == 0)
+                {
+                    await writer.RefreshAsync(ct);
+                }
+
+                if (random.Next(10) == 0)
+                {
+                    await writer.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, ct);
+                    continue;
+                }
+
+                // A replay of the last commit: its ranges are counted, so it adds nothing.
+                if (last is { } previous && random.Next(8) == 0)
+                {
+                    SourceCommit replayed = await CommitRangesAsync(previous.Writer, previous.Ranges, ct);
+                    Assert.Equal(OperationOutcome.AlreadyThere, replayed.Outcome);
+                    replays++;
+                    continue;
+                }
+
+                List<SourceRange> ranges = [];
+                foreach (string source in sources.OrderBy(_ => random.Next()).Take(random.Next(5) == 0 ? 2 : 1))
+                {
+                    ulong from = writer.SourceOffset(source);
+                    if (from < Entries)
+                    {
+                        ranges.Add(new SourceRange(source, from, Math.Min(Entries, from + (ulong)random.Next(1, 40))));
+                    }
+                }
+
+                if (ranges.Count == 0)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    SourceCommit commit = await CommitRangesAsync(writer, ranges, ct);
+                    if (commit.Outcome == OperationOutcome.Applied)
+                    {
+                        foreach (SourceRange range in ranges)
+                        {
+                            applied[range.Source].Add((range.From, range.To));
+                        }
+
+                        last = (writer, [.. ranges]);
+                    }
+                    else
+                    {
+                        counted++;
+                    }
+                }
+                catch (SourceOffsetConflictException conflict)
+                {
+                    // The handle reads the version that decided it, so it starts from there next time.
+                    Assert.Equal(conflict.Version, writer.Version);
+                    conflicts++;
+                }
+            }
+
+            // For each source, the ranges applied tile (0, r] without a gap or an overlap, and the
+            // rows are the entries of that span once each: what a single writer would have written.
+            await first.RefreshAsync(ct);
+            List<long> keys = [.. (await first.Scan<ChangeRow>().ToRecordsAsync(ct).ToListAsync(ct)).Select(row => row.Key)];
+            keys.Sort();
+            List<long> expected = [];
+            for (int s = 0; s < sources.Length; s++)
+            {
+                ulong reached = 0;
+                foreach ((ulong from, ulong to) in applied[sources[s]].OrderBy(range => range.From))
+                {
+                    Assert.Equal(reached, from);
+                    reached = to;
+                }
+
+                Assert.Equal(reached, first.SourceOffset(sources[s]));
+                for (ulong entry = 1; entry <= reached; entry++)
+                {
+                    expected.Add((s * 1_000_000L) + (long)entry);
+                }
+            }
+
+            expected.Sort();
+            Assert.Equal(expected, keys);
+            Console.Out.Write(FormattableString.Invariant(
+                $"DATASET FUZZ SOURCES seed {seed}: version {first.Version}, {keys.Count} entries counted, {conflicts} conflict(s), {counted} counted already, {replays} replay(s).\n"));
+            Assert.True(conflicts + counted > 0, "the schedule should have had two writers meet on a range");
+        }
+        finally
+        {
+            foreach (VortexDataset writer in writers.Skip(1))
+            {
+                await writer.DisposeAsync();
+            }
+        }
+    }
+
+    /// <summary>The rows of the ranges' entries, as one commit that counts them.</summary>
+    private static async Task<SourceCommit> CommitRangesAsync(VortexDataset writer, IReadOnlyList<SourceRange> ranges, CancellationToken ct)
+    {
+        List<ChangeRow> rows = [];
+        foreach (SourceRange range in ranges)
+        {
+            long source = range.Source[^1] - '0';
+            for (ulong entry = range.From + 1; entry <= range.To; entry++)
+            {
+                rows.Add(new ChangeRow((source * 1_000_000L) + (long)entry, entry * 0.5, "Paris"));
+            }
+        }
+
+        await using ObjectDraft draft = writer.StartObject();
+        await draft.Writer.WriteAsync<ChangeRow>([.. rows], ct);
+        return await writer.AppendAsync(draft, ranges, ct);
     }
 
     [Theory]
