@@ -1,7 +1,7 @@
 # Untyped files
 
 Read a file whose schema is unknown when the program is compiled: look at its schema, name its columns
-as strings, and write filters as text.
+as strings, and write filters as text or pass sets of values.
 
 ```csharp
 await using VortexFile file = await VortexFile.OpenAsync(path);
@@ -118,6 +118,28 @@ A number compared with a decimal column is scaled exactly from its digits, and t
 date, time, timestamp, uuid or decimal column is parsed in the column's type. Nulls follow
 three-valued logic, so `not (Celsius < 40)` does not return a row whose `Celsius` is null
 ([three-valued logic](../design/08-semantics.md#3-three-valued-logic)).
+
+A set of values does not need text at all. `VortexExpr.In` takes them as they are, a few or a
+million, and combines with the other forms:
+
+```csharp
+int[] days = new int[200];
+for (int i = 0; i < days.Length; i++)
+{
+    days[i] = i * 5;
+}
+
+VortexExpr chosen = VortexExpr.In("Day", days) & VortexExpr.Parse("City = 'Paris'");
+```
+
+```
+a set of 200 days in Paris: 25004 rows
+```
+
+The values are copied when the filter is built, so the array can be reused at once. They are checked
+against the column when a scan takes the filter, as a hole is: a number goes to any numeric column, a
+value of another type to a column of that type, and a value the column cannot hold, or a null, matches
+no row.
 
 ## Watch out
 

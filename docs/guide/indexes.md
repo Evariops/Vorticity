@@ -48,6 +48,13 @@ times for a hit and five times for a miss. The filters are read whole, 804 KB of
 bytes. The n-gram filters are cheaper and serve `Contains` and `Like`. `plan.Pruning` names the
 structure that pruned each block, as in `bloom filter pruned 48 reading 803596 bytes`.
 
+An `In` of many values is answered by the same filters, for as long as they pay. A block is excluded
+only when its filter refuses every value, and a filter with a false positive in a hundred refuses
+1 000 values almost never. So the scan counts what asking costs against the blocks it excludes and
+stops asking where they no longer pay, which keeps a set of 100 000 values from costing more than the
+scan it was meant to spare. A sorted run is walked with the sorted values, each of its segments asked
+about the values of its own range. Either way the rows are the same, only the time changes.
+
 A block that an index keeps is read by its chunk. The writer seals whole blocks into chunks, four
 here, and a column's chunk is one segment. The ten blocks that `Contains` keeps fall in ten of the
 file's thirteen chunks, which is why it reads most of the file. A file that is mostly read a few rows
