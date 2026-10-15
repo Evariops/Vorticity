@@ -197,6 +197,22 @@ internal sealed class IndexWriter : IDisposable
     internal RunScratch? Scratch => _scratch;
 
     /// <summary>The builder a policy names for a column, or why there is none.</summary>
+    /// <summary>Why an index of <paramref name="column"/> cannot be built on a column of <paramref name="dtype"/>, or null when it can.</summary>
+    /// <param name="column">The index asked for.</param>
+    /// <param name="dtype">The column's dtype.</param>
+    internal static string? Refusal(IndexSpec column, DType dtype)
+    {
+        string? reason = null;
+        bool supported = column.Kind switch
+        {
+            IndexPolicyKind.Bloom => BloomBuilder.Supports(dtype, out reason),
+            IndexPolicyKind.NgramBloom or IndexPolicyKind.NgramPostings => BloomBuilder.Supports(dtype, trigrams: true, out reason),
+            IndexPolicyKind.Postings or IndexPolicyKind.SortedRuns => KeyIndexBuilder.Supports(dtype, out _, out _, out reason),
+            _ => true,
+        };
+        return supported ? null : reason;
+    }
+
     private static string? Explicit(IndexSpec column, DType dtype, List<IndexBuilder> builders)
     {
         string? reason = null;
@@ -1122,16 +1138,16 @@ internal sealed class IndexWriter : IDisposable
     private bool OverBudget(long dataBytes) => LivingBytes * 1000 > dataBytes * _budgetPerMille;
 
     /// <summary>
-    /// Abandons every index the caller did not mark required and that has not yet written a byte.
-    /// One that has is kept: dropping it would leave its payloads in the file as dead weight, and
-    /// the verdict that let them out was the budget's own, reached before they were written.
+    /// Abandons every index the caller did not mark required or spare, and that has not yet written
+    /// a byte. One that has is kept: dropping it would leave its payloads in the file as dead weight,
+    /// and the verdict that let them out was the budget's own, reached before they were written.
     /// </summary>
     private void AbandonForBudget(long dataBytes)
     {
         long living = LivingBytes;
         for (int field = 0; field < _builders.Length; field++)
         {
-            if (_columns[field].Required)
+            if (_columns[field].Required || Spared?.Contains(_paths[field]) == true)
             {
                 continue;
             }
@@ -1353,6 +1369,9 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>Whether the required indexes are written even when they alone are over the budget; see <see cref="VortexWriteOptions.BudgetSparesRequired"/>.</summary>
     internal bool BudgetSparesRequired { get; init; }
+
+    /// <summary>The columns whose indexes the budget never abandons; see <see cref="VortexWriteOptions.BudgetSpares"/>.</summary>
+    internal IReadOnlySet<string>? Spared { get; set; }
 
     /// <summary>The runs whose tables go to pages, in the order the pages are written.</summary>
     private List<PagedRun>? _paged;

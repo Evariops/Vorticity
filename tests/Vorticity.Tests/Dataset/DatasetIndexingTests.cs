@@ -426,10 +426,11 @@ public sealed class DatasetIndexingTests
             await indexer.AppendAsync(ObjectRows(types, schema, i), ct);
         }
 
-        // The objects take fragments, and another process, whose options name neither index,
-        // merges them: the object it writes holds both indexes itself, and no fragment.
+        // The objects take fragments, and another process, whose options name neither index and
+        // keep the default budget, which these filters outweigh, merges them: the object it writes
+        // holds both indexes itself, and no fragment.
         await indexer.IndexAsync(PublicPolicy, cancellationToken: ct);
-        await using VortexDataset compactor = await VortexDataset.OpenAsync(store, Generous(Clustered()), ct);
+        await using VortexDataset compactor = await VortexDataset.OpenAsync(store, Clustered(), ct);
         Assert.NotNull(await compactor.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30, MaxObjectBytes = 1L << 30 }, ct));
         PositionedObject merged = Assert.Single(await ObjectsAsync(compactor));
         Assert.Empty(merged.Entry.Fragments);
@@ -458,7 +459,7 @@ public sealed class DatasetIndexingTests
 
         // The compaction reads the version before the policy and commits after the indexing: what it
         // writes holds no index, and takes the place of the two objects that had fragments.
-        await using VortexDataset compactor = await VortexDataset.OpenAsync(store, Generous(Clustered()), ct);
+        await using VortexDataset compactor = await VortexDataset.OpenAsync(store, Clustered(), ct);
         CompactionPlan plan = await compactor.PlanCompactionAsync(new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1L << 30, MaxObjectBytes = 1L << 30 }, ct);
         Assert.Equal(2L, (await indexer.IndexAsync(PublicPolicy, cancellationToken: ct)).ObjectsIndexed);
         CompactionResult compacted = await DatasetCompactor.RunAsync(compactor, Assert.IsType<CompactionJob>(plan.Job), ct);
@@ -501,7 +502,7 @@ public sealed class DatasetIndexingTests
     }
 
     [Fact]
-    public async Task AnIndexingRefusesWhatTheDatasetCannotKeepAndCountsWhatItLeaves()
+    public async Task AnIndexingRefusesWhatTheDatasetCannotKeepAndNoBudgetRefusesIt()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
@@ -518,11 +519,49 @@ public sealed class DatasetIndexingTests
         await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.IndexAsync(IndexPolicy.None.ForKey(["tag", "id"], IndexKind.SortedRuns), cancellationToken: ct));
         await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.IndexAsync(IndexPolicy.None, cancellationToken: ct));
         await Assert.ThrowsAsync<VortexSchemaException>(async () => await dataset.IndexAsync(IndexPolicy.None.Bloom("missing"), cancellationToken: ct));
+        ArgumentException trigrams = await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.IndexAsync(IndexPolicy.None.NgramBloom("tag"), cancellationToken: ct));
+        Assert.Contains("'tag'", trigrams.Message, StringComparison.Ordinal);
         Assert.Equal(version, dataset.Version);
 
-        // A budget that refuses the filter: the policy is the dataset's, and both objects are left.
-        IndexingResult refused = await dataset.IndexAsync(IndexPolicy.None.Bloom("tag").WithBudgetPerMille(0), cancellationToken: ct);
-        Assert.Equal((0L, 2L, 1, 1), (refused.ObjectsIndexed, refused.ObjectsLeft, refused.Walks, refused.Commits));
+        // Asked for by name, the indexes are built whatever the budget says, here none at all.
+        IndexingResult spared = await dataset.IndexAsync(IndexPolicy.None.Bloom("tag").WithBudgetPerMille(0), cancellationToken: ct);
+        Assert.Equal((2L, 0L, 2, 2), (spared.ObjectsIndexed, spared.ObjectsLeft, spared.Walks, spared.Commits));
+        await AssertAnswersAsync(dataset);
+    }
+
+    [Fact]
+    public async Task AnObjectWithoutAnIdentityIsLeftAndCounted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+
+        // A file of another writer, imported beside an object of the dataset's own.
+        System.IO.MemoryStream stream = new System.IO.MemoryStream();
+        await using (VortexFileWriter writer = VortexFileWriter.Create(
+            new StreamSegmentSink(stream), schema, new VortexWriteOptions { RowBlockSize = BlockRows }))
+        {
+            await foreach (RecordBatch batch in ObjectRows(types, schema, 0))
+            {
+                await writer.WriteAsync(batch, ct);
+            }
+
+            await writer.CompleteAsync(ct);
+        }
+
+        byte[] foreign = stream.ToArray();
+        int key = foreign.AsSpan().LastIndexOf(FileIdentity.MetadataKeyUtf8);
+        foreign[key + FileIdentity.MetadataKeyUtf8.Length - 1] = (byte)'Y';
+        string objectKey = CommitKey.ForData("foreign");
+        await store.PutIfAbsentAsync(objectKey, foreign, ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
+        await dataset.ImportAsync(objectKey, ct);
+        await dataset.AppendAsync(ObjectRows(types, schema, 1), ct);
+
+        IndexingResult result = await dataset.IndexAsync(IndexPolicy.None.Bloom("tag"), cancellationToken: ct);
+        Assert.Equal((1L, 1L, 2), (result.ObjectsIndexed, result.ObjectsLeft, result.Walks));
         await AssertAnswersAsync(dataset);
     }
 

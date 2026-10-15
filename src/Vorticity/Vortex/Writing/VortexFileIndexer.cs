@@ -531,6 +531,7 @@ public static class VortexFileIndexer
             options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals)
         {
             Fences = options?.Fences ?? FenceShape.Default,
+            Spared = options?.BudgetSpares,
         };
 
         // Every payload blob of the pass is assembled in the same workspace, one after the other.

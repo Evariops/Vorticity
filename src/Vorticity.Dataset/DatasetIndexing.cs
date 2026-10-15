@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.File;
 using Vorticity.Indexes;
+using Vorticity.Types;
 using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
@@ -90,9 +91,21 @@ internal static class DatasetIndexing
         }
 
         bool names = false;
+        DatasetSchema schema = dataset.Snapshot.Schema;
         foreach ((string path, IndexSpec spec) in wanted.Columns)
         {
-            _ = ToolPaths.Resolve(dataset.Snapshot.Schema.Columns, path);
+            // Refused here rather than left out of every object a writer builds from now on.
+            DType column = schema.DType;
+            foreach (int field in ToolPaths.Resolve(schema.Columns, path))
+            {
+                column = column.GetField(field);
+            }
+
+            if (IndexWriter.Refusal(spec, column) is { } reason)
+            {
+                throw new ArgumentException($"A {spec.Kind} index does not apply to column '{path}': {reason}.", nameof(policy));
+            }
+
             names |= IndexKinds.Of(spec.Kind) is not null;
         }
 
@@ -223,7 +236,7 @@ internal static class DatasetIndexing
                 new RowRange(0, file.RowCount),
                 storeToken: null,
                 contentHash: entry.Hash == UInt128.Zero ? null : entry.Hash,
-                build,
+                build with { BudgetSpares = new HashSet<string>(missing.Columns.Keys, StringComparer.Ordinal) },
                 cancellationToken).ConfigureAwait(false);
             foreach (IndexWriteReport report in fragment.Reports)
             {

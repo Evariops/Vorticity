@@ -42,6 +42,7 @@ internal sealed class DatasetSchema
         Retired = retired;
         PolicyBytes = policy;
         IndexPolicy = Indexes.IndexDirectory.PolicyOf(policy.Span);
+        IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
         Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
@@ -81,6 +82,9 @@ internal sealed class DatasetSchema
     /// options: what <see cref="VortexDataset.IndexAsync"/> added.
     /// </summary>
     internal Indexes.WritePolicy IndexPolicy { get; }
+
+    /// <summary>The columns <see cref="IndexPolicy"/> names, whose indexes no writer's budget refuses.</summary>
+    internal IReadOnlySet<string> IndexedColumns { get; }
 
     /// <summary>
     /// The schema a header names, <paramref name="previous"/> itself when the header names the same

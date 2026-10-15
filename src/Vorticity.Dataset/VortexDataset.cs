@@ -538,10 +538,11 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         // The indexes the dataset was given, at the version the write builds on, whatever this
-        // handle's own options say: a compaction by a handle that never heard of them keeps them.
+        // handle's own options say: a compaction by a handle that never heard of them keeps them,
+        // and its budget does not refuse them, since they were asked for by name.
         if (schema.IndexPolicy.Columns.Count > 0)
         {
-            write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy));
+            write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
         }
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
         if (schema.Key is { } clustering && !bySortedColumn)
