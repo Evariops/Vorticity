@@ -8,7 +8,7 @@ using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
-/// <summary>What one indexing did.</summary>
+/// <summary>What the commit of one index fragment did.</summary>
 /// <param name="Version">The version the commit created, or the one it found when it wrote nothing.</param>
 /// <param name="Outcome">
 /// What the commit made of the fragment: applied, already there — another indexer wrote the same
@@ -16,7 +16,7 @@ namespace Vorticity.Dataset;
 /// </param>
 /// <param name="Bytes">The fragment's length.</param>
 /// <param name="Reports">What became of every index the policy asked for.</param>
-internal sealed record IndexingResult(
+internal sealed record FragmentResult(
     ulong Version, OperationOutcome Outcome, long Bytes, IReadOnlyList<IndexWriteReport> Reports);
 
 /// <summary>Indexes a dataset's objects by fragments, one block range per commit. A fragment is
@@ -34,7 +34,7 @@ internal static class DatasetIndexer
     /// <exception cref="ArgumentException"><paramref name="target"/> does not come from the dataset's walk.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="rows"/> is not whole blocks of the object.</exception>
     /// <exception cref="VortexUnsupportedException">The object has no identity to bind a fragment to.</exception>
-    public static async ValueTask<IndexingResult> IndexAsync(
+    public static async ValueTask<FragmentResult> IndexAsync(
         VortexDataset dataset,
         PositionedObject target,
         WritePolicy policy,
@@ -45,7 +45,7 @@ internal static class DatasetIndexer
         IndexFragment fragment = await BuildAsync(dataset, target, policy, rows, options, cancellationToken).ConfigureAwait(false);
         CommitResult commit = await dataset
             .CommitAsync([Attach(target, fragment)], CommitKind.Index, cancellationToken).ConfigureAwait(false);
-        return new IndexingResult(commit.Version, commit.Outcomes[0], fragment.Bytes.Length, fragment.Reports);
+        return new FragmentResult(commit.Version, commit.Outcomes[0], fragment.Bytes.Length, fragment.Reports);
     }
 
     /// <summary>
@@ -59,7 +59,7 @@ internal static class DatasetIndexer
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="target"/> does not come from the dataset's walk.</exception>
     /// <exception cref="VortexUnsupportedException">The object has no identity to bind a fragment to.</exception>
-    public static async ValueTask<IndexingResult> RebuildAsync(
+    public static async ValueTask<FragmentResult> RebuildAsync(
         VortexDataset dataset,
         PositionedObject target,
         WritePolicy policy,
@@ -75,7 +75,7 @@ internal static class DatasetIndexer
 
         operations.Add(Attach(target, fragment));
         CommitResult commit = await dataset.CommitAsync(operations, CommitKind.Index, cancellationToken).ConfigureAwait(false);
-        return new IndexingResult(commit.Version, commit.Outcomes[^1], fragment.Bytes.Length, fragment.Reports);
+        return new FragmentResult(commit.Version, commit.Outcomes[^1], fragment.Bytes.Length, fragment.Reports);
     }
 
     private static DatasetOperation.AddFragment Attach(PositionedObject target, IndexFragment fragment) =>

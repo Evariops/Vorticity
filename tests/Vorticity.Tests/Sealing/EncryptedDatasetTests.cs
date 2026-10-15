@@ -369,7 +369,7 @@ public sealed class EncryptedDatasetTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, Encrypted(strict), ct);
         await AppendAsync(dataset, 0, ct);
-        IndexingResult indexed = await DatasetIndexer.IndexAsync(
+        FragmentResult indexed = await DatasetIndexer.IndexAsync(
             dataset, await SingleObjectAsync(dataset, ct), WritePolicy.None.For("City", IndexSpec.Postings),
             options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, cancellationToken: ct);
         Assert.Equal(OperationOutcome.Applied, indexed.Outcome);

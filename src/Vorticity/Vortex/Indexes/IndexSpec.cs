@@ -402,6 +402,29 @@ internal sealed class WritePolicy
         return new WritePolicy(Default, columns, [.. _keys]);
     }
 
+    /// <summary>
+    /// The same policy with every column <paramref name="other"/> names given what it names there: its
+    /// fallback stays this one's, and the other's composite keys follow this one's.
+    /// </summary>
+    /// <param name="other">The policy whose columns win.</param>
+    /// <returns>This policy when the other names nothing, a new one otherwise.</returns>
+    public WritePolicy With(WritePolicy other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        if (other._columns.Count == 0 && other._keys.Count == 0)
+        {
+            return this;
+        }
+
+        Dictionary<string, IndexSpec> columns = new Dictionary<string, IndexSpec>(_columns, StringComparer.Ordinal);
+        foreach ((string path, IndexSpec spec) in other._columns)
+        {
+            columns[path] = spec;
+        }
+
+        return new WritePolicy(Default, columns, [.. _keys, .. other._keys]);
+    }
+
     /// <summary>The policy that applies to one column.</summary>
     /// <param name="columnPath">The column path.</param>
     /// <returns>The override when there is one, otherwise <see cref="Default"/>.</returns>

@@ -35,10 +35,13 @@ internal sealed class DatasetSchema
     // long as the file is open, and an object every scan of a version reads is asked about each time.
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
-    private DatasetSchema(ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering)
+    private DatasetSchema(
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy)
     {
         Bytes = bytes;
         Retired = retired;
+        PolicyBytes = policy;
+        IndexPolicy = Indexes.IndexDirectory.PolicyOf(policy.Span);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
         Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
@@ -70,14 +73,24 @@ internal sealed class DatasetSchema
     /// <summary>Every name a column of the dataset gave up, in the order they were given up.</summary>
     internal IReadOnlyList<RetiredColumn> Retired { get; }
 
+    /// <summary>The indexes every writer builds at this version, as the header records them.</summary>
+    internal ReadOnlyMemory<byte> PolicyBytes { get; }
+
+    /// <summary>
+    /// The indexes every writer builds into an object at this version, besides those of its own
+    /// options: what <see cref="VortexDataset.IndexAsync"/> added.
+    /// </summary>
+    internal Indexes.WritePolicy IndexPolicy { get; }
+
     /// <summary>
     /// The schema a header names, <paramref name="previous"/> itself when the header names the same
     /// one: parsed once, and a record bound to it stays bound.
     /// </summary>
     internal static DatasetSchema Of(CommitHeader header, DatasetSchema? previous) =>
         previous is not null && previous.Bytes.Span.SequenceEqual(header.Schema.Span) && Same(previous.Retired, header.Retired)
+            && previous.PolicyBytes.Span.SequenceEqual(header.WritePolicy.Span)
             ? previous
-            : new DatasetSchema(header.Schema, header.Retired, header.ClusteringKey);
+            : new DatasetSchema(header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the

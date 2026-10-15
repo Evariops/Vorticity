@@ -53,4 +53,18 @@ internal static class IndexKinds
     /// <returns>Whether a run of this kind must carry at least one payload segment.</returns>
     public static bool HasPayload(string kind) =>
         !string.Equals(kind, DictProbe, StringComparison.Ordinal);
+
+    /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
+    /// <param name="policy">The policy's kind.</param>
+    /// <returns>The kind's name in the directory.</returns>
+    internal static string? Of(IndexPolicyKind policy) =>
+        policy switch
+        {
+            IndexPolicyKind.Bloom => BloomSbbf,
+            IndexPolicyKind.NgramBloom => BloomNgram3,
+            IndexPolicyKind.Postings => PostingsBlocks,
+            IndexPolicyKind.SortedRuns => SortedRuns,
+            IndexPolicyKind.NgramPostings => PostingsNgram3,
+            _ => null,
+        };
 }

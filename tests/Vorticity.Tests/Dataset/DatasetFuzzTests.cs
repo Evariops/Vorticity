@@ -324,7 +324,7 @@ public sealed class DatasetFuzzTests
             else
             {
                 PositionedObject target = seen[random.Next(seen.Count)];
-                IndexingResult result = await DatasetIndexer.IndexAsync(
+                FragmentResult result = await DatasetIndexer.IndexAsync(
                     handle, target, policy, ranges[random.Next(ranges.Length)], build, ct);
                 outcomes[result.Outcome] = outcomes.GetValueOrDefault(result.Outcome) + 1;
             }
