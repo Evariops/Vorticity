@@ -4,8 +4,8 @@
 // A file of `Blocks` blocks of 64 rows whose Int64 key column holds a key of its own on every row,
 // scattered, under a sorted-runs index. The filter asks for `Literals` keys, an equality for one
 // and an IN list for more, each held by one row and the rows spread over the file, so that exactly
-// that many blocks stay live. The pruner is built and refines a fresh mask. Run in a checkout of
-// the original and in the tree.
+// that many blocks stay live, or every block once the keys outnumber them. The pruner is built and
+// refines a fresh mask. Run in a checkout of the original and in the tree.
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -38,14 +38,14 @@ public class KeyIndexPruneBenchmarks
     public int Blocks { get; set; }
 
     /// <summary>Keys the filter asks for.</summary>
-    [Params(1, 64, 4_096)]
+    [Params(1, 64, 4_096, 65_536)]
     public int Literals { get; set; }
 
     private string _path = null!;
     private VortexFile _file = null!;
     private VortexExpr _filter = null!;
 
-    /// <summary>Writes the file, opens it, and checks the pruning leaves one block per literal.</summary>
+    /// <summary>Writes the file, opens it, and checks the pruning leaves one block per literal, or all of them.</summary>
     [GlobalSetup]
     public void Setup()
     {
@@ -63,7 +63,7 @@ public class KeyIndexPruneBenchmarks
         _filter = Literals == 1
             ? Expr.Eq(Expr.Field("key"), Expr.Literal(values[0]))
             : Expr.In(Expr.Field("key"), values);
-        if (Prune() != Literals)
+        if (Prune() != Math.Min(Literals, Blocks))
         {
             throw new InvalidOperationException("The index left another number of blocks than the literals'.");
         }

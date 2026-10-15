@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,11 +37,24 @@ internal sealed class KeyIndexPruner
     private readonly Dictionary<VortexExpr, Leaf> _leaves =
         new Dictionary<VortexExpr, Leaf>(ReferenceEqualityComparer.Instance);
 
+    /// <summary>
+    /// What each filter still in use asks of the columns' locating indexes, made once for the
+    /// filter rather than once per pruner: a dataset plans one filter over each of its objects, and
+    /// each would encode, index and sort the same literals again. They go with the filter.
+    /// </summary>
+    private static readonly ConditionalWeakTable<VortexExpr, Prepared> Preparations = [];
+
     private KeyIndexPruner(VortexExpr filter, Dictionary<string, Column> columns)
     {
         _filter = filter;
         _columns = columns;
-        Plan(filter);
+        foreach (Column column in columns.Values)
+        {
+            foreach ((VortexExpr question, (int first, int sets)) in column.Asked.Questions)
+            {
+                _leaves[question] = new Leaf(column, first, sets);
+            }
+        }
     }
 
     /// <summary>Segments read to consult the runs.</summary>
@@ -83,11 +97,9 @@ internal sealed class KeyIndexPruner
             return null;
         }
 
-        Dictionary<string, List<FilterLiteral>> equalities = new Dictionary<string, List<FilterLiteral>>(StringComparer.Ordinal);
-        Dictionary<string, List<StringMatchExpr>> matches = new Dictionary<string, List<StringMatchExpr>>(StringComparer.Ordinal);
-        Dictionary<string, HashSet<FilterLiteral>> seenLiterals =
-            new Dictionary<string, HashSet<FilterLiteral>>(StringComparer.Ordinal);
-        CollectEqualities(filter, equalities, seenLiterals, matches);
+        Prepared prepared = Preparations.GetValue(filter, static expr => new Prepared(expr));
+        Dictionary<string, List<FilterLiteral>> equalities = prepared.Equalities;
+        Dictionary<string, List<StringMatchExpr>> matches = prepared.Matches;
         if (equalities.Count == 0 && matches.Count == 0)
         {
             return null;
@@ -113,38 +125,21 @@ internal sealed class KeyIndexPruner
             }
 
             string key = trigrams ? TrigramKey(path) : path;
-            List<FilterLiteral>? literals;
+            List<StringMatchExpr>? predicates = null;
             KeyLayout layout;
             DType storage;
             if (trigrams)
             {
-                if (!matches.TryGetValue(path, out List<StringMatchExpr>? predicates))
+                // The keys a text index holds are trigrams, typed binary.
+                if (!matches.TryGetValue(path, out predicates))
                 {
                     continue;
-                }
-
-                // The keys a text index holds are trigrams, typed binary; its literals are the
-                // trigrams the predicates require, folded as the index was. The list keeps the
-                // order the slot arrays are indexed by, so it stays, and the set beside it answers
-                // "seen already" in constant time.
-                literals = [];
-                HashSet<FilterLiteral> seen = [];
-                foreach (StringMatchExpr predicate in predicates)
-                {
-                    foreach (byte[] trigram in Trigrams.Required(predicate, fold))
-                    {
-                        FilterLiteral literal = FilterLiteral.From(trigram);
-                        if (seen.Add(literal))
-                        {
-                            literals.Add(literal);
-                        }
-                    }
                 }
 
                 layout = new KeyLayout(KeyShape.Bytes, 0, default);
                 storage = new DTypeArena().Binary(Nullability.NonNullable);
             }
-            else if (!equalities.TryGetValue(path, out literals) || !KeyLayout.TryOf(dtype, out layout))
+            else if (!equalities.ContainsKey(path) || !KeyLayout.TryOf(dtype, out layout))
             {
                 continue;
             }
@@ -153,7 +148,13 @@ internal sealed class KeyIndexPruner
                 storage = Storage(dtype);
             }
 
-            if (columns.ContainsKey(key) || literals.Count == 0)
+            if (columns.ContainsKey(key))
+            {
+                continue;
+            }
+
+            Asked asked = prepared.For(key, layout, fold, predicates);
+            if (asked.Literals == 0)
             {
                 continue;
             }
@@ -170,7 +171,7 @@ internal sealed class KeyIndexPruner
 
             if (runs.Count > 0)
             {
-                columns[key] = new Column(entry.Kind == IndexKinds.SortedRuns, layout, storage, runs, literals, blocks, fold);
+                columns[key] = new Column(entry.Kind == IndexKinds.SortedRuns, asked, storage, runs, blocks);
             }
         }
 
@@ -183,16 +184,20 @@ internal sealed class KeyIndexPruner
             if (entry.Kind != IndexKinds.DictProbe || entry.Runs.Count == 0
                 || !TryResolve(file.DType, entry.ColumnPath, out string path, out DType dtype)
                 || columns.ContainsKey(path)
-                || !equalities.TryGetValue(path, out List<FilterLiteral>? literals) || literals.Count == 0
+                || !equalities.ContainsKey(path)
                 || !KeyLayout.TryOf(dtype, out KeyLayout layout))
             {
                 continue;
             }
 
-            columns[path] = new Column(rows: false, layout, Storage(dtype), [], literals, blocks, fold: false)
+            Asked asked = prepared.For(path, layout, fold: false, predicates: null);
+            if (asked.Literals > 0)
             {
-                DictionaryPath = path,
-            };
+                columns[path] = new Column(rows: false, asked, Storage(dtype), [], blocks)
+                {
+                    DictionaryPath = path,
+                };
+            }
         }
 
         return columns.Count == 0 ? null : new KeyIndexPruner(filter, columns);
@@ -236,7 +241,7 @@ internal sealed class KeyIndexPruner
     /// <summary>Reads the runs and the dictionaries, and records what they claim.</summary>
     private async ValueTask ClaimAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
     {
-        using IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)> batches = new();
+        using IndexBatches<(Column Column, Run Run, Fence Fence, int Low, int High, int[] Slots)> batches = new();
         foreach (Column column in _columns.Values)
         {
             if (column.DictionaryPath is { } dictionary)
@@ -252,9 +257,9 @@ internal sealed class KeyIndexPruner
                     continue;
                 }
 
-                // The segments that may hold a key, found by a descent per key: a page that does
-                // not read claims nothing for the run, which is then not covered.
-                List<Fence> fences;
+                // The segments that may hold a key, each with its keys: a page that does not read
+                // claims nothing for the run, which is then not covered.
+                List<(Fence Fence, int Low, int High)> fences;
                 int pagesBefore = run.Table.PagesRead;
                 try
                 {
@@ -269,8 +274,8 @@ internal sealed class KeyIndexPruner
                     Segments += run.Table.PagesRead - pagesBefore;
                 }
 
-                IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)>.Batch batch = batches.For(run.Meta);
-                foreach (Fence fence in fences)
+                IndexBatches<(Column Column, Run Run, Fence Fence, int Low, int High, int[] Slots)>.Batch batch = batches.For(run.Meta);
+                foreach ((Fence fence, int low, int high) in fences)
                 {
                     int[] slots = new int[column.Stride];
                     for (int array = 0; array < column.Stride; array++)
@@ -280,7 +285,7 @@ internal sealed class KeyIndexPruner
                             new SegmentSpec(payload.Offset, payload.Length, payload.AlignmentExponent, 0, 0));
                     }
 
-                    batch.Wanted.Add((column, run, fence, slots));
+                    batch.Wanted.Add((column, run, fence, low, high, slots));
                 }
 
                 // Every run consulted starts as "proves every key absent"; the lookups below lift
@@ -289,7 +294,7 @@ internal sealed class KeyIndexPruner
             }
         }
 
-        foreach ((int origin, IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)>.Batch batch) in batches.ByOrigin)
+        foreach ((int origin, IndexBatches<(Column Column, Run Run, Fence Fence, int Low, int High, int[] Slots)>.Batch batch) in batches.ByOrigin)
         {
             SegmentRequestSet requests = batch.Requests;
             if (requests.Count == 0)
@@ -302,11 +307,11 @@ internal sealed class KeyIndexPruner
             Bytes += bytes;
             await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             using ScanContext context = file.CreateIndexContext(origin);
-            foreach ((Column column, Run run, Fence fence, int[] slots) in batch.Wanted)
+            foreach ((Column column, Run run, Fence fence, int low, int high, int[] slots) in batch.Wanted)
             {
                 context.ResetBatch();
                 if (!Intact(requests, slots, fence)
-                    || !column.Lookup(context, requests, slots, run, fence, live.BlockRows))
+                    || !column.Lookup(context, requests, slots, run, fence, low, high, live.BlockRows))
                 {
                     column.Uncover(run.Meta);
                 }
@@ -357,48 +362,6 @@ internal sealed class KeyIndexPruner
         live.AnyLiveBlocks((long)run.FirstBlock, (long)run.EndBlock);
 
     // ------------------------------------------------------------------------------ the proof
-
-    /// <summary>
-    /// Records, once, which presence sets each question of the filter reads: an equality or an
-    /// <c>IN</c> reads one, fed by its literals; a text match one per trigram it requires.
-    /// </summary>
-    private void Plan(VortexExpr expr)
-    {
-        switch (expr)
-        {
-            case LogicalExpr logical:
-                Plan(logical.Left);
-                Plan(logical.Right);
-                break;
-
-            // A function of a column is not the column, whose keys the index holds.
-            case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal when _columns.TryGetValue(equal.Field.Path, out Column? column):
-                _leaves[expr] = new Leaf(column, column.Ask(equal.Value), 1);
-                break;
-
-            case InExpr { Field: not Compute.FunctionFieldExpr } @in when _columns.TryGetValue(@in.Field.Path, out Column? column):
-                _leaves[expr] = new Leaf(column, column.Ask(@in.Values), 1);
-                break;
-
-            case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
-            {
-                // Absent as soon as one required trigram is: a matching value holds them all.
-                int first = -1;
-                int count = 0;
-                foreach (byte[] trigram in Trigrams.Required(match, text.Fold))
-                {
-                    int set = text.Ask(FilterLiteral.From(trigram));
-                    first = count++ == 0 ? set : first;
-                }
-
-                _leaves[expr] = new Leaf(text, first, count);
-                break;
-            }
-
-            default:
-                break;
-        }
-    }
 
     /// <summary>
     /// Writes into <paramref name="absent"/> the blocks the claims prove <paramref name="expr"/>
@@ -579,29 +542,90 @@ internal sealed class KeyIndexPruner
     }
 
     /// <summary>
-    /// One column's runs and what they claim: the blocks they cover, and per question of the filter
-    /// the blocks where one of its keys was seen. A covered block holds none of a question's keys
-    /// but those its presence set records, so the question is false there.
+    /// What one filter asks of the columns' locating indexes, whatever the file: the literals each
+    /// column is asked for, and what each column layout makes of them.
     /// </summary>
-    private sealed class Column
+    private sealed class Prepared
     {
-        private readonly bool _rows;
-        private readonly KeyLayout _layout;
-        private readonly List<FilterLiteral> _literals;
+        private readonly VortexExpr _filter;
+        private readonly Dictionary<(string Key, KeyLayout Layout, bool Fold), Asked> _asked = [];
 
-        /// <summary>The dtypes a segment's arrays decode as: its keys, and its offsets, block lists or rows.</summary>
-        private readonly DType _keyType;
-        private readonly DType _u32;
-        private readonly DType _u64;
+        internal Prepared(VortexExpr filter)
+        {
+            _filter = filter;
+            CollectEqualities(filter, Equalities, new Dictionary<string, HashSet<FilterLiteral>>(StringComparer.Ordinal), Matches);
+        }
 
+        /// <summary>Per column path, the literals its equalities and <c>IN</c> lists name, each once.</summary>
+        internal Dictionary<string, List<FilterLiteral>> Equalities { get; } = new Dictionary<string, List<FilterLiteral>>(StringComparer.Ordinal);
+
+        /// <summary>Per column path, its text matches.</summary>
+        internal Dictionary<string, List<StringMatchExpr>> Matches { get; } = new Dictionary<string, List<StringMatchExpr>>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// What the column at <paramref name="key"/> is asked under <paramref name="layout"/>, built by
+        /// the first file that needs it. Two lanes may build it at once: both are equal, and one is kept.
+        /// </summary>
+        /// <param name="key">The column's key: its path, or its trigram key.</param>
+        /// <param name="layout">How the column's index orders its keys.</param>
+        /// <param name="fold">For a text index, whether its trigrams were folded.</param>
+        /// <param name="predicates">For a text index, the matches whose trigrams it is asked for; null for values.</param>
+        internal Asked For(string key, KeyLayout layout, bool fold, List<StringMatchExpr>? predicates)
+        {
+            (string, KeyLayout, bool) id = (key, layout, fold);
+            lock (_asked)
+            {
+                if (_asked.TryGetValue(id, out Asked? known))
+                {
+                    return known;
+                }
+            }
+
+            Asked built = new Asked(_filter, key, layout, fold, predicates is null ? Equalities[key] : TrigramsOf(predicates, fold));
+            lock (_asked)
+            {
+                return _asked.TryAdd(id, built) ? built : _asked[id];
+            }
+        }
+
+        /// <summary>
+        /// The trigrams the predicates require, folded as the index was, each once: the literals of a
+        /// text index, whose keys are trigrams typed binary.
+        /// </summary>
+        private static List<FilterLiteral> TrigramsOf(List<StringMatchExpr> predicates, bool fold)
+        {
+            List<FilterLiteral> literals = [];
+            HashSet<FilterLiteral> seen = [];
+            foreach (StringMatchExpr predicate in predicates)
+            {
+                foreach (byte[] trigram in Trigrams.Required(predicate, fold))
+                {
+                    FilterLiteral literal = FilterLiteral.From(trigram);
+                    if (seen.Add(literal))
+                    {
+                        literals.Add(literal);
+                    }
+                }
+            }
+
+            return literals;
+        }
+    }
+
+    /// <summary>
+    /// What a filter asks of one column's locating index, whatever the file: its literals, their keys
+    /// in the column's layout and in the runs' order, and the presence sets each question feeds.
+    /// </summary>
+    /// <remarks>
+    /// Built once per filter and layout and kept with the filter, as the zone maps keep an
+    /// <c>IN</c>'s ordered candidates: for a large set, encoding, indexing and sorting it costs more
+    /// than the lookups, and a dataset would pay it again at each of its objects. Nothing changes it
+    /// once built, so the lanes share it without a lock.
+    /// </remarks>
+    private sealed class Asked
+    {
         /// <summary>Each literal's slot, the first when the filter names one twice.</summary>
         private readonly Dictionary<FilterLiteral, int> _slots;
-        private readonly byte[]?[] _keys;
-        private readonly byte[]?[] _otherZeros;
-
-        /// <summary>The file's blocks, and the words of a bit per block.</summary>
-        private readonly int _blocks;
-        private readonly int _words;
 
         // Per literal slot, the presence sets it feeds, a list threaded through two arrays: each
         // slot's first feed, and per feed its set and the slot's next feed.
@@ -612,14 +636,227 @@ internal sealed class KeyIndexPruner
         /// <summary>Per presence set, whether it can prove absence: its question names keys, and every one encodes.</summary>
         private readonly List<bool> _keyed = [];
 
-        // While a refinement runs: the covered blocks, then each presence set, a bit per block.
-        private ulong[]? _bits;
+        internal Asked(VortexExpr filter, string key, KeyLayout layout, bool fold, List<FilterLiteral> literals)
+        {
+            Layout = layout;
+            Fold = fold;
+            _slots = new Dictionary<FilterLiteral, int>(literals.Count);
+            Keys = new byte[]?[literals.Count];
+            OtherZeros = new byte[]?[literals.Count];
+            _firstFeed = new int[literals.Count];
+            _firstFeed.AsSpan().Fill(-1);
+            Span<byte> scratch = stackalloc byte[sizeof(ulong)];
+            Span<byte> zero = stackalloc byte[sizeof(ulong)];
+            for (int i = 0; i < literals.Count; i++)
+            {
+                _slots.TryAdd(literals[i], i);
+                if (layout.TryEncode(literals[i], scratch, out ReadOnlySpan<byte> encoded, zero, out bool hasOtherZero))
+                {
+                    Keys[i] = encoded.ToArray();
+                    OtherZeros[i] = hasOtherZero ? zero[..layout.Width].ToArray() : null;
+                }
+            }
+
+            Plan(filter, key);
+            FirstFeed = _firstFeed;
+            FeedSet = [.. _feedSet];
+            NextFeed = [.. _nextFeed];
+            Sorted = Sort();
+        }
+
+        /// <summary>How the index orders its keys.</summary>
+        internal KeyLayout Layout { get; }
+
+        /// <summary>For a trigram index, whether its trigrams were folded.</summary>
+        internal bool Fold { get; }
+
+        /// <summary>The literals asked for.</summary>
+        internal int Literals => Keys.Length;
+
+        /// <summary>Each literal's key, or null when it does not encode exactly.</summary>
+        internal byte[]?[] Keys { get; }
+
+        /// <summary>For a float zero, the other zero's key.</summary>
+        internal byte[]?[] OtherZeros { get; }
+
+        /// <summary>Per literal, its first feed, or -1.</summary>
+        internal int[] FirstFeed { get; }
+
+        /// <summary>Per feed, the presence set it fills.</summary>
+        internal int[] FeedSet { get; }
+
+        /// <summary>Per feed, the literal's next feed, or -1.</summary>
+        internal int[] NextFeed { get; }
+
+        /// <summary>The presence sets.</summary>
+        internal int Sets => _keyed.Count;
 
         /// <summary>
         /// The keys the filter asks for, in the runs' own order, with their sort keys: the
-        /// merge-join's left side. Built at the first segment.
+        /// merge-join's left side.
         /// </summary>
-        private (int Literal, byte[] Key, ulong Sort)[]? _sorted;
+        internal (int Literal, byte[] Key, ulong Sort)[] Sorted { get; }
+
+        /// <summary>Each question of the filter the column answers, by reference: its presence sets, <c>Sets</c> from <c>First</c>.</summary>
+        internal Dictionary<VortexExpr, (int First, int Sets)> Questions { get; } =
+            new Dictionary<VortexExpr, (int First, int Sets)>(ReferenceEqualityComparer.Instance);
+
+        /// <summary>Whether presence set <paramref name="set"/> can prove absence.</summary>
+        internal bool Keyed(int set) => _keyed[set];
+
+        /// <summary>
+        /// Records which presence sets each question of the filter on this column reads: an
+        /// equality or an <c>IN</c> reads one, fed by its literals; a text match one per trigram it
+        /// requires.
+        /// </summary>
+        private void Plan(VortexExpr expr, string key)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Plan(logical.Left, key);
+                    Plan(logical.Right, key);
+                    break;
+
+                // A function of a column is not the column, whose keys the index holds.
+                case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal when equal.Field.Path == key:
+                    Questions[expr] = (Ask(equal.Value), 1);
+                    break;
+
+                case InExpr { Field: not Compute.FunctionFieldExpr } @in when @in.Field.Path == key:
+                    Questions[expr] = (Ask(@in.Values), 1);
+                    break;
+
+                case StringMatchExpr match when TrigramKey(match.Field.Path) == key:
+                {
+                    // Absent as soon as one required trigram is: a matching value holds them all.
+                    int first = -1;
+                    int count = 0;
+                    foreach (byte[] trigram in Trigrams.Required(match, Fold))
+                    {
+                        int set = Ask(FilterLiteral.From(trigram));
+                        first = count++ == 0 ? set : first;
+                    }
+
+                    Questions[expr] = (first, count);
+                    break;
+                }
+
+                default:
+                    break;
+            }
+        }
+
+        /// <summary>A question about one literal: a presence set it feeds.</summary>
+        private int Ask(FilterLiteral value)
+        {
+            int set = _keyed.Count;
+            _keyed.Add(Feed(value, set));
+            return set;
+        }
+
+        /// <summary>
+        /// A question about any of <paramref name="values"/>: one presence set they all feed. It
+        /// proves absence only where it names a literal and every one of them encodes.
+        /// </summary>
+        private int Ask(IReadOnlyList<FilterLiteral> values)
+        {
+            int set = _keyed.Count;
+            bool keyed = values.Count > 0;
+            for (int i = 0; i < values.Count; i++)
+            {
+                keyed &= Feed(values[i], set);
+            }
+
+            _keyed.Add(keyed);
+            return set;
+        }
+
+        private bool Feed(FilterLiteral value, int set)
+        {
+            if (!_slots.TryGetValue(value, out int slot))
+            {
+                return false;
+            }
+
+            // A literal a list names twice feeds its set once.
+            int head = _firstFeed[slot];
+            if (head < 0 || _feedSet[head] != set)
+            {
+                _feedSet.Add(set);
+                _nextFeed.Add(head);
+                _firstFeed[slot] = _feedSet.Count - 1;
+            }
+
+            return Keys[slot] is not null;
+        }
+
+        /// <summary>The keys in the runs' order, each with its sort key.</summary>
+        /// <remarks>
+        /// A float's second zero is a key of its own here, pointing at the same literal: two
+        /// entries a run may hold separately, one answer to give.
+        /// </remarks>
+        private (int Literal, byte[] Key, ulong Sort)[] Sort()
+        {
+            int count = 0;
+            for (int i = 0; i < Keys.Length; i++)
+            {
+                count += (Keys[i] is null ? 0 : 1) + (OtherZeros[i] is null ? 0 : 1);
+            }
+
+            (int Literal, byte[] Key, ulong Sort)[] sorted = count == 0 ? [] : new (int, byte[], ulong)[count];
+            int at = 0;
+            for (int i = 0; i < Keys.Length; i++)
+            {
+                Add(sorted, ref at, i, Keys[i]);
+                Add(sorted, ref at, i, OtherZeros[i]);
+            }
+
+            SpanSort.Sort(sorted.AsSpan(), new ByKey(Layout));
+            return sorted;
+
+            void Add((int Literal, byte[] Key, ulong Sort)[] into, ref int next, int literal, byte[]? key)
+            {
+                if (key is not null)
+                {
+                    into[next++] = (literal, key, Layout.Shape == KeyShape.Bytes ? 0 : Layout.SortKey(key));
+                }
+            }
+        }
+
+        /// <summary>Keys in the runs' order: their bytes for a bytes key, their sort key otherwise.</summary>
+        private readonly struct ByKey : IComparer<(int Literal, byte[] Key, ulong Sort)>
+        {
+            private readonly KeyLayout _layout;
+
+            internal ByKey(KeyLayout layout) => _layout = layout;
+
+            public int Compare((int Literal, byte[] Key, ulong Sort) a, (int Literal, byte[] Key, ulong Sort) b) =>
+                _layout.Shape == KeyShape.Bytes ? _layout.Compare(a.Key, b.Key) : a.Sort.CompareTo(b.Sort);
+        }
+    }
+
+    /// <summary>
+    /// One column's runs in one file and what they claim: the blocks they cover, and per question of
+    /// the filter the blocks where one of its keys was seen. A covered block holds none of a
+    /// question's keys but those its presence set records, so the question is false there.
+    /// </summary>
+    private sealed class Column
+    {
+        private readonly bool _rows;
+        private readonly KeyLayout _layout;
+
+        /// <summary>The dtypes a segment's arrays decode as: its keys, and its offsets, block lists or rows.</summary>
+        private readonly DType _keyType;
+        private readonly DType _u32;
+        private readonly DType _u64;
+
+        /// <summary>The file's blocks, and the words of a bit per block.</summary>
+        private readonly int _blocks;
+        private readonly int _words;
+
+        // While a refinement runs: the covered blocks, then each presence set, a bit per block.
+        private ulong[]? _bits;
 
         /// <summary>One segment's matches: per literal, the entries equal to its key.</summary>
         private readonly List<(int Literal, int Low, int High)> _matches = [];
@@ -627,12 +864,11 @@ internal sealed class KeyIndexPruner
         /// <summary>Whether the runs place each key at its rows, as sorted runs do, rather than at its blocks.</summary>
         internal bool Rows => _rows;
 
-        internal Column(
-            bool rows, KeyLayout layout, DType storage, List<Run> runs, List<FilterLiteral> literals, int blocks, bool fold)
+        internal Column(bool rows, Asked asked, DType storage, List<Run> runs, int blocks)
         {
-            Fold = fold;
+            Asked = asked;
             _rows = rows;
-            _layout = layout;
+            _layout = asked.Layout;
             DTypeArena types = new DTypeArena();
             _keyType = storage.Kind == DTypeKind.Primitive
                 ? types.Primitive(storage.PType, Nullability.NonNullable)
@@ -642,26 +878,12 @@ internal sealed class KeyIndexPruner
             _u32 = types.Primitive(PType.U32, Nullability.NonNullable);
             _u64 = types.Primitive(PType.U64, Nullability.NonNullable);
             Runs = runs;
-            _literals = literals;
-            _slots = new Dictionary<FilterLiteral, int>(literals.Count);
-            _keys = new byte[]?[literals.Count];
-            _otherZeros = new byte[]?[literals.Count];
             _blocks = blocks;
             _words = (blocks + 63) >> 6;
-            _firstFeed = new int[literals.Count];
-            _firstFeed.AsSpan().Fill(-1);
-            Span<byte> scratch = stackalloc byte[sizeof(ulong)];
-            Span<byte> zero = stackalloc byte[sizeof(ulong)];
-            for (int i = 0; i < literals.Count; i++)
-            {
-                _slots.TryAdd(literals[i], i);
-                if (layout.TryEncode(literals[i], scratch, out ReadOnlySpan<byte> key, zero, out bool hasOtherZero))
-                {
-                    _keys[i] = key.ToArray();
-                    _otherZeros[i] = hasOtherZero ? zero[..layout.Width].ToArray() : null;
-                }
-            }
         }
+
+        /// <summary>What the filter asks of the column, shared with every file it is asked of.</summary>
+        internal Asked Asked { get; }
 
         internal List<Run> Runs { get; }
 
@@ -671,56 +893,116 @@ internal sealed class KeyIndexPruner
         /// </summary>
         internal string? DictionaryPath { get; init; }
 
-        /// <summary>For a trigram index, whether its trigrams were folded.</summary>
-        internal bool Fold { get; }
-
         internal int Stride => _rows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
 
         /// <summary>
         /// The segments of <paramref name="table"/> whose range may hold one of the column's keys,
-        /// each once, in segment order: per key, a descent to the first segment whose last key does
-        /// not come before it, and the segments after it whose first key does not pass it.
+        /// each once, in segment order, with the keys of its range: <c>[Low, High)</c> of the keys
+        /// in the runs' order.
         /// </summary>
-        internal async ValueTask<List<Fence>> CandidatesAsync(
+        /// <remarks>
+        /// The keys and the segments are walked together, as two sorted lists are merged, so that
+        /// each segment is asked about its own keys only. A key past the segment at hand is reached
+        /// by steps to the next segments while they cost less than a descent, which compares about
+        /// log₂ of the segments, and by a descent past that: keys thick in the run cost a step each,
+        /// keys far apart a descent each. A run in pages is only descended, since a step could read
+        /// a page no key needs, which a descent never does.
+        /// </remarks>
+        internal async ValueTask<List<(Fence Fence, int Low, int High)>> CandidatesAsync(
             ISegmentReader source, FenceTable table, CancellationToken cancellationToken)
         {
-            SortedDictionary<long, Fence> found = [];
-            for (int i = 0; i < _keys.Length; i++)
+            List<(Fence Fence, int Low, int High)> found = [];
+            (int Literal, byte[] Key, ulong Sort)[] sorted = Asked.Sorted;
+            long count = table.SegmentCount;
+            int reach = table.Paged ? 0 : 64 - BitOperations.LeadingZeroCount((ulong)count);
+            int next = 0;
+            long segment = 0;
+            while (next < sorted.Length && segment < count)
             {
-                for (int zero = 0; zero < 2; zero++)
+                // The first segment from here whose last key does not come before the next key.
+                byte[] key = sorted[next].Key;
+                Fence fence = default;
+                bool reached = false;
+                for (int step = 0; step < reach && segment < count; step++, segment++)
                 {
-                    if ((zero == 0 ? _keys[i] : _otherZeros[i]) is not { } key)
+                    fence = await table.GetAsync(source, segment, cancellationToken).ConfigureAwait(false);
+                    if (fence.Bounds.Entries > 0 && _layout.Compare(fence.Bounds.Max, key) >= 0)
                     {
-                        continue;
+                        reached = true;
+                        break;
+                    }
+                }
+
+                if (!reached)
+                {
+                    long bound = await table.LowerBoundAsync(source, new KeyProbe(_layout, key), cancellationToken).ConfigureAwait(false);
+                    segment = Math.Max(segment, bound);
+                    if (segment >= count)
+                    {
+                        break;
                     }
 
-                    long s = await table.LowerBoundAsync(source, new KeyProbe(_layout, key), cancellationToken).ConfigureAwait(false);
-                    for (; s < table.SegmentCount; s++)
-                    {
-                        Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
-                        if (fence.Bounds.Entries == 0)
-                        {
-                            continue;
-                        }
+                    fence = await table.GetAsync(source, segment, cancellationToken).ConfigureAwait(false);
+                }
 
-                        if (_layout.Compare(fence.Bounds.Min, key) > 0)
-                        {
-                            break;
-                        }
+                // Its keys: from the first that does not come before its first key, up to its last.
+                // A key that falls between two segments is in neither, and is passed over here.
+                int low = Seek(sorted, next, fence.Bounds.Min, past: false);
+                int high = Seek(sorted, low, fence.Bounds.Max, past: true);
+                if (high > low)
+                {
+                    found.Add((fence, low, high));
+                }
 
-                        found.TryAdd(s, fence);
+                // A key equal to the segment's last may open the next segment too.
+                next = Seek(sorted, low, fence.Bounds.Max, past: false);
+                segment++;
+            }
 
-                        // A segment that ends past the key is the last that can hold it: the next
-                        // fence, perhaps on another page, is not read.
-                        if (_layout.Compare(fence.Bounds.Max, key) > 0)
-                        {
-                            break;
-                        }
-                    }
+            return found;
+        }
+
+        /// <summary>
+        /// The first of <paramref name="sorted"/> from <paramref name="from"/> that does not come
+        /// before <paramref name="bound"/>, or that comes after it when <paramref name="past"/>:
+        /// strides that double, then a binary search in the last, so that a short way costs a few
+        /// comparisons and a long one its logarithm.
+        /// </summary>
+        private int Seek((int Literal, byte[] Key, ulong Sort)[] sorted, int from, byte[] bound, bool past)
+        {
+            ulong sort = _layout.Shape == KeyShape.Bytes ? 0 : _layout.SortKey(bound);
+            int low = from;
+            int high = from;
+            int stride = 1;
+            while (high < sorted.Length && Before(sorted[high], bound, sort, past))
+            {
+                low = high + 1;
+                high += stride;
+                stride <<= 1;
+            }
+
+            high = Math.Min(high, sorted.Length);
+            while (low < high)
+            {
+                int mid = (low + high) >>> 1;
+                if (Before(sorted[mid], bound, sort, past))
+                {
+                    low = mid + 1;
+                }
+                else
+                {
+                    high = mid;
                 }
             }
 
-            return [.. found.Values];
+            return low;
+        }
+
+        /// <summary>Whether a key comes before <paramref name="bound"/>, or does not pass it when <paramref name="past"/>.</summary>
+        private bool Before((int Literal, byte[] Key, ulong Sort) pair, byte[] bound, ulong sort, bool past)
+        {
+            int sign = _layout.Shape == KeyShape.Bytes ? _layout.Compare(pair.Key, bound) : pair.Sort.CompareTo(sort);
+            return past ? sign <= 0 : sign < 0;
         }
 
         /// <summary>
@@ -751,20 +1033,21 @@ internal sealed class KeyIndexPruner
             }
 
             Fill(Covered, first, end, true);
-            for (int i = 0; i < _keys.Length; i++)
+            byte[]?[] keys = Asked.Keys;
+            for (int i = 0; i < keys.Length; i++)
             {
-                if (_keys[i] is not { } key)
+                if (keys[i] is not { } key)
                 {
                     continue;
                 }
 
                 // The two zeros of a float are one literal, and a dictionary may hold either.
                 if (source.DictionaryHolds(chunk, key)
-                    || (_otherZeros[i] is { } other && source.DictionaryHolds(chunk, other)))
+                    || (Asked.OtherZeros[i] is { } other && source.DictionaryHolds(chunk, other)))
                 {
-                    for (int feed = _firstFeed[i]; feed >= 0; feed = _nextFeed[feed])
+                    for (int feed = Asked.FirstFeed[i]; feed >= 0; feed = Asked.NextFeed[feed])
                     {
-                        Fill(Set(_feedSet[feed]), first, end, true);
+                        Fill(Set(Asked.FeedSet[feed]), first, end, true);
                     }
                 }
             }
@@ -776,37 +1059,10 @@ internal sealed class KeyIndexPruner
         /// <summary>Lifts the run's claim: a lookup in it failed.</summary>
         internal void Uncover(IndexRun run) => Fill(Covered, run.FirstBlock, run.EndBlock, false);
 
-        /// <summary>A question about one literal: a presence set it feeds.</summary>
-        /// <returns>The set.</returns>
-        internal int Ask(FilterLiteral value)
-        {
-            int set = _keyed.Count;
-            _keyed.Add(Feed(value, set));
-            return set;
-        }
-
-        /// <summary>
-        /// A question about any of <paramref name="values"/>: one presence set they all feed. It
-        /// proves absence only where it names a literal and every one of them encodes.
-        /// </summary>
-        /// <returns>The set.</returns>
-        internal int Ask(IReadOnlyList<FilterLiteral> values)
-        {
-            int set = _keyed.Count;
-            bool keyed = values.Count > 0;
-            for (int i = 0; i < values.Count; i++)
-            {
-                keyed &= Feed(values[i], set);
-            }
-
-            _keyed.Add(keyed);
-            return set;
-        }
-
         /// <summary>Takes the bits a refinement fills, no block claimed.</summary>
         internal void Rent()
         {
-            int length = (1 + _keyed.Count) * _words;
+            int length = (1 + Asked.Sets) * _words;
             _bits = ArrayPool<ulong>.Shared.Rent(length);
             _bits.AsSpan(0, length).Clear();
         }
@@ -827,7 +1083,7 @@ internal sealed class KeyIndexPruner
         /// </summary>
         internal void OrAbsent(int set, Span<ulong> absent)
         {
-            if (!_keyed[set])
+            if (!Asked.Keyed(set))
             {
                 return;
             }
@@ -845,26 +1101,6 @@ internal sealed class KeyIndexPruner
 
         private Span<ulong> Set(int set) => _bits.AsSpan((1 + set) * _words, _words);
 
-        /// <summary>Makes <paramref name="value"/>'s slot feed <paramref name="set"/>; whether the literal has a key.</summary>
-        private bool Feed(FilterLiteral value, int set)
-        {
-            if (!_slots.TryGetValue(value, out int slot))
-            {
-                return false;
-            }
-
-            // A literal a list names twice feeds its set once.
-            int head = _firstFeed[slot];
-            if (head < 0 || _feedSet[head] != set)
-            {
-                _feedSet.Add(set);
-                _nextFeed.Add(head);
-                _firstFeed[slot] = _feedSet.Count - 1;
-            }
-
-            return _keys[slot] is not null;
-        }
-
         /// <summary>Sets or clears the bits of blocks [<paramref name="first"/>, <paramref name="end"/>).</summary>
         private static void Fill(Span<ulong> bits, ulong first, ulong end, bool value) =>
             BitmapKernels.FillRange(MemoryMarshal.AsBytes(bits), (int)first, (int)(end - first), value);
@@ -873,7 +1109,7 @@ internal sealed class KeyIndexPruner
         /// Decodes one segment's arrays and marks, for every literal, the blocks that hold it.
         /// </summary>
         /// <returns>Whether the segment made sense.</returns>
-        internal bool Lookup(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, Fence fence, long blockRows)
+        internal bool Lookup(ScanContext context, SegmentRequestSet requests, int[] slots, Run run, Fence fence, int low, int high, long blockRows)
         {
             ulong expected = fence.Bounds.Entries;
             if (expected > int.MaxValue)
@@ -904,15 +1140,15 @@ internal sealed class KeyIndexPruner
                         return false;
                     }
 
-                    foreach ((int literal, int low, int high) in Match(keyNode))
+                    foreach ((int literal, int first, int end) in Match(keyNode, low, high))
                     {
                         if (wide)
                         {
-                            MarkRows(literal, low, high, rows.Values.Cast<ulong>(), firstBlock, blockRows);
+                            MarkRows(literal, first, end, rows.Values.Cast<ulong>(), firstBlock, blockRows);
                         }
                         else
                         {
-                            MarkRows(literal, low, high, rows.Values.Cast<uint>(), firstBlock, blockRows);
+                            MarkRows(literal, first, end, rows.Values.Cast<uint>(), firstBlock, blockRows);
                         }
                     }
 
@@ -936,9 +1172,9 @@ internal sealed class KeyIndexPruner
                 }
 
                 ReadOnlySpan<uint> blocks = lists.Values.Cast<uint>();
-                foreach ((int literal, int low, int high) in Match(keyNode))
+                foreach ((int literal, int first, int end) in Match(keyNode, low, high))
                 {
-                    MarkPostings(literal, low, high, starts, blocks, firstBlock);
+                    MarkPostings(literal, first, end, starts, blocks, firstBlock);
                 }
 
                 return true;
@@ -1000,60 +1236,12 @@ internal sealed class KeyIndexPruner
             ulong[] bits = _bits!;
             int word = (int)(block >> 6);
             ulong bit = 1UL << (int)(block & 63);
-            for (int feed = _firstFeed[literal]; feed >= 0; feed = _nextFeed[feed])
+            int[] next = Asked.NextFeed;
+            int[] sets = Asked.FeedSet;
+            for (int feed = Asked.FirstFeed[literal]; feed >= 0; feed = next[feed])
             {
-                bits[((1 + _feedSet[feed]) * _words) + word] |= bit;
+                bits[((1 + sets[feed]) * _words) + word] |= bit;
             }
-        }
-
-        /// <summary>The filter's keys in the runs' order, each with its sort key.</summary>
-        /// <remarks>
-        /// A float's second zero is a key of its own here, pointing at the same literal: two
-        /// entries a run may hold separately, one answer to give.
-        /// </remarks>
-        private (int Literal, byte[] Key, ulong Sort)[] Sorted()
-        {
-            if (_sorted is { } built)
-            {
-                return built;
-            }
-
-            int count = 0;
-            for (int i = 0; i < _keys.Length; i++)
-            {
-                count += (_keys[i] is null ? 0 : 1) + (_otherZeros[i] is null ? 0 : 1);
-            }
-
-            (int Literal, byte[] Key, ulong Sort)[] sorted = count == 0 ? [] : new (int, byte[], ulong)[count];
-            int at = 0;
-            for (int i = 0; i < _keys.Length; i++)
-            {
-                Add(sorted, ref at, i, _keys[i]);
-                Add(sorted, ref at, i, _otherZeros[i]);
-            }
-
-            SpanSort.Sort(sorted.AsSpan(), new ByKey(_layout));
-            _sorted = sorted;
-            return sorted;
-
-            void Add((int Literal, byte[] Key, ulong Sort)[] into, ref int next, int literal, byte[]? key)
-            {
-                if (key is not null)
-                {
-                    into[next++] = (literal, key, _layout.Shape == KeyShape.Bytes ? 0 : _layout.SortKey(key));
-                }
-            }
-        }
-
-        /// <summary>Keys in the runs' order: their bytes for a bytes key, their sort key otherwise.</summary>
-        private readonly struct ByKey : IComparer<(int Literal, byte[] Key, ulong Sort)>
-        {
-            private readonly KeyLayout _layout;
-
-            internal ByKey(KeyLayout layout) => _layout = layout;
-
-            public int Compare((int Literal, byte[] Key, ulong Sort) a, (int Literal, byte[] Key, ulong Sort) b) =>
-                _layout.Shape == KeyShape.Bytes ? _layout.Compare(a.Key, b.Key) : a.Sort.CompareTo(b.Sort);
         }
 
         /// <summary>
@@ -1065,13 +1253,16 @@ internal sealed class KeyIndexPruner
         /// keys costs <c>entries + keys</c>, so few keys favour the searches and many the walk.
         /// Both compare sort keys rather than bytes — a fixed-width key is one unsigned integer in
         /// the run's own order (<see cref="KeyLayout.SortKey"/>) — which makes a comparison a
-        /// single integer comparison instead of a span walk.
+        /// single integer comparison instead of a span walk. The keys are those of the segment's
+        /// range only, so a large set costs each segment its own share of it.
         /// </remarks>
         /// <param name="keys">The segment's decoded keys.</param>
-        private List<(int Literal, int Low, int High)> Match(CanonicalNode keys)
+        /// <param name="from">The first of the sorted keys in the segment's range.</param>
+        /// <param name="to">The one past the last.</param>
+        private List<(int Literal, int Low, int High)> Match(CanonicalNode keys, int from, int to)
         {
             _matches.Clear();
-            (int Literal, byte[] Key, ulong Sort)[] sorted = Sorted();
+            ReadOnlySpan<(int Literal, byte[] Key, ulong Sort)> sorted = Asked.Sorted.AsSpan(from, to - from);
             int entries = keys.Length;
             if (sorted.Length == 0 || entries == 0)
             {
