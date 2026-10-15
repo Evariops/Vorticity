@@ -70,9 +70,16 @@ turns any truncation into a stated error rather than a shorter object.
 The header holds the version, its parent, the schema and the names its columns gave up (see [schema
 evolution](#13-schema-evolution)), the clustering key, the indexes every writer builds into the
 objects it writes (see [fragments](#64-fragments-in-commit-objects-transient)), the tree's chunking
-parameters and seed, the compaction and retention settings, and, per level, where its last
-round-robin compaction stopped and its top page inlined, with the pages below it as long as the
-header stays within 192 KiB. One ranged read of the first 256 KiB opens a commit. The pages region
+parameters and seed, the compaction and retention settings, the last version that changed rows, and,
+per level, where its last round-robin compaction stopped and its top page inlined, with the pages
+below it as long as the header stays within 192 KiB.
+
+The last version that changed rows is set by a commit of rows or of the schema one of whose
+operations applied, to its own version, and copied from the parent by every other commit, a
+compaction, an index fragment, a repack or a rekey, so that a result worked out at a version is known
+to hold from the header alone. A writer that predates the field writes a header without it, and such a
+header reads as its own version: the field needs no new format, since its absence only makes a
+reader recompute what it might have kept. One ranged read of the first 256 KiB opens a commit. The pages region
 follows the header, so a page the commit wrote itself that ends inside those 256 KiB is not inlined,
 since the read that opens the commit brings it back once, where inlined it would be written twice.
 Nor is a leaf holding an object with marked rows (see [deleting rows](#12-deleting-and-updating-rows))

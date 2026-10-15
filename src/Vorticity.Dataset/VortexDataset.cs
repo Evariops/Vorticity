@@ -70,6 +70,19 @@ public sealed class VortexDataset : IAsyncDisposable
     public ulong Version => Snapshot.Version;
 
     /// <summary>
+    /// The last version whose commit changed rows, as the version this handle reads records it: an
+    /// append, an import, a delete, an update, a replacement of objects or a change of schema. A
+    /// compaction, an index fragment, a repack or a rekey creates a version without moving it, so a
+    /// result worked out at a version at or after it still holds.
+    /// </summary>
+    /// <remarks>
+    /// A version written by a library that predates the field records nothing, and reads as that
+    /// version itself until a commit that knows the field changes rows: no later change, which is all
+    /// that can be said.
+    /// </remarks>
+    public ulong LastDataChange => DatasetCommitter.LastDataChangeOf(Snapshot.Header, Snapshot.Version);
+
+    /// <summary>
     /// The dataset's columns at the version this handle reads. An object written under an earlier
     /// schema reads as this one: a column it lacks as nulls, a column renamed under its new name.
     /// </summary>

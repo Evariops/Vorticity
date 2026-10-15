@@ -150,6 +150,23 @@ may have lost its objects to vacuum, and then fails to open, or to read, with
 `ObjectNotFoundException`, never with a part of its rows. So a version number handed around has to
 be used well inside the window.
 
+Most versions of a busy dataset change no row: a compaction, an index or a repack only moves them.
+`LastDataChange` is the last version that changed rows, which an append, an import, a delete, an
+update, a replacement of objects or a change of schema makes, and every other commit copies:
+
+```csharp
+ulong changed = dataset.LastDataChange;
+await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 });
+```
+
+```
+after a compaction: version 12, rows last changed at version 11, as before (11)
+```
+
+So a result worked out at version V still holds while `LastDataChange` is at most V, however many
+compactions came since, and the version the handle reads is enough to tell. A version written by a
+library that predates the field reads as its own version, which is all that can be said of it.
+
 ## Removing and replacing objects
 
 ```csharp

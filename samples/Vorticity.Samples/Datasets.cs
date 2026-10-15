@@ -101,7 +101,6 @@ internal static class Datasets
         {
             Console.WriteLine($"version 2 opened by its number: {past.RowCount} rows, {past.ObjectCount} object");
         }
-
         DataObject first = objects[0];
         await using (ObjectDraft rewritten = dataset.StartObject())
         {
@@ -141,6 +140,12 @@ internal static class Datasets
         Console.WriteLine($"evolved: version {evolved}, columns {string.Join(", ", dataset.Schema.Select(field => field.Name))}");
         Console.WriteLine($"  humidity above 50: {humid} rows; unknown, in every row written before: {unknown} rows");
         Console.WriteLine($"  a row written before: {earlier}");
+
+        // A compaction creates a version and changes no row: what was worked out at the last change
+        // of rows still holds.
+        ulong changed = dataset.LastDataChange;
+        await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 });
+        Console.WriteLine($"after a compaction: version {dataset.Version}, rows last changed at version {dataset.LastDataChange}, as before ({changed})");
     }
 
     private static Observation[] Observations(int firstDay, int days)

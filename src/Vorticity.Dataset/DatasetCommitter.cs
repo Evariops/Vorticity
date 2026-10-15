@@ -299,6 +299,7 @@ internal static class DatasetCommitter
                 Schema = schema.Schema,
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
+                LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
                 Starts = starts,
             };
             header = Fitted(WithoutHeld(header));
@@ -1210,6 +1211,22 @@ internal static class DatasetCommitter
     }
 
     /// <summary>The schema a commit leaves, as its operations change it.</summary>
+    /// <summary>
+    /// Whether an attempt changes rows: the creation, or a commit of rows or of the schema one of whose
+    /// operations applied. A compaction, an index fragment, a repack and a rekey only move rows.
+    /// </summary>
+    private static bool ChangesRows(CommitKind kind, List<OperationOutcome> outcomes) =>
+        kind == CommitKind.Create
+        || (kind is CommitKind.Append or CommitKind.Import or CommitKind.Replace or CommitKind.Delete or CommitKind.Update or CommitKind.Schema
+            && outcomes.Contains(OperationOutcome.Applied));
+
+    /// <summary>
+    /// The last change of rows a version records, or, when a writer that does not know the field wrote
+    /// it, the version itself: no later one, which is all that can be said.
+    /// </summary>
+    internal static ulong LastDataChangeOf(CommitHeader header, ulong version) =>
+        header.LastDataChange != 0 ? Math.Min(header.LastDataChange, version) : version;
+
     private sealed class SchemaEdit(ReadOnlyMemory<byte> schema, IReadOnlyList<RetiredColumn> retired)
     {
         internal ReadOnlyMemory<byte> Schema { get; set; } = schema;

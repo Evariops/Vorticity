@@ -2878,6 +2878,7 @@ Vorticity.Dataset:     property bool IsEncrypted { get; }
 Vorticity.Dataset:     property long Lag { get; }
 Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
+Vorticity.Dataset:     property ulong LastDataChange { get; }
 Vorticity.Dataset:     property ulong Version { get; }
 Vorticity.RowEncoding: static class Vorticity.RowEncoding.RowEncoder
 Vorticity.RowEncoding:     const string VortexVersion = 0.86.1

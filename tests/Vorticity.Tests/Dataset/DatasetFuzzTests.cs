@@ -401,6 +401,10 @@ public sealed class DatasetFuzzTests
         // it opens by number after each step: one vacuum took answers ObjectNotFoundException, at the
         // open or at the read, and one it left answers every row it had.
         Dictionary<ulong, long> rowsAt = new Dictionary<ulong, long> { [dataset.Version] = 0 };
+
+        // And the last version that changed rows, which only an append moves here: the creation's
+        // until the first one, then each append's, whatever moves the rows in between.
+        Dictionary<ulong, ulong> changeAt = new Dictionary<ulong, ulong> { [dataset.Version] = dataset.Version };
         ulong recorded = dataset.Version;
         Random picks = new Random(seed + 1);
         int gone = 0;
@@ -408,11 +412,13 @@ public sealed class DatasetFuzzTests
         {
             clock.Advance(TimeSpan.FromMinutes(random.Next(90)));
             VortexDataset handle = handles[random.Next(2)];
+            bool appended = false;
             switch (rows == 0 ? 0 : random.Next(4))
             {
                 case 0:
                     await handle.AppendAsync(Batches(types, schema, rows, 300), ct);
                     rows += 300;
+                    appended = true;
                     break;
 
                 case 1:
@@ -468,8 +474,10 @@ public sealed class DatasetFuzzTests
             for (; recorded < dataset.Version; recorded++)
             {
                 rowsAt[recorded + 1] = rows;
+                changeAt[recorded + 1] = appended ? recorded + 1 : changeAt[recorded];
             }
 
+            Assert.Equal(changeAt[dataset.Version], dataset.LastDataChange);
             ulong opened = (ulong)picks.Next(1, (int)dataset.Version + 1);
             try
             {
@@ -478,6 +486,7 @@ public sealed class DatasetFuzzTests
                 held.Sort();
                 Assert.Equal(rowsAt[opened], held.Count);
                 Assert.Equal(rowsAt[opened] == 0 ? 0 : rowsAt[opened] - 1, held.Count == 0 ? 0 : held[^1]);
+                Assert.Equal(changeAt[opened], past.LastDataChange);
             }
             catch (ObjectNotFoundException)
             {
