@@ -3,10 +3,13 @@
 //
 // A file of `Blocks` blocks of 64 rows whose Int64 key column holds a key of its own on every row,
 // scattered, under a Bloom index of three resolutions: a filter per block, per sixteen blocks, and
-// above. The filter asks for `Literals` keys, an equality for one and an IN list for more, each held
-// by one row and the rows spread over the file, so that about that many blocks stay live, the
-// filters' false positives aside. The pruner is built and refines a fresh mask. Run in a checkout
-// of the original and in the tree.
+// above, sized for a false-positive rate of `Ppm` parts per million. The filter asks for `Literals`
+// keys, an equality for one and an IN list for more, each held by one row and the rows spread over
+// the file, so that about that many blocks stay live, the filters' false positives aside. The pruner
+// is built and refines a fresh mask, asking the filters while they pay for themselves (`rule`) or
+// every one of them (`always`), and the setup prints the blocks left live. `Unpruned` is the scan
+// of the whole file under the filter with the indexes off: what never asking costs, a block at a
+// time. Run in a checkout of the original and in the tree.
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -39,8 +42,16 @@ public class BloomPruneBenchmarks
     public int Blocks { get; set; }
 
     /// <summary>Keys the filter asks for.</summary>
-    [Params(1, 64)]
+    [Params(1, 64, 1_024, 16_384, 131_072)]
     public int Literals { get; set; }
+
+    /// <summary>The false-positive rate the filters were sized for, in parts per million.</summary>
+    [Params(10_000, 100)]
+    public int Ppm { get; set; }
+
+    /// <summary>Which filters the pruner asks: while they pay for themselves, or all of them.</summary>
+    [Params("rule", "always")]
+    public string Asking { get; set; } = "rule";
 
     private string _path = null!;
     private VortexFile _file = null!;
@@ -65,10 +76,12 @@ public class BloomPruneBenchmarks
             ? Expr.Eq(Expr.Field("key"), Expr.Literal(values[0]))
             : Expr.In(Expr.Field("key"), values);
         int live = Prune();
-        if (live < Literals || live > Blocks / 4)
+        if (live < Math.Min(Literals, Blocks))
         {
             throw new InvalidOperationException($"The filters left {live} blocks for {Literals} literals.");
         }
+
+        Console.Out.WriteLine($"BLOOM PRUNE {Blocks} blocks, {Literals} literals, {Ppm} ppm, {Asking}: {live} blocks live");
     }
 
     /// <summary>Closes and deletes the file.</summary>
@@ -83,14 +96,27 @@ public class BloomPruneBenchmarks
     [Benchmark]
     public int Prune() => PruneAsync().GetAwaiter().GetResult();
 
+    /// <summary>The whole file scanned under the filter, the indexes off: the rows it selects.</summary>
+    [Benchmark]
+    public long Unpruned() => UnprunedAsync().GetAwaiter().GetResult();
+
     private async Task<int> PruneAsync()
     {
         BloomPruner pruner = await BloomPruner.BuildAsync(_file, _filter, BlockRows, default).ConfigureAwait(false)
             ?? throw new InvalidOperationException("The file offers no Bloom index.");
+        if (Asking == "always")
+        {
+            pruner.BlockWorth = long.MaxValue;
+        }
+
         BlockMask live = new BlockMask(_file.RowCount, BlockRows);
         await pruner.RefineAsync(_file, live, default).ConfigureAwait(false);
         return live.LiveCount;
     }
+
+    private async Task<long> UnprunedAsync() =>
+        await _file.Scan("key").Where(_filter).With(new ScanOptions { UseIndexes = false, UseStatistics = false })
+            .CountAsync().ConfigureAwait(false);
 
     /// <summary>Row <paramref name="row"/>'s key: a multiplication by an odd number, one to one on 32 bits.</summary>
     private static long Key(long row) => (row * 2_654_435_761L) & 0xFFFF_FFFFL;
@@ -115,7 +141,7 @@ public class BloomPruneBenchmarks
         {
             RowBlockSize = BlockRows,
             IndexBudgetPerMille = 1_000_000,
-            WritePolicy = WritePolicy.None.For("key", IndexSpec.Bloom(resolutions: 3)),
+            WritePolicy = WritePolicy.None.For("key", IndexSpec.Bloom(falsePositivePpm: Ppm, resolutions: 3)),
         };
 
         await using VortexFileWriter writer = VortexFileWriter.Create(_path, schema, options);
