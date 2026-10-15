@@ -22,8 +22,8 @@ public sealed record CompactionSchedule
 
     /// <summary>
     /// How long the loop sleeps when nothing is due for it before it asks again; a minute by default.
-    /// Each wake is a refresh, one head request, and a plan, which reads the pages the handle does
-    /// not hold already.
+    /// Each wake is a refresh, one round trip, and a plan, which reads the pages the handle does not
+    /// hold already.
     /// </summary>
     public TimeSpan Idle { get; init; } = TimeSpan.FromMinutes(1);
 

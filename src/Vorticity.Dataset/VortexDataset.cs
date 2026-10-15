@@ -53,6 +53,10 @@ public sealed class VortexDataset : IAsyncDisposable
     // The store the handle made for a local directory it was given by location, which it disposes.
     private IObjectStore? _ownedStore;
 
+    // The location the handle was opened at, as its caller named it, which tags the activities of its
+    // commits, compactions and vacuums; null for a handle given a store.
+    private string? _location;
+
     private VortexDataset(IObjectStore store, DatasetOptions options, ulong version, CommitObject commit, DateTimeOffset knownAt)
     {
         _store = store;
@@ -108,6 +112,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>The store it reads and writes.</summary>
     internal IObjectStore Store => _store;
+
+    /// <summary>The location it was opened at, as its caller named it; null for a handle given a store.</summary>
+    internal string? Location => _location;
 
     /// <summary>How many of its open objects a read holds: none once every read has given its objects back.</summary>
     internal int LeasedObjects => _objects.Leased;
@@ -183,7 +190,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(schema);
         options ??= new DatasetOptions();
         (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
-        return OwningAsync(CreateAsync(store, schema, options, cancellationToken), owned);
+        return OwningAsync(CreateAtAsync(store, VortexTypes.ToDType(schema, new DTypeArena()), options, location, cancellationToken), owned, location);
     }
 
     /// <summary>
@@ -200,7 +207,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         options ??= new DatasetOptions();
         (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
-        return OwningAsync(OpenAsync(store, options, cancellationToken), owned);
+        return OwningAsync(OpenAsync(store, options, cancellationToken), owned, location);
     }
 
     /// <summary>
@@ -260,7 +267,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         options ??= new DatasetOptions();
         (IObjectStore store, IObjectStore? owned) = StoreAt(location, options);
-        return OwningAsync(OpenAsync(store, version, options, cancellationToken), owned);
+        return OwningAsync(OpenAsync(store, version, options, cancellationToken), owned, location);
     }
 
     /// <summary>
@@ -389,7 +396,7 @@ public sealed class VortexDataset : IAsyncDisposable
         await sealedStore.RekeyAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            CommitResult result = await CommitAsync([new DatasetOperation.Rekey()], cancellationToken).ConfigureAwait(false);
+            CommitResult result = await CommitAsync([new DatasetOperation.Rekey()], CommitKind.Rekey, cancellationToken).ConfigureAwait(false);
             return result.Version;
         }
         finally
@@ -566,7 +573,7 @@ public sealed class VortexDataset : IAsyncDisposable
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
         return written is { } produced
-            ? await ApplyAsync([new DatasetOperation.AddObject(produced.Key, produced.Entry)], cancellationToken).ConfigureAwait(false)
+            ? await ApplyAsync([new DatasetOperation.AddObject(produced.Key, produced.Entry)], CommitKind.Append, cancellationToken).ConfigureAwait(false)
             : Version;
     }
 
@@ -669,7 +676,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         return await ApplyAsync(
-            [new DatasetOperation.AddObject(treeKey, entry)], cancellationToken).ConfigureAwait(false);
+            [new DatasetOperation.AddObject(treeKey, entry)], CommitKind.Import, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -772,7 +779,8 @@ public sealed class VortexDataset : IAsyncDisposable
             return new ReplaceResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };
         }
 
-        CommitResult commit = await CommitAsync([new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }], cancellationToken)
+        CommitResult commit = await CommitAsync(
+                [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }], CommitKind.Replace, cancellationToken)
             .ConfigureAwait(false);
         if (outputs.Count > 0 && commit.Outcomes[0] == OperationOutcome.Applied)
         {
@@ -932,7 +940,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         IReadOnlyList<RetiredColumn> retired = current.Evolve(next, renamed);
-        CommitResult commit = await CommitAsync([new DatasetOperation.ChangeSchema(current.Bytes, bytes, retired)], cancellationToken)
+        CommitResult commit = await CommitAsync([new DatasetOperation.ChangeSchema(current.Bytes, bytes, retired)], CommitKind.Schema, cancellationToken)
             .ConfigureAwait(false);
         return commit.Outcomes[0] is OperationOutcome.Applied or OperationOutcome.AlreadyThere
             ? commit.Version
@@ -1006,7 +1014,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the marking and the deletes.</param>
     /// <returns>What vacuum kept and deleted.</returns>
     public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
-        DatasetVacuum.RunAsync(_store, options, cancellationToken);
+        DatasetVacuum.RunAsync(_store, options, _location, cancellationToken);
 
     /// <summary>
     /// Checks this version's pages, objects and fragments against what its references and entries
@@ -1050,13 +1058,17 @@ public sealed class VortexDataset : IAsyncDisposable
         return (directory, directory);
     }
 
-    /// <summary>Hands the handle the store it made, or disposes the store when no handle came of it.</summary>
-    private static async ValueTask<VortexDataset> OwningAsync(ValueTask<VortexDataset> opening, IObjectStore? owned)
+    /// <summary>
+    /// Hands the handle the store it made and the location it was opened at, or disposes the store
+    /// when no handle came of it.
+    /// </summary>
+    private static async ValueTask<VortexDataset> OwningAsync(ValueTask<VortexDataset> opening, IObjectStore? owned, string location)
     {
         try
         {
             VortexDataset dataset = await opening.ConfigureAwait(false);
             dataset._ownedStore = owned;
+            dataset._location = location;
             return dataset;
         }
         catch
@@ -1074,11 +1086,23 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Creates a dataset under a store prefix — everything under its keys — and returns a handle on
     /// version 1.
     /// </summary>
-    internal static async ValueTask<VortexDataset> CreateAsync(
+    internal static ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
         DType schema,
         DatasetOptions? options = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        CreateAtAsync(store, schema, options, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="CreateAsync(IObjectStore, DType, DatasetOptions?, CancellationToken)"/>, the
+    /// creation's commit tagged with the location the caller named, when it named one.
+    /// </summary>
+    private static async ValueTask<VortexDataset> CreateAtAsync(
+        IObjectStore store,
+        DType schema,
+        DatasetOptions? options,
+        string? location,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
         RequireOrderedListing(store);
@@ -1129,16 +1153,21 @@ public sealed class VortexDataset : IAsyncDisposable
         // the number: the loser is told so, rather than rebased onto the winner's dataset. The handle
         // reads the version as its commit wrote it, with nothing read back.
         CommitResult created = await DatasetCommitter
-            .CommitAsync(store, [], Commit(options, template) with { OnlyFirst = true }, cancellationToken).ConfigureAwait(false);
+            .CommitAsync(
+                store,
+                [],
+                Commit(options, template) with { OnlyFirst = true, Kind = CommitKind.Create, Location = location },
+                cancellationToken)
+            .ConfigureAwait(false);
         RequireEncryption(store, options);
         return new VortexDataset(store, options.For(created.Commit.Header), created.Version, created.Commit, created.KnownAt);
     }
 
     /// <summary>Applies operations, moves this handle to the version they created, and returns it.</summary>
     internal async ValueTask<ulong> ApplyAsync(
-        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken = default)
+        IReadOnlyList<DatasetOperation> operations, CommitKind kind, CancellationToken cancellationToken = default)
     {
-        CommitResult result = await CommitAsync(operations, cancellationToken).ConfigureAwait(false);
+        CommitResult result = await CommitAsync(operations, kind, cancellationToken).ConfigureAwait(false);
         await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
         return result.Version;
     }
@@ -1185,8 +1214,15 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Applies operations, reports what the commit made of each of them, and moves this handle to the
     /// version it created, or to the one it found nothing to change in.
     /// </summary>
+    internal ValueTask<CommitResult> CommitAsync(IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken) =>
+        CommitAsync(operations, CommitKind.Replace, cancellationToken);
+
+    /// <summary>
+    /// Applies operations made for <paramref name="kind"/>, which the commit's telemetry names,
+    /// reports what the commit made of each of them, and moves this handle on.
+    /// </summary>
     internal async ValueTask<CommitResult> CommitAsync(
-        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken)
+        IReadOnlyList<DatasetOperation> operations, CommitKind kind, CancellationToken cancellationToken)
     {
         RequireConditionalCreation(_store);
         DatasetSnapshot held = Snapshot;
@@ -1201,6 +1237,8 @@ public sealed class VortexDataset : IAsyncDisposable
                     TrustSpan = TrustSpan(held),
                     Held = held.Commit,
                     PageCache = _pageCache,
+                    Kind = kind,
+                    Location = _location,
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -1224,7 +1262,7 @@ public sealed class VortexDataset : IAsyncDisposable
         IReadOnlyList<ulong> versions, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(versions);
-        CommitResult result = await CommitAsync([new DatasetOperation.Repack(versions)], cancellationToken).ConfigureAwait(false);
+        CommitResult result = await CommitAsync([new DatasetOperation.Repack(versions)], CommitKind.Repack, cancellationToken).ConfigureAwait(false);
         return (result.Version, result.Outcomes[0]);
     }
 

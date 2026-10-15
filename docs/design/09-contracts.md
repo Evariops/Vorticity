@@ -120,11 +120,32 @@ so a listener that enables one only pays for that one:
 | `vortex.scan.blocks_decoded`, `vortex.scan.blocks_pruned` | whether pruning works at all |
 | `vortex.cache.hits`, `vortex.cache.misses` | whether the session's segment cache does anything |
 | `vortex.write.bytes` | bytes the writers handed to their sinks |
+| `vortex.dataset.commits`, by `vortex.operation` and `vortex.outcome` | how the commits of datasets end: applied, nothing to do, lost, cancelled or failed |
+| `vortex.dataset.commit_attempts`, by `vortex.operation` | the conditional creations commits sent, whose excess over the applied commits is the rebases, the measure of contention |
+| `vortex.dataset.compactions`, by `vortex.trigger` and `vortex.outcome` | how often compaction runs, and how often a job is abandoned, the measure of competing compactions |
+| `vortex.dataset.compaction.bytes_read`, `vortex.dataset.compaction.bytes_written`, by `vortex.trigger` | what compaction reads and rewrites, abandoned jobs included, which is the write amplification of the datasets |
+| `vortex.dataset.vacuum.objects_deleted` | what vacuums deleted, a dry run's nothing |
 
 A scan is one activity, `vortex.scan.typed` or `vortex.scan.tool`, tagged when it ends with its rows,
 batches, requests, bytes requested, and blocks decoded and pruned. A write is one activity,
 `vortex.write`, tagged with its rows, its bytes and whether it completed, and marked as an error when
 it is abandoned.
+
+A dataset's commit is one activity, `vortex.dataset.commit`, over all its attempts, tagged with its
+operation, its attempts, its outcome, the version it created or found, and the dataset's location
+when the handle was opened at one. A compaction is one activity, `vortex.dataset.compaction`, its
+commit's the child of it, tagged with its trigger, its levels, the objects and bytes it read and
+wrote, and its outcome. A vacuum is one, `vortex.dataset.vacuum`, tagged with what it deleted, kept
+as too young, found locked and retained, and whether it was a dry run. A commit or a compaction that
+raises is counted and marked as an error all the same, since the share of rebases or of abandoned
+jobs would otherwise be wrong when contention runs high, which is when it is wanted.
+
+A dataset's location tags its activities and never a counter. A process may hold a hundred thousand
+datasets, and a tag per location would make a series per dataset in every dashboard. A counter's tags
+take a handful of values each. A dataset's compaction lag has no counter either, since the library
+keeps no list of the handles a process holds: `VortexDataset.Lag` says it for one dataset, for the
+application to export where it cares. Every instrument is touched once per commit, compaction or
+vacuum, never per batch of rows, and when nothing listens the dataset's telemetry allocates nothing.
 
 The second is an event source, `Vorticity`, whose polling counters say whether an index earns its
 bytes: `segments-requested`, `bytes-requested`, `zones-pruned`, `zones-total`, `index-runs-read`,

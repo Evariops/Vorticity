@@ -165,7 +165,10 @@ internal static class DatasetRowChanges
             }
 
             CommitResult commit = await dataset
-                .CommitAsync([new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }], cancellationToken)
+                .CommitAsync(
+                    [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }],
+                    start is null ? CommitKind.Delete : CommitKind.Update,
+                    cancellationToken)
                 .ConfigureAwait(false);
             if (commit.Outcomes[0] == OperationOutcome.Applied)
             {

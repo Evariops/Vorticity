@@ -176,7 +176,7 @@ public sealed class DatasetVerifyTests
             // A caller that lies: the operation names the other object, its uid included, and carries
             // bytes built against the indexed one. The commit cannot tell; the fragment's binding
             // to the object it was built from can.
-            await dataset.ApplyAsync([new DatasetOperation.AddFragment(other.TreeKey, other.Entry.Uid, theirs)], ct);
+            await dataset.ApplyAsync([new DatasetOperation.AddFragment(other.TreeKey, other.Entry.Uid, theirs)], CommitKind.Index, ct);
 
             await using (VortexDataset reader = await VortexDataset.OpenAsync(store, Options(), ct))
             {
