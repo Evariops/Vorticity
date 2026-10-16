@@ -45,8 +45,12 @@ winner's version, up to `DatasetOptions.MaxAttempts` times (8 by default).
 `ClusteringKey` is the decision that matters most. Objects are ordered by the smallest key each
 holds, every object this handle writes carries a sorted-runs index on the key, and compaction keeps
 the levels above 0 free of overlap on it. That lets a scan skip whole objects, the same way ordered
-rows let a scan skip blocks. `SummaryColumns` picks which other columns each object summarises for
-the same purpose, the first 32 by default.
+rows let a scan skip blocks. The key goes on columns that hold no null, such as `Day` here, and
+`CreateAsync` refuses a nullable one with an `ArgumentException`. Every null is the same key, so the
+objects of a level would overlap on it, and a read that reaches the nulls would open each of them. A
+row whose key is unknown takes a value of its own instead, the smallest or the largest its type has.
+`SummaryColumns` picks which other columns each object summarises for the same purpose, the first 32
+by default.
 
 ## Adding rows
 
@@ -266,7 +270,7 @@ allowed changes are these:
 * drop a column, unless the clustering key uses it
 * rename a column, mapping the new name to the old one
 * widen a number within its kind: `int` to `long`, `uint` to `ulong`, `float` to `double`
-* make a column nullable
+* make a column nullable, unless the clustering key uses it
 
 Anything else could lose a value already written, and is refused before anything is committed, with
 the column and the reason.

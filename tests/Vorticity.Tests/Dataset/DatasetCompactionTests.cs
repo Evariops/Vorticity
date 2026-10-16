@@ -907,8 +907,9 @@ public sealed class DatasetCompactionTests
 
         // A composite run holds no tuple with a null, so a merge through it would drop the row, and
         // every compaction of an object holding one would be refused: such a key is refused before
-        // anything is written. One column's null keys are read last and merged (the test below,
-        // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's are not.
+        // anything is written, as a key of one nullable column is now. The null keys of one column of
+        // a dataset created before are read last and merged (the test below,
+        // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's never were.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
@@ -924,13 +925,60 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task AKeyThatMayHoldANullIsRefusedWhenTheDatasetIsCreated()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // A null has no place in the order the levels above 0 are disjoint on: every null is the
+        // same key, which no merge cuts between two objects. A key of one nullable column is refused
+        // before anything is written, and so is one under a struct that may be null.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType flat = types.Struct(
+            ["measure", "key"],
+            [types.Primitive(PType.F64, Nullability.Nullable), types.Primitive(PType.I64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+        DType nested = types.Struct(
+            ["origin", "measure"],
+            [types.Struct(["country"], [types.Utf8(Nullability.NonNullable)], Nullability.Nullable), types.Primitive(PType.F64, Nullability.Nullable)],
+            Nullability.NonNullable);
+        foreach ((DType schema, string key) in ((DType, string)[])[(flat, "measure"), (nested, "origin.country")])
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
+                async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { ClusteringKey = [key] }, ct));
+            Assert.Contains("may hold a null", refused.Message, StringComparison.Ordinal);
+            Assert.Contains("non-nullable column", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
+        }
+
+        // A dataset created with such a key before it was refused still opens and takes rows: the
+        // refusal is the creation's, not the key's.
+        await using MemoryObjectStore earlier = new MemoryObjectStore();
+        await using (VortexDataset created = await VortexDataset.CreateAsync(
+            earlier, flat, Unclustered() with { ClusteringKey = ["measure"], AcceptsNullableKey = true }, ct))
+        {
+            await created.AppendAsync(NullableMeasures(types, flat, residue: 0, nullEvery: 7, measureFirst: true), ct);
+        }
+
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(earlier, Unclustered(), ct);
+        await reopened.AppendAsync(NullableMeasures(types, flat, residue: 1, nullEvery: 7, measureFirst: true), ct);
+        List<double?> measures = await MeasuresAsync(reopened.ScanBuilder().InKeyOrder("measure"));
+        Assert.Equal("measure", reopened.Key!.Paths[0]);
+        Assert.Equal(2 * PerObject, measures.Count);
+        Assert.Contains(null, measures);
+        Assert.All(measures.SkipWhile(m => m is not null), m => Assert.Null(m));
+    }
+
+    [Fact]
     public async Task TheNullKeysOfOneColumnAreMergedLast()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // A key column holding nulls compacts. The core's key-ordered read delivers them last,
-        // which is where the merge's row encoding sorts them, so no row is dropped and the output
-        // reads back keyed rows first, nulls after.
+        // A dataset created before a nullable key was refused, its key column holding nulls,
+        // compacts. The core's key-ordered read delivers them last, which is where the merge's row
+        // encoding sorts them, so no row is dropped and the output reads back keyed rows first,
+        // nulls after.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
@@ -940,7 +988,7 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Unclustered() with { ClusteringKey = ["measure"] }, ct);
+            store, schema, Unclustered() with { ClusteringKey = ["measure"], AcceptsNullableKey = true }, ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
             await dataset.AppendAsync(NullableMeasures(types, schema, residue, nullEvery: 7, measureFirst: true), ct);

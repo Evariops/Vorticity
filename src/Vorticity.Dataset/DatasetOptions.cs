@@ -24,9 +24,10 @@ public sealed record DatasetOptions
     /// The columns the dataset is ordered by, or null for the order objects arrive in. Declaring one
     /// orders the objects by the smallest key they hold, gives every object this handle writes a
     /// sorted run on it so that a lookup inside one object is a seek, and makes compaction keep the
-    /// levels above 0 key-disjoint, so a lookup by key touches a bounded number of objects. A key of
-    /// several columns is declared on non-nullable ones: its run holds no tuple with a null, so a row
-    /// holding one could never be merged.
+    /// levels above 0 key-disjoint, so a lookup by key touches a bounded number of objects. The key
+    /// is declared on non-nullable columns: a null has no place in the order the levels are disjoint
+    /// on, and a run on several columns holds no tuple with one. A row whose key is unknown takes a
+    /// value of its own instead, the smallest or the largest its type has.
     /// </summary>
     public IReadOnlyList<string>? ClusteringKey { get; init; }
 
@@ -178,6 +179,13 @@ public sealed record DatasetOptions
     /// rules still build a correct tree, but not the same pages for the same keys.
     /// </summary>
     internal IBoundaryRule? Rule { get; init; }
+
+    /// <summary>
+    /// Whether a creation accepts a key of one column that may hold a null, as the library did before
+    /// it refused one. Only the tests of the datasets created then set it: such a dataset still
+    /// opens, reads and writes, and its nulls are read after every other key.
+    /// </summary>
+    internal bool AcceptsNullableKey { get; init; }
 
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
