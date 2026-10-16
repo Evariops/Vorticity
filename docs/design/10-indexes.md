@@ -335,6 +335,19 @@ A file that already exists can be indexed without touching a data byte:
   its runs when their blocks are disjoint. In a dataset, fragments live in commit objects (see
   [fragments](13-dataset.md#64-fragments-in-commit-objects-transient)).
 
+A dataset is indexed after the fact by `VortexDataset.IndexAsync(policy)`, which gives the indexes to
+the dataset before it gives them to the objects. Its first commit adds them to the policy the
+dataset's commits carry, in the bytes a directory stores a policy in, and from that version on every
+write and every compaction builds them into the objects it writes, whatever its own options say. Its
+budget spares them as it spares a dataset's clustering run, since they were asked for by name, but
+they are not required: a block of too few distinct values still leaves its filter out. The order
+matters: a compaction rewrites the objects it merges, and one that did not know the indexes
+would write its output without them and drop the fragments of its inputs, so an indexing that ran
+before the dataset knew the indexes could be undone by any compaction. The indexing then gives each
+object that lacks one of the indexes a fragment, a batch of objects per commit, and walks the objects
+again until a walk finds nothing to index, which is how it finds an object written by a compaction
+planned before its first commit.
+
 A key source needs complete coverage. A pruner uses whatever blocks the runs cover and leaves the
 others live, but a cursor over partial runs would miss keys, so a key source refuses an entry whose
 runs do not cover every block, and names the blocks it has.

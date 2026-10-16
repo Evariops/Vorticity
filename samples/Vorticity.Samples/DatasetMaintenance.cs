@@ -112,6 +112,20 @@ internal static class DatasetMaintenance
         {
             Console.WriteLine($"stopped: {ran} compactions, {dataset.ObjectCount} objects, lag {dataset.Lag}");
         }
+
+        // An index after the fact: the dataset keeps it, so every writer builds it from now on, and
+        // the objects already written take it as fragments.
+        store.Reset();
+        IndexingResult indexed = await dataset.IndexAsync(IndexPolicy.None.Bloom(Reading.ColumnNames.Celsius));
+        Console.WriteLine($"indexed: {indexed.ObjectsIndexed} objects, {indexed.ObjectsLeft} left, {indexed.Walks} walks, " +
+            $"{indexed.Commits} commits, {indexed.FragmentBytes} fragment bytes, version {indexed.Version}; cost: {Cost(store)}");
+        // Inside every object's bounds, so only the filters can say no row holds it.
+        store.Reset();
+        long none = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAsync();
+        Console.WriteLine($"a temperature no row holds: {none} rows; cost: {Cost(store)}");
+        store.Reset();
+        long without = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).With(new ScanOptions { UseIndexes = false }).CountAsync();
+        Console.WriteLine($"the same without the indexes: {without} rows; cost: {Cost(store)}");
     }
 
     private static string Cost(CountingObjectStore store) =>

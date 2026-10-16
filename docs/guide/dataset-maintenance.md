@@ -1,6 +1,6 @@
 # Dataset maintenance
 
-Compact, vacuum and verify a dataset, and see what each operation costs in store requests.
+Compact, vacuum, verify and index a dataset, and see what each operation costs in store requests.
 
 ```csharp
 await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
@@ -29,8 +29,8 @@ plan: work True, style Leveled, clustered True, lag 2, objects by level [10], by
 ```
 
 Appending is cheap, but it leaves a dataset in poor shape: many small objects, and every old version
-still holding on to its own. The three operations on this page put it back in order. None of them
-runs by itself. They are the caller's background job, and the dataset only reports how far behind
+still holding on to its own. The operations on this page put it back in order, and the last one gives
+it indexes it was written without. None of them runs by itself. They are the caller's background job, and the dataset only reports how far behind
 it is. Like everything in `Vorticity.Dataset`, they are experimental (see [datasets.md](datasets.md)).
 
 ## Compaction
@@ -204,6 +204,36 @@ merge's latency lands on that one commit, and larger jobs are left to another dr
 stands whatever happens to the merge, and a failed or cancelled merge leaves level 0 to the next
 commit.
 
+## Indexing after the fact
+
+A filter you find you need after months of data does not need the data rewritten.
+
+```csharp
+IndexingResult indexed = await dataset.IndexAsync(IndexPolicy.None.Bloom(Reading.ColumnNames.Celsius));
+long none = await dataset.Scan<Reading>().Where(r => r.Celsius == 25.15).CountAsync();
+```
+
+```
+indexed: 2 objects, 0 left, 2 walks, 2 commits, 9302 fragment bytes, version 26; cost: 20 requests (16 read, 2 head, 2 put, 0 delete, 0 list), 20 dependent steps, 399334 bytes read, 10623 written
+a temperature no row holds: 0 rows; cost: 0 requests (0 read, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
+the same without the indexes: 0 rows; cost: 2 requests (2 read, 0 head, 0 put, 0 delete, 0 list), 2 dependent steps, 121736 bytes read, 0 written
+```
+
+The first commit gives the index to the dataset, not to a handle. From that version on, every write
+and every compaction builds it into the objects it writes, whatever its own options and its budget
+say, so a compaction loop in another process, which never heard of the filter, does not drop it.
+Then each object written before takes an index fragment, kept in a commit, a batch of objects per
+commit (`IndexingOptions.ObjectsPerCommit`, 64 by default). The second walk found nothing more to
+index and ended the call. A temperature inside every object's bounds is then refused by the filters
+without reading a byte, where the scan without them reads the column of both objects.
+
+The indexing runs beside the writers and the compaction loop, and every version it commits answers as
+the dataset did before. A compaction that started before its first commit may still write an object
+without the index, and the next `IndexAsync` finds it. Two indexings of two columns at once keep both. An
+object written by another writer carries no identity to bind a fragment to, and `ObjectsLeft` counts
+it until a compaction rewrites it with the index. The indexes are on one column each: a composite key
+is refused, since its encoder lives in a handle's options.
+
 ## What each costs
 
 Measured above with `CountingObjectStore`, on a dataset of one object after compaction:
@@ -216,6 +246,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | `VerifyAsync` | 8 | every object hashed, every page read |
 | `VerifyAsync(since)` | 11 | what the earlier version does not share |
 | `VacuumAsync` | 5 to 16 | the listings, the commit object of each retained version and the trees they name, the deletes in batches |
+| `IndexAsync` | 20, for two objects | per walk a refresh, then per object its tail and its index directory, its columns read for a fragment, and one commit per batch |
 
 `DependentSteps` is the number that sets latency: the round trips that had to wait for the previous
 one. On a store where a request costs 30 ms, it is what a job takes. See

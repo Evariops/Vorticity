@@ -260,6 +260,14 @@ public sealed record VortexWriteOptions
     /// </summary>
     internal bool BudgetSparesRequired { get; init; }
 
+    /// <summary>
+    /// The columns whose indexes the budget never abandons, though they are not required: the ones a
+    /// dataset was given, which every writer of it builds whatever its own budget says, since they
+    /// were asked for by name. Another reason not to build one, such as a block of too few distinct
+    /// values, still leaves it out without failing the write.
+    /// </summary>
+    internal IReadOnlySet<string>? BudgetSpares { get; init; }
+
     /// <summary>Whether the chooser reads a list's elements from their ingest blocks.</summary>
     internal bool ElementStatistics { get; init; } = true;
 

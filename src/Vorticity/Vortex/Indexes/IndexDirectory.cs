@@ -280,6 +280,51 @@ internal sealed record IndexDirectory(
         }
     }
 
+    /// <summary>
+    /// A policy on its own, in the bytes a directory stores it in: what a dataset records in its
+    /// commits, so that every writer of the dataset builds the indexes it was given.
+    /// </summary>
+    /// <param name="policy">The policy.</param>
+    /// <returns>The bytes, the same for the same policy.</returns>
+    internal static byte[] PolicyBytes(WritePolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        ProtoWriter writer = new ProtoWriter();
+        try
+        {
+            WritePolicyBody(ref writer, policy);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The policy <see cref="PolicyBytes"/> wrote, or <see cref="WritePolicy.None"/> for no bytes or
+    /// bytes that do not read: a policy only asks for indexes, so one that does not read costs them,
+    /// never the commit that carries it.
+    /// </summary>
+    /// <param name="bytes">The bytes.</param>
+    /// <returns>The policy.</returns>
+    internal static WritePolicy PolicyOf(ReadOnlySpan<byte> bytes)
+    {
+        if (bytes.IsEmpty)
+        {
+            return WritePolicy.None;
+        }
+
+        try
+        {
+            return ReadPolicy(new ProtoReader(bytes));
+        }
+        catch (VortexFormatException)
+        {
+            return WritePolicy.None;
+        }
+    }
+
     private static void WritePolicyBody(ref ProtoWriter writer, WritePolicy policy)
     {
         using (ProtoWriter.MessageScope fallback = writer.BeginMessage(PolicyDefault))

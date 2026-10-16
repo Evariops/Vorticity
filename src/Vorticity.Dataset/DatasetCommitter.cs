@@ -225,7 +225,7 @@ internal static class DatasetCommitter
             // it and its entry names it there; a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
-            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired);
+            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired) { WritePolicy = template.WritePolicy };
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
                 await ApplyAsync(levels, operations, pages, builder, schema, options.InlineVectorBytes, cancellationToken).ConfigureAwait(false);
 
@@ -298,6 +298,7 @@ internal static class DatasetCommitter
                 Levels = recorded,
                 Schema = schema.Schema,
                 Retired = schema.Retired,
+                WritePolicy = schema.WritePolicy,
                 Starts = starts,
             };
             header = Fitted(WithoutHeld(header));
@@ -984,6 +985,25 @@ internal static class DatasetCommitter
                     outcomes.Add(OperationOutcome.Applied);
                     break;
 
+                case DatasetOperation.AddIndexPolicy added:
+                {
+                    // Joined to the policy of the version it lands on, never put in its place: two
+                    // indexings of two columns committed at once both keep their column.
+                    Indexes.WritePolicy current = Indexes.IndexDirectory.PolicyOf(schema.WritePolicy.Span);
+                    byte[] joined = Indexes.IndexDirectory.PolicyBytes(current.With(Indexes.IndexDirectory.PolicyOf(added.Policy.Span)));
+                    if (joined.AsSpan().SequenceEqual(Indexes.IndexDirectory.PolicyBytes(current)))
+                    {
+                        outcomes.Add(OperationOutcome.AlreadyThere);
+                    }
+                    else
+                    {
+                        schema.WritePolicy = joined;
+                        outcomes.Add(OperationOutcome.Applied);
+                    }
+
+                    break;
+                }
+
                 default:
                     throw new ArgumentException(
                         $"An operation of type {operation.GetType().Name} is not one a commit knows.", nameof(operations));
@@ -1195,6 +1215,9 @@ internal static class DatasetCommitter
         internal ReadOnlyMemory<byte> Schema { get; set; } = schema;
 
         internal IReadOnlyList<RetiredColumn> Retired { get; set; } = retired;
+
+        /// <summary>The indexes every writer builds, as the header records them.</summary>
+        internal ReadOnlyMemory<byte> WritePolicy { get; set; }
     }
 
     private sealed class Relocation

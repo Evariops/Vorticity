@@ -536,6 +536,14 @@ public sealed class VortexDataset : IAsyncDisposable
             // The runs an index of the object moves to disk hold its values: sealed as the object is.
             write = write with { SealScratch = true };
         }
+
+        // The indexes the dataset was given, at the version the write builds on, whatever this
+        // handle's own options say: a compaction by a handle that never heard of them keeps them,
+        // and its budget does not refuse them, since they were asked for by name.
+        if (schema.IndexPolicy.Columns.Count > 0)
+        {
+            write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
+        }
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
         if (schema.Key is { } clustering && !bySortedColumn)
         {
@@ -1015,6 +1023,44 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>What vacuum kept and deleted.</returns>
     public ValueTask<VacuumResult> VacuumAsync(VacuumOptions? options = null, CancellationToken cancellationToken = default) =>
         DatasetVacuum.RunAsync(_store, options, _location, cancellationToken);
+
+    /// <summary>
+    /// Gives the dataset indexes: every writer of it builds them from then on, compactions included,
+    /// and the objects already written take them as index fragments, a batch of objects per commit.
+    /// </summary>
+    /// <param name="policy">The indexes, each on one column, e.g. <c>IndexPolicy.None.Bloom("trace_id")</c>.</param>
+    /// <param name="options">How many objects a commit indexes; null for the defaults.</param>
+    /// <param name="cancellationToken">Cancels the indexing between two objects; what was committed stays.</param>
+    /// <returns>What the indexing did.</returns>
+    /// <remarks>
+    /// <para>
+    /// The first commit adds the indexes to those the dataset's commits carry, joined to them rather
+    /// than put in their place, so two indexings of two columns at once keep both. From that version
+    /// on, every write and every compaction builds them into the objects it writes, whatever its
+    /// handle's options say, so a compaction can no longer undo an indexing by rewriting an indexed
+    /// object without its index. The indexing then walks the objects and gives each one that lacks an
+    /// index a fragment, and walks again until a walk finds nothing to index: a compaction planned
+    /// before the first commit may still write an object without the indexes, which the next walk
+    /// finds.
+    /// </para>
+    /// <para>
+    /// Every version in between answers as the dataset without the indexes does: an object partly
+    /// indexed prunes the blocks its indexes cover. The indexes are asked for by name, so no budget
+    /// refuses them, neither a writer's nor the policy's. An object that carries no identity, written
+    /// by another writer, cannot take a fragment, and one with no block an index can be built for is
+    /// not asked again. <see cref="IndexingResult.ObjectsLeft"/> counts both, and a compaction that
+    /// rewrites the first builds the indexes into it.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="policy"/> is null.</exception>
+    /// <exception cref="ArgumentException">The policy names no index of a column, or names a composite key, whose encoder the dataset's commits cannot carry.</exception>
+    /// <exception cref="VortexSchemaException">The policy names a column the dataset does not have.</exception>
+    /// <exception cref="NotSupportedException">The store cannot create an object only when it is absent, and hosts readers only.</exception>
+    public ValueTask<IndexingResult> IndexAsync(IndexPolicy policy, IndexingOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        return DatasetIndexing.RunAsync(this, policy, options ?? IndexingOptions.Default, cancellationToken);
+    }
 
     /// <summary>
     /// Checks this version's pages, objects and fragments against what its references and entries

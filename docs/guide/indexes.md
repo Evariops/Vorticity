@@ -186,6 +186,21 @@ the file of the previous write in the sample. The budget is only judged once the
 filters below those regions. `file.VerifyIndexesAsync()` checks every listed region against its
 checksum, reading each one once. It is a tool's check, and a scan does not run it.
 
+## A dataset written without an index
+
+A dataset takes an index after the fact through `VortexDataset.IndexAsync`, without its objects
+being rewritten:
+
+```csharp
+IndexingResult indexed = await dataset.IndexAsync(IndexPolicy.None.Bloom(Reading.ColumnNames.Celsius));
+```
+
+The index becomes the dataset's own. Every writer builds it into the objects it writes from then on,
+compactions in other processes included, whatever their options and their budget say, and each object
+written before takes a fragment that holds it. [dataset-maintenance.md](dataset-maintenance.md) shows
+what it costs and what it buys, and the design is in
+[13-dataset.md](../design/13-dataset.md#64-fragments-in-commit-objects-transient).
+
 ## Watch out
 
 * `AppendIndexesAsync` rewrites the tail even when every index is abandoned, and the file takes a new

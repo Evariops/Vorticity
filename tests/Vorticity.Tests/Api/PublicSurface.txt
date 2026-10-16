@@ -2717,6 +2717,31 @@ Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader,
 Vorticity.Dataset:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.Dataset:     property bool Durable { get; init; }
 Vorticity.Dataset:     property string Root { get; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.IndexingOptions : IEquatable<IndexingOptions>
+Vorticity.Dataset:     ctor IndexingOptions()
+Vorticity.Dataset:     method IndexingOptions <Clone>$()
+Vorticity.Dataset:     method bool Equals(IndexingOptions)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(IndexingOptions, IndexingOptions)
+Vorticity.Dataset:     method bool op_Inequality(IndexingOptions, IndexingOptions)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property int ObjectsPerCommit { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.IndexingResult : IEquatable<IndexingResult>
+Vorticity.Dataset:     ctor IndexingResult()
+Vorticity.Dataset:     method IndexingResult <Clone>$()
+Vorticity.Dataset:     method bool Equals(IndexingResult)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(IndexingResult, IndexingResult)
+Vorticity.Dataset:     method bool op_Inequality(IndexingResult, IndexingResult)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property int Commits { get; init; }
+Vorticity.Dataset:     property int Walks { get; init; }
+Vorticity.Dataset:     property long FragmentBytes { get; init; }
+Vorticity.Dataset:     property long ObjectsIndexed { get; init; }
+Vorticity.Dataset:     property long ObjectsLeft { get; init; }
+Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.MemoryObjectStore : IObjectStore
 Vorticity.Dataset:     ctor MemoryObjectStore()
 Vorticity.Dataset:     method IAsyncEnumerable<ObjectListing> ListAsync(string, string, CancellationToken)
@@ -2825,6 +2850,7 @@ Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullable<ulong> = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<IndexingResult> IndexAsync(IndexPolicy, IndexingOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceObjectsAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)

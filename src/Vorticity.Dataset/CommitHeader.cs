@@ -75,7 +75,11 @@ internal sealed record CommitHeader
     /// <summary>The clustering key's columns, in key order.</summary>
     public IReadOnlyList<string> ClusteringKey { get; init; } = [];
 
-    /// <summary>The write policy the dataset applies to new objects. Opaque here.</summary>
+    /// <summary>
+    /// The indexes every writer of the dataset builds into the objects it writes, besides those of
+    /// its own options: what <see cref="VortexDataset.IndexAsync"/> adds, in the bytes an index
+    /// directory stores a policy in. Empty for none.
+    /// </summary>
     public ReadOnlyMemory<byte> WritePolicy { get; init; }
 
     public ChunkerSettings Chunker { get; init; }

@@ -68,7 +68,8 @@ object's own length, an XXH3-64 over the header and the table, and magic `VXCT`.
 turns any truncation into a stated error rather than a shorter object.
 
 The header holds the version, its parent, the schema and the names its columns gave up (see [schema
-evolution](#13-schema-evolution)), the clustering key, the write policy, the tree's chunking
+evolution](#13-schema-evolution)), the clustering key, the indexes every writer builds into the
+objects it writes (see [fragments](#64-fragments-in-commit-objects-transient)), the tree's chunking
 parameters and seed, the compaction and retention settings, and, per level, where its last
 round-robin compaction stopped and its top page inlined, with the pages below it as long as the
 header stays within 192 KiB. One ranged read of the first 256 KiB opens a commit. The pages region
@@ -349,6 +350,29 @@ payloads hold offsets into their own container. A data compaction that rewrites 
 index and drops every fragment, so at steady state the external layer only holds the indexes of
 objects nobody has rewritten yet.
 
+That last rule holds only if the compaction knows the index, and a compaction is another process,
+with its own options, as often as not. So the indexes a dataset is given live in the dataset, not in
+a handle. `IndexAsync` first commits them into the header's policy, joined to the policy the version
+it lands on already holds, so two indexings of two columns committed at once both keep their column.
+Every write and every compaction builds the policy of the version it builds on into the objects it
+writes, on top of its own options, and its budget spares those indexes, which were asked for by name. The indexing then gives fragments to the objects that lack an
+index, by batches of commits, and walks the objects again until a walk finds none: a compaction that
+read a version from before the policy still writes its output without the indexes, and the next walk
+finds that output.
+
+| step | the indexing | a compaction in another process, its options without the index |
+|---|---|---|
+| 1 | commits the policy | |
+| 2 | gives objects X and Y their fragments | |
+| 3 | | merges X and Y, building on a version with the policy: Z holds the index |
+| 3' | | or, having read a version from before the policy, merges them into Z without it |
+| 4 | the next walk finds Z, if it lacks the index, and gives it a fragment | |
+
+An object that carries no identity, written by another writer, cannot take a fragment. The
+indexing's result counts it, and a compaction that rewrites the object builds the index. A library that predates the policy copies it from header
+to header without applying it, which leaves objects without the index for the next walk to find,
+never a wrong answer.
+
 ### 6.5 Which structure for which column
 
 | distinct keys | structure | point lookup |
@@ -475,6 +499,8 @@ outputs), and never merges two trees. Each operation carries its own answer to a
 | compaction, delete or update that marks one of its inputs | the entry the compaction read changed, so it abandons, since its outputs would bring the marked rows back, and they are garbage |
 | schema change, schema change | the second finds a different schema from the one it was checked against, and is dropped ([schema evolution](#13-schema-evolution)) |
 | append, schema change | the object lands as it was written, and reads as the new schema like any earlier one ([schema evolution](#13-schema-evolution)) |
+| indexing, indexing of another column | the second's indexes join the policy the first committed, and the header keeps both ([fragments](#64-fragments-in-commit-objects-transient)) |
+| indexing, compaction that read a version from before it | the compaction's output holds no index and replaces objects that had fragments, and the indexing's next walk gives it one |
 | reader, anything | the reader holds a version, and everything it references is immutable |
 
 An object's key ends with its uid, which makes it unique and a function of the object. Without it,
@@ -578,6 +604,10 @@ a scan that stops at its first batch opens a single object.
   reads the pages from the store, not from a header's inlined copies, which is the only way to see a
   torn stored page that a reader never reads. It reports every problem by name and throws none. Given
   an older version, it only walks the difference between the two trees, O(changed pages).
+- Indexing (`IndexAsync`, explicit) gives the dataset indexes, which every writer builds from then
+  on, and the objects already written fragments that hold them (see
+  [fragments](#64-fragments-in-commit-objects-transient)). It runs beside the writers and the
+  compaction loop, and every version it commits answers as the dataset without the indexes does.
 - Rebuilding an index drops an object's fragments and attaches one over the whole object in the same
   commit, so no version holds the object with neither. Rewriting the object, as a compaction does,
   embeds the index instead.

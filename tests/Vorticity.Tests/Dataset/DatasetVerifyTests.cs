@@ -284,7 +284,7 @@ public sealed class DatasetVerifyTests
             if (indexed && i == 1)
             {
                 PositionedObject target = (await ObjectsAsync(dataset))[1];
-                IndexingResult result = await DatasetIndexer.IndexAsync(
+                FragmentResult result = await DatasetIndexer.IndexAsync(
                     dataset, target, WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 1_000)),
                     options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
                 Assert.Equal(OperationOutcome.Applied, result.Outcome);

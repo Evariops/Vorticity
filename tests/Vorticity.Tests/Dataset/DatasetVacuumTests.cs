@@ -278,7 +278,7 @@ public sealed class DatasetVacuumTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         await dataset.AppendAsync(Of(types, schema, 0, PerObject), ct);
         PositionedObject target = await SingleObjectAsync(dataset);
-        IndexingResult indexed = await DatasetIndexer.IndexAsync(
+        FragmentResult indexed = await DatasetIndexer.IndexAsync(
             dataset, target, WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 1_000)),
             options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, cancellationToken: ct);
         Assert.Equal(OperationOutcome.Applied, indexed.Outcome);
@@ -362,7 +362,7 @@ public sealed class DatasetVacuumTests
             await dataset.AppendAsync(Of(types, schema, i * 50, 50), ct);
             if (i == 0)
             {
-                IndexingResult indexed = await DatasetIndexer.IndexAsync(
+                FragmentResult indexed = await DatasetIndexer.IndexAsync(
                     dataset, await SingleObjectAsync(dataset), WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 1_000)),
                     options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, cancellationToken: ct);
                 Assert.Equal(OperationOutcome.Applied, indexed.Outcome);

@@ -578,6 +578,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
         };
+        if (writer._indexes is { } built)
+        {
+            built.Spared = options.BudgetSpares;
+        }
 
         // The entries rather than Keys, whose enumerator is an allocated iterator.
         foreach (KeyValuePair<string, int> target in options.ColumnChunkTargetBytes)

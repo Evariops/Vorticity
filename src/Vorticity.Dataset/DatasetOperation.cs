@@ -100,6 +100,13 @@ internal abstract record DatasetOperation
     /// <see cref="VortexDataset.RekeyAsync"/> makes, which always applies.
     /// </summary>
     public sealed record Rekey : DatasetOperation;
+
+    /// <summary>
+    /// Adds indexes to those every writer of the dataset builds: joined to the policy of the version
+    /// the commit lands on, a column it names taking what it names there.
+    /// </summary>
+    /// <param name="Policy">The indexes, in the bytes an index directory stores a policy in.</param>
+    public sealed record AddIndexPolicy(ReadOnlyMemory<byte> Policy) : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>
