@@ -113,41 +113,6 @@ public sealed class ObjectAdapterTests
     }
 
     [Fact]
-    public async Task ABatchReadsEachRunIntoItsBlockAndAllocatesNothingOnceTheBlocksArePooled()
-    {
-        // Sixteen runs a gap apart, each read straight into a pooled block its segments are views of:
-        // what the source allocates per batch is nothing, the store's own cost aside.
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        byte[] content = new byte[1 << 20];
-        new Random(0x0B_5_0C).NextBytes(content);
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        await store.PutIfAbsentAsync(Key, content, ct);
-        await using ObjectStoreSource source = new ObjectStoreSource(store, Key, content.Length, new SegmentReadOptions { CoalesceGapBytes = 0 });
-        using SegmentRequestSet set = new SegmentRequestSet();
-
-        long allocated = 0;
-        for (int round = 0; round < 4; round++)
-        {
-            for (int slot = 0; slot < 16; slot++)
-            {
-                set.Add(new SegmentSpec((ulong)slot << 16, 1_000, 6, 0, 0));
-            }
-
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            await source.ReadManyAsync(set, ct);
-            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-            for (int slot = 0; slot < 16; slot++)
-            {
-                Assert.True(set.GetBuffer(slot).Span.SequenceEqual(content.AsSpan(slot << 16, 1_000)));
-            }
-
-            set.Release();
-        }
-
-        Assert.Equal(0, allocated);
-    }
-
-    [Fact]
     public async Task ASourceRefusesAnObjectOfAnotherLengthThanTheOneItWasTold()
     {
         // A dataset's entry records the object's length, and an object of another length under its

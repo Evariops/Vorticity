@@ -295,7 +295,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private long _delivered;
 
     // The decodes the scan's degree still allows, and the splits started and waiting for one, the
-    // last `_queued` of them: both under the lock of `_lanes`.
+    // last `_queued` of them: both under the lock of the splits in flight (see EnterLanes).
     private int _free;
     private int _queued;
 
@@ -349,6 +349,40 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             Debug.Assert(_extras is LaneWindow, "Only a scan of several lanes has a window of them.");
             return Unsafe.As<LaneWindow>(_extras!);
+        }
+    }
+
+    /// <summary>
+    /// Enters the lock of the splits in flight: the window's, in a scan of several lanes, and the
+    /// array's monitor otherwise, which one lane never contends for.
+    /// </summary>
+    private LanesGate EnterLanes()
+    {
+        if (_extras is LaneWindow window)
+        {
+            window.Gate.Enter();
+        }
+        else
+        {
+            Monitor.Enter(_lanes);
+        }
+
+        return new LanesGate(this);
+    }
+
+    /// <summary>Leaves the lock <see cref="EnterLanes"/> took.</summary>
+    private readonly ref struct LanesGate(BatchAsyncEnumerator owner)
+    {
+        public void Dispose()
+        {
+            if (owner._extras is LaneWindow window)
+            {
+                window.Gate.Exit();
+            }
+            else
+            {
+                Monitor.Exit(owner._lanes);
+            }
         }
     }
 
@@ -773,6 +807,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // Every lane made, the idle ones first, the one freed last at the top of them, then those
         // holding a split: one array for both, the scan's allocation being held to a ceiling.
         private readonly Lane[] _made;
+
+        /// <summary>
+        /// The lock the pump and the lanes hand splits over under, made with the window: the array
+        /// of the splits in flight, as the lock, would get a monitor of its own the first time a lane
+        /// handed off while the consumer pumped, which the scan would pay part way, after its first
+        /// batch.
+        /// </summary>
+        internal Lock Gate { get; }
         private int _idleCount;
         private double _splitBytes;
         private double _splitShare;
@@ -790,6 +832,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         /// <param name="readsCopies">Whether a read copies the bytes out of the file rather than handing them out where they lie.</param>
         internal LaneWindow(int window, double guessedSplitBytes, bool inline, bool readsCopies)
         {
+            Gate = new Lock();
             _made = new Lane[window];
             _splitBytes = Math.Max(1, guessedSplitBytes);
             _splitShare = _splitBytes / GuessedClassBytes;
@@ -1903,7 +1946,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             // Published even when a split or a lane fails to come: a lane assigned and never
             // counted would be awaited by the dispose, and run by no one.
-            lock (_lanes)
+            using (EnterLanes())
             {
                 _queued += (int)(assigned - _started);
                 _started = assigned;
@@ -1923,7 +1966,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// </summary>
     private void HandOff()
     {
-        lock (_lanes)
+        using (EnterLanes())
         {
             if (_queued > 0)
             {
@@ -2030,7 +2073,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         // The splits no loop has started are withdrawn, since nothing would ever run them; the
         // lanes running one are awaited.
-        lock (_lanes)
+        using (EnterLanes())
         {
             for (long split = _started - _queued; split < _started; split++)
             {
