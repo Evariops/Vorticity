@@ -44,9 +44,9 @@ namespace Vorticity.Scanning;
 /// </para>
 /// <para>
 /// A set of one lane is its own lock: its lane never contends for it, and an uncontended monitor
-/// allocates nothing. A set several lanes share takes a lock made with it, because a monitor two
-/// threads first meet in inflates into a lock object of its own, which the scan would pay part way,
-/// after its first batch, whenever two of its lanes claimed at once.
+/// allocates nothing. A set several lanes share takes a lock the process keeps (see
+/// <see cref="LaneGates"/>), because a lock allocates the first time two threads meet in it or one
+/// blocks on it, which a lock of the scan's own would pay part way, after its first batch.
 /// </para>
 /// </remarks>
 internal sealed class ScanSegments : IDisposable
@@ -59,6 +59,9 @@ internal sealed class ScanSegments : IDisposable
 
     /// <param name="lanes">How many batches may be built at once; above one, a batch may wait for another's read.</param>
     internal ScanSegments(int lanes) => _lanes = lanes > 1 ? new Lanes(lanes) : null;
+
+    /// <summary>The lock the process lent the set, when lanes share it; null for a set of one lane.</summary>
+    internal Lock? SharedGate => _lanes?.Gate;
 
     /// <summary>
     /// The next batch number, for a scan whose batches are not numbered by a split plan: a
@@ -261,18 +264,21 @@ internal sealed class ScanSegments : IDisposable
     }
 
     /// <summary>
-    /// What a set several lanes share has and a set of one lane does not: the lock made with it, and
-    /// the batches parked on another's read. One field for both, so that a set of one lane is no
-    /// larger for them.
+    /// What a set several lanes share has and a set of one lane does not: the lock the process lends
+    /// it, and the batches parked on another's read. One field for both, so that a set of one lane is
+    /// no larger for them.
     /// </summary>
     private sealed class Lanes(int lanes)
     {
-        internal Lock Gate { get; } = new Lock();
+        internal Lock Gate { get; } = LaneGates.RentLock();
+
+        /// <summary>Whether the lock is still the set's, given back once, at the dispose.</summary>
+        internal bool Lent { get; set; } = true;
 
         internal SegmentWaiter?[] Parked { get; } = new SegmentWaiter?[lanes];
     }
 
-    /// <summary>Releases everything held and gives the array back, once no batch runs.</summary>
+    /// <summary>Releases everything held and gives the array back, then the lock, once no batch runs.</summary>
     public void Dispose()
     {
         using (Enter())
@@ -288,6 +294,12 @@ internal sealed class ScanSegments : IDisposable
                 ArrayPool<Entry>.Shared.Return(_entries, clearArray: true);
                 _entries = [];
             }
+        }
+
+        if (_lanes is { Lent: true } lanes)
+        {
+            lanes.Lent = false;
+            LaneGates.Return(lanes.Gate);
         }
     }
 

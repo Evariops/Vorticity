@@ -451,7 +451,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // Like the segments, the chunks decoded are the scan's and not a lane's: the lanes take
         // consecutive splits in turn, and a chunk of several splits would otherwise be decoded once
         // per lane that meets it.
-        _retained = new RetainedChunks(_mask.IsAll ? tree.Root.ChildCount : _mask.NamedFieldCount, degree);
+        _retained = RetainedChunks.Create(_mask.IsAll ? tree.Root.ChildCount : _mask.NamedFieldCount, degree);
 
         // The blocks the plan counts, so that what is decoded and pruned is counted in its units.
         long blockRows = live?.BlockRows ?? SplitPlan.NaturalBatchRows(tree);
@@ -809,12 +809,24 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         private readonly Lane[] _made;
 
         /// <summary>
-        /// The lock the pump and the lanes hand splits over under, made with the window: the array
-        /// of the splits in flight, as the lock, would get a monitor of its own the first time a lane
-        /// handed off while the consumer pumped, which the scan would pay part way, after its first
-        /// batch.
+        /// The lock the pump and the lanes hand splits over under, lent by the process (see
+        /// <see cref="LaneGates"/>): a lock of the scan's own allocates the first time a lane hands
+        /// off while the consumer pumps, or blocks waiting for it, which the scan would pay part way,
+        /// after its first batch.
         /// </summary>
         internal Lock Gate { get; }
+
+        /// <summary>Gives the lock back to the process, once, when no lane runs.</summary>
+        internal void ReturnGate()
+        {
+            if (_lent)
+            {
+                _lent = false;
+                LaneGates.Return(Gate);
+            }
+        }
+
+        private bool _lent = true;
         private int _idleCount;
         private double _splitBytes;
         private double _splitShare;
@@ -832,7 +844,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         /// <param name="readsCopies">Whether a read copies the bytes out of the file rather than handing them out where they lie.</param>
         internal LaneWindow(int window, double guessedSplitBytes, bool inline, bool readsCopies)
         {
-            Gate = new Lock();
+            Gate = LaneGates.RentLock();
             _made = new Lane[window];
             _splitBytes = Math.Max(1, guessedSplitBytes);
             _splitShare = _splitBytes / GuessedClassBytes;
@@ -2219,9 +2231,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        // Once no lane runs: the held segments and the retained chunks carry references of their own.
+        // Once no lane runs: the held segments and the retained chunks carry references of their own,
+        // and the locks they and the window were lent go back to the process.
         _segments.Dispose();
         _retained.Dispose();
+        (_extras as LaneWindow)?.ReturnGate();
     }
 
     /// <summary>

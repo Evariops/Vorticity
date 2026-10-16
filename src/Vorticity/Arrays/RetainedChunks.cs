@@ -41,12 +41,19 @@ namespace Vorticity.Arrays;
 /// allocates no table of its own: in order, which a release walks and a lookup walks too while the
 /// scan reads a few columns, and past that hashed by key again after them, which a lookup probes, so
 /// that a batch looking up each of its columns pays for each column once rather than for every
-/// entry before it. The table is its own lock, since a claim waits on it, and wakes the waiters only
-/// when there are some: a signal with none would still give the object a monitor, allocated for
-/// every scan.
+/// entry before it.
+/// </para>
+/// <para>
+/// A claim waits on the table's lock, which a table several contexts decode into borrows from the
+/// process (see <see cref="Scanning.LaneGates"/>): a monitor allocates the first time two threads meet
+/// in it, 40 bytes, and the first time one waits on it, 88, so a monitor of the table's own would pay
+/// that in every scan, part way, at the first claim two lanes made at once. A table of one context is
+/// its own lock, and never waits, and only a table of several, a class of its own, holds the monitor
+/// it borrows, so that a table of one is no larger for it. The waiters are woken only when there are
+/// some.
 /// </para>
 /// </remarks>
-internal sealed class RetainedChunks : IDisposable
+internal class RetainedChunks : IDisposable
 {
     private readonly int _capacity;
     private readonly int _lendingCapacity;
@@ -78,7 +85,7 @@ internal sealed class RetainedChunks : IDisposable
     /// it is made as the first batch is released, sized by what that batch retained, rather than
     /// in the middle of the scan.
     /// </param>
-    internal RetainedChunks(int columns, int lanes)
+    private protected RetainedChunks(int columns, int lanes)
     {
         _capacity = Math.Max(2 * columns + 2, 4);
 
@@ -87,6 +94,38 @@ internal sealed class RetainedChunks : IDisposable
         _lendingCapacity = Math.Max(4 * columns + 2, 6);
         _prepare = lanes > 1;
         _sideBySide = lanes > 1;
+    }
+
+    /// <summary>A table for a scan of <paramref name="lanes"/> contexts, which borrows the process's monitor when they are several.</summary>
+    /// <param name="columns">How many columns the scan reads (see the constructor).</param>
+    /// <param name="lanes">How many contexts decode at once.</param>
+    internal static RetainedChunks Create(int columns, int lanes) =>
+        lanes > 1 ? new SideBySide(columns, lanes) : new RetainedChunks(columns, lanes);
+
+    /// <summary>The lock the claims wait on: the table itself, or the monitor a table of several contexts borrows.</summary>
+    internal virtual object Gate => this;
+
+    /// <summary>Gives the borrowed monitor back, once the table is disposed and <paramref name="idle"/>, no context waiting on it.</summary>
+    private protected virtual void GiveBackGate(bool idle)
+    {
+    }
+
+    /// <summary>A table several contexts decode into, side by side: it waits and wakes on a monitor the process lends it.</summary>
+    private sealed class SideBySide(int columns, int lanes) : RetainedChunks(columns, lanes)
+    {
+        private readonly object _gate = Scanning.LaneGates.RentMonitor();
+        private bool _lent = true;
+
+        internal override object Gate => _gate;
+
+        private protected override void GiveBackGate(bool idle)
+        {
+            if (idle && _lent)
+            {
+                _lent = false;
+                Scanning.LaneGates.ReturnMonitor(_gate);
+            }
+        }
     }
 
     /// <summary>
@@ -141,7 +180,7 @@ internal sealed class RetainedChunks : IDisposable
         long key, ScanContext claimant, long batch, RetainedChunk? borrower,
         out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex)
     {
-        lock (this)
+        lock (Gate)
         {
             while (true)
             {
@@ -173,7 +212,7 @@ internal sealed class RetainedChunks : IDisposable
                     _waiters++;
                     try
                     {
-                        Monitor.Wait(this);
+                        Monitor.Wait(Gate);
                     }
                     finally
                     {
@@ -229,7 +268,7 @@ internal sealed class RetainedChunks : IDisposable
             return false;
         }
 
-        lock (this)
+        lock (Gate)
         {
             if (Find(key) is { NodeIndex: >= 0 } entry)
             {
@@ -266,7 +305,7 @@ internal sealed class RetainedChunks : IDisposable
 
     private void PublishCore(RetainedChunk claim, int nodeIndex, long batch, RetainedChunk? borrower)
     {
-        lock (this)
+        lock (Gate)
         {
             claim.Arena?.Seal();
             claim.NodeIndex = nodeIndex;
@@ -287,7 +326,7 @@ internal sealed class RetainedChunks : IDisposable
     /// <remarks>What the claim had borrowed is given back, and a lender it was the last to borrow is evicted when its own time has passed.</remarks>
     internal void Abandon(RetainedChunk claim)
     {
-        lock (this)
+        lock (Gate)
         {
             Remove(claim);
             claim.Arena?.Reset();
@@ -312,7 +351,7 @@ internal sealed class RetainedChunks : IDisposable
             return;
         }
 
-        lock (this)
+        lock (Gate)
         {
             if (_count == 0)
             {
@@ -367,7 +406,8 @@ internal sealed class RetainedChunks : IDisposable
     /// </summary>
     public void Dispose()
     {
-        lock (this)
+        bool idle;
+        lock (Gate)
         {
             if (_disposed)
             {
@@ -411,7 +451,12 @@ internal sealed class RetainedChunks : IDisposable
             }
 
             Wake();
+            idle = _waiters == 0;
         }
+
+        // Given back only when no context waits on it any more: one woken by the dispose takes the
+        // lock again to learn the table is gone, and would take another scan's lock otherwise.
+        GiveBackGate(idle);
     }
 
     private RetainedChunk Take()
@@ -630,7 +675,7 @@ internal sealed class RetainedChunks : IDisposable
     {
         if (_waiters != 0)
         {
-            Monitor.PulseAll(this);
+            Monitor.PulseAll(Gate);
         }
     }
 
