@@ -163,7 +163,7 @@ Task loop = dataset.RunCompactionAsync(
 stopped: 1 compactions, 2 objects, lag 0
 ```
 
-Each turn refreshes the handle (one head request), plans, and runs the job that is due. When nothing
+Each turn refreshes the handle (one round trip), plans, and runs the job that is due. When nothing
 is due it sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
 after a job it waits until what the job wrote fits the rate, which leaves the store's bandwidth to
 the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
@@ -177,6 +177,14 @@ its own that runs the dataset's only loop, and leave inline compaction off in th
 Loops that know about one another can share a dataset all the same, and say so with `Loops` and
 `Loop`: each takes the due job ranked at its index, and no two ranked jobs read or write the same
 level.
+
+To follow compaction from a dashboard, listen to the meter `Vorticity` (see
+[observability.md](observability.md)). `vortex.dataset.compaction.bytes_written` over the bytes the
+writers append is the write amplification, `vortex.dataset.compactions` with the outcome `abandoned`
+counts the jobs two compactions ran at once, and `vortex.dataset.commit_attempts` past the applied
+`vortex.dataset.commits` counts the rebases. A dataset's own lag is `VortexDataset.Lag`, which a host
+exports for the datasets it watches, and each compaction is an activity, `vortex.dataset.compaction`,
+tagged with its levels, its bytes and its outcome.
 
 ## In the writer's commit
 

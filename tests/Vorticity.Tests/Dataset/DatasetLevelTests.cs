@@ -185,7 +185,7 @@ public sealed class DatasetLevelTests
         }
 
         Assert.Equal(3, inputs.Count);
-        await dataset.ApplyAsync([new DatasetOperation.ReplaceObjects(inputs, outputs)], ct);
+        await dataset.ApplyAsync([new DatasetOperation.ReplaceObjects(inputs, outputs)], CommitKind.Replace, ct);
 
         Assert.Equal(3, dataset.Levels[0].Entries);
         Assert.Equal(3, dataset.Levels[1].Entries);

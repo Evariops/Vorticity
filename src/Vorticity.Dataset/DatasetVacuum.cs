@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -99,13 +100,35 @@ internal static class DatasetVacuum
         retention.Seconds > 0 ? TimeSpan.FromSeconds(retention.Seconds) : DefaultWindow;
 
     /// <summary>Marks from every version inside the window, then sweeps what is unmarked and old.</summary>
+    /// <param name="store">The dataset's store.</param>
+    /// <param name="options">The clock and whether to delete; null for the defaults.</param>
+    /// <param name="location">Where the dataset lives, as its handle was told, which tags the vacuum's activity; null when unknown.</param>
+    /// <param name="cancellationToken">Cancels the marking and the deletes.</param>
     /// <exception cref="CommitFormatException">A page it must mark from is not what its reference says.</exception>
     /// <exception cref="ObjectNotFoundException">A page it must mark from is missing; nothing was deleted.</exception>
     public static async ValueTask<VacuumResult> RunAsync(
-        IObjectStore store, VacuumOptions? options = null, CancellationToken cancellationToken = default)
+        IObjectStore store, VacuumOptions? options = null, string? location = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(store);
         options ??= new VacuumOptions();
+        Activity? activity = DatasetTelemetry.StartVacuum(location, options.DryRun);
+        VacuumResult result;
+        try
+        {
+            result = await SweepAsync(store, options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            DatasetTelemetry.VacuumFailed(activity, failure);
+            throw;
+        }
+
+        DatasetTelemetry.VacuumEnded(activity, result, options.DryRun);
+        return result;
+    }
+
+    private static async ValueTask<VacuumResult> SweepAsync(IObjectStore store, VacuumOptions options, CancellationToken cancellationToken)
+    {
         DateTimeOffset now = options.TimeProvider.GetUtcNow();
 
         (ulong latest, CommitObject? head) = await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false);

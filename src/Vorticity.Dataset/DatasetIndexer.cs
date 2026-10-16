@@ -44,7 +44,7 @@ internal static class DatasetIndexer
     {
         IndexFragment fragment = await BuildAsync(dataset, target, policy, rows, options, cancellationToken).ConfigureAwait(false);
         CommitResult commit = await dataset
-            .CommitAsync([Attach(target, fragment)], cancellationToken).ConfigureAwait(false);
+            .CommitAsync([Attach(target, fragment)], CommitKind.Index, cancellationToken).ConfigureAwait(false);
         return new IndexingResult(commit.Version, commit.Outcomes[0], fragment.Bytes.Length, fragment.Reports);
     }
 
@@ -74,7 +74,7 @@ internal static class DatasetIndexer
         }
 
         operations.Add(Attach(target, fragment));
-        CommitResult commit = await dataset.CommitAsync(operations, cancellationToken).ConfigureAwait(false);
+        CommitResult commit = await dataset.CommitAsync(operations, CommitKind.Index, cancellationToken).ConfigureAwait(false);
         return new IndexingResult(commit.Version, commit.Outcomes[^1], fragment.Bytes.Length, fragment.Reports);
     }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -74,11 +75,29 @@ internal static class DatasetCompactor
             throw new ArgumentException("A compaction reads at least one object.", nameof(job));
         }
 
-        if (job.Trigger == CompactionTrigger.Fragments)
+        // One activity over the job, its commit's as a child; a job counted however it ends.
+        Activity? activity = DatasetTelemetry.StartCompaction(job, dataset.Location);
+        CompactionResult result;
+        try
         {
-            return await BundleAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+            result = job.Trigger == CompactionTrigger.Fragments
+                ? await BundleAsync(dataset, job, cancellationToken).ConfigureAwait(false)
+                : await RewriteAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            DatasetTelemetry.CompactionFailed(activity, job.Trigger, failure);
+            throw;
         }
 
+        DatasetTelemetry.CompactionEnded(activity, result);
+        return result;
+    }
+
+    /// <summary>The job's rows read, merged or concatenated, written, and its replacement committed.</summary>
+    private static async ValueTask<CompactionResult> RewriteAsync(
+        VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
+    {
         bool merge = job.Style == CompactionStyle.Leveled;
         ClusteringKey? key = dataset.Key;
         if (merge)
@@ -138,7 +157,7 @@ internal static class DatasetCompactor
             Range = job.Range,
         };
         CommitResult commit = await dataset
-            .CommitAsync([replacement], cancellationToken).ConfigureAwait(false);
+            .CommitAsync([replacement], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
 
         return new CompactionResult
         {
@@ -218,7 +237,7 @@ internal static class DatasetCompactor
             operations.Add(new DatasetOperation.AddFragment(input.Key, input.Entry.Uid, bundle) { Level = input.Level });
         }
 
-        CommitResult commit = await dataset.CommitAsync(operations, cancellationToken).ConfigureAwait(false);
+        CommitResult commit = await dataset.CommitAsync(operations, CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
 
         // The bundles are the one operation per object that writes something.
         OperationOutcome outcome = OperationOutcome.Applied;

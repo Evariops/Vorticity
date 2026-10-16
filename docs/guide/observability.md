@@ -86,6 +86,40 @@ The connections themselves are the platform's: `System.Net.Http` reports the con
 their durations, and the requests and their durations, which OpenTelemetry collects as it does for
 any other client.
 
+The package Vorticity.Dataset adds six instruments to the same meter, the first time a dataset
+commits, compacts or vacuums:
+
+```
+instrument vortex.dataset.commits ({commit}): Commits of datasets, by operation and outcome.
+instrument vortex.dataset.commit_attempts ({attempt}): Conditional creations of a version that commits sent, by operation; those past the commits are rebases.
+instrument vortex.dataset.compactions ({compaction}): Compactions of datasets, by trigger and outcome.
+instrument vortex.dataset.compaction.bytes_read (By): Bytes the compactions that ran to their commit read, by trigger.
+instrument vortex.dataset.compaction.bytes_written (By): Bytes the compactions that ran to their commit wrote, by trigger.
+instrument vortex.dataset.vacuum.objects_deleted ({object}): Objects vacuums deleted.
+```
+
+A commit is tagged with `vortex.operation` (`create`, `append`, `import`, `replace`, `delete`, `update`,
+`schema`, `index`, `compaction`, `repack`, `rekey`) and `vortex.outcome` (`applied`, `nothing_to_do`,
+`lost`, `cancelled`, `failed`), and a compaction with `vortex.trigger` and its outcome (`applied`,
+`abandoned`, `cancelled`, `failed`). The attempts past the applied commits are the rebases, the
+measure of contention between writers, and the abandoned compactions measure compactions that
+compete. After the sample creates a dataset, appends three objects, compacts them and runs a dry
+vacuum:
+
+```
+total vortex.dataset.commit_attempts = 5
+total vortex.dataset.commits = 5
+total vortex.dataset.compaction.bytes_read = 10725
+total vortex.dataset.compaction.bytes_written = 2956
+total vortex.dataset.compactions = 1
+```
+
+A dry run deletes nothing and counts nothing. No tag of these counters names a dataset: a process can
+hold a hundred thousand of them, and a tag per location would make a series per dataset. The
+location is on the activities instead. A dataset's compaction lag has no counter, since the library
+keeps no list of the handles a process holds, so export `VortexDataset.Lag` for the datasets you care
+about.
+
 ## The activities
 
 Each scan gets one activity, named `vortex.scan.typed` or `vortex.scan.tool` after the path it took,
@@ -103,6 +137,25 @@ A write that is abandoned, or disposed without `CompleteAsync`, ends its activit
 `vortex.completed=False` and the status `Error`, described as `abandoned`. Activities are children of
 whatever activity is current when the scan or the writer starts, so a request's trace shows the
 scans it ran. `ExplainAsync` reads statistics and zone maps without starting one.
+
+A dataset's commit, compaction and vacuum get one activity each, `vortex.dataset.commit` over all of
+a commit's attempts, `vortex.dataset.compaction`, whose commit is its child, and
+`vortex.dataset.vacuum`. A handle opened at a location tags them with it:
+
+```
+activity vortex.dataset.commit [Unset]: vortex.operation=create, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=1
+activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=2
+activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=3
+activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=4
+activity vortex.dataset.commit [Unset]: vortex.operation=compaction, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=5
+activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=10725, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.bytes_out=2956, vortex.rows=6, vortex.version=5
+activity vortex.dataset.vacuum [Unset]: vortex.dry_run=True, vortex.location=observed-dataset, vortex.deleted=0, vortex.young=0, vortex.locked=0, vortex.retained=5
+```
+
+A commit that loses all its attempts, is cancelled or fails ends with the status `Error` and is
+counted with that outcome, as is a compaction that raises. A compaction its commit abandons, because
+another took an input first, ends without an error: it is the price of two compactions on one
+dataset, which its outcome counts.
 
 ## The event counters
 

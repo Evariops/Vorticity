@@ -82,5 +82,34 @@ internal static class Observability
         {
             Console.WriteLine($"total {name} = {total}");
         }
+
+        // A dataset's commits, compactions and vacuums, on the same meter and activity source. Three
+        // appends put level 0 one past a ceiling of two, and a compaction merges it.
+        finished.Clear();
+        totals.Clear();
+        string location = Demo.Path("observed-dataset");
+        await using (Dataset.VortexDataset dataset = await Dataset.VortexDataset.CreateAsync(
+            location, Reading.Schema, new Dataset.DatasetOptions { ClusteringKey = [Reading.ColumnNames.Day] }))
+        {
+            for (int day = 0; day < 3; day++)
+            {
+                await using Dataset.ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Reading>([new Reading(day, 20.0 + day, "Paris"), new Reading(day, 15.0 + day, "Lille")]);
+                await dataset.AppendAsync(draft);
+            }
+
+            await dataset.CompactAsync(new Dataset.CompactionOptions { LevelZeroCeiling = 2 });
+            await dataset.VacuumAsync(new Dataset.VacuumOptions { DryRun = true });
+        }
+
+        foreach (string activity in finished.Where(line => line.StartsWith("vortex.dataset.", StringComparison.Ordinal)))
+        {
+            Console.WriteLine($"activity {activity.Replace(location, "observed-dataset", StringComparison.Ordinal)}");
+        }
+
+        foreach ((string name, long total) in totals.Where(pair => pair.Key.StartsWith("vortex.dataset.", StringComparison.Ordinal)).OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            Console.WriteLine($"total {name} = {total}");
+        }
     }
 }

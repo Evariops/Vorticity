@@ -9,12 +9,24 @@ namespace Vorticity;
 /// <see cref="ActivitySource"/> of one activity per scan and per write.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The meter counts <c>vortex.scan.rows</c>, <c>vortex.scan.requests</c>,
 /// <c>vortex.scan.bytes_requested</c>, <c>vortex.scan.blocks_decoded</c>,
 /// <c>vortex.scan.blocks_pruned</c>, <c>vortex.cache.hits</c>, <c>vortex.cache.misses</c> and
 /// <c>vortex.write.bytes</c>, with no tags. A scan's activity carries its plan's figures as tags.
 /// Without a listener, neither costs anything but a check; the numbers of one scan are also on its
-/// <c>Statistics</c>.
+/// <c>Metrics</c>.
+/// </para>
+/// <para>
+/// The dataset package counts on the same meter <c>vortex.dataset.commits</c>, by operation and
+/// outcome, <c>vortex.dataset.commit_attempts</c>, by operation, <c>vortex.dataset.compactions</c>,
+/// by trigger and outcome, <c>vortex.dataset.compaction.bytes_read</c> and
+/// <c>vortex.dataset.compaction.bytes_written</c>, by trigger, and
+/// <c>vortex.dataset.vacuum.objects_deleted</c>. Its activities are <c>vortex.dataset.commit</c>,
+/// <c>vortex.dataset.compaction</c> and <c>vortex.dataset.vacuum</c>, which carry the dataset's
+/// location as a tag when the handle was opened at one. A location never tags a counter, which would
+/// make a series per dataset.
+/// </para>
 /// </remarks>
 public static class VortexDiagnostics
 {
@@ -28,7 +40,8 @@ public static class VortexDiagnostics
 /// <summary>The instruments behind <see cref="VortexDiagnostics"/>.</summary>
 internal static class VortexTelemetry
 {
-    private static readonly Meter Meter = new Meter(VortexDiagnostics.MeterName);
+    /// <summary>The library's meter, which the dataset package's instruments share.</summary>
+    internal static readonly Meter Meter = new Meter(VortexDiagnostics.MeterName);
 
     internal static readonly ActivitySource Source = new ActivitySource(VortexDiagnostics.ActivitySourceName);
 

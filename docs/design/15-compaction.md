@@ -100,7 +100,7 @@ primitive the other two drivers are built from.
 ### In the background
 
 `RunCompactionAsync(schedule, cancellationToken)` is a long-running call that any host runs: a hosted
-service, a worker, a console. It asks for the latest version, which costs one head request for a
+service, a worker, a console. It asks for the latest version, which costs one round trip for a
 handle that knows its own is recent (see [the latest
 version](13-dataset.md#83-the-latest-version-in-one-request)), plans, runs the job, and sleeps when
 nothing is due. Two limits shape it: a budget of bytes written per second, so compaction never takes

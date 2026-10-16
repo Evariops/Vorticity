@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -26,6 +27,12 @@ internal sealed record CommitOptions
     /// writer's header would hand its caller a schema and settings it did not ask for.
     /// </summary>
     public bool OnlyFirst { get; init; }
+
+    /// <summary>What the commit is for, which its telemetry names.</summary>
+    public CommitKind Kind { get; init; } = CommitKind.Replace;
+
+    /// <summary>Where the dataset lives, as the caller named it, which tags the commit's activity; null when it was given a store.</summary>
+    public string? Location { get; init; }
 
     /// <summary>
     /// A version the writer has seen, from which the latest is found by asking for the ones after
@@ -99,6 +106,9 @@ internal sealed record CommitResult(
 {
     /// <summary>Level 0's tree, where appends land.</summary>
     public DatasetTree Tree => Levels[0];
+
+    /// <summary>Whether the commit created <see cref="Version"/>, rather than finding nothing to apply on it.</summary>
+    public bool Created { get; init; }
 }
 
 /// <summary>
@@ -124,6 +134,45 @@ internal static class DatasetCommitter
         ArgumentNullException.ThrowIfNull(options);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxAttempts);
 
+        // One activity over every attempt, and a commit counted however it ends: one left uncounted
+        // when it lost or failed would make the share of rebases wrong when contention runs high,
+        // which is when it is wanted.
+        Activity? activity = DatasetTelemetry.StartCommit(options.Kind, options.Location);
+        CommitResult? result;
+        try
+        {
+            result = await AttemptAsync(store, operations, options, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            DatasetTelemetry.CommitEnded(
+                activity, options.Kind, failure is OperationCanceledException ? CommitEnd.Cancelled : CommitEnd.Failed, 0, 0);
+            throw;
+        }
+
+        if (result is null)
+        {
+            DatasetTelemetry.CommitEnded(activity, options.Kind, CommitEnd.Lost, options.MaxAttempts, 0);
+            throw new ObjectStoreException(
+                $"The commit lost {options.MaxAttempts} times; a coordinator that batches commits is the " +
+                "answer to contention, not more attempts.");
+        }
+
+        DatasetTelemetry.CommitEnded(
+            activity, options.Kind, result.Created ? CommitEnd.Applied : CommitEnd.NothingToDo, result.Attempts, result.Version);
+        return result;
+    }
+
+    /// <summary>
+    /// The commit's attempts, rebasing until one creates its version or the batch has nothing to
+    /// apply; null when every attempt lost.
+    /// </summary>
+    private static async ValueTask<CommitResult?> AttemptAsync(
+        IObjectStore store,
+        IReadOnlyList<DatasetOperation> operations,
+        CommitOptions options,
+        CancellationToken cancellationToken)
+    {
         ulong known = options.Known;
         DateTimeOffset knownAt = options.KnownAt;
         CommitObject? held = options.Held is { } given && given.Header.Version == known ? given : null;
@@ -257,11 +306,15 @@ internal static class DatasetCommitter
             string key = CommitKey.For(version);
             byte[] bytes = builder.Build(header);
             DateTimeOffset put = options.TimeProvider.GetUtcNow();
+            DatasetTelemetry.Attempted(options.Kind);
             if (await store.PutIfAbsentAsync(key, bytes, cancellationToken).ConfigureAwait(false)
                 == PutOutcome.Created)
             {
                 pages.Placed(bytes);
-                return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes), put);
+                return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes), put)
+                {
+                    Created = true,
+                };
             }
 
             // Another writer created this number: the search for the latest starts past it.
@@ -269,9 +322,7 @@ internal static class DatasetCommitter
             held = null;
         }
 
-        throw new ObjectStoreException(
-            $"The commit lost {options.MaxAttempts} times; a coordinator that batches commits is the " +
-            "answer to contention, not more attempts.");
+        return null;
     }
 
     /// <summary>What a creation is told when the store holds a dataset already.</summary>
