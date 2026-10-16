@@ -63,10 +63,24 @@ internal sealed class LaneCuts
         }
     }
 
-    /// <summary>The ranges, the last one to the rows' end; null when they make one.</summary>
-    internal RowRange[]? Finish()
+    /// <summary>
+    /// The ranges, the last one to the rows' end; null when they make one. Rows past the last range
+    /// that hold nothing live join it rather than make a range of their own: a lane would take that
+    /// one for nothing, and a lane that took it alone would group no row.
+    /// </summary>
+    /// <param name="tail">The live rows past the last boundary met, to the rows' end.</param>
+    internal RowRange[]? Finish(long tail)
     {
-        _parts.Add(new RowRange(_start, _rows.End));
+        _held += tail;
+        if (_held == 0 && _parts.Count > 0)
+        {
+            _parts[^1] = new RowRange(_parts[^1].Start, _rows.End);
+        }
+        else
+        {
+            _parts.Add(new RowRange(_start, _rows.End));
+        }
+
         return _parts.Count > 1 ? [.. _parts] : null;
     }
 

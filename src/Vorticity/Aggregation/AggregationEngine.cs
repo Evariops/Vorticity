@@ -4666,7 +4666,7 @@ internal static class AggregationEngine
             previous = at;
         }
 
-        return cuts.Finish();
+        return cuts.Finish(Live(live, new RowRange(previous, rows.End)));
     }
 
     /// <summary>The live rows of <paramref name="rows"/>: every one without a mask.</summary>

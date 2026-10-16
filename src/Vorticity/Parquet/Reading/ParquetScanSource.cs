@@ -266,7 +266,15 @@ internal sealed class ParquetScanSource(ParquetFile file) : StreamScanSource
             previous = groupRows.End;
         }
 
-        return cuts.Finish();
+        // The live rows past the last boundary: those of the groups the plan reads there.
+        long tail = 0;
+        RowRange rest = new RowRange(previous, rows.End);
+        for (int group = 0; group < footer.RowGroups.Length; group++)
+        {
+            tail += plan.Read[group] ? Rows(footer.RowGroups[group]).Intersect(rest).Length : 0;
+        }
+
+        return cuts.Finish(tail);
 
         static RowRange Rows(RowGroupEntry group) => new RowRange(group.FirstRow, group.FirstRow + group.RowCount);
     }
