@@ -39,7 +39,7 @@ public class RetainedLookupBenchmarks
     {
         _claimant = new ScanContext(["vortex.primitive"]);
         _original = new RetainedChunksBefore(Columns, lanes: 1);
-        _library = new RetainedChunks(Columns, lanes: 1);
+        _library = RetainedChunks.Create(Columns, lanes: 1);
     }
 
     /// <summary>Gives the entries back.</summary>

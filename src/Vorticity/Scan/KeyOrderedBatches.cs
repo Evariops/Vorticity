@@ -132,7 +132,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             // that walks the same column: a window of a sorted key is the next window of the same
             // chunk, and the source's zones are windows of it too.
             _held = new ScanSegments(Math.Max(_scan.Degree, 1));
-            _retained = new RetainedChunks((_read.IsAll ? _scan.Tree.Root.ChildCount : _read.NamedFieldCount) + 1, Math.Max(_scan.Degree, 1));
+            _retained = RetainedChunks.Create((_read.IsAll ? _scan.Tree.Root.ChildCount : _read.NamedFieldCount) + 1, Math.Max(_scan.Degree, 1));
             _context = new ScanContext(_scan.File) { Metrics = _scan.Metrics };
             _context.ShareRetained(_retained);
 

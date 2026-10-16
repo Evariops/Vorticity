@@ -730,7 +730,7 @@ internal sealed class ScanContext : IDisposable
     internal int BatchDecoded { get; set; }
 
     /// <summary>The table of retained chunks, created at the first claim; a context running alone reads a few columns.</summary>
-    private RetainedChunks Retained => _retained ??= new RetainedChunks(columns: 3, lanes: 1);
+    private RetainedChunks Retained => _retained ??= RetainedChunks.Create(columns: 3, lanes: 1);
 
     private ZstdDecompressor? _zstd;
 

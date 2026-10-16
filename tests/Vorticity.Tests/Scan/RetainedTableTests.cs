@@ -20,9 +20,9 @@ public sealed class RetainedTableTests
     /// entries, their table and their arenas are the process's.
     /// </summary>
     /// <remarks>
-    /// The table also leaves its monitor alone when no context waits on it, which this cannot see:
-    /// the runtime the tests run on keeps a monitor's state in native memory, where Native AOT
-    /// allocates a lock and a condition on the heap, and the AOT runner's count per round shows it.
+    /// What the table's lock costs when contexts meet in it, a monitor's lock object and its wait
+    /// event, which the runtime allocates on the heap, is counted by
+    /// <see cref="LaneGateAllocationTests"/>, which runs alone.
     /// </remarks>
     [Fact]
     public void AScanThatRetainsChunksAllocatesNothingForItsTable()
@@ -76,7 +76,7 @@ public sealed class RetainedTableTests
         using ScanContext lane = new ScanContext(["vortex.primitive"]);
         Assert.False(lane.MeetsOtherLanes);
 
-        using RetainedChunks shared = new RetainedChunks(columns: 2, lanes: 2);
+        using RetainedChunks shared = RetainedChunks.Create(columns: 2, lanes: 2);
         lane.ShareRetained(shared);
         Assert.False(lane.MeetsOtherLanes);
         Assert.False(shared.TryGet(7, lane, batch: 1, out RetainedChunk? claim, out _, out _));
@@ -85,7 +85,7 @@ public sealed class RetainedTableTests
         Assert.True(lane.MeetsOtherLanes);
 
         using ScanContext alone = new ScanContext(["vortex.primitive"]);
-        using RetainedChunks single = new RetainedChunks(columns: 2, lanes: 1);
+        using RetainedChunks single = RetainedChunks.Create(columns: 2, lanes: 1);
         alone.ShareRetained(single);
         Assert.False(single.TryGet(7, alone, batch: 1, out RetainedChunk? own, out _, out _));
         single.Publish(own!, nodeIndex: 0, batch: 1);
@@ -96,7 +96,7 @@ public sealed class RetainedTableTests
     public void AnEntryIsFoundUntilItsBatchesAreDeadAndThenEvicted()
     {
         using ScanContext claimant = new ScanContext(["vortex.primitive"]);
-        using RetainedChunks table = new RetainedChunks(columns: 2, lanes: 1);
+        using RetainedChunks table = RetainedChunks.Create(columns: 2, lanes: 1);
 
         // Twelve keys, past the table's first size of six: it grows and keeps every entry.
         for (long key = 0; key < 12; key++)
@@ -130,7 +130,7 @@ public sealed class RetainedTableTests
     public void AWideTableFindsEveryLiveEntryThroughEvictionsAndGrowth()
     {
         using ScanContext claimant = new ScanContext(["vortex.primitive"]);
-        using RetainedChunks table = new RetainedChunks(columns: 40, lanes: 1);
+        using RetainedChunks table = RetainedChunks.Create(columns: 40, lanes: 1);
 
         // Two hundred keys a segment number apart by 4096, past the table's first room of 128: the
         // table grows, and the keys agree in every low bit.
@@ -179,7 +179,7 @@ public sealed class RetainedTableTests
 
     private static void Cycle(ScanContext claimant, bool claims)
     {
-        RetainedChunks table = new RetainedChunks(columns: 4, lanes: 1);
+        RetainedChunks table = RetainedChunks.Create(columns: 4, lanes: 1);
         if (claims)
         {
             for (long batch = 1; batch <= 3; batch++)
