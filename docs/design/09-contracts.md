@@ -103,7 +103,8 @@ It fits in two sentences, because the alternative is an unbounded promise:
    nothing (see [the directory and the runs](10-indexes.md#3-the-directory-and-the-runs)).
 
 Not claimed: protection against resource exhaustion below the configured caps, or any
-confidentiality property (the format's encryption slot is an empty reserved table).
+confidentiality for a plain file. A sealed file, dataset or scratch file has the confidentiality and
+the integrity that [18-encryption.md](18-encryption.md#1-what-it-protects-and-from-whom) describes.
 
 ## 5. Observability
 

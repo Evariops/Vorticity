@@ -70,6 +70,19 @@ public sealed class VortexDataset : IAsyncDisposable
     public ulong Version => Snapshot.Version;
 
     /// <summary>
+    /// The last version whose commit changed rows, as the version this handle reads records it: an
+    /// append, an import, a delete, an update, a replacement of objects or a change of schema. A
+    /// compaction, an index fragment, a repack or a rekey creates a version without moving it, so a
+    /// result worked out at a version at or after it still holds.
+    /// </summary>
+    /// <remarks>
+    /// A version written by a library that predates the field records nothing, and reads as that
+    /// version itself until a commit that knows the field changes rows: no later change, which is all
+    /// that can be said.
+    /// </remarks>
+    public ulong LastDataChange => DatasetCommitter.LastDataChangeOf(Snapshot.Header, Snapshot.Version);
+
+    /// <summary>
     /// The dataset's columns at the version this handle reads. An object written under an earlier
     /// schema reads as this one: a column it lacks as nulls, a column renamed under its new name.
     /// </summary>
@@ -616,6 +629,134 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// How far the dataset counts the entries of <paramref name="source"/>, at the version this handle
+    /// reads: the offset the last range of it a commit consumed ended at, or 0 for a source no commit
+    /// consumed. It is free: the version's header holds it.
+    /// </summary>
+    /// <param name="source">The source's name.</param>
+    /// <returns>The offset, where the next range of the source starts.</returns>
+    /// <exception cref="ArgumentException"><paramref name="source"/> is null or empty.</exception>
+    public ulong SourceOffset(string source)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(source);
+        return SourceTable.OffsetOf(Snapshot.Header.Sources, source);
+    }
+
+    /// <summary>
+    /// Completes a data object written through <see cref="StartObject"/> from entries of the ranges
+    /// <paramref name="consumed"/>, puts it in the store and adds it in one commit that counts them,
+    /// so that each entry is counted once however many writers take it.
+    /// </summary>
+    /// <param name="draft">The object; its writer is completed here if the caller did not. It may hold no row, and the ranges are counted all the same.</param>
+    /// <param name="consumed">The ranges the rows take into account, one per source, each starting where the dataset counts its source up to (<see cref="SourceOffset"/>).</param>
+    /// <param name="cancellationToken">Cancels the put and the commit.</param>
+    /// <returns>
+    /// <see cref="OperationOutcome.Applied"/> and the version created, the offsets moved to the
+    /// ranges' ends; or <see cref="OperationOutcome.AlreadyThere"/> and the version that counts them
+    /// when another writer counted every range first, in which case nothing was added and the
+    /// object is left for vacuum.
+    /// </returns>
+    /// <remarks>
+    /// The ranges are judged at every attempt against the version the attempt lands on, rebases
+    /// included: the commit applies where each range starts at its source's offset, adds nothing where
+    /// each ends at or before it, and throws otherwise, since its rows mix its sources and cannot
+    /// apply in part. Act outside the dataset, a notification for one, only on
+    /// <see cref="OperationOutcome.Applied"/>: the commit names the one writer that counted the ranges.
+    /// A dataset whose commits count source offsets is written in commit format 3, which a library
+    /// that predates them refuses rather than forget the offsets at its first commit.
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="consumed"/> is empty, or names a source twice.</exception>
+    /// <exception cref="SourceOffsetConflictException">
+    /// A range would leave a gap, or overlap one another commit counted. Nothing was committed, the
+    /// handle reads the version the conflict was decided against, and the ranges are worked out
+    /// again from <see cref="SourceOffsetConflictException.Recorded"/>.
+    /// </exception>
+    /// <exception cref="InvalidOperationException">The draft belongs to another handle, was already committed, or its writer was abandoned.</exception>
+    public async ValueTask<SourceCommit> AppendAsync(
+        ObjectDraft draft, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        SourceTable.Check(consumed, nameof(consumed));
+        WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
+            .ConfigureAwait(false);
+        DatasetOperation[] operations = written is { } produced ? [new DatasetOperation.AddObject(produced.Key, produced.Entry)] : [];
+        CommitResult commit = await CommitAsync(operations, CommitKind.Append, consumed, null, cancellationToken).ConfigureAwait(false);
+        if (commit.Created)
+        {
+            await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        return new SourceCommit
+        {
+            Version = commit.Version,
+            Outcome = commit.Counted ? OperationOutcome.AlreadyThere : OperationOutcome.Applied,
+        };
+    }
+
+    /// <summary>
+    /// Writes the batches, taken from the ranges <paramref name="consumed"/>, as one data object, and
+    /// adds it in one commit that counts them; see <see cref="AppendAsync(ObjectDraft, IReadOnlyList{SourceRange}, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="batches">The rows, with the dataset's schema; there may be none.</param>
+    /// <param name="consumed">The ranges the rows take into account, one per source.</param>
+    /// <param name="cancellationToken">Cancels the writes, the put and the commit.</param>
+    /// <returns>What the commit made of the ranges, and the version.</returns>
+    /// <exception cref="ArgumentException"><paramref name="consumed"/> is empty, or names a source twice.</exception>
+    /// <exception cref="SourceOffsetConflictException">A range would leave a gap, or overlap one another commit counted; nothing was committed.</exception>
+    public async ValueTask<SourceCommit> AppendAsync(
+        IAsyncEnumerable<RecordBatch> batches, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(batches);
+        SourceTable.Check(consumed, nameof(consumed));
+        ObjectDraft draft = StartObject();
+        try
+        {
+            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            await draft.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return await AppendAsync(draft, consumed, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Forgets the offsets of <paramref name="sources"/>, in one commit that changes no row: what a
+    /// dataset does with a source no writer takes any more, whose offset it would carry otherwise in
+    /// every header.
+    /// </summary>
+    /// <param name="sources">The sources' names.</param>
+    /// <param name="cancellationToken">Cancels the commit.</param>
+    /// <returns>The version created.</returns>
+    /// <remarks>
+    /// Safe only once no writer can take one of the sources again: one that did would start it from
+    /// 0, and count its entries a second time.
+    /// </remarks>
+    /// <exception cref="ArgumentException"><paramref name="sources"/> is empty, or names an empty source.</exception>
+    public async ValueTask<ulong> ForgetSourcesAsync(IReadOnlyList<string> sources, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        if (sources.Count == 0)
+        {
+            throw new ArgumentException("Name at least one source to forget.", nameof(sources));
+        }
+
+        foreach (string source in sources)
+        {
+            ArgumentException.ThrowIfNullOrEmpty(source, nameof(sources));
+        }
+
+        CommitResult commit = await CommitAsync([], CommitKind.Sources, null, new HashSet<string>(sources, StringComparer.Ordinal), cancellationToken)
+            .ConfigureAwait(false);
+        return commit.Version;
+    }
+
+    /// <summary>
     /// Takes a Vortex file that is already in the store as a data object, without copying it, and
     /// adds it to the dataset in one commit.
     /// </summary>
@@ -736,8 +877,41 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </remarks>
     /// <exception cref="ArgumentException">An object does not come from this dataset's walk.</exception>
     /// <exception cref="InvalidOperationException">A draft belongs to another handle, was already committed, or its writer was abandoned.</exception>
-    public async ValueTask<ReplaceResult> ReplaceObjectsAsync(
-        IReadOnlyList<DataObject> removed, IReadOnlyList<ObjectDraft> added, CancellationToken cancellationToken = default)
+    public ValueTask<ReplaceResult> ReplaceObjectsAsync(
+        IReadOnlyList<DataObject> removed, IReadOnlyList<ObjectDraft> added, CancellationToken cancellationToken = default) =>
+        ReplaceAsync(removed, added, null, cancellationToken);
+
+    /// <summary>
+    /// Removes data objects and adds others, written from entries of the ranges
+    /// <paramref name="consumed"/>, in one commit that counts them; see
+    /// <see cref="ReplaceObjectsAsync(IReadOnlyList{DataObject}, IReadOnlyList{ObjectDraft}, CancellationToken)"/>
+    /// and <see cref="AppendAsync(ObjectDraft, IReadOnlyList{SourceRange}, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="removed">Objects from <see cref="ListObjectsAsync"/>.</param>
+    /// <param name="added">Drafts whose rows are written; each is completed and put before the commit.</param>
+    /// <param name="consumed">The ranges the change takes into account, one per source.</param>
+    /// <param name="cancellationToken">Cancels the puts and the commit.</param>
+    /// <returns>
+    /// The version created; or <see cref="OperationOutcome.AlreadyThere"/> and the version that
+    /// counts the ranges when another commit counted them first; or
+    /// <see cref="OperationOutcome.Abandoned"/> when an object to remove was gone, the ranges then
+    /// not counted. The objects written for a commit that did not apply are left for vacuum.
+    /// </returns>
+    /// <exception cref="ArgumentException">An object does not come from this dataset's walk, or <paramref name="consumed"/> is empty or names a source twice.</exception>
+    /// <exception cref="SourceOffsetConflictException">A range would leave a gap, or overlap one another commit counted; nothing was committed.</exception>
+    /// <exception cref="InvalidOperationException">A draft belongs to another handle, was already committed, or its writer was abandoned.</exception>
+    public ValueTask<ReplaceResult> ReplaceObjectsAsync(
+        IReadOnlyList<DataObject> removed,
+        IReadOnlyList<ObjectDraft> added,
+        IReadOnlyList<SourceRange> consumed,
+        CancellationToken cancellationToken = default)
+    {
+        SourceTable.Check(consumed, nameof(consumed));
+        return ReplaceAsync(removed, added, consumed, cancellationToken);
+    }
+
+    private async ValueTask<ReplaceResult> ReplaceAsync(
+        IReadOnlyList<DataObject> removed, IReadOnlyList<ObjectDraft> added, IReadOnlyList<SourceRange>? consumed, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(removed);
         ArgumentNullException.ThrowIfNull(added);
@@ -782,20 +956,24 @@ public sealed class VortexDataset : IAsyncDisposable
             }
         }
 
-        if (inputs.Count == 0 && outputs.Count == 0)
+        if (inputs.Count == 0 && outputs.Count == 0 && consumed is null)
         {
             return new ReplaceResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };
         }
 
-        CommitResult commit = await CommitAsync(
-                [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }], CommitKind.Replace, cancellationToken)
-            .ConfigureAwait(false);
-        if (outputs.Count > 0 && commit.Outcomes[0] == OperationOutcome.Applied)
+        DatasetOperation[] operations = inputs.Count == 0 && outputs.Count == 0
+            ? []
+            : [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }];
+        CommitResult commit = await CommitAsync(operations, CommitKind.Replace, consumed, null, cancellationToken).ConfigureAwait(false);
+        OperationOutcome outcome = commit.Counted ? OperationOutcome.AlreadyThere
+            : commit.Outcomes.Count > 0 ? commit.Outcomes[0]
+            : OperationOutcome.Applied;
+        if (outputs.Count > 0 && outcome == OperationOutcome.Applied)
         {
             await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        return new ReplaceResult { Version = commit.Version, Outcome = commit.Outcomes[0] };
+        return new ReplaceResult { Version = commit.Version, Outcome = outcome };
     }
 
     /// <summary>
@@ -878,6 +1056,100 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <exception cref="DatasetIntegrityException">A guard found that the update would lose or double rows; nothing was committed.</exception>
     public ValueTask<RowChangeResult> UpdateAsync<TRecord>(
         Func<Probe<TRecord>, Predicate> filter, Func<TRecord, TRecord> update, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord> =>
+        ChangeAsync(filter, update, null, cancellationToken);
+
+    /// <summary>
+    /// Changes the rows <paramref name="filter"/> is true for, in one commit that counts the source
+    /// ranges <paramref name="consumed"/>; see
+    /// <see cref="UpdateAsync{TRecord}(Func{Probe{TRecord}, Predicate}, Func{TRecord, TRecord}, CancellationToken)"/>
+    /// and <see cref="AppendAsync(ObjectDraft, IReadOnlyList{SourceRange}, CancellationToken)"/>.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the rows are read and written as; it has a member for every column of the dataset.</typeparam>
+    /// <param name="filter">A lambda over the record's columns.</param>
+    /// <param name="update">The change, called once per row.</param>
+    /// <param name="consumed">The ranges the change takes into account, one per source; counted even when no row matches.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>
+    /// The version created and the rows changed; or <see cref="OperationOutcome.AlreadyThere"/> and
+    /// the version that counts the ranges when another commit counted them first, no row changed.
+    /// </returns>
+    /// <exception cref="ArgumentException"><typeparamref name="TRecord"/> has no member for a column of the dataset, or <paramref name="consumed"/> is empty or names a source twice.</exception>
+    /// <exception cref="SourceOffsetConflictException">A range would leave a gap, or overlap one another commit counted; nothing was committed.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this update read on every attempt.</exception>
+    public ValueTask<RowChangeResult> UpdateAsync<TRecord>(
+        Func<Probe<TRecord>, Predicate> filter,
+        Func<TRecord, TRecord> update,
+        IReadOnlyList<SourceRange> consumed,
+        CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        SourceTable.Check(consumed, nameof(consumed));
+        return ChangeAsync(filter, update, consumed, cancellationToken);
+    }
+
+    /// <summary>
+    /// Deletes the rows <paramref name="filter"/> is true for, in one commit that counts the source
+    /// ranges <paramref name="consumed"/>; see
+    /// <see cref="DeleteAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/> and
+    /// <see cref="AppendAsync(ObjectDraft, IReadOnlyList{SourceRange}, CancellationToken)"/>.
+    /// </summary>
+    /// <typeparam name="TRecord">The record whose members name the columns.</typeparam>
+    /// <param name="filter">A lambda over the record's columns.</param>
+    /// <param name="consumed">The ranges the delete takes into account, one per source; counted even when no row matches.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>
+    /// The version created and the rows deleted; or <see cref="OperationOutcome.AlreadyThere"/> and
+    /// the version that counts the ranges when another commit counted them first, no row deleted.
+    /// </returns>
+    /// <exception cref="ArgumentException"><paramref name="consumed"/> is empty, or names a source twice.</exception>
+    /// <exception cref="SourceOffsetConflictException">A range would leave a gap, or overlap one another commit counted; nothing was committed.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this delete read on every attempt.</exception>
+    public ValueTask<RowChangeResult> DeleteAsync<TRecord>(
+        Func<Probe<TRecord>, Predicate> filter, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        SourceTable.Check(consumed, nameof(consumed));
+        Predicate predicate = filter(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return predicate.IsNone
+            ? CountRangesAsync(CommitKind.Delete, consumed, cancellationToken)
+            : DatasetRowChanges.RunAsync(this, Checked(predicate.Node), null, consumed, cancellationToken);
+    }
+
+    /// <summary>
+    /// Deletes the rows <paramref name="filter"/> is true for, in one commit that counts the source
+    /// ranges <paramref name="consumed"/>, for a caller without a record type.
+    /// </summary>
+    /// <param name="filter">The filter, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="consumed">The ranges the delete takes into account, one per source.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>The version created and the rows deleted, or <see cref="OperationOutcome.AlreadyThere"/> when the ranges were counted already.</returns>
+    /// <exception cref="ArgumentException"><paramref name="consumed"/> is empty, or names a source twice.</exception>
+    /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
+    /// <exception cref="SourceOffsetConflictException">A range would leave a gap, or overlap one another commit counted; nothing was committed.</exception>
+    public ValueTask<RowChangeResult> DeleteAsync(
+        VortexExpr filter, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        SourceTable.Check(consumed, nameof(consumed));
+        return DatasetRowChanges.RunAsync(this, Checked(ToolPaths.Check(Schema, filter)), null, consumed, cancellationToken);
+    }
+
+    /// <summary>The commit of ranges whose change can match no row: the offsets move, and nothing else.</summary>
+    private async ValueTask<RowChangeResult> CountRangesAsync(CommitKind kind, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken)
+    {
+        CommitResult commit = await CommitAsync([], kind, consumed, null, cancellationToken).ConfigureAwait(false);
+        return new RowChangeResult
+        {
+            Version = commit.Version,
+            Outcome = commit.Counted ? OperationOutcome.AlreadyThere : OperationOutcome.Applied,
+            Attempts = commit.Attempts,
+        };
+    }
+
+    private ValueTask<RowChangeResult> ChangeAsync<TRecord>(
+        Func<Probe<TRecord>, Predicate> filter, Func<TRecord, TRecord> update, IReadOnlyList<SourceRange>? consumed, CancellationToken cancellationToken)
         where TRecord : IVortexRecord<TRecord>
     {
         ArgumentNullException.ThrowIfNull(filter);
@@ -898,13 +1170,17 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         Predicate predicate = filter(new Probe<TRecord>(binding));
-        return predicate.IsNone
-            ? ValueTask.FromResult(Unchanged())
-            : DatasetRowChanges.RunAsync(
-                this,
-                Checked(predicate.Node),
-                (schema, end) => new ChangedRecords<TRecord>(this, schema, update, end),
-                cancellationToken);
+        if (predicate.IsNone)
+        {
+            return consumed is null ? ValueTask.FromResult(Unchanged()) : CountRangesAsync(CommitKind.Update, consumed, cancellationToken);
+        }
+
+        return DatasetRowChanges.RunAsync(
+            this,
+            Checked(predicate.Node),
+            (schema, end) => new ChangedRecords<TRecord>(this, schema, update, end),
+            consumed,
+            cancellationToken);
     }
 
     /// <summary>
@@ -1267,27 +1543,54 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Applies operations made for <paramref name="kind"/>, which the commit's telemetry names,
     /// reports what the commit made of each of them, and moves this handle on.
     /// </summary>
+    internal ValueTask<CommitResult> CommitAsync(
+        IReadOnlyList<DatasetOperation> operations, CommitKind kind, CancellationToken cancellationToken) =>
+        CommitAsync(operations, kind, null, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="CommitAsync(IReadOnlyList{DatasetOperation}, CommitKind, CancellationToken)"/>, for
+    /// rows that take the source ranges <paramref name="consumed"/> into account, or for a commit that
+    /// forgets the sources <paramref name="forgotten"/>.
+    /// </summary>
+    /// <exception cref="SourceOffsetConflictException">A range does not start where the dataset counts its source up to.</exception>
     internal async ValueTask<CommitResult> CommitAsync(
-        IReadOnlyList<DatasetOperation> operations, CommitKind kind, CancellationToken cancellationToken)
+        IReadOnlyList<DatasetOperation> operations,
+        CommitKind kind,
+        IReadOnlyList<SourceRange>? consumed,
+        IReadOnlyCollection<string>? forgotten,
+        CancellationToken cancellationToken)
     {
         RequireConditionalCreation(_store);
         DatasetSnapshot held = Snapshot;
-        CommitResult result = await DatasetCommitter
-            .CommitAsync(
-                _store,
-                operations,
-                Commit(_options, held.Header) with
-                {
-                    Known = held.Version,
-                    KnownAt = held.KnownAt,
-                    TrustSpan = TrustSpan(held),
-                    Held = held.Commit,
-                    PageCache = _pageCache,
-                    Kind = kind,
-                    Location = _location,
-                },
-                cancellationToken)
-            .ConfigureAwait(false);
+        CommitResult result;
+        try
+        {
+            result = await DatasetCommitter
+                .CommitAsync(
+                    _store,
+                    operations,
+                    Commit(_options, held.Header) with
+                    {
+                        Known = held.Version,
+                        KnownAt = held.KnownAt,
+                        TrustSpan = TrustSpan(held),
+                        Held = held.Commit,
+                        PageCache = _pageCache,
+                        Kind = kind,
+                        Location = _location,
+                        Consumed = consumed,
+                        Forgotten = forgotten,
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (SourceOffsetConflictException conflict) when (conflict.Held is { } decided)
+        {
+            // The handle reads the version the conflict was decided against, whose offsets the
+            // caller works its ranges out again from.
+            MoveTo(conflict.Version, decided, conflict.KnownAt);
+            throw;
+        }
 
         // As the writer holds it: reading it back would cost a request per version probed, then the
         // read that opens it, for bytes this process wrote.
@@ -1521,8 +1824,9 @@ public sealed class VortexDataset : IAsyncDisposable
         try
         {
             // Completed here unless the caller already did; the rows it holds are known once the
-            // last chunk is out.
-            if (!draft.Writer.IsFinished)
+            // last chunk is out. A writer that took no row is not: an object of no row is not put,
+            // and the run a clustered dataset requires could not be built over nothing.
+            if (!draft.Writer.IsFinished && draft.Writer.RowCount > 0)
             {
                 await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
             }

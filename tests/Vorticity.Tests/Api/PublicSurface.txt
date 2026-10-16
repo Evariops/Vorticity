@@ -2806,6 +2806,35 @@ Vorticity.Dataset:     property long ObjectsMarked { get; init; }
 Vorticity.Dataset:     property long ObjectsOut { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.SourceCommit : IEquatable<SourceCommit>
+Vorticity.Dataset:     ctor SourceCommit()
+Vorticity.Dataset:     method SourceCommit <Clone>$()
+Vorticity.Dataset:     method bool Equals(SourceCommit)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(SourceCommit, SourceCommit)
+Vorticity.Dataset:     method bool op_Inequality(SourceCommit, SourceCommit)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
+Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.SourceOffsetConflictException : VortexException
+Vorticity.Dataset:     ctor SourceOffsetConflictException()
+Vorticity.Dataset:     ctor SourceOffsetConflictException(string)
+Vorticity.Dataset:     ctor SourceOffsetConflictException(string, Exception)
+Vorticity.Dataset:     property IReadOnlyDictionary<string, ulong> Recorded { get; init; }
+Vorticity.Dataset:     property IReadOnlyList<SourceRange> Declared { get; init; }
+Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: struct Vorticity.Dataset.SourceRange : IEquatable<SourceRange>
+Vorticity.Dataset:     ctor SourceRange(string, ulong, ulong)
+Vorticity.Dataset:     method bool Equals(SourceRange)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(SourceRange, SourceRange)
+Vorticity.Dataset:     method bool op_Inequality(SourceRange, SourceRange)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property string Source { get; }
+Vorticity.Dataset:     property ulong From { get; }
+Vorticity.Dataset:     property ulong To { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.TornCommitException : VortexException
 Vorticity.Dataset:     ctor TornCommitException()
 Vorticity.Dataset:     ctor TornCommitException(string)
@@ -2854,9 +2883,15 @@ Vorticity.Dataset:     method ValueTask<IndexingResult> IndexAsync(IndexPolicy, 
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceObjectsAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceObjectsAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, IReadOnlyList<SourceRange>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr, IReadOnlyList<SourceRange>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, IReadOnlyList<SourceRange>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, IReadOnlyList<SourceRange>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<SourceCommit> AppendAsync(IAsyncEnumerable<RecordBatch>, IReadOnlyList<SourceRange>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<SourceCommit> AppendAsync(ObjectDraft, IReadOnlyList<SourceRange>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VacuumResult> VacuumAsync(VacuumOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> CreateAsync(IObjectStore, VortexSchema, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> CreateAsync(string, VortexSchema, DatasetOptions = default, CancellationToken = default)
@@ -2867,10 +2902,12 @@ Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(string, ulong, 
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> ForgetSourcesAsync(IReadOnlyList<string>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RekeyAsync(CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
+Vorticity.Dataset:     method ulong SourceOffset(string)
 Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; }
 Vorticity.Dataset:     property VortexSchema Schema { get; }
@@ -2879,6 +2916,7 @@ Vorticity.Dataset:     property bool IsEncrypted { get; }
 Vorticity.Dataset:     property long Lag { get; }
 Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
+Vorticity.Dataset:     property ulong LastDataChange { get; }
 Vorticity.Dataset:     property ulong Version { get; }
 Vorticity.RowEncoding: static class Vorticity.RowEncoding.RowEncoder
 Vorticity.RowEncoding:     const string VortexVersion = 0.86.1

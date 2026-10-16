@@ -244,6 +244,9 @@ public sealed class EncryptedDatasetTests
 
         ulong rekeyed = await dataset.RekeyAsync(ct);
         Assert.Equal(dataset.Version, rekeyed);
+
+        // A rekey changes no row: the last change is still the append before it.
+        Assert.Equal(rekeyed - 1, dataset.LastDataChange);
         await AppendAsync(dataset, 1, ct);
 
         List<string> commits = await KeysAsync(store, "commit/", ct);

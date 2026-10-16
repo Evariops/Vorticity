@@ -40,6 +40,9 @@ internal enum CommitKind
 
     /// <summary>The data key changed.</summary>
     Rekey = 10,
+
+    /// <summary>The offsets of sources no writer takes any more forgotten.</summary>
+    Sources = 11,
 }
 
 /// <summary>How a commit ended, as the dataset's telemetry names it.</summary>
@@ -292,6 +295,7 @@ internal static class DatasetTelemetry
         CommitKind.Compaction => "compaction",
         CommitKind.Repack => "repack",
         CommitKind.Rekey => "rekey",
+        CommitKind.Sources => "sources",
         _ => "other",
     };
 

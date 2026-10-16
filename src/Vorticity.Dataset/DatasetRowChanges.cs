@@ -92,9 +92,25 @@ internal static class DatasetRowChanges
     /// <param name="start">Makes, for one attempt, the sink the taken rows go to, given the schema they are read as and the position of a row that follows every other; null for a delete.</param>
     /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
     /// <exception cref="ObjectStoreException">Concurrent commits took an object first on every attempt.</exception>
+    internal static ValueTask<RowChangeResult> RunAsync(
+        VortexDataset dataset, VortexExpr? filter, Func<DatasetSchema, long, ChangedRows>? start, CancellationToken cancellationToken) =>
+        RunAsync(dataset, filter, start, null, cancellationToken);
+
+    /// <summary>
+    /// <see cref="RunAsync(VortexDataset, VortexExpr?, Func{DatasetSchema, long, ChangedRows}?, CancellationToken)"/>,
+    /// for a change that takes the source ranges <paramref name="consumed"/> into account: committed
+    /// even when it takes no row, so that the ranges are counted, and given up when another commit
+    /// counted them first.
+    /// </summary>
+    /// <exception cref="SourceOffsetConflictException">A range does not start where the dataset counts its source up to.</exception>
     internal static async ValueTask<RowChangeResult> RunAsync(
-        VortexDataset dataset, VortexExpr? filter, Func<DatasetSchema, long, ChangedRows>? start, CancellationToken cancellationToken)
+        VortexDataset dataset,
+        VortexExpr? filter,
+        Func<DatasetSchema, long, ChangedRows>? start,
+        IReadOnlyList<SourceRange>? consumed,
+        CancellationToken cancellationToken)
     {
+        CommitKind kind = start is null ? CommitKind.Delete : CommitKind.Update;
         int attempts = Math.Max(dataset.Options.MaxAttempts, 1);
         for (int attempt = 1; attempt <= attempts; attempt++)
         {
@@ -159,17 +175,38 @@ internal static class DatasetRowChanges
                 throw;
             }
 
-            if (inputs.Count == 0)
+            if (inputs.Count == 0 && consumed is null)
             {
                 return new RowChangeResult { Version = version.Version, Outcome = OperationOutcome.AlreadyThere, Attempts = attempt };
+            }
+
+            if (inputs.Count == 0)
+            {
+                // No row to take, and ranges to count all the same.
+                CommitResult counting = await dataset.CommitAsync([], kind, consumed, null, cancellationToken).ConfigureAwait(false);
+                return new RowChangeResult
+                {
+                    Version = counting.Version,
+                    Outcome = counting.Counted ? OperationOutcome.AlreadyThere : OperationOutcome.Applied,
+                    Attempts = attempt,
+                };
             }
 
             CommitResult commit = await dataset
                 .CommitAsync(
                     [new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }],
-                    start is null ? CommitKind.Delete : CommitKind.Update,
+                    kind,
+                    consumed,
+                    null,
                     cancellationToken)
                 .ConfigureAwait(false);
+            if (commit.Counted)
+            {
+                // Another commit counted the ranges first: this change is not to be applied, and what
+                // it wrote is left for vacuum.
+                return new RowChangeResult { Version = commit.Version, Outcome = OperationOutcome.AlreadyThere, Attempts = attempt };
+            }
+
             if (commit.Outcomes[0] == OperationOutcome.Applied)
             {
                 if (outputs.Count > marked)

@@ -28,6 +28,12 @@ internal readonly record struct InlinedPage(PageReference Reference, ReadOnlyMem
 /// <summary>Where the pages region of an earlier version's commit object starts, one past its header.</summary>
 internal readonly record struct PagesStart(ulong Version, long Offset);
 
+/// <summary>How far the entries of one of the application's sources are counted in the dataset.</summary>
+/// <param name="Source">The source's name, the application's: a shard of raw data, a partition of a log.</param>
+/// <param name="Offset">The position up to which its entries are counted, in the source's own numbering.</param>
+/// <param name="AtUnixMilliseconds">When the offset last moved, by the clock of the writer that moved it, for information.</param>
+internal readonly record struct SourceOffset(string Source, ulong Offset, long AtUnixMilliseconds);
+
 /// <summary>
 /// One level of the dataset tree, as the header records it; level 0 is the newest and smallest.
 /// <c>Inlined</c> holds the pages carried in the header, top first.
@@ -115,6 +121,20 @@ internal sealed record CommitHeader
     /// </summary>
     public bool LockedStore { get; init; }
 
+    /// <summary>
+    /// Per source of the application's entries, how far its entries are counted in the dataset, in
+    /// the ordinal order of the names: what the commits that declared the ranges they consumed
+    /// advanced. A header that carries one is written in commit format 3.
+    /// </summary>
+    public IReadOnlyList<SourceOffset> Sources { get; init; } = [];
+
+    /// <summary>
+    /// The last version whose commit changed rows, which a commit that only moves them copies from
+    /// its parent; 0 when a writer that does not know the field wrote the header, and nothing is
+    /// known then but that it is at most this version.
+    /// </summary>
+    public ulong LastDataChange { get; init; }
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -131,6 +151,15 @@ internal sealed record CommitHeader
         internal const int Retired = 12;
         internal const int Starts = 13;
         internal const int LockedStore = 14;
+        internal const int Sources = 15;
+        internal const int LastDataChange = 16;
+    }
+
+    internal static class SourceField
+    {
+        internal const int Name = 1;
+        internal const int Offset = 2;
+        internal const int At = 3;
     }
 
     internal static class StartField
@@ -208,6 +237,31 @@ internal sealed record CommitHeader
         if (LockedStore)
         {
             writer.WriteUInt64(Field.LockedStore, 1);
+        }
+
+        foreach (SourceOffset source in Sources)
+        {
+            WriteSource(ref writer, source);
+        }
+
+        writer.WriteUInt64(Field.LastDataChange, LastDataChange);
+    }
+
+    private static void WriteSource(ref ProtoWriter writer, SourceOffset source)
+    {
+        // The name is written even when empty, as a retired name is, so a reader can tell an entry
+        // from a torn one.
+        ProtoWriter inner = new ProtoWriter();
+        try
+        {
+            inner.WriteStringAlways(SourceField.Name, source.Source);
+            inner.WriteUInt64(SourceField.Offset, source.Offset);
+            inner.WriteInt64(SourceField.At, source.AtUnixMilliseconds);
+            writer.WriteBytes(Field.Sources, inner.WrittenSpan);
+        }
+        finally
+        {
+            inner.Dispose();
         }
     }
 
@@ -366,6 +420,8 @@ internal sealed record CommitHeader
         List<RetiredColumn> retired = [];
         List<PagesStart> starts = [];
         bool locked = false;
+        List<SourceOffset> sources = [];
+        ulong lastDataChange = 0;
 
         try
         {
@@ -416,6 +472,12 @@ internal sealed record CommitHeader
                     case (Field.LockedStore, ProtoWireType.Varint):
                         locked = reader.ReadVarint() != 0;
                         break;
+                    case (Field.Sources, ProtoWireType.LengthDelimited):
+                        sources.Add(ReadSource(reader.ReadLengthDelimited()));
+                        break;
+                    case (Field.LastDataChange, ProtoWireType.Varint):
+                        lastDataChange = reader.ReadVarint();
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -450,7 +512,37 @@ internal sealed record CommitHeader
             Retired = retired,
             Starts = starts,
             LockedStore = locked,
+            Sources = sources,
+            LastDataChange = lastDataChange,
         };
+    }
+
+    private static SourceOffset ReadSource(ReadOnlySpan<byte> bytes)
+    {
+        string name = string.Empty;
+        ulong offset = 0;
+        long at = 0;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (SourceField.Name, ProtoWireType.LengthDelimited):
+                    name = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (SourceField.Offset, ProtoWireType.Varint):
+                    offset = reader.ReadVarint();
+                    break;
+                case (SourceField.At, ProtoWireType.Varint):
+                    at = (long)reader.ReadVarint();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return new SourceOffset(name, offset, at);
     }
 
     private static PagesStart ReadStart(ReadOnlySpan<byte> bytes)
