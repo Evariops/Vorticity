@@ -105,6 +105,21 @@ internal static class ExprText
 
                 text.Append(')');
                 return;
+            case TypedInExpr typed:
+                AppendField(text, typed.Field);
+                text.Append(" in (");
+                for (int i = 0; i < typed.Count; i++)
+                {
+                    if (i != 0)
+                    {
+                        text.Append(", ");
+                    }
+
+                    AppendLiteral(text, typed.Shown(i));
+                }
+
+                text.Append(')');
+                return;
             case StringMatchExpr match:
                 AppendField(text, match.Field);
                 text.Append(match.Op switch

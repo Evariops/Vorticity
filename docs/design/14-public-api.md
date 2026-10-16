@@ -257,6 +257,12 @@ columns in the file's order. A number in a filter is the number the text wrote, 
 a decimal column, and text compared with a date, time, timestamp, uuid or decimal column is parsed in
 that type and refused when it does not parse ([untyped-files.md](../guide/untyped-files.md)).
 
+A set of values does not go through text. `VortexExpr.In(column, values)` takes a span of any size,
+copies it, and combines with `&`, `|` and `!` as a parsed filter does. It is checked against the column
+when a scan takes it, as a hole is: a number goes to any numeric column, placed against its width, a
+value of another type to a column of that type, and a null or a value the column cannot hold matches
+no row, as in the typed scan's `In`.
+
 ## 6. Writing
 
 Writing has the shape of a `PipeWriter`: the caller fills builders synchronously, and the writer

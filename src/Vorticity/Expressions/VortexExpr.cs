@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Compute;
@@ -40,6 +41,12 @@ internal enum ExprKind : byte
 
     /// <summary>A binary comparison of two columns of the same type.</summary>
     ColumnComparison = 9,
+
+    /// <summary>
+    /// <c>IN</c> over typed values not yet bound to their column, which a scan binds into an
+    /// <see cref="In"/> when it takes the filter.
+    /// </summary>
+    TypedIn = 10,
 }
 
 /// <summary>The three byte-pattern predicates a filter can apply to a column.</summary>
@@ -370,6 +377,80 @@ internal sealed class InExpr : VortexExpr
 
     /// <inheritdoc/>
     internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+}
+
+/// <summary>
+/// <c>IN</c> over typed values that only the column's type turns into literals: a scan binds it when
+/// it takes the filter, as it binds a hole of an interpolated filter, and nothing past that sees it.
+/// </summary>
+internal abstract class TypedInExpr : VortexExpr
+{
+    private protected TypedInExpr(FieldExpr field) => Field = field;
+
+    /// <summary>The column.</summary>
+    public FieldExpr Field { get; }
+
+    /// <summary>The values.</summary>
+    internal abstract int Count { get; }
+
+    /// <inheritdoc/>
+    internal override ExprKind Kind => ExprKind.TypedIn;
+
+    /// <inheritdoc/>
+    internal override void CollectFields(ICollection<string> paths) => Field.CollectFields(paths);
+
+    /// <summary>
+    /// The membership of the values <paramref name="column"/> holds exactly, as the typed scan
+    /// lowers its own: a null, or a value the column cannot hold, matches no row.
+    /// </summary>
+    /// <exception cref="VortexSchemaException">The column does not take values of this type.</exception>
+    internal abstract Predicate Bind(VortexField column);
+
+    /// <summary>Value <paramref name="index"/> as the filter grammar writes a literal, for the text of the filter.</summary>
+    internal abstract FilterLiteral Shown(int index);
+}
+
+/// <summary>A <see cref="TypedInExpr"/> over values of <typeparamref name="T"/>, copied when it is built.</summary>
+internal sealed class TypedInExpr<T> : TypedInExpr
+{
+    private readonly T[] _values;
+
+    internal TypedInExpr(FieldExpr field, T[] values)
+        : base(field) => _values = values;
+
+    /// <inheritdoc/>
+    internal override int Count => _values.Length;
+
+    /// <inheritdoc/>
+    internal override Predicate Bind(VortexField column)
+    {
+        ToolPaths.RequireValue<T>(column);
+        return SymLowering.In(new ColumnSym(Field, column.Type, null, null, -1, []), _values);
+    }
+
+    /// <inheritdoc/>
+    internal override FilterLiteral Shown(int index) => _values[index] switch
+    {
+        null => FilterLiteral.Null,
+        bool value => FilterLiteral.From(value),
+        string value => FilterLiteral.From(value),
+        byte[] value => FilterLiteral.From(value),
+        double value => FilterLiteral.From(value),
+        float value => FilterLiteral.From(value),
+        Half value => FilterLiteral.From((double)value),
+        long value => FilterLiteral.From(value),
+        int value => FilterLiteral.From(value),
+        short value => FilterLiteral.From(value),
+        sbyte value => FilterLiteral.From(value),
+        nint value => FilterLiteral.From(value),
+        ulong value => FilterLiteral.From(value),
+        uint value => FilterLiteral.From(value),
+        ushort value => FilterLiteral.From(value),
+        byte value => FilterLiteral.From(value),
+        nuint value => FilterLiteral.From(value),
+        IFormattable value => FilterLiteral.From(value.ToString(null, CultureInfo.InvariantCulture)),
+        object value => FilterLiteral.From(value.ToString() ?? string.Empty),
+    };
 }
 
 /// <summary>A field matched against a byte pattern.</summary>

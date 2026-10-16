@@ -115,6 +115,7 @@ Counts from the sample, each with its plan:
 |---|---|---|---|---|---|
 | `r.Day >= 900` | 100 000 | 14 of 123 | 1 | 428 | exactly, from the structures |
 | `r.Day.In(1, 2, 3)` | 3 000 | 1 of 123 | 1 | 412 | exactly, from the structures |
+| `r.Day.In(firstDays)`, 500 days | 500 000 | 62 of 123 | 8 | 3 384 | exactly, from the structures |
 | `r.Celsius == null` | 20 000 | 123 of 123 | 0 | 0 | every block proven by its null count |
 | `r.Celsius > 45.0` | 122 500 | 123 of 123 | 17 | 1 150 428 | 123 blocks evaluated |
 | `r.City == "Paris"` | 125 006 | 123 of 123 | 17 | 336 956 | 123 blocks evaluated |
@@ -124,6 +125,13 @@ The rows are in `Day` order, so the bounds of 109 blocks out of 123 settle `Day 
 and the count reads one small segment of `Day`, the one that holds the boundary. The zone maps it
 relies on are already in memory, kept by the scans before it, which is also why `== null` reads
 nothing at all.
+
+A set of any size goes through the same structures. `In` takes a span, so 500 days cost no more to
+write than three, and the zone maps sort the set once to answer each block by a search, which is how
+61 blocks are excluded and the 500 000 rows counted from 3 384 bytes. A set too large for an index to
+help, tens of thousands of values spread over every block, costs the index little: its Bloom filters
+are asked only while they exclude blocks ([indexes.md](indexes.md)), and each row is then tested
+against a hash set.
 
 `Celsius` covers its whole range inside every block, and every city appears in every block, so no
 block can be excluded and each value has to be compared. This is a property of the data, not of the

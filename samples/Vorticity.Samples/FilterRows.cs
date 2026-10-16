@@ -50,6 +50,13 @@ internal static class FilterRows
         await CountAsync("r.Celsius > 45.0", file.Scan<Reading>().Where(r => r.Celsius > 45.0));
         await CountAsync("r.City == \"Paris\"", file.Scan<Reading>().Where(r => r.City == "Paris"));
         await CountAsync("r.Day.In(1, 2, 3)", file.Scan<Reading>().Where(r => r.Day.In(1, 2, 3)));
+        int[] firstDays = new int[500];
+        for (int i = 0; i < firstDays.Length; i++)
+        {
+            firstDays[i] = i;
+        }
+
+        await CountAsync("r.Day.In(firstDays), 500 days", file.Scan<Reading>().Where(r => r.Day.In(firstDays)));
         await CountAsync("r.City.StartsWith(\"L\")", file.Scan<Reading>().Where(r => r.City.StartsWith("L")));
         await CountAsync("r.Celsius.Between(10.0, 20.0)", file.Scan<Reading>().Where(r => r.Celsius.Between(10.0, 20.0)));
         await CountAsync("r.Celsius == null", file.Scan<Reading>().Where(r => r.Celsius == null));

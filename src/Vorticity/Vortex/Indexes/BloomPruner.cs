@@ -22,11 +22,24 @@ namespace Vorticity.Indexes;
 /// a live block.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Only equality, membership, list containment and a string match claim anything, and only when the
 /// literal converts exactly to the bytes the column stores; a conversion that rounds claims nothing
 /// rather than proving something on the wrong value. Anything that does not check out -- a region
 /// whose bytes are not its checksum's, a node that is not what its parent says -- leaves its blocks
 /// live and stops the descent there, so a lying index may cost pruning but never rows.
+/// </para>
+/// <para>
+/// A question of many values asks a filter only while the filters pay for themselves. A node is
+/// proved absent only when its filter refuses every value, so its price grows with the values, and
+/// a filter of a few false positives in a thousand refuses ten thousand values almost never. Each
+/// level gives the question the worth of one of its nodes, counted in probes: a probe and a value
+/// hashed cost one, and a block ruled out earns <see cref="BlockWorth"/>. The question stops at the
+/// level where it runs out, and asks nothing below: what it would cost there is the same kind of
+/// probe, against nodes worth less each. Whatever the values, the filters' rates and where the values
+/// lie, the waste stays within the worth of one node per level, and a question that pays never runs
+/// out. Not asking only leaves blocks live: it changes the speed, never the rows.
+/// </para>
 /// </remarks>
 internal sealed class BloomPruner
 {
@@ -37,12 +50,27 @@ internal sealed class BloomPruner
     private readonly Dictionary<VortexExpr, Question> _questions =
         new Dictionary<VortexExpr, Question>(ReferenceEqualityComparer.Instance);
 
-    private BloomPruner(VortexExpr filter, Dictionary<string, Column> columns)
+    private BloomPruner(VortexExpr filter, Dictionary<string, Column> columns, long blockRows)
     {
         _filter = filter;
         _columns = columns;
+        BlockWorth = blockRows >= long.MaxValue / ProbesPerRow ? long.MaxValue : blockRows * ProbesPerRow;
         Plan(filter);
     }
+
+    /// <summary>
+    /// What a row a scan reads costs, in probes: a scan that tests an <c>IN</c> on an Int64 column
+    /// spends 5 to 7 ns on a row, a probe 3 ns and a key's hash 4 ns, on an M4 Pro
+    /// (<c>BloomPruneBenchmarks.Unpruned</c> and <c>BloomProbeBenchmarks</c>).
+    /// </summary>
+    private const long ProbesPerRow = 2;
+
+    /// <summary>
+    /// The probes a block ruled out pays for: its rows, each of which a scan that reads the block
+    /// decodes and tests.
+    /// </summary>
+    /// <remarks><see cref="long.MaxValue"/> asks every filter, as a benchmark's baseline does.</remarks>
+    internal long BlockWorth { get; set; }
 
     /// <summary>What consulting the filters cost: segments and bytes read.</summary>
     internal int Segments { get; private set; }
@@ -127,7 +155,7 @@ internal sealed class BloomPruner
             columns.Remove(key);
         }
 
-        return columns.Count == 0 ? null : new BloomPruner(filter, columns);
+        return columns.Count == 0 ? null : new BloomPruner(filter, columns, blockRows);
     }
 
     /// <summary>
@@ -167,7 +195,7 @@ internal sealed class BloomPruner
         VortexFile file, BlockMask live, CancellationToken cancellationToken, bool rootsOnly = false)
     {
         int top = await LoadRootsAsync(file, live, cancellationToken).ConfigureAwait(false);
-        for (int level = top; level >= 0 && !live.IsEmpty; level--)
+        for (int level = top; level >= 0 && !live.IsEmpty && Asked(); level--)
         {
             if (!rootsOnly && level < top)
             {
@@ -209,6 +237,11 @@ internal sealed class BloomPruner
         using IndexBatches<(Tree Tree, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
         {
+            if (!column.Asked)
+            {
+                continue;
+            }
+
             foreach (Tree tree in column.Trees)
             {
                 if (tree.Root is null && AnyLive(live, (long)tree.Run.FirstBlock, (long)tree.Run.EndBlock))
@@ -274,6 +307,12 @@ internal sealed class BloomPruner
         using IndexBatches<(Tree Tree, long Index, BloomNode Parent, int Slot)> batches = new();
         foreach (Column column in _columns.Values)
         {
+            // A level no question will ask is not worth its read.
+            if (!column.Asked)
+            {
+                continue;
+            }
+
             foreach (Tree tree in column.Trees)
             {
                 if (tree.Root is null || tree.Root.Level <= level || tree.NodesAt(level + 1) is not { } parents)
@@ -373,6 +412,20 @@ internal sealed class BloomPruner
 
     private static bool AnyLive(BlockMask live, long start, long end) => live.AnyLiveBlocks(start, end);
 
+    /// <summary>Whether a question still asks some column's filters.</summary>
+    private bool Asked()
+    {
+        foreach (Column column in _columns.Values)
+        {
+            if (column.Asked)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // ------------------------------------------------------------------------------ the proof
 
     /// <summary>
@@ -392,26 +445,32 @@ internal sealed class BloomPruner
             // A function of a column is not the column: its filter holds the column's values.
             case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal
                 when _columns.TryGetValue(equal.Field.Path, out Column? column) && !column.IsList:
-                _questions[expr] = new Question(column, [equal.Value]);
+                Ask(expr, new Question(column, [equal.Value]));
                 break;
 
             case ListContainsExpr contains
                 when _columns.TryGetValue(contains.Field.Path, out Column? column) && column.IsList:
                 // A list's filter holds its elements, each in its row's block.
-                _questions[expr] = new Question(column, [contains.Value]);
+                Ask(expr, new Question(column, [contains.Value]));
                 break;
 
             case InExpr { Field: not Compute.FunctionFieldExpr } @in when _columns.TryGetValue(@in.Field.Path, out Column? column) && !column.IsList:
-                _questions[expr] = new Question(column, @in.Values);
+                Ask(expr, new Question(column, @in.Values));
                 break;
 
             case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
-                _questions[expr] = new Question(text, Trigrams.Required(match, text.Fold));
+                Ask(expr, new Question(text, Trigrams.Required(match, text.Fold)));
                 break;
 
             default:
                 break;
         }
+    }
+
+    private void Ask(VortexExpr expr, Question question)
+    {
+        _questions[expr] = question;
+        question.Column.Questions.Add(question);
     }
 
     /// <summary>
@@ -445,7 +504,7 @@ internal sealed class BloomPruner
         absent.Clear();
         if (_questions.TryGetValue(expr, out Question? question))
         {
-            question.Absent(level, absent);
+            question.Absent(level, absent, BlockWorth);
         }
     }
 
@@ -512,6 +571,12 @@ internal sealed class BloomPruner
         /// <summary>The column's trees, in block order; their runs are disjoint.</summary>
         internal List<Tree> Trees { get; } = [];
 
+        /// <summary>The questions the column's filters answer.</summary>
+        internal List<Question> Questions { get; } = [];
+
+        /// <summary>Whether a question still asks the column's filters, which are then worth reading.</summary>
+        internal bool Asked => Questions.Exists(question => question.Asks);
+
         /// <summary>
         /// The hash (or the two, for a float zero) of <paramref name="value"/> as this column stores
         /// it; <see langword="false"/> when the conversion is not exact and nothing can be claimed.
@@ -544,51 +609,80 @@ internal sealed class BloomPruner
     /// column's trees use.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// An equality, an <c>IN</c> or a list's element is false under a filter that holds none of its
     /// keys, and claims nothing unless every key converts exactly; a text match is false under a
     /// filter that lacks one trigram it requires, and one that requires none claims nothing.
+    /// </para>
+    /// <para>
+    /// Keys are hashed as the probes reach them: a filter's answer stops at the first key it may
+    /// hold, so a question whose filters answer maybe early hashes a few of its keys, and only a node
+    /// proved absent needs them all. A text match's trigrams are few, and hashed at once.
+    /// </para>
     /// </remarks>
     private sealed class Question
     {
-        private readonly Column _column;
         private readonly IReadOnlyList<FilterLiteral>? _values;
         private readonly List<byte[]>? _trigrams;
-        private readonly ulong[] _first;
-        private readonly ulong[] _second;
-        private readonly bool[] _two;
+        private ulong[] _first;
+        private ulong[] _second;
+        private bool[] _two;
         private BloomHash _hash;
-        private bool _hashed;
-        private bool _claims;
+        private bool _hashing;
+        private int _hashed;
+        private bool _claims = true;
+        private bool _spent;
+        private long _credit;
 
         internal Question(Column column, IReadOnlyList<FilterLiteral> values)
         {
-            _column = column;
+            Column = column;
             _values = values;
-            _first = new ulong[values.Count];
-            _second = new ulong[values.Count];
-            _two = new bool[values.Count];
+            int capacity = Math.Min(values.Count, InitialKeys);
+            _first = new ulong[capacity];
+            _second = new ulong[capacity];
+            _two = new bool[capacity];
         }
 
         internal Question(Column column, List<byte[]> trigrams)
         {
-            _column = column;
+            Column = column;
             _trigrams = trigrams;
             _first = new ulong[trigrams.Count];
             _second = [];
             _two = [];
         }
 
+        /// <summary>The keys hashed before the first growth: an IN of a few values hashes into no more.</summary>
+        private const int InitialKeys = 64;
+
+        /// <summary>The column whose filters answer the question.</summary>
+        internal Column Column { get; }
+
+        /// <summary>Whether the question still asks: it claims something, and has not run out of credit.</summary>
+        internal bool Asks => _claims && !_spent;
+
         /// <summary>
         /// Sets in <paramref name="absent"/> the blocks under every node read at
-        /// <paramref name="level"/> whose filter answers no, each node asked once.
+        /// <paramref name="level"/> whose filter answers no, each node asked once, while the level's
+        /// credit lasts.
         /// </summary>
-        internal void Absent(int level, Span<ulong> absent)
+        /// <param name="level">The level read.</param>
+        /// <param name="absent">The blocks proved absent, set here.</param>
+        /// <param name="blockWorth">The probes a block ruled out pays for.</param>
+        internal void Absent(int level, Span<ulong> absent, long blockWorth)
         {
-            foreach (Tree tree in _column.Trees)
+            if (!Asks)
+            {
+                return;
+            }
+
+            _credit = _trigrams is null ? Worth(1L << (4 * level), blockWorth) : long.MaxValue;
+            foreach (Tree tree in Column.Trees)
             {
                 if (!Hash(tree.Hash))
                 {
-                    continue;
+                    return;
                 }
 
                 long first = (long)tree.Run.FirstBlock;
@@ -600,6 +694,11 @@ internal sealed class BloomPruner
                         {
                             long block = first + relative;
                             absent[(int)(block >> 6)] |= 1UL << (int)(block & 63);
+                            _credit = Earn(_credit, Worth(1, blockWorth));
+                        }
+                        else if (!Asks)
+                        {
+                            return;
                         }
                     }
                 }
@@ -612,22 +711,38 @@ internal sealed class BloomPruner
                             long start = first + (index << (4 * level));
                             long end = Math.Min(start + (1L << (4 * level)), (long)tree.Run.EndBlock);
                             BitmapKernels.FillRange(MemoryMarshal.AsBytes(absent), (int)start, (int)(end - start), true);
+                            _credit = Earn(_credit, Worth(end - start, blockWorth));
+                        }
+                        else if (!Asks)
+                        {
+                            return;
                         }
                     }
                 }
             }
         }
 
-        /// <summary>Hashes the keys for <paramref name="hash"/> unless they already are; whether the question claims anything.</summary>
+        /// <summary><paramref name="blocks"/> blocks' worth in probes, short of overflowing.</summary>
+        private static long Worth(long blocks, long blockWorth) =>
+            blocks >= long.MaxValue / Math.Max(blockWorth, 1) ? long.MaxValue : blocks * blockWorth;
+
+        private static long Earn(long credit, long worth) => credit >= long.MaxValue - worth ? long.MaxValue : credit + worth;
+
+        /// <summary>
+        /// Readies the keys for <paramref name="hash"/>: a text match's trigrams all at once, an
+        /// equality's keys from the first as the probes reach them. Whether the question may claim
+        /// anything under the hash.
+        /// </summary>
         private bool Hash(BloomHash hash)
         {
-            if (_hashed && _hash == hash)
+            if (_hashing && _hash == hash)
             {
                 return _claims;
             }
 
-            _hashed = true;
+            _hashing = true;
             _hash = hash;
+            _hashed = 0;
             if (_trigrams is not null)
             {
                 for (int i = 0; i < _trigrams.Count; i++)
@@ -640,15 +755,14 @@ internal sealed class BloomPruner
             }
 
             _claims = _values!.Count > 0;
-            for (int i = 0; i < _values.Count && _claims; i++)
-            {
-                _claims = _column.TryHash(_values[i], hash, out _first[i], out _second[i], out _two[i]);
-            }
-
             return _claims;
         }
 
-        /// <summary>Whether a filter's words prove the question false for the blocks under it.</summary>
+        /// <summary>
+        /// Whether a filter's words prove the question false for the blocks under it. A probe and a
+        /// key hashed each spend a unit of the credit, and a question out of it is spent: the
+        /// filter's answer is then unknown, and the blocks stay live.
+        /// </summary>
         private bool Proves(ReadOnlySpan<uint> words)
         {
             if (_trigrams is not null)
@@ -664,14 +778,51 @@ internal sealed class BloomPruner
                 return false;
             }
 
-            for (int i = 0; i < _first.Length; i++)
+            int count = _values!.Count;
+            for (int i = 0; i < count; i++)
             {
+                if (i == _hashed && !HashNext())
+                {
+                    return false;
+                }
+
+                if (--_credit < 0)
+                {
+                    _spent = true;
+                    return false;
+                }
+
                 if (SplitBlockBloom.Contains(words, _first[i]) || (_two[i] && SplitBlockBloom.Contains(words, _second[i])))
                 {
                     return false;
                 }
             }
 
+            return true;
+        }
+
+        /// <summary>
+        /// Hashes the next key; false when it does not convert exactly, and the question claims
+        /// nothing: no node can be proved absent without every key.
+        /// </summary>
+        private bool HashNext()
+        {
+            if (_hashed == _first.Length)
+            {
+                int capacity = (int)Math.Min((long)_first.Length * 2, _values!.Count);
+                Array.Resize(ref _first, capacity);
+                Array.Resize(ref _second, capacity);
+                Array.Resize(ref _two, capacity);
+            }
+
+            if (!Column.TryHash(_values![_hashed], _hash, out _first[_hashed], out _second[_hashed], out _two[_hashed]))
+            {
+                _claims = false;
+                return false;
+            }
+
+            _hashed++;
+            _credit--;
             return true;
         }
     }

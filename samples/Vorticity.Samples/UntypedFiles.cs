@@ -38,6 +38,16 @@ internal static class UntypedFiles
         VortexExpr combined = VortexExpr.Parse("City in ('Lyon', 'Nice')") & !VortexExpr.Parse("Celsius < 40");
         Console.WriteLine($"combined: {combined}, {await file.Scan().Where(combined).CountAsync()} rows");
 
+        // A set of values goes in as it is, of any size, rather than written out as text.
+        int[] days = new int[200];
+        for (int i = 0; i < days.Length; i++)
+        {
+            days[i] = i * 5;
+        }
+
+        VortexExpr chosen = VortexExpr.In("Day", days) & VortexExpr.Parse("City = 'Paris'");
+        Console.WriteLine($"a set of {days.Length} days in Paris: {await file.Scan().Where(chosen).CountAsync()} rows");
+
         try
         {
             string text = "900";

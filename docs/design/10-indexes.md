@@ -140,7 +140,7 @@ writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with
 | predicate | proof |
 |---|---|
 | `x = v` | a block whose filter does not contain `v` is pruned |
-| `x IN (v1 … vn)` | pruned if the filter contains none of them. The literals are hashed once per query |
+| `x IN (v1 … vn)` | pruned if the filter contains none of them, asked while the filters pay for themselves (below) |
 | `AND`, `OR` | a conjunction of proofs, and under `OR` a block is pruned only if every arm prunes it |
 | `ListContains(x, v)` | as `x = v`, over the element filters |
 | `!=`, `<`, `LIKE` | no claim (see [trigrams](#42-vorticitybloomngram3v1-trigrams-for-text-predicates) for `LIKE`) |
@@ -148,6 +148,33 @@ writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with
 A literal is only hashed when it converts exactly into the column's type. An integer beyond 2⁵³ from
 a double, a non-integral float or an out-of-range integer claims nothing, a zero asks for both zeros,
 and a NaN asks for nothing.
+
+An `IN` of many values is where a filter can cost more than it saves. A block is pruned only when its
+filter refuses every value, and each value passes a filter that does not hold it with the filter's
+false-positive rate p, so a block holding none of n values is pruned with probability (1 − p)ⁿ. That
+probability falls fast: at p = 1 %, it is 37 % for 100 values and almost nothing for 1 000. The rate p
+is not the one the policy asked for either. Rounding each filter up to a power of two leaves it 50 to
+100 % full, so the real rate of most filters lies 10 to 60 times below the nominal one, and a block
+of few distinct values has a nearly empty filter that refuses almost anything. And when every block
+holds one of the values, nothing can be pruned at all, whatever p.
+
+No fixed threshold on n can follow all of that, so the pruner counts what the filters cost against
+what they save, in probes, as it asks them. A probe and a value hashed cost one, and a block pruned
+earns two per row, since a scan that reads a block decodes and tests each of its rows. On an M4 Pro
+a probe takes 3 ns (3.5 ns in a filter of a megabyte), a value's hash 4 ns, and a row 5 to 7 ns when a
+scan tests an `IN` on an Int64 column. Each level of the tree gives the question the worth of one of
+its nodes. The question stops at the level where its credit runs out and asks nothing below, and a
+level no question still asks is not read. A filter answers maybe at the first value it may hold, so
+the values are hashed as the probes reach them, and only a node proved absent needs them all.
+
+The waste is then bounded by one node's worth per level, whatever n, the filters' rates and where the
+values lie, and a question whose filters pay never runs out. Over 4 096 blocks of 64 rows, the rule
+asks every filter up to 64 values and prunes the same blocks as asking them all. At 1 024 values and
+beyond it stops within 0.3 to 0.4 ms, where asking every filter took 8.5 to 400 ms to prune nothing or
+next to nothing. Counting the scan of the blocks left live, it stays within 1 % of the better of
+asking always and never up to 64 values, and within 8 to 17 % of never asking beyond, which is the
+price of reading the roots and one level before it gives up. Not asking a filter only leaves blocks
+live, so the rows a scan returns never change.
 
 ### 4.2 `vorticity.bloom.ngram3.v1`: trigrams for text predicates
 
@@ -198,6 +225,18 @@ Keys follow the total order described in [key order per
 dtype](12-index-reads.md#34-key-order-per-dtype). The run is built by sorting each chunk's distinct
 keys, counting-sorting its rows by rank, and k-way merging the chunk runs, so memory is one chunk plus
 the merge's buffers, never the whole column.
+
+An `IN` is answered by walking the run and the filter's sorted values together, as two sorted lists
+are merged, in this run and in a postings run alike. A value past the segment at hand is reached by
+steps to the next segments while they cost less than a descent of the segment table, which compares
+about log₂ of the segments, and by a descent past that, so values thick in the run cost a step each
+and values far apart a descent each. A table in pages is only descended, since a step could read a
+page no value needs. Each segment read is then matched against the values of its own range, by a
+search per value or a walk of its entries, whichever compares less. What the filter asks of the
+column, its values encoded in the column's layout and sorted in the run's order, is prepared once per
+filter and kept with it, so the objects of a dataset share it. Over a run of 4.2 million entries,
+4 096 values take 3.3 ms instead of 17.1 ms, and 65 536 values 12.4 ms instead of 36.5 ms, with
+128 KiB allocated instead of 17 MiB.
 
 ### 5.3 `vorticity.postings.ngram3.v1`: trigrams to blocks
 
