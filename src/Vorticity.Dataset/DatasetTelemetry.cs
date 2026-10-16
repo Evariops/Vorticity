@@ -206,6 +206,7 @@ internal static class DatasetTelemetry
 
         activity.SetTag("vortex.outcome", outcome);
         activity.SetTag("vortex.objects_out", result.ObjectsOut);
+        activity.SetTag("vortex.objects_moved", result.ObjectsMoved);
         activity.SetTag("vortex.bytes_out", result.BytesOut);
         activity.SetTag("vortex.rows", result.Rows);
         activity.SetTag("vortex.version", (long)result.Version);

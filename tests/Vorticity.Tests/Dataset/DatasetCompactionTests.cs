@@ -229,6 +229,109 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task KeysThatArriveInOrderAreMovedUpRatherThanRewritten()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // A clustering key whose values arrive in order, as when time leads it: no object overlaps
+        // another anywhere, and past level 0 each crossing moves the object rather than rewriting it.
+        // Every row is then rewritten once, by the merge that takes it out of level 0, and never again.
+        // The same stream without the moves, in the same process, is the reference.
+        Decoders.EnsureRegistered();
+        (long appended, long left, long rows, long bytes, long moved, int levels) = await InOrderStreamAsync(trivialMoves: true, ct);
+        (_, _, long rowsWithout, long bytesWithout, long movedWithout, int levelsWithout) = await InOrderStreamAsync(trivialMoves: false, ct);
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET TRIVIAL MOVES, keys in order: {appended} rows appended over {levels} levels; with the moves {rows} rows and {bytes} bytes rewritten, {moved} objects moved; without, {rowsWithout} rows and {bytesWithout} bytes rewritten ({(double)bytesWithout / bytes:F2}x).\n"));
+        Assert.Equal(levelsWithout, levels);
+        Assert.True(levels >= 4, $"the stream must cross three levels; it reached {levels}");
+        Assert.Equal(0, movedWithout);
+        Assert.True(moved > 0);
+        Assert.Equal(appended - left, rows);
+        Assert.True(rowsWithout > 2 * rows, $"{rowsWithout} rows rewritten without the moves, {rows} with them");
+        Assert.True(bytes < bytesWithout);
+    }
+
+    [Fact]
+    public async Task KeysThatArriveAtRandomRewriteNoMoreWithTheMoves()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Keys that arrive at random overlap the level above almost everywhere, so a move is rare: the
+        // stream rewrites about what it rewrites without them, and never more.
+        Decoders.EnsureRegistered();
+        (long rows, long bytes, long moved) = await RandomStreamAsync(trivialMoves: true, ct);
+        (long rowsWithout, long bytesWithout, _) = await RandomStreamAsync(trivialMoves: false, ct);
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET TRIVIAL MOVES, keys at random: with the moves {rows} rows and {bytes} bytes rewritten, {moved} objects moved; without, {rowsWithout} rows and {bytesWithout} bytes.\n"));
+        Assert.True(rows <= rowsWithout, $"{rows} rows rewritten with the moves, {rowsWithout} without");
+        Assert.True(bytes <= bytesWithout, $"{bytes} bytes rewritten with the moves, {bytesWithout} without");
+    }
+
+    /// <summary>The stream of the write amplification's test, leveled: the rows and bytes compaction rewrote, and the objects it moved.</summary>
+    private static async Task<(long Rows, long Bytes, long Moved)> RandomStreamAsync(bool trivialMoves, CancellationToken ct)
+    {
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 4, TrivialMoves = trivialMoves };
+        Random random = new Random(0xA3F1);
+        long rows = 0;
+        long bytes = 0;
+        long moved = 0;
+        for (int round = 0; round < 64; round++)
+        {
+            await dataset.AppendAsync(Shuffled(types, schema, random.Next(1_000_000), 50 + random.Next(100), random.Next()), ct);
+            while (await dataset.CompactAsync(options, ct) is { } step)
+            {
+                Assert.Equal(OperationOutcome.Applied, step.Outcome);
+                rows += step.Rows;
+                bytes += step.BytesOut;
+                moved += step.ObjectsMoved;
+            }
+        }
+
+        return (rows, bytes, moved);
+    }
+
+    /// <summary>
+    /// Appends of consecutive keys, each past every key before it, with compaction drained after each:
+    /// the rows appended, those left in level 0, the rows and bytes compaction rewrote, the objects it
+    /// moved, and the levels the dataset reached.
+    /// </summary>
+    private static async Task<(long Appended, long Left, long Rows, long Bytes, long Moved, int Levels)> InOrderStreamAsync(
+        bool trivialMoves, CancellationToken ct)
+    {
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 3, TrivialMoves = trivialMoves };
+        long appended = 0;
+        long rows = 0;
+        long bytes = 0;
+        long moved = 0;
+        for (int round = 0; round < 96; round++)
+        {
+            await dataset.AppendAsync(Ordered(types, schema, appended, 100), ct);
+            appended += 100;
+            while (await dataset.CompactAsync(options, ct) is { } step)
+            {
+                Assert.Equal(OperationOutcome.Applied, step.Outcome);
+                rows += step.Rows;
+                bytes += step.BytesOut;
+                moved += step.ObjectsMoved;
+            }
+        }
+
+        Assert.Equal(appended, dataset.RowCount);
+        Assert.Equal(await SortedKeysAsync(appended), await KeysAsync(dataset.ScanBuilder().InKeyOrder("key")));
+        return (appended, dataset.Levels[0].Rows, rows, bytes, moved, dataset.Levels.Count);
+    }
+
+    [Fact]
     public async Task ASeekOpensLevelZeroAndOneObjectPerLevelAbove()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -506,8 +609,10 @@ public sealed class DatasetCompactionTests
         Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder()));
     }
 
-    [Fact]
-    public async Task TwoCompactionsIntoOneLevelFromTwoLevelsLeaveItKeyDisjoint()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TwoCompactionsIntoOneLevelFromTwoLevelsLeaveItKeyDisjoint(bool trivialMove)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
@@ -515,7 +620,9 @@ public sealed class DatasetCompactionTests
         // object of level 1 into level 2, where nothing holds its keys yet. Before B commits, level 0
         // fills past what level 1 may hold and empties straight into level 2, inside B's range, through
         // A, in another process. B's input is still where B read it, unchanged: what moved is the level
-        // B writes into, which its commit has to look at again.
+        // B writes into, which its commit has to look at again. B merges its object into level 2, or,
+        // the object fitting what level 2 targets, moves it there whole, which is no less a commit
+        // into that part of the level.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -528,13 +635,17 @@ public sealed class DatasetCompactionTests
         List<long> appended = [.. Enumerable.Range(0, 200).Select(key => (long)key), .. Enumerable.Range(1_000, 50).Select(key => (long)key)];
 
         // Three levels at most, so that a level 0 over level 1's size empties into level 2, and a level
-        // 1 of a few bytes, so that both are over their size at once.
-        CompactionOptions options = new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1, MaxLevels = 3 };
+        // 1 that holds less than its two objects, so that both levels are over their size at once:
+        // a few bytes to merge, or, to move, the larger object and not both, which is also what an
+        // object written into level 2 then targets, a fan-out of 10 above.
+        long[] sizes = await SizesAsync(first, level: 1);
+        long capacity = trivialMove ? (sizes.Max() + sizes.Sum()) / 2 : 10;
+        CompactionOptions options = new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = capacity / 10, MaxLevels = 3 };
 
         // B, planned on this version: level 1 over its size, its largest object into an empty level 2.
         await using VortexDataset second = await VortexDataset.OpenAsync(store, Clustered(), ct);
         CompactionJob moving = Assert.IsType<CompactionJob>((await second.PlanCompactionAsync(options, ct)).Job);
-        Assert.Equal((CompactionTrigger.LevelSize, 1, 2), (moving.Trigger, moving.FromLevel, moving.ToLevel));
+        Assert.Equal((CompactionTrigger.LevelSize, 1, 2, trivialMove), (moving.Trigger, moving.FromLevel, moving.ToLevel, moving.Moves));
         ObjectEntry source = Assert.Single(moving.Inputs).Entry;
         Assert.True(source.Summaries.TryGet("key", out ColumnSummary range));
         long low = range.Min.SignedValue;
@@ -553,7 +664,7 @@ public sealed class DatasetCompactionTests
         // range B writes: B's outputs would overlap them, so B is abandoned, as a compaction whose input
         // went is, and leaves its outputs to vacuum.
         CompactionResult late = await DatasetCompactor.RunAsync(second, moving, ct);
-        Assert.Equal(OperationOutcome.Abandoned, late.Outcome);
+        Assert.Equal((OperationOutcome.Abandoned, trivialMove ? 1L : 0L), (late.Outcome, late.ObjectsMoved));
         await second.RefreshAsync(ct);
         await AssertInvariantAsync(second, options, appended);
 
@@ -996,6 +1107,18 @@ public sealed class DatasetCompactionTests
         Assert.Equal([OperationOutcome.Applied], moved.Outcomes);
     }
 
+    /// <summary>The bytes of every object of one level, in the tree's order.</summary>
+    private static async Task<long[]> SizesAsync(VortexDataset dataset, int level)
+    {
+        List<long> sizes = [];
+        await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, default))
+        {
+            sizes.Add(ObjectEntry.FromBytes(entry.Value.Span).Bytes);
+        }
+
+        return [.. sizes];
+    }
+
     /// <summary>The key range of every object of one level, in the tree's order.</summary>
     private static async Task<List<(long Min, long Max)>> RangesAsync(VortexDataset dataset, int level)
     {
@@ -1039,10 +1162,12 @@ public sealed class DatasetCompactionTests
         return entries;
     }
 
-    private static Task<List<long>> SortedKeysAsync()
+    private static Task<List<long>> SortedKeysAsync() => SortedKeysAsync(Rows);
+
+    private static Task<List<long>> SortedKeysAsync(long count)
     {
         List<long> keys = [];
-        for (long key = 0; key < Rows; key++)
+        for (long key = 0; key < count; key++)
         {
             keys.Add(key);
         }

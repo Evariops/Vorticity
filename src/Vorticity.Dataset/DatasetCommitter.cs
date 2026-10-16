@@ -897,7 +897,7 @@ internal static class DatasetCommitter
 
                     foreach ((int level, ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
                     {
-                        Put(level, key, WithCurrentFragments(entry, level, key, replace.Inputs, currents));
+                        Put(level, key, WithCurrentFragments(entry, key, replace.Inputs, currents));
                     }
 
                     outcomes.Add(OperationOutcome.Applied);
@@ -1119,13 +1119,13 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// An output that is one of the inputs under its own key, the same file with more rows marked, as
-    /// a delete leaves it, with the fragments the input carries now: the output was made from the entry
-    /// the delete read, and a fragment attached to the object or dropped from it since changes no row,
-    /// so the replacement goes ahead, and must neither drop the one nor bring back the other.
+    /// a delete leaves it, or moved into the level above whole, as a trivial move does, with the
+    /// fragments the input carries now: the output was made from the entry the job read, and a
+    /// fragment attached to the object or dropped from it since changes no row, so the replacement
+    /// goes ahead, and must neither drop the one nor bring back the other.
     /// </summary>
     private static ObjectEntry WithCurrentFragments(
         ObjectEntry output,
-        int level,
         ReadOnlyMemory<byte> key,
         IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key)> inputs,
         ObjectEntry?[] currents)
@@ -1134,7 +1134,6 @@ internal static class DatasetCommitter
         {
             if (currents[i] is { } current
                 && current.Uid == output.Uid
-                && inputs[i].Level == level
                 && inputs[i].Key.Span.SequenceEqual(key.Span))
             {
                 return SameFragments(current, output) ? output : output.WithFragments(current.Fragments);

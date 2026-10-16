@@ -38,7 +38,7 @@ internal sealed record ChurnOptions
         "         [--compact none|drain|inline] [--compact-every N] [--vacuum-every N] [--probe-every N] [--report-every N]\n" +
         "         [--store file|memory] [--dir PATH] [--seed N] [--minutes N] [--load-chunk N] [--index-budget PERMILLE]\n" +
         "         [--max-object MiB] [--level-one KiB] [--open-objects N] [--marks on|off] [--mark-bytes KiB] [--purge on|off] [--probe-rounds N]\n" +
-        "         [--pick auto|largest|round-robin]";
+        "         [--pick auto|largest|round-robin] [--moves on|off]";
 
     /// <summary>The rows loaded before the first operation.</summary>
     public long Rows { get; init; } = 1_000_000;
@@ -122,6 +122,12 @@ internal sealed record ChurnOptions
     public CompactionPick Pick { get; init; } = CompactionPick.Auto;
 
     /// <summary>
+    /// Whether compaction moves an object that overlaps nothing in the level above into it whole, as
+    /// the library does by default, or rewrites it, which measures what the moves save.
+    /// </summary>
+    public bool Moves { get; init; } = true;
+
+    /// <summary>
     /// How many times each probe's calls are timed at a checkpoint, the fastest round kept: what
     /// other work on the machine adds to a round, the fastest one holds the least of.
     /// </summary>
@@ -183,6 +189,7 @@ internal sealed record ChurnOptions
                 "--marks" => options with { Marks = value == "on" ? true : value == "off" ? false : throw new ArgumentException($"--marks takes on or off, not '{value}'.") },
                 "--mark-bytes" => options with { MarkKiB = Int(flag, value) },
                 "--purge" => options with { Purge = value == "on" ? true : value == "off" ? false : throw new ArgumentException($"--purge takes on or off, not '{value}'.") },
+                "--moves" => options with { Moves = value == "on" ? true : value == "off" ? false : throw new ArgumentException($"--moves takes on or off, not '{value}'.") },
                 "--probe-rounds" => options with { ProbeRounds = Math.Max(1, Int(flag, value)) },
                 "--pick" => options with
                 {
@@ -216,7 +223,8 @@ internal sealed record ChurnOptions
             $"keys {Keys.ToString().ToLowerInvariant()}, compaction {cadence}, vacuum every {VacuumEvery}, " +
             $"{(Memory ? "memory" : "file")} store, index budget {(IndexBudget > 0 ? IndexBudget.ToString(CultureInfo.InvariantCulture) + "‰" : "default")}, " +
             $"deletes by {(Marks ? "marks" : "rewrites")}{(Marks && MarkKiB > 0 ? string.Create(CultureInfo.InvariantCulture, $" of at most {MarkKiB} KiB") : "")}" +
-            $"{(Marks && !Purge ? ", never purged" : "")}, {Pick switch { CompactionPick.RoundRobin => "round robin", CompactionPick.Largest => "largest first", _ => "pick by style" }}, seed {Seed}");
+            $"{(Marks && !Purge ? ", never purged" : "")}, {Pick switch { CompactionPick.RoundRobin => "round robin", CompactionPick.Largest => "largest first", _ => "pick by style" }}, " +
+            $"{(Moves ? "trivial moves" : "no trivial move")}, seed {Seed}");
     }
 
     private static ChurnOptions Mix(ChurnOptions options, string value)

@@ -133,6 +133,12 @@ public sealed record CompactionOptions
     /// <summary>Whether an object whose marks reach half a delete's bounds is rewritten without them; true by default.</summary>
     internal bool PurgeMarks { get; init; } = true;
 
+    /// <summary>
+    /// Whether a job of one object that overlaps nothing in the level above moves the object's entry
+    /// there instead of rewriting the object; true by default, false to measure what the moves save.
+    /// </summary>
+    internal bool TrivialMoves { get; init; } = true;
+
     /// <summary>How many levels the dataset keeps, level 0 included; 0, the default, for no cap.</summary>
     /// <remarks>
     /// The top level is unbounded: compacting it into itself would rewrite key-disjoint objects
@@ -349,6 +355,13 @@ public sealed record CompactionJob
     /// or concatenates.
     /// </summary>
     internal LevelRange? Range { get; init; }
+
+    /// <summary>
+    /// Whether the job may move its one object into the level above whole, its entry taken out of one
+    /// tree and put into the other byte for byte, with no row read or written. A merge of that object
+    /// alone would write its rows as one object of the same bounds.
+    /// </summary>
+    internal bool Moves { get; init; }
 }
 
 /// <summary>

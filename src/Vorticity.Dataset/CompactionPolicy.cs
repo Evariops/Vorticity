@@ -299,8 +299,21 @@ internal static class CompactionPolicy
         {
             Stop = stops ? sources[^1].Key : default,
             Range = range,
+            Moves = range is not null && Moves(from, to, inputs, settings),
         };
     }
+
+    /// <summary>
+    /// Whether a leveled job may move its one object into the level above whole: an object of a level
+    /// above 0, which a merge wrote sorted on the key, that overlaps nothing in the level it goes to,
+    /// with no marks or fragments to fold, and no larger than what an object written there targets,
+    /// so that a merge of it alone would write it again as one object of the same bounds. Whether it
+    /// holds the current schema is known once it is opened, and one that does not is rewritten into it.
+    /// </summary>
+    private static bool Moves(int from, int to, List<CompactionInput> inputs, CompactionOptions settings) =>
+        settings.TrivialMoves && from > 0 && to == from + 1 && inputs.Count == 1
+        && inputs[0].Entry is { HasDeletions: false } entry && entry.Fragments.Count == 0
+        && entry.Bytes <= settings.TargetBytes(to);
 
     /// <summary>The objects a leveled compaction drains out of the source level.</summary>
     private static List<CompactionInput> Leveled(List<CompactionInput> source, int from, CompactionPick pick, ReadOnlySpan<byte> pointer)
@@ -663,6 +676,7 @@ internal static class CompactionPolicy
         {
             Stop = stop,
             Range = range,
+            Moves = Moves(from, to, inputs, settings),
         };
     }
 

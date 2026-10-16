@@ -82,6 +82,15 @@ commits it wrote 6 % more than the largest-first default, which is why leveled d
 it. Tiered datasets do, because their job concatenates a run of one level's objects, and finding the
 run after the pointer costs a page where finding the longest run means reading every leaf.
 
+When nothing in the next level overlaps the object that goes up, the job moves it there whole: its
+entry changes level, and no row is read or written. A merge of it alone would have written the same
+rows into one object of the same bounds. `CompactionResult.ObjectsMoved` says how many objects a job
+moved, and those count in neither `BytesIn` nor `BytesOut`. An object keeps being rewritten when it
+holds marks or fragments to fold, or a schema older than the dataset's, since a rewrite is what
+brings it to the current one. Keys that arrive in order, as when time leads the clustering key, never
+overlap, so every row is rewritten once, by the merge that takes it out of level 0: on a stream of a
+thousand appends at the tail, compaction wrote half the bytes it wrote without the moves.
+
 Compaction writes only the live rows. Rows a delete marked in an input object disappear with it, and
 the outputs carry no marks. An object whose marks reach half a delete's limits (a sixteenth of its
 rows or half a kilobyte of positions) is rewritten alone in its level by a job whose `Trigger` is
@@ -203,6 +212,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
 | `CompactAsync` | 12 | every input object read, one object written, one commit |
+| `CompactAsync`, a move | 1 to 2 | the object's tail, to know its schema, unless the handle holds it open, and one commit |
 | `VerifyAsync` | 8 | every object hashed, every page read |
 | `VerifyAsync(since)` | 11 | what the earlier version does not share |
 | `VacuumAsync` | 5 to 16 | the listings, the commit object of each retained version and the trees they name, the deletes in batches |

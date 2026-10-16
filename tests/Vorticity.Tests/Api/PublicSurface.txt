@@ -2594,6 +2594,7 @@ Vorticity.Dataset:     property int ToLevel { get; init; }
 Vorticity.Dataset:     property long BytesIn { get; init; }
 Vorticity.Dataset:     property long BytesOut { get; init; }
 Vorticity.Dataset:     property long ObjectsIn { get; init; }
+Vorticity.Dataset:     property long ObjectsMoved { get; init; }
 Vorticity.Dataset:     property long ObjectsOut { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
