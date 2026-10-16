@@ -2609,8 +2609,6 @@ Vorticity.Dataset:     property CompactionOptions Compaction { get; init; }
 Vorticity.Dataset:     property IProgress<CompactionResult> Progress { get; init; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan Idle { get; init; }
-Vorticity.Dataset:     property TimeSpan LeaseSpan { get; init; }
-Vorticity.Dataset:     property bool UseLeases { get; init; }
 Vorticity.Dataset:     property int Loop { get; init; }
 Vorticity.Dataset:     property int Loops { get; init; }
 Vorticity.Dataset:     property long BytesPerSecond { get; init; }

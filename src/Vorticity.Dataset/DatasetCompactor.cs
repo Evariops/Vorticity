@@ -135,6 +135,7 @@ internal static class DatasetCompactor
         {
             Expected = read,
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
+            Range = job.Range,
         };
         CommitResult commit = await dataset
             .CommitAsync([replacement], cancellationToken).ConfigureAwait(false);

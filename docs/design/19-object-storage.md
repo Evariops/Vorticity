@@ -177,7 +177,7 @@ await using VortexDataset same = await VortexDataset.OpenAsync(
 ```
 
 `Resolve` returns a view of the bucket's store under the prefix, sharing its connections, and the
-dataset's keys (`commit/`, `data/`, `leases/`) are relative to it as they are to a directory today.
+dataset's keys (`commit/`, `data/`) are relative to it as they are to a directory today.
 A location that names a local directory opens a `FileObjectStore` there, so a program that takes
 its location from configuration runs on a laptop and on any of the six services without a line
 changing.
@@ -413,8 +413,8 @@ upload in progress does not hold its key: another writer may create it meanwhile
 is then refused with 412. Both cases are written in the conditional writes guide.
 
 S3 also deletes conditionally, on an ETag, and the store does not use it. Vacuum deletes keys that
-no one creates again: a data object's key ends with a fresh uid, a superseded commit's version is
-never written twice, and a lease's key names a span of time that has ended.
+no one creates again: a data object's key ends with a fresh uid, and a superseded commit's version
+is never written twice.
 
 ### 7.3 Directory buckets
 
@@ -914,7 +914,6 @@ a proposal of this design, to be measured.
 | each segment of a range is copied into an aligned block of its own | code: `ObjectSegmentSource.cs`, `Aligned` |
 | a refused commit is rebuilt on the version that exists | code: `DatasetCommitter.cs`, the conditional creation |
 | vacuum keeps every unreferenced object younger than its window, and the latest version it lists | code: `DatasetVacuum.cs` |
-| a lease is created once, under a key naming the end of its span, and only vacuum deletes it, a window after that end | code: `CompactionSchedule.cs` (`CompactionLoop`), `DatasetVacuum.cs` |
 | the sink hashes every object with XXH3-128 | code: `ObjectSegmentSink.cs` |
 | the dataset's object source allocates per batch: a list, task arrays, a task per read, an array of ranges, a delegate | code: `ObjectSegmentSource.cs`, `ReadManyAsync` |
 | `System.IO.Hashing` 11 takes the parameters of any CRC, CRC-64/NVME and CRC-32C among them, where 10's `Crc64` was ECMA-182's alone | code: `Crc64ParameterSet.cs` and `Crc64.cs` in dotnet/runtime, and the documentation of `System.IO.Hashing` 10.0.12 |

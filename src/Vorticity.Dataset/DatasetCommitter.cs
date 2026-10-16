@@ -765,9 +765,10 @@ internal static class DatasetCommitter
                             && (replace.Expected is not { } expected || SameRows(current, expected[i]));
                     }
 
-                    if (!complete)
+                    // Another compaction took an input, so this one's outputs are garbage; or moved an
+                    // object into the part of the level the outputs fill, which they would overlap.
+                    if (!complete || (replace.Range is { } range && await ForeignAsync(replace, range).ConfigureAwait(false)))
                     {
-                        // Another compaction took an input, so this one's outputs are garbage.
                         outcomes.Add(OperationOutcome.Abandoned);
                         break;
                     }
@@ -891,6 +892,41 @@ internal static class DatasetCommitter
             return entry is { } found ? ObjectEntry.FromBytes(found.Value) : null;
         }
 
+        // Whether the part of the level a replacement's outputs fill holds an object that is none of
+        // its inputs, as this commit leaves the level so far: one the walk of the version finds and
+        // no earlier operation removed, or one an earlier operation put there. The walk enters only
+        // the subtrees whose summaries may meet the range, the ones the plan walked.
+        async ValueTask<bool> ForeignAsync(DatasetOperation.ReplaceObjects replace, LevelRange range)
+        {
+            await foreach (PositionedEntry held in levels[range.Level]
+                .WalkAsync(pages, 0, long.MaxValue, range.MayOverlap, cancellationToken).ConfigureAwait(false))
+            {
+                ReadOnlyMemory<byte> key = held.Entry.Key;
+                if (TryPending(range.Level, key.Span, out ObjectEntry? changed) && changed is null)
+                {
+                    continue;
+                }
+
+                if (!Takes(replace, range.Level, key.Span) && range.Overlaps(held.Entry.Value))
+                {
+                    return true;
+                }
+            }
+
+            if (pending.TryGetValue(range.Level, out Dictionary<byte[], ObjectEntry?>? entries))
+            {
+                foreach ((byte[] key, ObjectEntry? entry) in entries)
+                {
+                    if (entry is not null && !Takes(replace, range.Level, key) && range.Overlaps(entry.Summaries))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         void Put(int level, ReadOnlyMemory<byte> key, ObjectEntry entry)
         {
             // A vector too long for its entry goes into this commit object, once, and the entry, in
@@ -948,6 +984,20 @@ internal static class DatasetCommitter
         // whatever the operations that touch it.
         byte[] Stored(int level, ReadOnlySpan<byte> key) =>
             Pending(level).GetAlternateLookup<ReadOnlySpan<byte>>().TryGetValue(key, out byte[]? held, out _) ? held : key.ToArray();
+    }
+
+    /// <summary>Whether a replacement takes the object under <paramref name="key"/> in <paramref name="level"/> as an input.</summary>
+    private static bool Takes(DatasetOperation.ReplaceObjects replace, int level, ReadOnlySpan<byte> key)
+    {
+        foreach ((int at, ReadOnlyMemory<byte> input) in replace.Inputs)
+        {
+            if (at == level && input.Span.SequenceEqual(key))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

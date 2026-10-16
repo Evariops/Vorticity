@@ -2,9 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Vorticity.Expressions;
-using Vorticity.Keys;
-using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
 
@@ -281,16 +278,14 @@ internal static class CompactionPolicy
         }
 
         List<CompactionInput> inputs = [.. sources];
-        if (style == CompactionStyle.Leveled && to < levels.Count)
+        LevelRange? range = style == CompactionStyle.Leveled && dataset.Key is { } key ? LevelRange.Of(to, sources, key) : null;
+        if (range is not null && to < levels.Count)
         {
             // The destination objects the outputs would overlap are read too, so that the level
-            // stays key-disjoint. The range is the union of the sources, not one source at a time:
-            // a merge writes one sorted sequence, so it spans the holes between them as well.
-            ClusteringKey key = dataset.Key!;
-            (FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh) = Range(sources, key);
+            // stays key-disjoint.
             foreach (CompactionInput candidate in levels[to])
             {
-                if (Overlaps(candidate, key, low, hasLow, high, hasHigh))
+                if (range.Overlaps(candidate.Entry.Summaries))
                 {
                     inputs.Add(candidate);
                 }
@@ -303,6 +298,7 @@ internal static class CompactionPolicy
         return new CompactionJob(from, to, style, trigger, inputs, settings.TargetBytes(to), FirstRow(dataset, inputs[0]))
         {
             Stop = stops ? sources[^1].Key : default,
+            Range = range,
         };
     }
 
@@ -445,70 +441,6 @@ internal static class CompactionPolicy
             yield return (smallest, levels[smallest][at[smallest]++]);
         }
     }
-
-    /// <summary>The key range the inputs span, as their summaries state it.</summary>
-    private static (FilterLiteral Low, bool HasLow, FilterLiteral High, bool HasHigh) Range(
-        List<CompactionInput> inputs, ClusteringKey key)
-    {
-        string path = key.Paths[0];
-        FilterLiteral low = default;
-        FilterLiteral high = default;
-        bool hasLow = false;
-        bool hasHigh = false;
-        foreach (CompactionInput input in inputs)
-        {
-            if (!input.Entry.Summaries.TryGet(path, out ColumnSummary column))
-            {
-                // An object that says nothing about its key spans everything it might hold, so the
-                // union does too.
-                return (default, false, default, false);
-            }
-
-            if (!column.HasMin || !column.HasMax)
-            {
-                return (default, false, default, false);
-            }
-
-            if (!hasLow || KeyCursor.Compare(column.Min, low) < 0)
-            {
-                low = column.Min;
-                hasLow = true;
-            }
-
-            if (!hasHigh || KeyCursor.Compare(column.Max, high) > 0)
-            {
-                high = column.Max;
-                hasHigh = true;
-            }
-        }
-
-        return (low, hasLow, high, hasHigh);
-    }
-
-    /// <summary>Whether a destination object may hold a key inside <c>[low, high]</c>.</summary>
-    private static bool Overlaps(
-        CompactionInput candidate,
-        ClusteringKey key,
-        FilterLiteral low,
-        bool hasLow,
-        FilterLiteral high,
-        bool hasHigh)
-    {
-        if (!hasLow || !hasHigh)
-        {
-            return true;
-        }
-
-        return !candidate.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary column) || Overlaps(column, low, high);
-    }
-
-    /// <summary>
-    /// Whether a column's bounds may meet <c>[low, high]</c>. Only a positive proof of disjointness
-    /// excludes: a missing bound proves nothing, so it overlaps.
-    /// </summary>
-    private static bool Overlaps(ColumnSummary column, FilterLiteral low, FilterLiteral high) =>
-        !(column.HasMin && KeyCursor.Compare(column.Min, high) > 0)
-        && (!column.HasMax || KeyCursor.Compare(column.Max, low) >= 0);
 
     /// <summary>
     /// The plan by descent: the same job the full read chooses, found from the levels' top pages, one
@@ -713,24 +645,25 @@ internal static class CompactionPolicy
         CancellationToken cancellationToken)
     {
         List<CompactionInput> inputs = [.. sources];
+        LevelRange range = LevelRange.Of(to, sources, dataset.Key!);
         if (to < dataset.Levels.Count)
         {
-            ClusteringKey key = dataset.Key!;
-            (FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh) = Range(sources, key);
-            SummaryColumns leading = new SummaryColumns([key.Paths[0]]);
             await foreach (PositionedEntry held in dataset.Levels[to]
-                .WalkAsync(dataset.Pages, 0, long.MaxValue, node => MayOverlap(node, leading, low, hasLow, high, hasHigh), cancellationToken)
+                .WalkAsync(dataset.Pages, 0, long.MaxValue, range.MayOverlap, cancellationToken)
                 .ConfigureAwait(false))
             {
-                CompactionInput candidate = new CompactionInput(to, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value));
-                if (Overlaps(candidate, key, low, hasLow, high, hasHigh))
+                if (range.Overlaps(held.Entry.Value))
                 {
-                    inputs.Add(candidate);
+                    inputs.Add(new CompactionInput(to, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value)));
                 }
             }
         }
 
-        return new CompactionJob(from, to, CompactionStyle.Leveled, trigger, inputs, settings.TargetBytes(to), 0) { Stop = stop };
+        return new CompactionJob(from, to, CompactionStyle.Leveled, trigger, inputs, settings.TargetBytes(to), 0)
+        {
+            Stop = stop,
+            Range = range,
+        };
     }
 
     /// <summary>
@@ -964,27 +897,6 @@ internal static class CompactionPolicy
     {
         ObjectSummaryFold.SummariesOf(node.Summary.Span, out ObjectTally? tally);
         return tally ?? throw new CommitFormatException("A page under a tallied page carries no tally.");
-    }
-
-    /// <summary>
-    /// Whether a subtree may hold an object overlapping <c>[low, high]</c>: the test an object's own
-    /// summary is put to, asked of the union of its summaries, whose bounds hold every object's under it.
-    /// </summary>
-    private static bool MayOverlap(
-        InternalEntry node, SummaryColumns leading, FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh)
-    {
-        if (!hasLow || !hasHigh)
-        {
-            return true;
-        }
-
-        ReadOnlySpan<byte> summaries = ObjectSummaryFold.SummariesOf(node.Summary.Span, out _);
-        if (summaries.IsEmpty || !ObjectSummaries.Of(summaries, leading).TryGet(leading.PathAt(0), out ColumnSummary column))
-        {
-            return true;
-        }
-
-        return Overlaps(column, low, high);
     }
 
     /// <summary>Every level's leaves, in key order, with the key each one sits at.</summary>

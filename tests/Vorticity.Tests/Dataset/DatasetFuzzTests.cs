@@ -19,7 +19,9 @@
 //
 // THE MODEL SCHEDULE DRIVES `ReplaceObjects` DIRECTLY, since a model of synthetic leaves has no rows
 // to merge. The real compactor and vacuum run in their own schedule, over real
-// objects, where the invariant is the store's: every version a vacuum retained still verifies.
+// objects, where the invariant is the store's: every version a vacuum retained still verifies. And
+// compactions planned on one version and committed after others run in a third, where the invariant
+// is the levels': each one above 0 key-disjoint, which a walk of the key relies on.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -34,6 +36,7 @@ using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
+using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -468,6 +471,137 @@ public sealed class DatasetFuzzTests
             $"DATASET FUZZ LIFECYCLE seed {seed}: version {dataset.Version}, {dataset.ObjectCount} objects, {compactions} compaction(s), {deleted} object(s) vacuumed, {repacked} repack(s).\n"));
         Assert.True(deleted > 0, "the schedule should have vacuumed something");
         Assert.True(repacked > 0, "the schedule should have repacked something");
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(7)]
+    [InlineData(12)]
+    [InlineData(16)]
+    public async Task CompactionsPlannedOnOneVersionAndCommittedLaterKeepEveryLevelKeyDisjoint(int seed)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // A compaction plans on the version its handle saw and commits later, after other compactions
+        // have written into the levels it writes: three handles, each holding the job it planned, and
+        // appends whose keys land anywhere in a range a few times what they hold, so that the levels
+        // meet and keep holes between their objects. Each step is an append, a plan kept for later,
+        // the job held run and committed, or a refresh. After every step each level above 0 is
+        // key-disjoint, and a walk of the key cursor meets every row. Without the commit's look at the
+        // level a job writes, seeds 7 and 16 leave two objects of level 2 overlapping.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = new DatasetOptions
+        {
+            Seed = Seed,
+            ClusteringKey = ["key"],
+            Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
+        };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, options, ct);
+        await using VortexDataset third = await VortexDataset.OpenAsync(store, options, ct);
+        VortexDataset[] handles = [dataset, second, third];
+        CompactionJob?[] held = new CompactionJob?[handles.Length];
+
+        // An object here takes three or four kibibytes, most of them its footer, whatever its rows. A
+        // level 1 that holds three of them, and outputs rolled at half a kibibyte there and at a
+        // kibibyte above, so that a merge into level 1 leaves it over its size and level 2 keeps
+        // narrow objects; and three levels: level 0 empties into level 1 or straight into level 2,
+        // depending on what it holds, while level 1 empties into level 2. The third handle plans as a
+        // background loop beside inline compactions might, with a ceiling on level 0 it never
+        // reaches and a level 1 of two objects, so that it moves level 1 up while the others empty
+        // level 0.
+        CompactionOptions compaction = new CompactionOptions
+        {
+            LevelZeroCeiling = 2,
+            TargetBytesAtLevelOne = 512,
+            Fanout = 24,
+            MaxObjectBytes = 1 << 10,
+            MaxLevels = 3,
+        };
+        CompactionOptions[] plans = [compaction, compaction, compaction with { LevelZeroCeiling = 1_000, TargetBytesAtLevelOne = 64 }];
+
+        // Three appends, three plans and three runs for a refresh: a held job then often commits after
+        // another handle's.
+        Random random = new Random(seed);
+        List<long> appended = [];
+        Dictionary<OperationOutcome, int> outcomes = [];
+        for (int step = 0; step < 150; step++)
+        {
+            int at = random.Next(handles.Length);
+            VortexDataset handle = handles[at];
+            switch (appended.Count == 0 ? 0 : random.Next(10) / 3)
+            {
+                case 0:
+                {
+                    long from = random.Next(3_000);
+                    int count = 10 + random.Next(60);
+                    await handle.AppendAsync(Batches(types, schema, from, count), ct);
+                    for (int i = 0; i < count; i++)
+                    {
+                        appended.Add(from + i);
+                    }
+
+                    break;
+                }
+
+                case 1:
+                    held[at] = (await handle.PlanCompactionAsync(plans[at], ct)).Job;
+                    break;
+
+                case 2:
+                    if (held[at] is { } job)
+                    {
+                        held[at] = null;
+                        CompactionResult result = await DatasetCompactor.RunAsync(handle, job, ct);
+                        outcomes[result.Outcome] = outcomes.GetValueOrDefault(result.Outcome) + 1;
+                    }
+
+                    break;
+
+                default:
+                    await handle.RefreshAsync(ct);
+                    break;
+            }
+
+            await dataset.RefreshAsync(ct);
+            for (int level = 1; level < dataset.Levels.Count; level++)
+            {
+                long last = long.MinValue;
+                await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, ct))
+                {
+                    Assert.True(ObjectEntry.FromBytes(entry.Value.Span).Summaries.TryGet("key", out ColumnSummary key));
+                    Assert.True(
+                        last < key.Min.SignedValue,
+                        $"step {step}: level {level} holds an object from {key.Min.SignedValue} after one that ends at {last}");
+                    last = key.Max.SignedValue;
+                }
+            }
+
+            List<long> walked = [];
+            await using (DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct))
+            {
+                for (bool on = await cursor.SeekFirstAsync(ct); on; on = await cursor.NextAsync(ct))
+                {
+                    walked.Add(cursor.Key.SignedValue);
+                }
+            }
+
+            List<long> sorted = [.. appended];
+            sorted.Sort();
+            Assert.Equal(sorted, walked);
+        }
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET FUZZ LATE COMPACTIONS seed {seed}: version {dataset.Version}, {dataset.ObjectCount} objects over {dataset.Levels.Count} levels, {outcomes.GetValueOrDefault(OperationOutcome.Applied)} applied, {outcomes.GetValueOrDefault(OperationOutcome.Abandoned)} abandoned.\n"));
+        Assert.True(outcomes.GetValueOrDefault(OperationOutcome.Applied) > 3, "the schedule must compact something");
+        Assert.True(outcomes.GetValueOrDefault(OperationOutcome.Abandoned) > 0, "the schedule must commit a job the ground moved under");
     }
 
     /// <summary>One writer's next batch, built from the dataset as it is right now.</summary>

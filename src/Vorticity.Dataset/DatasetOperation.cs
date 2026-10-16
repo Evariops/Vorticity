@@ -45,6 +45,14 @@ internal abstract record DatasetOperation
         /// only with the replacement, so a job abandoned leaves it for the job that took its inputs.
         /// </summary>
         public (int Level, ReadOnlyMemory<byte> Key)? Pointer { get; init; }
+
+        /// <summary>
+        /// The part of a key-disjoint level the outputs fill, every object of which must be an input;
+        /// null for a replacement whose outputs stay inside their inputs' own place. An object there
+        /// that is none abandons the whole replacement: another compaction moved it in after the plan
+        /// read the level, and the outputs would overlap it.
+        /// </summary>
+        public LevelRange? Range { get; init; }
     }
 
     /// <summary>Attaches an index fragment to an object.</summary>

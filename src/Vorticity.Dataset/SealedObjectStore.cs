@@ -27,8 +27,8 @@ namespace Vorticity.Dataset;
 /// </para>
 /// <para>
 /// What it seals: the commit objects, each bound to the dataset's id and its version, and the data
-/// objects, each bound to the uid its key and its entry name. Leases hold a version number and are
-/// never read, so they stay plain, and so does anything else under the store. A writer seals under the
+/// objects, each bound to the uid its key and its entry name. Anything else under the store stays as
+/// it is, since the dataset neither writes nor reads it. A writer seals under the
 /// data key of the newest commit object it has read, so the writers of a dataset share one, and
 /// <see cref="RekeyAsync"/> draws another for the next commit.
 /// </para>

@@ -416,8 +416,7 @@ key context. From then on a handle knows the dataset is encrypted because its la
 It seals every object it writes, data objects and commit objects, and refuses a dataset that mixes
 sealed and plain objects, a plain commit after a sealed one included. Given to a handle of an existing
 dataset, `Encrypted` refuses one that is plain. Nothing in the commit header changes, so the dataset's
-format does not either, and a plain dataset becomes encrypted only by being copied into a new one. The
-compaction loops' leases hold only a version number and are never read, so they stay plain.
+format does not either, and a plain dataset becomes encrypted only by being copied into a new one.
 
 Each object is bound to what names it:
 

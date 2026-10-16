@@ -56,9 +56,15 @@ Three costs remain, and this document is about them:
 
 A job is always the same thing: one plan's inputs read in key order, the outputs written, and one
 `ReplaceObjects` committed. That commit names the entries it read, and is abandoned when one of them
-changed (see [rebase](13-dataset.md#82-rebase-by-re-applying-operations)). Correctness never depends
-on who runs the job, so every driver below is safe against every other one and against every writer.
-What they differ in is who waits for the work, and how much of it is wasted.
+changed (see [rebase](13-dataset.md#82-rebase-by-re-applying-operations)). A leveled job also names
+the part of the level it writes that its outputs fill, the range of the clustering key its sources
+span, and the commit looks at that part of the level again: an object there that the job did not read
+abandons it. Another compaction moved that object in after the plan, from another level, and the
+outputs would overlap it. Two jobs that start from the same level always share such an object, but a
+job that empties level 0 into the first level that can hold it and one that pushes an object of
+level 1 into the same level may share none, and only that look keeps the level key-disjoint.
+Correctness never depends on who runs the job, so every driver below is safe against every other one
+and against every writer. What they differ in is who waits for the work, and how much of it is wasted.
 
 | driver | who pays | the bounds | what goes wrong |
 |---|---|---|---|
@@ -102,28 +108,27 @@ the store's bandwidth away from the writers, and one job at a time per loop. A h
 such as `IHostedService`, belongs in a separate package, since the dataset package takes no
 dependency.
 
-Two loops on one dataset are safe but wasteful: both plan the same job, and one commit loses. The
-waste can be avoided without any coordinating object, in one of two ways:
-
-- Deterministic job choice. The planner ranks the due jobs, and a loop that knows it is one of `n`
-  takes the job whose rank is its index modulo `n`, which spreads `n` loops over `n` jobs.
-- Leases. Before a job, a loop creates `leases/<level>/<time bucket>` with put-if-absent. A bucket is,
-  say, a minute, and the lease is held for as long as its bucket is current. Nothing releases a
-  lease, since the next bucket replaces it. That matters under a retention lock ([stores that cannot
-  delete](#5-stores-that-cannot-delete)), which would refuse a lease's delete.
-
-The first costs nothing but needs the number of loops. The second costs one request per level a job
-touches, and needs nothing else.
+Two loops on one dataset are safe but wasteful: both plan the same job, and one commit loses. A
+dataset that several processes write is therefore compacted by a process of its own, which runs the
+dataset's only loop, while the writers leave inline compaction off, as it is by default. Two
+compactions then never run at once on the dataset, and nothing has to coordinate them. Loops that
+must share a dataset avoid the waste by a deterministic choice of job: the planner ranks the due
+jobs, and a loop that knows it is one of `n` takes the job whose rank is its index, which spreads `n`
+loops over `n` jobs and costs no request.
 
 `RunCompactionAsync` takes a `CompactionSchedule`: the options it plans against, `BytesPerSecond`,
 the `Idle` sleep, and `Loops` and `Loop` for loops that know one another. The planner ranks the due
 jobs so that no two read or write the same level (a job on levels that share nothing never takes
 another's input), and a loop takes the one ranked at its index. A descent and a read of every leaf
-rank the same jobs. `UseLeases` turns on leases instead, one per level a job touches,
-`leases/<level>/<end of the span>`, tried job by job in rank order. The key dates the lease, so vacuum
-deletes the ones that ended a window ago without a head request each. A job still running when its
-lease ends may collide with another loop's, which one commit then abandons, so a `LeaseSpan` of a
-minute outlasts most jobs.
+rank the same jobs.
+
+Leases were weighed and set aside. A loop would create `leases/<level>/<end of a span>` with
+put-if-absent before a job, and hold its levels until the span ends. Once the commit of a job checks
+the part of the level it writes ([three drivers](#2-three-drivers-for-one-job)), a lease protects
+nothing: it saves the work of a job two loops that do not know each other would both run. For that
+it costs a request per level a job touches, objects that vacuum has to list and delete, and on a
+store under a retention lock a hundred bytes kept for the lock's term per lease. A process of its own
+for compaction saves the same work for nothing.
 
 ## 3. Planning in the depth of the tree
 
@@ -278,9 +283,7 @@ What changes:
 4. Commits are data too. Each commit object stays for the term. Ten thousand commits a day of leaf
    pages is the gigabyte above, so the group commit a writer can already make, one commit of many
    appends, pays off in bytes.
-5. A lease cannot be released ([three drivers](#2-three-drivers-for-one-job)). Its key has to expire
-   by its name, which the time bucket does, and each one is a hundred bytes kept for the term.
-6. A put may have to carry a checksum, and must still be conditional. S3 refuses a put into a bucket
+5. A put may have to carry a checksum, and must still be conditional. S3 refuses a put into a bucket
    under a lock without a Content-MD5 or a checksum header, which a streamed put of known length sends
    as a trailing checksum. The store library also has to confirm that its put-if-absent still holds
    on the versioned bucket a lock requires. Both are that library's work rather than this one's (see
@@ -301,8 +304,8 @@ only deletes what is past both its window and the lock. The rest is `Locked`, wi
 date the first of it may go. `DatasetOptions.LockedStore`, fixed at creation and carried by every
 header, is the profile. Every handle on the dataset then marks whatever an object's size or the share
 of its rows, with vectors up to the page's bound, plans purge nothing, the levels merge at a fan-out
-of 100 unless the dataset states one, and vacuum asks for the head of each lease it would delete,
-since only there does it learn a lease's lock. `MemoryObjectStore.RetainFor` and `Hold` simulate a
+of 100 unless the dataset states one, and vacuum asks for the head of each object old enough to go
+when the store's listing does not say its lock, as S3's does not. `MemoryObjectStore.RetainFor` and `Hold` simulate a
 locked store, refusing a whole batch of deletes when one key in it is locked, as such a store does.
 The checksum a locked bucket asks of every put, and the conditional put on a versioned bucket, remain
 the store library's to prove in its contract tests.
@@ -324,8 +327,8 @@ or to the application.
    commit's bytes with and without it: the purges move a fifth of them into compaction and leave the
    total the same.
 3. The background driver ([three drivers](#2-three-drivers-for-one-job)): `RunCompactionAsync`, with
-   a byte budget and one job at a time, loops that know one another spread by the rank of independent
-   jobs, and leases for those that cannot count one another.
+   a byte budget and one job at a time, and loops that know one another spread by the rank of
+   independent jobs.
 4. Inline level 0 compaction ([three drivers](#2-three-drivers-for-one-job)):
    `DatasetOptions.InlineCompactionBytes`, off by default, bounded by its byte budget.
 5. The locked-store profile ([stores that cannot delete](#5-stores-that-cannot-delete)), and the

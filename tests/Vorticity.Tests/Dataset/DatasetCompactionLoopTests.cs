@@ -3,8 +3,7 @@
 //
 // A LOOP IS ONLY EVER A CALLER OF CompactAsync'S JOB, so what these tests hold it to is what it adds:
 // that it drains a dataset and then waits instead of spinning, that loops which know one another
-// take distinct jobs from one plan, that loops which cannot count one another lease a job's levels,
-// that the leases a store keeps are swept once they end, and that the pace is the rate it was given.
+// take distinct jobs from one plan, and that the pace is the rate it was given.
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -109,68 +108,12 @@ public sealed class DatasetCompactionLoopTests
     }
 
     [Fact]
-    public async Task EachLoopTakesTheJobRankedAtItsIndex()
+    public void EachLoopTakesTheJobRankedAtItsIndex()
     {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        await using MemoryObjectStore store = new MemoryObjectStore();
         CompactionPlan plan = new CompactionPlan { Jobs = [Job(0, 1), Job(2, 3)] };
-
-        CompactionJob? zero = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 2, Loop = 0 }, plan, new LeaseBook(), ct);
-        CompactionJob? one = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 2, Loop = 1 }, plan, new LeaseBook(), ct);
-        CompactionJob? two = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 3, Loop = 2 }, plan, new LeaseBook(), ct);
-        Assert.Same(plan.Jobs[0], zero);
-        Assert.Same(plan.Jobs[1], one);
-        Assert.Null(two);
-        Assert.Equal(0, store.Count);
-    }
-
-    [Fact]
-    public async Task ALoopThatLeasesTakesTheNextJobWhenAnotherHoldsALevel()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 30, TimeSpan.Zero));
-        CompactionSchedule leasing = new CompactionSchedule { UseLeases = true, TimeProvider = clock };
-        CompactionPlan plan = new CompactionPlan { Jobs = [Job(0, 1), Job(1, 2), Job(3, 3)] };
-
-        // The first loop leases the first job's levels; the second finds level 1 held, skips the job
-        // that shares it, and takes the third; a third loop finds nothing it can lease this minute.
-        LeaseBook first = new LeaseBook();
-        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, first, ct));
-        Assert.Same(plan.Jobs[2], await CompactionLoop.ChooseAsync(store, leasing, plan, new LeaseBook(), ct));
-        Assert.Null(await CompactionLoop.ChooseAsync(store, leasing, plan, new LeaseBook(), ct));
-        long end = CompactionLoop.LeaseEnd(clock.Now, leasing.LeaseSpan);
-        Assert.Equal(new DateTimeOffset(2026, 9, 18, 12, 1, 0, TimeSpan.Zero).ToUnixTimeSeconds(), end);
-        Assert.Equal(
-            [CompactionLoop.LeaseKey(0, end), CompactionLoop.LeaseKey(1, end), CompactionLoop.LeaseKey(3, end)],
-            (await store.ListAllAsync(CompactionLoop.LeasePrefix, ct)).Order(StringComparer.Ordinal));
-
-        // The first loop holds its levels for the rest of the minute, and runs their next job.
-        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, first, ct));
-        Assert.Equal(3, (await store.ListAllAsync(CompactionLoop.LeasePrefix, ct)).Count);
-
-        // The next minute, nothing is held.
-        clock.Advance(TimeSpan.FromMinutes(1));
-        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, new LeaseBook(), ct));
-    }
-
-    [Fact]
-    public async Task VacuumDeletesTheLeasesThatEndedAWindowAgo()
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
-        await using VortexDataset dataset = await CreateAsync(store, 1, ct);
-        long old = CompactionLoop.LeaseEnd(clock.Now - TimeSpan.FromHours(3), TimeSpan.FromMinutes(1));
-        long current = CompactionLoop.LeaseEnd(clock.Now, TimeSpan.FromMinutes(1));
-        Assert.True(await CompactionLoop.TryLeaseAsync(store, Job(0, 1), old, dataset.Version, null, ct));
-        Assert.True(await CompactionLoop.TryLeaseAsync(store, Job(0, 1), current, dataset.Version, null, ct));
-
-        VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
-        Assert.Equal([CompactionLoop.LeaseKey(0, old), CompactionLoop.LeaseKey(1, old)], vacuumed.Deleted.Where(key => key.StartsWith(CompactionLoop.LeasePrefix, StringComparison.Ordinal)));
-        Assert.Equal(
-            [CompactionLoop.LeaseKey(0, current), CompactionLoop.LeaseKey(1, current)],
-            (await store.ListAllAsync(CompactionLoop.LeasePrefix, ct)).Order(StringComparer.Ordinal));
+        Assert.Same(plan.Jobs[0], CompactionLoop.Choose(new CompactionSchedule { Loops = 2, Loop = 0 }, plan));
+        Assert.Same(plan.Jobs[1], CompactionLoop.Choose(new CompactionSchedule { Loops = 2, Loop = 1 }, plan));
+        Assert.Null(CompactionLoop.Choose(new CompactionSchedule { Loops = 3, Loop = 2 }, plan));
     }
 
     [Fact]
@@ -217,7 +160,6 @@ public sealed class DatasetCompactionLoopTests
                 new CompactionSchedule { Loops = 0 },
                 new CompactionSchedule { Idle = TimeSpan.Zero },
                 new CompactionSchedule { BytesPerSecond = -1 },
-                new CompactionSchedule { UseLeases = true, LeaseSpan = TimeSpan.FromMilliseconds(10) },
             ])
         {
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => dataset.RunCompactionAsync(wrong, ct));
