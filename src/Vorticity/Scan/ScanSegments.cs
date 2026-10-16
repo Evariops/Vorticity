@@ -43,20 +43,22 @@ namespace Vorticity.Scanning;
 /// G steps under the lock rather than G times E.
 /// </para>
 /// <para>
-/// The set is its own lock: a scan of one lane never contends for it, and an uncontended monitor
-/// allocates nothing.
+/// A set of one lane is its own lock: its lane never contends for it, and an uncontended monitor
+/// allocates nothing. A set several lanes share takes a lock made with it, because a monitor two
+/// threads first meet in inflates into a lock object of its own, which the scan would pay part way,
+/// after its first batch, whenever two of its lanes claimed at once.
 /// </para>
 /// </remarks>
 internal sealed class ScanSegments : IDisposable
 {
-    private readonly SegmentWaiter?[] _parked;
+    private readonly Lanes? _lanes;
     private Entry[] _entries = [];
     private int _count;
     private long _tickets;
     private bool _failed;
 
     /// <param name="lanes">How many batches may be built at once; above one, a batch may wait for another's read.</param>
-    internal ScanSegments(int lanes) => _parked = lanes > 1 ? new SegmentWaiter?[lanes] : [];
+    internal ScanSegments(int lanes) => _lanes = lanes > 1 ? new Lanes(lanes) : null;
 
     /// <summary>
     /// The next batch number, for a scan whose batches are not numbered by a split plan: a
@@ -78,7 +80,7 @@ internal sealed class ScanSegments : IDisposable
     /// </returns>
     internal bool Claim(SegmentRequestSet requests, long batch, SegmentWaiter? waiter)
     {
-        lock (this)
+        using (Enter())
         {
             bool blocked = false;
             for (int i = 0; i < _count; i++)
@@ -124,8 +126,10 @@ internal sealed class ScanSegments : IDisposable
                 return false;
             }
 
+            // A waiter means lanes beside this one, so the set was made with room to park it.
+            SegmentWaiter?[] parked = _lanes!.Parked;
             waiter.Park(requests, batch);
-            _parked[Array.IndexOf(_parked, null)] = waiter;
+            parked[Array.IndexOf(parked, null)] = waiter;
             return true;
         }
     }
@@ -135,7 +139,7 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="batch">The batch's number.</param>
     internal void Publish(SegmentRequestSet requests, long batch)
     {
-        lock (this)
+        using (Enter())
         {
             int kept = 0;
             for (int i = 0; i < _count; i++)
@@ -165,7 +169,7 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="batch">The batch's number.</param>
     internal void Abandon(long batch)
     {
-        lock (this)
+        using (Enter())
         {
             _failed = true;
             int kept = 0;
@@ -193,7 +197,7 @@ internal sealed class ScanSegments : IDisposable
             return;
         }
 
-        lock (this)
+        using (Enter())
         {
             int kept = 0;
             for (int i = 0; i < _count; i++)
@@ -225,10 +229,53 @@ internal sealed class ScanSegments : IDisposable
         kept++;
     }
 
+    /// <summary>Enters the set's lock: the one made with it when lanes share it, its monitor when one lane has it to itself.</summary>
+    private Gate Enter()
+    {
+        if (_lanes is { } lanes)
+        {
+            lanes.Gate.Enter();
+        }
+        else
+        {
+            Monitor.Enter(this);
+        }
+
+        return new Gate(this);
+    }
+
+    /// <summary>Leaves the lock <see cref="Enter"/> took.</summary>
+    private readonly ref struct Gate(ScanSegments set)
+    {
+        public void Dispose()
+        {
+            if (set._lanes is { } lanes)
+            {
+                lanes.Gate.Exit();
+            }
+            else
+            {
+                Monitor.Exit(set);
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a set several lanes share has and a set of one lane does not: the lock made with it, and
+    /// the batches parked on another's read. One field for both, so that a set of one lane is no
+    /// larger for them.
+    /// </summary>
+    private sealed class Lanes(int lanes)
+    {
+        internal Lock Gate { get; } = new Lock();
+
+        internal SegmentWaiter?[] Parked { get; } = new SegmentWaiter?[lanes];
+    }
+
     /// <summary>Releases everything held and gives the array back, once no batch runs.</summary>
     public void Dispose()
     {
-        lock (this)
+        using (Enter())
         {
             for (int i = 0; i < _count; i++)
             {
@@ -368,15 +415,21 @@ internal sealed class ScanSegments : IDisposable
     /// <summary>Wakes each parked batch no unread claim of another batch holds back any more; every one, once the scan has failed.</summary>
     private void WakeUnblocked()
     {
-        for (int w = 0; w < _parked.Length; w++)
+        if (_lanes is not { } lanes)
         {
-            SegmentWaiter? waiter = _parked[w];
+            return;
+        }
+
+        SegmentWaiter?[] parked = lanes.Parked;
+        for (int w = 0; w < parked.Length; w++)
+        {
+            SegmentWaiter? waiter = parked[w];
             if (waiter is null || (!_failed && Blocked(waiter)))
             {
                 continue;
             }
 
-            _parked[w] = null;
+            parked[w] = null;
 
             // The continuation runs on the thread pool, so waking under the lock runs nothing under it.
             waiter.Wake();
