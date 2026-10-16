@@ -170,7 +170,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// other throws, rather than handing its caller a dataset of another's schema and settings.
     /// </remarks>
     /// <exception cref="ObjectStoreException">The store already holds a dataset, or another creation made it first.</exception>
-    /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
+    /// <exception cref="ArgumentException">A clustering key column is not in the schema, or may hold a null.</exception>
     /// <exception cref="NotSupportedException">
     /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), the store does
     /// not create a key only while it is free (<see cref="ObjectStoreCapabilities.CreatesConditionally"/>), or the
@@ -1452,7 +1452,7 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema);
+        _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
 
         CommitHeader template = new CommitHeader
         {

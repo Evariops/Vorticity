@@ -742,6 +742,10 @@ public sealed class DatasetDeletionVectorTests
         return dataset;
     }
 
+    /// <summary>
+    /// A dataset keyed on a nullable column, as a library could create before such a key was
+    /// refused: it still opens, reads and writes, its null keys after every other.
+    /// </summary>
     private static async Task<VortexDataset> NullableAsync(IObjectStore store, bool marking, CancellationToken ct)
     {
         Decoders.EnsureRegistered();
@@ -752,6 +756,7 @@ public sealed class DatasetDeletionVectorTests
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
             MarkedObjectBytes = marking ? 0 : long.MaxValue,
             MarkedShare = 1,
+            AcceptsNullableKey = true,
         };
         VortexDataset dataset = await VortexDataset.CreateAsync(store, NullableKeyRow.Schema, options, ct);
         for (int part = 0; part < 3; part++)

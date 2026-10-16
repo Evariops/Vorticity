@@ -214,6 +214,13 @@ library never stalls a writer.
   the capacities keep growing past it, so a level holds `F` times the one below whatever the size of
   its objects, and a dataset of `N` bytes spans about `log_F(N / 128 KiB)` levels. A level holding a
   single object is never over its size.
+- The clustering key holds no null. A dataset refuses at its creation a key over a column that may
+  hold one, or under a struct that may be null. A null has no place in the order a level is disjoint
+  on: every merge that took null keys would leave one more object holding them in its level, and a
+  read in key order, which gives them last, would keep each such object open to the end. A row whose
+  key is unknown takes a value of its own instead, the smallest or the largest its type has. A
+  dataset created with a key of one nullable column before it was refused still opens, reads and
+  writes, with its null keys last.
 - Without a clustering key, levels are size tiers. A lookup touches every object the summaries do not
   refute, which is output-sensitive rather than bounded, and the plan says so.
 - Inside every object, an index entry has at most four runs, the same rule as for a single file
@@ -268,10 +275,11 @@ cost is `k` comparisons per window. Rows are compared by their row encoding, the
 runs and the seeks already use. An output is sealed at the first key change past its target, never
 inside a key, since two outputs sharing a boundary value would overlap, and the destination inputs
 are chosen against the union of the source range. The commit looks for them again in that range, and
-abandons the job when it finds one the plan did not take ([rebase](#82-rebase-by-re-applying-operations)). Rows with a null key come last. A composite key
-merges on its tuple, and a composite key whose columns hold nulls is refused, since its run holds no
-such tuple. The rows written are checked against the inputs' count, because a rewrite that loses rows
-is the one failure it must not have. Measured on four interleaved level 0 objects: 42 808 bytes in,
+abandons the job when it finds one the plan did not take ([rebase](#82-rebase-by-re-applying-operations)). A composite key merges on its tuple.
+A dataset created with a nullable key before such keys were refused is still merged. The rows whose
+key of one column is null are written last, and an object that may hold a null in a composite key's
+column is refused, since its run holds no such tuple. The rows written are checked against the
+inputs' count, because a rewrite that loses rows is the one failure it must not have. Measured on four interleaved level 0 objects: 42 808 bytes in,
 and one sorted object of 16 596 out.
 
 The triggers, in order, are level 0 above its ceiling, a level above its size, an object whose marks
@@ -795,7 +803,7 @@ clustering key uses it), a column renamed, a number widened within its kind (a s
 wider signed one, an unsigned to a wider unsigned, a float to a wider float), or a column made
 nullable. Each keeps every value already written readable, and anything else is refused before the
 commit. The clustering key's columns keep their names and types in every object, since they order the
-objects and the trees.
+objects and the trees, so a key column never becomes nullable either.
 
 Names are identities. An object's field belongs to the column with its name, or to the column a
 rename moved that name to. The header records every name a column gave up, along with the column
