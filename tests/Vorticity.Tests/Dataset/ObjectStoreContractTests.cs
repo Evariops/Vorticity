@@ -466,7 +466,8 @@ public sealed class ObjectStoreContractTests : IDisposable
     public async Task EachStoreDeclaresWhatItDoesInOneRequest()
     {
         ObjectStoreCapabilities all = ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder
-            | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
+            | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
+            | ObjectStoreCapabilities.CreatesConditionally;
         await using IObjectStore memory = Open("memory");
         await using IObjectStore file = Open("file");
         Assert.Equal(all, memory.Capabilities);

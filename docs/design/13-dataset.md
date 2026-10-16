@@ -432,11 +432,17 @@ Uncontended, a commit is three dependent requests: the listing, the read of `N`'
 creation. The data objects add nothing to the commit itself. A handle that knows its version was the
 latest less than half a retention window ago (see [the latest
 version](#83-the-latest-version-in-one-request)) builds on that version directly, so its commit is a
-single request, the creation. A refusal tells it another writer went first, and it then asks for the
-versions after the number it lost and rebases. Past that half window it lists first. Either way, it
+single request, the creation. A refusal tells it another writer went first, and it then reads the
+version that won while a head asks whether another followed, both at once, and rebases. Past that
+half window it lists first. Either way, it
 reads the version it created as it wrote it, with nothing read back. A handle whose commit found
 nothing to change reads the version that decision was made on, which is fetched first when the batch
 was decided on the version it held, since a no-op names the latest version.
+
+A creation is the one commit that does not rebase. It is two requests, the listing that finds no
+version and the creation of the first, and one that finds a version there, or loses the creation to
+another, throws rather than taking up the winner's header: two processes that create one dataset
+with two schemas get one dataset and one error, never two handles on one schema.
 
 ### 8.2 Rebase by re-applying operations
 
@@ -476,13 +482,30 @@ reader that wants to read its own writes is handed the version by its writer. Th
 object.
 
 A handle that knows its version was the latest less than half a retention window ago asks for the
-versions after it instead, with a head request each. Every one of them was created after that moment,
-and vacuum only takes a commit a full window after the next one superseded it, so they are all still
-there and the first missing one ends the run. Past that half window, the handle lists. Below the
+versions after it instead. Every one of them was created after that moment, and vacuum only takes a
+commit a full window after the next one superseded it, so they are all still there and the first
+missing one ends the run. The first request reads the next version's commit object while a head
+asks for the one after it, both at once. Nothing after the one read, and it is the latest, read
+already, or there is no new version when the read found nothing: no commit or one costs a round
+trip, where heads alone took one round trip and four. Something after it, and versions came in,
+whatever the read found, since the store may answer the two in either order and a version never
+exists without the one before it: heads then go on from there in doubling steps, bisect, and the
+latest is read. The answer is a version that was the latest at some moment during the call, which
+is all a refresh can promise, since a commit may land just after. The price is a request more when
+nothing is new, the read of an absent key, which the stores bill as a head. Past that half window,
+the handle lists. Below the
 window the commits are not contiguous: vacuum keeps an old commit object whose pages a retained
 version still names and removes the unnamed ones after it, so a handle that took the gap above its
 own version for the end would read it as the latest and commit on it. The handle's clock therefore
 has to agree with the store's to within the other half window, as a vacuum's already must.
+
+A version whose number a reader already knows, because a writer handed it over, needs no listing at
+all. A commit object's key is a function of its version, so `OpenAsync(store, version)` is the one
+read of that key. The handle it returns does not take its version for the latest: its first refresh
+or commit lists, as a handle past the half window does. A version vacuum took no longer opens, and a
+version superseded for longer than the window may lose objects while it is read, in both cases with
+`ObjectNotFoundException` naming what is gone, so a version number is good for well under the
+window.
 
 ## 9. The read-path budget
 
@@ -494,7 +517,7 @@ costs:
 
 | step | dependent requests | cached by |
 |---|---|---|
-| list the latest commit, read its header | 2 | version |
+| list the latest commit, read its header | 2, or 1 for a version known by its number | version |
 | descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, across versions, since pages are immutable |
 | open the object's tail | 1, in parallel across the ≤ 8 + L objects touched | object |
 | its fences, then the two payload segments | 1 + 1 | run |
@@ -566,7 +589,11 @@ stores this repository ships for S3, Azure and Cloud Storage, are in
 A store must document an atomic creation, reads and heads that see every write that completed, a
 listing in ordinal order that lags by less than the retention window, a token that changes whenever
 the bytes under a key change, and ranged reads on objects of any size. A store declares what it does
-in one request (`Capabilities`), and a dataset refuses a store that does not list in order. Three
+in one request (`Capabilities`), and a dataset refuses a store that does not list in order. It also
+refuses to write to a store that does not declare an atomic creation (`CreatesConditionally`), since
+two commits of one version would both land there, the second's object over the first's. A reader
+needs no such creation, so a handle on that store reads, and each of its writes throws before it
+writes anything. Three
 behaviours are part of the interface: a put streams and writes nothing when its content ends early or
 runs long, a delete takes a batch and reports nothing, and a listing pages by itself as it is
 enumerated. Retries, hedging, connection pools and credentials belong to the store library, never to

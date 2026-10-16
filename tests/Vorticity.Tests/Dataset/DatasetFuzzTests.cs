@@ -396,6 +396,14 @@ public sealed class DatasetFuzzTests
         int compactions = 0;
         int deleted = 0;
         int repacked = 0;
+
+        // Every version the schedule made, with the rows it holds, and its own draws for the version
+        // it opens by number after each step: one vacuum took answers ObjectNotFoundException, at the
+        // open or at the read, and one it left answers every row it had.
+        Dictionary<ulong, long> rowsAt = new Dictionary<ulong, long> { [dataset.Version] = 0 };
+        ulong recorded = dataset.Version;
+        Random picks = new Random(seed + 1);
+        int gone = 0;
         for (int step = 0; step < 30; step++)
         {
             clock.Advance(TimeSpan.FromMinutes(random.Next(90)));
@@ -456,6 +464,26 @@ public sealed class DatasetFuzzTests
 
             await dataset.RefreshAsync(ct);
             Assert.Equal(rows, dataset.RowCount);
+            // A step makes one version at most, so every version since the last step holds its rows.
+            for (; recorded < dataset.Version; recorded++)
+            {
+                rowsAt[recorded + 1] = rows;
+            }
+
+            ulong opened = (ulong)picks.Next(1, (int)dataset.Version + 1);
+            try
+            {
+                await using VortexDataset past = await VortexDataset.OpenAsync(store, opened, options, ct);
+                List<long> held = await KeysAsync(past.ScanBuilder());
+                held.Sort();
+                Assert.Equal(rowsAt[opened], held.Count);
+                Assert.Equal(rowsAt[opened] == 0 ? 0 : rowsAt[opened] - 1, held.Count == 0 ? 0 : held[^1]);
+            }
+            catch (ObjectNotFoundException)
+            {
+                gone++;
+            }
+
             VortexExpr question = Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(rows / 8.0)));
             Assert.Equal(
                 await KeysAsync(dataset.ScanBuilder().Where(question).WithIndexes(false).WithSummaries(false)),
@@ -468,9 +496,10 @@ public sealed class DatasetFuzzTests
 
         Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
         Console.Out.Write(FormattableString.Invariant(
-            $"DATASET FUZZ LIFECYCLE seed {seed}: version {dataset.Version}, {dataset.ObjectCount} objects, {compactions} compaction(s), {deleted} object(s) vacuumed, {repacked} repack(s).\n"));
+            $"DATASET FUZZ LIFECYCLE seed {seed}: version {dataset.Version}, {dataset.ObjectCount} objects, {compactions} compaction(s), {deleted} object(s) vacuumed, {repacked} repack(s), {gone} of 30 versions opened by number gone.\n"));
         Assert.True(deleted > 0, "the schedule should have vacuumed something");
         Assert.True(repacked > 0, "the schedule should have repacked something");
+        Assert.True(gone > 0, "the schedule should have opened a version vacuum took");
     }
 
     [Theory]

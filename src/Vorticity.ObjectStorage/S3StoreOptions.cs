@@ -77,6 +77,15 @@ public sealed class S3StoreOptions
     public bool? ListsInOrder { get; init; }
 
     /// <summary>
+    /// Whether the service honours <c>If-None-Match: *</c> on a put in one step, creating the key only
+    /// while it is free, which a dataset needs for its commits. Null takes the profile's: yes on Amazon
+    /// S3, R2, OVHcloud and Scaleway, which each document it, and no on another service until the
+    /// contract tests pass against it, many times over, since a service that checked and then wrote
+    /// would pass them one at a time and fail only when two puts meet.
+    /// </summary>
+    public bool? CreatesConditionally { get; init; }
+
+    /// <summary>
     /// Whether the service keeps objects under Object Lock's retention and legal hold, which a dataset
     /// created for a locked store needs. Null takes the profile's: yes on Amazon S3, and no elsewhere
     /// until the contract tests prove it, R2 keeping none and an OVHcloud Local Zone neither. Set it true

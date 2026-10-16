@@ -21,6 +21,13 @@ internal sealed record CommitOptions
     public int MaxAttempts { get; init; } = 8;
 
     /// <summary>
+    /// Whether the commit may only create the dataset's first version, as a creation does: one that
+    /// finds a version there throws rather than rebasing onto it, since a creation that took up another
+    /// writer's header would hand its caller a schema and settings it did not ask for.
+    /// </summary>
+    public bool OnlyFirst { get; init; }
+
+    /// <summary>
     /// A version the writer has seen, from which the latest is found by asking for the ones after
     /// it while <see cref="KnownAt"/> is recent enough; 0 lists the commits instead.
     /// </summary>
@@ -102,7 +109,10 @@ internal sealed record CommitResult(
 internal static class DatasetCommitter
 {
     /// <summary>Applies the operations to the dataset's latest version, rebasing until it wins.</summary>
-    /// <exception cref="ObjectStoreException">The writer lost <see cref="CommitOptions.MaxAttempts"/> times.</exception>
+    /// <exception cref="ObjectStoreException">
+    /// The writer lost <see cref="CommitOptions.MaxAttempts"/> times, or a commit that may only create
+    /// the first version (<see cref="CommitOptions.OnlyFirst"/>) found one there.
+    /// </exception>
     public static async ValueTask<CommitResult> CommitAsync(
         IObjectStore store,
         IReadOnlyList<DatasetOperation> operations,
@@ -122,6 +132,13 @@ internal static class DatasetCommitter
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            // A creation that lost its put to another one knows a first version is there, without
+            // asking: it is told so rather than handed the other's dataset.
+            if (options.OnlyFirst && known > 0)
+            {
+                throw AlreadyThere(known);
+            }
+
             // 1. The latest version: the one the writer holds, taken as it is while every version
             // after it is surely in the store, since the creation tells a writer that another went
             // first; otherwise asked for from the one the writer last saw, which a lost attempt moves
@@ -136,6 +153,11 @@ internal static class DatasetCommitter
             if (!outright)
             {
                 knownAt = asked;
+            }
+
+            if (options.OnlyFirst && parent != 0)
+            {
+                throw AlreadyThere(parent);
             }
 
             known = parent;
@@ -252,6 +274,10 @@ internal static class DatasetCommitter
             "answer to contention, not more attempts.");
     }
 
+    /// <summary>What a creation is told when the store holds a dataset already.</summary>
+    private static ObjectStoreException AlreadyThere(ulong version) =>
+        new ObjectStoreException($"This store already holds a dataset at version {version}; open it rather than creating it.");
+
     /// <summary>
     /// The latest version and its commit object; (0, null) when the dataset has none. From
     /// <paramref name="known"/>, a version the caller knew to be the latest recently enough that
@@ -268,23 +294,13 @@ internal static class DatasetCommitter
         held = held is not null && held.Header.Version == known ? held : null;
         if (known > 0 && trusted)
         {
-            ulong newest = await NewestFromAsync(store, known, cancellationToken).ConfigureAwait(false);
-            if (newest == known && held is not null)
-            {
-                return (known, held);
-            }
-
             try
             {
-                return (newest, await CommitObject.OpenAsync(store, CommitKey.For(newest), cancellationToken).ConfigureAwait(false));
+                return await AfterAsync(store, known, held, cancellationToken).ConfigureAwait(false);
             }
             catch (ObjectNotFoundException)
             {
                 // Vacuumed since it was seen: the listing finds what is there now.
-            }
-            catch (CommitFormatException torn)
-            {
-                throw TornCommitException.Of(newest, torn);
             }
         }
 
@@ -295,6 +311,55 @@ internal static class DatasetCommitter
         }
 
         return listed == 0 ? (0, null) : (listed, await OpenAsync(store, listed, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// The latest version from <paramref name="known"/>, a version every one after which is still in
+    /// the store, and its commit object. The first version not in hand is read while a head asks for the
+    /// one after it, both in one round trip: the version after <paramref name="known"/> when
+    /// <paramref name="held"/> is its commit object, <paramref name="known"/> itself otherwise. Nothing
+    /// after the one read, and it is the latest, read already, or <paramref name="known"/> when it is
+    /// absent. Something after it, and versions came in whatever the read found, since the two answers
+    /// may come back in either order: the search goes on from there.
+    /// </summary>
+    /// <remarks>
+    /// A refresh then sees no commit or one in a round trip, where heads alone took one and four, and
+    /// a rebase onto the version it lost to reads that version in the same round trip. The price is a
+    /// request more when nothing is new, a read of an absent key, which stores bill as a head.
+    /// </remarks>
+    /// <exception cref="ObjectNotFoundException">The version read is gone, which vacuum may do to one it superseded long ago.</exception>
+    private static async ValueTask<(ulong Version, CommitObject? Commit)> AfterAsync(
+        IObjectStore store, ulong known, CommitObject? held, CancellationToken cancellationToken)
+    {
+        ulong first = held is null ? known : known + 1;
+        Task<CommitObject?> read = ReadIfThereAsync(store, first, cancellationToken);
+        Task<ObjectHead?> next = store.HeadAsync(CommitKey.For(first + 1), cancellationToken).AsTask();
+        await Task.WhenAll(read, next).ConfigureAwait(false);
+        if (await next.ConfigureAwait(false) is not null)
+        {
+            ulong newest = await NewestFromAsync(store, first + 1, cancellationToken).ConfigureAwait(false);
+            return (newest, await OpenAsync(store, newest, cancellationToken).ConfigureAwait(false));
+        }
+
+        if (await read.ConfigureAwait(false) is { } commit)
+        {
+            return (first, commit);
+        }
+
+        return held is not null ? (known, held) : throw ObjectNotFoundException.For(CommitKey.For(known));
+    }
+
+    /// <summary>The commit object of <paramref name="version"/>, or null when the store holds none; a torn one reported against it.</summary>
+    private static async Task<CommitObject?> ReadIfThereAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await OpenAsync(store, version, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectNotFoundException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -348,7 +413,8 @@ internal static class DatasetCommitter
     }
 
     /// <summary>The commit object of <paramref name="version"/>, a torn one reported against it.</summary>
-    private static async ValueTask<CommitObject> OpenAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
+    /// <exception cref="ObjectNotFoundException">The version has no commit object.</exception>
+    internal static async ValueTask<CommitObject> OpenAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
     {
         try
         {

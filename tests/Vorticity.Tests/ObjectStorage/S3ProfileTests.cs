@@ -16,7 +16,8 @@ namespace Vorticity.Tests.ObjectStorage;
 
 public sealed class S3ProfileTests
 {
-    private const ObjectStoreCapabilities Proven = ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch;
+    private const ObjectStoreCapabilities Proven =
+        ObjectStoreCapabilities.ListsInOrder | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.CreatesConditionally;
 
     [Fact]
     public async Task EachFactoryTakesItsServicesEndpointRegionAndPrudentCapabilities()
@@ -26,11 +27,36 @@ public sealed class S3ProfileTests
         await using S3ObjectStore ovh = S3ObjectStore.ForOvhcloud("gra", "archive", Keys());
         await using S3ObjectStore scaleway = S3ObjectStore.ForScaleway("fr-par", "exports", Keys());
         await using S3ObjectStore amazon = new S3ObjectStore(new S3StoreOptions { Bucket = "lake", Region = "eu-west-3", Credentials = Keys() });
+        await using S3ObjectStore other = new S3ObjectStore(new S3StoreOptions { Bucket = "lake", Endpoint = new Uri("https://ceph.example"), Credentials = Keys() });
 
         Assert.Equal((S3Profile.R2, Proven), (r2.Profile, r2.Capabilities));
-        Assert.Equal((S3Profile.Ovhcloud, ObjectStoreCapabilities.ReplacesOnTokenMatch), (ovh.Profile, ovh.Capabilities));
+        Assert.Equal((S3Profile.Ovhcloud, Proven & ~ObjectStoreCapabilities.ListsInOrder), (ovh.Profile, ovh.Capabilities));
         Assert.Equal((S3Profile.Scaleway, Proven), (scaleway.Profile, scaleway.Capabilities));
         Assert.Equal((S3Profile.Amazon, Proven | ObjectStoreCapabilities.KeepsLocks | ObjectStoreCapabilities.ReadsSuffix), (amazon.Profile, amazon.Capabilities));
+
+        // Another service creates conditionally once its options say so, which nothing proves for it.
+        Assert.Equal((S3Profile.Other, Proven & ~ObjectStoreCapabilities.CreatesConditionally), (other.Profile, other.Capabilities));
+    }
+
+    [Fact]
+    public async Task AServiceThatNothingProvesCreatesConditionallyHostsNoWriterUntilItsOptionsSaySo()
+    {
+        // A commit is a put that creates its key only while it is free. On a service that checked and
+        // then wrote, two writers of one version would both hear that they had committed.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator { Region = "us-east-1" };
+        await using (S3ObjectStore unproven = Other(emulator, createsConditionally: null))
+        {
+            NotSupportedException refused = await Assert.ThrowsAsync<NotSupportedException>(
+                async () => await VortexDataset.CreateAsync(unproven, LocationTests.Reading.Schema, cancellationToken: ct));
+            Assert.Contains("S3ObjectStore", refused.Message, StringComparison.Ordinal);
+            Assert.Contains("S3StoreOptions.CreatesConditionally", refused.Message, StringComparison.Ordinal);
+            Assert.Equal(0, emulator.Requests);
+        }
+
+        await using S3ObjectStore checkedCreation = Other(emulator, createsConditionally: true);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(checkedCreation, LocationTests.Reading.Schema, cancellationToken: ct);
+        Assert.Equal(1UL, dataset.Version);
     }
 
     [Theory]
@@ -155,6 +181,15 @@ public sealed class S3ProfileTests
         Handler = emulator,
         KeepsLocks = keepsLocks,
         Checksum = checksum,
+    });
+
+    private static S3ObjectStore Other(S3Emulator emulator, bool? createsConditionally) => new S3ObjectStore(new S3StoreOptions
+    {
+        Bucket = "lake",
+        Endpoint = new Uri("http://localhost:8080"),
+        Credentials = StoreCredentials.AccessKey(S3Emulator.AccessKey, S3Emulator.Secret),
+        Handler = emulator,
+        CreatesConditionally = createsConditionally,
     });
 
     private static S3ObjectStore Ovh(S3Emulator emulator, bool? listsInOrder) => new S3ObjectStore(new S3StoreOptions

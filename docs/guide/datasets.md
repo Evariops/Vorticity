@@ -124,15 +124,31 @@ function of it, a group by streams, because the dataset delivers its rows in key
 
 ## Versions
 
-```
-after another append: the handle reads version 5, 130000 rows; a scan built before it counts 120000; another handle reads version 4 until it refreshes to 5
+```csharp
+await using VortexDataset past = await VortexDataset.OpenAsync(store, version: 2);
 ```
 
-A handle is pinned to one version. It moves only when it commits or when you call `RefreshAsync`. A
-scan is pinned to the version its handle held when the scan was built, so a commit in the middle of
-a query does not change the answer. `Version`, `RowCount`, `ObjectCount` and `Lag` describe the
+```
+after another append: the handle reads version 5, 130000 rows; a scan built before it counts 120000; another handle reads version 4 until it refreshes to 5
+version 2 opened by its number: 50000 rows, 1 object
+```
+
+A handle is pinned to one version. It moves only when it commits or when you call `RefreshAsync`,
+which takes a single round trip to the store when no commit or one came in since, and lands on a
+version that was the latest at some moment during the call. A scan is pinned to the version its
+handle held when the scan was built, so a commit in the middle of a query does not change the
+answer. `Version`, `RowCount`, `ObjectCount` and `Lag` describe the
 version the handle holds. `Lag` is how many objects level 0 holds beyond its ceiling of eight, and
 compaction brings it back to 0 ([dataset-maintenance.md](dataset-maintenance.md)).
+
+`OpenAsync(store, version)` opens a version whose number you know, in one request, where opening the
+latest takes a listing and a read. A writer can hand the number of the version it committed to its
+readers, which then read exactly that version. Such a handle does not take its version for the
+latest: its first refresh or commit lists the commits, and a commit from it applies its changes to
+the latest version, as any commit does. A version superseded for longer than the retention window
+may have lost its objects to vacuum, and then fails to open, or to read, with
+`ObjectNotFoundException`, never with a part of its rows. So a version number handed around has to
+be used well inside the window.
 
 ## Removing and replacing objects
 
@@ -256,8 +272,12 @@ never lend its values to an unrelated column.
   group the rows you change into few calls: two one-row deletes in a small object rewrite it twice.
 * Two writers changing the schema at the same time do not both succeed. The second gets an
   `InvalidOperationException`, and once it has refreshed it sees the schema the first one set.
-* The store must create objects atomically and list them consistently. A store that cannot promise
-  `PutIfAbsent` cannot host a dataset safely. See [object-store.md](object-store.md).
+* Two processes creating the same dataset at the same time do not both succeed either. One creates
+  it, and the other gets an `ObjectStoreException` saying the store already holds a dataset. Open it
+  then, and check that its schema is the one you need.
+* The store must create objects atomically and list them consistently. A dataset writes only to a
+  store that declares `ObjectStoreCapabilities.CreatesConditionally`, and only reads from one that
+  does not. See [object-store.md](object-store.md).
 * Every version keeps its objects alive until a vacuum removes them, and a handle that outlives the
   retention window can lose its objects to vacuum. See
   [dataset-maintenance.md](dataset-maintenance.md).

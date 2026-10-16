@@ -206,6 +206,7 @@ a caller chooses the cheaper path without trying the other:
 | lists in ordinal order, after a key | yes | yes, OVHcloud's to check | yes | yes | yes | yes |
 | replaces on a token's match | yes | yes | yes | yes | no | yes |
 | keeps locks, as S3 Object Lock does | yes | to check, never on R2 or in an OVHcloud Local Zone | yes | yes | no | yes |
+| creates a key only while it is free, in one step | yes | yes on R2, OVHcloud and Scaleway, to check on another service | yes | yes | yes | yes |
 
 A listing says on each entry whether it gave the object's lock: Azure's, Cloud Storage's and the
 memory store's do, the file store's does by saying none, and S3's never does, so a head tells there.
@@ -487,10 +488,16 @@ store never changes what it sends on the text of a refusal, which a provider may
 
 A service that speaks S3's API without a profile here, Ceph for instance, is taken to list in order
 and to do nothing that a test has not proven. Its options say the rest rather than a detection at run
-time: whether it reads suffixes, keeps locks or wants `Content-MD5`, and whether it addresses buckets
-by path. A dataset refuses a store that cannot create conditionally, as
-[the store abstraction](13-dataset.md#11-the-store-abstraction) requires. The contract tests run
-against such a service as against the others, once the environment names one of its buckets.
+time: whether it reads suffixes, keeps locks, creates a key only while it is free or wants
+`Content-MD5`, and whether it addresses buckets by path. A dataset refuses to write to a store that
+does not declare that it creates conditionally (`ObjectStoreCapabilities.CreatesConditionally`), as
+[the store abstraction](13-dataset.md#11-the-store-abstraction) requires, and reads from it all the
+same. `S3StoreOptions.CreatesConditionally` declares it once the contract tests pass against the
+service. The two that matter are a second creation of one key answered `Exists`, and sixteen
+creations of one key at once of which only one is `Created`. A service that checked whether the key
+is there and then wrote would pass the first and fail the second only when the puts meet, so the
+second is run many times over before the option is set. The contract tests run against such a
+service as against the others, once the environment names one of its buckets.
 
 ## 8. Azure Blob Storage
 

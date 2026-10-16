@@ -109,10 +109,14 @@ public sealed class MemoryObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Reads suffixes, lists in order, keeps locks, which each entry of its listing reports, and replaces on a token's match.</summary>
+    /// <summary>
+    /// Reads suffixes, lists in order, keeps locks, which each entry of its listing reports, creates a
+    /// key only while it is free, and replaces on a token's match.
+    /// </summary>
     public ObjectStoreCapabilities Capabilities =>
         ObjectStoreCapabilities.ReadsSuffix | ObjectStoreCapabilities.ListsInOrder
-        | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks;
+        | ObjectStoreCapabilities.ReplacesOnTokenMatch | ObjectStoreCapabilities.KeepsLocks
+        | ObjectStoreCapabilities.CreatesConditionally;
 
     /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadAsync(

@@ -434,8 +434,11 @@ public sealed class DatasetPageCacheTests
     public async Task ABatchThatFindsNothingToDoAsksOnlyWhetherItsVersionIsStillTheLatest()
     {
         // Built on the version held, the batch finds nothing to do and asks whether a later one
-        // exists; none does, and the commit object it holds is the latest's, which it reads again
-        // for nothing.
+        // exists, by a read of the next version and a head of the one after it, sent together. None
+        // does, and the commit object it holds is the latest's, which it does not read again.
+        // Raised on 2026-10-15 from one request, a head, to these two in one round trip: the read
+        // makes a refresh, or a batch like this one, that finds a single new commit take one round
+        // trip where heads alone took four.
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
@@ -445,7 +448,143 @@ public sealed class DatasetPageCacheTests
         store.Reset();
         CommitResult result = await dataset.CommitAsync([Add(2)], ct);
         Assert.Equal((OperationOutcome.AlreadyThere, held), (result.Outcomes[0], result.Version));
-        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.Head)));
+        Assert.Equal((2, 1, 1), (store.Requests, store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.Read)));
+    }
+
+    // A refresh reads the version after its own while a head asks for the one after that, both at
+    // once: no commit or one in a round trip, where heads alone took one and four.
+    [Fact]
+    public async Task ARefreshSeesNoCommitOrOneInARoundTrip()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset reader = await CreateAsync(store, new DatasetOptions(), 3, ct);
+        await using VortexDataset writer = await VortexDataset.OpenAsync(inner, new DatasetOptions(), ct);
+
+        // A latency, so that the read is still on its way when the head goes out.
+        inner.Latency = TimeSpan.FromMilliseconds(5);
+        long[] steps = new long[3];
+        long[] requests = new long[3];
+        for (int commits = 0; commits < 3; commits++)
+        {
+            for (int i = 0; i < commits; i++)
+            {
+                await writer.CommitAsync([Add(100 + (10L * commits) + i)], ct);
+            }
+
+            store.Reset();
+            Assert.Equal(writer.Version, await reader.RefreshAsync(ct));
+            (steps[commits], requests[commits]) = (store.DependentSteps, store.Requests);
+        }
+
+        // No commit and one: the read and the head, together. Two: the head finds the second, a head
+        // past it finds nothing, and the second is read.
+        Assert.Equal([1L, 1L, 3L], steps);
+        Assert.Equal([2L, 2L, 4L], requests);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(10)]
+    [InlineData(1_000)]
+    public async Task ARefreshFindsTheLatestVersionWhateverCameIn(int commits)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset reader = await CreateAsync(store, new DatasetOptions(), 3, ct);
+        await using VortexDataset writer = await VortexDataset.OpenAsync(store, new DatasetOptions(), ct);
+        for (int i = 0; i < commits; i++)
+        {
+            await writer.CommitAsync([Add(100 + (2L * i))], ct);
+        }
+
+        Assert.Equal(writer.Version, await reader.RefreshAsync(ct));
+        Assert.Equal(3 + commits, await CountAsync(reader, ct));
+    }
+
+    // The read and the head go out together, and two commits land between their answers. The read
+    // first: the next version is not there yet, and the one after it is by the time of the head, so
+    // versions came in and the search goes on to the second. The head first: the one after the next is
+    // not there yet, and the next is by the time of the read, so the handle takes the next, which was
+    // the latest during the call, until the second landed; its next refresh moves on.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ARefreshWhoseAnswersCrossTwoCommitsLandsOnAVersionThatWasTheLatest(bool readFirst)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using VortexDataset writer = await CreateAsync(inner, new DatasetOptions(), 3, ct);
+        ulong held = writer.Version;
+        await using Crossing store = new Crossing(inner, held, readFirst, async () =>
+        {
+            await writer.CommitAsync([Add(100)], ct);
+            await writer.CommitAsync([Add(102)], ct);
+        });
+        await using VortexDataset reader = await VortexDataset.OpenAsync(store, new DatasetOptions(), ct);
+        Assert.Equal(held, reader.Version);
+
+        Assert.Equal(readFirst ? held + 2 : held + 1, await reader.RefreshAsync(ct));
+        Assert.Equal(held + 2, await reader.RefreshAsync(ct));
+        Assert.Equal(5, await CountAsync(reader, ct));
+    }
+
+    /// <summary>
+    /// A store whose answers to a refresh's read of the version after <c>held</c> and head of the one
+    /// after that cross two commits: the read answered before them and the head after, or the other
+    /// way round.
+    /// </summary>
+    private sealed class Crossing(IObjectStore inner, ulong held, bool readFirst, Func<Task> between) : ForwardingStore(inner)
+    {
+        private readonly TaskCompletionSource _read = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _crossed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _headed;
+
+        public override async ValueTask<ObjectRead> ReadAsync(
+            string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
+        {
+            if (!string.Equals(key, CommitKey.For(held + 1), StringComparison.Ordinal))
+            {
+                return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+            }
+
+            if (!readFirst)
+            {
+                await _crossed.Task.WaitAsync(cancellationToken);
+            }
+
+            try
+            {
+                return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
+            }
+            finally
+            {
+                _read.TrySetResult();
+            }
+        }
+
+        public override async ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken)
+        {
+            if (!string.Equals(key, CommitKey.For(held + 2), StringComparison.Ordinal) || Interlocked.Exchange(ref _headed, 1) != 0)
+            {
+                return await Inner.HeadAsync(key, cancellationToken);
+            }
+
+            if (readFirst)
+            {
+                await _read.Task.WaitAsync(cancellationToken);
+                await between();
+                return await Inner.HeadAsync(key, cancellationToken);
+            }
+
+            ObjectHead? head = await Inner.HeadAsync(key, cancellationToken);
+            await between();
+            _crossed.SetResult();
+            return head;
+        }
     }
 
     [Fact]
@@ -457,11 +596,13 @@ public sealed class DatasetPageCacheTests
         await using CountingObjectStore store = new CountingObjectStore(inner);
         await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { TimeProvider = clock }, 3, ct);
 
-        // Within half the window a refresh with nothing new is one head; past it, one listing, and
-        // neither reads the version again.
+        // Within half the window a refresh with nothing new is a read of the next version and a head
+        // of the one after it, sent together (two requests since 2026-10-15, where a head alone
+        // made one: see the batch that finds nothing to do); past it, one listing, and neither reads
+        // the version again.
         store.Reset();
         Assert.Equal(dataset.Version, await dataset.RefreshAsync(ct));
-        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.Head)));
+        Assert.Equal((2, 1, 1), (store.Requests, store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.Read)));
         clock.Advance(TimeSpan.FromDays(4));
         store.Reset();
         Assert.Equal(dataset.Version, await dataset.RefreshAsync(ct));

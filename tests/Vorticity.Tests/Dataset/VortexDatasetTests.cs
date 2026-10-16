@@ -434,6 +434,196 @@ public sealed class VortexDatasetTests
         public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.ListsInOrder;
     }
 
+    // A commit is a put that creates its key only while it is free, which a store has to declare it does
+    // in one step. A store that does not hosts readers: every write is refused before it writes anything.
+    [Fact]
+    public async Task AStoreThatCannotCreateConditionallyHostsReadersOnly()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using (VortexDataset written = await VortexDataset.CreateAsync(inner, schema, Options(), ct))
+        {
+            for (int i = 0; i < 9; i++)
+            {
+                await written.AppendAsync(Batches(types, schema, i * 100, 100), ct);
+            }
+        }
+
+        int held = inner.Count;
+        await using Unconditional store = new Unconditional(inner);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), ct);
+        ulong version = dataset.Version;
+        Assert.Equal(900, await dataset.ScanBuilder().CountAsync(ct));
+        List<DataObject> objects = await dataset.ListObjectsAsync(ct).ToListAsync(ct);
+
+        NotSupportedException refused = Assert.Throws<NotSupportedException>(() => dataset.StartObject());
+        Assert.Contains("CreatesConditionally", refused.Message, StringComparison.Ordinal);
+        Assert.Contains(nameof(Unconditional), refused.Message, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.AppendAsync(Batches(types, schema, 900, 100), ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.CompactAsync(cancellationToken: ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.DeleteAsync(VortexExpr.Parse("key < 10"), ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.RemoveObjectsAsync([objects[0]], ct));
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await dataset.ImportAsync(objects[0].Key, ct));
+        Assert.Equal((held, version), (inner.Count, dataset.Version));
+
+        await using MemoryObjectStore empty = new MemoryObjectStore();
+        await using Unconditional fresh = new Unconditional(empty);
+        await Assert.ThrowsAsync<NotSupportedException>(async () => await VortexDataset.CreateAsync(fresh, schema, Options(), ct));
+        Assert.Equal(0, empty.Count);
+    }
+
+    // A creation is exclusive. Sixteen at once, of two schemas, on one store: one creates the dataset,
+    // and every other is told the store holds one, rather than rebasing onto the winner's first version
+    // and coming back with a handle on a schema it never asked for.
+    [Fact]
+    public async Task OfManyCreationsAtOnceOneCreatesAndTheOthersAreTold()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType[] schemas =
+        [
+            Schema(types),
+            types.Struct(
+                ["key", "label"],
+                [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.I32, Nullability.Nullable)],
+                Nullability.NonNullable),
+        ];
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        TaskCompletionSource go = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<VortexDataset?>[] creations = [.. Enumerable.Range(0, 16).Select(i => Task.Run(async () =>
+        {
+            await go.Task;
+            try
+            {
+                return await VortexDataset.CreateAsync(store, schemas[i % 2], Options(), ct);
+            }
+            catch (ObjectStoreException told)
+            {
+                Assert.Contains("already holds a dataset", told.Message, StringComparison.Ordinal);
+                return null;
+            }
+        }))];
+        go.SetResult();
+        VortexDataset?[] made = await Task.WhenAll(creations);
+
+        int winner = Assert.Single(Enumerable.Range(0, 16), i => made[i] is not null);
+        await using VortexDataset dataset = made[winner]!;
+        Assert.Equal(1UL, dataset.Version);
+        Assert.Equal(schemas[winner % 2].GetFieldName(1), dataset.Schema[1].Name);
+        await using VortexDataset opened = await VortexDataset.OpenAsync(store, Options(), ct);
+        Assert.Equal(dataset.Schema[1].Name, opened.Schema[1].Name);
+    }
+
+    // A creation is a listing that finds no version and the creation of the first, and the handle reads
+    // what it wrote without asking for it again.
+    [Fact]
+    public async Task ACreationIsAListingAndAPut()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Schema(types), Options(), ct);
+        Assert.Equal((2L, 2L, 1L, 1L), (store.Requests, store.DependentSteps, store.CountOf(ObjectOperation.List), store.CountOf(ObjectOperation.Put)));
+
+        // And the handle on what it wrote takes appends like one that opened it.
+        store.Reset();
+        Assert.Equal(2UL, await dataset.AppendAsync(Batches(types, Schema(types), 0, 100), ct));
+        Assert.Equal(100, dataset.RowCount);
+    }
+
+    // A version known by its number opens in one request, its commit object's key computed from the
+    // number, and reads as a handle that stayed on it does. The handle does not take it for the latest:
+    // its refresh lists, and its commit lands on the latest version.
+    [Fact]
+    public async Task AVersionKnownByItsNumberOpensInOneRequestAndReadsAsAHandleThatStayedOnIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        List<(ulong Version, List<long> Keys)> kept = [(writer.Version, [])];
+        for (int i = 0; i < 4; i++)
+        {
+            await writer.AppendAsync(Batches(types, schema, i * 1_000, 1_000), ct);
+            await using VortexDataset stayed = await VortexDataset.OpenAsync(store, Options(), ct);
+            kept.Add((stayed.Version, await KeysAsync(stayed.ScanBuilder())));
+        }
+
+        foreach ((ulong version, List<long> keys) in kept)
+        {
+            store.Reset();
+            await using VortexDataset opened = await VortexDataset.OpenAsync(store, version, Options(), ct);
+            Assert.Equal((1L, 1L, 1L), (store.Requests, store.DependentSteps, store.CountOf(ObjectOperation.Read)));
+            Assert.Equal(version, opened.Version);
+            Assert.Equal(keys, await KeysAsync(opened.ScanBuilder()));
+        }
+
+        ulong latest = writer.Version;
+        ObjectNotFoundException missing = await Assert.ThrowsAsync<ObjectNotFoundException>(
+            async () => await VortexDataset.OpenAsync(store, latest + 1, Options(), ct));
+        Assert.Contains($"no version {latest + 1}", missing.Message, StringComparison.Ordinal);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await VortexDataset.OpenAsync(store, 0UL, Options(), ct));
+
+        await using (VortexDataset old = await VortexDataset.OpenAsync(store, kept[1].Version, Options(), ct))
+        {
+            store.Reset();
+            Assert.Equal(latest, await old.RefreshAsync(ct));
+            Assert.Equal(1, store.CountOf(ObjectOperation.List));
+        }
+
+        await using VortexDataset behind = await VortexDataset.OpenAsync(store, kept[1].Version, Options(), ct);
+        Assert.Equal(latest + 1, await behind.AppendAsync(Batches(types, schema, 4_000, 10), ct));
+        Assert.Equal(4_010, behind.RowCount);
+    }
+
+    // A version superseded for longer than the retention window loses what no later version shares
+    // to vacuum. Opened by its number, or read by a handle that held it all along, it fails with
+    // ObjectNotFoundException, never with a part of its rows.
+    [Fact]
+    public async Task AVersionVacuumTookFailsToOpenAndToReadRatherThanAnsweringInPart()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 10, 15, 0, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
+        DatasetOptions options = Options() with { RetentionWindow = TimeSpan.FromHours(1), TimeProvider = clock };
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, options, ct);
+        for (int i = 0; i < 9; i++)
+        {
+            await writer.AppendAsync(Batches(types, schema, i * 100, 100), ct);
+        }
+
+        ulong before = writer.Version;
+        await using VortexDataset held = await VortexDataset.OpenAsync(store, before, options, ct);
+        Assert.NotNull(await writer.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, ct));
+        clock.Advance(TimeSpan.FromHours(2));
+        VacuumResult vacuumed = await writer.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.DoesNotContain(before, vacuumed.Retained);
+
+        // A count is answered by the entries the handle holds, which no vacuum takes from it; reading
+        // the rows needs the objects.
+        Assert.Equal(900, await held.ScanBuilder().CountAsync(ct));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await KeysAsync(held.ScanBuilder()));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await VortexDataset.OpenAsync(store, before, options, ct));
+        Assert.Equal(900, (await KeysAsync(writer.ScanBuilder())).Count);
+    }
+
+    /// <summary>A store that does not declare that it creates a key only while it is free.</summary>
+    private sealed class Unconditional(IObjectStore inner) : ForwardingStore(inner)
+    {
+        public override ObjectStoreCapabilities Capabilities => Inner.Capabilities & ~ObjectStoreCapabilities.CreatesConditionally;
+    }
+
     // A writer that stops before its last byte leaves a commit that is not whole under the next
     // version's key. Every reader and writer that meets it names it, and removing it on request gives
     // the dataset back its previous version and the number to the next commit.
