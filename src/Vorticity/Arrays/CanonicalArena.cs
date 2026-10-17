@@ -2028,11 +2028,13 @@ internal partial class CanonicalArena
         // gather below writes into a buffer it never has to grow.
         long referenced = ViewedBytes(src.BufferA.Span, rows);
 
+        // The views start on a boundary of their own size, as a decoder puts them, whatever the
+        // slab holds before them: see CopyBuffer.
         VortexBuffer views = VortexBuffer.Empty;
         Span<byte> writable = default;
         if (rows > 0)
         {
-            views = AllocateUninitialized(viewBytes, 1, out writable);
+            views = AllocateUninitialized(viewBytes, ViewSize, out writable);
             src.BufferA.Span[..viewBytes].CopyTo(writable);
         }
 
@@ -2131,9 +2133,19 @@ internal partial class CanonicalArena
 
     /// <summary>Materializes one buffer's bytes into storage this arena owns.</summary>
     /// <remarks>
+    /// <para>
     /// An empty buffer copies to an empty buffer rather than to a zero-length allocation: renting a
     /// block to hold nothing would charge every copy of a non-nullable column for a validity buffer
     /// that does not exist.
+    /// </para>
+    /// <para>
+    /// The copy starts on the strictest boundary a reader asks of any buffer, as a decoder's own
+    /// buffers do, because a copy knows bytes and not the width they are read at. The small blocks
+    /// of an arena are carved from one slab end to end, so a copy that asked for no alignment would
+    /// start where the buffer before it ended: behind 32-bit values over an odd number of rows,
+    /// 64-bit values would sit four bytes off their boundary. The padding is a few bytes of a slab
+    /// per buffer, and a buffer too large for the slab has a block of its own, aligned already.
+    /// </para>
     /// </remarks>
     private VortexBuffer CopyBuffer(VortexBuffer source)
     {
@@ -2145,7 +2157,8 @@ internal partial class CanonicalArena
         // Uninitialized because the copy below writes every byte of it, which is the only thing
         // that makes skipping the zero-fill safe.
         System.Threading.Interlocked.Add(ref BytesMaterialized, source.Length);
-        VortexBuffer copy = AllocateUninitialized(source.Length, 1, out Span<byte> destination);
+        VortexBuffer copy = AllocateUninitialized(
+            source.Length, Decoders.Canonical.CanonicalSupport.MaxRequiredAlignment, out Span<byte> destination);
         source.Span.CopyTo(destination);
         return copy;
     }

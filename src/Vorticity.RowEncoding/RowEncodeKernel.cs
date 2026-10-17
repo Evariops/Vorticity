@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -141,36 +142,53 @@ internal static class RowEncodeKernel
                 EncodeFixed<byte, OrderU8>(values.Span, validity, field, offsets, cursors, destination);
                 return;
             case PType.U16:
-                EncodeFixed<ushort, OrderU16>(values.Cast<ushort>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<ushort, OrderU16>(Values<ushort>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.U32:
-                EncodeFixed<uint, OrderU32>(values.Cast<uint>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<uint, OrderU32>(Values<uint>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.U64:
-                EncodeFixed<ulong, OrderU64>(values.Cast<ulong>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<ulong, OrderU64>(Values<ulong>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.I8:
                 EncodeFixed<byte, OrderI8>(values.Span, validity, field, offsets, cursors, destination);
                 return;
             case PType.I16:
-                EncodeFixed<ushort, OrderI16>(values.Cast<ushort>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<ushort, OrderI16>(Values<ushort>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.I32:
-                EncodeFixed<uint, OrderI32>(values.Cast<uint>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<uint, OrderI32>(Values<uint>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.I64:
-                EncodeFixed<ulong, OrderI64>(values.Cast<ulong>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<ulong, OrderI64>(Values<ulong>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.F16:
-                EncodeFixed<ushort, OrderF16>(values.Cast<ushort>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<ushort, OrderF16>(Values<ushort>(values), validity, field, offsets, cursors, destination);
                 return;
             case PType.F32:
-                EncodeFixed<uint, OrderF32>(values.Cast<uint>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<uint, OrderF32>(Values<uint>(values), validity, field, offsets, cursors, destination);
                 return;
             default:
-                EncodeFixed<ulong, OrderF64>(values.Cast<ulong>(), validity, field, offsets, cursors, destination);
+                EncodeFixed<ulong, OrderF64>(Values<ulong>(values), validity, field, offsets, cursors, destination);
                 return;
         }
+    }
+
+    /// <summary>
+    /// A column's values at their width, wherever they lie. The arena allocates a buffer on that
+    /// boundary, but a segment read in place sits where its file laid it out, and a load reads the
+    /// values there just the same on every platform the library runs on: refusing them would fail
+    /// a key for where its bytes happen to be.
+    /// </summary>
+    private static ReadOnlySpan<T> Values<T>(VortexBuffer values)
+        where T : unmanaged
+    {
+        if (values.Length % Unsafe.SizeOf<T>() != 0)
+        {
+            throw RowThrow.RaggedValues(values.Length, Unsafe.SizeOf<T>());
+        }
+
+        return MemoryMarshal.Cast<byte, T>(values.Span);
     }
 
     /// <summary>
