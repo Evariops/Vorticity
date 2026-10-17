@@ -15,6 +15,11 @@ internal static class RowThrow
             VortexComponentKind.DType,
             $"Row encoding does not support canonical {node.Kind} arrays.");
 
+    /// <summary>Always throws: a buffer of fixed-width values that ends inside a value.</summary>
+    internal static VortexFormatException RaggedValues(int length, int width) =>
+        throw new VortexFormatException(
+            $"A column of {width}-byte values holds {length} bytes, {length % width} past its last whole value.");
+
     /// <summary>
     /// Always throws: a decimal value too wide for the key width its declared precision implies.
     /// </summary>

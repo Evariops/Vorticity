@@ -28,7 +28,13 @@ internal sealed class RowFixture : IDisposable
 
     internal CanonicalArena Arena { get; }
 
-    /// <summary>Copies bytes into arena-owned memory.</summary>
+    /// <summary>
+    /// How many bytes past a boundary of its alignment every buffer starts: none, or a shift that
+    /// leaves the values off their width's boundary, where a copy or a segment read in place can.
+    /// </summary>
+    internal int Shift { get; init; }
+
+    /// <summary>Copies bytes into arena-owned memory, <see cref="Shift"/> bytes past a boundary of <paramref name="alignment"/>.</summary>
     internal VortexBuffer Bytes(ReadOnlySpan<byte> data, int alignment = 16)
     {
         if (data.IsEmpty)
@@ -36,9 +42,9 @@ internal sealed class RowFixture : IDisposable
             return VortexBuffer.Empty;
         }
 
-        VortexBuffer buffer = Arena.Allocate(data.Length, alignment, out Span<byte> destination);
-        data.CopyTo(destination);
-        return buffer;
+        VortexBuffer buffer = Arena.Allocate(data.Length + Shift, alignment, out Span<byte> destination);
+        data.CopyTo(destination[Shift..]);
+        return buffer.Slice(Shift);
     }
 
     /// <summary>A validity from a per-row flag array, or all-valid when <paramref name="valid"/> is null.</summary>

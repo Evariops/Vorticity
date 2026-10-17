@@ -161,6 +161,9 @@ because the encoder would otherwise be silently choosing an ordering the format 
 - There is no allocation per row, since the output size is known before a byte is written. The
   kernels call `TryWriteBigEndian`, never `WriteBigEndian`: the latter is a default interface method
   the primitive types do not override, so a generic call to it boxes its receiver on every row.
+- It reads a column's values at their width wherever they lie. The arena allocates every buffer on
+  a multiple of its values' width, and a copy of a batch keeps that boundary, but a segment read in
+  place sits where its file laid it out, and a key must not depend on the address of its bytes.
 - It is synchronous. It is CPU work over arrays already in memory, and the async-only rule is for
   I/O.
 
