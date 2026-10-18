@@ -31,11 +31,17 @@ internal readonly record struct TimeSlice(long Start, long End, long FirstRow, l
 /// </remarks>
 internal sealed class SliceTable
 {
-    private const byte Version = 1;
+    // Version 1 holds the slices alone, and version 2 the order inside them after them.
+    private const byte Version = 2;
+    private const byte FirstVersion = 1;
 
-    /// <summary>A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>.</summary>
+    /// <summary>
+    /// A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>, whose rows
+    /// are sorted inside each slice by the top-level columns <paramref name="order"/>, then by the instant;
+    /// in time order for no order.
+    /// </summary>
     /// <exception cref="ArgumentException">The slices are empty, do not follow each other, or one is empty or inverted.</exception>
-    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices)
+    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices, IReadOnlyList<int>? order = null)
     {
         ArgumentNullException.ThrowIfNull(slices);
         if (Problem(slices) is { } problem)
@@ -45,10 +51,17 @@ internal sealed class SliceTable
 
         Unit = unit;
         Slices = slices;
+        Order = order ?? [];
     }
 
     /// <summary>The unit the slices' bounds are counted in: the instant column's.</summary>
     internal TimeUnit Unit { get; }
+
+    /// <summary>
+    /// The top-level columns the rows of each slice are sorted by, in that order, the instant after them:
+    /// the object's synopsis columns. Empty for rows in time order.
+    /// </summary>
+    internal IReadOnlyList<int> Order { get; }
 
     /// <summary>The slices, in time order.</summary>
     internal IReadOnlyList<TimeSlice> Slices { get; }
@@ -107,6 +120,12 @@ internal sealed class SliceTable
                 end = slice.End;
             }
 
+            writer.WriteVarint((ulong)Order.Count);
+            foreach (int field in Order)
+            {
+                writer.WriteVarint((ulong)field);
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -121,7 +140,8 @@ internal sealed class SliceTable
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
-            if (reader.ReadVarint() != Version)
+            ulong version = reader.ReadVarint();
+            if (version is not (Version or FirstVersion))
             {
                 return null;
             }
@@ -148,7 +168,23 @@ internal sealed class SliceTable
                 end = stop;
             }
 
-            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices) : null;
+            int[] order = [];
+            if (version == Version)
+            {
+                ulong fields = reader.ReadVarint();
+                if (fields > (ulong)bytes.Length)
+                {
+                    return null;
+                }
+
+                order = new int[(int)fields];
+                for (int i = 0; i < order.Length; i++)
+                {
+                    order[i] = checked((int)reader.ReadVarint());
+                }
+            }
+
+            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices, order) : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException or ArgumentException)
         {
