@@ -258,21 +258,24 @@ of the file to a slice's rows without the footer:
 ```
 request 1   the EOF marker, the last 8 bytes, which give the postscript's length
 request 2   the postscript, which names the index directory
-request 3   the index directory: the slice table, and the region of the chunk directory
-request 4   the chunk directory
-request 5   the chunks of every column that overlap the slice, in one request set
+request 3   the index directory: the slice table, the encodings, a region per column
+request 4   the regions of the columns the read wants, the first time it wants them
+request 5   the chunks of those columns that overlap the slice, in one request set
 ```
 
-Each chunk decodes from its own bytes, the encoding table the chunk directory carries, and the
-column's type, which the caller knows from the dataset's schema. The chunks that overlap a slice are
-cut to its rows and joined, so a slice that starts inside a chunk reads that chunk whole, as any read
-of a flat chunk does. Requests 1 to 4 are small, and a dataset's leaf entry that records the chunk
-directory's region spares them. A file without the slice kinds, or with ones that do not decode or do
-not cover its rows, opens no such reader, and its rows are read through an open as before.
+Each chunk decodes from its own bytes, the encoding table the directory carries, and the column's
+type, which the caller knows from the dataset's schema. The chunks that overlap a slice are cut to its
+rows and joined, so a slice that starts inside a chunk reads that chunk whole, as any read of a flat
+chunk does. A read may name the columns it wants, and then fetches only their regions and chunks: the
+edges of a window read the instant alone. Requests 1 to 4 are small, are paid once per file, and a
+dataset's leaf entry that records the regions spares the first three. A file without the slice
+kinds, or with ones that do not decode or do not cover its rows, opens no such reader, and its rows
+are read through an open as before.
 
 The test that reads every slice of a file checks that no byte between the index directory and the
-postscript, where the dtype, the layout and the footer lie, is read. A warm read of a slice allocates
-its decode context, about 17 KB, and nothing per row (`SliceReadAllocationTests`).
+postscript, where the dtype, the layout and the footer lie, is read, and that the instant alone reads
+half the requests of both columns. A warm read of a slice allocates its decode context, about 17 KB,
+and nothing per row (`SliceReadAllocationTests`).
 
 ## 6. Predicates on text and lists
 

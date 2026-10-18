@@ -27,7 +27,7 @@ public sealed class SliceReadAllocationTests
 
         // A first read warms the pool; the floor over the passes after it is the ceiling's figure.
         // 2 000 rows of two eight-byte columns decode 32 000 bytes, so a cost per row would pass it.
-        using (await reader.ReadSliceAsync(3, ct))
+        using (await reader.ReadSliceAsync(3, null, ct))
         {
         }
 
@@ -35,7 +35,7 @@ public sealed class SliceReadAllocationTests
         for (int pass = 0; pass < 5; pass++)
         {
             long before = GC.GetAllocatedBytesForCurrentThread();
-            ValueTask<RecordBatch> read = reader.ReadSliceAsync(3, ct);
+            ValueTask<RecordBatch> read = reader.ReadSliceAsync(3, null, ct);
             Assert.True(read.IsCompletedSuccessfully);
             using (await read)
             {

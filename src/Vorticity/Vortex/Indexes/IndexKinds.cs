@@ -39,8 +39,8 @@ internal static class IndexKinds
 
     /// <summary>
     /// Where the chunks of every top-level column lie and the array encodings their trees name, on
-    /// the root, in one payload region: what reads a slice's rows without the footer
-    /// (<see cref="Indexes.SliceChunks"/>).
+    /// the root, the encodings in its options and a payload region per column: what reads a slice's
+    /// rows without the footer (<see cref="Indexes.SliceChunks"/>).
     /// </summary>
     public const string SliceChunks = "vorticity.slices.chunks.v1";
 

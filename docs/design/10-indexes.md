@@ -208,13 +208,15 @@ declares the slices before it completes the file, which checks that they cover i
 ([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)).
 
 A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
-root. Its one payload region holds, behind a version byte, the file's table of array encodings, then
-per column its chunks, each its offset, length, alignment and rows as varints. That is about ten
-bytes a chunk, 5 MB for a day of 10⁹ rows in 20 columns, so it is a region read when needed rather
-than options every open reads. With it a reader decodes the chunks that hold a slice from their own
-bytes, since a chunk's segment ends with its encoding tree, and never reads the footer ([the rows of
-a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)). An append drops
-both slice kinds, since they describe the file as its writer cut it.
+root. Its options hold the file's table of array encodings, and its one run has a payload region per
+top-level column, in column order. A column's region holds, behind a version byte, its chunks, each
+its offset, length, alignment and rows as varints. That is about ten bytes a chunk, 250 KB a column
+for a day of 10⁹ rows, so the regions are read when needed rather than kept in the options every open
+reads, and a read of one column, the instant at the edges of a window, fetches that column's region
+alone. With it a reader decodes the chunks that hold a slice from their own bytes, since a chunk's
+segment ends with its encoding tree, and never reads the footer ([the rows of a time
+slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)). An append drops both slice
+kinds, since they describe the file as its writer cut it.
 
 ### 4.5 The file-level filter
 

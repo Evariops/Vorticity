@@ -141,14 +141,15 @@ public sealed partial class TimeSliceTests
     {
         ChunkSpan[] column = [new(64, 100, 6, 0, 2048), new(192, 100, 6, 2048, 2048), new(320, 50, 6, 4096, 904)];
         SliceChunks chunks = new(["vortex.primitive", "fastlanes.bitpacked"], [column, column]);
-        SliceChunks read = SliceChunks.FromBytes(chunks.ToBytes())!;
-        Assert.Equal(chunks.Encodings, read.Encodings);
-        Assert.Equal(column, read.Columns[1]);
-        Assert.Equal(column[..1], read.Overlapping(0, 0, 2048).ToArray());
-        Assert.Equal(column[..2], read.Overlapping(0, 2000, 100).ToArray());
-        Assert.Equal(column[2..], read.Overlapping(1, 4096, 904).ToArray());
-        Assert.Null(SliceChunks.FromBytes(chunks.ToBytes()[..^1]));
-        Assert.Null(SliceChunks.FromBytes([2]));
+        Assert.Equal(chunks.Encodings, SliceChunks.EncodingsFrom(chunks.OptionBytes()));
+        ChunkSpan[] read = SliceChunks.ColumnFrom(chunks.ColumnBytes(1))!;
+        Assert.Equal(column, read);
+        Assert.Equal(column[..1], SliceChunks.Overlapping(read, 0, 2048).ToArray());
+        Assert.Equal(column[..2], SliceChunks.Overlapping(read, 2000, 100).ToArray());
+        Assert.Equal(column[2..], SliceChunks.Overlapping(read, 4096, 904).ToArray());
+        Assert.Null(SliceChunks.ColumnFrom(chunks.ColumnBytes(0)[..^1]));
+        Assert.Null(SliceChunks.EncodingsFrom(chunks.OptionBytes()[..^1]));
+        Assert.Null(SliceChunks.ColumnFrom([2]));
     }
 
     /// <summary>A slice's rows, read through the chunk directory, without a byte of the dtype, the layout or the footer.</summary>
@@ -158,29 +159,56 @@ public sealed partial class TimeSliceTests
         Sliced sliced = await WriteSlicedAsync(declare: true, Ct);
         (Reading[] rows, SliceTable table, byte[] bytes, DType schema) = sliced;
 
-        // Chunks of 2 048 rows, so that slices start and end inside them.
-        Assert.Contains(table.Slices, slice => slice.FirstRow % 2048 != 0);
+        // Chunks of 1 024 rows, so that slices start and end inside them.
+        Assert.Contains(table.Slices, slice => slice.FirstRow % 1024 != 0);
         TestSegmentSource source = new(bytes) { Ranges = [] };
         SliceReader reader = (await SliceReader.OpenAsync(source, bytes.Length, schema, null, Ct))!;
         Assert.Equal(table.Slices, reader.Slices.Slices);
         for (int s = 0; s < table.Slices.Count; s++)
         {
             TimeSlice slice = table.Slices[s];
-            using RecordBatch batch = await reader.ReadSliceAsync(s, Ct);
+            using RecordBatch batch = await reader.ReadSliceAsync(s, null, Ct);
             Reading[] expected = rows[(int)slice.FirstRow..(int)(slice.FirstRow + slice.Rows)];
             Assert.Equal(expected, Read(batch));
         }
 
         // Nothing read lies between the index directory and the postscript, where the dtype, the
-        // layout and the footer are: two reads of the end, the directory, the chunk directory, then
-        // one request a slice.
+        // layout and the footer are: two reads of the end, the directory, the chunk directories with
+        // the first slice, then one request a slice.
         SegmentSpec directory = (await VortexFile.ReadMetadataSpecAsync(new TestSegmentSource(bytes), bytes.Length, IndexDirectory.MetadataKey, Ct))!.Value;
         long footerEnd = bytes.Length - 8 - BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(bytes.Length - 6, 2));
         Assert.True(footerEnd > (long)directory.End);
         Assert.All(source.Ranges, range => Assert.True(
             range.Offset + range.Length <= (long)directory.End || range.Offset >= footerEnd, $"{range} reads the footer"));
         Assert.Equal(2, source.RangeReads);
-        Assert.Equal(table.Slices.Count, source.BatchReads);
+        Assert.Equal(table.Slices.Count + 1, source.BatchReads);
+
+        // The instant alone reads its own chunk directory and chunks, none of the other column's.
+        TestSegmentSource instants = new(bytes) { Ranges = [] };
+        SliceReader edge = (await SliceReader.OpenAsync(instants, bytes.Length, schema, null, Ct))!;
+        int opened = instants.Ranges.Count;
+        using (RecordBatch batch = await edge.ReadSliceAsync(3, [0], Ct))
+        {
+            TimeSlice slice = table.Slices[3];
+            DateTimeOffset[] at = new DateTimeOffset[batch.RowCount];
+            batch.View.Column<DateTimeOffset>(0).CopyTo(at);
+            Assert.Equal(rows[(int)slice.FirstRow..(int)(slice.FirstRow + slice.Rows)].Select(r => r.At), at);
+            Assert.Equal(nameof(Reading.At), Assert.Single(batch.View.Schema).Name);
+        }
+
+        // Slice 3, rows 6 000 to 8 000, lies across several chunks: one region and its chunks for the
+        // instant alone, against twice as many reads for both columns.
+        TestSegmentSource both = new(bytes) { Ranges = [] };
+        SliceReader whole = (await SliceReader.OpenAsync(both, bytes.Length, schema, null, Ct))!;
+        using (await whole.ReadSliceAsync(3, null, Ct))
+        {
+        }
+
+        Assert.InRange(instants.Ranges.Count - opened, 1 + 2, int.MaxValue);
+        Assert.Equal(2 * (instants.Ranges.Count - opened), both.Ranges.Count - opened);
+        Assert.True(
+            instants.Ranges.Skip(opened).Sum(range => range.Length) < both.Ranges.Skip(opened).Sum(range => range.Length),
+            "the instant alone reads less than both columns");
 
         // A file that declares no slices opens no slice reader.
         byte[] plain = (await WriteSlicedAsync(declare: false, Ct)).Bytes;
@@ -190,7 +218,7 @@ public sealed partial class TimeSliceTests
     internal readonly record struct Sliced(Reading[] Rows, SliceTable Table, byte[] Bytes, DType Schema);
 
     /// <summary>
-    /// 20 000 rows 30 ms apart, in chunks of 2 048 rows and slices of a minute, 2 000 rows: the file's
+    /// 20 000 rows 30 ms apart, in chunks of 1 024 rows and slices of a minute, 2 000 rows: the file's
     /// bytes and schema, its slices declared or not.
     /// </summary>
     internal static async Task<Sliced> WriteSlicedAsync(bool declare, CancellationToken ct)

@@ -162,7 +162,7 @@ finest grain of time, as the order of the rows themselves, and leaves the rest t
 | fresh level | a level of objects younger than their period's seal, key-disjoint, which grow by merging adjacent objects | level 0, whose objects overlap |
 | late level | the level of rows older than the fresh object they would overlap, or than their period's seal, whose objects overlap under a ceiling | a partition |
 | seal | the job that writes a period's object in one pass, once the period's end and the lateness horizon have passed | sealing a file, which checks its order |
-| slice directory | per slice and per column, where the chunks covering the slice lie in the object | the slice table, which gives a slice's rows |
+| slice directory | per column, where its chunks lie in the object and the rows each holds, so that the chunks covering a slice are found by its rows | the slice table, which gives a slice's rows |
 | identifier | a column the application declares as one whose values questions look up, which gets a sorted run outside the index budget | a synopsis column |
 | erasure delay | how long a deleted row may stay in the bytes of the store, declared by the application | the retention window |
 | time slice | the rows of an object whose instant falls in `[t, t + w)`, `w` a calendar unit in UTC: a contiguous range of rows | the slices of a sorted run, in key cursors |
@@ -376,9 +376,11 @@ What it costs, with f = 30 on the example (estimate):
    directory names the chunks that overlap it: a read of one slice reads at most one chunk partly
    outside it at each end. A run that crosses a slice boundary is cut at the slice's first row ([what
    a slice is](#61-what-a-slice-is)).
-5. The synopsis part carries a slice directory: per slice and per column, the chunks covering the
-   slice, with their offsets, lengths and rows. Rows read in a period's object, for an edge, a needle or
-   rows to show, are found through it, never through the footer. The footer, 20 to 40 MB for a day at
+5. The synopsis part carries a slice directory: a region per column listing its chunks, with their
+   offsets, lengths and rows, about 250 KB a column for a day, and the encodings their trees name. The
+   chunks covering a slice are found by its rows, and a read of the instant alone fetches the
+   instant's region alone. Rows read in a period's object, for an edge, a needle or rows to show, are
+   found through it, never through the footer ([index reads](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)). The footer, 20 to 40 MB for a day at
    that chunk size (estimate), is read only by a whole open: compaction, and Rust readers.
 6. The leaf entry records the footer's length, so that a whole open reads the tail and the footer in
    one request at any size, under commit format 4.
@@ -680,7 +682,7 @@ grain. The synopsis keeps, beside them, what the runs cannot give cheaply:
 | part | what it holds | where it lies |
 |---|---|---|
 | the slice table | per slice: its bounds, first row, row count, and the object's order of its synopsis columns | an index region |
-| the slice directory | per slice and per column, the chunks covering the slice: their offsets, lengths and rows | an index region |
+| the slice directory | per column, its chunks: their offsets, lengths and rows | an index region per column |
 | the synopsis columns of the synopsis part | the data's own synopsis columns, from the first down to a depth the budget sets, written as long column chunks so that they lie together | data segments, which the index directory names |
 | run statistics | per run of each column the budget keeps them for, the states of every measure column | index regions |
 | coarse tables | per bucket coarser than the slice (an hour, the period) and per depth the budget keeps: the bucket, the first `k` synopsis columns, a count and states | index regions |

@@ -1486,20 +1486,25 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Writes where the chunks of every column lie as one region at the sink's position, and adds the
-    /// entry that names it: on the root, one run over every block of the file's <paramref name="rows"/>,
-    /// the region checksummed as every payload is.
+    /// Writes where the chunks of each column lie, a region per column from the sink's position, and
+    /// adds the entry that names them: on the root, the encodings in its options, one run over every
+    /// block of the file's <paramref name="rows"/>, each region checksummed as every payload is.
     /// </summary>
     internal async ValueTask AddSliceChunksAsync(
         ISegmentSink sink, SliceChunks chunks, long rows, int blockRows, CancellationToken cancellationToken)
     {
-        byte[] bytes = chunks.ToBytes();
-        long offset = sink.Position;
-        await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        IndexSegment[] regions = new IndexSegment[chunks.Columns.Count];
+        for (int column = 0; column < regions.Length; column++)
+        {
+            byte[] bytes = chunks.ColumnBytes(column);
+            regions[column] = IndexSegment.Of(sink.Position, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        }
+
         int length = Math.Max(blockRows, 1);
         _entries.Add(new IndexEntry(
-            IndexKinds.SliceChunks, [], (ulong)length, [],
-            [new IndexRun(0, Blocks(rows, length), [IndexSegment.Of(offset, bytes, 0)], [])]));
+            IndexKinds.SliceChunks, [], (ulong)length, chunks.OptionBytes(),
+            [new IndexRun(0, Blocks(rows, length), regions, [])]));
     }
 
     private static uint Blocks(long rows, int length) => checked((uint)((rows + length - 1) / length));
