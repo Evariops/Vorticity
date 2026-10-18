@@ -54,16 +54,16 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
         if (rows.Count > 0)
         {
             QuantileSketch sketch = Sketch(group);
-            long before = sketch.Bytes;
+            long grown = 0;
             foreach (int row in rows)
             {
                 if (valid.IsEmpty || (valid[row >> 6] & (1UL << row)) != 0)
                 {
-                    sketch.Add(double.CreateTruncating(values[row]));
+                    grown += sketch.Add(double.CreateTruncating(values[row]));
                 }
             }
 
-            _bytes += sketch.Bytes - before;
+            _bytes += grown;
         }
 
         if (!(start == 0 && end == input.Rows && input.Selection.IsEmpty))
@@ -76,13 +76,13 @@ internal sealed class DistributionSlot<TValue, TResult> : AggregateSlot<TResult>
     {
         ReadOnlySpan<TValue> values = FixedReader.Values(input.Arena, input.Node, StorageKind.Primitive, ref _values, out ReadOnlySpan<ulong> valid);
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), input.Start, input.End);
+        long grown = 0;
         while (rows.Next(out int row))
         {
-            QuantileSketch sketch = Sketch(groups[row]);
-            long before = sketch.Bytes;
-            sketch.Add(double.CreateTruncating(values[row]));
-            _bytes += sketch.Bytes - before;
+            grown += Sketch(groups[row]).Add(double.CreateTruncating(values[row]));
         }
+
+        _bytes += grown;
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)

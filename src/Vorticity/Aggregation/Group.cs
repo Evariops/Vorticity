@@ -253,6 +253,15 @@ public readonly struct Group<TRecord, TKey>
         where T : INumber<T> =>
         Aggregators.Filtered(Aggregators.Distribution(Aggregators.Input(_binding, column), relativeError), _filter);
 
+    /// <summary>The distribution of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
+    /// <typeparam name="T">The column's numeric type, without its nullability.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <param name="relativeError">The largest relative error of a quantile; 1 % by default.</param>
+    /// <returns>The symbol of the distribution; null when no row holds a value.</returns>
+    public Sym<Distribution?> Distribution<T>(Func<Probe<TRecord>, Sym<T?>> column, double relativeError = 0.01)
+        where T : struct, INumber<T> =>
+        Aggregators.Filtered(Aggregators.Distribution(Aggregators.Input(_binding, column), relativeError), _filter);
+
     /// <summary>The sample variance of <paramref name="column"/> in the group, over <c>n − 1</c>.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>

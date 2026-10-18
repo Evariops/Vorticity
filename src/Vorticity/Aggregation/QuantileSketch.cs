@@ -78,30 +78,30 @@ internal sealed class QuantileSketch
     /// <summary>The relative error a grid of <paramref name="bits"/> guarantees.</summary>
     internal static double ErrorOf(int bits) => 1.0 / ((1L << (bits + 1)) + 1);
 
-    /// <summary>Counts <paramref name="value"/> once.</summary>
-    internal void Add(double value) => Add(value, 1);
+    /// <summary>Counts <paramref name="value"/> once, and returns the bytes the sketch grew by: zero but when an array grew.</summary>
+    internal long Add(double value) => Add(value, 1);
 
-    /// <summary>Counts <paramref name="value"/> <paramref name="count"/> times.</summary>
-    internal void Add(double value, long count)
+    /// <summary>Counts <paramref name="value"/> <paramref name="count"/> times, and returns the bytes the sketch grew by.</summary>
+    internal long Add(double value, long count)
     {
         if (double.IsNaN(value) || count == 0)
         {
-            return;
+            return 0;
         }
 
         Count += count;
         if (value > 0)
         {
-            _positive.Add(Index(value), count);
+            return _positive.Add(Index(value), count);
         }
-        else if (value < 0)
+
+        if (value < 0)
         {
-            _negative.Add(Index(-value), count);
+            return _negative.Add(Index(-value), count);
         }
-        else
-        {
-            Zeros += count;
-        }
+
+        Zeros += count;
+        return 0;
     }
 
     /// <summary>Adds <paramref name="other"/>'s counts, a sketch of the same grid.</summary>
@@ -237,7 +237,8 @@ internal sealed class QuantileSketch
         internal readonly long Bytes =>
             _window is { } window ? (long)window.Length * sizeof(long) : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
 
-        internal void Add(int index, long count)
+        /// <summary>Adds a bucket's count, and returns the bytes the store grew by: zero unless an array grew.</summary>
+        internal long Add(int index, long count)
         {
             if (_window is { } window)
             {
@@ -245,35 +246,44 @@ internal sealed class QuantileSketch
                 if ((uint)at < (uint)window.Length)
                 {
                     window[at] += count;
-                    return;
+                    return 0;
                 }
 
+                long before = Bytes;
                 Widen(index);
                 _window![index - _low] += count;
-                return;
+                return Bytes - before;
             }
 
-            _keys ??= new int[4];
-            _counts ??= new long[4];
+            long grown = 0;
+            if (_keys is null)
+            {
+                _keys = new int[4];
+                _counts = new long[4];
+                grown = Bytes;
+            }
+
             int found = Array.BinarySearch(_keys, 0, _sparse, index);
             if (found >= 0)
             {
                 _counts[found] += count;
-                return;
+                return grown;
             }
 
             int insert = ~found;
             if (_sparse == _keys.Length)
             {
+                long before = Bytes;
                 if (_sparse >= SparseLimit)
                 {
                     Densify();
                     Add(index, count);
-                    return;
+                    return grown + Bytes - before;
                 }
 
                 Array.Resize(ref _keys, _keys.Length * 2);
                 Array.Resize(ref _counts, _counts.Length * 2);
+                grown += Bytes - before;
             }
 
             Array.Copy(_keys, insert, _keys, insert + 1, _sparse - insert);
@@ -281,6 +291,7 @@ internal sealed class QuantileSketch
             _keys[insert] = index;
             _counts[insert] = count;
             _sparse++;
+            return grown;
         }
 
         /// <summary>Adds this store's counts into <paramref name="into"/>.</summary>

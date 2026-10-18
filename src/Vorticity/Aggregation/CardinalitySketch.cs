@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 
 namespace Vorticity.Aggregating;
@@ -12,9 +13,9 @@ namespace Vorticity.Aggregating;
 /// <para>
 /// A register keeps the most leading zeros plus one that a hash of its index showed, and a merge keeps
 /// each register's maximum, so a sketch merged in any order holds the same registers. Its form depends
-/// on its content alone: the exact hashes while they number at most <see cref="ExactLimit"/>, sorted
-/// register entries while at most <see cref="SparseLimit"/> registers are set, all the registers past
-/// that. The relative standard error is about 0.81 %, <c>1.04 / √(2^14)</c>.
+/// on its content alone: the exact hashes while they number at most <see cref="ExactLimit"/>, the set
+/// registers in a small open-addressing table while at most <see cref="SparseLimit"/> are set, all the
+/// registers past that, 16 KiB. The relative standard error is about 0.81 %, <c>1.04 / √(2^14)</c>.
 /// </para>
 /// <para>
 /// O. Ertl, <i>New cardinality estimation algorithms for HyperLogLog sketches</i> (2017), algorithm 6.
@@ -28,19 +29,19 @@ internal sealed class CardinalitySketch
     /// <summary>The hashes kept exactly, before registers take over.</summary>
     internal const int ExactLimit = 64;
 
-    /// <summary>The registers kept as sorted entries, before all of them are.</summary>
-    internal const int SparseLimit = 1 << (Precision - 3);
+    /// <summary>The registers kept in the table, at half its load at most, before all of them are: 8 KiB of table at most.</summary>
+    internal const int SparseLimit = 1 << (Precision - 4);
 
     private const int Registers = 1 << Precision;
     private const int MaxRank = 64 - Precision + 1;
+    private const int FirstTable = 128;
 
     // Exactly: the distinct hashes, sorted; null once registers hold the sketch.
     private ulong[]? _hashes = [];
     private int _exact;
 
-    // Sparsely: the set registers' indices and ranks, sorted by index; null when dense or exact.
-    private int[]? _indices;
-    private byte[]? _ranks;
+    // Sparsely: the set registers, each ((index + 1) << 8) | rank, in an open-addressing table; 0 is empty.
+    private int[]? _table;
     private int _set;
 
     // Densely: every register's rank.
@@ -48,7 +49,7 @@ internal sealed class CardinalitySketch
 
     /// <summary>The bytes the sketch holds.</summary>
     internal long Bytes =>
-        ((long)(_hashes?.Length ?? 0) * sizeof(ulong)) + ((long)(_indices?.Length ?? 0) * (sizeof(int) + 1)) + (_dense?.Length ?? 0);
+        ((long)(_hashes?.Length ?? 0) * sizeof(ulong)) + ((long)(_table?.Length ?? 0) * sizeof(int)) + (_dense?.Length ?? 0);
 
     /// <summary>Whether the sketch still counts exactly.</summary>
     internal bool IsExact => _hashes is not null;
@@ -114,9 +115,12 @@ internal sealed class CardinalitySketch
             return;
         }
 
-        for (int i = 0; i < other._set; i++)
+        foreach (int entry in other._table!)
         {
-            Raise(other._indices![i], other._ranks![i]);
+            if (entry != 0)
+            {
+                Raise((entry >> 8) - 1, (byte)entry);
+            }
         }
     }
 
@@ -140,16 +144,23 @@ internal sealed class CardinalitySketch
         else
         {
             counts[0] = Registers - _set;
-            for (int i = 0; i < _set; i++)
+            foreach (int entry in _table!)
             {
-                counts[_ranks![i]]++;
+                if (entry != 0)
+                {
+                    counts[(byte)entry]++;
+                }
             }
         }
 
         return (long)Math.Round(Ertl(counts));
     }
 
-    /// <summary>The sketch's words for a spill or a state: its form, then its hashes or its set registers.</summary>
+    /// <summary>
+    /// The sketch's words for a spill or a state: its form, then its hashes ascending, or its set
+    /// registers ascending by index, each <c>(index &lt;&lt; 8) | rank</c>: the same words for the same
+    /// content, whichever form held it.
+    /// </summary>
     internal void Write(Action<long> word)
     {
         if (_hashes is { } hashes)
@@ -165,30 +176,34 @@ internal sealed class CardinalitySketch
         }
 
         word(1);
+        List<long> entries = [];
         if (_dense is { } dense)
         {
-            int set = 0;
-            foreach (byte rank in dense)
-            {
-                set += rank != 0 ? 1 : 0;
-            }
-
-            word(set);
             for (int i = 0; i < dense.Length; i++)
             {
                 if (dense[i] != 0)
                 {
-                    word(((long)i << 8) | dense[i]);
+                    entries.Add(((long)i << 8) | dense[i]);
+                }
+            }
+        }
+        else
+        {
+            foreach (int entry in _table!)
+            {
+                if (entry != 0)
+                {
+                    entries.Add(((long)((entry >> 8) - 1) << 8) | (byte)entry);
                 }
             }
 
-            return;
+            entries.Sort();
         }
 
-        word(_set);
-        for (int i = 0; i < _set; i++)
+        word(entries.Count);
+        foreach (long entry in entries)
         {
-            word(((long)_indices![i] << 8) | _ranks![i]);
+            word(entry);
         }
     }
 
@@ -211,14 +226,13 @@ internal sealed class CardinalitySketch
         sketch.Registered();
         for (long i = 0; i < entries; i++)
         {
-            long entry = word();
-            sketch.Raise(checked((int)(entry >> 8)), (byte)entry);
+            sketch.RaiseEntry(word());
         }
 
         return sketch;
     }
 
-    /// <summary>Adds a register entry read back, the form already chosen by <see cref="BeginRegisters"/>.</summary>
+    /// <summary>Adds a register entry read back, <c>(index &lt;&lt; 8) | rank</c>, after <see cref="BeginRegisters"/>.</summary>
     internal void RaiseEntry(long entry) => Raise(checked((int)(entry >> 8)), (byte)entry);
 
     /// <summary>Turns a sketch read back into registers, before its entries.</summary>
@@ -235,8 +249,7 @@ internal sealed class CardinalitySketch
         int exact = _exact;
         _hashes = null;
         _exact = 0;
-        _indices = new int[16];
-        _ranks = new byte[16];
+        _table = new int[FirstTable];
         for (int i = 0; i < exact; i++)
         {
             Set(hashes[i]);
@@ -263,49 +276,83 @@ internal sealed class CardinalitySketch
             return;
         }
 
-        int found = Array.BinarySearch(_indices!, 0, _set, index);
-        if (found >= 0)
+        int[] table = _table!;
+        int mask = table.Length - 1;
+        int key = index + 1;
+        for (int slot = Slot(index, table.Length); ; slot = (slot + 1) & mask)
         {
-            if (rank > _ranks![found])
+            int entry = table[slot];
+            if (entry == 0)
             {
-                _ranks[found] = rank;
+                if (_set == SparseLimit)
+                {
+                    Densify();
+                    Raise(index, rank);
+                    return;
+                }
+
+                table[slot] = (key << 8) | rank;
+                _set++;
+                if (_set * 2 > table.Length)
+                {
+                    Grow();
+                }
+
+                return;
             }
 
-            return;
-        }
+            if (entry >> 8 == key)
+            {
+                if (rank > (byte)entry)
+                {
+                    table[slot] = (key << 8) | rank;
+                }
 
-        if (_set == SparseLimit)
+                return;
+            }
+        }
+    }
+
+    /// <summary>The table slot an index starts its probe at: a multiplicative hash of the index's bits.</summary>
+    private static int Slot(int index, int length) => (int)(((uint)index * 0x9E3779B1u) >> (32 - BitOperations.Log2((uint)length)));
+
+    private void Grow()
+    {
+        int[] old = _table!;
+        int[] table = new int[old.Length * 2];
+        int mask = table.Length - 1;
+        foreach (int entry in old)
         {
-            Densify();
-            Raise(index, rank);
-            return;
+            if (entry == 0)
+            {
+                continue;
+            }
+
+            int slot = Slot((entry >> 8) - 1, table.Length);
+            while (table[slot] != 0)
+            {
+                slot = (slot + 1) & mask;
+            }
+
+            table[slot] = entry;
         }
 
-        if (_set == _indices!.Length)
-        {
-            Array.Resize(ref _indices, _indices.Length * 2);
-            Array.Resize(ref _ranks, _ranks!.Length * 2);
-        }
-
-        int insert = ~found;
-        Array.Copy(_indices, insert, _indices, insert + 1, _set - insert);
-        Array.Copy(_ranks!, insert, _ranks!, insert + 1, _set - insert);
-        _indices[insert] = index;
-        _ranks![insert] = rank;
-        _set++;
+        _table = table;
     }
 
     private void Densify()
     {
         byte[] dense = new byte[Registers];
-        for (int i = 0; i < _set; i++)
+        foreach (int entry in _table!)
         {
-            dense[_indices![i]] = _ranks![i];
+            if (entry != 0)
+            {
+                dense[(entry >> 8) - 1] = (byte)entry;
+            }
         }
 
         _dense = dense;
-        _indices = null;
-        _ranks = null;
+        _table = null;
         _set = 0;
     }
 
