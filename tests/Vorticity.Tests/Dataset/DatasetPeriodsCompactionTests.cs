@@ -124,10 +124,11 @@ public sealed partial class DatasetPeriodsCompactionTests
     }
 
     /// <summary>
-    /// Appends in the order of their instants, one row in a hundred late by up to the horizon, each
-    /// followed by compactions until none is due: after every round every level but 0 and the late one
-    /// is key-disjoint, no object outside level 0 spans two periods, level 0 and the late level stay
-    /// under their ceiling, and the rows read back in key order are the rows appended.
+    /// Appends in the order of their instants, one row in a hundred late by up to half an hour, a delete
+    /// now and then, each round followed by compactions until none is due: after every round every level
+    /// but 0 and the late one is key-disjoint, no object outside level 0 spans two periods, level 0
+    /// stays under its ceiling and the late level too unless each of its periods holds one object, and
+    /// the rows read back in key order are the rows appended and not deleted.
     /// </summary>
     [Theory]
     [InlineData(3)]
@@ -142,6 +143,7 @@ public sealed partial class DatasetPeriodsCompactionTests
         CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 3, Fanout = 3 };
         Random random = new Random(seed);
         List<DateTimeOffset> appended = [];
+        List<long> statuses = [];
         DateTimeOffset newest = Noon;
         Dictionary<CompactionTrigger, int> triggers = [];
         for (int round = 0; round < 300; round++)
@@ -154,7 +156,24 @@ public sealed partial class DatasetPeriodsCompactionTests
                 instants.Add(random.Next(100) == 0 ? newest.AddSeconds(-random.Next(1, 1_800)) : newest);
             }
 
-            await AppendAsync(dataset, instants, appended);
+            await AppendAsync(dataset, instants, appended, statuses);
+
+            // Now and then a delete of one status, which marks rows in every level or rewrites objects
+            // in their own, and purges that follow.
+            if (random.Next(15) == 0)
+            {
+                long status = 200 + random.Next(30);
+                await dataset.DeleteAsync(VortexExpr.Parse($"Status = {status}"), Ct);
+                for (int i = appended.Count - 1; i >= 0; i--)
+                {
+                    if (statuses[i] == status)
+                    {
+                        appended.RemoveAt(i);
+                        statuses.RemoveAt(i);
+                    }
+                }
+            }
+
             int jobs = 0;
             while (await dataset.CompactAsync(compaction, Ct) is { } result)
             {
@@ -251,14 +270,16 @@ public sealed partial class DatasetPeriodsCompactionTests
     private static Task AppendAsync(VortexDataset dataset, DateTimeOffset from, int rows, List<DateTimeOffset> appended) =>
         AppendAsync(dataset, [.. Enumerable.Range(0, rows).Select(i => from.AddMinutes(i))], appended);
 
-    /// <summary>Appends requests at <paramref name="instants"/>, as one object.</summary>
-    private static async Task AppendAsync(VortexDataset dataset, List<DateTimeOffset> instants, List<DateTimeOffset> appended)
+    /// <summary>Appends requests at <paramref name="instants"/>, as one object, their statuses 200 on.</summary>
+    private static async Task AppendAsync(
+        VortexDataset dataset, List<DateTimeOffset> instants, List<DateTimeOffset> appended, List<long>? statuses = null)
     {
         Request[] requests = [.. instants.Select((at, i) => new Request(at, $"r-{appended.Count + i}", 200 + i))];
         await using ObjectDraft draft = dataset.StartObject();
         await draft.Writer.WriteAsync<Request>(requests, Ct);
         await dataset.AppendAsync(draft, Ct);
         appended.AddRange(instants);
+        statuses?.AddRange(requests.Select(request => request.Status));
     }
 
     [VortexRecord]
