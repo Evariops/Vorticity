@@ -754,8 +754,8 @@ second of rows.
 | `Sum` of integers or decimals | the exact sum, in the width the engine already chooses | addition | the sum in the column's type, as LINQ gives it, which throws when the total does not fit. A widened sum, asked by `AsInt128()` on the column (`g.Sum(r => r.DurationNs.AsInt128())`), delivers it whole |
 | `Sum` of floats, `Average` | the indexed sum of [16-queries.md](16-queries.md#51-sums-exact-and-the-same-bits-whatever-the-cut): its three bins, their high parts and its top, and a count | bin by bin, each high part with its bin | the sum rounded once, the average |
 | `Min`, `Max` | the extreme, whether there is one | the smaller or the larger | the extreme |
-| `Distribution(x => e, relativeError)`, new | a DDSketch: counts per bucket of a logarithmic grid, a value's bucket computed from the bits of its exponent and mantissa, never from `Math.Log` | addition per bucket | quantiles, a histogram |
-| `ApproximateCountDistinct(x => e)`, new | UltraLogLog registers over an XXH3-64 of fixed seed, an exact set while small, sparse past that, dense last | the larger of each register | the estimate |
+| `Distribution(x => e, relativeError)`, new | counts per bucket of a log-linear grid, each power of two split into `2^k` buckets, a value's bucket the top bits of its double, its exponent and `k` bits of its mantissa, never `Math.Log` ([distributions](16-queries.md#56-distributions-and-quantiles)) | addition per bucket | quantiles, a histogram |
+| `ApproximateCountDistinct(x => e)`, new | HyperLogLog registers over an XXH3-64 of fixed seed, an exact set while small, sparse past that, dense last. UltraLogLog takes fewer bytes for the same error, but merges by OR-ing the hash prefixes its registers encode rather than by their maximum | the larger of each register | Ertl's improved estimator, no bias table |
 
 Every merge is commutative, associative and exact within a state's capacity, so the order in which
 objects, slices, runs and rows are merged never changes a bit. The states are integers and vectors of
@@ -788,14 +788,13 @@ An integer sum keeps the column's type because LINQ does, and `Sum(DurationNs)` 
 days of the example once the mean duration passes 71 ms (estimate): hence the widened sum, asked by
 name.
 
-A distribution is the synopsis's heaviest state: up to about 900 buckets at 1 % from a microsecond to
-100 seconds, a few dozen to a few hundred of them kept by an entry of a thousand rows (estimate). A
-threshold is answered exactly only on the grid, whose bounds are powers of γ, and the thresholds people
-use, 250 ms, 500 ms or a second, almost never are. A decimal log-linear grid, of buckets
-`[d · 10^e, (d + 1) · 10^e)` for `d` from 100 to 999, keeps a relative error of 0.5 %, answers every
-threshold of three significant digits exactly, and finds a value's bucket from its count of digits and
-one division by a power of ten from a table, in integers. It holds about eight times the buckets of a
-DDSketch at 1 % per decade (hypothesis, weighed in bytes and speed against DDSketch).
+A distribution is the synopsis's heaviest state: an entry of a thousand latencies, log-normal around
+50 ms, occupies about 395 buckets of the grid (`vortex-queries --micro sketches`, 2026-10-19). A
+threshold is answered exactly only on the grid's bounds, fractions of powers of two, and the thresholds
+people use, 250 ms, 500 ms or a second, almost never are. A decimal grid, of buckets
+`[d · 10^e, (d + 1) · 10^e)` for `d` from 100 to 999, would answer every threshold of three
+significant digits exactly, at 0.5 %. Weighed on the same entries it occupied 695 buckets and took 13.2
+ns a value, where the bits take 1.6 ns and DDSketch's logarithm 2.4 ns, so the bits stay.
 
 Every state is a kind of the index directory with a version, test vectors across platforms as the
 Bloom filter has against Rust ([10-indexes.md](10-indexes.md#41-vorticitybloomsbbfv1-a-split-block-bloom-filter-per-block)),
