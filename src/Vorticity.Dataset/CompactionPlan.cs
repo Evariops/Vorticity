@@ -96,7 +96,7 @@ public sealed record CompactionOptions
 
     internal const long DefaultTargetBytesAtLevelOne = 128L << 10;
 
-    internal const long DefaultMaxObjectBytes = 4L << 20;
+    internal const long DefaultMaxObjectBytes = 64L << 20;
 
     internal const int DefaultMaxFragments = 4;
 
@@ -122,13 +122,16 @@ public sealed record CompactionOptions
     public long TargetBytesAtLevelOne { get; init; } = DefaultTargetBytesAtLevelOne;
 
     /// <summary>
-    /// The cap on an output object, so that one stays a reasonable unit of rewrite: what a delete or
-    /// an update of one of its rows rewrites, and what a compaction reads at least; 4 MiB by default.
+    /// The cap on an output object, so that one stays a reasonable unit of work: what a compaction reads
+    /// at least, and what a change that lands while it runs makes it give up; 64 MiB by default.
     /// </summary>
     /// <remarks>
-    /// Measured on ten million rows, a delete of ten rows cost 40 ms under a cap of 16 MiB and 14 ms
-    /// under 4 MiB, rewriting 12 and 3 MB, while a scan of every row took 19 and 23 ms over nine and
-    /// thirty-one objects. A dataset that is scanned far more than it is changed may raise it.
+    /// A delete marks rows rather than rewrite the object, so the cap no longer bounds what a delete
+    /// costs: it weighs an object's per-object costs, its opens, entries and requests, against the work
+    /// a large object loses. On the churn bench, at ten million rows, caps of 16 and 64 MiB against
+    /// 4 MiB took 5 % fewer requests a commit and a quarter fewer requests a filter or a scan, at the
+    /// same commit latency, compaction taking 6 % less time for 5 % more bytes. The cap binds from level
+    /// 4 up with the default level-one target, so a dataset under a gigabyte keeps its levels' own sizes.
     /// </remarks>
     public long MaxObjectBytes { get; init; } = DefaultMaxObjectBytes;
 

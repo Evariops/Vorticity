@@ -71,7 +71,8 @@ Level 0 goes to the first level large enough to hold it. The ten appends here, 1
 1, which holds ten objects of 128 KiB, while a load of gigabytes skips the levels it would only
 overflow and is written once. A dataset that takes many small commits therefore pays for each one a
 merge into a level a few times its size, never a merge into the levels that hold most of its rows.
-An output object is at most `MaxObjectBytes`, 4 MiB by default.
+An output object is at most `MaxObjectBytes`, 64 MiB by default, reached at level 4 and above with the
+default target of level 1.
 
 When a level above 0 grows past its size, it gives up one object, which is merged into the next
 level with the objects there whose keys it overlaps. By default it picks the largest object, the one

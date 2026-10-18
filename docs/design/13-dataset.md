@@ -216,10 +216,14 @@ library never stalls a writer.
   within a level, so a lookup by key touches at most one object per level, 8 + L in all. This is
   leveled compaction as RocksDB does it, with Vortex files as the sorted tables. Level `i` holds
   `128 KiB × F^i`, with `F` = 10, and an object written into it targets `128 KiB × F^(i−1)`, capped
-  at 4 MiB. The cap is what a delete rewrites ([deleting rows](#12-deleting-and-updating-rows)), and
-  the capacities keep growing past it, so a level holds `F` times the one below whatever the size of
-  its objects, and a dataset of `N` bytes spans about `log_F(N / 128 KiB)` levels. A level holding a
-  single object is never over its size.
+  at 64 MiB. The capacities keep growing past the cap, so a level holds `F` times the one below
+  whatever the size of its objects, and a dataset of `N` bytes spans about `log_F(N / 128 KiB)`
+  levels. A level holding a single object is never over its size. The cap was 4 MiB while a delete
+  rewrote the object it touched; since deletes mark rows, it is what an object's per-object costs
+  weigh against the work a large object loses to a concurrent change. On the churn bench, objects
+  of 16 and 64 MiB against 4 MiB took 5 % fewer requests a commit, a quarter fewer requests a filter
+  or a scan, the same commit latency, and compaction 6 % less time for 5 % more bytes; a footer of
+  20 columns at 262 MB is 20 KB, inside an open's first read.
 - The clustering key holds no null. A dataset refuses at its creation a key over a column that may
   hold one, or under a struct that may be null. A null has no place in the order a level is disjoint
   on: every merge that took null keys would leave one more object holding them in its level, and a
