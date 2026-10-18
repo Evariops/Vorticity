@@ -287,6 +287,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
 
+    // The time slices the caller declared, written with the indexes at completion; null for none.
+    private (int Field, SliceTable Table)? _slices;
+
+    /// <summary>
+    /// Declares the file's time slices on its top-level instant column <paramref name="column"/>, which
+    /// completion writes into the index directory: the caller, which sorts its rows slice by slice,
+    /// knows them. They must cover the file's rows once, in order, which completion checks.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The writer builds no index, so it writes no directory to hold them.</exception>
+    /// <exception cref="ArgumentException"><paramref name="column"/> names no top-level column.</exception>
+    internal void DeclareSlices(string column, SliceTable table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        if (_indexes is null)
+        {
+            throw new InvalidOperationException("A file's time slices ride in its index directory, which a writer that builds no index does not write.");
+        }
+
+        int field = _isTabular ? _schema.IndexOfField(column) : -1;
+        _slices = field >= 0
+            ? (field, table)
+            : throw new ArgumentException($"'{column}' is no top-level column of the file.", nameof(column));
+    }
+
     /// <summary>What every blob of the file is assembled in, created with the first one.</summary>
     private ArrayBlobWriter.Workspace? _blobs;
 
@@ -1831,6 +1855,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _indexes?.SettleBudget(dataEnd - interleaved);
         await FlushIndexesAsync(cancellationToken, judged: true).ConfigureAwait(false);
         _indexes?.Close(_columns, _chunkRows, _blockRows, dataEnd - interleaved);
+        if (_slices is { } slices)
+        {
+            _indexes!.AddSlices(slices.Field, slices.Table, _rowCount, _blockRows);
+        }
 
         // Before any byte of the tail: a file missing an index its policy required is not completed.
         if (_indexes?.MissingRequired() is { } missing)

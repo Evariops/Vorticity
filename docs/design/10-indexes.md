@@ -132,7 +132,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#44-the-file-level-filter)).
+file-level filter](#45-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -196,7 +196,18 @@ one segment, so it pays off when the probed column is one of several (on a 1M-ro
 columns, an absent value reads 0.073× the bytes of the scan) and breaks even on a file with a single
 column.
 
-### 4.4 The file-level filter
+### 4.4 `vorticity.slices.v1`: the time slices of a file
+
+A file whose rows a dataset sorts slice by slice of their instant carries its slice table: per slice,
+its bounds on the instant, its first row and its row count, in time order, covering every row once.
+Like the dictionary probe it has no payload. The entry is on the instant column, one run over every
+block, and its options hold the table behind a version byte: the instant's unit, then per slice the
+gap from the previous slice's end, its width and its rows, each a varint, a few bytes a slice. A table
+that does not decode, or whose rows are not the file's, is not read. The writer that sorts the rows
+declares the slices before it completes the file, which checks that they cover its rows
+([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)).
+
+### 4.5 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics, and `ScanPlan.MayMatch` is false when either proves the scan empty. `VortexFile.MayMatch`

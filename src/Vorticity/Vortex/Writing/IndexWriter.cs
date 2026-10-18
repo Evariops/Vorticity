@@ -1471,6 +1471,24 @@ internal sealed class IndexWriter : IDisposable
     /// dictionary-encoded chunks. The run is the claim, so a chunk that is not a dictionary lies
     /// between two runs and the reader gets no claim for it.
     /// </summary>
+    /// <summary>
+    /// Adds the file's slice table: an entry on the top-level instant column <paramref name="field"/>,
+    /// one run over every block of the file's <paramref name="rows"/>, the table in its options.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The table does not cover the file's rows.</exception>
+    internal void AddSlices(int field, SliceTable table, long rows, int blockRows)
+    {
+        if (table.Rows != rows)
+        {
+            throw new InvalidOperationException($"The slices cover {table.Rows} rows of a file of {rows}: they cover each row once.");
+        }
+
+        int length = Math.Max(blockRows, 1);
+        uint blocks = checked((uint)((rows + length - 1) / length));
+        _entries.Add(new IndexEntry(
+            IndexKinds.Slices, [checked((uint)field)], (ulong)length, table.ToBytes(), [new IndexRun(0, blocks, [], [])]));
+    }
+
     private void DictProbe(int field, ColumnWriter column, IReadOnlyList<long> chunkRows, int blockRows)
     {
         List<IndexRun> runs = [];

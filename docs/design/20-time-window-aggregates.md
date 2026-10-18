@@ -369,8 +369,13 @@ What it costs, with f = 30 on the example (estimate):
    of 4 MiB (estimate). With 50 columns, about 7 MB. A variant column is not sized with the others: its
    chunks are long and its own, about 10⁶ rows, so that the encoding trees of its shredded paths stay
    few ([21-variant-columns.md](21-variant-columns.md#53-what-an-object-shreds)).
-4. A chunk ends at every slice boundary, in every column. A slice's chunks can then be named and read
-   alone, and no run spans two slices ([what a slice is](#61-what-a-slice-is)).
+4. Chunks stay whole blocks of 8 192 rows, as a file's zone maps and every one of its indexes count
+   them (code: the writer's block arithmetic in `VortexFileWriter.cs`). A chunk that ended inside a
+   block would split that block's statistics and index entries across two chunks. The slice table
+   records each slice's first row and row count instead, so a slice's rows are a range, and the slice
+   directory names the chunks that overlap it: a read of one slice reads at most one chunk partly
+   outside it at each end. A run that crosses a slice boundary is cut at the slice's first row ([what
+   a slice is](#61-what-a-slice-is)).
 5. The synopsis part carries a slice directory: per slice and per column, the chunks covering the
    slice, with their offsets, lengths and rows. Rows read in a period's object, for an edge, a needle or
    rows to show, are found through it, never through the footer. The footer, 20 to 40 MB for a day at
@@ -514,9 +519,10 @@ A time slice is the rows of an object whose instant falls in `[t, t + w)`, where
 in UTC: a second, a minute, an hour, a day, a month. Slices follow each other in time. A period's
 object holds whole slices, and a fresh object holds whole slices except at its two ends, whose
 partial slices a later merge completes. The slice table records, per slice, its bounds, its first row
-and its row count. A chunk ends at every slice boundary, in every column ([writing the object of a
-period](#52-writing-the-object-of-a-period)), so no run spans two slices, and the slice directory says
-where each slice's chunks lie.
+and its row count, which cut every run at a slice boundary, and the slice directory says which chunks
+hold each slice's rows ([writing the object of a period](#52-writing-the-object-of-a-period)). The
+table is an entry of the file's index directory, `vorticity.slices.v1`, on the instant column, which
+a writer that sorts its rows slice by slice declares before it completes the file.
 
 The width follows from the volume, per object. A slice is the finest grain of time a question reads
 without reading rows, and the most rows an edge of a window reads ([edges](#93-edges)). The cost model
@@ -579,8 +585,8 @@ All figures in this table are estimates. Five things follow.
 
 1. The length of a run is a count. The number of rows holding a combination of the first `k` columns
    is the length of its run in column `k`, so the counts of every combination, at the slice's grain,
-   are stored once, as the order of the rows, and never a second time. No run spans two slices, since
-   a chunk ends at every slice boundary.
+   are stored once, as the order of the rows, and never a second time. No run spans two slices: one
+   that crosses a boundary is cut at the slice's first row.
 2. A predicate on the first column is a range of rows, and a predicate on the `k`-th column is a range
    inside each run of the column before it. Rows a filter on a shallow column excludes are skipped
    whole.
@@ -657,8 +663,8 @@ a measure (hypothesis).
 - Rows in time order, the key cursor, `OrderBy` and the streaming group by give the answers they give
   today, on objects of sorted slices.
 - A slice sort holds its reservation, and a slice past it sorts in runs.
-- A chunk ends at every slice boundary, and slices whose last and next first rows hold the same values
-  still count each slice's rows exactly.
+- A run that crosses a slice boundary is cut there, and slices whose last and next first rows hold the
+  same values still count each slice's rows exactly.
 - The bytes of an object of sorted slices against the same rows in time order, under the default and
   the size-first profiles, recorded on the write bench.
 - The costs of a lookup by key, a rank and a page of rows in time order inside a sorted slice,
@@ -897,7 +903,7 @@ For one slice and a question of depth `d`:
 4. Skip whole every range a predicate on a shallow column excludes.
 
 The cost is the runs of the `d`-th column, plus those of the shallower columns touched, never a row.
-No run spans two slices, since a chunk ends at every slice boundary. The engine already groups a
+No run spans two slices: one that crosses a boundary is cut at the slice's first row. The engine already groups a
 composite key whose parts are run-end encoded this way, one lookup per range
 ([16-queries.md](16-queries.md#91-keys-block-by-block)).
 

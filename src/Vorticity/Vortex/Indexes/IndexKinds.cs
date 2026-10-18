@@ -32,6 +32,12 @@ internal static class IndexKinds
     public const string PostingsNgram3 = "vorticity.postings.ngram3.v1";
 
     /// <summary>
+    /// The time slices of a file, on its instant column: per slice its bounds, its first row and its
+    /// row count, held in the entry's options with no payload (<see cref="SliceTable"/>).
+    /// </summary>
+    public const string Slices = "vorticity.slices.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -41,7 +47,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 => true,
+                or PostingsNgram3 or Slices => true,
             _ => false,
         };
 
@@ -52,7 +58,7 @@ internal static class IndexKinds
     /// <param name="kind">The name.</param>
     /// <returns>Whether a run of this kind must carry at least one payload segment.</returns>
     public static bool HasPayload(string kind) =>
-        !string.Equals(kind, DictProbe, StringComparison.Ordinal);
+        !string.Equals(kind, DictProbe, StringComparison.Ordinal) && !string.Equals(kind, Slices, StringComparison.Ordinal);
 
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>
