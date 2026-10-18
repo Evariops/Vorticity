@@ -193,7 +193,7 @@ finest grain of time, as the order of the rows themselves, and leaves the rest t
 | A delete marks rows rather than rewrite an object, up to limits ([13-dataset.md](13-dataset.md#12-deleting-and-updating-rows)) | the limits were sized for objects of 4 MiB. A vector past 1 KiB makes a delete rewrite the object, and half that makes a purge rewrite it alone (code: [DatasetOptions.cs:155](../../src/Vorticity.Dataset/DatasetOptions.cs#L155)). A hundred scattered rows would rewrite an object of a day whole (estimate) |
 | A put of unknown length grows its parts as it goes ([19-object-storage.md](19-object-storage.md#111-a-file-written-to-a-location)) | R2 wants parts of one size and refuses such a put past about 156 GiB, and Scaleway's growing parts stop near 100 GiB |
 | A flat segment is read whole (code: [FlatLayoutReader.cs:48](../../src/Vorticity/Vortex/Layouts/FlatLayoutReader.cs#L48)), and a chunk targets a megabyte of its widest column ([blocks-and-chunks.md](../guide/blocks-and-chunks.md)) | the chunk is both the unit the footer counts and the least a selective read fetches. An open reads a fixed 64 KiB tail (code: [ObjectStoreSource.cs:33](../../src/Vorticity/IO/ObjectStoreSource.cs#L33)), and a footer past it costs a second read |
-| A float sum is exact and the same bits whatever the cut ([16-queries.md](16-queries.md#51-sums-exact-and-the-same-bits-whatever-the-cut)) | it takes 2^36 values, about 69 billion, and throws past them, when lanes merge too (code: [IndexedSum.cs:263-276](../../src/Vorticity/Aggregation/IndexedSum.cs#L263-L276), [450-458](../../src/Vorticity/Aggregation/IndexedSum.cs#L450-L458)). A sum of weights over 16 days of the example throws |
+| A float sum is exact and the same bits whatever the cut ([16-queries.md](16-queries.md#51-sums-exact-and-the-same-bits-whatever-the-cut)) | its 32-byte state takes 2^36 values, about 69 billion, and throws past them, when lanes merge too. A sum of weights over 16 days of the example threw, until the wide state of [the states](#75-states) |
 | Bloom filter trees and sorted runs find values ([10-indexes.md](10-indexes.md#3-the-directory-and-the-runs)) | over 4 × 10⁹ values in an object, a tree keeps no upper node, `Auto` gives it up, and `Auto` never builds a sorted run ([10-indexes.md, The policy](10-indexes.md#6-the-policy)) |
 | "Level 0 is not sorted, and nothing ever sorts it", and the writer never has to learn to sort ([13-dataset.md](13-dataset.md#53-what-a-compaction-does)) | rows lie in arrival or time order, so a column whose values repeat is stored once per row, and counting it reads every row |
 | Zone maps hold a minimum, a maximum and a null count per block, and counts, extremes and some group bys are answered from them ([12-index-reads.md](12-index-reads.md#4-answers-without-rows), [16-queries.md](16-queries.md#93-statistics-and-zone-maps)) | nothing counts values or combinations, so a count under a filter that keeps most rows reads them all |
@@ -756,18 +756,25 @@ value's bucket, reads bits instead of calling a platform's logarithm. A numeric 
 repeat, such as `Weight`, is a synopsis column, and its sum under any grouping is the sum of value
 times count, exactly.
 
-The engine's float sum takes 2^36 values, about 69 billion, and throws past them, when two lanes merge
-too (code: [IndexedSum.cs:263-276](../../src/Vorticity/Aggregation/IndexedSum.cs#L263-L276),
-[450-458](../../src/Vorticity/Aggregation/IndexedSum.cs#L450-L458)), so a sum of weights over 16 days
-of the example throws today. Its state gains a word. Every 2^35 values, and when two sums merge, each
-bin's multiples of 2^56 move into its high part, 21 bits a bin in the new word, which leaves the bin's
-long within 2^55 of zero. A settling moves value within a bin, never between two, so it changes no bit
-of the answer, whenever it happens. A sum then takes about 7 × 10¹³ values, the most whose bins' total
-still fits 127 bits once shifted into place. The price is 40 bytes a group instead of 32, and 80
-instead of 64 for a variance, which a bench of the grouped float sum at a million groups weighs.
-Persisted, a bin is two `Int64` columns, its long and its high part, the second almost always zero and
-compressed to nothing. The engine needs it before any state is persisted: a scan of rows that sums
-more than 2^36 values throws today as well.
+The engine's float sum took 2^36 values, about 69 billion, and threw past them, when two lanes merged
+too, so a sum of weights over 16 days of the example threw. A wide state now takes the values past
+that: an indexed sum whose bins are settled every 2^35 values and when two sums merge, each bin's
+multiples of 2^56 moved into a high part of its own, 18 bits a bin in a word that also counts the
+epochs settled, which leaves the bin's long within 2^55 of zero (code:
+[WideIndexedSum.cs](../../src/Vorticity/Aggregation/WideIndexedSum.cs)). A settling moves value within
+a bin, never between two, so it changes no bit of the answer, whenever it happens, and a high part
+moves up with its bin when the top moves. A wide sum takes about 3.5 × 10¹³ values, 1,023 epochs and
+one short of its end.
+
+The wide state costs 40 bytes a group instead of 32, and 80 instead of 64 for a variance. A bench of
+the grouped float sum measured that price on every group (vortex-queries --micro floatsum, 10⁷ rows,
+2026-10-18): 3.5 % at a hundred groups, 9 % at 10⁵ and 15 % at 10⁶, beyond the noise. So the engine
+keeps the 32-byte state wherever a source proves its rows within 2^36, as a file, a Parquet file and a
+dataset do, and takes the wide one where it does not, as a query's result read again, and for every
+state a dataset persists or merges past a scan. The integer sums choose their width the same way. The
+wide state folds without the narrow one's grouped fast path, 1.6 to 1.7 times its time on that bench,
+which only a source past 69 billion rows pays. Persisted, a bin is two `Int64` columns, its long and
+its high part, the second almost always zero and compressed to nothing.
 
 An integer sum keeps the column's type because LINQ does, and `Sum(DurationNs)` passes a `long` over 30
 days of the example once the mean duration passes 71 ms (estimate): hence the widened sum, asked by
@@ -1336,7 +1343,7 @@ limit already throws on scans of rows, and phase 1 needs the marks, the put's bo
 | the same bits by every path | the query matrix with runs and synopses on and off, at degrees 1 to the machine's, over objects of one slice, several slices and several periods, before and after compaction |
 | slices stay sorted | sealing refuses an object whose slices are out of order or unsorted, and a fuzzer of appends, late rows, fresh merges and seals seals every object it makes |
 | one round trip per object cold for whole periods, two for a shorter window, none warm | ratchets on a counting store with latency |
-| sums hold any window | a sum past 2^36 values gives the bits of its exact total rounded, whatever the order of its merges, and throws only past its capacity. The grouped float sum at a million groups, at 40 bytes a group against 32, on the bench |
+| sums hold any window | a sum past 2^36 values gives the bits of its exact total rounded, whatever the order of its merges, and throws only past its capacity. A source that proves its rows within 2^36 keeps the 32-byte state, and the grouped float sum's bench reads the same times |
 | the life of a row | the rewrites per row and the objects per question on the bench of appends in order with late rows, as ratchets, and no seal abandoned by a late row in the fuzzer |
 | deletes at the scale of a period | a hundred scattered rows in a period's object rewrite nothing, and a purge runs once per erasure delay |
 | selective reads | the bytes of a needle's rows and of an edge, no more than in objects of 4 MiB, on a counting store |
@@ -1394,7 +1401,7 @@ the documents they extend until only its decisions and alternatives remain.
 | 18 | reading part of a flat segment | later, after a bench on needles, edges and rows to show | now, for every column |
 | 19 | needles | identifiers declared by the application, decided on 2026-10-18, with a sorted run outside the index budget, then a hashed index from value to block if a bench holds it | Bloom filter trees, or a sorted run inside the budget |
 | 20 | physical erasure | a delay the application declares, decided on 2026-10-18, one purge per object and delay | a purge triggered by the vector's bytes |
-| 21 | the float sum's state | high parts in a fifth word, 40 bytes a group, decided on 2026-10-18, weighed by a bench at a million groups | 32 bytes with a wide part kept aside, which every slot would have to pass the group's number to |
+| 21 | the float sum's state | 32 bytes where the source proves its rows within 2^36, and a wide state of 40 bytes with its high parts in a fifth word elsewhere and for persisted states, decided on 2026-10-18 after the bench measured 40 bytes on every group at 3.5 % to 15 % | 40 bytes for every sum, which every group by of floats would pay |
 | 22 | the size of objects for every dataset | 64 MiB at the deep levels, then 256 MiB once the leaf entry records the footer's length, the default set by the churn bench | 4 MiB |
 | 23 | the grid of distributions | DDSketch at 1 % | a decimal log-linear grid, exact at every threshold of three significant digits, with eight times the buckets |
 | 24 | the order of the fresh levels' rows | sorted slices, as in periods | time order with a synopsis beside them, which keeps newest first and the key cursor cheap where they matter most (hypothesis) |

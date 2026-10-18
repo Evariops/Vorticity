@@ -78,6 +78,38 @@ public sealed partial class GroupedFloatSumTests
             sums.OrderBy(s => s.Id).Select(s => (s.Id, Bits(s.Mixed), Bits(s.Ranged))));
     }
 
+    // A query's result read again states no count of rows, so its sums take the wide state: the bits the
+    // narrow state gives the same values.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ASumOverAResultTakesTheWideStateAndTheSameBits(int degree)
+    {
+        (_, string path) = await Fixture.Async;
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+        await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+        Scan<KeySums> Grouped() => file.Scan<Reading>().GroupBy(r => r.Key)
+            .Select(g => (g.Key, g.Sum(r => r.Mixed), g.Sum(r => r.Uniform), g.Average(r => r.Uniform), g.Average(r => r.Mixed), g.Sum(r => r.Ranged)))
+            .As<KeySums>();
+        List<KeySums> first = [];
+        await foreach (KeySums sum in Grouped().ToRecordsAsync(Ct))
+        {
+            first.Add(sum);
+        }
+
+        IndexedSum ranged = default;
+        IndexedSum mixed = default;
+        foreach (KeySums sum in first)
+        {
+            ranged.Add(sum.Ranged);
+            mixed.Add(sum.Mixed);
+        }
+
+        Assert.False(Aggregators.HoldsNarrowFloatSums(null));
+        Assert.Equal(Bits(ranged.Value), Bits(await Grouped().SumAsync(s => s.Ranged, Ct)));
+        Assert.Equal(Bits(mixed.Value), Bits(await Grouped().SumAsync(s => s.Mixed, Ct)));
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static long Bits(double value) => BitConverter.DoubleToInt64Bits(value);
@@ -170,5 +202,4 @@ public sealed partial class GroupedFloatSumTests
     public partial record struct KeySums(int Key, double Mixed, double Uniform, double? UniformMean, double? MixedMean, double Ranged);
 
     [VortexRecord]
-    public partial record struct IdSum(int Id, double Mixed, double Ranged);
-}
+    public partial record struct IdSum(int Id, double Mixed, double Ranged);}

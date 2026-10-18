@@ -393,9 +393,11 @@ and run-end blocks included.
 * A float sum gives the same bits at every degree, in every order of the rows and however the data
   is cut into files or objects, and it is closer to the exact sum than a plain loop. Each value is
   split into three integer parts on a grid of exponents, those parts are summed exactly, and the total
-  is rounded once. It accepts 2^36 values, about 69 billion, in one group or one scan, and throws
-  `OverflowException` beyond that. Grouped row by row it costs about a fifth more than a plain sum,
-  and nothing measurable over runs and sorted keys.
+  is rounded once. Over a file or a dataset, whose rows are known, it accepts 2^36 values, about 69
+  billion, in one group or one scan. Over more rows, or a source that does not know its rows, such as
+  a query's result read again, it uses a state eight bytes larger and accepts about 3.5 × 10¹³ values.
+  It throws `OverflowException` beyond them. Grouped row by row it costs about a fifth more than a
+  plain sum, and nothing measurable over runs and sorted keys.
 * Encoded steps need generic instantiation at run time. Under Native AOT, the scan calls `Step` with
   the plain form instead ([native-aot.md](native-aot.md)).
 * The first passes of a process run on code the JIT has not optimized yet. Tiered compilation starts

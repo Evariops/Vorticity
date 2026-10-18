@@ -19,14 +19,17 @@ public sealed partial class VarianceTests
 
     /// <summary>
     /// The center and what a stored value is worth are the run's, held by the slot's op: a group's
-    /// state is its two sums, a line of cache.
+    /// state is its two sums, a line of cache, or 80 bytes with the wide sums.
     /// </summary>
     [Fact]
     public void AGroupsStateIsItsTwoSums()
     {
-        Aggregating.AggregateSlot slot = new Aggregating.FixedSlot<long, Aggregating.VarianceState, Aggregating.VarianceOp<long>, double?>(
-            Aggregating.StorageKind.Primitive, static s => s.Variance, new Aggregating.VarianceOp<long>(1_000, 1));
-        Assert.Equal(64, slot.StateBytes);
+        Aggregating.AggregateSlot narrow = new Aggregating.FixedSlot<long, Aggregating.VarianceState<Aggregating.IndexedSum>, Aggregating.VarianceOp<long, Aggregating.IndexedSum>, double?>(
+            Aggregating.StorageKind.Primitive, static s => s.Variance, new Aggregating.VarianceOp<long, Aggregating.IndexedSum>(1_000, 1));
+        Assert.Equal(64, narrow.StateBytes);
+        Aggregating.AggregateSlot wide = new Aggregating.FixedSlot<long, Aggregating.VarianceState<Aggregating.WideIndexedSum>, Aggregating.VarianceOp<long, Aggregating.WideIndexedSum>, double?>(
+            Aggregating.StorageKind.Primitive, static s => s.Variance, new Aggregating.VarianceOp<long, Aggregating.WideIndexedSum>(1_000, 1));
+        Assert.Equal(80, wide.StateBytes);
     }
 
     [Theory]

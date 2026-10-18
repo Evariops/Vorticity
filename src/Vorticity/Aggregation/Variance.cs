@@ -9,12 +9,15 @@ namespace Vorticity.Aggregating;
 /// same bits in any order and under any cut, around a center fixed for the whole run, the middle of
 /// the column's bounds where the statistics hold them. The closer the center to a group's mean, the
 /// fewer digits the difference of the two sums cancels. The center is the run's, held once by the op
-/// of the slot (<see cref="VarianceOp{TValue}"/>): 64 bytes a group, a line of cache.
+/// of the slot (<see cref="VarianceOp{TValue, TSum}"/>): 64 bytes a group, a line of cache, with the
+/// narrow sums, and 80 with the wide ones a source takes when it does not prove its rows within the
+/// narrow sum's values.
 /// </summary>
-internal struct VarianceState
+internal struct VarianceState<TSum>
+    where TSum : struct, IFloatSumState<TSum>
 {
-    internal IndexedSum Shifted;
-    internal IndexedSum Squares;
+    internal TSum Shifted;
+    internal TSum Squares;
 
     /// <summary>The sample variance, over <c>n − 1</c>; null below two values.</summary>
     internal readonly double? Variance
@@ -41,8 +44,9 @@ internal struct VarianceState
 /// first: the center and what a stored value is worth, the same for every group of the run, held by
 /// the op rather than by each group's state.
 /// </summary>
-internal readonly struct VarianceOp<TValue> : IValueOp<TValue, VarianceState>
+internal readonly struct VarianceOp<TValue, TSum> : IValueOp<TValue, VarianceState<TSum>>
     where TValue : unmanaged, INumberBase<TValue>
+    where TSum : struct, IFloatSumState<TSum>
 {
     private readonly double _center;
     private readonly double _unit;
@@ -55,19 +59,19 @@ internal readonly struct VarianceOp<TValue> : IValueOp<TValue, VarianceState>
         _unit = unit;
     }
 
-    public VarianceState Seed() => default;
+    public VarianceState<TSum> Seed() => default;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Add(ref VarianceState state, TValue value)
+    public void Add(ref VarianceState<TSum> state, TValue value)
     {
         double shifted = (double.CreateTruncating(value) * _unit) - _center;
         state.Shifted.Add(shifted);
         state.Squares.Add(shifted * shifted);
     }
 
-    public void AddSelected(ref VarianceState state, TValue value) => Add(ref state, value);
+    public void AddSelected(ref VarianceState<TSum> state, TValue value) => Add(ref state, value);
 
-    public void AddWeighted(ref VarianceState state, TValue value, long count)
+    public void AddWeighted(ref VarianceState<TSum> state, TValue value, long count)
     {
         double shifted = (double.CreateTruncating(value) * _unit) - _center;
         state.Shifted.AddWeighted(shifted, count);
@@ -75,7 +79,7 @@ internal readonly struct VarianceOp<TValue> : IValueOp<TValue, VarianceState>
     }
 
     [SkipLocalsInit]
-    public void AddSpan(ref VarianceState state, ReadOnlySpan<TValue> values)
+    public void AddSpan(ref VarianceState<TSum> state, ReadOnlySpan<TValue> values)
     {
         Span<double> moved = stackalloc double[IndexedSum.Chunk];
         for (int start = 0; start < values.Length; start += IndexedSum.Chunk)
@@ -97,7 +101,7 @@ internal readonly struct VarianceOp<TValue> : IValueOp<TValue, VarianceState>
         }
     }
 
-    public void Merge(ref VarianceState into, in VarianceState other)
+    public void Merge(ref VarianceState<TSum> into, in VarianceState<TSum> other)
     {
         into.Shifted.Merge(in other.Shifted);
         into.Squares.Merge(in other.Squares);
@@ -105,7 +109,7 @@ internal readonly struct VarianceOp<TValue> : IValueOp<TValue, VarianceState>
 
     /// <remarks>The rows left out are left out, not read as zero: a zero moved by the center is a value.</remarks>
     [SkipLocalsInit]
-    public void AddWords(ref VarianceState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    public void AddWords(ref VarianceState<TSum> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
     {
         Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
         int count = 0;

@@ -145,9 +145,9 @@ internal static class Aggregators
                 PType.U16 => Unsigned<ushort, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
                 PType.U32 => Unsigned<uint, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
                 PType.U64 => Unsigned<ulong, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
-                PType.F16 => static _ => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
-                PType.F32 => static _ => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
-                _ => static _ => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
+                PType.F16 => FloatSum<Half, T>(static s => T.CreateChecked(s.Value), static s => T.CreateChecked(s.Value)),
+                PType.F32 => FloatSum<float, T>(static s => T.CreateChecked(s.Value), static s => T.CreateChecked(s.Value)),
+                _ => FloatSum<double, T>(static s => T.CreateChecked(s.Value), static s => T.CreateChecked(s.Value)),
             },
             StorageKind.Decimal or StorageKind.Decimal256 => Unsourced(DecimalSumSlot<T>(shape)),
             _ => throw shape.Unsupported("a sum"),
@@ -282,9 +282,9 @@ internal static class Aggregators
                     PType.U16 => Unsigned<ushort, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
                     PType.U32 => Unsigned<uint, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
                     PType.U64 => Unsigned<ulong, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
-                    PType.F16 => static _ => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
-                    PType.F32 => static _ => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
-                    _ => static _ => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
+                    PType.F16 => FloatSum<Half, double?>(static s => Mean(s.Value, s.Count), static s => Mean(s.Value, s.Count)),
+                    PType.F32 => FloatSum<float, double?>(static s => Mean(s.Value, s.Count), static s => Mean(s.Value, s.Count)),
+                    _ => FloatSum<double, double?>(static s => Mean(s.Value, s.Count), static s => Mean(s.Value, s.Count)),
                 };
                 break;
             case StorageKind.Decimal when shape.Type.Precision <= 18:
@@ -321,26 +321,23 @@ internal static class Aggregators
     /// </summary>
     internal static Sym<double?> Variance(ColumnShape shape, bool deviation)
     {
-        Func<VarianceState, double?> finish = deviation
-            ? static s => s.Variance is double variance ? Math.Sqrt(variance) : null
-            : static s => s.Variance;
         Func<ScanSource?, AggregateSlot<double?>> create = shape.Kind switch
         {
             StorageKind.Primitive => shape.PType switch
             {
-                PType.I8 => source => VarianceSlot<sbyte>(source, shape, 1, finish),
-                PType.I16 => source => VarianceSlot<short>(source, shape, 1, finish),
-                PType.I32 => source => VarianceSlot<int>(source, shape, 1, finish),
-                PType.I64 => source => VarianceSlot<long>(source, shape, 1, finish),
-                PType.U8 => source => VarianceSlot<byte>(source, shape, 1, finish),
-                PType.U16 => source => VarianceSlot<ushort>(source, shape, 1, finish),
-                PType.U32 => source => VarianceSlot<uint>(source, shape, 1, finish),
-                PType.U64 => source => VarianceSlot<ulong>(source, shape, 1, finish),
-                PType.F16 => source => VarianceSlot<Half>(source, shape, 1, finish),
-                PType.F32 => source => VarianceSlot<float>(source, shape, 1, finish),
-                _ => source => VarianceSlot<double>(source, shape, 1, finish),
+                PType.I8 => source => VarianceSlot<sbyte>(source, shape, 1, deviation),
+                PType.I16 => source => VarianceSlot<short>(source, shape, 1, deviation),
+                PType.I32 => source => VarianceSlot<int>(source, shape, 1, deviation),
+                PType.I64 => source => VarianceSlot<long>(source, shape, 1, deviation),
+                PType.U8 => source => VarianceSlot<byte>(source, shape, 1, deviation),
+                PType.U16 => source => VarianceSlot<ushort>(source, shape, 1, deviation),
+                PType.U32 => source => VarianceSlot<uint>(source, shape, 1, deviation),
+                PType.U64 => source => VarianceSlot<ulong>(source, shape, 1, deviation),
+                PType.F16 => source => VarianceSlot<Half>(source, shape, 1, deviation),
+                PType.F32 => source => VarianceSlot<float>(source, shape, 1, deviation),
+                _ => source => VarianceSlot<double>(source, shape, 1, deviation),
             },
-            StorageKind.Decimal => source => VarianceSlot<Int128>(source, shape, Math.Pow(10, -shape.Type.Scale), finish),
+            StorageKind.Decimal => source => VarianceSlot<Int128>(source, shape, Math.Pow(10, -shape.Type.Scale), deviation),
             _ => throw shape.Unsupported(deviation ? "a standard deviation" : "a variance"),
         };
 
@@ -350,10 +347,11 @@ internal static class Aggregators
     /// <summary>
     /// A variance's slot, whose op holds its center: the middle of the column's bounds over the whole
     /// source where its statistics hold them, zero where they do not; the same for every group and
-    /// every partition of the run, and so held once rather than in each group's state.
+    /// every partition of the run, and so held once rather than in each group's state. Its sums are
+    /// narrow where the source proves its rows within them (<see cref="HoldsNarrowFloatSums"/>), wide
+    /// otherwise.
     /// </summary>
-    private static FixedSlot<TValue, VarianceState, VarianceOp<TValue>, double?> VarianceSlot<TValue>(
-        ScanSource? source, ColumnShape shape, double unit, Func<VarianceState, double?> finish)
+    private static AggregateSlot<double?> VarianceSlot<TValue>(ScanSource? source, ColumnShape shape, double unit, bool deviation)
         where TValue : unmanaged, INumberBase<TValue>
     {
         double center = 0;
@@ -363,8 +361,35 @@ internal static class Aggregators
             center = double.IsFinite(middle) ? middle : 0;
         }
 
-        return new FixedSlot<TValue, VarianceState, VarianceOp<TValue>, double?>(shape.Kind, finish, new VarianceOp<TValue>(center, unit));
+        return HoldsNarrowFloatSums(source)
+            ? new FixedSlot<TValue, VarianceState<IndexedSum>, VarianceOp<TValue, IndexedSum>, double?>(
+                shape.Kind, Finish<IndexedSum>(deviation), new VarianceOp<TValue, IndexedSum>(center, unit))
+            : new FixedSlot<TValue, VarianceState<WideIndexedSum>, VarianceOp<TValue, WideIndexedSum>, double?>(
+                shape.Kind, Finish<WideIndexedSum>(deviation), new VarianceOp<TValue, WideIndexedSum>(center, unit));
     }
+
+    private static Func<VarianceState<TSum>, double?> Finish<TSum>(bool deviation)
+        where TSum : struct, IFloatSumState<TSum> =>
+        deviation
+            ? static s => s.Variance is double variance ? Math.Sqrt(variance) : null
+            : static s => s.Variance;
+
+    /// <summary>
+    /// Whether an exact float sum over <paramref name="source"/> can take <see cref="IndexedSum"/>'s 32
+    /// bytes: its rows known and within the 2^36 values that sum takes, with room for the rows of a run
+    /// of words, which the sum counts as zeros and then takes back. A source that does not say takes
+    /// <see cref="WideIndexedSum"/>'s 40.
+    /// </summary>
+    internal static bool HoldsNarrowFloatSums(ScanSource? source) =>
+        source is { RowBound: >= 0 } && source.RowBound <= IndexedSum.Endurance - (WordFold.Run * 64);
+
+    /// <summary>The state of an exact float sum, chosen as the run starts by <see cref="HoldsNarrowFloatSums"/>.</summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> FloatSum<TValue, TResult>(
+        Func<IndexedSum, TResult> narrow, Func<WideIndexedSum, TResult> wide)
+        where TValue : unmanaged, INumberBase<TValue> =>
+        source => HoldsNarrowFloatSums(source)
+            ? new FixedSlot<TValue, IndexedSum, IndexedFloatSum<TValue>, TResult>(StorageKind.Primitive, narrow)
+            : new FixedSlot<TValue, WideIndexedSum, WideIndexedFloatSum<TValue>, TResult>(StorageKind.Primitive, wide);
 
     private static double Number(Expressions.FilterLiteral bound, double unit) => bound.Kind switch
     {

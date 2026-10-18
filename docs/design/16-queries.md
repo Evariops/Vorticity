@@ -385,9 +385,15 @@ whose error grows with the rows.
 
 The top is each sum's own, taken from its own values, and no statistics are read, so a group of small
 values keeps its precision next to a group of large ones, a result's scan and a dataset sum exactly
-as a file does, and a filter changes no grid. A part is at most 2^26 units, so a sum takes 2^36
-values, some 69 billion, in one group or one scan, and throws `OverflowException` past that rather
-than lose its exactness. A NaN is skipped. A sum holding +∞ and not −∞ is +∞, and one holding both is
+as a file does, and a filter changes no grid. A part is at most 2^26 units, so a sum's state of 32
+bytes takes 2^36 values, some 69 billion, in one group or one scan. The engine takes it where the
+source proves its rows within those values, as a file, a Parquet file and a dataset do. Elsewhere, as
+for a query's result read again, it takes a wide state of 40 bytes, which settles each bin's multiples
+of 2^56 into a high part every 2^35 values and at every merge, and takes some 3.5 × 10¹³ values. A
+settling moves value within a bin, so the bits are the narrow state's. Past its values a state throws
+`OverflowException` rather than lose its exactness. The wide state costs 3.5 % to 15 % more on every
+group of a grouped float sum, from a hundred groups to a million, which is why the narrow one stays
+wherever the rows are proven (vortex-queries --micro floatsum). A NaN is skipped. A sum holding +∞ and not −∞ is +∞, and one holding both is
 NaN, as IEEE 754 says.
 
 An average is that sum divided by the count. A variance comes from the reproducible sums of `x − c`
