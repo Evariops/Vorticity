@@ -148,7 +148,9 @@ refuses them as the reference does, and never invents an ordering.
 
 Upstream does not support `Extension` either. Here, an extension column at the top level of the key
 (a date, a time, a timestamp, a uuid) is encoded as its storage column, which gives exactly the bytes
-Rust produces when a caller encodes that storage column itself. An extension nested inside a struct
+Rust produces when a caller encodes that storage column itself. A seek key built from a literal of such
+a column is encoded the same way, so that a dataset keyed by an instant seeks and merges on the bytes
+its rows hold. An extension nested inside a struct
 or a fixed-size list is refused with `VortexUnsupportedException`, as the reference refuses it,
 because the encoder would otherwise be silently choosing an ordering the format has not defined.
 

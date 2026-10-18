@@ -114,6 +114,15 @@ internal enum DatasetFeatures : ulong
     /// it would keep marks past it, against what the application owes.
     /// </summary>
     ErasureDelay = 2,
+
+    /// <summary>
+    /// Compaction by periods, under a lateness horizon: a library that does not know it would compact
+    /// the levels as it compacts any dataset, against the order its tiers keep.
+    /// </summary>
+    Periods = 4,
+
+    /// <summary>Columns whose values questions look up, which a library that does not know them would drop from the headers it writes.</summary>
+    Identifiers = 8,
 }
 
 /// <summary>

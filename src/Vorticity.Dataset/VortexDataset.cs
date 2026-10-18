@@ -53,6 +53,10 @@ public sealed class VortexDataset : IAsyncDisposable
     // The store the handle made for a local directory it was given by location, which it disposes.
     private IObjectStore? _ownedStore;
 
+    // The newest instant this handle appended to a dataset of periods, in its column's unit; the
+    // least long before the first: what the lateness of the next append is measured against.
+    private long _newestInstant = long.MinValue;
+
     // The location the handle was opened at, as its caller named it, which tags the activities of its
     // commits, compactions and vacuums; null for a handle given a store.
     private string? _location;
@@ -345,6 +349,69 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Records how late the oldest row of an object this handle appends to a dataset of periods came,
+    /// behind the newest instant the handle appended before: zero for rows in order. Read from the
+    /// object's summary of its instant, so it costs no read.
+    /// </summary>
+    private void ObserveLateness(WrittenObject? written)
+    {
+        if (written is not { } produced || _options.Periods is null || Key is not { } key
+            || !produced.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary summary)
+            || !summary.HasMin || !summary.HasMax
+            || summary.Min.Kind != FilterLiteralKind.Signed || summary.Max.Kind != FilterLiteralKind.Signed)
+        {
+            return;
+        }
+
+        long oldest = summary.Min.SignedValue;
+        long newest = Volatile.Read(ref _newestInstant);
+        if (newest != long.MinValue)
+        {
+            DatasetTelemetry.Late(Math.Max(0, (double)newest - oldest) / UnitsPerSecond(PeriodOptions.InstantOf(key)));
+        }
+
+        long latest = summary.Max.SignedValue;
+        while (latest > newest)
+        {
+            long seen = Interlocked.CompareExchange(ref _newestInstant, latest, newest);
+            if (seen == newest)
+            {
+                break;
+            }
+
+            newest = seen;
+        }
+    }
+
+    /// <summary>How many of <paramref name="unit"/> a second holds.</summary>
+    private static double UnitsPerSecond(TimeUnit unit) => unit switch
+    {
+        TimeUnit.Nanoseconds => 1e9,
+        TimeUnit.Microseconds => 1e6,
+        TimeUnit.Milliseconds => 1e3,
+        TimeUnit.Seconds => 1,
+        _ => 1.0 / 86_400,
+    };
+
+    /// <summary>Refuses identifiers that name no top-level column of <paramref name="schema"/>, or one twice.</summary>
+    private static void RequireIdentifiers(IReadOnlyList<string> identifiers, DType schema)
+    {
+        HashSet<string> seen = new(StringComparer.Ordinal);
+        foreach (string column in identifiers)
+        {
+            if (column is null || schema.Kind != DTypeKind.Struct || schema.IndexOfField(column) < 0)
+            {
+                throw new ArgumentException($"The identifier '{column}' names no column of the dataset's schema.", nameof(DatasetOptions.Identifiers));
+            }
+
+            if (!seen.Add(column))
+            {
+                throw new ArgumentException($"The identifier '{column}' is named twice.", nameof(DatasetOptions.Identifiers));
+            }
+        }
+    }
+
+    /// <summary>
     /// Refuses a store whose listing is not in ordinal order, as an S3 directory bucket's is not: the
     /// latest version is the first key of <c>commit/</c>, which such a listing does not give.
     /// </summary>
@@ -593,6 +660,7 @@ public sealed class VortexDataset : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(draft);
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
+        ObserveLateness(written);
         return written is { } produced
             ? await ApplyAsync([new DatasetOperation.AddObject(produced.Key, produced.Entry)], CommitKind.Append, cancellationToken).ConfigureAwait(false)
             : Version;
@@ -679,6 +747,7 @@ public sealed class VortexDataset : IAsyncDisposable
         SourceTable.Check(consumed, nameof(consumed));
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
+        ObserveLateness(written);
         DatasetOperation[] operations = written is { } produced ? [new DatasetOperation.AddObject(produced.Key, produced.Entry)] : [];
         CommitResult commit = await CommitAsync(operations, CommitKind.Append, consumed, null, cancellationToken).ConfigureAwait(false);
         if (commit.Created)
@@ -1460,7 +1529,19 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        _ = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
+        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
+        DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
+        if (options.Periods is not null)
+        {
+            _ = PeriodOptions.InstantOf(key);
+            features |= DatasetFeatures.Periods;
+        }
+
+        if (options.Identifiers is { Count: > 0 } identifiers)
+        {
+            RequireIdentifiers(identifiers, schema);
+            features |= DatasetFeatures.Identifiers;
+        }
 
         CommitHeader template = new CommitHeader
         {
@@ -1474,7 +1555,9 @@ public sealed class VortexDataset : IAsyncDisposable
                 : options.Compaction,
             LockedStore = options.LockedStore,
             ErasureDelay = options.ErasureDelay,
-            Features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay,
+            Lateness = options.Periods?.Lateness,
+            Identifiers = [.. options.Identifiers ?? []],
+            Features = features,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,

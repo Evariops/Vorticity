@@ -94,6 +94,18 @@ internal static class DatasetTelemetry
     private static readonly Counter<long> VacuumDeleted = VortexTelemetry.Meter.CreateCounter<long>(
         "vortex.dataset.vacuum.objects_deleted", "{object}", "Objects vacuums deleted.");
 
+    private static readonly Histogram<double> Lateness = VortexTelemetry.Meter.CreateHistogram<double>(
+        "vortex.dataset.lateness", "s", "How far behind the newest instant a handle appended the oldest row of each append to a dataset of periods came.");
+
+    /// <summary>Records how late an append's oldest row came: what tells a lateness horizon too short.</summary>
+    internal static void Late(double seconds)
+    {
+        if (Lateness.Enabled)
+        {
+            Lateness.Record(seconds);
+        }
+    }
+
     /// <summary>Starts the activity of one commit, or returns null when nothing listens.</summary>
     internal static Activity? StartCommit(CommitKind kind, string? location)
     {

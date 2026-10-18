@@ -2858,8 +2858,10 @@ Vorticity.Dataset:     method bool op_Inequality(DatasetOptions, DatasetOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
+Vorticity.Dataset:     property IReadOnlyList<string> Identifiers { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> SummaryColumns { get; init; }
 Vorticity.Dataset:     property Nullable<TimeSpan> ErasureDelay { get; init; }
+Vorticity.Dataset:     property PeriodOptions Periods { get; init; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
@@ -2963,6 +2965,16 @@ Vorticity.Dataset:     const OperationOutcome AlreadyThere = 1
 Vorticity.Dataset:     const OperationOutcome Applied = 0
 Vorticity.Dataset:     const OperationOutcome Dropped = 2
 Vorticity.Dataset:     field int value__
+Vorticity.Dataset: sealed class Vorticity.Dataset.PeriodOptions : IEquatable<PeriodOptions>
+Vorticity.Dataset:     ctor PeriodOptions()
+Vorticity.Dataset:     method PeriodOptions <Clone>$()
+Vorticity.Dataset:     method bool Equals(PeriodOptions)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(PeriodOptions, PeriodOptions)
+Vorticity.Dataset:     method bool op_Inequality(PeriodOptions, PeriodOptions)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property TimeSpan Lateness { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ReplaceResult : IEquatable<ReplaceResult>
 Vorticity.Dataset:     ctor ReplaceResult()
 Vorticity.Dataset:     method ReplaceResult <Clone>$()

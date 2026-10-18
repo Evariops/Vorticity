@@ -82,6 +82,9 @@ internal sealed class ClusteringKey
     /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
     public bool MayHoldNull { get; }
 
+    /// <summary>The dtype of the key's first column.</summary>
+    internal DType LeadingType => _dtypes[0];
+
     /// <summary>The key's columns, in key order.</summary>
     public IReadOnlyList<string> Paths => _paths;
 

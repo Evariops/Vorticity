@@ -149,6 +149,19 @@ internal sealed record CommitHeader
     /// </summary>
     public TimeSpan? ErasureDelay { get; init; }
 
+    /// <summary>
+    /// The lateness horizon of a dataset compacted by periods (<see cref="DatasetOptions.Periods"/>),
+    /// fixed at creation and kept by every header; null for a dataset that is not. A header that
+    /// carries one names <see cref="DatasetFeatures.Periods"/>.
+    /// </summary>
+    public TimeSpan? Lateness { get; init; }
+
+    /// <summary>
+    /// The columns whose values questions look up (<see cref="DatasetOptions.Identifiers"/>), kept by
+    /// every header; empty for none. A header that carries any names <see cref="DatasetFeatures.Identifiers"/>.
+    /// </summary>
+    public IReadOnlyList<string> Identifiers { get; init; } = [];
+
     /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
     private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
 
@@ -172,6 +185,8 @@ internal sealed record CommitHeader
         internal const int LastDataChange = 16;
         internal const int Features = 17;
         internal const int ErasureDelay = 18;
+        internal const int Lateness = 19;
+        internal const int Identifiers = 20;
     }
 
     internal static class SourceField
@@ -272,6 +287,17 @@ internal sealed record CommitHeader
         if (ErasureDelay is { } delay)
         {
             writer.WriteUInt64(Field.ErasureDelay, (ulong)delay.TotalSeconds);
+        }
+
+        // Written even when zero: the field's presence is what says the dataset is compacted by periods.
+        if (Lateness is { } lateness)
+        {
+            writer.WriteUInt64Always(Field.Lateness, (ulong)lateness.TotalSeconds);
+        }
+
+        foreach (string column in Identifiers)
+        {
+            writer.WriteString(Field.Identifiers, column);
         }
     }
 
@@ -452,6 +478,8 @@ internal sealed record CommitHeader
         ulong lastDataChange = 0;
         DatasetFeatures features = DatasetFeatures.None;
         TimeSpan? erasureDelay = null;
+        TimeSpan? lateness = null;
+        List<string> identifiers = [];
 
         try
         {
@@ -514,6 +542,12 @@ internal sealed record CommitHeader
                     case (Field.ErasureDelay, ProtoWireType.Varint):
                         erasureDelay = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
                         break;
+                    case (Field.Lateness, ProtoWireType.Varint):
+                        lateness = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
+                        break;
+                    case (Field.Identifiers, ProtoWireType.LengthDelimited):
+                        identifiers.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -552,6 +586,8 @@ internal sealed record CommitHeader
             LastDataChange = lastDataChange,
             Features = features,
             ErasureDelay = erasureDelay,
+            Lateness = lateness,
+            Identifiers = identifiers,
         };
     }
 

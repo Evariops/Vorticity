@@ -618,7 +618,20 @@ rows, and refuse it, or worse. So the header names the features of format 4 the 
 `Features`, and a header that names one is written in commit format 4. The first is entries with
 such fields. A feature stays named in every header after the one that introduced it, since the pages
 that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
-3 as before.
+3 as before. The others are settings fixed when the dataset is created, which a library that does not
+know them would ignore against what the dataset promises: the erasure delay, compaction by periods
+and its lateness horizon, and the identifier columns.
+
+A dataset compacted by periods (`DatasetOptions.Periods`) declares its instant as the first column of
+its clustering key, a timestamp in UTC or naive, which it reads as UTC, and a lateness horizon, how
+late its sources may send a row. The creation refuses a key that does not lead with such a timestamp.
+The horizon is a property of the sources, which the application declares, kept to the second, and the
+dataset reports the lateness it sees: each append records how far its oldest row came behind the
+newest instant the handle appended before (`vortex.dataset.lateness`, in seconds, zero for rows in
+order), so that a horizon too short shows. Identifier columns (`DatasetOptions.Identifiers`) name the
+columns whose values questions look up one at a time; each names a column of the schema, once. A key
+that leads with a timestamp is encoded as the timestamp's storage, its seek keys too
+([06-row-encoding.md](06-row-encoding.md#6-unsupported-types)).
 
 ## 9. The read-path budget
 

@@ -207,6 +207,22 @@ public sealed record DatasetOptions
     private readonly TimeSpan? _erasureDelay;
 
     /// <summary>
+    /// Compacts the dataset by periods of its instant, the first column of its clustering key, a
+    /// timestamp in UTC: the open period's rows in fresh levels, rows later than the lateness horizon
+    /// beside them, and each period, once closed, sealed into one object. Null, the default, compacts
+    /// by levels. Fixed when the dataset is created and carried by every commit, which a library that
+    /// does not know periods refuses.
+    /// </summary>
+    public PeriodOptions? Periods { get; init; }
+
+    /// <summary>
+    /// The columns whose values questions look up one at a time, such as a request's id: those an
+    /// object indexes by value so that a lookup reads the objects that hold the value and no other.
+    /// Null, the default, names none. Fixed when the dataset is created and carried by every commit.
+    /// </summary>
+    public IReadOnlyList<string>? Identifiers { get; init; }
+
+    /// <summary>
     /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
     /// object's own (<see cref="MarkedVectorShare"/>), whichever is more.
     /// </summary>
@@ -246,6 +262,10 @@ public sealed record DatasetOptions
     /// </summary>
     internal bool AcceptsNullableKey { get; init; }
 
+    /// <summary>The periods a header records, or null for a dataset compacted by levels.</summary>
+    private static PeriodOptions? PeriodsOf(CommitHeader header) =>
+        header.Lateness is { } lateness ? new PeriodOptions { Lateness = lateness } : null;
+
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
 
@@ -258,12 +278,21 @@ public sealed record DatasetOptions
     /// the bound of a page.
     /// </summary>
     internal DatasetOptions For(CommitHeader header) => !header.LockedStore
-        ? this with { Seed = header.Seed, LockedStore = false, ErasureDelay = header.ErasureDelay }
+        ? this with
+        {
+            Seed = header.Seed,
+            LockedStore = false,
+            ErasureDelay = header.ErasureDelay,
+            Periods = PeriodsOf(header),
+            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
+        }
         : this with
         {
             Seed = header.Seed,
             LockedStore = true,
             ErasureDelay = null,
+            Periods = PeriodsOf(header),
+            Identifiers = header.Identifiers.Count > 0 ? header.Identifiers : null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,
