@@ -119,8 +119,7 @@ public enum CompactionTrigger
 /// level 0's exit, the rows whose instant lies past <c>FreshAfter</c> into the first fresh level and
 /// the others into the late level.
 /// </summary>
-/// <param name="Length">The calendar unit a period spans.</param>
-/// <param name="Unit">The unit the instant column counts in.</param>
+/// <param name="Calendar">Where the periods start and end.</param>
 /// <param name="FreshAfter">
 /// In level 0's exit, the largest instant a fresh object or a period holds, past which a row is fresh;
 /// null when there is none, every row being fresh. Ignored by the other jobs, whose rows all go to
@@ -128,8 +127,17 @@ public enum CompactionTrigger
 /// </param>
 /// <param name="Exit">Whether the job is level 0's exit, which routes rows between two levels.</param>
 /// <param name="Slices">Whether the job is a seal, whose object declares its time slices.</param>
-internal sealed record PeriodCut(SliceWidth Length, TimeUnit Unit, long? FreshAfter, bool Exit, bool Slices = false)
+internal sealed record PeriodCut(PeriodCalendar Calendar, long? FreshAfter, bool Exit, bool Slices = false)
 {
+    /// <summary>The unit the instant column counts in.</summary>
+    internal TimeUnit Unit => Calendar.Unit;
+
+    /// <summary>
+    /// For a seal, the newest instant the dataset held when it was planned: a change of length the
+    /// period it writes asks for takes effect past it.
+    /// </summary>
+    internal long? Newest { get; init; }
+
     /// <summary>The level a row of <paramref name="instant"/> goes to in a job whose destination is <paramref name="to"/>.</summary>
     internal int LevelOf(long instant, int to) =>
         !Exit ? to : FreshAfter is { } after && instant <= after ? PeriodLevels.Late : PeriodLevels.FirstFresh;

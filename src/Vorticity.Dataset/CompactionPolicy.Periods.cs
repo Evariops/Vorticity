@@ -10,18 +10,19 @@ internal static partial class CompactionPolicy
 {
     /// <summary>
     /// The first job due on a dataset compacted by periods, on the levels no job ranked before took, in
-    /// order of priority: level 0's exit, the late level's merge, the fresh merges from the lowest fresh
-    /// level up, a purge of marks, then fragments.
+    /// order of priority: level 0's exit, a seal, the late level's merge, the fresh merges from the
+    /// lowest fresh level up, a purge of marks, then fragments.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Level 0's exit reads every object of level 0 and routes each row: past the largest instant a
     /// fresh object or a period holds, to the first fresh level, where it follows every object; any
     /// other row to the late level, so that a late row rewrites neither a fresh object nor a period.
-    /// The late level merges into itself past level 0's ceiling. A fresh level whose objects hold
-    /// <c>F</c> adjacent ones of one period merges them into the next, where they follow every object
-    /// of that level, since the rows past every fresh object only ever enter the first. Every job
-    /// writes an object per period, so that no object spans two.
+    /// A period whose end the newest instant has passed by the lateness horizon is sealed into one
+    /// object of the periods level. The late level merges into itself past level 0's ceiling. A fresh
+    /// level whose objects hold <c>F</c> adjacent ones of one open period merges them into the next,
+    /// where they follow every object of that level, since the rows past every fresh object only ever
+    /// enter the first. Every job writes an object per period, so that no object spans two.
     /// </para>
     /// <para>
     /// <c>F</c> is the options' fan-out until the cost model that weighs the objects a question over the
@@ -32,17 +33,17 @@ internal static partial class CompactionPolicy
         PlannedVersion dataset, List<List<CompactionInput>> levels, CompactionOptions settings, HashSet<int> taken)
     {
         ClusteringKey key = dataset.Key!;
-        PeriodOptions periods = dataset.Options.Periods ?? new PeriodOptions();
-        SliceWidth length = periods.Length;
         TimeUnit unit = PeriodOptions.InstantOf(key);
+        PeriodCalendar calendar = PeriodCalendar.Of(dataset.Header, unit);
+        TimeSpan lateness = dataset.Header.Lateness ?? TimeSpan.Zero;
         string path = key.Paths[0];
         long? after = NewestHeld(levels, path);
 
         // A period is closed once the newest instant held is past its end by the horizon: the horizon
         // is how late a row may come behind the newest one.
-        long horizon = TimeSlicer.Units(periods.Lateness, unit);
+        long horizon = TimeSlicer.Units(lateness, unit);
         bool Closed(long period) =>
-            after is { } newest && newest != long.MaxValue && TimeSlicer.Next(period, unit, length) <= newest - horizon;
+            after is { } newest && newest != long.MaxValue && calendar.Next(period) <= newest - horizon;
 
         if (Held(levels, 0) > settings.LevelZeroCeiling
             && !taken.Contains(0) && !taken.Contains(PeriodLevels.Late) && !taken.Contains(PeriodLevels.FirstFresh))
@@ -54,32 +55,32 @@ internal static partial class CompactionPolicy
                 Range = after is { } newest
                     ? LevelRange.Above(PeriodLevels.FirstFresh, FilterLiteral.From(newest), sources, key)
                     : LevelRange.Of(PeriodLevels.FirstFresh, sources, key),
-                Cut = new PeriodCut(length, unit, after, Exit: true),
+                Cut = new PeriodCut(calendar, after, Exit: true),
             };
         }
 
         bool lateCrowded = Held(levels, PeriodLevels.Late) > settings.LevelZeroCeiling;
         if (!taken.Contains(PeriodLevels.Late) && !taken.Contains(PeriodLevels.Periods)
-            && Sealable(levels, path, unit, length, Closed, lateCrowded) is { } sealing)
+            && Sealable(levels, path, calendar, Closed, lateCrowded) is { } sealing)
         {
-            List<CompactionInput> inputs = Of(levels, sealing, path, unit, length);
+            List<CompactionInput> inputs = Of(levels, sealing, path, calendar);
             return new CompactionJob(
                 inputs[0].Level, PeriodLevels.Periods, CompactionStyle.Periods, CompactionTrigger.Seal, inputs, long.MaxValue, 0)
             {
                 Range = LevelRange.Of(PeriodLevels.Periods, inputs, key),
-                Cut = new PeriodCut(length, unit, null, Exit: false, Slices: true),
+                Cut = new PeriodCut(calendar, null, Exit: false, Slices: true) { Newest = after },
             };
         }
 
         // Merged per period, the late level holds an object per period with late rows: when there are
-        // more such periods than its ceiling, only sealing them again lowers it.
+        // more such periods than its ceiling, only sealing them lowers it.
         if (lateCrowded && !taken.Contains(0) && !taken.Contains(PeriodLevels.Late)
-            && Crowded(levels[PeriodLevels.Late], path, unit, length) is { Count: > 1 } crowded)
+            && Crowded(levels[PeriodLevels.Late], path, calendar) is { Count: > 1 } crowded)
         {
             return new CompactionJob(
                 PeriodLevels.Late, PeriodLevels.Late, CompactionStyle.Periods, CompactionTrigger.LateCeiling, crowded, long.MaxValue, 0)
             {
-                Cut = new PeriodCut(length, unit, null, Exit: false),
+                Cut = new PeriodCut(calendar, null, Exit: false),
             };
         }
 
@@ -88,7 +89,7 @@ internal static partial class CompactionPolicy
         {
             // A closed period's objects are sealed rather than merged up.
             if (taken.Contains(level) || taken.Contains(level + 1)
-                || Adjacent(levels[level], fanout, path, unit, length, Closed) is not { } run)
+                || Adjacent(levels[level], fanout, path, calendar, Closed) is not { } run)
             {
                 continue;
             }
@@ -111,7 +112,7 @@ internal static partial class CompactionPolicy
             return new CompactionJob(level, level + 1, CompactionStyle.Periods, CompactionTrigger.FreshMerge, inputs, long.MaxValue, 0)
             {
                 Range = range,
-                Cut = new PeriodCut(length, unit, null, Exit: false),
+                Cut = new PeriodCut(calendar, null, Exit: false),
             };
         }
 
@@ -119,7 +120,7 @@ internal static partial class CompactionPolicy
         {
             return Purge(marked, Marking.Of(dataset), settings, CompactionStyle.Periods, 0) with
             {
-                Cut = new PeriodCut(length, unit, null, Exit: false),
+                Cut = new PeriodCut(calendar, null, Exit: false),
             };
         }
 
@@ -178,13 +179,13 @@ internal static partial class CompactionPolicy
     /// one period, or that lies in a closed one, breaks a run.
     /// </summary>
     private static List<CompactionInput>? Adjacent(
-        List<CompactionInput> level, int fanout, string path, TimeUnit unit, SliceWidth length, Func<long, bool> closed)
+        List<CompactionInput> level, int fanout, string path, PeriodCalendar calendar, Func<long, bool> closed)
     {
         List<CompactionInput> run = [];
         long period = long.MinValue;
         foreach (CompactionInput input in level)
         {
-            long? of = PeriodOf(input.Entry, path, unit, length);
+            long? of = PeriodOf(input.Entry, path, calendar);
             if (of is null || of != period)
             {
                 run.Clear();
@@ -212,14 +213,14 @@ internal static partial class CompactionPolicy
     /// second seal folds into its object. Null when none is.
     /// </summary>
     private static long? Sealable(
-        List<List<CompactionInput>> levels, string path, TimeUnit unit, SliceWidth length, Func<long, bool> closed, bool lateCrowded)
+        List<List<CompactionInput>> levels, string path, PeriodCalendar calendar, Func<long, bool> closed, bool lateCrowded)
     {
         HashSet<long> done = [];
         if (PeriodLevels.Periods < levels.Count)
         {
             foreach (CompactionInput input in levels[PeriodLevels.Periods])
             {
-                if (PeriodOf(input.Entry, path, unit, length) is { } period)
+                if (PeriodOf(input.Entry, path, calendar) is { } period)
                 {
                     done.Add(period);
                 }
@@ -236,7 +237,7 @@ internal static partial class CompactionPolicy
 
             foreach (CompactionInput input in levels[level])
             {
-                if (PeriodOf(input.Entry, path, unit, length) is { } period && closed(period)
+                if (PeriodOf(input.Entry, path, calendar) is { } period && closed(period)
                     && (level != PeriodLevels.Late || lateCrowded || !done.Contains(period))
                     && (oldest is null || period < oldest))
                 {
@@ -249,7 +250,7 @@ internal static partial class CompactionPolicy
     }
 
     /// <summary>Every object of <paramref name="period"/> in the fresh levels, the late level and the periods level, in that order.</summary>
-    private static List<CompactionInput> Of(List<List<CompactionInput>> levels, long period, string path, TimeUnit unit, SliceWidth length)
+    private static List<CompactionInput> Of(List<List<CompactionInput>> levels, long period, string path, PeriodCalendar calendar)
     {
         List<CompactionInput> inputs = [];
         void Add(int level)
@@ -261,7 +262,7 @@ internal static partial class CompactionPolicy
 
             foreach (CompactionInput input in levels[level])
             {
-                if (PeriodOf(input.Entry, path, unit, length) == period)
+                if (PeriodOf(input.Entry, path, calendar) == period)
                 {
                     inputs.Add(input);
                 }
@@ -283,12 +284,12 @@ internal static partial class CompactionPolicy
     /// period turns into fewer objects. The others are left where they are, which a merge would only
     /// rewrite.
     /// </summary>
-    private static List<CompactionInput> Crowded(List<CompactionInput> level, string path, TimeUnit unit, SliceWidth length)
+    private static List<CompactionInput> Crowded(List<CompactionInput> level, string path, PeriodCalendar calendar)
     {
         Dictionary<long, int> held = [];
         foreach (CompactionInput input in level)
         {
-            if (PeriodOf(input.Entry, path, unit, length) is { } period)
+            if (PeriodOf(input.Entry, path, calendar) is { } period)
             {
                 held[period] = held.GetValueOrDefault(period) + 1;
             }
@@ -297,7 +298,7 @@ internal static partial class CompactionPolicy
         List<CompactionInput> crowded = [];
         foreach (CompactionInput input in level)
         {
-            if (PeriodOf(input.Entry, path, unit, length) is { } period && held[period] > 1)
+            if (PeriodOf(input.Entry, path, calendar) is { } period && held[period] > 1)
             {
                 crowded.Add(input);
             }
@@ -307,7 +308,7 @@ internal static partial class CompactionPolicy
     }
 
     /// <summary>The start of the one period an object's instants lie in, or null when its summaries do not say so.</summary>
-    private static long? PeriodOf(ObjectEntry entry, string path, TimeUnit unit, SliceWidth length)
+    private static long? PeriodOf(ObjectEntry entry, string path, PeriodCalendar calendar)
     {
         if (!entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax
             || column.Min.Kind != FilterLiteralKind.Signed || column.Max.Kind != FilterLiteralKind.Signed)
@@ -315,7 +316,7 @@ internal static partial class CompactionPolicy
             return null;
         }
 
-        long start = TimeSlicer.Floor(column.Min.SignedValue, unit, length);
-        return TimeSlicer.Floor(column.Max.SignedValue, unit, length) == start ? start : null;
+        long start = calendar.Floor(column.Min.SignedValue);
+        return calendar.Floor(column.Max.SignedValue) == start ? start : null;
     }
 }

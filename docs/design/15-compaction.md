@@ -234,8 +234,10 @@ period, so its plan reads every leaf. Its jobs come in this order:
 - Purges and fragments, as for any dataset.
 
 Every job writes an object per period, so that no object spans two, and level 0's exit an object per
-level as well. A period is a day until the rule that picks its length is written, and the header
-keeps it, so that every writer cuts the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
+level as well. A period is a day at creation, and each seal weighs the load of the period it wrote and
+records the length that load calls for, from past the newest instant ([the length of a
+period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts
+the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
 appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
 minutes past their end. After each round it checks that every level but 0 and the late one is
 key-disjoint, that no object spans two periods, and that the key cursor and a key-ordered scan give

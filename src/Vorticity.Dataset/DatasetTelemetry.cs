@@ -106,6 +106,21 @@ internal static class DatasetTelemetry
         }
     }
 
+    private static readonly Histogram<double> PeriodLoad = VortexTelemetry.Meter.CreateHistogram<double>(
+        "vortex.dataset.period.load", "By/s", "The bytes per second of data time of each period a seal wrote, with the period length that load calls for.");
+
+    /// <summary>
+    /// Records the load a seal weighed and the length it calls for: the measure the length's rule is
+    /// built on, which a deployment reads to see whether the rule's constants fit it.
+    /// </summary>
+    internal static void PeriodWeighed(double bytesPerSecond, SliceWidth length)
+    {
+        if (PeriodLoad.Enabled)
+        {
+            PeriodLoad.Record(bytesPerSecond, new KeyValuePair<string, object?>("length", length.ToString()));
+        }
+    }
+
     /// <summary>Starts the activity of one commit, or returns null when nothing listens.</summary>
     internal static Activity? StartCommit(CommitKind kind, string? location)
     {

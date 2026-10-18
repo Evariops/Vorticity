@@ -634,8 +634,16 @@ and its lateness horizon, and the identifier columns.
 A dataset compacted by periods (`DatasetOptions.Periods`) declares its instant as the first column of
 its clustering key, a timestamp in UTC or naive, which it reads as UTC, and a lateness horizon, how
 late its sources may send a row. The creation refuses a key that does not lead with such a timestamp.
-The header also keeps the length of a period, a calendar unit in UTC, a day until the rule that
-picks it from the store and the data is written.
+The header also keeps the length of a period, a calendar unit in UTC, a day at creation, and the
+changes of it the dataset made since. Each seal weighs the period it wrote, its bytes and rows per
+second of data time, and asks in its own commit for the cheapest unit that holds four constraints:
+the object cap, a chunk of the widest column under 16 MiB at the length the footer's cap gives, a
+purge within half the erasure delay, and a tenth of the retention. A change takes effect from the
+next boundary of both units past the newest instant, so the periods already written keep their
+bounds, and a change worked out on a calendar another writer changed first is dropped. The
+constants (the widest chunk, a rewrite rate of 100 MB/s, the share of the retention, one question a
+second over a day at 50 ms an object) are the design's example until the benches measure them, and
+`vortex.dataset.period.load` reports the load each seal weighed.
 The horizon is a property of the sources, which the application declares, kept to the second, and the
 dataset reports the lateness it sees: each append records how far its oldest row came behind the
 newest instant the handle appended before (`vortex.dataset.lateness`, in seconds, zero for rows in

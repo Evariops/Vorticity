@@ -176,8 +176,18 @@ internal static class DatasetCompactor
             Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
             Range = job.Range,
         };
+
+        // A seal weighs the period it wrote, and asks in the same commit for the length that load
+        // calls for, from past the newest instant: the periods already written keep their bounds.
+        List<DatasetOperation> operations = [replacement];
+        if (job.Cut is { Slices: true, Newest: { } newest } sealing && outputs.Written.Count == 1
+            && Reweigh(dataset, sealing, outputs.Written[0].Entry, newest) is { } change)
+        {
+            operations.Add(change);
+        }
+
         CommitResult commit = await dataset
-            .CommitAsync([replacement], CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
+            .CommitAsync(operations, CommitKind.Compaction, cancellationToken).ConfigureAwait(false);
 
         return new CompactionResult
         {
@@ -191,7 +201,8 @@ internal static class DatasetCompactor
             Rows = rows,
             BytesIn = job.Bytes,
             BytesOut = outputs.Bytes,
-            Outcome = commit.Outcomes.Count == 1 ? commit.Outcomes[0] : OperationOutcome.Applied,
+            // The replacement's, first among the operations; a change of period length rides beside it.
+            Outcome = commit.Outcomes.Count > 0 ? commit.Outcomes[0] : OperationOutcome.Applied,
         };
     }
 
@@ -478,6 +489,53 @@ internal static class DatasetCompactor
         return rows;
     }
 
+    /// <summary>
+    /// The change of period length the load of the period a seal wrote calls for, or null: its bytes
+    /// and rows over its span of data time, its columns, the object cap, the erasure delay. A row's
+    /// bytes bound its widest column's, which keeps the chunk constraint on the safe side.
+    /// </summary>
+    private static DatasetOperation.ChangePeriodLength? Reweigh(VortexDataset dataset, PeriodCut cut, ObjectEntry period, long newest)
+    {
+        if (dataset.Key is not { } key || !period.Summaries.TryGet(key.Paths[0], out ColumnSummary instant)
+            || !instant.HasMin || instant.Min.Kind != Vorticity.Expressions.FilterLiteralKind.Signed || period.Rows == 0)
+        {
+            return null;
+        }
+
+        long start = cut.Calendar.Floor(instant.Min.SignedValue);
+        double seconds = (cut.Calendar.Next(start) - start) / (double)TimeSlicer.Units(TimeSpan.FromSeconds(1), cut.Unit);
+        PeriodLoad load = new PeriodLoad(
+            period.Bytes / seconds,
+            period.Rows / seconds,
+            LeafColumns(dataset.Snapshot.Schema.DType),
+            (double)period.Bytes / period.Rows,
+            dataset.Options.MaxObjectBytes,
+            dataset.Snapshot.Header.ErasureDelay,
+            Retention: null);
+        SliceWidth length = PeriodLengths.Choose(load);
+        DatasetTelemetry.PeriodWeighed(load.BytesPerSecond, length);
+        return cut.Calendar.ChangeTo(length, newest) is { } change
+            ? new DatasetOperation.ChangePeriodLength(change, cut.Calendar.Changes.Count)
+            : null;
+    }
+
+    /// <summary>The leaf columns of a schema, which a footer holds a node per chunk of.</summary>
+    private static int LeafColumns(Vorticity.Types.DType dtype)
+    {
+        if (dtype.Kind != Vorticity.Types.DTypeKind.Struct)
+        {
+            return 1;
+        }
+
+        int leaves = 0;
+        for (int field = 0; field < dtype.FieldCount; field++)
+        {
+            leaves += LeafColumns(dtype.GetField(field));
+        }
+
+        return Math.Max(leaves, 1);
+    }
+
     /// <summary>Where a part of a run ends, and the level and period its rows go to.</summary>
     private readonly record struct Cut(int End, int Level, long Period);
 
@@ -494,8 +552,8 @@ internal static class DatasetCompactor
         {
             long first = instants[at];
             int level = cut.LevelOf(first, to);
-            long period = TimeSlicer.Floor(first, cut.Unit, cut.Length);
-            long stop = TimeSlicer.Next(period, cut.Unit, cut.Length);
+            long period = cut.Calendar.Floor(first);
+            long stop = cut.Calendar.Next(period);
             if (level == PeriodLevels.Late && cut.Exit && cut.FreshAfter is { } after && after < long.MaxValue)
             {
                 stop = Math.Min(stop, after + 1);

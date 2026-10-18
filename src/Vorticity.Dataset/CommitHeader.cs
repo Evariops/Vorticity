@@ -163,6 +163,12 @@ internal sealed record CommitHeader
     internal SliceWidth? PeriodLength { get; init; }
 
     /// <summary>
+    /// The changes of the period length the dataset made since its creation, in order
+    /// (<see cref="PeriodCalendar"/>); empty for none.
+    /// </summary>
+    internal IReadOnlyList<PeriodChange> PeriodChanges { get; init; } = [];
+
+    /// <summary>
     /// The columns whose values questions look up (<see cref="DatasetOptions.Identifiers"/>), kept by
     /// every header; empty for none. A header that carries any names <see cref="DatasetFeatures.Identifiers"/>.
     /// </summary>
@@ -194,6 +200,13 @@ internal sealed record CommitHeader
         internal const int Lateness = 19;
         internal const int Identifiers = 20;
         internal const int PeriodLength = 21;
+        internal const int PeriodChanges = 22;
+    }
+
+    internal static class PeriodChangeField
+    {
+        internal const int From = 1;
+        internal const int Length = 2;
     }
 
     internal static class SourceField
@@ -310,6 +323,21 @@ internal sealed record CommitHeader
         if (PeriodLength is { } length)
         {
             writer.WriteUInt64Always(Field.PeriodLength, (ulong)length);
+        }
+
+        foreach (PeriodChange change in PeriodChanges)
+        {
+            ProtoWriter inner = new ProtoWriter();
+            try
+            {
+                inner.WriteSInt64Always(PeriodChangeField.From, change.From);
+                inner.WriteUInt64Always(PeriodChangeField.Length, (ulong)change.Length);
+                writer.WriteBytes(Field.PeriodChanges, inner.WrittenSpan);
+            }
+            finally
+            {
+                inner.Dispose();
+            }
         }
     }
 
@@ -493,6 +521,7 @@ internal sealed record CommitHeader
         TimeSpan? lateness = null;
         List<string> identifiers = [];
         SliceWidth? periodLength = null;
+        List<PeriodChange> periodChanges = [];
 
         try
         {
@@ -562,10 +591,10 @@ internal sealed record CommitHeader
                         identifiers.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
                     case (Field.PeriodLength, ProtoWireType.Varint):
-                        ulong unit = reader.ReadVarint();
-                        periodLength = unit is >= (ulong)SliceWidth.Minute and <= (ulong)SliceWidth.Month
-                            ? (SliceWidth)unit
-                            : throw new CommitFormatException($"A commit header names period unit {unit}, which is none of a minute, an hour, a day or a month.");
+                        periodLength = PeriodUnit(reader.ReadVarint());
+                        break;
+                    case (Field.PeriodChanges, ProtoWireType.LengthDelimited):
+                        periodChanges.Add(ReadPeriodChange(reader.ReadLengthDelimited()));
                         break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
@@ -608,7 +637,39 @@ internal sealed record CommitHeader
             Lateness = lateness,
             Identifiers = identifiers,
             PeriodLength = periodLength,
+            PeriodChanges = periodChanges,
         };
+    }
+
+    /// <summary>A period unit as a header writes it.</summary>
+    /// <exception cref="CommitFormatException">The code names no unit a period may span.</exception>
+    private static SliceWidth PeriodUnit(ulong unit) =>
+        unit is >= (ulong)SliceWidth.Minute and <= (ulong)SliceWidth.Month
+            ? (SliceWidth)unit
+            : throw new CommitFormatException($"A commit header names period unit {unit}, which is none of a minute, an hour, a day or a month.");
+
+    private static PeriodChange ReadPeriodChange(ReadOnlySpan<byte> bytes)
+    {
+        long from = 0;
+        ulong unit = 0;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (PeriodChangeField.From, ProtoWireType.Varint):
+                    from = reader.ReadSInt64();
+                    break;
+                case (PeriodChangeField.Length, ProtoWireType.Varint):
+                    unit = reader.ReadVarint();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return new PeriodChange(from, PeriodUnit(unit));
     }
 
     private static SourceOffset ReadSource(ReadOnlySpan<byte> bytes)

@@ -277,7 +277,11 @@ internal static class DatasetCommitter
             // it and its entry names it there; a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
-            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired) { WritePolicy = template.WritePolicy };
+            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired)
+            {
+                WritePolicy = template.WritePolicy,
+                PeriodChanges = template.PeriodChanges,
+            };
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
                 await ApplyAsync(levels, operations, pages, builder, schema, options.InlineVectorBytes, cancellationToken).ConfigureAwait(false);
 
@@ -357,6 +361,7 @@ internal static class DatasetCommitter
                 Schema = schema.Schema,
                 Retired = schema.Retired,
                 WritePolicy = schema.WritePolicy,
+                PeriodChanges = schema.PeriodChanges,
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
                 Sources = sources,
                 Starts = starts,
@@ -1093,6 +1098,21 @@ internal static class DatasetCommitter
                     break;
                 }
 
+                case DatasetOperation.ChangePeriodLength change:
+                {
+                    if (schema.PeriodChanges.Count != change.After)
+                    {
+                        outcomes.Add(OperationOutcome.Dropped);
+                    }
+                    else
+                    {
+                        schema.PeriodChanges = [.. schema.PeriodChanges, change.Change];
+                        outcomes.Add(OperationOutcome.Applied);
+                    }
+
+                    break;
+                }
+
                 default:
                     throw new ArgumentException(
                         $"An operation of type {operation.GetType().Name} is not one a commit knows.", nameof(operations));
@@ -1323,6 +1343,9 @@ internal static class DatasetCommitter
 
         /// <summary>The indexes every writer builds, as the header records them.</summary>
         internal ReadOnlyMemory<byte> WritePolicy { get; set; }
+
+        /// <summary>The changes of the period length, as the header records them.</summary>
+        internal IReadOnlyList<PeriodChange> PeriodChanges { get; set; } = [];
     }
 
     private sealed class Relocation

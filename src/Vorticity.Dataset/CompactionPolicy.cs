@@ -117,6 +117,9 @@ internal static partial class CompactionPolicy
         /// <summary>The erasure delay its header carries; null for none.</summary>
         internal TimeSpan? ErasureDelay => _snapshot.Header.ErasureDelay;
 
+        /// <summary>Its header.</summary>
+        internal CommitHeader Header => _snapshot.Header;
+
         /// <summary>The handle's options, which no version changes.</summary>
         internal DatasetOptions Options { get; } = dataset.Options;
     }
