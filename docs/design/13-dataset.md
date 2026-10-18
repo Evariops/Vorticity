@@ -233,6 +233,14 @@ library never stalls a writer.
   writes, with its null keys last.
 - Without a clustering key, levels are size tiers. A lookup touches every object the summaries do not
   refute, which is output-sensitive rather than bounded, and the plan says so.
+- A dataset that declares periods lays its levels out for them ([compaction by
+  periods](20-time-window-aggregates.md#51-a-compaction-style-by-periods)). Level 0 is the same.
+  Level 1 is the late level, which holds the rows that were older than the newest fresh instant when
+  they left level 0, in sorted objects that overlap, one per period once merged. Level 2 holds the
+  object of each sealed period, and the fresh levels, from 3 up, hold the rows past every fresh
+  object, `F` adjacent objects of one period merging into the next level. Every level but 0 and 1 is
+  key-disjoint and no object above level 0 spans two periods, so a lookup touches level 0, the late
+  level and one object per other level.
 - Inside every object, an index entry has at most four runs, the same rule as for a single file
   appended in place (see [the directory and the runs](10-indexes.md#3-the-directory-and-the-runs)).
 
@@ -626,6 +634,8 @@ and its lateness horizon, and the identifier columns.
 A dataset compacted by periods (`DatasetOptions.Periods`) declares its instant as the first column of
 its clustering key, a timestamp in UTC or naive, which it reads as UTC, and a lateness horizon, how
 late its sources may send a row. The creation refuses a key that does not lead with such a timestamp.
+The header also keeps the length of a period, a calendar unit in UTC, a day until the rule that
+picks it from the store and the data is written.
 The horizon is a property of the sources, which the application declares, kept to the second, and the
 dataset reports the lateness it sees: each append records how far its oldest row came behind the
 newest instant the handle appended before (`vortex.dataset.lateness`, in seconds, zero for rows in

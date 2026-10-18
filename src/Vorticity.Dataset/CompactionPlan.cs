@@ -23,6 +23,15 @@ public enum CompactionStyle
     /// key-disjoint.
     /// </summary>
     Tiered = 2,
+
+    /// <summary>
+    /// By periods of time, for a dataset that declares them (<see cref="DatasetOptions.Periods"/>), and
+    /// only for one: level 0's rows past every fresh object go to the first fresh level and the others
+    /// to a late level, <c>F</c> adjacent objects of one period in a fresh level merge into the next,
+    /// and the late level merges into itself past level 0's ceiling. A lookup by key opens at most
+    /// level 0, the late level and one object per other level.
+    /// </summary>
+    Periods = 3,
 }
 
 /// <summary>Which objects a job takes from a level over its size.</summary>
@@ -83,6 +92,38 @@ public enum CompactionTrigger
     /// order as merges make them grow with keys at random.
     /// </summary>
     Neighbours = 6,
+
+    /// <summary>
+    /// The late level of a dataset compacted by periods holds more objects than level 0's ceiling: they
+    /// are merged into one object per period, in that level.
+    /// </summary>
+    LateCeiling = 7,
+
+    /// <summary>
+    /// A fresh level of a dataset compacted by periods holds <c>F</c> adjacent objects of one period:
+    /// they are merged into one object of the next fresh level.
+    /// </summary>
+    FreshMerge = 8,
+}
+
+/// <summary>
+/// How a job of a dataset compacted by periods cuts what it writes: an object per period, and in
+/// level 0's exit, the rows whose instant lies past <c>FreshAfter</c> into the first fresh level and
+/// the others into the late level.
+/// </summary>
+/// <param name="Length">The calendar unit a period spans.</param>
+/// <param name="Unit">The unit the instant column counts in.</param>
+/// <param name="FreshAfter">
+/// In level 0's exit, the largest instant a fresh object or a period holds, past which a row is fresh;
+/// null when there is none, every row being fresh. Ignored by the other jobs, whose rows all go to
+/// their destination.
+/// </param>
+/// <param name="Exit">Whether the job is level 0's exit, which routes rows between two levels.</param>
+internal sealed record PeriodCut(SliceWidth Length, TimeUnit Unit, long? FreshAfter, bool Exit)
+{
+    /// <summary>The level a row of <paramref name="instant"/> goes to in a job whose destination is <paramref name="to"/>.</summary>
+    internal int LevelOf(long instant, int to) =>
+        !Exit ? to : FreshAfter is { } after && instant <= after ? PeriodLevels.Late : PeriodLevels.FirstFresh;
 }
 
 /// <summary>
@@ -275,11 +316,13 @@ public sealed record CompactionOptions
     };
 
     /// <summary>
-    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a
-    /// clustering key, whatever was asked, since a plan refuses tiered there first.
+    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: by periods for a
+    /// dataset that declares them, leveled with a clustering key, whatever was asked, since a plan
+    /// refuses the others there first.
     /// </summary>
-    internal CompactionStyle StyleFor(bool clustered) => Style switch
+    internal CompactionStyle StyleFor(bool clustered, bool periods = false) => Style switch
     {
+        _ when periods => CompactionStyle.Periods,
         _ when clustered => CompactionStyle.Leveled,
         CompactionStyle.Leveled => CompactionStyle.Leveled,
         _ => CompactionStyle.Tiered,
@@ -385,6 +428,9 @@ public sealed record CompactionJob
     /// alone would write its rows as one object of the same bounds.
     /// </summary>
     internal bool Moves { get; init; }
+
+    /// <summary>How a job of a dataset compacted by periods cuts its outputs; null for any other job.</summary>
+    internal PeriodCut? Cut { get; init; }
 }
 
 /// <summary>

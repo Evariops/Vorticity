@@ -7,34 +7,47 @@ namespace Vorticity.Dataset;
 /// The trees of one version of a dataset, one per level. Levels hold the lookup bound: at most
 /// eight objects in level 0 and key-disjoint objects in every level above, so a lookup by key
 /// touches at most eight plus the level count. Empty levels keep their place, since a level's
-/// number is its meaning.
+/// number is its meaning. A dataset compacted by periods keeps one level above 0 whose objects
+/// overlap, its late level (<see cref="PeriodLevels"/>), under a ceiling as level 0 is.
 /// </summary>
 internal sealed class DatasetLevels
 {
-    private static readonly DatasetLevels None = new DatasetLevels([], null);
+    private static readonly DatasetLevels None = new DatasetLevels([], null, byPeriods: false);
+    private static readonly DatasetLevels NoneByPeriods = new DatasetLevels([], null, byPeriods: true);
     private readonly DatasetTree[] _levels;
 
     // Where each level's last job stopped, by level; null while no level records one, which is
     // every version of a dataset compacted by its largest objects.
     private readonly ReadOnlyMemory<byte>[]? _pointers;
 
-    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers)
+    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers, bool byPeriods)
     {
         _levels = levels;
         _pointers = pointers;
+        ByPeriods = byPeriods;
     }
 
     /// <summary>A dataset with nothing in it.</summary>
     public static DatasetLevels Empty => None;
 
+    /// <summary>Whether the dataset is compacted by periods, and so keeps a late level.</summary>
+    public bool ByPeriods { get; }
+
     /// <summary>
     /// Whether a level of a dataset with a clustering key holds objects each written in the key's
-    /// order, null keys last, whose keys no other object of the level overlaps, in the order of their
-    /// entries: every level above 0, which only a leveled compaction writes into, a merge on the key,
-    /// since a plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any
-    /// order and overlapping. Off the key, a level's objects are in no order of it.
+    /// order, null keys last: every level above 0, which only a merge on the key writes into, since a
+    /// plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any order.
+    /// Off the key, a level's objects are in no order of it.
     /// </summary>
     public static bool InKeyOrder(int level) => level > 0;
+
+    /// <summary>
+    /// Whether no two objects of a level overlap on the clustering key, so that its objects follow
+    /// each other in the order of their entries: every level above 0 but a dataset of periods' late
+    /// level, whose sorted objects overlap as level 0's do. A read by key opens at most one object of
+    /// such a level at a time.
+    /// </summary>
+    public bool IsDisjoint(int level) => level > 0 && !(ByPeriods && level == PeriodLevels.Late);
 
     /// <summary>How many levels the version names; level numbers run from 0 to this minus one.</summary>
     public int Count => _levels.Length;
@@ -97,9 +110,10 @@ internal sealed class DatasetLevels
             }
         }
 
+        bool byPeriods = header.Lateness is not null;
         if (highest < 0)
         {
-            return None;
+            return byPeriods ? NoneByPeriods : None;
         }
 
         DatasetTree[] trees = new DatasetTree[highest + 1];
@@ -118,7 +132,7 @@ internal sealed class DatasetLevels
             }
         }
 
-        return new DatasetLevels(trees, pointers);
+        return new DatasetLevels(trees, pointers, byPeriods);
     }
 
     /// <summary>These levels with one of them replaced.</summary>
@@ -132,7 +146,7 @@ internal sealed class DatasetLevels
         Array.Fill(trees, DatasetTree.Empty);
         _levels.CopyTo(trees, 0);
         trees[level] = tree;
-        return new DatasetLevels(trees, _pointers);
+        return new DatasetLevels(trees, _pointers, ByPeriods);
     }
 
     /// <summary>
@@ -155,7 +169,7 @@ internal sealed class DatasetLevels
         ReadOnlyMemory<byte>[] pointers = new ReadOnlyMemory<byte>[Math.Max(_pointers?.Length ?? 0, level + 1)];
         _pointers?.CopyTo(pointers, 0);
         pointers[level] = key;
-        return new DatasetLevels(_levels, pointers);
+        return new DatasetLevels(_levels, pointers, ByPeriods);
     }
 
     /// <summary>

@@ -2,11 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Layouts;
+using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Writing;
 
@@ -109,7 +112,7 @@ internal static class DatasetCompactor
             return moved;
         }
 
-        bool merge = job.Style == CompactionStyle.Leveled;
+        bool merge = job.Style is CompactionStyle.Leveled or CompactionStyle.Periods;
         ClusteringKey? key = dataset.Key;
         if (merge)
         {
@@ -119,7 +122,7 @@ internal static class DatasetCompactor
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
-        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows);
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows, job.ToLevel);
         long rows;
         try
         {
@@ -148,9 +151,10 @@ internal static class DatasetCompactor
         }
 
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> produced = [];
-        foreach (WrittenObject written in outputs.Written)
+        for (int i = 0; i < outputs.Written.Count; i++)
         {
-            produced.Add((job.ToLevel, written.Key, written.Entry));
+            WrittenObject written = outputs.Written[i];
+            produced.Add((outputs.Levels[i], written.Key, written.Entry));
         }
 
         // What each input was read as: a delete that marked rows in one meanwhile leaves it under its
@@ -428,10 +432,31 @@ internal static class DatasetCompactor
             opened: null,
             cancellationToken);
         long rows = 0;
+        List<Cut> cuts = [];
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
+                RecordBatch run = merge.Current;
+                if (job.Cut is { } cut)
+                {
+                    // An object per period, and in level 0's exit, per level: a run whose rows cross a
+                    // period's end, or the last fresh instant, is written in parts. One key has one
+                    // instant, so no part splits a key.
+                    CutRun(run, paths[0], cut, job.ToLevel, cuts);
+                    int at = 0;
+                    foreach ((int end, int level, long period) in cuts)
+                    {
+                        await outputs.RouteAsync(level, period, cancellationToken).ConfigureAwait(false);
+                        await outputs.WriteAsync(at == 0 && end == run.RowCount ? run : run.Window(at, end - at), cancellationToken)
+                            .ConfigureAwait(false);
+                        at = end;
+                    }
+
+                    rows += run.RowCount;
+                    continue;
+                }
+
                 if (outputs.WantsRoll && !outputs.HoldsKey(merge.FirstKey))
                 {
                     // Never split a key across two objects: two outputs sharing a boundary value
@@ -440,13 +465,78 @@ internal static class DatasetCompactor
                 }
 
                 outputs.Note(merge.LastKey);
-                RecordBatch run = merge.Current;
                 rows += run.RowCount;
                 await outputs.WriteAsync(run, cancellationToken).ConfigureAwait(false);
             }
         }
 
         return rows;
+    }
+
+    /// <summary>Where a part of a run ends, and the level and period its rows go to.</summary>
+    private readonly record struct Cut(int End, int Level, long Period);
+
+    /// <summary>
+    /// Cuts a run, sorted on its instant, into the parts that go to one level and one period, into
+    /// <paramref name="cuts"/>.
+    /// </summary>
+    private static void CutRun(RecordBatch run, string instant, PeriodCut cut, int to, List<Cut> cuts)
+    {
+        cuts.Clear();
+        ReadOnlySpan<long> instants = Instants(run, instant);
+        int at = 0;
+        while (at < instants.Length)
+        {
+            long first = instants[at];
+            int level = cut.LevelOf(first, to);
+            long period = TimeSlicer.Floor(first, cut.Unit, cut.Length);
+            long stop = TimeSlicer.Next(period, cut.Unit, cut.Length);
+            if (level == PeriodLevels.Late && cut.Exit && cut.FreshAfter is { } after && after < long.MaxValue)
+            {
+                stop = Math.Min(stop, after + 1);
+            }
+
+            int end = at + LowerBound(instants[at..], stop);
+            cuts.Add(new Cut(end, level, period));
+            at = end;
+        }
+    }
+
+    /// <summary>
+    /// The instants of a run, its key's leading column as stored, read where they lie: a window's
+    /// values may start anywhere in a buffer, which a read of longs does not mind.
+    /// </summary>
+    private static ReadOnlySpan<long> Instants(RecordBatch run, string path)
+    {
+        CanonicalArena arena = run.Arena;
+        int node = RowEncoder.Storage(arena, ColumnPath.NodeOf(run, path));
+        if (arena.RecordRef(node).Kind != CanonicalKind.Primitive)
+        {
+            node = EncodedForms.Canonical(arena, node);
+        }
+
+        return MemoryMarshal.Cast<byte, long>(arena.RecordRef(node).BufferA.Span)[..run.RowCount];
+    }
+
+    /// <summary>The first index of the ascending <paramref name="values"/> at or past <paramref name="value"/>.</summary>
+    private static int LowerBound(ReadOnlySpan<long> values, long value)
+    {
+        int low = 0;
+        int high = values.Length;
+        while (low < high)
+        {
+            int middle = (int)((uint)(low + high) >> 1);
+            if (values[middle] < value)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low;
     }
 
     /// <summary>The objects a compaction writes, rolled at the destination level's size.</summary>
@@ -458,14 +548,17 @@ internal static class DatasetCompactor
         private readonly long _target;
         private readonly long _rowBound;
         private readonly List<WrittenObject> _written = [];
+        private readonly List<int> _levels = [];
         private byte[] _lastKey = [];
         private int _lastKeyLength = -1;
         private ObjectDraft? _draft;
         private long _rows;
         private long _firstRow;
+        private int _level;
+        private long _period;
 
         // The rows the job reads, `rowBound`, bound every object it writes, and so the length of their chunks.
-        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound)
+        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level)
         {
             _dataset = dataset;
             _schema = schema;
@@ -473,10 +566,30 @@ internal static class DatasetCompactor
             _target = target;
             _firstRow = firstRow;
             _rowBound = rowBound;
+            _level = level;
         }
 
         /// <summary>The objects it has sealed.</summary>
         internal IReadOnlyList<WrittenObject> Written => _written;
+
+        /// <summary>The level each object it has sealed goes to, in the order of <see cref="Written"/>.</summary>
+        internal IReadOnlyList<int> Levels => _levels;
+
+        /// <summary>
+        /// Sends what is written next to <paramref name="level"/> and <paramref name="period"/>, sealing
+        /// the object being written when it holds another's: an object holds one level's rows of one
+        /// period.
+        /// </summary>
+        internal async ValueTask RouteAsync(int level, long period, CancellationToken cancellationToken)
+        {
+            if (_draft is not null && (level != _level || period != _period))
+            {
+                await RollAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            _level = level;
+            _period = period;
+        }
 
         internal long Bytes
         {
@@ -541,6 +654,7 @@ internal static class DatasetCompactor
             if (written is { } output)
             {
                 _written.Add(output);
+                _levels.Add(_level);
             }
 
             _firstRow += _rows;

@@ -205,6 +205,32 @@ store for one page, where reading every leaf would ask for 71. A dataset ordered
 level's objects together, a run of level 0 moving up whole and the next landing past it, so the two
 picks take the same runs there, and the round robin is a tiered dataset's default.
 
+### A dataset of periods
+
+A dataset that declares periods is compacted by them (`CompactionStyle.Periods`), which its plan
+picks and no option overrides, since its levels are laid out for them ([the levels of a dataset of
+periods](13-dataset.md#52-the-invariant)). It holds few objects, a few per level and one per sealed
+period, so its plan reads every leaf. Its jobs come in this order:
+
+- Level 0 past its ceiling empties. Each row past the newest instant the fresh levels and the sealed
+  periods hold goes to the first fresh level, where it follows every object, and every other row goes
+  to the late level, so that a late row rewrites neither a fresh object nor a period. The commit checks
+  that nothing came into the first fresh level past that instant meanwhile.
+- The late level past level 0's ceiling merges the objects of each period it holds several of into
+  one, in place. When it holds more periods than its ceiling, only sealing them again lowers it.
+- `F` adjacent objects of one period in a fresh level merge into one object of the next fresh level,
+  where they follow every object, since only the first fresh level takes new rows. `F` is the
+  fan-out until the cost model that weighs the objects a question over the recent hours reads against
+  the rewrites per row gives it.
+- Purges and fragments, as for any dataset.
+
+Every job writes an object per period, so that no object spans two, and level 0's exit an object per
+level as well. A period is a day until the rule that picks its length is written, and the header
+keeps it, so that every writer cuts the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
+appends, one row in a hundred late by up to half an hour, and after each round checks that every
+level but 0 and the late one is key-disjoint, that no object spans two periods, and that the key
+cursor and a key-ordered scan give back the rows appended.
+
 ## 4. Folding marks where no merge goes
 
 A purge is a job with a single input: an object rewritten alone, without its marked rows, in its own

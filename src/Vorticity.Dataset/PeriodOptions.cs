@@ -34,6 +34,28 @@ public sealed record PeriodOptions
         }
     }
 
+    private readonly SliceWidth _length = SliceWidth.Day;
+
+    /// <summary>
+    /// The calendar unit a period spans, in UTC: a day until the rule that weighs the store's largest
+    /// streamed object, the footer's cap, a purge's cost and the retention picks it. Set by tests to
+    /// reach a period's end in a few rows; recorded in the header, so every writer cuts the same.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The unit is finer than a minute.</exception>
+    internal SliceWidth Length
+    {
+        get => _length;
+        init
+        {
+            if (value is < SliceWidth.Minute or > SliceWidth.Month)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "A period spans a minute, an hour, a day or a month.");
+            }
+
+            _length = value;
+        }
+    }
+
     /// <summary>
     /// The unit of the instant a dataset of periods leads its key with: its key's first column, a
     /// timestamp stored in UTC, or naive, which a dataset of periods reads as UTC.
@@ -58,4 +80,26 @@ public sealed record PeriodOptions
 
         return leading.Unit ?? TimeUnit.Microseconds;
     }
+}
+
+/// <summary>
+/// The levels of a dataset compacted by periods. Level 0 holds the appends. The late level holds rows
+/// older than the fresh object they would overlap, and rows of sealed periods: sorted objects that
+/// overlap, under a ceiling as level 0's. The periods level holds one object per sealed period, and
+/// the fresh levels, from <see cref="FirstFresh"/> up, the open period and the closed ones until their
+/// seal, each level f times the one below; every one of them is key-disjoint.
+/// </summary>
+internal static class PeriodLevels
+{
+    /// <summary>The late level.</summary>
+    internal const int Late = 1;
+
+    /// <summary>The level of sealed periods.</summary>
+    internal const int Periods = 2;
+
+    /// <summary>The first fresh level, which level 0's exit writes the rows past every fresh object into.</summary>
+    internal const int FirstFresh = 3;
+
+    /// <summary>Whether a level is a fresh one.</summary>
+    internal static bool IsFresh(int level) => level >= FirstFresh;
 }

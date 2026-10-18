@@ -858,8 +858,8 @@ internal sealed class DatasetScanBuilder
     /// <summary>
     /// The most objects the scan will hold open at once, stated before any is read: one in the
     /// tree's order, two with a prefetch, which opens the next object ahead; key-ordered on the
-    /// clustering key, level 0's objects and one per level above it; on any other column every
-    /// object, the summaries giving no disjointness to lean on.
+    /// clustering key, level 0's objects, a late level's, and one per other level; on any other column
+    /// every object, the summaries giving no disjointness to lean on.
     /// </summary>
     private long CursorBound(long objects, List<long> keptByLevel)
     {
@@ -878,13 +878,11 @@ internal sealed class DatasetScanBuilder
             return objects;
         }
 
+        // Level 0's objects, and a late level's, overlap: each may be open at once.
         long cursors = keptByLevel.Count > 0 ? keptByLevel[0] : 0;
         for (int level = 1; level < keptByLevel.Count; level++)
         {
-            if (keptByLevel[level] > 0)
-            {
-                cursors++;
-            }
+            cursors += _version.Levels.IsDisjoint(level) ? Math.Min(keptByLevel[level], 1) : keptByLevel[level];
         }
 
         return cursors;

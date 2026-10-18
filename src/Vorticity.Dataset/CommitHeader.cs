@@ -157,6 +157,12 @@ internal sealed record CommitHeader
     public TimeSpan? Lateness { get; init; }
 
     /// <summary>
+    /// The calendar unit a period of a dataset compacted by periods spans (<see cref="PeriodOptions.Length"/>);
+    /// null for a dataset that is not, or one whose header predates the field, whose periods are days.
+    /// </summary>
+    internal SliceWidth? PeriodLength { get; init; }
+
+    /// <summary>
     /// The columns whose values questions look up (<see cref="DatasetOptions.Identifiers"/>), kept by
     /// every header; empty for none. A header that carries any names <see cref="DatasetFeatures.Identifiers"/>.
     /// </summary>
@@ -187,6 +193,7 @@ internal sealed record CommitHeader
         internal const int ErasureDelay = 18;
         internal const int Lateness = 19;
         internal const int Identifiers = 20;
+        internal const int PeriodLength = 21;
     }
 
     internal static class SourceField
@@ -298,6 +305,11 @@ internal sealed record CommitHeader
         foreach (string column in Identifiers)
         {
             writer.WriteString(Field.Identifiers, column);
+        }
+
+        if (PeriodLength is { } length)
+        {
+            writer.WriteUInt64Always(Field.PeriodLength, (ulong)length);
         }
     }
 
@@ -480,6 +492,7 @@ internal sealed record CommitHeader
         TimeSpan? erasureDelay = null;
         TimeSpan? lateness = null;
         List<string> identifiers = [];
+        SliceWidth? periodLength = null;
 
         try
         {
@@ -548,6 +561,12 @@ internal sealed record CommitHeader
                     case (Field.Identifiers, ProtoWireType.LengthDelimited):
                         identifiers.Add(System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.PeriodLength, ProtoWireType.Varint):
+                        ulong unit = reader.ReadVarint();
+                        periodLength = unit is >= (ulong)SliceWidth.Minute and <= (ulong)SliceWidth.Month
+                            ? (SliceWidth)unit
+                            : throw new CommitFormatException($"A commit header names period unit {unit}, which is none of a minute, an hour, a day or a month.");
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -588,6 +607,7 @@ internal sealed record CommitHeader
             ErasureDelay = erasureDelay,
             Lateness = lateness,
             Identifiers = identifiers,
+            PeriodLength = periodLength,
         };
     }
 

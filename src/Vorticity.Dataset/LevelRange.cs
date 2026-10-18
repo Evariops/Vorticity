@@ -24,8 +24,9 @@ internal sealed class LevelRange
     private readonly FilterLiteral _low;
     private readonly FilterLiteral _high;
     private readonly bool _bounded;
+    private readonly bool _lowExcluded;
 
-    private LevelRange(int level, string path, FilterLiteral low, FilterLiteral high, bool bounded)
+    private LevelRange(int level, string path, FilterLiteral low, FilterLiteral high, bool bounded, bool lowExcluded = false)
     {
         Level = level;
         Path = path;
@@ -33,6 +34,21 @@ internal sealed class LevelRange
         _low = low;
         _high = high;
         _bounded = bounded;
+        _lowExcluded = lowExcluded;
+    }
+
+    /// <summary>
+    /// The part of <paramref name="level"/> strictly above <paramref name="low"/> and up to the largest
+    /// maximum of <paramref name="sources"/>: where level 0's exit of a dataset of periods writes the
+    /// rows past every fresh object, the last of which ends at <paramref name="low"/>. Unbounded when a
+    /// source states no maximum on the key.
+    /// </summary>
+    internal static LevelRange Above(int level, FilterLiteral low, IReadOnlyList<CompactionInput> sources, ClusteringKey key)
+    {
+        LevelRange hull = Of(level, sources, key);
+        return hull._bounded
+            ? new LevelRange(level, hull.Path, low, hull._high, bounded: true, lowExcluded: true)
+            : hull;
     }
 
     /// <summary>The level the range lies in.</summary>
@@ -104,7 +120,19 @@ internal sealed class LevelRange
     }
 
     /// <summary>Whether a column's bounds may meet the range; a missing bound proves nothing, so it meets.</summary>
-    private bool Meets(ColumnSummary column) =>
-        !(column.HasMin && KeyCursor.Compare(column.Min, _high) > 0)
-        && (!column.HasMax || KeyCursor.Compare(column.Max, _low) >= 0);
+    private bool Meets(ColumnSummary column)
+    {
+        if (column.HasMin && KeyCursor.Compare(column.Min, _high) > 0)
+        {
+            return false;
+        }
+
+        if (!column.HasMax)
+        {
+            return true;
+        }
+
+        int order = KeyCursor.Compare(column.Max, _low);
+        return order > 0 || (order == 0 && !_lowExcluded);
+    }
 }

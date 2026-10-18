@@ -24,7 +24,7 @@ namespace Vorticity.Dataset;
 /// tallies. Both choose the same job.
 /// </para>
 /// </remarks>
-internal static class CompactionPolicy
+internal static partial class CompactionPolicy
 {
     /// <summary>
     /// Plans the compaction due on a dataset's current version; the plan's job is null when nothing
@@ -51,8 +51,16 @@ internal static class CompactionPolicy
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
         PlannedVersion version = new PlannedVersion(dataset);
         CompactionOptions settings = SettingsFor(version, options);
-        CompactionStyle style = settings.StyleFor(version.Key is not null);
-        bool descends = style == CompactionStyle.Leveled ? version.Key is not null : settings.PickFor(style) == CompactionPick.RoundRobin;
+        CompactionStyle style = settings.StyleFor(version.Key is not null, version.Levels.ByPeriods);
+
+        // A dataset of periods holds few objects, a few per level and one per sealed period, so its
+        // plan reads them all.
+        bool descends = style switch
+        {
+            CompactionStyle.Periods => false,
+            CompactionStyle.Leveled => version.Key is not null,
+            _ => settings.PickFor(style) == CompactionPick.RoundRobin,
+        };
         if (descends && await TalliesAsync(version, cancellationToken).ConfigureAwait(false) is { } tallies)
         {
             return await DescendAsync(version, settings, style, tallies, jobs, cancellationToken).ConfigureAwait(false);
@@ -71,7 +79,8 @@ internal static class CompactionPolicy
         ArgumentNullException.ThrowIfNull(dataset);
         PlannedVersion version = new PlannedVersion(dataset);
         CompactionOptions settings = SettingsFor(version, options);
-        return await ReadEveryLeafAsync(version, settings, settings.StyleFor(version.Key is not null), jobs, cancellationToken)
+        return await ReadEveryLeafAsync(
+                version, settings, settings.StyleFor(version.Key is not null, version.Levels.ByPeriods), jobs, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -119,6 +128,22 @@ internal static class CompactionPolicy
     /// <exception cref="ArgumentException">The options ask for tiered levels on a dataset with a clustering key.</exception>
     private static CompactionOptions SettingsFor(PlannedVersion dataset, CompactionOptions? options)
     {
+        // The periods are written in the dataset, so the style they imply is every writer's.
+        if (options is { Style: CompactionStyle.Leveled or CompactionStyle.Tiered } && dataset.Levels.ByPeriods)
+        {
+            throw new ArgumentException(
+                "A dataset that declares periods compacts by periods: its late level and its fresh levels are laid out for them, " +
+                "and another style would merge across them.",
+                nameof(options));
+        }
+
+        if (options is { Style: CompactionStyle.Periods } && !dataset.Levels.ByPeriods)
+        {
+            throw new ArgumentException(
+                "Compacting by periods takes a dataset that declares them at creation (DatasetOptions.Periods).",
+                nameof(options));
+        }
+
         if (options is { Style: CompactionStyle.Tiered } && dataset.Key is not null)
         {
             // The style is not written in the dataset, so two writers could compact it under two;
@@ -198,6 +223,11 @@ internal static class CompactionPolicy
         CompactionStyle style,
         HashSet<int> taken)
     {
+        if (style == CompactionStyle.Periods)
+        {
+            return ChoosePeriods(dataset, levels, settings, taken);
+        }
+
         if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0)
             && Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling) is { } drained
             && !taken.Contains(drained.ToLevel))

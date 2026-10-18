@@ -2800,11 +2800,14 @@ Vorticity.Dataset:     property long BytesPerSecond { get; init; }
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionStyle
 Vorticity.Dataset:     const CompactionStyle Auto = 0
 Vorticity.Dataset:     const CompactionStyle Leveled = 1
+Vorticity.Dataset:     const CompactionStyle Periods = 3
 Vorticity.Dataset:     const CompactionStyle Tiered = 2
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionTrigger
 Vorticity.Dataset:     const CompactionTrigger Erasure = 5
 Vorticity.Dataset:     const CompactionTrigger Fragments = 3
+Vorticity.Dataset:     const CompactionTrigger FreshMerge = 8
+Vorticity.Dataset:     const CompactionTrigger LateCeiling = 7
 Vorticity.Dataset:     const CompactionTrigger LevelSize = 2
 Vorticity.Dataset:     const CompactionTrigger LevelZeroCeiling = 1
 Vorticity.Dataset:     const CompactionTrigger Marks = 4

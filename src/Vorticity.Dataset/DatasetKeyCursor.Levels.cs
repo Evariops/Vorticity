@@ -36,13 +36,17 @@ internal sealed partial class DatasetKeyCursor
             _owner = owner;
             _path = new Frame[tree.Depth];
             Number = number;
+            Disjoint = owner._version.Levels.IsDisjoint(number);
         }
 
         /// <summary>The level's number.</summary>
         internal int Number { get; }
 
-        /// <summary>Whether the level's objects are key-disjoint, in the order of their keys.</summary>
-        internal bool InKeyOrder => DatasetLevels.InKeyOrder(Number);
+        /// <summary>
+        /// Whether the level's objects are key-disjoint, in the order of their keys: every level above
+        /// 0 but the late level of a dataset of periods, whose objects overlap.
+        /// </summary>
+        internal bool Disjoint { get; }
 
         /// <summary>Whether an object lies past the place.</summary>
         internal bool HasNext => _nextLength > 0;

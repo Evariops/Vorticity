@@ -1556,6 +1556,7 @@ public sealed class VortexDataset : IAsyncDisposable
             LockedStore = options.LockedStore,
             ErasureDelay = options.ErasureDelay,
             Lateness = options.Periods?.Lateness,
+            PeriodLength = options.Periods?.Length,
             Identifiers = [.. options.Identifiers ?? []],
             Features = features,
             Chunker = new ChunkerSettings(

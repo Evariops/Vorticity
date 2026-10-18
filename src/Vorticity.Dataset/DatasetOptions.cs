@@ -264,7 +264,9 @@ public sealed record DatasetOptions
 
     /// <summary>The periods a header records, or null for a dataset compacted by levels.</summary>
     private static PeriodOptions? PeriodsOf(CommitHeader header) =>
-        header.Lateness is { } lateness ? new PeriodOptions { Lateness = lateness } : null;
+        header.Lateness is { } lateness
+            ? new PeriodOptions { Lateness = lateness, Length = header.PeriodLength ?? SliceWidth.Day }
+            : null;
 
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);

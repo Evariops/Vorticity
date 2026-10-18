@@ -18,7 +18,7 @@ namespace Vorticity.Dataset;
 /// On the clustering key an object's cursor opens only once it could hold the next key. Walking
 /// up, its tree key is an exact lower bound on its keys. Walking down, the levels above 0 are
 /// key-disjoint, so the tree key of the next object of its level is a strict upper bound on them;
-/// level 0's objects, which nothing bounds from above, open at the seek. On any other column every
+/// level 0's objects, and a late level's, which nothing bounds from above, open at the seek. On any other column every
 /// object's cursor opens at the first seek. The heap is a min-heap walking up and a max-heap
 /// walking down, and a step against its direction re-seeks every object at the current entry, as
 /// the core's merge of runs does: the entries are ordered by key, then by the dataset's row, so the
@@ -927,10 +927,10 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
                 continue;
             }
 
-            if (direction > 0 && sought is not null && level.InKeyOrder)
+            if (direction > 0 && sought is not null && level.Disjoint)
             {
-                // Above level 0 the objects are disjoint on the clustering key, so everything before
-                // the last one whose minimum is at or below the sought key holds only smaller keys.
+                // In a key-disjoint level, everything before the last object whose minimum is at or
+                // below the sought key holds only smaller keys.
                 await level.SeekAsync(root, sought, inclusive: true, before: true, cancellationToken).ConfigureAwait(false);
             }
             else if (direction > 0)
@@ -1055,9 +1055,9 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
     /// <summary>
     /// Walking down, whether the object past the place of <paramref name="level"/> bounds the keys
     /// of the next one to open, strictly from above: the levels above 0 are key-disjoint. Nothing
-    /// bounds them in level 0, past a level's last object, and off the clustering key.
+    /// bounds them in level 0 or a late level, past a level's last object, and off the clustering key.
     /// </summary>
-    private bool HasLimit(LevelWalk level) => _bounded && level.InKeyOrder && level.HasNext;
+    private bool HasLimit(LevelWalk level) => _bounded && level.Disjoint && level.HasNext;
 
     /// <summary>Whether level <paramref name="left"/>'s next object has a higher limit than level <paramref name="right"/>'s.</summary>
     private bool Higher(LevelWalk left, LevelWalk right) =>
