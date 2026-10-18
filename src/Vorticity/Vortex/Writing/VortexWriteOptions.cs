@@ -242,6 +242,14 @@ public sealed record VortexWriteOptions
     /// <summary>Whether the runs the writer moves to <see cref="ScratchDirectory"/> are sealed: set for a writer of a session that seals its files.</summary>
     internal bool SealScratch { get; init; }
 
+    /// <summary>
+    /// The most rows the file will hold, when the caller knows a bound, 0 otherwise: a compaction knows
+    /// its inputs' rows. A writer that sizes its chunks (no <see cref="ChunkTargetBytes"/>) then keeps
+    /// them long enough that the footer, a node per chunk and column, stays within half the tables a
+    /// traversal of it may visit, whatever the bytes per chunk.
+    /// </summary>
+    internal long RowBound { get; init; }
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

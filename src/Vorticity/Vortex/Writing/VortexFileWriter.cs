@@ -201,6 +201,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Whether the writer sizes the chunks, the options having set no byte target.</summary>
     private bool _automaticChunks;
 
+    /// <summary>The fewest blocks a chunk holds, from the file's row bound (<see cref="LeastChunkBlocks"/>); 0 for none.</summary>
+    private long _leastChunkBlocks;
+
     /// <summary>Whether the schema holds a list or a map, so a chunk may share a batch's children.</summary>
     private readonly bool _mayShareChildren;
 
@@ -608,6 +611,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
         };
+        writer._leastChunkBlocks = LeastChunkBlocks(options.RowBound, schema, writer._rowBlock);
         if (writer._indexes is { } built)
         {
             built.Spared = options.BudgetSpares;
@@ -994,7 +998,41 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             blocks = Math.Min(blocks, AutomaticChunkBytes * rows / total / _rowBlock);
         }
 
-        return Math.Max(1, blocks) * _rowBlock;
+        return Math.Max(Math.Max(1, blocks), _leastChunkBlocks) * _rowBlock;
+    }
+
+    /// <summary>
+    /// The fewest blocks a chunk holds so that a file of <paramref name="rowBound"/> rows keeps its
+    /// footer, a flat layout per chunk and leaf column, within half the tables a traversal may visit
+    /// (<see cref="VortexLimits.MaxFlatBufferTables"/>): <c>2 × rows × columns / tables</c> rows,
+    /// in whole blocks. Zero without a bound, or when one call is one chunk.
+    /// </summary>
+    internal static long LeastChunkBlocks(long rowBound, DType schema, int rowBlock)
+    {
+        if (rowBound <= 0 || rowBlock <= 0)
+        {
+            return 0;
+        }
+
+        long rows = (long)Math.Ceiling(2.0 * rowBound * LeafColumns(schema) / VortexLimits.MaxFlatBufferTables);
+        return (rows + rowBlock - 1) / rowBlock;
+    }
+
+    /// <summary>The columns of <paramref name="dtype"/> a layout writes a flat layout for: each leaf of its structs.</summary>
+    private static long LeafColumns(DType dtype)
+    {
+        if (dtype.Kind != DTypeKind.Struct)
+        {
+            return 1;
+        }
+
+        long leaves = 0;
+        for (int i = 0; i < dtype.FieldCount; i++)
+        {
+            leaves += LeafColumns(dtype.GetField(i));
+        }
+
+        return Math.Max(leaves, 1);
     }
 
     /// <summary>

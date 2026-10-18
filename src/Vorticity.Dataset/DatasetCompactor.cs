@@ -119,7 +119,7 @@ internal static class DatasetCompactor
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
-        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge);
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows);
         long rows;
         try
         {
@@ -456,6 +456,7 @@ internal static class DatasetCompactor
         private readonly DatasetSchema _schema;
         private readonly bool _inKeyOrder;
         private readonly long _target;
+        private readonly long _rowBound;
         private readonly List<WrittenObject> _written = [];
         private byte[] _lastKey = [];
         private int _lastKeyLength = -1;
@@ -463,13 +464,15 @@ internal static class DatasetCompactor
         private long _rows;
         private long _firstRow;
 
-        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder)
+        // The rows the job reads, `rowBound`, bound every object it writes, and so the length of their chunks.
+        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound)
         {
             _dataset = dataset;
             _schema = schema;
             _inKeyOrder = inKeyOrder;
             _target = target;
             _firstRow = firstRow;
+            _rowBound = rowBound;
         }
 
         /// <summary>The objects it has sealed.</summary>
@@ -510,7 +513,7 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder);
+            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder, _rowBound);
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             _rows += batch.RowCount;
         }

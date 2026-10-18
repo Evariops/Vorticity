@@ -50,6 +50,13 @@ widest column within a megabyte, between one block and 128, with all columns wit
 is what a read fetches of a column, so this bounds what a selective read brings in, and at eight
 bytes per value it makes sixteen blocks, enough for a scan to pay the fixed cost of a chunk rarely.
 
+The footer holds a node per chunk and column, and a reader visits at most a million tables of it
+(`MaxFlatBufferTables` in [limits](limits.md)). A dataset's compaction knows how many rows the object it
+writes holds at most, the rows it reads, and then keeps its chunks at least `2 × rows × columns / 10⁶`
+rows long, in whole blocks, so that even a very large object's footer stays within half that cap. A
+day of 10⁹ rows of 20 columns takes chunks of 40 960 rows at least, which the megabyte rule already
+passes for columns of eight bytes; a larger object, or a wider one, lengthens them.
+
 `ChunkTargetBytes` sets a fixed target in bytes for all the columns instead.
 `ColumnChunkTargetBytes` gives a single column a target of its own: its rows wait across the file's
 chunks until they reach that many bytes, then go out as one chunk of that column, so a dictionary is
