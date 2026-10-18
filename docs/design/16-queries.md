@@ -512,6 +512,16 @@ Two aggregates are the same when they have the same function, the same input exp
 filter, so the `g.Count()` of a `where`, an `orderby` and a `select` is counted once. An average
 shares the sum and the count of its column with a sum and a count of that column.
 
+### 5.6 States kept past a scan
+
+A dataset of periods keeps aggregates past a scan, for its runs and its tables, and merges them later
+with the states of a query. What it keeps is the engine's own state, in its widest form: a count, an
+integer sum as an `Int128`, a decimal sum in its 320 bits, a float sum as the wide indexed sum, which
+takes some 35 trillion values, and an extreme with whether there is one. Each is a kind of the index
+directory ([the kinds of persisted states](10-indexes.md#56-the-kinds-of-persisted-states)) stored as
+the words the engine holds, so a state read back merges into a query's as if the query had folded the
+rows itself, and the answer is the same bits whatever the cut between what was kept and what was read.
+
 ## 6. After the group by
 
 ### 6.1 Results: `Select`

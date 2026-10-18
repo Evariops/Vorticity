@@ -27,6 +27,20 @@ internal struct WideSum
     /// <summary>Whether the total is zero.</summary>
     internal readonly bool IsZero => (_l0 | _l1 | _l2 | _l3 | _l4) == 0;
 
+    /// <summary>The limbs of the total, least significant first: what a persisted state stores.</summary>
+    internal readonly void GetLimbs(out ulong l0, out ulong l1, out ulong l2, out ulong l3, out ulong l4)
+    {
+        l0 = _l0;
+        l1 = _l1;
+        l2 = _l2;
+        l3 = _l3;
+        l4 = _l4;
+    }
+
+    /// <summary>The total whose limbs, least significant first, are these: a persisted state read back.</summary>
+    internal static WideSum FromLimbs(ulong l0, ulong l1, ulong l2, ulong l3, ulong l4) =>
+        new WideSum { _l0 = l0, _l1 = l1, _l2 = l2, _l3 = l3, _l4 = l4 };
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void Add(Int128 value)
     {

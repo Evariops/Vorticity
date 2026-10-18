@@ -288,6 +288,25 @@ lists its key columns in its options together with the name of the encoding its 
   exactly the regime where filters cost more than they save, and a composite sorted run answers the
   same question exactly.
 
+### 5.6 The kinds of persisted states
+
+The aggregates a dataset of periods keeps past a scan, for runs and for its tables, are kinds of their
+own, each a version in its name ([states](16-queries.md#56-states-kept-past-a-scan)). A state is
+integers on every machine, stored as columns of 64-bit integers that hold its words as the engine
+keeps them, so a state read back is the same bits and merges as the engine merges, in any order:
+
+| kind | the state | its columns |
+|---|---|---|
+| `vorticity.state.count.v1` | a count | `count` |
+| `vorticity.state.sum.int128.v1` | an exact sum of integers | `low`, `high` |
+| `vorticity.state.sum.int320.v1` | an exact sum of unscaled decimals | `l0` to `l4`, least significant first |
+| `vorticity.state.sum.indexed.v1` | an exact float sum and its count | `m0`, `m1`, `m2` (the three bins), `meta` (count, top bin, infinities met), `high` (the bins' high parts, the epochs settled) |
+| `vorticity.state.min.v1`, `vorticity.state.max.v1` | an extreme | a column of the value's own type, null where there is none |
+
+A kind's layout never changes under its name. A reader meeting a version it does not know ignores the
+state and works from the rows, as with any index. Fixed vectors pin the words of three float sums, so
+that the CI's x64 runs hold the bits arm64 computed.
+
 ## 6. The policy
 
 `VortexWriteOptions.Indexes` is an `IndexPolicy`, `None` by default, so a file written with the
