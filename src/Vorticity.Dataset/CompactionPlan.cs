@@ -104,6 +104,14 @@ public enum CompactionTrigger
     /// they are merged into one object of the next fresh level.
     /// </summary>
     FreshMerge = 8,
+
+    /// <summary>
+    /// A period of a dataset compacted by periods has ended, and the lateness horizon past it too: its
+    /// fresh objects, its late rows and its earlier object if it has one are written into one object of
+    /// the periods level, with its time slices. A sealed period is sealed again when its late rows
+    /// crowd the late level.
+    /// </summary>
+    Seal = 9,
 }
 
 /// <summary>
@@ -119,7 +127,8 @@ public enum CompactionTrigger
 /// their destination.
 /// </param>
 /// <param name="Exit">Whether the job is level 0's exit, which routes rows between two levels.</param>
-internal sealed record PeriodCut(SliceWidth Length, TimeUnit Unit, long? FreshAfter, bool Exit)
+/// <param name="Slices">Whether the job is a seal, whose object declares its time slices.</param>
+internal sealed record PeriodCut(SliceWidth Length, TimeUnit Unit, long? FreshAfter, bool Exit, bool Slices = false)
 {
     /// <summary>The level a row of <paramref name="instant"/> goes to in a job whose destination is <paramref name="to"/>.</summary>
     internal int LevelOf(long instant, int to) =>

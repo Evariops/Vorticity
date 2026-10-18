@@ -842,6 +842,12 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether the policy asks for no index: the writer holds this one only for what rides in the
+    /// directory, the time slices, and its ingest needs nothing of it.
+    /// </summary>
+    internal bool AsksNothing => !Asks(_policy);
+
     /// <summary>Whether a column feeds a streaming builder, so the ingest has something to call.</summary>
     internal bool Streams
     {

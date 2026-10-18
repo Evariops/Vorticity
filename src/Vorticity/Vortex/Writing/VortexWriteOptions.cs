@@ -250,6 +250,12 @@ public sealed record VortexWriteOptions
     /// </summary>
     internal long RowBound { get; init; }
 
+    /// <summary>
+    /// Whether the writer will be given the file's time slices, which ride in its index directory: it
+    /// then keeps that directory whatever its policy builds, which may be nothing.
+    /// </summary>
+    internal bool CarriesSlices { get; init; }
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Expressions;
+using Vorticity.Indexes;
 using Vorticity.Scanning;
 using Xunit;
 
@@ -19,11 +20,89 @@ public sealed partial class DatasetPeriodsCompactionTests
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
-    private static DatasetOptions Options(SliceWidth length) => new DatasetOptions
+    private static DatasetOptions Options(SliceWidth length, TimeSpan? lateness = null) => new DatasetOptions
     {
         ClusteringKey = [nameof(Request.At)],
-        Periods = new PeriodOptions { Lateness = TimeSpan.FromHours(1), Length = length },
+        Periods = new PeriodOptions { Lateness = lateness ?? TimeSpan.FromHours(1), Length = length },
     };
+
+    /// <summary>
+    /// Once the newest instant passes a period's end by the horizon, its objects become one object of
+    /// the periods level, with its time slices, whose rows read without its footer. Late rows of it
+    /// wait in the late level until they crowd it, then a second seal folds them in.
+    /// </summary>
+    [Fact]
+    public async Task AClosedPeriodIsSealedIntoOneObjectWithItsSlices()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, Request.Schema, Options(SliceWidth.Hour, TimeSpan.FromMinutes(10)), Ct);
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 1, Fanout = 100 };
+        List<DateTimeOffset> appended = [];
+        for (int quarter = 0; quarter < 6; quarter++)
+        {
+            await AppendAsync(dataset, Noon.AddMinutes(quarter * 15), 15, appended);
+        }
+
+        Dictionary<CompactionTrigger, int> triggers = await DrainAsync(dataset, compaction);
+        Assert.Equal(1, triggers.GetValueOrDefault(CompactionTrigger.Seal));
+        int[] counts = await CountsAsync(dataset);
+        Assert.Equal(1, counts[PeriodLevels.Periods]);
+        await CheckAsync(dataset, appended, SliceWidth.Hour);
+
+        // The period's object: its slices cover its sixty rows, and read without its footer.
+        TreeEntry period = await FirstAsync(dataset, PeriodLevels.Periods);
+        ObjectEntry entry = ObjectEntry.FromBytes(period.Value.Span);
+        Assert.Equal(60, entry.Rows);
+        await using (ObjectLease lease = await dataset.RentAsync(entry, Ct))
+        {
+            SliceTable slices = (await SliceTable.ReadAsync(lease.File, Ct))!;
+            Assert.Equal(60, slices.Rows);
+            SliceReader reader = (await SliceReader.OpenAsync(lease.File, lease.File.FileLength, lease.File.DType, null, Ct))!;
+            using RecordBatch rows = await reader.ReadSliceAsync(0, [0], Ct);
+            Assert.Equal(slices.Slices[0].Rows, rows.RowCount);
+        }
+
+        // A late row of the sealed hour waits beside it; a second one crowds the late level, past its
+        // ceiling of one, and both are sealed in.
+        await AppendAsync(dataset, Noon.AddMinutes(30).AddSeconds(30), 1, appended);
+        await AppendAsync(dataset, Noon.AddMinutes(100), 5, appended);
+        Assert.Equal(0, (await DrainAsync(dataset, compaction)).GetValueOrDefault(CompactionTrigger.Seal));
+        Assert.Equal(1, (await CountsAsync(dataset))[PeriodLevels.Late]);
+
+        await AppendAsync(dataset, Noon.AddMinutes(31).AddSeconds(30), 1, appended);
+        await AppendAsync(dataset, Noon.AddMinutes(105), 5, appended);
+        Assert.Equal(1, (await DrainAsync(dataset, compaction)).GetValueOrDefault(CompactionTrigger.Seal));
+        counts = await CountsAsync(dataset);
+        Assert.Equal((0, 1), (counts[PeriodLevels.Late], counts[PeriodLevels.Periods]));
+        Assert.Equal(62, ObjectEntry.FromBytes((await FirstAsync(dataset, PeriodLevels.Periods)).Value.Span).Rows);
+        await CheckAsync(dataset, appended, SliceWidth.Hour);
+    }
+
+    /// <summary>Runs every compaction due, and counts them by trigger.</summary>
+    private static async Task<Dictionary<CompactionTrigger, int>> DrainAsync(VortexDataset dataset, CompactionOptions compaction)
+    {
+        Dictionary<CompactionTrigger, int> triggers = [];
+        int jobs = 0;
+        while (await dataset.CompactAsync(compaction, Ct) is { } result)
+        {
+            Assert.Equal(OperationOutcome.Applied, result.Outcome);
+            Assert.True(++jobs < 50, $"compaction does not settle, {result.Trigger} again");
+            triggers[result.Trigger] = triggers.GetValueOrDefault(result.Trigger) + 1;
+        }
+
+        return triggers;
+    }
+
+    private static async Task<TreeEntry> FirstAsync(VortexDataset dataset, int level)
+    {
+        await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+        {
+            return entry;
+        }
+
+        throw new InvalidOperationException($"Level {level} holds no object.");
+    }
 
     [Fact]
     public async Task TheStyleFollowsThePeriodsAndTheirLengthIsKept()
@@ -100,8 +179,10 @@ public sealed partial class DatasetPeriodsCompactionTests
     [Fact]
     public async Task TheLateLevelMergesPastItsCeiling()
     {
+        // A horizon of three hours keeps every hour open, so that no seal takes the late rows first.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, Options(SliceWidth.Hour), Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, Request.Schema, Options(SliceWidth.Hour, TimeSpan.FromHours(3)), Ct);
         CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 1 };
         List<DateTimeOffset> appended = [];
         await AppendAsync(dataset, Noon, 30, appended);
@@ -138,8 +219,10 @@ public sealed partial class DatasetPeriodsCompactionTests
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         // Hours of appends of about half a minute each, an exit every few minutes: a period holds a few
-        // dozen fresh objects, and late rows cross its start.
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, Options(SliceWidth.Hour), Ct);
+        // dozen fresh objects, late rows cross its start, and it is sealed ten minutes past its end,
+        // which late rows of up to half an hour then follow.
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, Request.Schema, Options(SliceWidth.Hour, TimeSpan.FromMinutes(10)), Ct);
         CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 3, Fanout = 3 };
         Random random = new Random(seed);
         List<DateTimeOffset> appended = [];
@@ -196,6 +279,7 @@ public sealed partial class DatasetPeriodsCompactionTests
             $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}.\n"));
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.FreshMerge) > 0, "the schedule must merge fresh objects up");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.LevelZeroCeiling) > 0, "the schedule must empty level 0");
+        Assert.True(triggers.GetValueOrDefault(CompactionTrigger.Seal) > 0, "the schedule must seal a period");
     }
 
     /// <summary>

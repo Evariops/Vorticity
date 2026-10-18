@@ -32,15 +32,22 @@ internal static partial class CompactionPolicy
         PlannedVersion dataset, List<List<CompactionInput>> levels, CompactionOptions settings, HashSet<int> taken)
     {
         ClusteringKey key = dataset.Key!;
-        SliceWidth length = dataset.Options.Periods?.Length ?? SliceWidth.Day;
+        PeriodOptions periods = dataset.Options.Periods ?? new PeriodOptions();
+        SliceWidth length = periods.Length;
         TimeUnit unit = PeriodOptions.InstantOf(key);
         string path = key.Paths[0];
+        long? after = NewestHeld(levels, path);
+
+        // A period is closed once the newest instant held is past its end by the horizon: the horizon
+        // is how late a row may come behind the newest one.
+        long horizon = TimeSlicer.Units(periods.Lateness, unit);
+        bool Closed(long period) =>
+            after is { } newest && newest != long.MaxValue && TimeSlicer.Next(period, unit, length) <= newest - horizon;
 
         if (Held(levels, 0) > settings.LevelZeroCeiling
             && !taken.Contains(0) && !taken.Contains(PeriodLevels.Late) && !taken.Contains(PeriodLevels.FirstFresh))
         {
             List<CompactionInput> sources = levels[0];
-            long? after = NewestHeld(levels, path);
             return new CompactionJob(
                 0, PeriodLevels.FirstFresh, CompactionStyle.Periods, CompactionTrigger.LevelZeroCeiling, [.. sources], long.MaxValue, 0)
             {
@@ -51,9 +58,22 @@ internal static partial class CompactionPolicy
             };
         }
 
+        bool lateCrowded = Held(levels, PeriodLevels.Late) > settings.LevelZeroCeiling;
+        if (!taken.Contains(PeriodLevels.Late) && !taken.Contains(PeriodLevels.Periods)
+            && Sealable(levels, path, unit, length, Closed, lateCrowded) is { } sealing)
+        {
+            List<CompactionInput> inputs = Of(levels, sealing, path, unit, length);
+            return new CompactionJob(
+                inputs[0].Level, PeriodLevels.Periods, CompactionStyle.Periods, CompactionTrigger.Seal, inputs, long.MaxValue, 0)
+            {
+                Range = LevelRange.Of(PeriodLevels.Periods, inputs, key),
+                Cut = new PeriodCut(length, unit, null, Exit: false, Slices: true),
+            };
+        }
+
         // Merged per period, the late level holds an object per period with late rows: when there are
         // more such periods than its ceiling, only sealing them again lowers it.
-        if (Held(levels, PeriodLevels.Late) > settings.LevelZeroCeiling && !taken.Contains(0) && !taken.Contains(PeriodLevels.Late)
+        if (lateCrowded && !taken.Contains(0) && !taken.Contains(PeriodLevels.Late)
             && Crowded(levels[PeriodLevels.Late], path, unit, length) is { Count: > 1 } crowded)
         {
             return new CompactionJob(
@@ -66,8 +86,9 @@ internal static partial class CompactionPolicy
         int fanout = Math.Max(settings.Fanout, 2);
         for (int level = PeriodLevels.FirstFresh; level < levels.Count; level++)
         {
+            // A closed period's objects are sealed rather than merged up.
             if (taken.Contains(level) || taken.Contains(level + 1)
-                || Adjacent(levels[level], fanout, path, unit, length) is not { } run)
+                || Adjacent(levels[level], fanout, path, unit, length, Closed) is not { } run)
             {
                 continue;
             }
@@ -152,12 +173,12 @@ internal static partial class CompactionPolicy
     }
 
     /// <summary>
-    /// The first <paramref name="fanout"/> adjacent objects of one period in a fresh level, in key order;
-    /// null when no period holds that many. An object whose summaries do not place it in one period
-    /// breaks a run.
+    /// The first <paramref name="fanout"/> adjacent objects of one open period in a fresh level, in key
+    /// order; null when no open period holds that many. An object whose summaries do not place it in
+    /// one period, or that lies in a closed one, breaks a run.
     /// </summary>
     private static List<CompactionInput>? Adjacent(
-        List<CompactionInput> level, int fanout, string path, TimeUnit unit, SliceWidth length)
+        List<CompactionInput> level, int fanout, string path, TimeUnit unit, SliceWidth length, Func<long, bool> closed)
     {
         List<CompactionInput> run = [];
         long period = long.MinValue;
@@ -170,7 +191,7 @@ internal static partial class CompactionPolicy
                 period = of ?? long.MinValue;
             }
 
-            if (of is null)
+            if (of is not { } open || closed(open))
             {
                 continue;
             }
@@ -183,6 +204,78 @@ internal static partial class CompactionPolicy
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The oldest closed period a seal is due on: one that fresh objects hold, or late rows and no
+    /// object of the periods level yet, or, when the late level is crowded, late rows at all, which a
+    /// second seal folds into its object. Null when none is.
+    /// </summary>
+    private static long? Sealable(
+        List<List<CompactionInput>> levels, string path, TimeUnit unit, SliceWidth length, Func<long, bool> closed, bool lateCrowded)
+    {
+        HashSet<long> done = [];
+        if (PeriodLevels.Periods < levels.Count)
+        {
+            foreach (CompactionInput input in levels[PeriodLevels.Periods])
+            {
+                if (PeriodOf(input.Entry, path, unit, length) is { } period)
+                {
+                    done.Add(period);
+                }
+            }
+        }
+
+        long? oldest = null;
+        for (int level = PeriodLevels.Late; level < levels.Count; level++)
+        {
+            if (level == PeriodLevels.Periods)
+            {
+                continue;
+            }
+
+            foreach (CompactionInput input in levels[level])
+            {
+                if (PeriodOf(input.Entry, path, unit, length) is { } period && closed(period)
+                    && (level != PeriodLevels.Late || lateCrowded || !done.Contains(period))
+                    && (oldest is null || period < oldest))
+                {
+                    oldest = period;
+                }
+            }
+        }
+
+        return oldest;
+    }
+
+    /// <summary>Every object of <paramref name="period"/> in the fresh levels, the late level and the periods level, in that order.</summary>
+    private static List<CompactionInput> Of(List<List<CompactionInput>> levels, long period, string path, TimeUnit unit, SliceWidth length)
+    {
+        List<CompactionInput> inputs = [];
+        void Add(int level)
+        {
+            if (level >= levels.Count)
+            {
+                return;
+            }
+
+            foreach (CompactionInput input in levels[level])
+            {
+                if (PeriodOf(input.Entry, path, unit, length) == period)
+                {
+                    inputs.Add(input);
+                }
+            }
+        }
+
+        for (int level = PeriodLevels.FirstFresh; level < levels.Count; level++)
+        {
+            Add(level);
+        }
+
+        Add(PeriodLevels.Late);
+        Add(PeriodLevels.Periods);
+        return inputs;
     }
 
     /// <summary>

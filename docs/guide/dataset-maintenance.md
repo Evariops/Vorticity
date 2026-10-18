@@ -285,6 +285,11 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
   every commit then throws `TornCommitException`, which names the version.
   `VortexDataset.RemoveTornCommitAsync(store)` removes it once no writer holds it, and the dataset
   reads as the version before.
+* A compaction that dies leaves what it wrote, which no version names, and vacuum deletes it like any
+  other object. An upload in parts it had started is aborted when the job fails, and one the abort
+  could not reach, because the process died, stays in the bucket as parts no object shows. Give the
+  bucket a lifecycle rule that aborts incomplete uploads after a day. The seal of a dataset of periods
+  writes a period's object, gigabytes, in one upload, which makes the rule worth its line.
 * None of this changes the data. After all three operations, the same rows read back.
 
 ## Run it

@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
@@ -122,7 +123,11 @@ internal static class DatasetCompactor
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
-        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows, job.ToLevel);
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge, rowBound: job.Rows, job.ToLevel)
+        {
+            // A seal's object declares its time slices, on the instant, a top-level column.
+            Slicing = job.Cut is { Slices: true } cut && !key!.Paths[0].Contains('.') ? (key.Paths[0], cut.Unit) : null,
+        };
         long rows;
         try
         {
@@ -576,6 +581,14 @@ internal static class DatasetCompactor
         internal IReadOnlyList<int> Levels => _levels;
 
         /// <summary>
+        /// The instant column and its unit when each object declares its time slices, cut from its rows
+        /// counted per second as they are written; null for none.
+        /// </summary>
+        internal (string Path, TimeUnit Unit)? Slicing { get; init; }
+
+        private SecondCounts? _seconds;
+
+        /// <summary>
         /// Sends what is written next to <paramref name="level"/> and <paramref name="period"/>, sealing
         /// the object being written when it holds another's: an object holds one level's rows of one
         /// period.
@@ -626,7 +639,12 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder, _rowBound);
+            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder, _rowBound, sliced: Slicing is not null);
+            if (Slicing is { } slicing)
+            {
+                (_seconds ??= new SecondCounts(slicing.Unit)).Add(Instants(batch, slicing.Path));
+            }
+
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             _rows += batch.RowCount;
         }
@@ -646,6 +664,12 @@ internal static class DatasetCompactor
             _lastKeyLength = -1;
             await using (draft.Writer.ConfigureAwait(false))
             {
+                if (Slicing is { } slicing && _seconds is { Rows: > 0 } seconds)
+                {
+                    draft.Writer.DeclareSlices(slicing.Path, new SliceTable(slicing.Unit, TimeSlicer.Cut(seconds.Seconds, slicing.Unit)));
+                }
+
+                _seconds = null;
                 await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
             }
 

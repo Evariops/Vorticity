@@ -2813,6 +2813,7 @@ Vorticity.Dataset:     const CompactionTrigger LevelZeroCeiling = 1
 Vorticity.Dataset:     const CompactionTrigger Marks = 4
 Vorticity.Dataset:     const CompactionTrigger Neighbours = 6
 Vorticity.Dataset:     const CompactionTrigger None = 0
+Vorticity.Dataset:     const CompactionTrigger Seal = 9
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.CountingObjectStore : IObjectStore
 Vorticity.Dataset:     ctor CountingObjectStore(IObjectStore, bool = default)

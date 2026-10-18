@@ -360,7 +360,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired,
-        bool sealScratch = false)
+        bool sealScratch = false, bool carriesSlices = false)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -404,7 +404,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Pin(hints);
         }
 
-        _indexes = IndexWriter.Asks(indexes)
+        _indexes = IndexWriter.Asks(indexes) || carriesSlices
             ? new IndexWriter(
                 indexes, schema, _isTabular, _fieldCount, indexBudgetPerMille, _blockRows, keyEncoder,
                 scratchDirectory, scratchMemoryBytes, wideRowsAbove, sealScratch)
@@ -628,7 +628,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
-            options.SealScratch)
+            options.SealScratch, options.CarriesSlices)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _zstdLevel = options.ZstdLevel,
@@ -1283,7 +1283,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The index builders read every column at every block close, so a write that builds some
         // ingests on one thread.
-        if (_indexes is null && rows >= _blockRows && Fan is { } fan)
+        if (_indexes is null or { AsksNothing: true } && rows >= _blockRows && Fan is { } fan)
         {
             IngestAcross(fan, arena, rows);
             return;

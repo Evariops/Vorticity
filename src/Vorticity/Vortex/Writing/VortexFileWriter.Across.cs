@@ -152,7 +152,7 @@ public sealed partial class VortexFileWriter
     /// side by side, and the batch would be ingested across the threads too.
     /// </summary>
     private bool IngestsWithColumns(int rows) =>
-        CompressesAcross && _gathering is null && _indexes is null && _blockRows > 0 && rows >= _blockRows && Fan is not null;
+        CompressesAcross && _gathering is null && _indexes is null or { AsksNothing: true } && _blockRows > 0 && rows >= _blockRows && Fan is not null;
 
     /// <summary>
     /// Ingests a chunk cut whole from a batch and compresses its columns in one pass across the

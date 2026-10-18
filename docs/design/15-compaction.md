@@ -216,20 +216,35 @@ period, so its plan reads every leaf. Its jobs come in this order:
   periods hold goes to the first fresh level, where it follows every object, and every other row goes
   to the late level, so that a late row rewrites neither a fresh object nor a period. The commit checks
   that nothing came into the first fresh level past that instant meanwhile.
+- A period is sealed once the newest instant the dataset holds is past its end by the lateness
+  horizon, which is how late a row may come behind the newest. The seal reads the period's fresh
+  objects, its late rows and its earlier object if it has one, and writes one object into the periods
+  level, with its time slices ([the slice
+  table](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)), counted per second as the
+  rows stream past, so that a day costs 1.4 MB of counts rather than its instants. From then on, level
+  0's exit sends that period's rows to the late level, since they lie before the newest fresh instant,
+  so a late row never abandons a seal. Late rows of a sealed period wait in the late level, and when
+  the late level is past its ceiling a second seal folds them into the period's object.
 - The late level past level 0's ceiling merges the objects of each period it holds several of into
-  one, in place. When it holds more periods than its ceiling, only sealing them again lowers it.
-- `F` adjacent objects of one period in a fresh level merge into one object of the next fresh level,
-  where they follow every object, since only the first fresh level takes new rows. `F` is the
-  fan-out until the cost model that weighs the objects a question over the recent hours reads against
-  the rewrites per row gives it.
+  one, in place. When it holds more open periods than its ceiling, only their seals lower it.
+- `F` adjacent objects of one open period in a fresh level merge into one object of the next fresh
+  level, where they follow every object, since only the first fresh level takes new rows. A closed
+  period's objects wait for its seal instead. `F` is the fan-out until the cost model that weighs the
+  objects a question over the recent hours reads against the rewrites per row gives it.
 - Purges and fragments, as for any dataset.
 
 Every job writes an object per period, so that no object spans two, and level 0's exit an object per
 level as well. A period is a day until the rule that picks its length is written, and the header
 keeps it, so that every writer cuts the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
-appends, one row in a hundred late by up to half an hour, and after each round checks that every
-level but 0 and the late one is key-disjoint, that no object spans two periods, and that the key
-cursor and a key-ordered scan give back the rows appended.
+appends, one row in a hundred late by up to half an hour, deletes now and then, and hours sealed ten
+minutes past their end. After each round it checks that every level but 0 and the late one is
+key-disjoint, that no object spans two periods, and that the key cursor and a key-ordered scan give
+back the rows appended and not deleted. A seed runs about 75 exits, 34 fresh merges and 7 seals,
+none abandoned.
+
+A seal is a compaction for its commit: a delete that marks one of its inputs while it runs abandons
+it, and its outputs are left for vacuum. Carrying the marks over to the period's object instead is
+worth measuring on jobs of minutes over gigabytes, and is not done.
 
 ## 4. Folding marks where no merge goes
 

@@ -496,7 +496,8 @@ public sealed class DatasetPlanTests
         foreach (CompactionTrigger trigger in Enum.GetValues<CompactionTrigger>())
         {
             Assert.True(
-                trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge || met.GetValueOrDefault(trigger) > 0,
+                trigger is CompactionTrigger.LateCeiling or CompactionTrigger.FreshMerge or CompactionTrigger.Seal
+                    || met.GetValueOrDefault(trigger) > 0,
                 $"no shape met {trigger}, so the test proves nothing of it");
         }
 

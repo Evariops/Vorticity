@@ -43,18 +43,23 @@ internal static class TimeSlicer
     internal static List<TimeSlice> Cut(ReadOnlySpan<long> instants, TimeUnit unit, long targetRows = DefaultTargetRows)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(targetRows);
-        for (int i = 1; i < instants.Length; i++)
-        {
-            if (instants[i] < instants[i - 1])
-            {
-                throw new ArgumentException($"Row {i} comes before row {i - 1} in time: slices cut rows sorted by their instant.", nameof(instants));
-            }
-        }
+        SecondCounts seconds = new SecondCounts(unit);
+        seconds.Add(instants);
+        return Cut(seconds.Seconds, unit, targetRows);
+    }
 
+    /// <summary>
+    /// The slices of rows counted per second in <paramref name="seconds"/>, ascending: the same slices
+    /// the rows' instants give, since no slice is finer than a second.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The target is not positive.</exception>
+    internal static List<TimeSlice> Cut(ReadOnlySpan<SecondCount> seconds, TimeUnit unit, long targetRows = DefaultTargetRows)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(targetRows);
         List<TimeSlice> slices = [];
-        if (!instants.IsEmpty)
+        if (!seconds.IsEmpty)
         {
-            Cut(instants, 0, unit, WidthFor(instants, unit, targetRows), targetRows, slices);
+            Cut(seconds, 0, unit, WidthFor(seconds, unit, targetRows), targetRows, slices);
         }
 
         return slices;
@@ -67,17 +72,24 @@ internal static class TimeSlicer
     /// </summary>
     internal static SliceWidth WidthFor(ReadOnlySpan<long> instants, TimeUnit unit, long targetRows)
     {
-        List<int> counts = [];
+        SecondCounts seconds = new SecondCounts(unit);
+        seconds.Add(instants);
+        return WidthFor(seconds.Seconds, unit, targetRows);
+    }
+
+    private static SliceWidth WidthFor(ReadOnlySpan<SecondCount> seconds, TimeUnit unit, long targetRows)
+    {
+        List<long> counts = [];
         for (SliceWidth width = SliceWidth.Month; width > SliceWidth.Second; width--)
         {
             counts.Clear();
-            int row = 0;
-            while (row < instants.Length)
+            int at = 0;
+            while (at < seconds.Length)
             {
-                long end = Next(Floor(instants[row], unit, width), unit, width);
-                int stop = row + LowerBound(instants[row..], end);
-                counts.Add(stop - row);
-                row = stop;
+                long end = Next(Floor(seconds[at].Start, unit, width), unit, width);
+                int stop = at + LowerBound(seconds[at..], end);
+                counts.Add(RowsOf(seconds[at..stop]));
+                at = stop;
             }
 
             counts.Sort();
@@ -91,37 +103,49 @@ internal static class TimeSlicer
     }
 
     /// <summary>Cuts the rows at <paramref name="width"/>, a unit past the burst bound cut again one width finer.</summary>
-    private static void Cut(ReadOnlySpan<long> instants, long firstRow, TimeUnit unit, SliceWidth width, long target, List<TimeSlice> into)
+    private static void Cut(ReadOnlySpan<SecondCount> seconds, long firstRow, TimeUnit unit, SliceWidth width, long target, List<TimeSlice> into)
     {
-        int row = 0;
-        while (row < instants.Length)
+        int at = 0;
+        while (at < seconds.Length)
         {
-            long start = Floor(instants[row], unit, width);
+            long start = Floor(seconds[at].Start, unit, width);
             long end = Next(start, unit, width);
-            int stop = row + LowerBound(instants[row..], end);
-            int count = stop - row;
+            int stop = at + LowerBound(seconds[at..], end);
+            long count = RowsOf(seconds[at..stop]);
             if (count > BurstFactor * target && width > SliceWidth.Second)
             {
-                Cut(instants[row..stop], firstRow + row, unit, width - 1, target, into);
+                Cut(seconds[at..stop], firstRow, unit, width - 1, target, into);
             }
             else
             {
-                into.Add(new TimeSlice(start, end, firstRow + row, count));
+                into.Add(new TimeSlice(start, end, firstRow, count));
             }
 
-            row = stop;
+            firstRow += count;
+            at = stop;
         }
     }
 
-    /// <summary>The first index of <paramref name="sorted"/> at or past <paramref name="value"/>.</summary>
-    private static int LowerBound(ReadOnlySpan<long> sorted, long value)
+    private static long RowsOf(ReadOnlySpan<SecondCount> seconds)
+    {
+        long rows = 0;
+        foreach (SecondCount second in seconds)
+        {
+            rows += second.Rows;
+        }
+
+        return rows;
+    }
+
+    /// <summary>The first index of <paramref name="seconds"/> whose start is at or past <paramref name="value"/>.</summary>
+    private static int LowerBound(ReadOnlySpan<SecondCount> seconds, long value)
     {
         int low = 0;
-        int high = sorted.Length;
+        int high = seconds.Length;
         while (low < high)
         {
             int middle = (int)((uint)(low + high) >> 1);
-            if (sorted[middle] < value)
+            if (seconds[middle].Start < value)
             {
                 low = middle + 1;
             }
@@ -169,6 +193,9 @@ internal static class TimeSlicer
         _ => 30 * 86_400,
     };
 
+    /// <summary>A span of time counted in <paramref name="unit"/>, as an instant column counts it.</summary>
+    internal static long Units(TimeSpan span, TimeUnit unit) => checked((long)(span.TotalSeconds * UnitsPerSecond(unit)));
+
     /// <summary>A width of a fixed length, in <paramref name="unit"/>.</summary>
     private static long Length(TimeUnit unit, SliceWidth width) =>
         checked((long)(Seconds(width) * UnitsPerSecond(unit)));
@@ -191,5 +218,61 @@ internal static class TimeSlicer
     {
         long ticks = utc.Ticks - DateTime.UnixEpoch.Ticks;
         return unit == TimeUnit.Nanoseconds ? checked(ticks * 100) : TemporalUnits.FloorDiv(ticks, TemporalUnits.TicksPer(unit));
+    }
+}
+
+/// <summary>The rows of one second, its start counted in the instant's unit.</summary>
+internal readonly record struct SecondCount(long Start, long Rows);
+
+/// <summary>
+/// The rows of each second that holds some, counted as sorted instants stream past: what slices are
+/// cut from without keeping the instants, sixteen bytes a second holding rows, 1.4 MB for a day.
+/// </summary>
+internal sealed class SecondCounts(TimeUnit unit)
+{
+    private SecondCount[] _seconds = new SecondCount[16];
+    private int _count;
+    private long _last = long.MinValue;
+
+    // The end of the last second counted, so that an instant inside it costs a comparison.
+    private long _end = long.MinValue;
+
+    /// <summary>The seconds counted so far, ascending.</summary>
+    internal ReadOnlySpan<SecondCount> Seconds => _seconds.AsSpan(0, _count);
+
+    /// <summary>The rows counted so far.</summary>
+    internal long Rows { get; private set; }
+
+    /// <summary>Counts <paramref name="instants"/>, which follow those counted before.</summary>
+    /// <exception cref="ArgumentException">An instant comes before the one counted before it.</exception>
+    internal void Add(ReadOnlySpan<long> instants)
+    {
+        for (int i = 0; i < instants.Length; i++)
+        {
+            long instant = instants[i];
+            if (instant < _last)
+            {
+                throw new ArgumentException(
+                    $"Row {Rows + i} comes before row {Rows + i - 1} in time: slices cut rows sorted by their instant.", nameof(instants));
+            }
+
+            _last = instant;
+            if (instant < _end)
+            {
+                _seconds[_count - 1] = _seconds[_count - 1] with { Rows = _seconds[_count - 1].Rows + 1 };
+                continue;
+            }
+
+            long start = TimeSlicer.Floor(instant, unit, SliceWidth.Second);
+            _end = TimeSlicer.Next(start, unit, SliceWidth.Second);
+            if (_count == _seconds.Length)
+            {
+                Array.Resize(ref _seconds, _count * 2);
+            }
+
+            _seconds[_count++] = new SecondCount(start, 1);
+        }
+
+        Rows += instants.Length;
     }
 }
