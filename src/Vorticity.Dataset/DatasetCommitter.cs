@@ -360,6 +360,7 @@ internal static class DatasetCommitter
                 LastDataChange = ChangesRows(options.Kind, outcomes) ? version : LastDataChangeOf(template, parent),
                 Sources = sources,
                 Starts = starts,
+                Features = template.Features | FeaturesOf(operations),
             };
             header = Fitted(WithoutHeld(header));
 
@@ -745,6 +746,34 @@ internal static class DatasetCommitter
         }
 
         return header;
+    }
+
+    /// <summary>
+    /// The features of format 4 the operations bring into the trees: an entry they add with fields of
+    /// format 4. An entry rebuilt from one in the trees keeps its fields, and its feature is named already.
+    /// </summary>
+    private static DatasetFeatures FeaturesOf(IReadOnlyList<DatasetOperation> operations)
+    {
+        foreach (DatasetOperation operation in operations)
+        {
+            switch (operation)
+            {
+                case DatasetOperation.AddObject { Entry.HasFields: true }:
+                    return DatasetFeatures.EntryFields;
+                case DatasetOperation.ReplaceObjects replace:
+                    foreach ((int _, ReadOnlyMemory<byte> _, ObjectEntry entry) in replace.Outputs)
+                    {
+                        if (entry.HasFields)
+                        {
+                            return DatasetFeatures.EntryFields;
+                        }
+                    }
+
+                    break;
+            }
+        }
+
+        return DatasetFeatures.None;
     }
 
     /// <summary>The header with the inlined pages of <paramref name="omitted"/> left out.</summary>

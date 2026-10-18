@@ -1178,6 +1178,23 @@ public sealed partial class VortexFile : IAsyncDisposable
     internal long FileLength { get; }
 
     /// <summary>
+    /// The bytes from the first structure an open reads to the end of the file, its dtype included:
+    /// what an open asking for that many (<see cref="VortexOpenOptions.InitialReadBytes"/>) reads in
+    /// one request.
+    /// </summary>
+    /// <remarks>Parsed again from the retained tail on every call, so a file that is never asked costs nothing for it.</remarks>
+    /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
+    internal long TailBytes
+    {
+        get
+        {
+            ThrowIfDisposed();
+            PostscriptInfo postscript = ParsePostscript(_tail.Buffer.Span, _tailOffset, FileLength, VortexOpenOptions.Default);
+            return FileLength - RequiredOffset(in postscript, FileLength);
+        }
+    }
+
+    /// <summary>
     /// The identity of this version of the file's bytes, or null when the file carries none.
     /// </summary>
     /// <remarks>

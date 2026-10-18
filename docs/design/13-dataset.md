@@ -165,6 +165,12 @@ A leaf entry describes one data object:
   rows](#12-deleting-and-updating-rows)). A vector takes at most 1 KiB, which reduces the fan-out of
   the page holding it until the object is next rewritten: a page of entries all at the cap holds
   about a hundred
+- the length of its footer, when it passes the 64 KiB an open reads first: the bytes from the
+  object's statistics to its end, which the writer knows when it completes the object. An open then
+  asks for that many and reads the footer in one request, where it would take two, which matters
+  for objects of hundreds of megabytes and wide tables. This field and those like it come after the
+  summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
+  then their length and their tagged bytes, so an entry without them keeps its bytes
 
 An internal entry holds a page reference to a child, the sum of its rows, the union of its children's
 summaries, and the tally of the objects under it: their bytes, the largest of them, the rows marked
@@ -602,6 +608,13 @@ first commit. So a header that carries an offset is written in commit format 3, 
 refuses, and a dataset whose table is empty, never used or emptied by `ForgetSourcesAsync`, is
 written in format 2 still. Every header carries the whole table, about 30 bytes a source: 256
 sources take 7.5 KiB of the 192 KiB a header keeps for itself and its pages.
+
+A library that reads format 3 would parse an entry that carries a footer's length as one with deleted
+rows, and refuse it, or worse. So the header names the features of format 4 the dataset's trees use,
+`Features`, and a header that names one is written in commit format 4. The first is entries with
+such fields. A feature stays named in every header after the one that introduced it, since the pages
+that hold its entries stay in the trees, and a dataset that never uses one is written in format 2 or
+3 as before.
 
 ## 9. The read-path budget
 

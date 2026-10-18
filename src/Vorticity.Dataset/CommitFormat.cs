@@ -34,11 +34,20 @@ internal static class CommitFormat
     /// </summary>
     public const uint WithSources = 3;
 
+    /// <summary>
+    /// The format of a header that names features (<see cref="DatasetFeatures"/>): its tree holds
+    /// entries with fields past their summaries, which a reader of format 3 parses as deleted rows and
+    /// refuses, or as nothing at all. Once a dataset uses one, every later commit names it, since the
+    /// pages that hold such entries stay in its trees. It refuses the dataset by this number instead.
+    /// </summary>
+    public const uint WithFeatures = 4;
+
     /// <summary>The newest format this library reads.</summary>
-    public const uint Newest = WithSources;
+    public const uint Newest = WithFeatures;
 
     /// <summary>The format a commit object of <paramref name="header"/> is written in.</summary>
-    public static uint For(CommitHeader header) => header.Sources.Count > 0 ? WithSources : Version;
+    public static uint For(CommitHeader header) =>
+        header.Features != DatasetFeatures.None ? WithFeatures : header.Sources.Count > 0 ? WithSources : Version;
 
     /// <summary>
     /// The oldest format this library reads: format 1 holds nothing format 2 does not read the same,
@@ -82,6 +91,21 @@ internal static class CommitFormat
         BinaryPrimitives.WriteUInt64LittleEndian(destination[20..], checksum);
         TrailerMagic.CopyTo(destination[28..]);
     }
+}
+
+/// <summary>
+/// What a dataset uses of commit format 4, as its header names it: a library that reads format 3
+/// would misread each, so a header that names one is written in format 4, and every header after it
+/// names it too.
+/// </summary>
+[Flags]
+internal enum DatasetFeatures : ulong
+{
+    /// <summary>Nothing past format 3.</summary>
+    None = 0,
+
+    /// <summary>Leaf entries that carry fields of format 4, such as their object's footer length.</summary>
+    EntryFields = 1,
 }
 
 /// <summary>

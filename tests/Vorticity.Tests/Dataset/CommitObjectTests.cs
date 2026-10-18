@@ -294,6 +294,52 @@ public sealed class CommitObjectTests
         byte[] written = new CommitObjectBuilder(counting.Version).Build(counting);
         Assert.Equal(CommitFormat.WithSources, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(written.AsSpan(8)));
         Assert.Equal(counting.Sources, CommitObject.Open(written, written.Length).Header.Sources);
+
+        // A header that names a feature of format 4 is written in format 4, whatever else it counts,
+        // and reads back with it.
+        CommitHeader featured = counting with { Features = DatasetFeatures.EntryFields };
+        byte[] fourth = new CommitObjectBuilder(featured.Version).Build(featured);
+        Assert.Equal(CommitFormat.WithFeatures, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(fourth.AsSpan(8)));
+        CommitHeader reread = CommitObject.Open(fourth, fourth.Length).Header;
+        Assert.Equal(DatasetFeatures.EntryFields, reread.Features);
+        Assert.Equal(counting.Sources, reread.Sources);
+    }
+
+    // An entry that records its object's footer length: the same bytes as before up to its summaries, the
+    // fields after them, read back whole and read in place, with its deleted rows in line or out of line.
+    // Under what an open reads first, nothing is recorded and the entry keeps an earlier format's bytes.
+    [Fact]
+    public void AnEntryWithAFooterLengthReadsBackAndInPlace()
+    {
+        ObjectSummaries summaries = ObjectSummaries.From(
+            [new Vorticity.Scanning.ColumnSummary("k", Vorticity.Expressions.FilterLiteral.From(3L), true, Vorticity.Expressions.FilterLiteral.From(90L), true, true, 0, true)]);
+        PageReference fragment = new PageReference(7, 100, 40, 0xFEED);
+        ObjectEntry plain = new ObjectEntry("data/0001.vortex", 11, 1_000, 5_000_000, 22, [fragment], summaries);
+        Assert.Same(plain, plain.WithFooterBytes(ObjectEntry.FirstReadBytes));
+        Assert.False(plain.HasFields);
+
+        ObjectEntry described = plain.WithFooterBytes(300_000);
+        Assert.True(described.HasFields);
+        Assert.Equal(300_000, described.FooterBytes);
+        byte[] before = plain.ToBytes();
+        byte[] after = described.ToBytes();
+        Assert.Equal(before, after.AsSpan(0, before.Length).ToArray());
+
+        DeletionVector deleted = DeletionVector.Of([4, 5, 6, 7, 8, 40]);
+        foreach (ObjectEntry entry in (ObjectEntry[])[described, described.WithDeletions(deleted), described.WithDeletions(deleted).WithVectorAt(new PageReference(8, 0, 12, 0xBEEF))])
+        {
+            byte[] bytes = entry.ToBytes();
+            ObjectEntry back = ObjectEntry.FromBytes(bytes);
+            Assert.Equal(entry, back);
+            Assert.Equal(300_000, back.FooterBytes);
+            Assert.Equal(bytes, back.ToBytes());
+            Assert.Equal(entry.DeletedRows, back.DeletedRows);
+            (long bytesOf, long rows, long deletedRows, long fragments, long _) = ObjectEntry.TallyOf(bytes);
+            Assert.Equal((entry.Bytes, entry.Rows, entry.DeletedRows, 1L), (bytesOf, rows, deletedRows, fragments));
+            Assert.Equal(entry.Summaries.ToBytes(), ObjectEntry.SummaryOf(bytes).ToArray());
+            Assert.True(ObjectEntry.NamesAny(bytes, [7]));
+            Assert.Equal(entry.VectorAt.Exists, ObjectEntry.NamesAny(bytes, [8]));
+        }
     }
 
     [Fact]

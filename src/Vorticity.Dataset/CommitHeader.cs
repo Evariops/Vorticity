@@ -135,6 +135,13 @@ internal sealed record CommitHeader
     /// </summary>
     public ulong LastDataChange { get; init; }
 
+    /// <summary>
+    /// The features of commit format 4 the dataset uses, kept by every header after the first that
+    /// names one: the trees still hold what they describe. A header that names any is written in
+    /// format 4.
+    /// </summary>
+    public DatasetFeatures Features { get; init; }
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -153,6 +160,7 @@ internal sealed record CommitHeader
         internal const int LockedStore = 14;
         internal const int Sources = 15;
         internal const int LastDataChange = 16;
+        internal const int Features = 17;
     }
 
     internal static class SourceField
@@ -245,6 +253,10 @@ internal sealed record CommitHeader
         }
 
         writer.WriteUInt64(Field.LastDataChange, LastDataChange);
+        if (Features != DatasetFeatures.None)
+        {
+            writer.WriteUInt64(Field.Features, (ulong)Features);
+        }
     }
 
     private static void WriteSource(ref ProtoWriter writer, SourceOffset source)
@@ -422,6 +434,7 @@ internal sealed record CommitHeader
         bool locked = false;
         List<SourceOffset> sources = [];
         ulong lastDataChange = 0;
+        DatasetFeatures features = DatasetFeatures.None;
 
         try
         {
@@ -478,6 +491,9 @@ internal sealed record CommitHeader
                     case (Field.LastDataChange, ProtoWireType.Varint):
                         lastDataChange = reader.ReadVarint();
                         break;
+                    case (Field.Features, ProtoWireType.Varint):
+                        features = (DatasetFeatures)reader.ReadVarint();
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -514,6 +530,7 @@ internal sealed record CommitHeader
             LockedStore = locked,
             Sources = sources,
             LastDataChange = lastDataChange,
+            Features = features,
         };
     }
 

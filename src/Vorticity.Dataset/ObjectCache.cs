@@ -56,6 +56,18 @@ internal sealed class ObjectCache : IAsyncDisposable
             ? OpenOptions
             : OpenOptions with { Read = new VortexReadOptions { IndexFragments = fragments, IndexFragmentsAuthenticated = true } };
 
+    /// <summary>
+    /// <see cref="OpenOptionsWith"/>, with the footer's length when the entry records one: the open
+    /// then reads the object's footer in one request where it would take two.
+    /// </summary>
+    internal static VortexOpenOptions OpenOptionsOf(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
+    {
+        VortexOpenOptions options = OpenOptionsWith(fragments);
+        return entry.FooterBytes > 0
+            ? options with { InitialReadBytes = (int)Math.Min(entry.FooterBytes, int.MaxValue) }
+            : options;
+    }
+
     /// <summary>How many rents were answered without opening anything.</summary>
     internal long Hits { get; private set; }
 
@@ -208,7 +220,7 @@ internal sealed class ObjectCache : IAsyncDisposable
         ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
         try
         {
-            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), OpenOptionsWith(fragments), cancellationToken).ConfigureAwait(false);
+            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), OpenOptionsOf(entry, fragments), cancellationToken).ConfigureAwait(false);
             file.Session = _session;
             return new Held(file, source) { Leases = 1, FragmentRefusals = refused };
         }

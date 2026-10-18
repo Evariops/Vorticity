@@ -819,7 +819,8 @@ public sealed class VortexDataset : IAsyncDisposable
                 }
 
                 entry = new ObjectEntry(
-                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file));
+                    objectKey, Identity(file), file.RowCount, head.Length, UInt128.Zero, Summaries(file))
+                    .WithFooterBytes(file.TailBytes);
                 treeKey = await TreeKeyAsync(file, entry, end, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -1698,7 +1699,8 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // What the store holds, sealed bytes included: what a head reports, and verification checks.
         long bytes = draft.Sink.StoredLength;
-        ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries);
+        ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
+            .WithFooterBytes(draft.Writer.TailBytes);
         return new WrittenObject(entry, KeyOf(prefix, entry));
     }
 

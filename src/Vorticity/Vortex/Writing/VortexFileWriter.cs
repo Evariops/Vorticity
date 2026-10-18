@@ -150,6 +150,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal int BatchesIngestedAcross { get; private set; }
 
     /// <summary>
+    /// Once the file is completed, the bytes from its first structure an open reads to its end: what an
+    /// open asking for that many reads in one request. 0 before.
+    /// </summary>
+    internal long TailBytes { get; private set; }
+
+    /// <summary>
     /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
     /// rather than from a walk of the chunk, the columns' children included. The width counterpart
     /// of <see cref="ChunksFromTable"/>.
@@ -1903,6 +1909,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         await _sink.FinishAsync(cancellationToken).ConfigureAwait(false);
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
+
+        // What an open reads in one request: from the statistics, or the dtype when there are none,
+        // to the end, the index directory between them included.
+        TailBytes = _sink.Position - (statisticsLength > 0 ? statisticsOffset : dtypeOffset);
 
         // Runs written between chunks sit inside `dataEnd`, and are moved to the index count.
         long data = dataEnd - interleaved;
