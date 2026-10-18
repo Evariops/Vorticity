@@ -28,6 +28,8 @@ build on those two.
 | [17-parquet.md](17-parquet.md) | Parquet: where it sits in the core, reading and writing without copying, the kernels, what it decides where the Parquet standard is silent, and the gates that hold it |
 | [18-encryption.md](18-encryption.md) | AES-256-GCM over everything the library stores, files, datasets and scratch, with the platform's cipher, transparent to the API and costing no request to the store |
 | [19-object-storage.md](19-object-storage.md) | files and datasets read and written straight on Amazon S3, Cloudflare R2, OVHcloud, Scaleway, Azure Blob Storage and Google Cloud Storage, with clients written here over the platform's HTTP client, the same API, and every operation's requests counted |
+| [20-time-window-aggregates.md](20-time-window-aggregates.md) | a proposal, not built yet: objects that cover periods sized by their volume and sealed in one pass, rows sorted inside each time slice so that they count themselves, a synopsis for what runs cannot give, the changes every dataset needs first, and every worst case a question still meets |
+| [21-variant-columns.md](21-variant-columns.md) | a proposal, not built yet: attributes whose keys are data stored as the format's shredded variant, chosen per object, with rows sorted by shape, so that any path reads like a declared column |
 | [90-registry.md](90-registry.md) | every encoding, layout and dtype: its edition, whether it is read and written, how a take is served |
 | [99-sources.md](99-sources.md) | the primary sources, and how to verify them again |
 
