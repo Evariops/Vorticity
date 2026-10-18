@@ -92,6 +92,13 @@ internal sealed record UploadLimits
     /// <summary>The most a put read from a stream holds in memory to send it whole.</summary>
     internal required long MaxHeldBytes { get; init; }
 
+    /// <summary>
+    /// Whether parts sized by a bound of <paramref name="bound"/> bytes reach it: the most parts the
+    /// service takes, each as large as it takes.
+    /// </summary>
+    internal bool Reaches(long bound) =>
+        bound <= (long)MaxParts * Math.Min(MaxPartBytes, int.MaxValue & ~((1 << 20) - 1));
+
     /// <summary>Where a put read from a stream is held whole, on disk, before it is sent; null to send as it is read.</summary>
     internal required string? SpoolDirectory { get; init; }
 
@@ -193,7 +200,7 @@ internal static class Upload
             throw new ObjectStoreException($"'{key}' is {length} bytes, past the {limits.MaxSinglePut} a conditional {service.PutOperation} sends in one request.");
         }
 
-        return PartsAsync(service, transport, limits, key, PartSource.Of(content), length, condition, cancellationToken);
+        return PartsAsync(service, transport, limits, key, PartSource.Of(content), length, -1, condition, cancellationToken);
     }
 
     /// <summary>
@@ -202,16 +209,54 @@ internal static class Upload
     /// condition only on a whole put, up to <see cref="UploadLimits.MaxHeldBytes"/>, and sent in parts as
     /// they fill past it.
     /// </summary>
+    internal static ValueTask<PutOutcome> PutAsync(
+        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
+        PutAsync(service, transport, limits, key, content, length, -1, condition, cancellationToken);
+
+    /// <summary>
+    /// A put read from a stream whose length is unknown but at most <paramref name="bound"/>, or -1 for no
+    /// bound: held whole when the bound is under the part threshold, and otherwise sent in parts sized by
+    /// the bound, of one size on a service that wants them so, rather than spooled; a bound past what the
+    /// service's parts reach goes to the spool, or is refused without one. Without a bound, as
+    /// <see cref="PutAsync(IUploadService, HttpTransport, UploadLimits, string, PipeReader, long, PutCondition, CancellationToken)"/>.
+    /// </summary>
     internal static async ValueTask<PutOutcome> PutAsync(
-        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PipeReader content, long length, long bound, PutCondition condition, CancellationToken cancellationToken)
     {
-        if (limits.SpoolDirectory is { } directory)
+        bool bounded = length < 0 && bound >= 0;
+        bool inParts = condition.Kind == PutConditionKind.None || limits.ConditionalParts;
+        if (limits.SpoolDirectory is { } directory && !(bounded && inParts && limits.Reaches(bound)))
         {
             using SpoolFile spool = await SpoolFile.FillAsync(directory, content, length, key, cancellationToken).ConfigureAwait(false);
             return await PutAsync(service, transport, limits, key, spool.Bytes, condition, cancellationToken).ConfigureAwait(false);
         }
 
-        bool inParts = condition.Kind == PutConditionKind.None || limits.ConditionalParts;
+        if (bounded && inParts)
+        {
+            if (!limits.Reaches(bound))
+            {
+                throw new ObjectStoreException(
+                    $"'{key}' may take {bound} bytes, past what the {limits.MaxParts} parts the service takes reach: set StoreTransportOptions.SpoolDirectory to hold it on disk first.");
+            }
+
+            if (bound <= Math.Min(limits.PartThreshold, limits.MaxSinglePut))
+            {
+                // Under the threshold whatever it holds: held whole, and sent in one request.
+                (ChunkedBuffer body, bool ended) = await ChunkedBuffer.FillAsync(content, bound, cancellationToken).ConfigureAwait(false);
+                using (body)
+                {
+                    if (!ended)
+                    {
+                        throw PastItsBound(key, bound);
+                    }
+
+                    return await WholeAsync(service, transport, key, body.Sequence(), condition, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            return await PartsAsync(service, transport, limits, key, PartSource.Of(content, new Queue<ChunkedBuffer>()), -1, bound, condition, cancellationToken).ConfigureAwait(false);
+        }
+
         long threshold = inParts
             ? Math.Min(limits.PartThreshold, limits.MaxSinglePut)
             : Math.Min(limits.MaxHeldBytes, limits.MaxSinglePut);
@@ -259,7 +304,7 @@ internal static class Upload
             }
         }
 
-        return await PartsAsync(service, transport, limits, key, PartSource.Of(content, carried), length, condition, cancellationToken).ConfigureAwait(false);
+        return await PartsAsync(service, transport, limits, key, PartSource.Of(content, carried), length, -1, condition, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>One request, whose outcome is settled by the head when its answer is lost.</summary>
@@ -286,13 +331,13 @@ internal static class Upload
     /// its first part when its content can be sent again, held in memory or spooled on disk.
     /// </summary>
     private static async ValueTask<PutOutcome> PartsAsync(
-        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PartSource source, long length, PutCondition condition, CancellationToken cancellationToken)
+        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PartSource source, long length, long bound, PutCondition condition, CancellationToken cancellationToken)
     {
         for (int made = 1; ; made++)
         {
             try
             {
-                return await PartsOnceAsync(service, transport, limits, key, source, length, condition, cancellationToken).ConfigureAwait(false);
+                return await PartsOnceAsync(service, transport, limits, key, source, length, bound, condition, cancellationToken).ConfigureAwait(false);
             }
             catch (StoreRestartException again)
             {
@@ -313,9 +358,14 @@ internal static class Upload
         }
     }
 
+    /// <remarks>
+    /// The parts are sized by the length when it is known, by the bound when only that is, and grow with
+    /// their number when neither is; content past the bound is refused, and the upload given up.
+    /// </remarks>
     private static async ValueTask<PutOutcome> PartsOnceAsync(
-        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PartSource source, long length, PutCondition condition, CancellationToken cancellationToken)
+        IUploadService service, HttpTransport transport, UploadLimits limits, string key, PartSource source, long length, long bound, PutCondition condition, CancellationToken cancellationToken)
     {
+        long sizedBy = length >= 0 ? length : bound;
         UploadState upload;
         try
         {
@@ -333,7 +383,8 @@ internal static class Upload
                 key,
                 source,
                 length,
-                number => limits.PartSizeOf(number, length),
+                bound,
+                number => limits.PartSizeOf(number, sizedBy),
                 limits.MaxParts,
                 limits.PartsInFlight,
                 async (number, body, ct) => upload.Received(number, await service.SendPartAsync(upload, number, body, ct).ConfigureAwait(false)),
@@ -490,6 +541,9 @@ internal static class Upload
             $"A conditional {service.PutOperation} goes in one request, and '{key}' is {(length < 0 ? "longer than" : $"{length} bytes, past")} " +
             $"the {Math.Min(limits.MaxHeldBytes, limits.MaxSinglePut)} bytes a put holds in memory to send whole: " +
             "set StoreTransportOptions.SpoolDirectory to hold it on disk instead.");
+
+    private static ObjectStoreException PastItsBound(string key, long bound) =>
+        new ObjectStoreException($"'{key}' was announced as at most {bound} bytes and its content runs past them.");
 
     private static void CheckEnd(string key, long length, long read, bool ended)
     {

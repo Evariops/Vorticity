@@ -667,6 +667,13 @@ the head that settles a lost answer. What a put holds to send again depends on i
   that directory, mapped, and sent from the mapping as bytes in memory are, then the file is deleted.
   Its upload starts once the stream has ended, and it holds no pooled buffer, only the pages the
   system reads back as it sends them.
+- A stream whose length is unknown but bounded, the overload that takes a `maxLength`, as a
+  compaction's output is by its inputs, is sized by its bound: held whole and sent in one request
+  when the bound is under the part threshold, and otherwise sent in parts sized as an object of
+  that length's would be, of one size on R2, so that no part has to grow and no spool is needed.
+  Only a bound past what the service's parts reach goes to the spool, or is refused before a byte
+  goes when there is none, and content past its bound is refused and its upload given up. The
+  stores that only hold bytes, in memory or in a directory, take the bound as an unknown length.
 
 A completion that S3 refuses with 409 asks for the upload to be made again: the upload starts anew
 from its first part when the content can be sent again, held in memory or spooled, and the put throws

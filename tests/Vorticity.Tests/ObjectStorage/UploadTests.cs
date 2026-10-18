@@ -156,6 +156,77 @@ public sealed class UploadTests : IDisposable
         Assert.Equal(16 << 20, r2.PartSizeFor(-1, 5_000));
     }
 
+    [Fact]
+    public async Task APutBoundedInLengthStreamsWhereAnUnknownOneIsSpooled()
+    {
+        // A spool directory nothing can be written into: what goes through it fails, what streams does not.
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("A directory is made read-only by its Unix mode.");
+        }
+        else
+        {
+            await BoundedUnderALockedSpoolAsync(TestContext.Current.CancellationToken);
+        }
+    }
+
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    private async Task BoundedUnderALockedSpoolAsync(CancellationToken ct)
+    {
+        string locked = Directory.CreateDirectory(Path.Combine(_spool, "locked")).FullName;
+        StoreTransportOptions unusable = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero, SpoolDirectory = locked };
+        using S3Emulator emulator = new S3Emulator { MinimumPartSize = 64 << 10 };
+        await using S3ObjectStore store = Store(emulator, transport: unusable);
+        System.IO.File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            await BoundedAsync(emulator, store, ct);
+        }
+        finally
+        {
+            System.IO.File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static async Task BoundedAsync(S3Emulator emulator, S3ObjectStore store, CancellationToken ct)
+    {
+        byte[] content = Bytes(600_000, 9);
+
+        // Past the part threshold, in parts sized by the bound; under it, whole.
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("data/1", PipeReader.Create(Segmented(content, 7_000)), -1, 700_000, PutCondition.None, ct));
+        Assert.Equal(content, emulator.BytesOf(Bucket, "data/1"));
+        Assert.Equal(10, emulator.Log.Count(line => line.Contains("partNumber", StringComparison.Ordinal)));
+        Assert.Equal(PutOutcome.Created, await store.PutAsync("data/2", PipeReader.Create(new ReadOnlySequence<byte>(content.AsMemory(0, 100_000))), -1, 200_000, PutCondition.None, ct));
+        Assert.Equal(content.AsSpan(0, 100_000).ToArray(), emulator.BytesOf(Bucket, "data/2"));
+        Assert.Equal("PUT /data/2", emulator.Log.Last());
+        await Assert.ThrowsAnyAsync<UnauthorizedAccessException>(
+            async () => await store.PutAsync("data/3", PipeReader.Create(new ReadOnlySequence<byte>(content)), -1, PutCondition.None, ct));
+
+        // Content past its bound is refused, and nothing is left behind, in parts or whole.
+        foreach (long bound in new long[] { 500_000, 200_000 })
+        {
+            ObjectStoreException past = await Assert.ThrowsAsync<ObjectStoreException>(
+                async () => await store.PutAsync("data/4", PipeReader.Create(new ReadOnlySequence<byte>(content)), -1, bound, PutCondition.None, ct));
+            Assert.Contains("at most", past.Message, StringComparison.Ordinal);
+        }
+
+        Assert.Equal(0, emulator.OpenUploads);
+        Assert.Null(emulator.BytesOf(Bucket, "data/4"));
+
+        // A bound past what the service's parts reach goes to the spool, and is refused before a byte
+        // goes without a spool.
+        await using S3ObjectStore plain = Store(emulator);
+        int before = emulator.Log.Count;
+        ObjectStoreException far = await Assert.ThrowsAsync<ObjectStoreException>(
+            async () => await plain.PutAsync("data/5", PipeReader.Create(new ReadOnlySequence<byte>(content)), -1, 1L << 50, PutCondition.None, ct));
+        Assert.Contains("SpoolDirectory", far.Message, StringComparison.Ordinal);
+        Assert.Equal(before, emulator.Log.Count);
+
+        // On R2, the parts of a bounded put are of one size.
+        await using S3ObjectStore r2 = Store(emulator, S3Profile.R2);
+        Assert.Equal(r2.PartSizeFor(700_000, 1), r2.PartSizeFor(700_000, 9));
+    }
+
     private static S3ObjectStore Store(S3Emulator emulator, S3Profile? profile = null, StoreTransportOptions? transport = null) =>
         new S3ObjectStore(new S3StoreOptions
         {

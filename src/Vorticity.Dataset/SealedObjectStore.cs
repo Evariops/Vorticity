@@ -173,6 +173,13 @@ internal sealed class SealedObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
+    public async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, long maxLength, PutCondition condition, CancellationToken cancellationToken)
+    {
+        (PutOutcome outcome, _) = await PutSealedAsync(key, content, length, condition, cancellationToken, maxLength).ConfigureAwait(false);
+        return outcome;
+    }
+
+    /// <inheritdoc/>
     public async ValueTask<PutOutcome> PutAsync(string key, ReadOnlySequence<byte> content, PutCondition condition, CancellationToken cancellationToken)
     {
         (PutOutcome outcome, _) = await PutSealedAsync(key, content, condition, cancellationToken).ConfigureAwait(false);
@@ -266,8 +273,17 @@ internal sealed class SealedObjectStore : IObjectStore
     /// Creates an object, sealed when it is one of an encrypted dataset's commit or data objects and as
     /// given otherwise, and answers what the store answered and the bytes it now holds.
     /// </summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="content">Its bytes, streamed.</param>
+    /// <param name="length">Their length, or -1 when unknown.</param>
+    /// <param name="condition">When the put may write.</param>
+    /// <param name="cancellationToken">Cancels the put.</param>
+    /// <param name="maxLength">
+    /// When the length is unknown, the most bytes the content holds, or -1: sealed, the bound of what
+    /// that many plaintext bytes take.
+    /// </param>
     internal async ValueTask<(PutOutcome Outcome, long StoredLength)> PutSealedAsync(
-        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+        string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken, long maxLength = -1)
     {
         bool commit = CommitKey.TryParse(key, out ulong version);
         bool data = !commit && TryUid(key, out _);
@@ -279,7 +295,7 @@ internal sealed class SealedObjectStore : IObjectStore
 
         if (!Seals || (!commit && !data))
         {
-            return (await _inner.PutAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false), length);
+            return (await _inner.PutAsync(key, content, length, maxLength, condition, cancellationToken).ConfigureAwait(false), length);
         }
 
         byte[] id = DatasetId();
@@ -307,6 +323,7 @@ internal sealed class SealedObjectStore : IObjectStore
         // A content of unknown length is put as unknown, its sealed length following from the
         // plaintext's once it has ended.
         long sealedLength = length < 0 ? -1 : SealedFormat.SealedLength(descriptorLength, length, 1 << FrameLog2);
+        long sealedBound = length >= 0 || maxLength < 0 ? -1 : SealedFormat.SealedLength(descriptorLength, maxLength, 1 << FrameLog2);
         DataKey dataKey = await _keys.UnwrapAsync(name.KeyId, name.Wrapped, id, cancellationToken).ConfigureAwait(false);
 
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 1 << 20, resumeWriterThreshold: 1 << 19, useSynchronizationContext: false));
@@ -314,7 +331,7 @@ internal sealed class SealedObjectStore : IObjectStore
         PutOutcome outcome;
         try
         {
-            outcome = await _inner.PutAsync(key, pipe.Reader, sealedLength, condition, cancellationToken).ConfigureAwait(false);
+            outcome = await _inner.PutAsync(key, pipe.Reader, sealedLength, sealedBound, condition, cancellationToken).ConfigureAwait(false);
         }
         catch
         {

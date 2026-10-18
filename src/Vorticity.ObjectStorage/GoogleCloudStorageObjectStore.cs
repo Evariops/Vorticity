@@ -207,7 +207,11 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     }
 
     /// <inheritdoc/>
-    public async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+    public ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken) =>
+        PutAsync(key, content, length, -1, condition, cancellationToken);
+
+    /// <inheritdoc/>
+    public async ValueTask<PutOutcome> PutAsync(string key, PipeReader content, long length, long maxLength, PutCondition condition, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(content);
         Exception? failure = null;
@@ -215,8 +219,9 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
         {
             CheckKey(key);
             ArgumentOutOfRangeException.ThrowIfLessThan(length, -1);
+            ArgumentOutOfRangeException.ThrowIfLessThan(maxLength, -1);
             ThrowIfDisposed();
-            return await Upload.PutAsync(this, _transport, _limits, key, content, length, condition, cancellationToken).ConfigureAwait(false);
+            return await Upload.PutAsync(this, _transport, _limits, key, content, length, maxLength, condition, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception caught)
         {

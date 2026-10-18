@@ -65,6 +65,7 @@ internal static class PartPump
     /// <param name="key">The object's key, for the messages.</param>
     /// <param name="source">Where the parts come from.</param>
     /// <param name="length">The length announced, or -1.</param>
+    /// <param name="bound">The most bytes the content holds when its length is not announced, or -1.</param>
     /// <param name="sizeOf">The size of a part, by its number from 1: every part but the last has it.</param>
     /// <param name="maxParts">The most parts the service takes.</param>
     /// <param name="inFlight">The most parts in flight at once.</param>
@@ -79,6 +80,7 @@ internal static class PartPump
         string key,
         PartSource source,
         long length,
+        long bound,
         Func<int, int> sizeOf,
         int maxParts,
         int inFlight,
@@ -113,6 +115,12 @@ internal static class PartPump
                 {
                     part.Owner?.Dispose();
                     throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content runs past them.");
+                }
+
+                if (length < 0 && bound >= 0 && total > bound)
+                {
+                    part.Owner?.Dispose();
+                    throw new ObjectStoreException($"'{key}' was announced as at most {bound} bytes and its content runs past them.");
                 }
 
                 count++;
