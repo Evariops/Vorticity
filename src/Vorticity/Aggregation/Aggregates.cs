@@ -99,7 +99,7 @@ public readonly struct Aggregates<TRecord>
     /// <returns>The symbol of the sum; zero when no row holds a value. Reading it throws <see cref="OverflowException"/> when the sum does not fit <typeparamref name="T"/>.</returns>
     public Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<T>> column)
         where T : INumber<T> =>
-        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
+        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.SumInput(_binding, column)), _filter);
 
     /// <summary>The sum of the non-null values of a nullable <paramref name="column"/>.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
@@ -107,7 +107,7 @@ public readonly struct Aggregates<TRecord>
     /// <returns>The symbol of the sum; zero when no row holds a value.</returns>
     public Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
-        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
+        Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.SumInput(_binding, column)), _filter);
 
     /// <summary>The sum of <paramref name="column"/>, as a long, which no sum of narrower integers overflows on the way.</summary>
     /// <param name="column">The column.</param>

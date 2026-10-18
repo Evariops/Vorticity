@@ -363,8 +363,11 @@ scan that keeps no row.
 | `Half`, `float`, `double` | `double` | reproducibly: the same bits whatever the split |
 
 A sum widens what could overflow on the way and keeps the type of what could not, and it only throws
-`OverflowException` when the exact total does not fit the type it is delivered as. A nullable column
-sums as its type without the nullability. The engine accumulates an integer sum in the narrowest
+`OverflowException` when the exact total does not fit the type it is delivered as. A `long` or `ulong`
+column whose total may pass its type is widened by name, `g.Sum(r => r.DurationNs.AsInt128())`, and
+its sum is then delivered whole as an `Int128` or a `UInt128`. The widening changes no value, so it is
+the input of a sum and of nothing else: a comparison, an order or a projection of it throws. A
+nullable column sums as its type without the nullability. The engine accumulates an integer sum in the narrowest
 integer the statistics prove cannot overflow (the rows times the largest magnitude they give): a
 64-bit state where they prove it, 128 bits where they prove nothing. The width is the engine's choice,
 and the exactness is the promise.

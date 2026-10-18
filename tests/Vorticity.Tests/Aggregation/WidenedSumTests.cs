@@ -139,8 +139,68 @@ public sealed partial class WidenedSumTests
         return path;
     }
 
+    // A long column whose total passes long.MaxValue: its sum throws, and the sum of it widened by name is the
+    // exact total, of a scan and of every group, nullable or not, signed or not.
+    [Fact]
+    public async Task ASumWidenedByNameDeliversTheTotalALongWouldNotHold()
+    {
+        Duration[] rows = [.. Enumerable.Range(0, 400).Select(row => new Duration(
+            row % 3,
+            (1L << 61) + row,
+            row % 4 == 0 ? null : (1L << 60) + row,
+            (1UL << 63) + (ulong)row))];
+        string directory = Path.Combine(AppContext.BaseDirectory, "widened-sums");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"durations-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Duration>(path))
+        {
+            await writer.WriteAsync<Duration>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            await Assert.ThrowsAsync<OverflowException>(async () => await file.Scan<Duration>().SumAsync(r => r.Nanoseconds, Ct));
+
+            Int128 exact = rows.Aggregate(Int128.Zero, (sum, r) => sum + r.Nanoseconds);
+            Assert.Equal(exact, await file.Scan<Duration>().SumAsync(r => r.Nanoseconds.AsInt128(), Ct));
+            Assert.Equal(rows.Aggregate(Int128.Zero, (sum, r) => sum + (r.Maybe ?? 0)), await file.Scan<Duration>().SumAsync(r => r.Maybe.AsInt128(), Ct));
+            Assert.Equal(rows.Aggregate(UInt128.Zero, (sum, r) => sum + r.Count), await file.Scan<Duration>().SumAsync(r => r.Count.AsUInt128(), Ct));
+
+            List<DurationTotals> groups = await ListAsync(file.Scan<Duration>()
+                .GroupBy(r => r.Group)
+                .Select(g => (g.Key, g.Sum(r => r.Nanoseconds.AsInt128()), g.Sum(r => r.Maybe.AsInt128()), g.Sum(r => r.Count.AsUInt128())))
+                .As<DurationTotals>());
+            Assert.Equal(3, groups.Count);
+            foreach (DurationTotals group in groups)
+            {
+                Duration[] of = [.. rows.Where(r => r.Group == group.Group)];
+                Assert.Equal(of.Aggregate(Int128.Zero, (sum, r) => sum + r.Nanoseconds), group.Nanoseconds);
+                Assert.Equal(of.Aggregate(Int128.Zero, (sum, r) => sum + (r.Maybe ?? 0)), group.Maybe);
+                Assert.Equal(of.Aggregate(UInt128.Zero, (sum, r) => sum + r.Count), group.Count);
+            }
+
+            // A widened column is a sum's input and nothing else's.
+            InvalidOperationException average = await Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await file.Scan<Duration>().AverageAsync(r => r.Nanoseconds.AsInt128(), Ct));
+            Assert.Contains("AsInt128()", average.Message, StringComparison.Ordinal);
+            Assert.Throws<InvalidOperationException>(() => file.Scan<Duration>().Where(r => r.Nanoseconds.AsInt128() > Int128.One));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [VortexRecord]
     public partial record struct Sample(int Group, int Large, byte Small, int? Maybe, float Single, long Wide);
+
+    [VortexRecord]
+    public partial record struct Duration(int Group, long Nanoseconds, long? Maybe, ulong Count);
+
+    [VortexRecord]
+    public partial record struct DurationTotals(int Group, Int128 Nanoseconds, Int128 Maybe, UInt128 Count);
 
     [VortexRecord]
     public partial record struct Totals(int Group, long Large, ulong Small, long Maybe, double Single, long Wide);

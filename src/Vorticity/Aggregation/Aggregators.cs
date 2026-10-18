@@ -13,7 +13,17 @@ namespace Vorticity.Aggregating;
 /// </summary>
 internal static class Aggregators
 {
-    internal static ColumnShape Input<TRecord, T>(RecordBinding? binding, Func<Probe<TRecord>, Sym<T>> column)
+    internal static ColumnShape Input<TRecord, T>(RecordBinding? binding, Func<Probe<TRecord>, Sym<T>> column) =>
+        Input(binding, column, sum: false);
+
+    /// <summary>
+    /// The column a sum reads: <see cref="Input{TRecord, T}(RecordBinding?, Func{Probe{TRecord}, Sym{T}})"/>'s,
+    /// or the column a widening such as <c>AsInt128()</c> stands for, whose sum the wider type then delivers.
+    /// </summary>
+    internal static ColumnShape SumInput<TRecord, T>(RecordBinding? binding, Func<Probe<TRecord>, Sym<T>> column) =>
+        Input(binding, column, sum: true);
+
+    private static ColumnShape Input<TRecord, T>(RecordBinding? binding, Func<Probe<TRecord>, Sym<T>> column, bool sum)
     {
         ArgumentNullException.ThrowIfNull(column);
         if (binding is null)
@@ -21,7 +31,10 @@ internal static class Aggregators
             throw new InvalidOperationException("An aggregate is built inside the lambda of Select or AggregateAsync, which hands it its columns.");
         }
 
-        ColumnSym read = column(new Probe<TRecord>(binding)).Column;
+        Sym<T> symbol = column(new Probe<TRecord>(binding));
+        ColumnSym read = symbol.Node is WidenedSym widened
+            ? (sum ? widened.Column : throw widened.NotASum())
+            : symbol.Column;
         if (read.Field is ResultFieldExpr)
         {
             throw new InvalidOperationException(

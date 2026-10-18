@@ -24,7 +24,7 @@ public sealed partial class Scan<TRecord>
     /// <exception cref="OverflowException">The sum, exact in 128 bits for integers, does not fit <typeparamref name="T"/>.</exception>
     public ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default)
         where T : INumber<T> =>
-        ScalarAsync(Aggregators.Sum<T>(Aggregators.Input(Binding, column)), cancellationToken);
+        ScalarAsync(Aggregators.Sum<T>(Aggregators.SumInput(Binding, column)), cancellationToken);
 
     /// <summary>The sum of the non-null values of a nullable <paramref name="column"/> over the rows the scan keeps.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
@@ -34,7 +34,7 @@ public sealed partial class Scan<TRecord>
     /// <exception cref="OverflowException">The sum, exact in 128 bits for integers, does not fit <typeparamref name="T"/>.</exception>
     public ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T?>> column, CancellationToken cancellationToken = default)
         where T : struct, INumber<T> =>
-        ScalarAsync(Aggregators.Sum<T>(Aggregators.Input(Binding, column)), cancellationToken);
+        ScalarAsync(Aggregators.Sum<T>(Aggregators.SumInput(Binding, column)), cancellationToken);
 
     /// <summary>The sum of <paramref name="column"/> over the rows the scan keeps, as a long, which no sum of narrower integers overflows on the way.</summary>
     /// <param name="column">The column.</param>

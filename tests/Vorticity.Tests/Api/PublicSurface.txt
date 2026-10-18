@@ -1943,6 +1943,7 @@ Vorticity:     method Sym<DateTime> Truncate(Sym<DateTime>, CalendarUnit, TimeZo
 Vorticity:     method Sym<DateTimeOffset> Bucket(Sym<DateTimeOffset>, TimeSpan)
 Vorticity:     method Sym<DateTimeOffset> Truncate(Sym<DateTimeOffset>, CalendarUnit)
 Vorticity:     method Sym<DateTimeOffset> Truncate(Sym<DateTimeOffset>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Int128> AsInt128(Sym<long>)
 Vorticity:     method Sym<Nullable<DateOnly>> Truncate(Sym<Nullable<DateOnly>>, CalendarUnit)
 Vorticity:     method Sym<Nullable<DateTime>> Bucket(Sym<Nullable<DateTime>>, TimeSpan)
 Vorticity:     method Sym<Nullable<DateTime>> Truncate(Sym<Nullable<DateTime>>, CalendarUnit)
@@ -1950,8 +1951,15 @@ Vorticity:     method Sym<Nullable<DateTime>> Truncate(Sym<Nullable<DateTime>>, 
 Vorticity:     method Sym<Nullable<DateTimeOffset>> Bucket(Sym<Nullable<DateTimeOffset>>, TimeSpan)
 Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(Sym<Nullable<DateTimeOffset>>, CalendarUnit)
 Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(Sym<Nullable<DateTimeOffset>>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Nullable<Int128>> AsInt128(Sym<Nullable<long>>)
 Vorticity:     method Sym<Nullable<T>> Bucket<T>(Sym<Nullable<T>>, T)
+Vorticity:     method Sym<Nullable<UInt128>> AsUInt128(Sym<Nullable<ulong>>)
 Vorticity:     method Sym<T> Bucket<T>(Sym<T>, T)
+Vorticity:     method Sym<UInt128> AsUInt128(Sym<ulong>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$01DF41D9D29CD05019B5DC2C6435FB93
+Vorticity:     method Sym<UInt128> AsUInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$01DF41D9D29CD05019B5DC2C6435FB93.<M>$7815B10799D30D492102E0201CB121CC
+Vorticity:     method void <Extension>$(Sym<ulong>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$2FDA5503ABB056406F404D2C3F724432
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
@@ -1961,6 +1969,10 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$37A6A56DEBF90248B270BF9600C7
 Vorticity:     method Sym<Nullable<$T0>> Bucket($T0)
 Vorticity: static class Vorticity.SymExtensions.<G>$37A6A56DEBF90248B270BF9600C76F4F<$T0>.<M>$E8787F4DF31CF81B4F002AF712E79BE1<T>
 Vorticity:     method void <Extension>$(Sym<Nullable<T>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$3C2BB8F25650A82C8DF1A6E96409F80B
+Vorticity:     method Sym<Nullable<UInt128>> AsUInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$3C2BB8F25650A82C8DF1A6E96409F80B.<M>$2FDA0D8FAC62BED0BB5F74E2B37C91CB
+Vorticity:     method void <Extension>$(Sym<Nullable<ulong>>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$4C7D5077080AC1A5394CB5178E1F0FF5
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
@@ -1976,6 +1988,10 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$837CA7DEF17F2A1F96954268115A
 Vorticity:     method Sym<$T0> Bucket($T0)
 Vorticity: static class Vorticity.SymExtensions.<G>$837CA7DEF17F2A1F96954268115A8702<$T0>.<M>$97A91C006A20D00A21379E1385636A2B<T>
 Vorticity:     method void <Extension>$(Sym<T>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$848CB171E543E8F4CCE2DA9EBCD79843
+Vorticity:     method Sym<Int128> AsInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$848CB171E543E8F4CCE2DA9EBCD79843.<M>$DBFF0452614E86503919C745FCB933E2
+Vorticity:     method void <Extension>$(Sym<long>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$9FD7CB55BBCFCC43139C4DC27427F569<$T0>
 Vorticity:     method Predicate Contains(string)
 Vorticity:     method Predicate Like(string, char = default)
@@ -2012,6 +2028,10 @@ Vorticity: sealed class Vorticity.SymExtensions.<G>$E4B1ED5526513B78501FC93560F5
 Vorticity:     method Sym<DateOnly> Truncate(CalendarUnit)
 Vorticity: static class Vorticity.SymExtensions.<G>$E4B1ED5526513B78501FC93560F57992.<M>$5A3764AF8CDFD5F03F3968F88BD7F5FD
 Vorticity:     method void <Extension>$(Sym<DateOnly>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CFD457
+Vorticity:     method Sym<Nullable<Int128>> AsInt128()
+Vorticity: static class Vorticity.SymExtensions.<G>$EAA1A4811C4615E6168DDA7467CFD457.<M>$9CE249A2642403A1F116F7D653B92A9E
+Vorticity:     method void <Extension>$(Sym<Nullable<long>>)
 Vorticity: static class Vorticity.TextColumnBuilderExtensions
 Vorticity:     method Span<byte> GetSpan<TText>(ColumnBuilder<TText>, int = default)
 Vorticity:     method void Append<TText, TValue>(ColumnBuilder<TText>, TValue)

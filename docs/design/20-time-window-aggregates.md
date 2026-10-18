@@ -743,7 +743,7 @@ second of rows.
 | aggregate | state | merge | final |
 |---|---|---|---|
 | `Count()` | a signed 64-bit count, or a run's length | addition | the count |
-| `Sum` of integers or decimals | the exact sum, in the width the engine already chooses | addition | the sum in the column's type, as LINQ gives it, which throws when the total does not fit. A widened sum, asked by a cast to `Int128` in the value expression, delivers it whole |
+| `Sum` of integers or decimals | the exact sum, in the width the engine already chooses | addition | the sum in the column's type, as LINQ gives it, which throws when the total does not fit. A widened sum, asked by `AsInt128()` on the column (`g.Sum(r => r.DurationNs.AsInt128())`), delivers it whole |
 | `Sum` of floats, `Average` | the indexed sum of [16-queries.md](16-queries.md#51-sums-exact-and-the-same-bits-whatever-the-cut): its three bins, their high parts and its top, and a count | bin by bin, each high part with its bin | the sum rounded once, the average |
 | `Min`, `Max` | the extreme, whether there is one | the smaller or the larger | the extreme |
 | `Distribution(x => e, relativeError)`, new | a DDSketch: counts per bucket of a logarithmic grid, a value's bucket computed from the bits of its exponent and mantissa, never from `Math.Log` | addition per bucket | quantiles, a histogram |

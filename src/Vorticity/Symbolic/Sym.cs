@@ -37,7 +37,9 @@ public readonly struct Sym<T> : ISymbol
     internal ColumnSym Column =>
         Node as ColumnSym
         ?? (Node as Aggregating.ResultNode<T>)?.Comparable
-        ?? throw new InvalidOperationException("Only a column or an aggregate can be compared: a filter on groups compares the group's key and its aggregates.");
+        ?? throw (Node is WidenedSym widened
+            ? widened.NotASum()
+            : new InvalidOperationException("Only a column or an aggregate can be compared: a filter on groups compares the group's key and its aggregates."));
 
     /// <summary>The rows whose value equals <paramref name="value"/>; <c>== null</c> is <see cref="IsNull"/>.</summary>
     public static Predicate operator ==(Sym<T> column, T value) => SymLowering.Compare(column.Column, ComparisonOp.Equal, value);
@@ -177,6 +179,25 @@ internal interface ISymbol
     /// <summary>The column this symbol stands for as element <paramref name="position"/> of a projection.</summary>
     /// <exception cref="InvalidOperationException">The symbol is not a column.</exception>
     IProjectionElement Projected(int position);
+}
+
+/// <summary>
+/// A column of integers read as 128-bit ones, <c>AsInt128()</c> or <c>AsUInt128()</c>: the input of a sum
+/// delivered whole where the column's own type would not hold it, and of nothing else.
+/// </summary>
+internal sealed class WidenedSym(ColumnSym column, string widening) : SymNode
+{
+    /// <summary>The column widened.</summary>
+    internal ColumnSym Column { get; } = column;
+
+    /// <summary>The widening's name, for a message.</summary>
+    internal string Widening { get; } = widening;
+
+    internal InvalidOperationException NotASum() =>
+        new InvalidOperationException(
+            $"'{Column.Field.Path}.{Widening}()' widens a column for a sum, which it delivers whole: compare, order or project '{Column.Field.Path}' itself.");
+
+    public override string ToString() => $"{Column}.{Widening}()";
 }
 
 /// <summary>A column of the scanned file, with the type the file gives it.</summary>

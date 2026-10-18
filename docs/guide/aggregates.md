@@ -383,7 +383,9 @@ and run-end blocks included.
   `ushort` or `uint` column as a `ulong`, and a `Half` or `float` column as a `double`. So
   `SumAsync(v => v.DurationMs)` over the `int` column of the visits file returns a `long`. A `long`,
   a `ulong` or a `decimal` column sums as itself, exactly, and throws `OverflowException` only when
-  the exact total does not fit. Internally the engine keeps 64 bits per group when the file
+  the exact total does not fit. When that total may pass a `long`, ask for it widened:
+  `SumAsync(v => v.DurationNs.AsInt128())` returns the exact total as an `Int128`, and `AsUInt128()`
+  does the same for a `ulong`. Internally the engine keeps 64 bits per group when the file
   statistics prove the rows times the column's largest value fit, and 128 bits otherwise.
 * The file carries no sum. `MinAsync`, `MaxAsync` and `CountAsync` without a filter are answered
   from the file statistics, while `SumAsync` and `AverageAsync` read the column
