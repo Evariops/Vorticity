@@ -172,6 +172,46 @@ public sealed class ObjectAdapterTests
     }
 
     [Fact]
+    public async Task ASinkPastItsThresholdStreamsTheObjectAndHoldsNothing()
+    {
+        // Past 64 KiB, what was held goes into the pipe to the store's put, and the rest as it is
+        // written: the object is the same bytes, its hash the same, and the sink holds none of them.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        byte[] expected = new byte[(3 << 20) + 54_321];
+        new Random(0x5_7_EA).NextBytes(expected);
+        await using ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/streamed", streamedFrom: 64 << 10);
+        for (int at = 0, piece = 1; at < expected.Length; at += piece, piece = (piece * 7 % 100_003) + 1)
+        {
+            await sink.WriteAsync(expected.AsMemory(at, Math.Min(piece, expected.Length - at)), ct);
+            Assert.True(sink.HeldBytes <= 64 << 10, $"{sink.HeldBytes} bytes held at {at}");
+        }
+
+        Assert.True(sink.IsStreamed);
+        Assert.Throws<InvalidOperationException>(() => sink.Content());
+        Assert.Equal(System.IO.Hashing.XxHash128.HashToUInt128(expected), sink.ContentHash);
+        Assert.Equal(PutOutcome.Created, await sink.CommitAsync(ct));
+        Assert.Equal(expected.Length, sink.StoredLength);
+        using ObjectRange stored = await store.GetRangeAsync("data/streamed", 0, expected.Length, ct);
+        Assert.True(stored.Contiguous().Span.SequenceEqual(expected));
+    }
+
+    [Fact]
+    public async Task AStreamedSinkGivenUpLeavesNoObject()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using (ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/given-up", streamedFrom: 64 << 10))
+        {
+            await sink.WriteAsync(new byte[200_000], ct);
+            Assert.True(sink.IsStreamed);
+            sink.Discard();
+        }
+
+        Assert.Null(await store.HeadAsync("data/given-up", ct));
+    }
+
+    [Fact]
     public async Task ASinkOverATakenKeyReportsItRatherThanOverwriting()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

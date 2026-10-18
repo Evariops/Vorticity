@@ -43,8 +43,19 @@ public sealed record DatasetOptions
     /// <summary>How many superseded versions vacuum keeps whatever their age; none by default.</summary>
     public int RetainedVersions { get; init; }
 
-    /// <summary>The most bytes one data object may take while it is written, before the store takes it; 1 GiB by default.</summary>
+    /// <summary>
+    /// The most bytes one data object may take, refused past them as it is written; no bound by default,
+    /// where the store refuses what its parts cannot reach. An object is held in memory up to 32 MiB and
+    /// sent to the store as it is written past them, so this bounds what the store keeps, not what the
+    /// writer holds.
+    /// </summary>
     public long MaxObjectBytes { get; init; } = ObjectSegmentSink.DefaultMaxBytes;
+
+    /// <summary>
+    /// The bytes past which an object is sent to the store as it is written rather than held whole:
+    /// <see cref="ObjectSegmentSink.DefaultStreamedFromBytes"/>, the part threshold, unless a test asks for less.
+    /// </summary>
+    internal long StreamedObjectBytes { get; init; } = ObjectSegmentSink.DefaultStreamedFromBytes;
 
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
     /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the clustering key's columns are always among them.</remarks>

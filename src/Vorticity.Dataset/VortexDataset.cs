@@ -542,7 +542,7 @@ public sealed class VortexDataset : IAsyncDisposable
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
-        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
+        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes);
         VortexWriteOptions write = _options.Write.WithIdentity(identity);
         if (_store is SealedObjectStore { Seals: true })
         {
@@ -1698,9 +1698,23 @@ public sealed class VortexDataset : IAsyncDisposable
         UInt128 hash = draft.Sink.ContentHash;
 
         // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
-        // smallest key its leaf is ordered by then cost no request at all.
-        (ObjectSummaries summaries, byte[] prefix) =
-            await DescribeAsync(draft.Sink.Content(), firstRow, draft.BySortedColumn, cancellationToken).ConfigureAwait(false);
+        // smallest key its leaf is ordered by then cost no request at all. An object that went to the
+        // store as it was written is read from there once put, its footer in a request or two: an object
+        // past the part threshold took a request a part anyway. Should that read fail, the object is
+        // left unnamed, as an abandoned job's are, for a vacuum to take.
+        ObjectSummaries summaries;
+        byte[] prefix;
+        bool streamed = draft.Sink.IsStreamed;
+        if (!streamed)
+        {
+            SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
+            (summaries, prefix) = await DescribeAsync(held, firstRow, draft.BySortedColumn, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            (summaries, prefix) = (ObjectSummaries.Empty, []);
+        }
+
         if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
         {
             throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
@@ -1708,6 +1722,11 @@ public sealed class VortexDataset : IAsyncDisposable
 
         // What the store holds, sealed bytes included: what a head reports, and verification checks.
         long bytes = draft.Sink.StoredLength;
+        if (streamed)
+        {
+            ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
+            (summaries, prefix) = await DescribeAsync(stored, firstRow, draft.BySortedColumn, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
+        }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes);
         return new WrittenObject(entry, KeyOf(prefix, entry));
@@ -1891,12 +1910,19 @@ public sealed class VortexDataset : IAsyncDisposable
     /// has reached the store: the object's bounds and the key its leaf sits at. Only the ranges the
     /// open and the first key ask for are read, where they lie.
     /// </summary>
+    /// <param name="source">The object's bytes, held or in the store; the file opened over it owns it.</param>
+    /// <param name="firstRow">The position of its first row, for a dataset without a clustering key.</param>
+    /// <param name="bySortedColumn">Whether its rows were written in key order, which is checked.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
-        ISegmentSource bytes, long firstRow, bool bySortedColumn, CancellationToken cancellationToken)
+        ISegmentReader source, long firstRow, bool bySortedColumn, CancellationToken cancellationToken, long tailBytes = 0)
     {
-        SourceReader source = new SourceReader(bytes, ownsSource: true, _options.Session.Options.EnginePool);
+        VortexOpenOptions options = tailBytes > ObjectEntry.FirstReadBytes
+            ? ObjectCache.OpenOptions with { InitialReadBytes = (int)Math.Min(tailBytes, int.MaxValue) }
+            : ObjectCache.OpenOptions;
         VortexFile file = await VortexFile
-            .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
+            .OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
             if (bySortedColumn)

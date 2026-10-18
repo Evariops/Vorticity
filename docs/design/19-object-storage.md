@@ -681,18 +681,23 @@ for a stream sent as it was read, its message pointing at the spool.
 
 ### 11.2 The objects of a dataset
 
-A dataset buffers each object it writes, since it reads the object's statistics and first key from
-memory before the put, which costs no request (`VortexDataset.cs`, `SealAsync`). The put goes at the
-commit, from that buffer where it lies: whole up to the part threshold, in parts past it, each part a
-slice of the buffer, and any retry sent from the same bytes, so nothing is copied on its way. A data
-object's key ends with a fresh uid and is never taken, so its put carries no condition, whole or in
-parts, on every service, and a lost answer needs no head: sent again, it writes the same bytes. A
-commit object keeps its condition everywhere.
+A dataset holds each object it writes up to the part threshold, 32 MiB, since it reads the object's
+statistics and first key from memory before the put, which costs no request (`VortexDataset.cs`,
+`SealAsync`). The put goes at the commit, from that buffer where it lies, in one request, and any
+retry is sent from the same bytes, so nothing is copied on its way.
 
-The upload could start while the writer goes on, once the buffer passes the threshold. It did for a
-while, and gained a few tens of milliseconds on a 48 MB object against an emulator, for a reader of
-the buffer written by hand and a task in the background of every large object. The gain waits for a
-measurement against a service.
+An object that passes the threshold is sent as it is written (`ObjectSegmentSink`): what was held goes
+into a pipe whose reader is the store's put of unknown length, and the rest follows as the writer
+writes it. The store sends it in parts as they fill, its parts in flight in its own buffers, and the
+writer waits on the pipe when the link is slower, so a writer holds a few mebibytes whatever the
+object's size, and the cap of 1 GiB an object once had is gone (`DatasetOptions.MaxObjectBytes` now
+bounds what the store keeps, unbounded by default). The commit completes the pipe, which completes the
+upload. The object's statistics and first key are then read from the store, its footer in one request
+when its entry records the footer's length, which an object past the threshold takes as a few requests
+among the dozens its parts took. An object given up completes its pipe with an error, and the store
+gives its upload up. A data object's key ends with a fresh uid and is never taken, so its put carries
+no condition, whole or in parts, on every service, and a lost answer needs no head: sent again, it
+writes the same bytes. A commit object keeps its condition everywhere.
 
 ### 11.3 Checksums
 

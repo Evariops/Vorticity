@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.IO;
@@ -9,24 +10,43 @@ using Vorticity.Writing;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// An <see cref="ISegmentSink"/> that becomes one object of an <see cref="IObjectStore"/>, buffering
-/// the whole object. It outlives its writer on purpose: disposing only closes it to further writes
-/// and keeps the bytes, since a writer disposes its sink before the file is known to be complete.
-/// <see cref="CommitAsync"/> creates the object afterwards, and <see cref="Discard"/> is what a
-/// caller that changed its mind calls instead.
+/// An <see cref="ISegmentSink"/> that becomes one object of an <see cref="IObjectStore"/>: held whole
+/// up to <see cref="DefaultStreamedFromBytes"/>, and past it sent to the store as it is written. It
+/// outlives its writer on purpose: disposing only closes it to further writes and keeps the bytes,
+/// since a writer disposes its sink before the file is known to be complete. <see cref="CommitAsync"/>
+/// creates the object afterwards, and <see cref="Discard"/> is what a caller that changed its mind
+/// calls instead.
 /// </summary>
 /// <remarks>
-/// The bytes are held in chunks from a pool, never in one buffer: a buffer that doubles as the object
+/// <para>
+/// The bytes held are in chunks from a pool, never in one buffer: a buffer that doubles as the object
 /// grows copies it at every step, and hands the pool arrays of every size up to the object's, which a
 /// pool then keeps. The first chunk is <see cref="FirstChunkBytes"/>, each next one twice the one
 /// before up to <see cref="ChunkBytes"/>, so a small object, as a commit of a few rows writes, holds
 /// a few kilobytes of the pool rather than a mebibyte, and a chunk is the most a pool is handed back
 /// at once, whatever the object's size.
+/// </para>
+/// <para>
+/// An object that passes the threshold goes through a pipe to the store's put, which sends it in parts
+/// as they fill, its parts in flight in the store's own buffers: the writer waits on the pipe when the
+/// link is slower, and the sink holds a few mebibytes whatever the object's size. Its bytes are then
+/// not there to read: the dataset reads its statistics from the store once it is put.
+/// </para>
 /// </remarks>
 internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 {
-    /// <summary>The most bytes this sink buffers before refusing, 1 GiB.</summary>
-    public const long DefaultMaxBytes = 1L << 30;
+    /// <summary>The most bytes an object takes unless the dataset says otherwise: none, the store refuses what its parts cannot reach.</summary>
+    public const long DefaultMaxBytes = long.MaxValue;
+
+    /// <summary>
+    /// The bytes past which the object is sent as it is written rather than held: the part threshold
+    /// every store uses by default, under which an object goes in one request anyway and the dataset
+    /// reads its statistics from memory, without a request.
+    /// </summary>
+    internal const long DefaultStreamedFromBytes = 32L << 20;
+
+    /// <summary>The bytes a pipe to the store holds before the writer waits.</summary>
+    private const int PipeBytes = 4 * ChunkBytes;
 
     /// <summary>The bytes of the largest chunks of the buffer, those past the first few.</summary>
     internal const int ChunkBytes = 1 << 20;
@@ -37,8 +57,16 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     private readonly IObjectStore _store;
     private readonly string _key;
     private readonly long _maxBytes;
+    private readonly long _streamedFrom;
     private readonly MemoryPool<byte> _pool;
     private readonly List<IMemoryOwner<byte>> _chunks = [];
+
+    /// <summary>
+    /// The pipe a streamed object goes through, and the store's put that reads it; null while the object
+    /// is held. A pipe completed with an exception is what stops the put of an object given up.
+    /// </summary>
+    private Pipe? _pipe;
+    private Task<(PutOutcome Outcome, long StoredLength)>? _put;
 
     /// <summary>Appended to as the bytes go by, rather than computed from the buffer.</summary>
     private readonly System.IO.Hashing.XxHash128 _hash = new System.IO.Hashing.XxHash128();
@@ -54,18 +82,27 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
     /// <summary>
     /// Opens a sink that will create <paramref name="key"/>; <paramref name="maxBytes"/> of 0 means
-    /// <see cref="DefaultMaxBytes"/>, and a null <paramref name="pool"/> the shared aligned one.
+    /// <see cref="DefaultMaxBytes"/>, <paramref name="streamedFrom"/> of 0
+    /// <see cref="DefaultStreamedFromBytes"/>, and a null <paramref name="pool"/> the shared aligned one.
     /// </summary>
-    public ObjectSegmentSink(IObjectStore store, string key, long maxBytes = 0, MemoryPool<byte>? pool = null)
+    public ObjectSegmentSink(IObjectStore store, string key, long maxBytes = 0, MemoryPool<byte>? pool = null, long streamedFrom = 0)
     {
         ArgumentNullException.ThrowIfNull(store);
         ObjectKey.Check(key);
         ArgumentOutOfRangeException.ThrowIfNegative(maxBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(streamedFrom);
         _store = store;
         _key = key;
         _maxBytes = maxBytes == 0 ? DefaultMaxBytes : maxBytes;
+        _streamedFrom = streamedFrom == 0 ? DefaultStreamedFromBytes : streamedFrom;
         _pool = pool ?? AlignedMemoryPool.Shared;
     }
+
+    /// <summary>Whether the object passed the threshold and goes to the store as it is written: its bytes are not held.</summary>
+    public bool IsStreamed => _pipe is not null;
+
+    /// <summary>The bytes the sink holds now: the object's while it is held, and none once it streams.</summary>
+    internal long HeldBytes => _pipe is null && !_released ? _written : 0;
 
     /// <inheritdoc/>
     public long Position => _written;
@@ -87,10 +124,13 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// out of them rather than read the object back after the put. It reads the chunks in place and
     /// is not to be used once <see cref="CommitAsync"/> or <see cref="Discard"/> released them.
     /// </summary>
+    /// <exception cref="InvalidOperationException">The object is streamed: its bytes are in the store.</exception>
     public ISegmentSource Content()
     {
         ObjectDisposedException.ThrowIf(_released, this);
-        return new ChunkSource(this);
+        return _pipe is null
+            ? new ChunkSource(this)
+            : throw new InvalidOperationException($"'{_key}' went to the store as it was written, and its bytes are not held.");
     }
 
     /// <inheritdoc/>
@@ -108,11 +148,23 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         if (wanted > _maxBytes)
         {
             throw new ObjectStoreException(
-                $"'{_key}' would buffer {wanted} bytes, over the {_maxBytes} an object may take while it is " +
-                "written (DatasetOptions.MaxObjectBytes).");
+                $"'{_key}' would take {wanted} bytes, over the {_maxBytes} an object may take " +
+                "(DatasetOptions.MaxObjectBytes).");
         }
 
-        ReadOnlySpan<byte> rest = data.Span;
+        if (_pipe is not null || wanted > _streamedFrom)
+        {
+            return StreamAsync(data, cancellationToken);
+        }
+
+        Hold(data.Span);
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>Holds <paramref name="data"/> in the chunks.</summary>
+    private void Hold(ReadOnlySpan<byte> data)
+    {
+        ReadOnlySpan<byte> rest = data;
         _hash.Append(rest);
         while (!rest.IsEmpty)
         {
@@ -129,8 +181,62 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
             _used += taken;
             _written += taken;
         }
+    }
 
-        return ValueTask.CompletedTask;
+    /// <summary>
+    /// Sends <paramref name="data"/> through the pipe to the store, starting the put with what was held
+    /// when the object first passes the threshold: the chunks go in, and back to the pool.
+    /// </summary>
+    private async ValueTask StreamAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        if (_pipe is null)
+        {
+            _pipe = new Pipe(new PipeOptions(pool: _pool, pauseWriterThreshold: PipeBytes, resumeWriterThreshold: PipeBytes / 2, useSynchronizationContext: false));
+            _put = PutStreamedAsync(_pipe.Reader);
+            for (int chunk = 0; chunk < _chunks.Count; chunk++)
+            {
+                await SendAsync(Held(chunk), cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (IMemoryOwner<byte> chunk in _chunks)
+            {
+                chunk.Dispose();
+            }
+
+            _chunks.Clear();
+            _used = 0;
+        }
+
+        _hash.Append(data.Span);
+        _written += data.Length;
+        await SendAsync(data, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Writes to the pipe and waits while it is full; a put that stopped reading says why.</summary>
+    private async ValueTask SendAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        FlushResult flushed = await _pipe!.Writer.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+        if (flushed.IsCompleted)
+        {
+            // The put stopped reading, which only its failure does: its failure is the write's.
+#pragma warning disable VSTHRD003
+            await _put!.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+            throw new ObjectStoreException($"The put of '{_key}' stopped reading its content before its end.");
+        }
+    }
+
+    /// <summary>The store's put of the streamed object, run beside the writer: its outcome and the bytes the store holds, -1 when they are those written.</summary>
+    private async Task<(PutOutcome Outcome, long StoredLength)> PutStreamedAsync(PipeReader content)
+    {
+        await Task.Yield();
+        PutCondition condition = SealedObjectStore.TryUid(_key, out _) ? PutCondition.None : PutCondition.IfAbsent;
+        if (_store is SealedObjectStore sealedStore)
+        {
+            return await sealedStore.PutSealedAsync(_key, content, -1, condition, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        return (await _store.PutAsync(_key, content, -1, condition, CancellationToken.None).ConfigureAwait(false), -1);
     }
 
     /// <summary>The bytes chunk <paramref name="chunk"/> takes of what is written: twice the one before, up to <see cref="ChunkBytes"/>.</summary>
@@ -168,8 +274,21 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
 
         _closed = true;
-        PutCondition condition = SealedObjectStore.TryUid(_key, out _) ? PutCondition.None : PutCondition.IfAbsent;
         PutOutcome outcome;
+        if (_pipe is not null)
+        {
+            // The last bytes are in the pipe: its end completes the put.
+            await _pipe.Writer.CompleteAsync().ConfigureAwait(false);
+#pragma warning disable VSTHRD003
+            (outcome, long stored) = await _put!.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+            StoredLength = stored >= 0 ? stored : _written;
+            _committed = true;
+            Release();
+            return outcome;
+        }
+
+        PutCondition condition = SealedObjectStore.TryUid(_key, out _) ? PutCondition.None : PutCondition.IfAbsent;
         if (_store is SealedObjectStore sealedStore)
         {
             (outcome, StoredLength) = await sealedStore.PutSealedAsync(_key, Bytes(), condition, cancellationToken).ConfigureAwait(false);
@@ -191,10 +310,21 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     /// </summary>
     public long StoredLength { get; private set; } = -1;
 
-    /// <summary>Throws the buffered bytes away without creating the object.</summary>
+    /// <summary>
+    /// Throws the bytes away without creating the object: those held go back to the pool, and the put
+    /// of a streamed object is cancelled, its upload given up by the store.
+    /// </summary>
     public void Discard()
     {
         _closed = true;
+        if (_pipe is not null && !_committed)
+        {
+            _pipe.Writer.Complete(new OperationCanceledException($"The object '{_key}' was given up."));
+
+            // Its failure is the abandonment's own: seen, so that nothing reports it unobserved.
+            _ = _put!.ContinueWith(static put => _ = put.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
+        }
+
         Release();
     }
 
