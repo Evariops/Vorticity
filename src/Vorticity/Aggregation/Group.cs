@@ -104,6 +104,17 @@ public readonly struct Group<TRecord, TKey>
     public Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>> column) =>
         Aggregators.Filtered(Aggregators.CountDistinct(Aggregators.Input(_binding, column)), _filter);
 
+    /// <summary>
+    /// About the number of distinct non-null values of <paramref name="column"/> in the group: exact up
+    /// to 64 values, about 0.8 % off past them, in at most 16 KiB a group whatever the values, and the
+    /// same count however the scan is cut.
+    /// </summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the estimate.</returns>
+    public Sym<long> ApproximateCountDistinct<T>(Func<Probe<TRecord>, Sym<T>> column) =>
+        Aggregators.Filtered(Aggregators.ApproximateCountDistinct(Aggregators.Input(_binding, column)), _filter);
+
     /// <summary>The sum of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>

@@ -21,6 +21,7 @@ internal enum AggregateKind : byte
     MaxBy,
     Distribution,
     Quantile,
+    ApproximateCountDistinct,
 }
 
 /// <summary>A result of an aggregation, whatever its type: what an element of a selection of several values is.</summary>

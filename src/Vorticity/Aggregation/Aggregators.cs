@@ -156,6 +156,34 @@ internal static class Aggregators
                 _ => _ => new DistributionSlot<double, T>(bits, final),
             };
 
+    /// <summary>An approximate count of the distinct non-null values of a column, about 0.81 % off at most typically.</summary>
+    internal static Sym<long> ApproximateCountDistinct(ColumnShape shape)
+    {
+        Func<AggregateSlot<long>> create = shape.Kind switch
+        {
+            StorageKind.Primitive => shape.PType switch
+            {
+                PType.I8 => static () => new FixedCardinalitySlot<sbyte>(StorageKind.Primitive),
+                PType.I16 => static () => new FixedCardinalitySlot<short>(StorageKind.Primitive),
+                PType.I32 => static () => new FixedCardinalitySlot<int>(StorageKind.Primitive),
+                PType.I64 => static () => new FixedCardinalitySlot<long>(StorageKind.Primitive),
+                PType.U8 => static () => new FixedCardinalitySlot<byte>(StorageKind.Primitive),
+                PType.U16 => static () => new FixedCardinalitySlot<ushort>(StorageKind.Primitive),
+                PType.U32 => static () => new FixedCardinalitySlot<uint>(StorageKind.Primitive),
+                PType.U64 => static () => new FixedCardinalitySlot<ulong>(StorageKind.Primitive),
+                PType.F16 => static () => new FixedCardinalitySlot<Half>(StorageKind.Primitive),
+                PType.F32 => static () => new FixedCardinalitySlot<float>(StorageKind.Primitive),
+                _ => static () => new FixedCardinalitySlot<double>(StorageKind.Primitive),
+            },
+            StorageKind.Decimal => static () => new FixedCardinalitySlot<Int128>(StorageKind.Decimal),
+            StorageKind.Decimal256 => static () => new FixedCardinalitySlot<Int256>(StorageKind.Decimal256),
+            StorageKind.Uuid => static () => new FixedCardinalitySlot<UInt128>(StorageKind.Uuid),
+            StorageKind.Bytes => static () => new BytesCardinalitySlot(),
+            _ => throw shape.Unsupported("an approximate distinct count"),
+        };
+        return new Sym<long>(new AggregateNode<long>(AggregateKind.ApproximateCountDistinct, shape, create, null));
+    }
+
     internal static Sym<long> CountDistinct(ColumnShape shape)
     {
         Func<AggregateSlot<long>> create = shape.Kind switch

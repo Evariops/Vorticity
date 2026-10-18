@@ -42,7 +42,35 @@ internal static class SketchMicro
         Measure("log-linear bits, k = 6", values, rounds, static v => (int)(BitConverter.DoubleToInt64Bits(v) >> 46));
         Measure("DDSketch logarithmic, 1 %", values, rounds, v => (int)Math.Ceiling(Math.Log(v) / logGamma));
         Measure("decimal, d · 10^e", values, rounds, Decimal);
+        Distinct(rounds);
         return 0;
+    }
+
+    /// <summary>The approximate distinct count's fold: ten million longs hashed and added, a million of them distinct.</summary>
+    private static void Distinct(int rounds)
+    {
+        long[] keys = new long[Values];
+        for (int i = 0; i < keys.Length; i++)
+        {
+            keys[i] = (i * 7919L) % 1_000_000;
+        }
+
+        double best = double.MaxValue;
+        long estimate = 0;
+        for (int round = 0; round < rounds; round++)
+        {
+            CardinalitySketch sketch = new CardinalitySketch();
+            long start = Stopwatch.GetTimestamp();
+            for (int i = 0; i < keys.Length; i++)
+            {
+                sketch.Add(CardinalitySlot.Hash(System.Runtime.InteropServices.MemoryMarshal.AsBytes(new ReadOnlySpan<long>(ref keys[i]))));
+            }
+
+            best = Math.Min(best, Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+            estimate = sketch.Estimate();
+        }
+
+        Console.WriteLine($"{"distinct, 2^14 registers",-28} {"estimate " + estimate,14} {"16 KiB",8} {best * 1e6 / keys.Length,9:F2}");
     }
 
     /// <summary>The decimal grid's bucket: the exponent of the third significant digit, then the first three digits.</summary>
