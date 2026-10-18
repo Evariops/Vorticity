@@ -238,8 +238,8 @@ public sealed class DatasetCompactionTests
         // Every row is then rewritten once, by the merge that takes it out of level 0, and never again.
         // The same stream without the moves, in the same process, is the reference.
         Decoders.EnsureRegistered();
-        (long appended, long left, long rows, long bytes, long moved, int levels) = await InOrderStreamAsync(trivialMoves: true, ct);
-        (_, _, long rowsWithout, long bytesWithout, long movedWithout, int levelsWithout) = await InOrderStreamAsync(trivialMoves: false, ct);
+        (long appended, long left, long rows, long bytes, long moved, int levels, _) = await InOrderStreamAsync(trivialMoves: true, ct, neighbours: false);
+        (_, _, long rowsWithout, long bytesWithout, long movedWithout, int levelsWithout, _) = await InOrderStreamAsync(trivialMoves: false, ct, neighbours: false);
 
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET TRIVIAL MOVES, keys in order: {appended} rows appended over {levels} levels; with the moves {rows} rows and {bytes} bytes rewritten, {moved} objects moved; without, {rowsWithout} rows and {bytesWithout} bytes rewritten ({(double)bytesWithout / bytes:F2}x).\n"));
@@ -250,6 +250,27 @@ public sealed class DatasetCompactionTests
         Assert.Equal(appended - left, rows);
         Assert.True(rowsWithout > 2 * rows, $"{rowsWithout} rows rewritten without the moves, {rows} with them");
         Assert.True(bytes < bytesWithout);
+    }
+
+    [Fact]
+    public async Task KeysThatArriveInOrderGrowTheirObjectsAsSmallNeighboursMerge()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Moved up whole, the objects keys in order make stay the size they left level 0 at, whatever the
+        // level's target. Merged F at a time as neighbours of one size at a level's end, they grow until
+        // they are within F of the target: a row is rewritten by the merge out of level 0, then once a
+        // size class, a carry each time F objects of a class make one of the class above. With F = 3
+        // here, objects of level 4 grow from 6 KB to 23 KB, and the dataset holds half as many.
+        Decoders.EnsureRegistered();
+        (long appended, long left, long rows, _, _, int levels, long objects) = await InOrderStreamAsync(trivialMoves: true, ct, neighbours: true);
+        (_, _, long rowsAlone, _, _, _, long objectsAlone) = await InOrderStreamAsync(trivialMoves: true, ct, neighbours: false);
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET NEIGHBOURS, keys in order: {appended} rows appended over {levels} levels; with the merges {objects} objects above level 0 and {rows} rows rewritten, without {objectsAlone} objects and {rowsAlone} rows.\n"));
+        Assert.True(objects * 2 <= objectsAlone, $"{objects} objects above level 0 with the merges, {objectsAlone} without");
+        Assert.Equal(appended - left, rowsAlone);
+        Assert.InRange(rows, rowsAlone + 1, rowsAlone * (levels + 1));
     }
 
     [Fact]
@@ -301,14 +322,14 @@ public sealed class DatasetCompactionTests
     /// the rows appended, those left in level 0, the rows and bytes compaction rewrote, the objects it
     /// moved, and the levels the dataset reached.
     /// </summary>
-    private static async Task<(long Appended, long Left, long Rows, long Bytes, long Moved, int Levels)> InOrderStreamAsync(
-        bool trivialMoves, CancellationToken ct)
+    private static async Task<(long Appended, long Left, long Rows, long Bytes, long Moved, int Levels, long ObjectsAbove)> InOrderStreamAsync(
+        bool trivialMoves, CancellationToken ct, bool neighbours)
     {
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
-        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 3, TrivialMoves = trivialMoves };
+        CompactionOptions options = Options(target: 2 << 10) with { Fanout = 3, TrivialMoves = trivialMoves, MergeNeighbours = neighbours };
         long appended = 0;
         long rows = 0;
         long bytes = 0;
@@ -328,7 +349,13 @@ public sealed class DatasetCompactionTests
 
         Assert.Equal(appended, dataset.RowCount);
         Assert.Equal(await SortedKeysAsync(appended), await KeysAsync(dataset.ScanBuilder().InKeyOrder("key")));
-        return (appended, dataset.Levels[0].Rows, rows, bytes, moved, dataset.Levels.Count);
+        long above = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            above += dataset.Levels[level].Entries;
+        }
+
+        return (appended, dataset.Levels[0].Rows, rows, bytes, moved, dataset.Levels.Count, above);
     }
 
     [Fact]

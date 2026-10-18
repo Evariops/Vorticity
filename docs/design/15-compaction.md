@@ -53,6 +53,18 @@ that takes it out of level 0. Measured on 96 appends of 100 rows over five level
 churn bench, a thousand appends of 2 000 rows at the tail, 22.0 MiB against 42.8 MiB. With keys that
 arrive at random, a move is rare and the bytes barely move: 770 620 against 796 300.
 
+A move keeps the object's size, so with keys in order objects stayed the size they left level 0 at,
+whatever their level's target. `CompactionTrigger.Neighbours` makes them grow. An object's size class
+in its level is how many times the fan-out `F` fits between its bytes and the level's target, 0 within
+`F` of the target. When the objects at a level's end hold a run of at least `F` adjacent objects of one
+class above 0, those whose bytes stay within the target are merged into one, in their level, which is
+of the class above and joins the run before it, as a carry does. A byte is rewritten once a class,
+`log_F(target / size)` times, as the leveled merges of random keys rewrite it once a level, never once
+per append, and the objects end within `F` of their level's target. The plan reads the last `F²`
+entries of each level for it, a page or two down the tree's right edge, and ranks it after the purges
+of marks. On the 96 appends above, at `F = 3`, it halved the objects above level 0, from 32 to 16,
+level 4's growing from 6 KB to 23 KB, for 9 600 more rows rewritten.
+
 Three costs remain, and this document is about them:
 
 1. Who pays, and when. On demand, whoever calls `CompactAsync` pays, when they call it. Until then a

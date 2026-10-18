@@ -76,6 +76,13 @@ public enum CompactionTrigger
     /// without its deleted rows, before the delay passes.
     /// </summary>
     Erasure = 5,
+
+    /// <summary>
+    /// At a level's end, at least as many adjacent small objects of one size as the fan-out, which keys
+    /// in order leave there: they are merged into one, in their level, so that objects grow with keys in
+    /// order as merges make them grow with keys at random.
+    /// </summary>
+    Neighbours = 6,
 }
 
 /// <summary>
@@ -145,6 +152,12 @@ public sealed record CompactionOptions
     /// there instead of rewriting the object; true by default, false to measure what the moves save.
     /// </summary>
     internal bool TrivialMoves { get; init; } = true;
+
+    /// <summary>
+    /// Whether small neighbours at a level's end are merged (<see cref="CompactionTrigger.Neighbours"/>);
+    /// true by default, false to measure what the merges cost and what they grow.
+    /// </summary>
+    internal bool MergeNeighbours { get; init; } = true;
 
     /// <summary>How many levels the dataset keeps, level 0 included; 0, the default, for no cap.</summary>
     /// <remarks>

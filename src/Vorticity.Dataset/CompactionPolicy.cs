@@ -226,6 +226,16 @@ internal static class CompactionPolicy
             return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
         }
 
+        // Small neighbours at a level's end, which keys in order leave there.
+        for (int level = 1; level < levels.Count && settings.MergeNeighbours; level++)
+        {
+            if (!taken.Contains(level)
+                && Neighbours(levels[level].GetRange(Math.Max(0, levels[level].Count - Window(settings)), Math.Min(levels[level].Count, Window(settings))), level, settings) is { } small)
+            {
+                return Merged(dataset, small, level, settings, style);
+            }
+        }
+
         // Fragments last: this rewrites no row, and a trigger that moves data would drop the
         // object's fragments with the object anyway.
         List<CompactionInput> fragmented = [];
@@ -561,6 +571,25 @@ internal static class CompactionPolicy
             return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
         }
 
+        for (int level = 1; level < levels && settings.MergeNeighbours; level++)
+        {
+            if (taken.Contains(level) || objects[level] < Math.Max(settings.Fanout, 2))
+            {
+                continue;
+            }
+
+            List<CompactionInput> tail = [];
+            foreach (TreeEntry entry in await dataset.Levels[level].LastAsync(dataset.Pages, Window(settings), cancellationToken).ConfigureAwait(false))
+            {
+                tail.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+            }
+
+            if (Neighbours(tail, level, settings) is { } small)
+            {
+                return Merged(dataset, small, level, settings, style);
+            }
+        }
+
         List<CompactionInput> untaken = fragmented.FindAll(input => !taken.Contains(input.Level));
         return untaken.Count == 0
             ? null
@@ -771,6 +800,74 @@ internal static class CompactionPolicy
             [marked],
             Math.Max(settings.TargetBytes(marked.Level), marked.Entry.Bytes),
             firstRow);
+
+    /// <summary>
+    /// The objects at a level's end a neighbours job reads: the last <c>F²</c>, which hold the groups of
+    /// small ones a run of appends in key order leaves there, at most <c>F − 1</c> a size class.
+    /// </summary>
+    private static int Window(CompactionOptions settings) => Math.Max(settings.Fanout, 2) * Math.Max(settings.Fanout, 2);
+
+    /// <summary>
+    /// The size class of an object in a level: how many times <c>F</c> fits between its bytes and the
+    /// level's target, 0 for an object within <c>F</c> of the target, which is grown enough.
+    /// </summary>
+    private static int ClassOf(long bytes, long target, int fanout)
+    {
+        int size = 0;
+        long grown = Math.Max(bytes, 1);
+        while (grown <= target / fanout)
+        {
+            grown *= fanout;
+            size++;
+        }
+
+        return size;
+    }
+
+    /// <summary>
+    /// The neighbours due among the objects at a level's end, <paramref name="tail"/> in key order: the
+    /// run at the very end of objects of one size class under the target, when it holds at least
+    /// <c>F</c>, its last ones whose bytes stay within the target; null otherwise. Merged, <c>F</c>
+    /// objects of a class make one of the class above, which joins the run before it as a carry does, so
+    /// a byte is rewritten once a class, <c>log_F(target / size)</c> times, as the leveled merges of
+    /// random keys rewrite it once a level.
+    /// </summary>
+    private static List<CompactionInput>? Neighbours(List<CompactionInput> tail, int level, CompactionOptions settings)
+    {
+        int fanout = Math.Max(settings.Fanout, 2);
+        long target = settings.TargetBytes(level);
+        if (tail.Count < fanout)
+        {
+            return null;
+        }
+
+        int size = ClassOf(tail[^1].Entry.Bytes, target, fanout);
+        if (size == 0)
+        {
+            return null;
+        }
+
+        List<CompactionInput> run = [];
+        long bytes = 0;
+        for (int i = tail.Count - 1; i >= 0 && ClassOf(tail[i].Entry.Bytes, target, fanout) == size && bytes + tail[i].Entry.Bytes <= target; i--)
+        {
+            run.Add(tail[i]);
+            bytes += tail[i].Entry.Bytes;
+        }
+
+        if (run.Count < fanout)
+        {
+            return null;
+        }
+
+        run.Reverse();
+        return run;
+    }
+
+    /// <summary>The job that merges small neighbours into one object, in their own level.</summary>
+    private static CompactionJob Merged(
+        PlannedVersion dataset, List<CompactionInput> neighbours, int level, CompactionOptions settings, CompactionStyle style) =>
+        new CompactionJob(level, level, style, CompactionTrigger.Neighbours, neighbours, settings.TargetBytes(level), FirstRow(dataset, neighbours[0]));
 
     /// <summary>
     /// The object whose marks are the most due outside the levels <paramref name="taken"/>, the first

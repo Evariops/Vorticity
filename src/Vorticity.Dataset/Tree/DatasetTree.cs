@@ -315,6 +315,50 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         return wrap ? leaf[0] : null;
     }
 
+    /// <summary>
+    /// The last <paramref name="count"/> entries, or every entry when there are fewer, in key order:
+    /// read down the right edge of the tree, a leaf at a time from the last, so that what a level's
+    /// end holds costs a page or two whatever the level's size.
+    /// </summary>
+    public async ValueTask<List<TreeEntry>> LastAsync(IPageSource source, int count, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        List<TreeEntry> last = [];
+        if (IsEmpty || count == 0)
+        {
+            return last;
+        }
+
+        // A stack whose top is the next page from the right: a page's children are pushed in key
+        // order, so the last is read first.
+        Stack<(PageReference Reference, int Level)> pending = new Stack<(PageReference, int)>();
+        pending.Push((Root, Depth));
+        while (pending.Count > 0 && last.Count < count)
+        {
+            (PageReference reference, int level) = pending.Pop();
+            ReadOnlyMemory<byte> bytes = await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
+            if (level == 1)
+            {
+                IReadOnlyList<TreeEntry> leaf = TreePage.ReadLeaf(bytes);
+                for (int i = leaf.Count - 1; i >= 0 && last.Count < count; i--)
+                {
+                    last.Add(leaf[i]);
+                }
+
+                continue;
+            }
+
+            foreach (InternalEntry child in TreePage.ReadInternal(bytes))
+            {
+                pending.Push((child.Child, level - 1));
+            }
+        }
+
+        last.Reverse();
+        return last;
+    }
+
     /// <summary>Every entry, in key order.</summary>
     public async IAsyncEnumerable<TreeEntry> EnumerateAsync(
         IPageSource source,
