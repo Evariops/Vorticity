@@ -122,23 +122,7 @@ internal static class ToolPaths
             }
 
             case InExpr membership:
-            {
-                VortexType type = Column(schema, membership.Field);
-                List<FilterLiteral> literals = [];
-                foreach (FilterLiteral literal in membership.Literals)
-                {
-                    // A null, or a value the column cannot hold exactly, equals no row, so it leaves the set.
-                    if (literal.Kind != FilterLiteralKind.Null
-                        && Compare(membership.Field, type, ComparisonOp.Equal, literal) is ComparisonExpr { Op: ComparisonOp.Equal } equal)
-                    {
-                        literals.Add(equal.Value);
-                    }
-                }
-
-                return literals.Count == 0
-                    ? Expr.And(new NullCheckExpr(membership.Field, isNull: true), new NullCheckExpr(membership.Field, isNull: false))
-                    : Expr.In(membership.Field, [.. literals]);
-            }
+                return Membership(membership, Column(schema, membership.Field));
 
             case TypedInExpr typed:
                 // Typed values, bound as the typed scan binds its own: each placed against the
@@ -174,12 +158,80 @@ internal static class ToolPaths
             }
 
             case Compute.VariantFilterExpr fence:
-                // Its paths were typed where they were written, by what each is read as.
-                return fence;
+                return fence.With(CheckPath(schema, fence.Inner));
 
             default:
                 throw new VortexSchemaException($"'{filter}' is not a predicate.");
         }
+    }
+
+    /// <summary>
+    /// A leaf over paths of variant columns checked as a column's leaf is, against the type each path
+    /// is read as: its column a variant, its literals placed in that type.
+    /// </summary>
+    private static VortexExpr CheckPath(VortexSchema schema, VortexExpr leaf)
+    {
+        switch (leaf)
+        {
+            case ComparisonExpr comparison:
+                return Compare(comparison.Field, PathType(schema, comparison.Field), comparison.Op, comparison.Value);
+            case InExpr membership:
+                return Membership(membership, PathType(schema, membership.Field));
+            case NullCheckExpr check:
+                _ = PathType(schema, check.Field);
+                return check;
+            case StringMatchExpr match:
+            {
+                VortexType type = PathType(schema, match.Field);
+                return type.Kind == VortexTypeKind.Utf8
+                    ? match
+                    : throw new VortexSchemaException($"'{match.Field.Path}' is read as {type}; {match.Op} reads text.");
+            }
+
+            case ColumnComparisonExpr columns:
+            {
+                VortexType left = PathType(schema, columns.Left);
+                VortexType right = PathType(schema, columns.Right);
+                return left.NonNullable.Equals(right.NonNullable)
+                    ? columns
+                    : throw new VortexSchemaException($"'{columns.Left.Path}' is {left} and '{columns.Right.Path}' is {right}: two values compare when their types are the same.");
+            }
+
+            default:
+                return leaf;
+        }
+    }
+
+    /// <summary>The type a path is read as, its column checked to be a variant; a column's own type for a field that is not a path.</summary>
+    private static VortexType PathType(VortexSchema schema, FieldExpr field)
+    {
+        if (field is not Compute.VariantFieldExpr path)
+        {
+            return Column(schema, field);
+        }
+
+        VortexType column = Column(schema, path.Column);
+        return column.Kind == VortexTypeKind.Variant
+            ? Compute.VariantFieldExpr.TypeOf(path.Read)
+            : throw new VortexSchemaException($"'{path.Column.Path}' is a column of {column}; a key or an index walks into a variant column.");
+    }
+
+    /// <summary>A membership with its literals placed in <paramref name="type"/>: a null, or a value the column cannot hold exactly, equals no row and leaves the set.</summary>
+    private static VortexExpr Membership(InExpr membership, VortexType type)
+    {
+        List<FilterLiteral> literals = [];
+        foreach (FilterLiteral literal in membership.Literals)
+        {
+            if (literal.Kind != FilterLiteralKind.Null
+                && Compare(membership.Field, type, ComparisonOp.Equal, literal) is ComparisonExpr { Op: ComparisonOp.Equal } equal)
+            {
+                literals.Add(equal.Value);
+            }
+        }
+
+        return literals.Count == 0
+            ? Expr.And(new NullCheckExpr(membership.Field, isNull: true), new NullCheckExpr(membership.Field, isNull: false))
+            : Expr.In(membership.Field, [.. literals]);
     }
 
     /// <summary>Refuses a value of <typeparamref name="T"/> for a column that does not take one, as a hole of an interpolated filter is refused.</summary>
@@ -207,12 +259,37 @@ internal static class ToolPaths
     }
 
     /// <summary>The column a hole of an interpolated filter is compared to: the field of the predicate the text ends in.</summary>
-    internal static VortexField ColumnBeforeHole(VortexSchema schema, string text)
+    /// <remarks>
+    /// Before a path of a variant column, the column is the type the path is read as: its read, or
+    /// for a path written without one, the type of <paramref name="hole"/>, as a literal's says.
+    /// </remarks>
+    internal static VortexField ColumnBeforeHole(VortexSchema schema, string text, Type? hole = null)
     {
-        string[] segments = ExprText.LastField(text)
+        (string[] segments, Compute.VariantStep[] steps, Compute.VariantRead? read) = ExprText.LastPath(text)
             ?? throw new FormatException($"A hole follows '{text}', which names no column before it.");
         string display = string.Join('.', segments);
-        return new VortexField(display, TypeOf(schema, segments, display));
+        VortexType type = TypeOf(schema, segments, display);
+        if (steps.Length == 0 && read is null)
+        {
+            return new VortexField(display, type);
+        }
+
+        if (type.Kind != VortexTypeKind.Variant)
+        {
+            throw new VortexSchemaException($"'{display}' is a column of {type}; a key or an index walks into a variant column.");
+        }
+
+        Compute.VariantRead chosen = read ?? (hole is null ? ClrKind.Unsupported : ClrShape.Of(hole).Kind) switch
+        {
+            ClrKind.Signed or ClrKind.Unsigned => Compute.VariantRead.AsInt64,
+            ClrKind.Float => Compute.VariantRead.AsDouble,
+            ClrKind.String => Compute.VariantRead.AsString,
+            ClrKind.Bool => Compute.VariantRead.AsBool,
+            _ => throw new FormatException(
+                $"The hole after '{display}{string.Concat(steps)}' says nothing of what the path is read as: write .AsInt64(), .AsTimestamp() or another read after it."),
+        };
+
+        return new VortexField(display + string.Concat(steps), Compute.VariantFieldExpr.TypeOf(chosen));
     }
 
     /// <summary>A decimal hole as a literal at the column's scale, refused when it has more digits than the scale.</summary>

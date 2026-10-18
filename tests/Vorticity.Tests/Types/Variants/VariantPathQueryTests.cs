@@ -8,6 +8,8 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.Writing;
 using Xunit;
 
@@ -120,6 +122,77 @@ public sealed partial class VariantPathQueryTests
                 await IdsAsync(file, r => r.Attributes["status"] == Variant.From(1L)));
             Assert.Contains("AsInt64()", refused.Message, StringComparison.Ordinal);
         });
+    }
+
+    [Fact]
+    public async Task TheToolPathTakesTheSamePathsInItsText()
+    {
+        await WithFileAsync(async file =>
+        {
+            Assert.Equal(2, await file.Scan().Where($"Attributes['status'] >= 500").CountAsync(Ct));
+            Assert.Equal(4, await file.Scan().Where($"Attributes['status'].ToInt64() >= 500").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['status'] = '502'").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['status'] > 500.5").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['http.route'] = '/x'").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['http']['route'] = '/y'").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['tags'][1] starts with 't2'").CountAsync(Ct));
+            Assert.Equal(5, await file.Scan().Where($"Attributes['status'] exists").CountAsync(Ct));
+            Assert.Equal(3, await file.Scan().Where($"not (Attributes['status'] exists)").CountAsync(Ct));
+            Assert.Equal(3, await file.Scan().Where($"Attributes['route'] in ('/a', null)").CountAsync(Ct));
+            Assert.Equal(5, await file.Scan().Where($"Attributes['status'].AsInt64() is null").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['at'].AsTimestamp() = '2026-10-18T12:00:00Z'").CountAsync(Ct));
+            Assert.Equal(2, await file.Scan().Where($"Id > 2 and Attributes['route'] = '/a'").CountAsync(Ct));
+
+            // A hole is placed by the read, or by its own type where the path has none.
+            Assert.Equal(2, await file.Scan().Where($"Attributes['status'] >= {500L}").CountAsync(Ct));
+            Assert.Equal(4, await file.Scan().Where($"Attributes['status'].ToInt64() >= {500}").CountAsync(Ct));
+            Assert.Equal(3, await file.Scan().Where($"Attributes['route'] = {"/a"}").CountAsync(Ct));
+            Assert.Equal(1, await file.Scan().Where($"Attributes['at'].AsTimestamp() >= {At}").CountAsync(Ct));
+        });
+    }
+
+    [Fact]
+    public async Task TheToolPathRefusesAPathItCannotType()
+    {
+        await WithFileAsync(file =>
+        {
+            Assert.Throws<VortexSchemaException>(() => file.Scan().Where($"Id['k'] = 1"));
+            Assert.Throws<FormatException>(() => file.Scan().Where($"Attributes['k'] is null"));
+            Assert.Throws<FormatException>(() => file.Scan().Where($"Attributes['k'] exists or Id = 1 and Attributes['k'] = Id"));
+            Assert.Throws<FormatException>(() => file.Scan().Where($"Attributes['at'] >= {At}"));
+            Assert.Throws<VortexSchemaException>(() => file.Scan().Where($"Attributes['status'].AsInt64() = 'x'"));
+            return Task.CompletedTask;
+        });
+    }
+
+    /// <summary>A path written as text, and read back: its column, each key quoted whole, and what it is read as.</summary>
+    [Theory]
+    [InlineData("Attributes['http.route'].AsString() = '/x'")]
+    [InlineData("Attributes['http']['route'].AsString() = '/y'")]
+    [InlineData("Attributes['it''s'][0].ToInt64() >= 3")]
+    [InlineData("Attributes['k'] exists")]
+    [InlineData("not (Attributes['a'].AsBool() = true) and Id > 2")]
+    [InlineData("Attributes['a'].AsDouble() > Attributes['b'].AsDouble()")]
+    public void APathIsWrittenAndReadBackAsText(string text)
+    {
+        Assert.Equal(text, ExprText.Format(ExprText.Parse(text)));
+    }
+
+    [Fact]
+    public void ADottedKeyAndANestedKeyStayTwoPaths()
+    {
+        VortexExpr dotted = ExprText.Parse("Attributes['http.route'] = 'a'");
+        VortexExpr nested = ExprText.Parse("Attributes['http']['route'] = 'a'");
+        VariantFieldExpr one = Path(dotted);
+        VariantFieldExpr two = Path(nested);
+        Assert.Equal(["http.route"], one.Steps.Select(s => s.Key));
+        Assert.Equal(["http", "route"], two.Steps.Select(s => s.Key));
+        Assert.NotEqual(one.Key, two.Key);
+        Assert.Equal("Attributes['http.route'].AsString() = 'a'", ExprText.Format(dotted));
+        Assert.Equal("Attributes['http']['route'].AsString() = 'a'", ExprText.Format(nested));
+
+        static VariantFieldExpr Path(VortexExpr filter) =>
+            (VariantFieldExpr)((ComparisonExpr)((VariantFilterExpr)filter).Inner).Field;
     }
 
     /// <summary>The same questions over the reference's shredded files and their unshredded twins give the same rows.</summary>

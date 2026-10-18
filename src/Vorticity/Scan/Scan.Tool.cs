@@ -315,7 +315,7 @@ public ref struct FilterHandler
     public readonly void AppendFormatted<T>(T value)
     {
         string text = _text.ToString();
-        VortexField column = ToolPaths.ColumnBeforeHole(_scan.FileSchema, text);
+        VortexField column = ToolPaths.ColumnBeforeHole(_scan.FileSchema, text, typeof(T));
         if (value is null)
         {
             _values.Add(FilterLiteral.Null);

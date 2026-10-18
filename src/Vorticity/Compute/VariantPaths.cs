@@ -42,8 +42,8 @@ internal readonly struct VariantStep
     /// <summary>The step as a path's text writes it: the key quoted whole, the index as a number.</summary>
     public override string ToString() => IsKey ? "[" + Quoted(Key!) + "]" : "[" + Index.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]";
 
-    /// <summary>A key between single quotes, a quote or a backslash in it escaped by a backslash.</summary>
-    internal static string Quoted(string key) => "'" + key.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("'", "\\'", StringComparison.Ordinal) + "'";
+    /// <summary>A key between single quotes, a quote in it doubled, as the filter grammar quotes text.</summary>
+    internal static string Quoted(string key) => "'" + key.Replace("'", "''", StringComparison.Ordinal) + "'";
 }
 
 /// <summary>What a path's value is read as.</summary>
@@ -497,5 +497,6 @@ internal sealed class VariantFilterExpr : VortexExpr
     };
 
     /// <summary>The same filter with its inner predicate rewritten.</summary>
-    internal VariantFilterExpr With(VortexExpr inner) => ReferenceEquals(inner, Inner) ? this : new VariantFilterExpr(inner);
+    internal VariantFilterExpr With(VortexExpr inner) =>
+        ReferenceEquals(inner, Inner) ? this : inner as VariantFilterExpr ?? new VariantFilterExpr(inner);
 }

@@ -119,6 +119,24 @@ date, time, timestamp, uuid or decimal column is parsed in the column's type. Nu
 three-valued logic, so `not (Celsius < 40)` does not return a row whose `Celsius` is null
 ([three-valued logic](../design/08-semantics.md#3-three-valued-logic)).
 
+A variant column is walked by path. Each key is quoted whole, so `'http.route'` is one key with a dot
+in it, and an index is a number. What the path is read as follows it, or, when nothing follows, the
+literal decides: an integer reads it as `AsInt64`, a float as `AsDouble`, text as `AsString` and a
+boolean as `AsBool`. `exists` asks whether the path is there, and is never unknown:
+
+```csharp
+file.Scan().Where($"Attributes['http.response.status_code'] >= 500");          // integers only
+file.Scan().Where($"Attributes['http.response.status_code'].ToInt64() >= 500"); // "502" too
+file.Scan().Where($"Attributes['http']['route'] = {route} and Attributes['user.id'] exists");
+file.Scan().Where($"Attributes['at'].AsTimestamp() >= {since}");
+```
+
+The text `"502"` is not the integer `502`: only `ToInt64()` reads it as one. A path absent, or of
+another type than the one read, is null, so the row is not returned. A hole after a path without a
+read is read as the hole's type says, and a timestamp needs `.AsTimestamp()` written. The same
+paths, with the same rules, are the typed path's `r.Attributes["http.route"].AsString()`
+([records.md](records.md)).
+
 A set of values does not need text at all. `VortexExpr.In` takes them as they are, a few or a
 million, and combines with the other forms:
 

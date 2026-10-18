@@ -260,6 +260,13 @@ columns in the file's order. A number in a filter is the number the text wrote, 
 a decimal column, and text compared with a date, time, timestamp, uuid or decimal column is parsed in
 that type and refused when it does not parse ([untyped-files.md](../guide/untyped-files.md)).
 
+A path of a variant column is written as its column, each key quoted whole and each index a number,
+then what it is read as: `Attributes['http']['route'].AsString()`. A path written without a read is
+read as the literal or the hole it meets says, and `Attributes['user.id'] exists` asks whether it is
+there. The same text is how a plan prints a path, and the form any later text that names a path takes,
+an index policy included, so `'http.route'` and `['http']['route']` stay two paths wherever they
+are written.
+
 A set of values does not go through text. `VortexExpr.In(column, values)` takes a span of any size,
 copies it, and combines with `&`, `|` and `!` as a parsed filter does. It is checked against the column
 when a scan takes it, as a hole is: a number goes to any numeric column, placed against its width, a
