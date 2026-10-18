@@ -51,9 +51,11 @@ AOT and trimming.
 - Lazily. An id this library does not know only fails the read that needs it. An unprojected column
   may use one, and a zone-map aggregate nobody knows only disables its own pruning (see [unknown
   components](08-semantics.md#4-unknown-components-resolve-lazily-fail-on-use)).
-- A few things are refused by name, with the id and its kind: a legacy two-buffer `vortex.fsst`, a
-  shredded variant child, and a compressed buffer or segment, which the schema declares but no
-  Vortex release implements (see [buffer-level LZ4](08-semantics.md#7-buffer-level-lz4)).
+- A few things are refused by name, with the id and its kind: a legacy two-buffer `vortex.fsst`,
+  and a compressed buffer or segment, which the schema declares but no Vortex release implements
+  (see [buffer-level LZ4](08-semantics.md#7-buffer-level-lz4)).
+- Shredded variants, in both spellings. A shredded `vortex.variant` or `vortex.parquet.variant` reads
+  as the same values as the rows unshredded, whichever paths each chunk shreds.
 
 ## 4. What it writes
 

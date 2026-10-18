@@ -56,12 +56,20 @@ A patched ALP or bit-packed array written normally carries its patches in its ow
 no `vortex.patched` node. In-memory arrays with no wire id (slices, filters, shared arrays) have
 nothing to read.
 
-Two forms are refused by name. The first is the legacy two-buffer `vortex.fsst`, which keeps its codes
-as a nested `vortex.varbin` array. The arena canonicalizes that array on the way in, inlining short
-codes into views, so the contiguous code stream the decode needs no longer exists. Every writer since
-the encoding stabilized emits the three-buffer form, and the corpus generator can produce the other
-one if a file in the read-forever range ever needs it. The second is a shredded variant child, refused
-by its decoder with a message naming it.
+One form is refused by name: the legacy two-buffer `vortex.fsst`, which keeps its codes as a nested
+`vortex.varbin` array. The arena canonicalizes that array on the way in, inlining short codes into
+views, so the contiguous code stream the decode needs no longer exists. Every writer since the
+encoding stabilized emits the three-buffer form, and the corpus generator can produce the other one if
+a file in the read-forever range ever needs it.
+
+A shredded variant is read in both spellings. Rust writes the canonical one: a `vortex.variant` whose
+core storage is a `vortex.parquet.variant` of the metadata and the residual values, and whose second
+child is the shredded tree. In that tree an object is a struct by field name, an array a list, a
+primitive its typed column, and a field that kept values of its own beside its typed column a nested
+`vortex.variant`. The other spelling is a `vortex.parquet.variant` with a `typed_value` child shaped
+as the Parquet standard shreds. The decoder maps either onto the standard's groups of a value and a
+typed value and rebuilds each row as the standard's `construct_variant` does, with the plan the Parquet
+reader uses, so a row reads the same shredded or not.
 
 A selection is pushed down, not gathered up. A decoder that has nothing to say about a take decodes
 the node once and gathers. One with `DecodeSelected` receives the selection through the layout tree,

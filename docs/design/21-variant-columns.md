@@ -164,7 +164,7 @@ binary for the rest, and the format's own name for both, so a Rust reader reads 
 | the arrays `vortex.variant` and `vortex.parquet.variant`, added by the edition `core2026.08.3`, read by Rust 0.85.0 and later, frozen with a read-forever guarantee | (code: [core2026.08.3.toml](../../spec/editions/core2026.08.3.toml)) |
 | `vortex.parquet.variant`: a `metadata` child, a `value` child, and an optional `typed_value` child holding shredded paths | (code: [VariantMetadata.cs](../../src/Vorticity/Vortex/Arrays/Metadata/VariantMetadata.cs#L89-L105)) |
 | `vortex.variant`: a variant over its storage, with an optional shredded child | (code: [VariantMetadata.cs](../../src/Vorticity/Vortex/Arrays/Metadata/VariantMetadata.cs#L7-L21)) |
-| Vorticity reads and writes the unshredded form, and refuses both shredded forms by name | (code: [VariantDecoder.cs:69-75](../../src/Vorticity/Vortex/Arrays/Decoders/Compressed/VariantDecoder.cs#L69-L75) and [154-169](../../src/Vorticity/Vortex/Arrays/Decoders/Compressed/VariantDecoder.cs#L154-L169)) |
+| Vorticity writes the unshredded form, and reads both shredded forms, the reference's tree and the Parquet layout, by mapping each onto the Parquet groups its Parquet reader rebuilds rows from | (code: [VariantDecoder.cs](../../src/Vorticity/Vortex/Arrays/Decoders/Compressed/VariantDecoder.cs), `ShreddedTree`) |
 | no .NET type maps a variant column | [07-dotnet-mapping.md](07-dotnet-mapping.md) |
 | maps are written under `core2026.08.3`, and refused below it | [90-registry.md](90-registry.md) |
 | a column added after creation is a commit of the schema | [13-dataset.md](13-dataset.md#13-schema-evolution) |
@@ -221,19 +221,25 @@ as its column, its keys and its type class apart, each key quoted whole.
 
 ### 5.2 How a variant is stored
 
-As the edition's `vortex.parquet.variant`, laid out as the Parquet specification lays a shredded
-variant out (source):
+As the reference stores it: a `vortex.variant` whose core storage is a `vortex.parquet.variant` of the
+rows' metadata and residual values, and whose second child, the shredded tree, holds the typed columns.
+The reference turns any shredded `vortex.parquet.variant` into that form before its writer compresses
+it (code: vortex-parquet-variant 0.86.1, `vtable.rs:276-288` and `array.rs:182-296`, unchanged in
+0.87.0), so that is the form its files hold and the form ours write.
 
 | child | holds |
 |---|---|
-| `metadata` | per row, the dictionary of the keys its residual uses. Rows of one shape share one, so a dictionary encoding stores it once per shape |
-| `value` | the residual: the variant binary of what was not shredded |
-| `typed_value` | for an object, a struct with one field per shredded key, each field itself a `value` and a `typed_value`, and so on down nested objects. For a list, a list of the same pair. For a primitive, a typed column |
+| core storage, `metadata` | per row, the dictionary of the keys its values use. Rows of one shape share one, so a dictionary encoding stores it once per shape |
+| core storage, `value` | the residual: the variant binary of what was not shredded |
+| shredded tree | for an object, a struct with one field per shredded key. A key whose values all have the shredded type is that typed column. A key that also holds values of other types is a nested `vortex.variant`, whose core storage keeps those values and whose tree is the typed column. For a list, a list of the same. For a primitive, a typed column |
 
-The format's rules hold as written. A missing key has both its `value` and its `typed_value` null. A
-value of another type than the shredded one stays whole in that field's `value`. A key that is shredded
-never appears in the residual. A reader rebuilds the object as the union of both, its keys in order.
-Different files may shred differently (source), which is what lets each object choose.
+The tree is the Parquet layout (source) with its wrappers taken off. A Parquet group of a `value` and a
+`typed_value` becomes its typed column when it has no `value`, and a nested variant when it has both
+(code). The format's rules hold as written. A missing key is null in both its columns. A value of
+another type than the shredded one stays whole in the field's values. A key that is shredded never
+appears in the residual. A reader rebuilds the object as the union of both, its keys in order. Each
+chunk's tree type lies in its node's metadata, so different chunks, and different objects, may shred
+differently, which is what lets each object choose.
 
 The specification maps each variant type to one Parquet type, says nothing of widening one, and keeps
 a column's statistics valid only when every value has the shredded type (source). The integers of
@@ -242,10 +248,22 @@ are therefore rebuilt at the column's width: equal in value under the format's e
 not in width. OpenTelemetry sends every integer as 64 bits, so its attributes keep their width. A JSON
 body parsed by the size of each number does not.
 
-Before a byte is written, the children the reference implementation gives a shredded
-`vortex.parquet.variant`, and the shredded child of `vortex.variant`, are read in its code and checked
-against this layout, and the cross-check makes Rust write such files for us to read (hypothesis,
-refuted if the reference lays them out otherwise, in which case this design follows the reference).
+A cross-check has Rust write shredded objects, nested objects, lists, primitives and a column of three
+chunks shredded three ways, beside the same rows unshredded, and Vorticity reads each back equal to its
+unshredded twin, value for value (code: `tools/conformance-gen/examples/gen_shredded_variants.rs`,
+`ShreddedVortexVariantTests`). Three findings bound what a writer of ours may do:
+
+- The reference converts a list whose elements keep values of their own wrongly: it pairs the rows'
+  metadata with the elements' values, whose lengths differ, and refuses the write. A list whose
+  elements all fit their typed column keeps no element values, and is written and read. A writer of
+  ours shreds a list only that way, or leaves it in the residual.
+- The reference's default writer concatenates chunks under 1 MiB before compressing them, and refuses
+  to concatenate chunks shredded differently. Chunks kept apart, as the layouts of ours keep them, are
+  written and read by both.
+- The reference reads a shredded key that a row lacks as a key holding null, where the format, the
+  unshredded row and Vorticity leave it out. Its reads of a shredded file also differ from its reads of
+  the unshredded one in the width of integers and the order of keys, which its scalar equality counts
+  and the format's equivalence classes do not.
 
 ### 5.3 What an object shreds
 
@@ -385,10 +403,10 @@ The design here pays none of these on the way in, and less at its exit:
 5. The choice comes from the slice's exact counts, which the sort computes anyway: no sample, no
    second pass.
 6. The shredded type lies in each array node's metadata (code:
-   [VariantMetadata.cs](../../src/Vorticity/Vortex/Arrays/Metadata/VariantMetadata.cs#L89-L105)), so each
+   [VariantMetadata.cs](../../src/Vorticity/Vortex/Arrays/Metadata/VariantMetadata.cs)), so each
    chunk carries its own shredding while the column's dtype stays `Variant`. An object whose chunks
-   shred differently is legal for the format (hypothesis: the reference reads chunks of one column
-   shredded differently, which the cross-check checks).
+   shred differently is legal for the format, and the reference writes and reads one when its chunks
+   are kept apart ([how a variant is stored](#52-how-a-variant-is-stored)).
 
 What shredding adds per job that writes a slice (estimate, to measure): decoding an attribute and
 routing it takes 10 to 20 ns, so 0.2 to 0.4 µs for a row of 20 attributes, or 10 to 20 ms of one lane
@@ -413,7 +431,8 @@ other way, which costs the append ([decisions to take](#13-decisions-to-take)).
 - A dataset with a variant column targets the edition `core2026.08.3` or later, and a variant column
   below it fails the write, as it does today.
 - Rust 0.85.0 and later reads every object, shredded variants included, and the cross-check proves it
-  value for value.
+  value for value, under the one difference in how Rust reads a shredded key a row lacks ([how a
+  variant is stored](#52-how-a-variant-is-stored)).
 - Everything Vorticity adds (the path directory, the path map, the shapes) lies in the index
   directory, which Rust never reads.
 - An encoding tree inlined in a flat layout is read by every reader since 0.84, and Rust 0.85.0, the
@@ -829,7 +848,7 @@ To clean up: the refusal of shredded variants, its messages and its tests, once 
 | | question | proposed | the other way |
 |---|---|---|---|
 | 1 | how an attribute bag is stored | a variant shredded per object | a map, numbered columns, or declared columns ([the models, compared](#3-the-models-compared)) |
-| 2 | which variant form | `vortex.parquet.variant`, the Parquet layout, which Vorticity already writes unshredded | `vortex.variant` with its shredded child, if the reference makes it the preferred form |
+| 2 | which variant form | `vortex.variant` with its shredded child over a `vortex.parquet.variant` core, the form the reference converts every shredded variant to before writing, decided on 2026-10-18 from its code | `vortex.parquet.variant` with a `typed_value`, the Parquet layout, which the reference reads but never stores |
 | 3 | types | strict: `AsInt64()` takes the path's integers as stored and gives null for a text, so the typed column is enough. A conversion is a `To…` the question names | loose conversions by default, which read the field's `value` too |
 | 4 | paths on the typed path | a path is a value, as a map's key is | paths only on the tool path |
 | 5 | object bodies | stored once, shredded, rebuilt to show | kept as text as well |

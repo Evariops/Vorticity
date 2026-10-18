@@ -590,9 +590,23 @@ internal sealed class ArrayDecodeContext
                 $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
         }
 
+        return DecodeValidityChild(in node, firstValidityChildIndex, length);
+    }
+
+    /// <summary>
+    /// The validity the child at <paramref name="childIndex"/> holds, for an array that places its
+    /// validity child elsewhere than after its other children and has already counted them.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="childIndex">Where the validity child sits.</param>
+    /// <param name="length">The node's row count.</param>
+    /// <returns>The validity, collapsed as <see cref="DecodeValidity"/> collapses it.</returns>
+    /// <exception cref="VortexFormatException">The child is not a Bool of exactly <paramref name="length"/> rows.</exception>
+    public Validity DecodeValidityChild(in ArrayNode node, int childIndex, int length)
+    {
         // A validity child is always a non-nullable Bool of exactly the parent's length.
         DType boolType = Types.Bool(Nullability.NonNullable);
-        int decoded = DecodeChild(in node, firstValidityChildIndex, boolType, length);
+        int decoded = DecodeChild(in node, childIndex, boolType, length);
 
         CanonicalNode bits = Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)
@@ -650,8 +664,23 @@ internal sealed class ArrayDecodeContext
                 $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
         }
 
+        return DecodeValidityChildSelected(in node, firstValidityChildIndex, length, wanted);
+    }
+
+    /// <summary>
+    /// The validity of the rows at <paramref name="wanted"/> the child at <paramref name="childIndex"/>
+    /// holds, read as <see cref="DecodeValidityChild"/> reads the whole.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="childIndex">Where the validity child sits.</param>
+    /// <param name="length">The node's whole row count.</param>
+    /// <param name="wanted">Row indices, strictly ascending, all in <c>[0, length)</c>.</param>
+    /// <returns>The selected rows' validity, collapsed.</returns>
+    /// <exception cref="VortexFormatException">The child is not a Bool, or selects another row count.</exception>
+    public Validity DecodeValidityChildSelected(in ArrayNode node, int childIndex, int length, ReadOnlySpan<int> wanted)
+    {
         DType boolType = Types.Bool(Nullability.NonNullable);
-        int decoded = DecodeChildSelected(in node, firstValidityChildIndex, boolType, length, wanted);
+        int decoded = DecodeChildSelected(in node, childIndex, boolType, length, wanted);
 
         CanonicalNode bits = Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)

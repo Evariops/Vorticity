@@ -37,6 +37,14 @@ futures-lite = "2"
 # off, so this pulls the format crate and not arrow; `bloom_filter::Sbbf` needs nothing else.
 parquet = { version = "=60.0.0", default-features = false }
 
+[dev-dependencies]
+# For examples/gen_shredded_variants: the Arrow variant crates the reference's
+# `vortex.parquet.variant` is built on, at the versions vortex-parquet-variant 0.86.1 takes, whose
+# `json_to_variant` and `shred_variant` make the shredded columns the reference itself would.
+arrow-array = "59.2"
+arrow-schema = "59.2"
+parquet-variant-compute = "59.2"
+
 [profile.release]
 opt-level = 1
 debug = false

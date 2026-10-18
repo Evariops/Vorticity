@@ -6,7 +6,7 @@ namespace Vorticity.Arrays.Metadata;
 
 /// <summary>
 /// <c>vortex.variant</c> array metadata. The message carries no length and no physical type: all it
-/// says is which children are present, which is why the reader returns presence and not a payload.
+/// says is whether there is a shredded child, and of which dtype.
 /// </summary>
 /// <remarks>
 /// <code>
@@ -15,8 +15,7 @@ namespace Vorticity.Arrays.Metadata;
 /// }
 /// </code>
 /// The shredded dtype is the only field, and its presence is what says whether there is a second
-/// child. The dtype itself is not decoded here: this build refuses a shredded variant, so the
-/// bytes are counted and skipped rather than parsed into a type nothing will use.
+/// child. Its bytes are kept as the file holds them, and the decoder reads the dtype from them.
 /// </remarks>
 internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
 {
@@ -24,10 +23,20 @@ internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
 
     /// <summary>Creates variant metadata.</summary>
     /// <param name="hasShreddedDType">Whether a shredded dtype, and so a shredded child, is present.</param>
-    public VariantMetadata(bool hasShreddedDType) => HasShreddedDType = hasShreddedDType;
+    public VariantMetadata(bool hasShreddedDType)
+        : this(hasShreddedDType ? [] : null)
+    {
+    }
+
+    /// <summary>Creates variant metadata whose shredded child is of the dtype <paramref name="shreddedDType"/> serializes.</summary>
+    /// <param name="shreddedDType">The dtype message of the shredded child (tag 1), or null for none.</param>
+    public VariantMetadata(byte[]? shreddedDType) => ShreddedDType = shreddedDType;
 
     /// <summary>Whether the node carries a shredded child (tag 1 present).</summary>
-    public bool HasShreddedDType { get; }
+    public bool HasShreddedDType => ShreddedDType is not null;
+
+    /// <summary>The dtype message of the shredded child, as the file holds it; null when there is none.</summary>
+    public byte[]? ShreddedDType { get; }
 
     /// <summary>Reads the message body: no outer tag, no length prefix.</summary>
     /// <param name="metadata">The metadata bytes.</param>
@@ -36,14 +45,13 @@ internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
     public static VariantMetadata Read(ReadOnlySpan<byte> metadata)
     {
         ProtoReader reader = new ProtoReader(metadata);
-        bool shredded = false;
+        byte[]? shredded = null;
 
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             if (field == 1)
             {
-                _ = MetadataProto.ReadBytes(ref reader, wire, MessageName, "shredded_dtype");
-                shredded = true;
+                shredded = MetadataProto.ReadBytes(ref reader, wire, MessageName, "shredded_dtype").ToArray();
                 continue;
             }
 
@@ -67,7 +75,8 @@ internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
     }
 
     /// <inheritdoc/>
-    public bool Equals(VariantMetadata other) => HasShreddedDType == other.HasShreddedDType;
+    public bool Equals(VariantMetadata other) =>
+        HasShreddedDType == other.HasShreddedDType && ShreddedDType.AsSpan().SequenceEqual(other.ShreddedDType);
 
     /// <inheritdoc/>
     public override bool Equals(object? obj) => obj is VariantMetadata other && Equals(other);
@@ -111,9 +120,18 @@ internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetad
     /// <param name="hasTypedValue">Whether a shredded <c>typed_value</c> child is present (tag 2).</param>
     /// <param name="valueNullable">Whether the <c>value</c> child is nullable (tag 3).</param>
     public ParquetVariantMetadata(bool hasValue, bool hasTypedValue, bool valueNullable)
+        : this(hasValue, hasTypedValue ? [] : null, valueNullable)
+    {
+    }
+
+    /// <summary>Creates parquet-variant metadata whose shredded child is of the dtype <paramref name="typedValueDType"/> serializes.</summary>
+    /// <param name="hasValue">Whether the unshredded <c>value</c> child is present (tag 1).</param>
+    /// <param name="typedValueDType">The dtype message of the <c>typed_value</c> child (tag 2), or null for none.</param>
+    /// <param name="valueNullable">Whether the <c>value</c> child is nullable (tag 3).</param>
+    public ParquetVariantMetadata(bool hasValue, byte[]? typedValueDType, bool valueNullable)
     {
         HasValue = hasValue;
-        HasTypedValue = hasTypedValue;
+        TypedValueDType = typedValueDType;
         ValueNullable = valueNullable;
     }
 
@@ -121,7 +139,10 @@ internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetad
     public bool HasValue { get; }
 
     /// <summary>Whether a shredded <c>typed_value</c> child is present.</summary>
-    public bool HasTypedValue { get; }
+    public bool HasTypedValue => TypedValueDType is not null;
+
+    /// <summary>The dtype message of the shredded <c>typed_value</c> child, as the file holds it; null when there is none.</summary>
+    public byte[]? TypedValueDType { get; }
 
     /// <summary>Whether the <c>value</c> child is nullable.</summary>
     public bool ValueNullable { get; }
@@ -134,7 +155,7 @@ internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetad
     {
         ProtoReader reader = new ProtoReader(metadata);
         bool hasValue = false;
-        bool hasTypedValue = false;
+        byte[]? typedValueDType = null;
         bool valueNullable = false;
 
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
@@ -145,8 +166,7 @@ internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetad
                     hasValue = MetadataProto.ReadBool(ref reader, wire, MessageName, "has_value");
                     break;
                 case 2:
-                    _ = MetadataProto.ReadBytes(ref reader, wire, MessageName, "typed_value_dtype");
-                    hasTypedValue = true;
+                    typedValueDType = MetadataProto.ReadBytes(ref reader, wire, MessageName, "typed_value_dtype").ToArray();
                     break;
                 case 3:
                     valueNullable = MetadataProto.ReadBool(ref reader, wire, MessageName, "value_nullable");
@@ -157,7 +177,7 @@ internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetad
             }
         }
 
-        return new ParquetVariantMetadata(hasValue, hasTypedValue, valueNullable);
+        return new ParquetVariantMetadata(hasValue, typedValueDType, valueNullable);
     }
 
     /// <summary>Writes the message body: no outer tag, no length prefix.</summary>
@@ -180,6 +200,7 @@ internal readonly struct ParquetVariantMetadata : IEquatable<ParquetVariantMetad
     public bool Equals(ParquetVariantMetadata other) =>
         HasValue == other.HasValue &&
         HasTypedValue == other.HasTypedValue &&
+        TypedValueDType.AsSpan().SequenceEqual(other.TypedValueDType) &&
         ValueNullable == other.ValueNullable;
 
     /// <inheritdoc/>

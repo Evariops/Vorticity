@@ -595,8 +595,11 @@ name = "conformance-gen"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-schema",
  "futures-lite",
  "parquet",
+ "parquet-variant-compute",
  "pco",
  "serde",
  "serde_json",

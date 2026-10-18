@@ -21,9 +21,9 @@ public sealed class ScopeSplitTests
     // THE SPLIT IS 876/0, and the zero is the point: every file of the conformance corpus is
     // readable by this build. No component is left unread, whether once left out of scope or in
     // no core edition -- `fastlanes.delta` and `vortex.zstd_buffers` are both read, and both
-    // variants are. What is still refused is a SHAPE rather than an id: a shredded variant, the
-    // two-buffer form of fsst. Each of those is refused by its decoder with a message naming the
-    // shape, and none of them is in the corpus.
+    // variants are, shredded or not. What is still refused is a SHAPE rather than an id: the
+    // two-buffer form of fsst, refused by its decoder with a message naming the shape, and not in
+    // the corpus.
     private const int ExpectedInScope = 876;
     private const int ExpectedOutOfScope = 0;
 
