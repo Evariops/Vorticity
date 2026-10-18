@@ -280,6 +280,46 @@ public static class ColumnExtensions
         public TimeZoneInfo TimeZone => column.Type.ZoneInfo;
     }
 
+    extension(Column<Variant> column)
+    {
+        /// <summary>The value of row <paramref name="index"/>, its bytes copied.</summary>
+        public Variant this[int index] => ColumnData.Variant(column.Arena, column.Node, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>; rows that follow each other with the same metadata share one copy of it.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<Variant> destination) => ColumnData.CopyVariants(column.Arena, column.Node, destination);
+
+        /// <summary>The metadata bytes of row <paramref name="index"/>, borrowed from the batch.</summary>
+        /// <param name="index">The row.</param>
+        /// <returns>The bytes, valid until the batch is disposed.</returns>
+        public ReadOnlySpan<byte> GetMetadata(int index) => ColumnData.VariantMetadata(column.Arena, column.Node, index);
+
+        /// <summary>The value bytes of row <paramref name="index"/>, borrowed from the batch.</summary>
+        /// <param name="index">The row.</param>
+        /// <returns>The bytes, valid until the batch is disposed.</returns>
+        public ReadOnlySpan<byte> GetValue(int index) => ColumnData.VariantValue(column.Arena, column.Node, index);
+    }
+
+    extension(Column<Variant?> column)
+    {
+        /// <summary>The value of row <paramref name="index"/>, its bytes copied, or null for a null row.</summary>
+        public Variant? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.Variant(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row; rows that follow each other with the same metadata share one copy of it.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<Variant?> destination) => ColumnData.CopyVariants(column.Arena, column.Node, destination);
+
+        /// <summary>The metadata bytes of row <paramref name="index"/>, borrowed from the batch; undefined for a null row.</summary>
+        /// <param name="index">The row.</param>
+        /// <returns>The bytes, valid until the batch is disposed.</returns>
+        public ReadOnlySpan<byte> GetMetadata(int index) => ColumnData.VariantMetadata(column.Arena, column.Node, index);
+
+        /// <summary>The value bytes of row <paramref name="index"/>, borrowed from the batch; undefined for a null row.</summary>
+        /// <param name="index">The row.</param>
+        /// <returns>The bytes, valid until the batch is disposed.</returns>
+        public ReadOnlySpan<byte> GetValue(int index) => ColumnData.VariantValue(column.Arena, column.Node, index);
+    }
+
     extension(Column<Guid> column)
     {
         /// <summary>The value of row <paramref name="index"/>.</summary>

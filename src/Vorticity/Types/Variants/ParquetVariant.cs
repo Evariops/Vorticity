@@ -4,41 +4,7 @@ using System.Buffers.Binary;
 using Vorticity.Arrays;
 using Vorticity.Types.Numerics;
 
-namespace Vorticity.Types.Variant;
-
-/// <summary>What a decoded variant value turned out to be.</summary>
-internal enum VariantKind : byte
-{
-    /// <summary>The variant `null`, which is a value in its own right, not an absent row.</summary>
-    Null = 0,
-
-    /// <summary>A boolean.</summary>
-    Bool,
-
-    /// <summary>A signed 8-bit integer.</summary>
-    Int8,
-
-    /// <summary>A signed 16-bit integer.</summary>
-    Int16,
-
-    /// <summary>A signed 32-bit integer.</summary>
-    Int32,
-
-    /// <summary>A signed 64-bit integer.</summary>
-    Int64,
-
-    /// <summary>A 32-bit float.</summary>
-    Float,
-
-    /// <summary>A 64-bit float.</summary>
-    Double,
-
-    /// <summary>A UTF-8 string, either short-form or long-form.</summary>
-    String,
-
-    /// <summary>Arbitrary bytes.</summary>
-    Binary,
-}
+namespace Vorticity.Types.Variants;
 
 /// <summary>One decoded Parquet Variant value.</summary>
 /// <remarks>

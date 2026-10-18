@@ -1,6 +1,6 @@
 using System;
 
-namespace Vorticity.Types.Variant;
+namespace Vorticity.Types.Variants;
 
 /// <summary>
 /// A variant's metadata read in place: the header, then the dictionary of strings an object's

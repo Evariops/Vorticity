@@ -611,6 +611,14 @@ internal static class ColumnStores
                 return new StructStore(dtype, children, pool);
             }
 
+            case DTypeKind.Variant:
+            {
+                // A variant is the struct of its metadata and its value wearing the variant dtype:
+                // the shape a read delivers, and the one the writer writes as vortex.parquet.variant.
+                DType binary = dtype.Arena.Binary(Nullability.NonNullable);
+                return new StructStore(dtype, [new VarBinStore(binary, pool), new VarBinStore(binary, pool)], pool);
+            }
+
             case DTypeKind.List:
                 return new ListStore(dtype, Create(dtype.ElementType, pool), pool);
             case DTypeKind.FixedSizeList:

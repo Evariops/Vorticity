@@ -13,10 +13,10 @@ using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Scanning;
 using Vorticity.Types;
-using Vorticity.Types.Variant;
+using Vorticity.Types.Variants;
 using Xunit;
 
-namespace Vorticity.Tests.Types.Variant;
+namespace Vorticity.Tests.Types.Variants;
 
 public sealed class ShreddedVortexVariantTests
 {

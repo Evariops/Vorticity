@@ -508,6 +508,73 @@ internal static class ColumnData
         return new IntegerStorage(record.Values.Span, record.PType, record.Length);
     }
 
+    /// <summary>The metadata and the value nodes of a variant node, each in its canonical views.</summary>
+    private static (int Metadata, int Value) VariantFields(CanonicalArena arena, int node)
+    {
+        CanonicalNode variant = arena.GetNode(node);
+        if (variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+        {
+            throw new VortexFormatException($"A variant column decoded as {variant.Kind}, not as the struct of its metadata and its value.");
+        }
+
+        return (EncodedForms.Canonical(arena, variant.GetFieldIndex(0)), EncodedForms.Canonical(arena, variant.GetFieldIndex(1)));
+    }
+
+    /// <summary>The metadata bytes of row <paramref name="index"/> of a variant node, borrowed from the batch.</summary>
+    internal static ReadOnlySpan<byte> VariantMetadata(CanonicalArena arena, int node, int index) =>
+        Bytes(arena, VariantFields(arena, node).Metadata, index);
+
+    /// <summary>The value bytes of row <paramref name="index"/> of a variant node, borrowed from the batch.</summary>
+    internal static ReadOnlySpan<byte> VariantValue(CanonicalArena arena, int node, int index) =>
+        Bytes(arena, VariantFields(arena, node).Value, index);
+
+    /// <summary>The variant of row <paramref name="index"/> of a variant node, its bytes copied.</summary>
+    internal static Variant Variant(CanonicalArena arena, int node, int index) =>
+        new(VariantMetadata(arena, node, index).ToArray(), VariantValue(arena, node, index).ToArray());
+
+    /// <summary>
+    /// Copies the rows of a variant node, a null for a null row when <typeparamref name="TVariant"/>
+    /// is nullable: each value copied, and one metadata array shared by the rows that follow each
+    /// other with the same bytes, which rows of one shape do.
+    /// </summary>
+    /// <typeparam name="TVariant"><see cref="Vorticity.Variant"/>, with or without its nullability.</typeparam>
+    internal static void CopyVariants<TVariant>(CanonicalArena arena, int node, Span<TVariant> destination)
+    {
+        (int metadataIndex, int valueIndex) = VariantFields(arena, node);
+        CanonicalNode metadata = arena.GetNode(metadataIndex);
+        CanonicalNode value = arena.GetNode(valueIndex);
+        ReadOnlySpan<byte> metadataViews = metadata.Views.Span;
+        ReadOnlySpan<byte> valueViews = value.Views.Span;
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<TVariant> into = Destination(destination, metadata.Length);
+        byte[]? shared = null;
+        for (int i = 0; i < into.Length; i++)
+        {
+            if (!IsValid(valid, i))
+            {
+                into[i] = default!;
+                continue;
+            }
+
+            ReadOnlySpan<byte> bytes = ViewBytes(in metadata, metadataViews, i);
+            if (shared is null || !bytes.SequenceEqual(shared))
+            {
+                shared = bytes.ToArray();
+            }
+
+            Variant row = new(shared, ViewBytes(in value, valueViews, i).ToArray());
+            if (typeof(TVariant) == typeof(Variant))
+            {
+                into[i] = Unsafe.As<Variant, TVariant>(ref row);
+            }
+            else
+            {
+                Variant? present = row;
+                into[i] = Unsafe.As<Variant?, TVariant>(ref present);
+            }
+        }
+    }
+
     /// <summary>The bytes of row <paramref name="index"/> of a canonical text node, which must be valid.</summary>
     private static ReadOnlySpan<byte> ViewBytes(in CanonicalNode record, ReadOnlySpan<byte> views, int index)
     {

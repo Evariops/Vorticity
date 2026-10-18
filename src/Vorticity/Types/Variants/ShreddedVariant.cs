@@ -12,7 +12,7 @@ using Vorticity.Buffers;
 using Vorticity.Types.Numerics;
 using Vorticity.Writing;
 
-namespace Vorticity.Types.Variant;
+namespace Vorticity.Types.Variants;
 
 /// <summary>
 /// The value of a Parquet Variant put back together from the columns shredded out of it: each

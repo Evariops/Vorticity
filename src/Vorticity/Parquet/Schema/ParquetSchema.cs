@@ -947,7 +947,7 @@ internal sealed class ParquetSchema
             return new ParquetField
             {
                 Name = name,
-                Type = VortexType.Variant(nullable),
+                Type = nullable ? VortexType.Variant.Nullable : VortexType.Variant,
                 Shape = FieldShape.Variant,
                 Children = children,
                 Storage = nullable ? storage.Nullable : storage,

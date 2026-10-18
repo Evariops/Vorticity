@@ -11,7 +11,7 @@ using System.Text.Json;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;
-using Vorticity.Types.Variant;
+using Vorticity.Types.Variants;
 using Vorticity.Types.Numerics;
 using Xunit;
 

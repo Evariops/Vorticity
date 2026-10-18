@@ -108,7 +108,7 @@ internal static class VortexTypes
             }
 
             case DTypeKind.Variant:
-                return VortexType.Variant(nullable);
+                return nullable ? VortexType.Variant.Nullable : VortexType.Variant;
             default:
                 throw new VortexUnsupportedException(d.Kind.ToString(), ComponentKind.DType);
         }

@@ -1,9 +1,9 @@
 using Vorticity.Arrays;
 using Vorticity.Types;
-using Vorticity.Types.Variant;
+using Vorticity.Types.Variants;
 using Xunit;
 
-namespace Vorticity.Tests.Types.Variant;
+namespace Vorticity.Tests.Types.Variants;
 
 public sealed class ParquetVariantTests
 {

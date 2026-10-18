@@ -75,6 +75,8 @@ internal static class ColumnReader
                 return Temporal.Zoned(arena, node, type, index);
             case ClrKind.Guid:
                 return ColumnData.Guid(arena, node, index);
+            case ClrKind.Variant:
+                return ColumnData.Variant(arena, node, index);
             default:
                 throw new NotSupportedException($"A single value of {shape.Type} is read through its column's accessors.");
         }

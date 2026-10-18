@@ -1,6 +1,6 @@
 using System;
 
-namespace Vorticity.Types.Variant;
+namespace Vorticity.Types.Variants;
 
 /// <summary>
 /// A variant object or array read in place: its count, an object's field ids, the offsets of its

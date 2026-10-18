@@ -81,9 +81,11 @@ is created. It opens files from a path or from any `ISegmentSource`, creates wri
 
 The schema is a value: `VortexSchema`, a list of `VortexField(Name, VortexType)` that a collection
 expression builds, and `VortexType`, immutable and interned by value, with a factory per dtype
-(`Schema/`), `Map(key, value)` included. `Union` and `Variant` have no factory: a file may declare
-them, so the schema shows them, but no .NET type maps to them. The arena the reader decodes into is
-built once at open and never appears in the API.
+(`Schema/`), `Map(key, value)` and `Variant` included. `Union` has no factory: a file may declare it,
+so the schema shows it, but no .NET type maps to it. A variant column maps to `Variant`, a value of the
+Parquet Variant encoding that walks by key and index, and whose `As…` and `To…` follow the rules of
+[names](#11-names). The arena the reader decodes into is built once at open and never appears in the
+API.
 
 ## 4. Records: the generated contract
 

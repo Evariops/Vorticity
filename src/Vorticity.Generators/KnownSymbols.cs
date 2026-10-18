@@ -34,6 +34,7 @@ internal sealed class KnownSymbols
         TimeOnly = compilation.GetTypeByMetadataName("System.TimeOnly");
         DateTimeOffset = compilation.GetTypeByMetadataName("System.DateTimeOffset");
         Guid = compilation.GetTypeByMetadataName("System.Guid");
+        Variant = compilation.GetTypeByMetadataName("Vorticity.Variant");
         TimeSpan = compilation.GetTypeByMetadataName("System.TimeSpan");
         Int128 = compilation.GetTypeByMetadataName("System.Int128");
         UInt128 = compilation.GetTypeByMetadataName("System.UInt128");
@@ -118,6 +119,8 @@ internal sealed class KnownSymbols
     public INamedTypeSymbol? DateTimeOffset { get; }
 
     public INamedTypeSymbol? Guid { get; }
+
+    public INamedTypeSymbol? Variant { get; }
 
     public INamedTypeSymbol? TimeSpan { get; }
 
