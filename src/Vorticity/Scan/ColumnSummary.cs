@@ -261,6 +261,34 @@ internal sealed class SummaryPruner
             return true;
         }
 
+        return Pruner(summaries, rows) is not { } pruner || pruner.MayMatch(new RowRange(0, rows));
+    }
+
+    /// <summary>Whether the predicate selects every row behind these summaries: the dual of <see cref="MayMatch"/>.</summary>
+    /// <param name="summaries">What is known about the columns, in any order.</param>
+    /// <param name="rows">How many rows the summaries cover.</param>
+    /// <returns>
+    /// <see langword="true"/> only when the summaries prove every row selected: bounds inside the
+    /// predicate's range, and a null count proven zero on a column a comparison reads. A column the
+    /// predicate reads and the summaries do not cover proves nothing, so the answer is then false.
+    /// </returns>
+    /// <remarks>
+    /// Bounds stay valid when rows of the extent are deleted, since the survivors lie inside them,
+    /// so an extent proven whole is proven whole for its live rows too.
+    /// </remarks>
+    public bool MustMatch(IReadOnlyList<ColumnSummary> summaries, long rows)
+    {
+        if (summaries is null || rows <= 0 || _paths.Count == 0)
+        {
+            return false;
+        }
+
+        return Pruner(summaries, rows) is { } pruner && pruner.MustMatch(new RowRange(0, rows));
+    }
+
+    /// <summary>The zone pruner over the summaries of the columns the predicate reads, or null when none is summarised.</summary>
+    private ZonePruner? Pruner(IReadOnlyList<ColumnSummary> summaries, long rows)
+    {
         List<ZoneColumn>? columns = null;
         for (int i = 0; i < summaries.Count; i++)
         {
@@ -275,6 +303,6 @@ internal sealed class SummaryPruner
                 Expr.Field(summary.Path), rows, rows, [ColumnSummaries.Bounds(summary, rows)]));
         }
 
-        return columns is null || new ZonePruner(_filter, columns.ToArray()).MayMatch(new RowRange(0, rows));
+        return columns is null ? null : new ZonePruner(_filter, columns.ToArray());
     }
 }

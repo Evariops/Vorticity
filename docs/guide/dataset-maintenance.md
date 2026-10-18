@@ -253,6 +253,20 @@ object written by another writer carries no identity to bind a fragment to, and 
 it until a compaction rewrites it with the index. The indexes are on one column each: a composite key
 is refused, since its encoder lives in a handle's options.
 
+## Expiry
+
+A dataset that declares periods drops old data a period at a time, without reading it:
+
+```csharp
+DateTimeOffset applied = await dataset.ExpireAsync(DateTimeOffset.UtcNow - TimeSpan.FromDays(30), ct);
+```
+
+The cutoff is aligned down to the start of the period holding the instant you give, and returned. Every
+object whose rows all lie before it goes in one commit, decided from the dataset's tree, with no data
+object read. A row may therefore outlive the instant you gave by up to a period. To drop rows exactly,
+delete them (`DeleteAsync`), which opens the objects that straddle the cutoff and marks their rows.
+Expiry, like a delete, leaves the bytes to vacuum.
+
 ## What each costs
 
 Measured above with `CountingObjectStore`, on a dataset of one object after compaction:

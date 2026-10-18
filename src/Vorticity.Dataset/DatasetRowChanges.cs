@@ -129,8 +129,11 @@ internal static class DatasetRowChanges
                 await foreach (PositionedObject held in version
                     .WalkAsync(pruner, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
                 {
-                    Change change = await RewriteAsync(dataset, version, held, filter, changed, cancellationToken)
-                        .ConfigureAwait(false);
+                    // An object whose summaries prove every row selected goes whole, unopened, when no
+                    // sink wants its rows: bounds only loosen under marks, so its live rows are selected too.
+                    Change change = changed is null && pruner is not null && pruner.MustMatch(held.Entry.Summaries.Columns, held.Entry.PhysicalRows)
+                        ? new Change(held.Entry.Rows, null, null)
+                        : await RewriteAsync(dataset, version, held, filter, changed, cancellationToken).ConfigureAwait(false);
                     if (change.Taken == 0)
                     {
                         continue;

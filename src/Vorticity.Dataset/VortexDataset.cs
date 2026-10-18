@@ -1104,6 +1104,22 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Drops, in one commit and reading none of them, every object of a dataset of periods whose rows
+    /// all lie before <paramref name="before"/>, aligned down to the start of the period holding it.
+    /// </summary>
+    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
+    /// <remarks>
+    /// A row may outlive the cutoff by up to a period, the one that holds it, and an object of level 0
+    /// that straddles it stays until compaction cuts it by period. What drops a row exactly is
+    /// <see cref="DeleteAsync(VortexExpr, CancellationToken)"/>, which opens the objects it touches.
+    /// </remarks>
+    public ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset before, CancellationToken cancellationToken = default) =>
+        DatasetExpiry.RunAsync(this, before, cancellationToken);
+
+    /// <summary>
     /// Changes the rows <paramref name="filter"/> is true for, in one commit: each is read as a
     /// record, passed through <paramref name="update"/>, and written again, while the objects it
     /// came from are rewritten without it.

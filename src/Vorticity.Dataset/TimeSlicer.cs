@@ -193,6 +193,13 @@ internal static class TimeSlicer
         _ => 30 * 86_400,
     };
 
+    /// <summary>A UTC time as an instant column counts it, in <paramref name="unit"/> since the epoch.</summary>
+    internal static long InstantOf(DateTimeOffset at, TimeUnit unit) => Count(at.UtcDateTime, unit);
+
+    /// <summary>An instant counted in <paramref name="unit"/> as a UTC time, to the tick.</summary>
+    internal static DateTimeOffset TimeOf(long instant, TimeUnit unit) =>
+        new DateTimeOffset(DateTime.UnixEpoch.AddTicks(Ticks(instant, unit)), TimeSpan.Zero);
+
     /// <summary>A span of time counted in <paramref name="unit"/>, as an instant column counts it.</summary>
     internal static long Units(TimeSpan span, TimeUnit unit) => checked((long)(span.TotalSeconds * UnitsPerSecond(unit)));
 

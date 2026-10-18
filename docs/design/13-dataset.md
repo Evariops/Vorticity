@@ -761,8 +761,18 @@ for (a row it is false or unknown for stays, as a scan would not return it) and 
 leaf entry of each object that holds one, as a deletion vector: the sorted runs of the object's own
 row positions it takes, two varints per run, placed after everything else the entry holds (see [what a
 node carries](#42-what-a-node-carries)). The object's bytes do not change, so the commit writes the
-pages on the path to the entries it changed and no data object. An object whose rows all go is removed
-from the tree without being read, and one whose summaries refute the filter is not opened.
+pages on the path to the entries it changed and no data object. An object whose summaries prove the
+filter true for every row, its bounds inside the filter's range and no null on a column a comparison
+reads, is removed from the tree without being read, and one whose summaries refute the filter is not
+opened. Bounds only loosen as rows are marked, so a proof over the physical rows holds for the live
+ones.
+
+A dataset of periods also expires whole periods (`ExpireAsync(before)`). The cutoff is aligned down to
+the start of the period holding `before`, and every object whose instant's maximum lies before it is
+removed in one commit, from what the leaves say, without reading one. Every object above level 0 holds
+one period, so none straddles the cutoff, and an object of level 0 that does stays until its exit
+cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
+read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
 
 An update is a delete and an insert applied together. The rows it takes are marked where they were,
 read as records, passed through the caller's function, and written into new level 0 objects, where
