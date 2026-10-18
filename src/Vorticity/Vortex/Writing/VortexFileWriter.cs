@@ -314,6 +314,31 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             : throw new ArgumentException($"'{column}' is no top-level column of the file.", nameof(column));
     }
 
+    /// <summary>Where every column's chunks lie and the encodings their trees name, as the layout will say.</summary>
+    private SliceChunks ChunkDirectory()
+    {
+        ChunkSpan[][] columns = new ChunkSpan[_fieldCount][];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            AppendList<int> segments = _columnSegments[field];
+            AppendList<long> chunkRows = _gathering?[field]?.ChunkRows ?? _chunkRows;
+            ChunkSpan[] spans = new ChunkSpan[segments.Count];
+            long row = 0;
+            for (int chunk = 0; chunk < spans.Length; chunk++)
+            {
+                SegmentSpec spec = _segments[segments[chunk]];
+                spans[chunk] = new ChunkSpan(spec.Offset, spec.Length, spec.AlignmentExponent, row, chunkRows[chunk]);
+                row += chunkRows[chunk];
+            }
+
+            columns[field] = spans;
+        }
+
+        // The encodings the chunks name are a prefix of the table, which only grows: the zone maps
+        // written after may add some.
+        return new SliceChunks([.. _arrayEncodings.Ids], columns);
+    }
+
     /// <summary>What every blob of the file is assembled in, created with the first one.</summary>
     private ArrayBlobWriter.Workspace? _blobs;
 
@@ -1905,10 +1930,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 $"The {missing.Kind} index on '{missing.Column}' is required and was not built: {missing.Reason}. The file is not completed.");
         }
 
-        // A long run's fence pages, which name the regions just written.
+        // A long run's fence pages, which name the regions just written, then where the chunks of a
+        // sliced file lie, for a reader that opens no footer.
         if (_indexes is { } closed)
         {
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
+            if (_slices is not null)
+            {
+                await closed.AddSliceChunksAsync(_sink, ChunkDirectory(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         long indexStart = _sink.Position;

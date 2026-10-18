@@ -246,6 +246,34 @@ The dataset's key-ordered reads and its compaction merge are built on this, one 
 [what a compaction does](13-dataset.md#53-what-a-compaction-does) and [order beyond the
 lookup](13-dataset.md#66-order-beyond-the-lookup)).
 
+### 5.1 The rows of a time slice, without the footer
+
+An open reads the footer, which holds a node per chunk and column. For the object of a dataset's
+period that is megabytes, and a question that needs the rows of a slice or two (the edges of a time
+window, an exact lookup, the rows to show) needs none of it. A sliced file carries its slice table and
+where its chunks lie in its index directory ([the slice
+kinds](10-indexes.md#44-vorticityslicesv1-the-time-slices-of-a-file)), so a reader goes from the end
+of the file to a slice's rows without the footer:
+
+```
+request 1   the EOF marker, the last 8 bytes, which give the postscript's length
+request 2   the postscript, which names the index directory
+request 3   the index directory: the slice table, and the region of the chunk directory
+request 4   the chunk directory
+request 5   the chunks of every column that overlap the slice, in one request set
+```
+
+Each chunk decodes from its own bytes, the encoding table the chunk directory carries, and the
+column's type, which the caller knows from the dataset's schema. The chunks that overlap a slice are
+cut to its rows and joined, so a slice that starts inside a chunk reads that chunk whole, as any read
+of a flat chunk does. Requests 1 to 4 are small, and a dataset's leaf entry that records the chunk
+directory's region spares them. A file without the slice kinds, or with ones that do not decode or do
+not cover its rows, opens no such reader, and its rows are read through an open as before.
+
+The test that reads every slice of a file checks that no byte between the index directory and the
+postscript, where the dtype, the layout and the footer lie, is read. A warm read of a slice allocates
+its decode context, about 17 KB, and nothing per row (`SliceReadAllocationTests`).
+
 ## 6. Predicates on text and lists
 
 Four predicates go beyond comparisons, `IN` and nullity, each with its own pruning:

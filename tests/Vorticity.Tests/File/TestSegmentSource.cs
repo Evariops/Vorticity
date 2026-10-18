@@ -50,6 +50,9 @@ internal sealed class TestSegmentSource : ISegmentReader
     /// <summary>Whether <see cref="DisposeAsync"/> ran.</summary>
     internal bool Disposed { get; private set; }
 
+    /// <summary>When set, every byte range read, in the order read: a test proves by it which regions a read never touched.</summary>
+    internal System.Collections.Generic.List<(long Offset, long Length)>? Ranges { get; init; }
+
     /// <inheritdoc/>
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
     {
@@ -70,6 +73,7 @@ internal sealed class TestSegmentSource : ISegmentReader
             throw new VortexFormatException($"Segment {spec.Offset}+{spec.Length} escapes the file.");
         }
 
+        Ranges?.Add(((long)spec.Offset, spec.Length));
         return new ValueTask<SegmentOwner>(PinnedArraySegmentOwner.CopyOf(
             _bytes.AsSpan((int)spec.Offset, (int)spec.Length),
             1 << spec.AlignmentExponent));
@@ -110,6 +114,7 @@ internal sealed class TestSegmentSource : ISegmentReader
         }
 
         int available = (int)Math.Min(length, _bytes.Length - offset);
+        Ranges?.Add((offset, available));
         return new ValueTask<SegmentOwner>(
             PinnedArraySegmentOwner.CopyOf(_bytes.AsSpan((int)offset, available), alignment));
     }

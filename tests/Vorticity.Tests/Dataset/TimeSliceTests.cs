@@ -1,13 +1,19 @@
 // Time slices: how rows sorted by their instant are cut, by a calendar unit chosen from their volume
 // and finer where a burst fills one, and the slice table a file carries in its index directory.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
+using Vorticity.IO;
+using Vorticity.Serialization.Schemas;
+using Vorticity.Tests.File;
+using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
 
@@ -128,6 +134,107 @@ public sealed partial class TimeSliceTests
             System.IO.File.Delete(path);
             System.IO.File.Delete(path + ".2");
         }
+    }
+
+    [Fact]
+    public void AChunkDirectoryNamesTheChunksASliceOverlaps()
+    {
+        ChunkSpan[] column = [new(64, 100, 6, 0, 2048), new(192, 100, 6, 2048, 2048), new(320, 50, 6, 4096, 904)];
+        SliceChunks chunks = new(["vortex.primitive", "fastlanes.bitpacked"], [column, column]);
+        SliceChunks read = SliceChunks.FromBytes(chunks.ToBytes())!;
+        Assert.Equal(chunks.Encodings, read.Encodings);
+        Assert.Equal(column, read.Columns[1]);
+        Assert.Equal(column[..1], read.Overlapping(0, 0, 2048).ToArray());
+        Assert.Equal(column[..2], read.Overlapping(0, 2000, 100).ToArray());
+        Assert.Equal(column[2..], read.Overlapping(1, 4096, 904).ToArray());
+        Assert.Null(SliceChunks.FromBytes(chunks.ToBytes()[..^1]));
+        Assert.Null(SliceChunks.FromBytes([2]));
+    }
+
+    /// <summary>A slice's rows, read through the chunk directory, without a byte of the dtype, the layout or the footer.</summary>
+    [Fact]
+    public async Task ASliceIsReadWithoutTheFooter()
+    {
+        Sliced sliced = await WriteSlicedAsync(declare: true, Ct);
+        (Reading[] rows, SliceTable table, byte[] bytes, DType schema) = sliced;
+
+        // Chunks of 2 048 rows, so that slices start and end inside them.
+        Assert.Contains(table.Slices, slice => slice.FirstRow % 2048 != 0);
+        TestSegmentSource source = new(bytes) { Ranges = [] };
+        SliceReader reader = (await SliceReader.OpenAsync(source, bytes.Length, schema, null, Ct))!;
+        Assert.Equal(table.Slices, reader.Slices.Slices);
+        for (int s = 0; s < table.Slices.Count; s++)
+        {
+            TimeSlice slice = table.Slices[s];
+            using RecordBatch batch = await reader.ReadSliceAsync(s, Ct);
+            Reading[] expected = rows[(int)slice.FirstRow..(int)(slice.FirstRow + slice.Rows)];
+            Assert.Equal(expected, Read(batch));
+        }
+
+        // Nothing read lies between the index directory and the postscript, where the dtype, the
+        // layout and the footer are: two reads of the end, the directory, the chunk directory, then
+        // one request a slice.
+        SegmentSpec directory = (await VortexFile.ReadMetadataSpecAsync(new TestSegmentSource(bytes), bytes.Length, IndexDirectory.MetadataKey, Ct))!.Value;
+        long footerEnd = bytes.Length - 8 - BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(bytes.Length - 6, 2));
+        Assert.True(footerEnd > (long)directory.End);
+        Assert.All(source.Ranges, range => Assert.True(
+            range.Offset + range.Length <= (long)directory.End || range.Offset >= footerEnd, $"{range} reads the footer"));
+        Assert.Equal(2, source.RangeReads);
+        Assert.Equal(table.Slices.Count, source.BatchReads);
+
+        // A file that declares no slices opens no slice reader.
+        byte[] plain = (await WriteSlicedAsync(declare: false, Ct)).Bytes;
+        Assert.Null(await SliceReader.OpenAsync(new TestSegmentSource(plain), plain.Length, schema, null, Ct));
+    }
+
+    internal readonly record struct Sliced(Reading[] Rows, SliceTable Table, byte[] Bytes, DType Schema);
+
+    /// <summary>
+    /// 20 000 rows 30 ms apart, in chunks of 2 048 rows and slices of a minute, 2 000 rows: the file's
+    /// bytes and schema, its slices declared or not.
+    /// </summary>
+    internal static async Task<Sliced> WriteSlicedAsync(bool declare, CancellationToken ct)
+    {
+        Reading[] rows = [.. Enumerable.Range(0, 20_000).Select(i => new Reading(DateTimeOffset.FromUnixTimeMilliseconds((Noon / 1000) + (i * 30L)), i))];
+        long[] instants = [.. rows.Select(r => r.At.ToUnixTimeMilliseconds() * 1000)];
+        SliceTable table = new(TimeUnit.Microseconds, TimeSlicer.Cut(instants, TimeUnit.Microseconds, targetRows: 2_500));
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-slices-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            VortexWriteOptions options = new()
+            {
+                Indexes = IndexPolicy.Auto.SortedRuns(nameof(Reading.At), true),
+                BlockRows = 1024,
+                ChunkTargetBytes = 16 * 1024,
+            };
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>(path, options))
+            {
+                await writer.WriteAsync<Reading>(rows, ct);
+                if (declare)
+                {
+                    writer.DeclareSlices(nameof(Reading.At), table);
+                }
+
+                await writer.CompleteAsync(ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            return new Sliced(rows, table, await System.IO.File.ReadAllBytesAsync(path, ct), file.DType);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    private static Reading[] Read(RecordBatch batch)
+    {
+        Columns<Reading> columns = batch.As<Reading>();
+        DateTimeOffset[] at = new DateTimeOffset[batch.RowCount];
+        long[] values = new long[batch.RowCount];
+        columns.Column<DateTimeOffset>(0).CopyTo(at);
+        columns.Column<long>(1).CopyTo(values);
+        return [.. at.Zip(values, (a, v) => new Reading(a, v))];
     }
 
     [VortexRecord]

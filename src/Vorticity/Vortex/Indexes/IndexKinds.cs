@@ -38,6 +38,13 @@ internal static class IndexKinds
     public const string Slices = "vorticity.slices.v1";
 
     /// <summary>
+    /// Where the chunks of every top-level column lie and the array encodings their trees name, on
+    /// the root, in one payload region: what reads a slice's rows without the footer
+    /// (<see cref="Indexes.SliceChunks"/>).
+    /// </summary>
+    public const string SliceChunks = "vorticity.slices.chunks.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -47,18 +54,23 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or Slices => true,
+                or PostingsNgram3 or Slices or SliceChunks => true,
             _ => false,
         };
 
     /// <summary>
-    /// Whether the kind carries payload segments. <see cref="DictProbe"/> is the one that does
-    /// not: its whole content is the statement that the column's chunks are dictionary-encoded.
+    /// Whether the kind carries payload segments. <see cref="DictProbe"/> does not, its whole content
+    /// being the statement that the column's chunks are dictionary-encoded, and neither does
+    /// <see cref="Slices"/>, whose table fits in its options.
     /// </summary>
     /// <param name="kind">The name.</param>
     /// <returns>Whether a run of this kind must carry at least one payload segment.</returns>
     public static bool HasPayload(string kind) =>
-        !string.Equals(kind, DictProbe, StringComparison.Ordinal) && !string.Equals(kind, Slices, StringComparison.Ordinal);
+        kind switch
+        {
+            DictProbe or Slices => false,
+            _ => true,
+        };
 
     /// <summary>The kind a policy of <paramref name="policy"/> builds, or null for a policy that names none.</summary>
     /// <param name="policy">The policy's kind.</param>

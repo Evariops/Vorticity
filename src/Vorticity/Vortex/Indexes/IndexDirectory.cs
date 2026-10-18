@@ -120,6 +120,9 @@ internal sealed record IndexDirectory(
     /// <summary>The postscript metadata key the directory is stored under.</summary>
     public const string MetadataKey = "vorticity.index";
 
+    /// <summary>A file row count a reader that opens no footer does not know: the directory's own stands.</summary>
+    internal const ulong UnknownRows = ulong.MaxValue;
+
     /// <summary>The version this library writes and reads: checksummed.</summary>
     internal const byte FormatVersion = 2;
 
@@ -420,7 +423,10 @@ internal sealed record IndexDirectory(
     /// and an entry that does not hold up is dropped on its own.
     /// </summary>
     /// <param name="bytes">The metadata segment.</param>
-    /// <param name="fileRowCount">The file's own row count.</param>
+    /// <param name="fileRowCount">
+    /// The file's own row count, or <see cref="UnknownRows"/> for a reader that opens no footer and
+    /// reads an object no one appends to, whose directory's own count then stands.
+    /// </param>
     /// <param name="dataEnd">
     /// The first byte a run may not reach: the footer's start. A run segment lies inside the file
     /// and before the footer, or its entry is ignored.
@@ -539,7 +545,7 @@ internal sealed record IndexDirectory(
             return false;
         }
 
-        if (rowCount != fileRowCount)
+        if (fileRowCount != UnknownRows && rowCount != fileRowCount)
         {
             reason = $"the directory was written for {rowCount} rows and the file has {fileRowCount}: " +
                 "a stale directory after a failed append proves nothing";

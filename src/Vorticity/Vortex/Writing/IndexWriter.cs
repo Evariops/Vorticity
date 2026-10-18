@@ -624,7 +624,9 @@ internal sealed class IndexWriter : IDisposable
 
         foreach (IndexEntry entry in entries)
         {
-            if (entry.Kind == IndexKinds.DictProbe || Kept(entry, boundary) is not { } kept)
+            // The slice kinds describe the file as its writer cut it, which an append changes.
+            if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks
+                || Kept(entry, boundary) is not { } kept)
             {
                 continue;
             }
@@ -1467,11 +1469,6 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// The dictionary probe: no payload, one run per maximal range of consecutive
-    /// dictionary-encoded chunks. The run is the claim, so a chunk that is not a dictionary lies
-    /// between two runs and the reader gets no claim for it.
-    /// </summary>
-    /// <summary>
     /// Adds the file's slice table: an entry on the top-level instant column <paramref name="field"/>,
     /// one run over every block of the file's <paramref name="rows"/>, the table in its options.
     /// </summary>
@@ -1484,11 +1481,34 @@ internal sealed class IndexWriter : IDisposable
         }
 
         int length = Math.Max(blockRows, 1);
-        uint blocks = checked((uint)((rows + length - 1) / length));
         _entries.Add(new IndexEntry(
-            IndexKinds.Slices, [checked((uint)field)], (ulong)length, table.ToBytes(), [new IndexRun(0, blocks, [], [])]));
+            IndexKinds.Slices, [checked((uint)field)], (ulong)length, table.ToBytes(), [new IndexRun(0, Blocks(rows, length), [], [])]));
     }
 
+    /// <summary>
+    /// Writes where the chunks of every column lie as one region at the sink's position, and adds the
+    /// entry that names it: on the root, one run over every block of the file's <paramref name="rows"/>,
+    /// the region checksummed as every payload is.
+    /// </summary>
+    internal async ValueTask AddSliceChunksAsync(
+        ISegmentSink sink, SliceChunks chunks, long rows, int blockRows, CancellationToken cancellationToken)
+    {
+        byte[] bytes = chunks.ToBytes();
+        long offset = sink.Position;
+        await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        int length = Math.Max(blockRows, 1);
+        _entries.Add(new IndexEntry(
+            IndexKinds.SliceChunks, [], (ulong)length, [],
+            [new IndexRun(0, Blocks(rows, length), [IndexSegment.Of(offset, bytes, 0)], [])]));
+    }
+
+    private static uint Blocks(long rows, int length) => checked((uint)((rows + length - 1) / length));
+
+    /// <summary>
+    /// The dictionary probe: no payload, one run per maximal range of consecutive
+    /// dictionary-encoded chunks. The run is the claim, so a chunk that is not a dictionary lies
+    /// between two runs and the reader gets no claim for it.
+    /// </summary>
     private void DictProbe(int field, ColumnWriter column, IReadOnlyList<long> chunkRows, int blockRows)
     {
         List<IndexRun> runs = [];

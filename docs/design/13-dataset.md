@@ -425,6 +425,7 @@ The trees are ordered by the clustering key, so the order of that one key is bou
 | rows by position, `Rows(a, b)` | the row sums of every node | O(log N) plus the objects the range touches |
 | count and rank on the clustering key | objects whose summaries lie wholly inside the range are counted unopened, and the core's exact cover handles the boundary objects | at most level 0's objects plus two per level opened |
 | an order on another column | no tree helps | one cursor per object the summaries cannot refute |
+| the rows of a time slice, in an object written with its slices | the object's slice table and chunk directory ([the rows of a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)) | four small requests, then one per slice, and never the object's footer |
 
 An object opens when it could hold the next row, and not before. Objects are offered in the order of
 a lower bound on their keys (on the clustering key, ascending, a leaf key is the object's exact

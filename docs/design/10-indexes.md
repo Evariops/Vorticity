@@ -207,6 +207,15 @@ that does not decode, or whose rows are not the file's, is not read. The writer 
 declares the slices before it completes the file, which checks that they cover its rows
 ([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)).
 
+A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
+root. Its one payload region holds, behind a version byte, the file's table of array encodings, then
+per column its chunks, each its offset, length, alignment and rows as varints. That is about ten
+bytes a chunk, 5 MB for a day of 10⁹ rows in 20 columns, so it is a region read when needed rather
+than options every open reads. With it a reader decodes the chunks that hold a slice from their own
+bytes, since a chunk's segment ends with its encoding tree, and never reads the footer ([the rows of
+a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)). An append drops
+both slice kinds, since they describe the file as its writer cut it.
+
 ### 4.5 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
