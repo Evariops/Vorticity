@@ -512,7 +512,31 @@ Two aggregates are the same when they have the same function, the same input exp
 filter, so the `g.Count()` of a `where`, an `orderby` and a `select` is counted once. An average
 shares the sum and the count of its column with a sum and a count of that column.
 
-### 5.6 States kept past a scan
+### 5.6 Distributions and quantiles
+
+`g.Quantile(r => r.Millis, 0.99)` is the value at that share of the group's values in ascending order,
+within a relative error, 1 % by default, and `Distribution(r => r.Millis)` the whole distribution,
+its quantiles and its histogram, which a selection of groups cannot hold as a column and an answer
+over a whole scan can. Both fold the values into a sketch: counts per bucket of a log-linear grid,
+each power of two split into `2^k` equal buckets, the fewest `k` whose buckets hold the error (`k = 6`
+at 1 %, which holds 0.77 %). A value's bucket is the top bits of its double, its exponent and the first
+`k` bits of its mantissa, so it is the same integer on every machine, and every count is an integer, so
+merges in any order and at any degree give the same buckets and the same bits of every quantile. A
+quantile is answered with `2LU / (L + U)` of its bucket `[L, U)`, within the error of every value of it.
+
+The grid was weighed against DDSketch's logarithmic grid and a decimal one, of buckets
+`[d · 10^e, (d + 1) · 10^e)`, on entries of a thousand latencies, log-normal around 50 ms
+(`vortex-queries --micro sketches`, 10⁷ values, 2026-10-19): 395 buckets an entry and 1.6 ns a value
+for the bits, 258 and 2.4 ns for the logarithm, which also asks each platform's logarithm for a bucket,
+and 695 and 13.2 ns for the decimal grid, which answers thresholds of three digits exactly but costs
+2.7 times the logarithm's buckets and 5.4 times its time. The bits keep 0.77 % where the logarithm keeps
+1 %, which a third of their extra buckets pays for.
+
+A group's sketch is made at its first value and grows with the buckets it meets, sorted pairs while
+few, a dense window past 32, and the query's memory counts its arrays as they grow. A lane that spills
+writes it as its buckets. A quantile of a decimal column is not taken yet.
+
+### 5.7 States kept past a scan
 
 A dataset of periods keeps aggregates past a scan, for its runs and its tables, and merges them later
 with the states of a query. What it keeps is the engine's own state, in its widest form: a count, an
@@ -1156,7 +1180,7 @@ early](#24-stopping-early) describes.
 | an implicit order of groups | it used to change with the writer's encodings, so an order is asked for ([order](#63-order-orderby-thenby)). Without one, the order is not defined. At one lane the groups come in the order they were first met, and at more, in the merge's order: the largest lane's, then the others' as they merged in, or part by part of the key space, the parts cut by a hash seeded once per process, so two runs of a query in one process cut them alike. The repository's tests run with an internal switch that shuffles it, the same way for a process, so no test relies on it |
 | the same bits for a custom aggregator whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in ([how it is tested](#13-how-it-is-tested)), its consolidation made of merges alone. A merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, and a third more at a million groups, whose 32 bytes per group leave the cache. It is more accurate, and a second semantics would be a second test matrix |
-| approximate distinct counts, quantiles, grouping sets | later, as aggregates and as operators of the same pipeline |
+| approximate distinct counts, grouping sets | later, as aggregates and as operators of the same pipeline |
 | aggregates on the tool path | a later API, over the same engine |
 
 ## 13. How it is tested

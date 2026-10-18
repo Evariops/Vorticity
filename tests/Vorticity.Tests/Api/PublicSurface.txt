@@ -4,8 +4,11 @@ Vorticity:     method Probe<TRecord> First()
 Vorticity:     method Probe<TRecord> Last()
 Vorticity:     method Probe<TRecord> MaxBy<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Probe<TRecord> MinBy<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Distribution> Distribution<T>(Func<Probe<TRecord>, Sym<T>>, double = default)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, double, double = default)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<T>>, double, double = default)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<Nullable<double>> Variance<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
@@ -812,6 +815,25 @@ Vorticity: ref struct Vorticity.DictionaryView<T>
 Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> Codes { get; }
 Vorticity:     property int Cardinality { get; }
+Vorticity: sealed class Vorticity.Distribution
+Vorticity:     method Nullable<double> Quantile(double)
+Vorticity:     method string ToString()
+Vorticity:     property IReadOnlyList<DistributionBucket> Histogram { get; }
+Vorticity:     property Nullable<double> Median { get; }
+Vorticity:     property double RelativeError { get; }
+Vorticity:     property long Count { get; }
+Vorticity: struct Vorticity.DistributionBucket : IEquatable<DistributionBucket>
+Vorticity:     ctor DistributionBucket(double, double, long)
+Vorticity:     method bool Equals(DistributionBucket)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(DistributionBucket, DistributionBucket)
+Vorticity:     method bool op_Inequality(DistributionBucket, DistributionBucket)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out double, out double, out long)
+Vorticity:     property double Lower { get; init; }
+Vorticity:     property double Upper { get; init; }
+Vorticity:     property long Count { get; init; }
 Vorticity: sealed class Vorticity.EncodingAdvice : IEquatable<EncodingAdvice>
 Vorticity:     ctor EncodingAdvice(EncodingGoal, long, long, ImmutableArray<ColumnEncodingAdvice>)
 Vorticity:     method EncodingAdvice <Clone>$()
@@ -915,8 +937,11 @@ Vorticity:     method Probe<TRecord> First()
 Vorticity:     method Probe<TRecord> Last()
 Vorticity:     method Probe<TRecord> MaxBy<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Probe<TRecord> MinBy<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Distribution> Distribution<T>(Func<Probe<TRecord>, Sym<T>>, double = default)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, double, double = default)
+Vorticity:     method Sym<Nullable<double>> Quantile<T>(Func<Probe<TRecord>, Sym<T>>, double, double = default)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
 Vorticity:     method Sym<Nullable<double>> StandardDeviation<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<Nullable<double>> Variance<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)

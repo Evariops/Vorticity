@@ -115,6 +115,47 @@ internal static class Aggregators
     internal static Sym<bool> Exists(RowFilter? filter, bool all) =>
         new Sym<bool>(new AggregateNode<bool>(all ? AggregateKind.All : AggregateKind.Any, null, all ? static () => new ExistsSlot(true) : static () => new ExistsSlot(false), null, filter: filter));
 
+    /// <summary>The distribution of a numeric column, within <paramref name="relativeError"/>.</summary>
+    internal static Sym<Distribution?> Distribution(ColumnShape shape, double relativeError)
+    {
+        int bits = QuantileSketch.BitsFor(relativeError);
+        return new Sym<Distribution?>(new AggregateNode<Distribution?>(
+            AggregateKind.Distribution, shape, Distributed<Distribution?>(shape, bits, static d => d), null,
+            parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"bits={bits}")));
+    }
+
+    /// <summary>The quantile at <paramref name="q"/> of a numeric column, within <paramref name="relativeError"/>.</summary>
+    internal static Sym<double?> Quantile(ColumnShape shape, double q, double relativeError)
+    {
+        if (!(q >= 0 && q <= 1))
+        {
+            throw new ArgumentOutOfRangeException(nameof(q), q, "A quantile's share lies within [0, 1].");
+        }
+
+        int bits = QuantileSketch.BitsFor(relativeError);
+        return new Sym<double?>(new AggregateNode<double?>(
+            AggregateKind.Quantile, shape, Distributed<double?>(shape, bits, d => d?.Quantile(q)), null,
+            parameters: string.Create(System.Globalization.CultureInfo.InvariantCulture, $"q={q:R};bits={bits}")));
+    }
+
+    private static Func<ScanSource?, AggregateSlot<T>> Distributed<T>(ColumnShape shape, int bits, Func<Distribution?, T> final) =>
+        shape.Kind != StorageKind.Primitive
+            ? throw shape.Unsupported("a distribution")
+            : shape.PType switch
+            {
+                PType.I8 => _ => new DistributionSlot<sbyte, T>(bits, final),
+                PType.I16 => _ => new DistributionSlot<short, T>(bits, final),
+                PType.I32 => _ => new DistributionSlot<int, T>(bits, final),
+                PType.I64 => _ => new DistributionSlot<long, T>(bits, final),
+                PType.U8 => _ => new DistributionSlot<byte, T>(bits, final),
+                PType.U16 => _ => new DistributionSlot<ushort, T>(bits, final),
+                PType.U32 => _ => new DistributionSlot<uint, T>(bits, final),
+                PType.U64 => _ => new DistributionSlot<ulong, T>(bits, final),
+                PType.F16 => _ => new DistributionSlot<Half, T>(bits, final),
+                PType.F32 => _ => new DistributionSlot<float, T>(bits, final),
+                _ => _ => new DistributionSlot<double, T>(bits, final),
+            };
+
     internal static Sym<long> CountDistinct(ColumnShape shape)
     {
         Func<AggregateSlot<long>> create = shape.Kind switch

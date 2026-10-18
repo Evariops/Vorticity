@@ -71,6 +71,12 @@ if (Text(args, "--micro") == "variants")
     return VariantMicro.Run(rounds);
 }
 
+// --micro sketches: the grids of a distribution weighed, in buckets and speed (SketchMicro.cs).
+if (Text(args, "--micro") == "sketches")
+{
+    return SketchMicro.Run(rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {

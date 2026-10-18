@@ -291,7 +291,7 @@ lists its key columns in its options together with the name of the encoding its 
 ### 5.6 The kinds of persisted states
 
 The aggregates a dataset of periods keeps past a scan, for runs and for its tables, are kinds of their
-own, each a version in its name ([states](16-queries.md#56-states-kept-past-a-scan)). A state is
+own, each a version in its name ([states](16-queries.md#57-states-kept-past-a-scan)). A state is
 integers on every machine, stored as columns of 64-bit integers that hold its words as the engine
 keeps them, so a state read back is the same bits and merges as the engine merges, in any order:
 
