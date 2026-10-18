@@ -147,12 +147,60 @@ public sealed record DatasetOptions
     internal int MarkedShare { get; init; } = 8;
 
     /// <summary>
-    /// The most bytes an object's marks take in its entry, past which a delete rewrites the object
-    /// instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which every
-    /// commit that marks a row of any object on it writes again: the bound trades the rewrites it
-    /// saves against the bytes it adds to each of those commits.
+    /// The fewest bytes an object's marks may take in its entry, past which a delete rewrites the
+    /// object instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which
+    /// every commit that marks a row of any object on it writes again: the bound trades the rewrites
+    /// it saves against the bytes it adds to each of those commits. A larger object's marks may take
+    /// a part of its bytes (<see cref="MarkedVectorShare"/>).
     /// </summary>
     internal int MarkedVectorBytes { get; init; } = 1 << 10;
+
+    /// <summary>
+    /// The part of an object's bytes its marks may take, as a divisor: a vector past
+    /// <see cref="MarkedVectorBytes"/> up to <c>1/MarkedVectorShare</c>-th of its object, 1,024 by
+    /// default. A rewrite costs the object's bytes read and written; a vector out of line costs its
+    /// own bytes at each open of the object and each delete that grows it, so marks of a thousandth of
+    /// the object stay the cheaper until the object has been opened and marked some two thousand times
+    /// since. An object of 4 MiB keeps its marks to 4 KiB, one of 64 MiB to 64 KiB.
+    /// </summary>
+    internal int MarkedVectorShare { get; init; } = 1 << 10;
+
+    /// <summary>
+    /// The most time a deleted row may stay in the store's bytes after its delete: within it, the
+    /// planner rewrites every object whose marks are as old as half of it, so that the rewrite has the
+    /// other half to run, with every delete those marks gathered since. Null, the default, erases a
+    /// row when its marks pass their bounds of share and bytes. Fixed when the dataset is created and
+    /// carried by every commit, which a library that does not know the delay refuses.
+    /// </summary>
+    /// <remarks>
+    /// The rewritten object leaves the old one behind for the versions the retention keeps, and a
+    /// vacuum deletes it once they pass: the bytes are gone from the store when both are, so the delay
+    /// the application owes is this one plus the retention. A dataset on a store that locks what it
+    /// keeps cannot erase before the lock's term, and refuses a delay.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The delay is under a second.</exception>
+    public TimeSpan? ErasureDelay
+    {
+        get => _erasureDelay;
+        init
+        {
+            if (value is { } delay && delay < TimeSpan.FromSeconds(1))
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "An erasure delay is a second or more.");
+            }
+
+            _erasureDelay = value;
+        }
+    }
+
+    private readonly TimeSpan? _erasureDelay;
+
+    /// <summary>
+    /// The bytes an object's marks may take: <see cref="MarkedVectorBytes"/>, or a part of the
+    /// object's own (<see cref="MarkedVectorShare"/>), whichever is more.
+    /// </summary>
+    internal long MarkedVectorBytesOf(long objectBytes) =>
+        Math.Max(MarkedVectorBytes, objectBytes / Math.Max(MarkedVectorShare, 1));
 
     /// <summary>
     /// The most bytes a vector takes inside its entry; past them a commit writes it once into its own
@@ -199,13 +247,15 @@ public sealed record DatasetOptions
     /// the bound of a page.
     /// </summary>
     internal DatasetOptions For(CommitHeader header) => !header.LockedStore
-        ? this with { Seed = header.Seed, LockedStore = false }
+        ? this with { Seed = header.Seed, LockedStore = false, ErasureDelay = header.ErasureDelay }
         : this with
         {
             Seed = header.Seed,
             LockedStore = true,
+            ErasureDelay = null,
             MarkedObjectBytes = 0,
             MarkedShare = 1,
             MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,
+            MarkedVectorShare = int.MaxValue,
         };
 }

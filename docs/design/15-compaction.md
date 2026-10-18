@@ -219,6 +219,11 @@ than the cap would let them grow.
 
 `CompactionTrigger.Marks` implements it, at half a delete's limits, ranked by how due an object is:
 its marked share or its vector size, relative to half its limit, whichever is further along. The
+vector's limit grows with its object, a thousandth of its bytes and never under 1 KiB. Under an
+erasure delay (`DatasetOptions.ErasureDelay`), the age of the object's oldest mark relative to half
+the delay takes the place of the vector's size, and a purge it makes due is
+`CompactionTrigger.Erasure`: the delay is a bound the application owes, the vector's bytes no
+longer trigger anything there, and the tallies then lead the plan to every object with marks. The
 tallies carry the largest share and the largest vector under every page, so the plan only walks to
 objects that may be due. On the churn bench the purges move the rewrites more than they remove them.
 Once the vectors have filled, a commit writes about 56 KiB rather than 77, compaction about 83 KiB

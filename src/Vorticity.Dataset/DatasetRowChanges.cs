@@ -266,7 +266,7 @@ internal static class DatasetRowChanges
                 // only then handed to the sink, which a rewrite would hand them to instead.
                 bool fits = FitsAtWorst(dataset.Options, held.Entry, matched);
                 DeletionVector deletions = await MarkAsync(file, held, columns, filter, fits ? changed : null, cancellationToken).ConfigureAwait(false);
-                if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytes)
+                if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytesOf(held.Entry.Bytes))
                 {
                     if (!fits && changed is not null)
                     {
@@ -280,7 +280,13 @@ internal static class DatasetRowChanges
                             "a delete that loses or doubles rows is the one failure it must not have.");
                     }
 
-                    return new Change(matched, null, held.Entry.WithDeletions(deletions));
+                    // Under an erasure delay the entry says when its oldest mark was made, which the
+                    // planner purges it by.
+                    ObjectEntry marked = held.Entry.WithDeletions(deletions);
+                    return new Change(
+                        matched,
+                        null,
+                        dataset.Options.ErasureDelay is null ? marked : marked.WithMarkedAt(dataset.Options.TimeProvider.GetUtcNow().ToUnixTimeSeconds()));
                 }
             }
 
@@ -346,7 +352,7 @@ internal static class DatasetRowChanges
     {
         int varint = TreePage.VarintBytes((ulong)entry.PhysicalRows);
         long held = entry.VectorBytes;
-        return held + (matched * 2 * varint) <= options.MarkedVectorBytes;
+        return held + (matched * 2 * varint) <= options.MarkedVectorBytesOf(entry.Bytes);
     }
 
     /// <summary>

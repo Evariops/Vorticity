@@ -1438,6 +1438,13 @@ public sealed class VortexDataset : IAsyncDisposable
                 "(ObjectStoreCapabilities.KeepsLocks): its objects would be deleted while it believes them kept.");
         }
 
+        if (options.LockedStore && options.ErasureDelay is not null)
+        {
+            throw new ArgumentException(
+                "A dataset on a locked store keeps every byte it writes for the lock's term, so it cannot erase deleted rows within a delay.",
+                nameof(options));
+        }
+
         // Encrypted when asked, and when the session seals what it writes or refuses plaintext, whose
         // own open would refuse a plain dataset.
         bool encrypted = options.Encrypted || options.Session.Seals || options.Session.Options.RefusePlaintext;
@@ -1466,6 +1473,8 @@ public sealed class VortexDataset : IAsyncDisposable
                 ? options.Compaction with { Fanout = DatasetOptions.LockedFanout }
                 : options.Compaction,
             LockedStore = options.LockedStore,
+            ErasureDelay = options.ErasureDelay,
+            Features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,

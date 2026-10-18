@@ -142,6 +142,16 @@ internal sealed record CommitHeader
     /// </summary>
     public DatasetFeatures Features { get; init; }
 
+    /// <summary>
+    /// The most time a deleted row stays in the store's bytes after its delete
+    /// (<see cref="DatasetOptions.ErasureDelay"/>), fixed at creation and kept by every header; null
+    /// for none. A header that carries one names <see cref="DatasetFeatures.ErasureDelay"/>.
+    /// </summary>
+    public TimeSpan? ErasureDelay { get; init; }
+
+    /// <summary>The longest delay a header reads, in seconds: what a <see cref="TimeSpan"/> holds.</summary>
+    private const ulong MaxDelaySeconds = (ulong)(long.MaxValue / TimeSpan.TicksPerSecond);
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -161,6 +171,7 @@ internal sealed record CommitHeader
         internal const int Sources = 15;
         internal const int LastDataChange = 16;
         internal const int Features = 17;
+        internal const int ErasureDelay = 18;
     }
 
     internal static class SourceField
@@ -256,6 +267,11 @@ internal sealed record CommitHeader
         if (Features != DatasetFeatures.None)
         {
             writer.WriteUInt64(Field.Features, (ulong)Features);
+        }
+
+        if (ErasureDelay is { } delay)
+        {
+            writer.WriteUInt64(Field.ErasureDelay, (ulong)delay.TotalSeconds);
         }
     }
 
@@ -435,6 +451,7 @@ internal sealed record CommitHeader
         List<SourceOffset> sources = [];
         ulong lastDataChange = 0;
         DatasetFeatures features = DatasetFeatures.None;
+        TimeSpan? erasureDelay = null;
 
         try
         {
@@ -494,6 +511,9 @@ internal sealed record CommitHeader
                     case (Field.Features, ProtoWireType.Varint):
                         features = (DatasetFeatures)reader.ReadVarint();
                         break;
+                    case (Field.ErasureDelay, ProtoWireType.Varint):
+                        erasureDelay = TimeSpan.FromSeconds((long)Math.Min(reader.ReadVarint(), MaxDelaySeconds));
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -531,6 +551,7 @@ internal sealed record CommitHeader
             Sources = sources,
             LastDataChange = lastDataChange,
             Features = features,
+            ErasureDelay = erasureDelay,
         };
     }
 

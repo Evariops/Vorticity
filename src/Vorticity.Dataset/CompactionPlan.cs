@@ -69,6 +69,13 @@ public enum CompactionTrigger
     /// instead: the object is rewritten alone, in its level, without them.
     /// </summary>
     Marks = 4,
+
+    /// <summary>
+    /// An object's oldest mark reaches half of the dataset's erasure delay
+    /// (<see cref="DatasetOptions.ErasureDelay"/>): the object is rewritten alone, in its level,
+    /// without its deleted rows, before the delay passes.
+    /// </summary>
+    Erasure = 5,
 }
 
 /// <summary>

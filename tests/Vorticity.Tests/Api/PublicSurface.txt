@@ -2641,6 +2641,7 @@ Vorticity.Dataset:     const CompactionStyle Leveled = 1
 Vorticity.Dataset:     const CompactionStyle Tiered = 2
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionTrigger
+Vorticity.Dataset:     const CompactionTrigger Erasure = 5
 Vorticity.Dataset:     const CompactionTrigger Fragments = 3
 Vorticity.Dataset:     const CompactionTrigger LevelSize = 2
 Vorticity.Dataset:     const CompactionTrigger LevelZeroCeiling = 1
@@ -2694,6 +2695,7 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKey { get; init; }
 Vorticity.Dataset:     property IReadOnlyList<string> SummaryColumns { get; init; }
+Vorticity.Dataset:     property Nullable<TimeSpan> ErasureDelay { get; init; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }

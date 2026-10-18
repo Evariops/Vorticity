@@ -291,8 +291,8 @@ await using VortexDataset requests = await VortexDataset.CreateAsync(store, Requ
     Periods = new PeriodOptions                      // new
     {
         Lateness = TimeSpan.FromHours(1),            // how late rows may come, a property of the sources
-        ErasureDelay = TimeSpan.FromDays(30),        // how long a deleted row may stay in the store
     },
+    ErasureDelay = TimeSpan.FromDays(30),            // how long a deleted row may stay in the store, for every dataset
     Identifiers = [Request.ColumnNames.RequestId],   // new: columns whose values questions look up
 });
 ```

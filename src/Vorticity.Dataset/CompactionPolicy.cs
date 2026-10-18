@@ -105,6 +105,9 @@ internal static class CompactionPolicy
         /// <summary>Whether its header says the store locks what it keeps.</summary>
         internal bool LockedStore => _snapshot.Header.LockedStore;
 
+        /// <summary>The erasure delay its header carries; null for none.</summary>
+        internal TimeSpan? ErasureDelay => _snapshot.Header.ErasureDelay;
+
         /// <summary>The handle's options, which no version changes.</summary>
         internal DatasetOptions Options { get; } = dataset.Options;
     }
@@ -218,9 +221,9 @@ internal static class CompactionPolicy
 
         // An object whose marks are due next: rewriting it alone costs its bytes, so the one with the
         // most marked goes first.
-        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset.Options), taken) is { } marked)
+        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset), taken) is { } marked)
         {
-            return Purge(marked, settings, style, FirstRow(dataset, marked));
+            return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
         }
 
         // Fragments last: this rewrites no row, and a trigger that moves data would drop the
@@ -553,9 +556,9 @@ internal static class CompactionPolicy
         }
 
         if (settings.PurgeMarks
-            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset.Options), taken, cancellationToken).ConfigureAwait(false) is { } marked)
+            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset), taken, cancellationToken).ConfigureAwait(false) is { } marked)
         {
-            return Purge(marked, settings, style, FirstRow(dataset, marked));
+            return Purge(marked, Marking.Of(dataset), settings, style, FirstRow(dataset, marked));
         }
 
         List<CompactionInput> untaken = fragmented.FindAll(input => !taken.Contains(input.Level));
@@ -759,12 +762,12 @@ internal static class CompactionPolicy
     /// keys lie inside its old range, so a level stays key-disjoint, and it is written as one object
     /// whatever its level's target, so that a purge of level 0 does not put it over its ceiling.
     /// </summary>
-    private static CompactionJob Purge(CompactionInput marked, CompactionOptions settings, CompactionStyle style, long firstRow) =>
+    private static CompactionJob Purge(CompactionInput marked, Marking marking, CompactionOptions settings, CompactionStyle style, long firstRow) =>
         new CompactionJob(
             marked.Level,
             marked.Level,
             style,
-            CompactionTrigger.Marks,
+            marking.Erases(marked.Entry) ? CompactionTrigger.Erasure : CompactionTrigger.Marks,
             [marked],
             Math.Max(settings.TargetBytes(marked.Level), marked.Entry.Bytes),
             firstRow);
@@ -833,31 +836,62 @@ internal static class CompactionPolicy
 
     /// <summary>
     /// When an object's marks are due for a purge: at half the share of its rows, or half the bytes of
-    /// vector, past which a delete rewrites the object itself.
+    /// vector, past which a delete rewrites the object itself. Under an erasure delay, at half the
+    /// delay since its oldest mark instead of by its vector's bytes, so that the purge has the other
+    /// half to run and the vector alone triggers none.
     /// </summary>
     /// <param name="Share">The divisor of a delete's share, <see cref="DatasetOptions.MarkedShare"/>.</param>
-    /// <param name="VectorBytes">A delete's bound on a vector, <see cref="DatasetOptions.MarkedVectorBytes"/>.</param>
-    private readonly record struct Marking(int Share, int VectorBytes)
+    /// <param name="Options">The handle's options, whose bound on a vector grows with the object.</param>
+    /// <param name="ErasureSeconds">The erasure delay in seconds; 0 for none.</param>
+    /// <param name="NowSeconds">The time the plan is made, in seconds since the Unix epoch.</param>
+    private readonly record struct Marking(int Share, DatasetOptions Options, long ErasureSeconds, long NowSeconds)
     {
-        public static Marking Of(DatasetOptions options) =>
-            new Marking(Math.Max(options.MarkedShare, 1), Math.Max(options.MarkedVectorBytes, 1));
+        public static Marking Of(PlannedVersion dataset) =>
+            new Marking(
+                Math.Max(dataset.Options.MarkedShare, 1),
+                dataset.Options,
+                dataset.ErasureDelay is { } delay ? Math.Max((long)delay.TotalSeconds, 1) : 0,
+                dataset.Options.TimeProvider.GetUtcNow().ToUnixTimeSeconds());
 
         /// <summary>
         /// How due an object's marks are: its share of marked rows, or its vector's bytes, over half of
-        /// a delete's bound, whichever is further; due from 1.
+        /// a delete's bound, or under an erasure delay the age of its oldest mark over half the delay,
+        /// whichever is further; due from 1. A mark of no known age is due.
         /// </summary>
-        public double Load(ObjectEntry entry) => !entry.HasDeletions
-            ? 0
-            : Math.Max(
-                (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows,
-                (double)entry.VectorBytes * 2 / VectorBytes);
+        public double Load(ObjectEntry entry)
+        {
+            if (!entry.HasDeletions)
+            {
+                return 0;
+            }
+
+            double share = (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows;
+            if (ErasureSeconds > 0)
+            {
+                double age = entry.MarkedAt > 0 ? (double)(NowSeconds - entry.MarkedAt) * 2 / ErasureSeconds : 1;
+                return Math.Max(share, age);
+            }
+
+            return Math.Max(share, (double)entry.VectorBytes * 2 / Options.MarkedVectorBytesOf(entry.Bytes));
+        }
+
+        /// <summary>
+        /// Whether the purge <see cref="Load"/> calls due erases rows a delay owes: the age of the
+        /// marks, and not their share, made it due.
+        /// </summary>
+        public bool Erases(ObjectEntry entry) =>
+            ErasureSeconds > 0 && entry.HasDeletions
+            && (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows < 1;
 
         /// <summary>
         /// Whether an object under a tally may be due: a share rounded down past the due share rounded
-        /// down, or a vector at half the bound. A tally never rules out an object that is due.
+        /// down, or a vector at half the least bound; under an erasure delay, any mark. A tally never
+        /// rules out an object that is due.
         /// </summary>
         public bool MayBeDue(ObjectTally tally) =>
-            tally.MostMarked >= ObjectTally.Whole / (2L * Share) || tally.LargestVector * 2 >= VectorBytes;
+            ErasureSeconds > 0
+                ? tally.DeletedRows > 0
+                : tally.MostMarked >= ObjectTally.Whole / (2L * Share) || tally.LargestVector * 2 >= Math.Max(Options.MarkedVectorBytes, 1);
     }
 
     /// <summary>

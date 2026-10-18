@@ -738,10 +738,26 @@ whole change, so a reader sees all of it or none of it.
 An object is rewritten without the rows, rather than marked, when the marks would cost its reads more
 than they save the write. That happens under `MarkedObjectBytes` (a mebibyte), where a rewrite is a
 few requests and leaves the object exact, when the rows marked in it would pass an eighth of its rows
-(`MarkedShare`), since every read of it steps over them, and when its vector would pass 1 KiB
-(`MarkedVectorBytes`), a few hundred runs. The vector is counted as the runs it will form: one run per
-row when that already fits, and otherwise from the rows' positions, read before anything is written,
-since the rows a range takes form one run whatever their number.
+(`MarkedShare`), since every read of it steps over them, and when its vector would pass its bound. The
+bound grows with the object: a thousandth of its bytes (`MarkedVectorShare`), and never under 1 KiB
+(`MarkedVectorBytes`), a few hundred runs. A rewrite costs the object's bytes read and written, and a
+vector costs its own bytes at each open of the object and each delete that grows it, so a vector of a
+thousandth of the object stays cheaper until the object has been opened and marked some two thousand
+times: an object of 4 MiB keeps 4 KiB of marks, one of 64 MiB keeps 64 KiB. The vector is counted as
+the runs it will form: one run per row when that already fits, and otherwise from the rows'
+positions, read before anything is written, since the rows a range takes form one run whatever their
+number.
+
+An application that owes the erasure of deleted rows within a delay declares it,
+`DatasetOptions.ErasureDelay`, when it creates the dataset. Every header carries the delay, in commit
+format 4, so a library that does not know it refuses the dataset rather than keep marks past it. An
+entry then records when its oldest mark was made, and the planner rewrites an object whose oldest mark
+is half the delay old, with every delete gathered since, so that the rewrite has the other half to
+run (`CompactionTrigger.Erasure`). The vector's bytes alone no longer make an object due: the delay
+does, and the share of rows marked still does. The bytes are gone from the store once the vacuum
+takes the old object, past the retention, so the delay the application owes is this one plus the
+retention. A dataset on a store that locks what it keeps cannot erase before the lock's term and
+refuses a delay.
 
 The vector lives in a leaf page, so a commit that marks a row in any object of a page writes that page
 again, and the bounds weigh the rewrites the marks save against the bytes they add to each of those

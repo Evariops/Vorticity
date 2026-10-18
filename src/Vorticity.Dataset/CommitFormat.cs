@@ -47,7 +47,9 @@ internal static class CommitFormat
 
     /// <summary>The format a commit object of <paramref name="header"/> is written in.</summary>
     public static uint For(CommitHeader header) =>
-        header.Features != DatasetFeatures.None ? WithFeatures : header.Sources.Count > 0 ? WithSources : Version;
+        header.Features != DatasetFeatures.None || header.ErasureDelay is not null ? WithFeatures
+        : header.Sources.Count > 0 ? WithSources
+        : Version;
 
     /// <summary>
     /// The oldest format this library reads: format 1 holds nothing format 2 does not read the same,
@@ -106,6 +108,12 @@ internal enum DatasetFeatures : ulong
 
     /// <summary>Leaf entries that carry fields of format 4, such as their object's footer length.</summary>
     EntryFields = 1,
+
+    /// <summary>
+    /// A delay within which deleted rows are erased from the store's bytes: a library that does not know
+    /// it would keep marks past it, against what the application owes.
+    /// </summary>
+    ErasureDelay = 2,
 }
 
 /// <summary>
