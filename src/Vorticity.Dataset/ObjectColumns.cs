@@ -593,6 +593,18 @@ internal sealed class ObjectColumns
             case LiteralExpr { Value.Kind: FilterLiteralKind.Null }:
                 return (Truth.Unknown, null);
 
+            case Compute.VariantFilterExpr fence:
+            {
+                // A presence is false, never unknown, where the object lacks the variant column.
+                if (fence.Inner is ComparisonExpr { Field: Compute.VariantFieldExpr { Read: Compute.VariantRead.Has } presence } && Absent(presence))
+                {
+                    return (Truth.False, null);
+                }
+
+                (Truth truth, VortexExpr? inner) = Fold(fence.Inner, select);
+                return truth == Truth.Expression ? (Truth.Expression, fence.With(inner!)) : (truth, null);
+            }
+
             default:
                 return (Truth.Unsettled, null);
         }
@@ -710,8 +722,13 @@ internal sealed class ObjectColumns
         string[] renamed = field.Segments is { } segments ? (string[])segments.Clone() : field.Path.Split('.');
         renamed[0] = _file.GetFieldName(_sources[column]);
 
-        // A value expression keeps its functions over the column's name in the object.
-        return field is Compute.FunctionFieldExpr function ? function.Over(new FieldExpr(renamed)) : new FieldExpr(renamed);
+        // A value expression keeps its functions, and a variant's path its steps, over the column's name in the object.
+        return field switch
+        {
+            Compute.FunctionFieldExpr function => function.Over(new FieldExpr(renamed)),
+            Compute.VariantFieldExpr path => path.Over(new FieldExpr(renamed)),
+            _ => new FieldExpr(renamed),
+        };
     }
 
     /// <summary>The dataset column a path starts from, or null when it names none, which the filter's check has already refused.</summary>

@@ -76,6 +76,9 @@ internal static class ExprText
                 Append(text, negation.Operand, parentIsAnd: null);
                 text.Append(')');
                 return;
+            case VariantFilterExpr fence:
+                Append(text, fence.Inner, parentIsAnd);
+                return;
             case ComparisonExpr comparison:
                 AppendField(text, comparison.Field);
                 text.Append(' ').Append(Operator(comparison.Op)).Append(' ');
@@ -164,6 +167,14 @@ internal static class ExprText
 
     private static void AppendField(StringBuilder text, FieldExpr field)
     {
+        // A variant's path: its column, each key quoted whole, and what its value is read as.
+        if (field is VariantFieldExpr path)
+        {
+            AppendField(text, path.Column);
+            text.Append(string.Concat(path.Steps)).Append('.').Append(path.Read).Append("()");
+            return;
+        }
+
         string[] names = field.Segments ?? field.Path.Split('.');
         for (int i = 0; i < names.Length; i++)
         {

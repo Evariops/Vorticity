@@ -173,6 +173,10 @@ internal static class ToolPaths
                 return contains;
             }
 
+            case Compute.VariantFilterExpr fence:
+                // Its paths were typed where they were written, by what each is read as.
+                return fence;
+
             default:
                 throw new VortexSchemaException($"'{filter}' is not a predicate.");
         }

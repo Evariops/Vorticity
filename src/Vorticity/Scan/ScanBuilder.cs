@@ -1341,6 +1341,8 @@ internal sealed class ScanBuilder
                 return VisitFields(negation.Operand, ref visitor);
             case LogicalExpr logical:
                 return VisitFields(logical.Left, ref visitor) && VisitFields(logical.Right, ref visitor);
+            case Compute.VariantFilterExpr fence:
+                return VisitFields(fence.Inner, ref visitor);
             default:
                 return true;
         }

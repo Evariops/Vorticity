@@ -4523,7 +4523,8 @@ internal static class AggregationEngine
     /// <summary>Whether the statistics say the key column is sorted, so that its rows come in runs of one key.</summary>
     internal static bool IsSorted(ScanSource source, ColumnShape key)
     {
-        if (source is not FileScanSource file || !file.File.HasFileStatistics || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct)
+        if (source is not FileScanSource file || !file.File.HasFileStatistics || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct
+            || key.Field is VariantFieldExpr)
         {
             return false;
         }
@@ -4542,7 +4543,7 @@ internal static class AggregationEngine
         {
             sorted[k] = IsSorted(source, keys[k]);
             ColumnShape key = keys[k];
-            bounds[k] = key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1
+            bounds[k] = key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr
                 ? null
                 : await source.BoundsAsync(key, cancellationToken).ConfigureAwait(false);
         }
@@ -4569,13 +4570,14 @@ internal static class AggregationEngine
     /// without a read: a file's statistics, a dataset's summaries in hand; what bounds a table of its
     /// groups (<see cref="FixedKeys{TValue}"/>).
     /// </summary>
+    /// <remarks>A variant's path has none: the variant column's statistics describe the column, not a path in it.</remarks>
     internal static KeyBounds? Bounds(ScanSource source, ColumnShape key) =>
-        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 ? null : source.Bounds(key);
+        key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || key.Column.FieldPath.Length != 1 || key.Field is VariantFieldExpr ? null : source.Bounds(key);
 
     /// <summary>The smallest and the largest value of an integer column of a key, when <paramref name="file"/>'s statistics hold them exactly.</summary>
     internal static KeyBounds? FileBounds(VortexFile file, ColumnShape key)
     {
-        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || !file.HasFileStatistics
+        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || !file.HasFileStatistics || key.Field is VariantFieldExpr
             || key.Column.FieldPath.Length != 1 || !file.Schema.RootIsStruct || key.Column.FieldPath[0] >= file.Statistics.Count)
         {
             return null;

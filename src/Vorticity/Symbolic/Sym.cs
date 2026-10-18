@@ -37,9 +37,12 @@ public readonly struct Sym<T> : ISymbol
     internal ColumnSym Column =>
         Node as ColumnSym
         ?? (Node as Aggregating.ResultNode<T>)?.Comparable
-        ?? throw (Node is WidenedSym widened
-            ? widened.NotASum()
-            : new InvalidOperationException("Only a column or an aggregate can be compared: a filter on groups compares the group's key and its aggregates."));
+        ?? throw (Node switch
+        {
+            WidenedSym widened => widened.NotASum(),
+            VariantPathSym path => path.NotComparable(),
+            _ => new InvalidOperationException("Only a column or an aggregate can be compared: a filter on groups compares the group's key and its aggregates."),
+        });
 
     /// <summary>The rows whose value equals <paramref name="value"/>; <c>== null</c> is <see cref="IsNull"/>.</summary>
     public static Predicate operator ==(Sym<T> column, T value) => SymLowering.Compare(column.Column, ComparisonOp.Equal, value);

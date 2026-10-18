@@ -16,7 +16,8 @@ public readonly struct Predicate
 
     internal Predicate(VortexExpr node)
     {
-        Node = node;
+        // A leaf over a variant's path is fenced where it is made, so that no pruner reads it.
+        Node = Compute.VariantFilterExpr.Of(node);
         _shape = PredicateShape.Expression;
     }
 

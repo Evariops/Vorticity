@@ -299,6 +299,34 @@ repeated hour in autumn is two hours, with two offsets, and so two buckets.
 Other functions (date parts, text functions, a coalesce) will take the same path: a function on a
 symbol, evaluated where the block lies.
 
+### 3.6 Variant paths
+
+A variant column's symbol walks into each row's value: `r.Attributes["http.route"]` takes one whole
+key, dots included, `["cart"]["items"]` a nested key, and `[3]` an element of an array. A path is a
+value, as a map's key is, so the compiler checks the column and not the keys, which are data. It
+becomes a column of the scan through what it is read as:
+
+| member | gives |
+|---|---|
+| `AsInt64()`, `AsDouble()`, `AsString()`, `AsBool()`, `AsTimestamp()` | the value as stored when it is of that type, and null otherwise. `AsInt64()` takes an integer of any width, `AsDouble()` a float or a double |
+| `ToInt64()`, `ToDouble()` | the value converted: a number without a fraction, a boolean, text that parses. Null when it does not convert |
+| `Has(key)`, `Exists` | whether the path is present: true or false, never unknown |
+
+The text `"502"` is not the integer `502`, and only `ToInt64()` reads it as one. A path that is
+absent, of another type, or under a null row is null, so a filter on it is unknown and keeps no row
+([three-valued logic](08-semantics.md#3-three-valued-logic)). A path read as a column is valid
+wherever a value expression is: in a row filter, as a key component, as an aggregate's input and as
+an element of a projection.
+
+A batch extracts each path once, from the rows' bytes: the path's keys are looked up in the row's
+dictionary once per run of rows of the same metadata, an object's field is found by halves when the
+dictionary is sorted, a string is a view of the variant's own bytes, and the batch allocates its
+output and nothing else. Nothing prunes on a path yet. The variant column's statistics describe the
+column, not a path in it: its null count says nothing of whether a path is absent. So a filter over
+a path is fenced from every pruner and answered row by row, and a key over one takes no bound and no
+sort from the column's statistics. The time-window design's synopsis and the per-path statistics are
+what make a path prune ([21-variant-columns.md](21-variant-columns.md)).
+
 ## 4. Keys
 
 ```csharp

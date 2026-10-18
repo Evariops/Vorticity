@@ -2181,6 +2181,55 @@ Vorticity:     const VariantKind Time = 14
 Vorticity:     const VariantKind Timestamp = 12
 Vorticity:     const VariantKind Uuid = 15
 Vorticity:     field byte value__
+Vorticity: static class Vorticity.VariantSymbols
+Vorticity:     method Predicate Has(Sym<Nullable<Variant>>, string)
+Vorticity:     method Predicate Has(Sym<Variant>, string)
+Vorticity:     method Predicate get_Exists(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp(Sym<Variant>)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Nullable<Variant>>, int)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Nullable<Variant>>, string)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Variant>, int)
+Vorticity:     method Sym<Nullable<Variant>> get_Item(Sym<Variant>, string)
+Vorticity:     method Sym<Nullable<bool>> AsBool(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<bool>> AsBool(Sym<Variant>)
+Vorticity:     method Sym<Nullable<double>> AsDouble(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<double>> AsDouble(Sym<Variant>)
+Vorticity:     method Sym<Nullable<double>> ToDouble(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<double>> ToDouble(Sym<Variant>)
+Vorticity:     method Sym<Nullable<long>> AsInt64(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<long>> AsInt64(Sym<Variant>)
+Vorticity:     method Sym<Nullable<long>> ToInt64(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<Nullable<long>> ToInt64(Sym<Variant>)
+Vorticity:     method Sym<string> AsString(Sym<Nullable<Variant>>)
+Vorticity:     method Sym<string> AsString(Sym<Variant>)
+Vorticity: sealed class Vorticity.VariantSymbols.<G>$1A569DCED8742D8A6953D11BBE1CD7E1
+Vorticity:     method Predicate Has(string)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp()
+Vorticity:     method Sym<Nullable<bool>> AsBool()
+Vorticity:     method Sym<Nullable<double>> AsDouble()
+Vorticity:     method Sym<Nullable<double>> ToDouble()
+Vorticity:     method Sym<Nullable<long>> AsInt64()
+Vorticity:     method Sym<Nullable<long>> ToInt64()
+Vorticity:     method Sym<string> AsString()
+Vorticity:     property Predicate Exists { get; }
+Vorticity:     property Sym<Nullable<Variant>> Item[int] { get; }
+Vorticity:     property Sym<Nullable<Variant>> Item[string] { get; }
+Vorticity: static class Vorticity.VariantSymbols.<G>$1A569DCED8742D8A6953D11BBE1CD7E1.<M>$5DB7C8869AB76FE5B9A2F69CA8A135CF
+Vorticity:     method void <Extension>$(Sym<Nullable<Variant>>)
+Vorticity: sealed class Vorticity.VariantSymbols.<G>$605D60C85C1CCE73E1B2B617B441846F
+Vorticity:     method Predicate Has(string)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> AsTimestamp()
+Vorticity:     method Sym<Nullable<bool>> AsBool()
+Vorticity:     method Sym<Nullable<double>> AsDouble()
+Vorticity:     method Sym<Nullable<double>> ToDouble()
+Vorticity:     method Sym<Nullable<long>> AsInt64()
+Vorticity:     method Sym<Nullable<long>> ToInt64()
+Vorticity:     method Sym<string> AsString()
+Vorticity:     property Sym<Nullable<Variant>> Item[int] { get; }
+Vorticity:     property Sym<Nullable<Variant>> Item[string] { get; }
+Vorticity: static class Vorticity.VariantSymbols.<G>$605D60C85C1CCE73E1B2B617B441846F.<M>$A8D32CB066FF2849E1A4BAB217D6AA8C
+Vorticity:     method void <Extension>$(Sym<Variant>)
 Vorticity: sealed class Vorticity.VortexColumnAttribute : Attribute
 Vorticity:     ctor VortexColumnAttribute()
 Vorticity:     ctor VortexColumnAttribute(string)

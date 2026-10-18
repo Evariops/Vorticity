@@ -67,6 +67,10 @@ Predicates evaluate over `{true, false, unknown}`, SQL-style:
 * `ListContains(list, v)` is `unknown` on a null list and under a null `v`. A null element matches
   nothing and leaves the row `false` (see [predicates on text and
   lists](12-index-reads.md#6-predicates-on-text-and-lists)).
+* A path of a variant column read through `As…` or `To…` is null where the path is absent, where its
+  value is of another type than the one read, and under a null row, so a comparison on it is
+  `unknown` there. `Has` and `Exists` never yield `unknown`: a null row holds no path (see [variant
+  paths](16-queries.md#36-variant-paths)).
 
 A literal of a type the column cannot be compared with is not a silent non-match. It is refused
 before a row is read. On the typed path it does not compile, because `Sym<T>` only compares with a
@@ -85,7 +89,8 @@ ordering against `null` matches nothing, and a `null` among the values of `In` i
 For pruning, a zone where `null_count == row_count` can be skipped for any predicate that nulls
 cannot satisfy, which means anything except `IS NULL` and expressions reducible to it. This is one of
 the most valuable pruning rules in practice, and it depends entirely on the three-valued logic above
-being fixed.
+being fixed. A path of a variant column is the exception: the column's null count does not count the
+rows where a path is absent, so no zone is skipped on a path's predicate.
 
 ## 4. Unknown components: resolve lazily, fail on use
 

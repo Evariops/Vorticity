@@ -138,6 +138,7 @@ exactly what is pushed down:
 | `r.City.StartsWith("Par")`, `r.City.Like("P_r%")`, `r.Pages.Contains(42)` | text and list predicates (see [predicates on text and lists](12-index-reads.md#6-predicates-on-text-and-lists)) |
 | `r.High > r.Low` | one column against another of the same type |
 | `r.At.Truncate(CalendarUnit.Day) == day`, `r.Celsius.Bucket(5.0) >= 40.0` | a function of a column, non-decreasing, so the zone maps still prune (see [value expressions](16-queries.md#3-value-expressions)) |
+| `r.Attributes["http.route"].AsString() == "/orders"`, `r.Attributes["cart"]["items"][0].ToInt64() > 2`, `r.Attributes.Has("user.id")` | a path of a variant column: whole keys and indices, read as stored by `As…` or converted by `To…`; nothing prunes on it yet (see [variant paths](16-queries.md#36-variant-paths)) |
 | `r.Day >= "900"`, `r.Day % 2 == 0`, `Math.Abs(r.Celsius) > 1` | does not compile: a literal of the wrong type, or no pushdown |
 
 The same symbols serve every lambda: the keys of a `GroupBy`, the inputs of an aggregate, the

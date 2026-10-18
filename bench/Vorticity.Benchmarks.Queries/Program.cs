@@ -65,6 +65,12 @@ if (Text(args, "--micro") == "floatsum")
     return FloatSumMicro.Run(rounds);
 }
 
+// --micro variants: a variant's path extracted alone, in memory (VariantMicro.cs).
+if (Text(args, "--micro") == "variants")
+{
+    return VariantMicro.Run(rounds);
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {

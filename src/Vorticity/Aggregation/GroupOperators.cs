@@ -126,6 +126,9 @@ internal static class GroupPredicates
             case NotExpr not:
                 Fields(not.Operand, into);
                 break;
+            case Compute.VariantFilterExpr fence:
+                Fields(fence.Inner, into);
+                break;
             default:
                 break;
         }
