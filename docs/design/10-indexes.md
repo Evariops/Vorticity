@@ -204,8 +204,11 @@ Like the dictionary probe it has no payload. The entry is on the instant column,
 block, and its options hold the table behind a version byte: the instant's unit, then per slice the
 gap from the previous slice's end, its width and its rows, each a varint, a few bytes a slice, then the
 columns each slice's rows are sorted by before the instant, each zigzagged, an entry below zero standing
-for the shapes of a shredded variant column (version 3; version 2 names columns alone, version 1 none,
-its rows in time order). A table that does not decode, or whose rows are not the file's, is not read.
+for the shapes of a shredded variant column, then the paths the file's synopsis counts: per path its
+variant column, its key and the class its values are read at. An entry from 2²⁴ up names one of those
+paths, a key a variant column shreds whose values repeat (version 4; version 3 holds no paths, version
+2 names columns alone, version 1 none, its rows in time order). A synopsis table's keys and measures
+name paths the same way. A table that does not decode, or whose rows are not the file's, is not read.
 The writer that sorts the rows declares the slices before it completes the file, which checks that
 they cover its rows ([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)),
 and writes an index directory for them even when its policy asks for no index. The table is also the

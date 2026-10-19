@@ -589,13 +589,38 @@ internal static class DatasetCompactor
             }
 
             plans[(level, period)] = new ObjectPlan(
-                table,
+                new SliceTable(table.Unit, table.Slices, table.Order, SynopsisPaths(schema.DType, shredded)),
                 shredded,
                 chunks,
                 directories);
         }
 
         return plans;
+    }
+
+    /// <summary>
+    /// The paths an object's synopsis may count: each key its variant columns shred as one class, in the
+    /// order of the columns and of their keys. The first slice places those whose values repeat in the
+    /// object's order, and the synopsis sums the numeric ones that do not.
+    /// </summary>
+    private static List<SynopsisPath> SynopsisPaths(Vorticity.Types.DType schema, ImmutableDictionary<string, VariantShredding> shredded)
+    {
+        List<SynopsisPath> paths = [];
+        for (int field = 0; field < schema.FieldCount; field++)
+        {
+            if (shredded.TryGetValue(schema.GetFieldName(field), out VariantShredding? plan) && plan.Kind == VariantShreddingKind.Object)
+            {
+                foreach (ShreddedKey key in plan.Keys)
+                {
+                    if (key.Field.Kind == VariantShreddingKind.Primitive)
+                    {
+                        paths.Add(new SynopsisPath(field, key.Name, key.Field.Class));
+                    }
+                }
+            }
+        }
+
+        return paths;
     }
 
     /// <summary>The top-level variant columns of <paramref name="schema"/>.</summary>
@@ -854,7 +879,7 @@ internal static class DatasetCompactor
                     _sorter = new SortedSlices(_table, instant, _schema.DType, Shapes(plan.Shredded));
 
                     // The synopsis's tables, counted from each slice as it is sorted.
-                    _synopsis = new SynopsisTables(_schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant, _table.Order));
+                    _synopsis = new SynopsisTables(_schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant, _table.Order), _table.Paths);
                     _slice = 0;                }
             }
 
@@ -869,13 +894,13 @@ internal static class DatasetCompactor
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
         }
 
-        /// <summary>The object's synopsis columns, by name: the columns its slices are sorted by, shapes aside.</summary>
+        /// <summary>The object's synopsis columns, by name: the top-level columns its slices are sorted by, shapes and paths aside.</summary>
         private List<string> SynopsisColumns(SliceTable table)
         {
             List<string> columns = [];
             foreach (int entry in table.Order)
             {
-                if (entry >= 0)
+                if (entry >= 0 && !SynopsisPath.Names(entry))
                 {
                     columns.Add(_schema.DType.GetFieldName(entry));
                 }
@@ -902,7 +927,7 @@ internal static class DatasetCompactor
 
         private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken)
         {
-            _synopsis?.AddSlice(sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes);
+            _synopsis?.AddSlice(sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes, _sorter.PathColumns);
             _slice++;
             return _draft!.Writer.WriteBatchAsync(sorted, cancellationToken);
         }

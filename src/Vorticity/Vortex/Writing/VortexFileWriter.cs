@@ -401,11 +401,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                 IndexWriter indexes = writer._indexes!;
                 long dataBytes = writer._sink.Position - indexes.FileBytes;
+
+                // A path's values are read from its variant column, at that column's bytes at most.
+                IReadOnlyList<SynopsisPath> paths = writer._slices?.Table.Paths ?? [];
+                long ColumnBytes(int entry) => indexes.ColumnBytes(SynopsisPath.Names(entry) ? paths[SynopsisPath.Place(entry)].Field : entry);
                 (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(
-                    sizes, indexes.ColumnBytes, writer._rowCount, indexes.SynopsisBudget(dataBytes), SynopsisPrices.Default);
+                    sizes, ColumnBytes, writer._rowCount, indexes.SynopsisBudget(dataBytes), SynopsisPrices.Default);
                 for (int i = 0; i < encoded.Count; i++)
                 {
-                    indexes.ReportSynopsis(sizes[i].Table, kept[i], verdicts[i], sizes[i].Bytes);
+                    indexes.ReportSynopsis(sizes[i].Table, paths, kept[i], verdicts[i], sizes[i].Bytes);
                     if (!kept[i])
                     {
                         continue;

@@ -32,18 +32,20 @@ internal readonly record struct TimeSlice(long Start, long End, long FirstRow, l
 internal sealed class SliceTable
 {
     // Version 1 holds the slices alone, version 2 the order inside them after them, its fields as they
-    // are, and version 3 the order's entries zigzagged, a variant field's shapes below zero.
-    private const byte Version = 3;
+    // are, version 3 the order's entries zigzagged, a variant field's shapes below zero, and version 4 the
+    // object's synopsis paths after the order, which its entries from SynopsisPath.Base name.
+    private const byte Version = 4;
+    private const byte ShapesVersion = 3;
     private const byte OrderVersion = 2;
     private const byte FirstVersion = 1;
 
     /// <summary>
     /// A table of <paramref name="slices"/> over instants counted in <paramref name="unit"/>, whose rows
-    /// are sorted inside each slice by the top-level columns <paramref name="order"/>, then by the instant;
-    /// in time order for no order.
+    /// are sorted inside each slice by the entries <paramref name="order"/>, then by the instant, in time
+    /// order for no order; the object's synopsis paths <paramref name="paths"/>.
     /// </summary>
     /// <exception cref="ArgumentException">The slices are empty, do not follow each other, or one is empty or inverted.</exception>
-    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices, IReadOnlyList<int>? order = null)
+    internal SliceTable(TimeUnit unit, IReadOnlyList<TimeSlice> slices, IReadOnlyList<int>? order = null, IReadOnlyList<SynopsisPath>? paths = null)
     {
         ArgumentNullException.ThrowIfNull(slices);
         if (Problem(slices) is { } problem)
@@ -54,15 +56,23 @@ internal sealed class SliceTable
         Unit = unit;
         Slices = slices;
         Order = order ?? [];
+        Paths = paths ?? [];
     }
+
+    /// <summary>
+    /// The paths of the object's variant columns its synopsis counts, which an entry of <see cref="Order"/>,
+    /// or a table's key or measure, names from <see cref="SynopsisPath.Base"/>. Empty for none.
+    /// </summary>
+    internal IReadOnlyList<SynopsisPath> Paths { get; }
 
     /// <summary>The unit the slices' bounds are counted in: the instant column's.</summary>
     internal TimeUnit Unit { get; }
 
     /// <summary>
-    /// The top-level columns the rows of each slice are sorted by, in that order, the instant after them:
-    /// the object's synopsis columns, an entry below zero the shapes of variant field <c>-entry - 1</c>.
-    /// Empty for rows in time order.
+    /// What the rows of each slice are sorted by, in that order, the instant after them: the object's
+    /// synopsis columns, a top-level field each, an entry below zero the shapes of variant field
+    /// <c>-entry - 1</c>, an entry from <see cref="SynopsisPath.Base"/> one of <see cref="Paths"/>. Empty for
+    /// rows in time order.
     /// </summary>
     internal IReadOnlyList<int> Order { get; }
 
@@ -129,6 +139,16 @@ internal sealed class SliceTable
                 writer.WriteVarint(ZigZag(entry));
             }
 
+            writer.WriteVarint((ulong)Paths.Count);
+            foreach (SynopsisPath path in Paths)
+            {
+                byte[] key = System.Text.Encoding.UTF8.GetBytes(path.Key);
+                writer.WriteVarint((ulong)path.Field);
+                writer.WriteVarint((ulong)key.Length);
+                writer.WriteRawBytes(key);
+                writer.WriteVarint((byte)path.Class);
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -144,7 +164,7 @@ internal sealed class SliceTable
         {
             ProtoReader reader = new ProtoReader(bytes);
             ulong version = reader.ReadVarint();
-            if (version is not (Version or OrderVersion or FirstVersion))
+            if (version is not (Version or ShapesVersion or OrderVersion or FirstVersion))
             {
                 return null;
             }
@@ -184,11 +204,35 @@ internal sealed class SliceTable
                 for (int i = 0; i < order.Length; i++)
                 {
                     ulong entry = reader.ReadVarint();
-                    order[i] = version == Version ? checked((int)UnZigZag(entry)) : checked((int)entry);
+                    order[i] = version >= ShapesVersion ? checked((int)UnZigZag(entry)) : checked((int)entry);
                 }
             }
 
-            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices, order) : null;
+            SynopsisPath[] paths = [];
+            if (version == Version)
+            {
+                ulong held = reader.ReadVarint();
+                if (held > (ulong)bytes.Length)
+                {
+                    return null;
+                }
+
+                paths = new SynopsisPath[(int)held];
+                for (int i = 0; i < paths.Length; i++)
+                {
+                    int field = checked((int)reader.ReadVarint());
+                    string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    ulong @class = reader.ReadVarint();
+                    if (!Enum.IsDefined((Types.Variants.VariantClass)(byte)Math.Min(@class, byte.MaxValue)))
+                    {
+                        return null;
+                    }
+
+                    paths[i] = new SynopsisPath(field, key, (Types.Variants.VariantClass)(byte)@class);
+                }
+            }
+
+            return reader.End && Problem(slices) is null ? new SliceTable(unit, slices, order, paths) : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException or ArgumentException)
         {

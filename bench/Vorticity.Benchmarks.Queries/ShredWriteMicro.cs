@@ -54,6 +54,8 @@ internal static class ShredWriteMicro
             VariantShredding? plan = null;
             double coding = double.MaxValue;
             int shapes = 0;
+            double pathing = double.MaxValue;
+            int pathKeys = 0;
             Vorticity.Indexes.VariantDirectory? directory = null;
             int chunk = 0;
             long wholeBytes = 0;
@@ -87,6 +89,19 @@ internal static class ShredWriteMicro
                     }
 
                     coding = Math.Min(coding, Stopwatch.GetElapsedTime(shaped).TotalMilliseconds);
+
+                    // Every primitive key's values read into a column of its class, as the sort of a slice
+                    // reads the paths its synopsis counts.
+                    (string, VariantClass)[] keys = [.. plan.Keys.Where(k => k.Field.Kind == VariantShreddingKind.Primitive).Select(k => (k.Name, k.Field.Class))];
+                    long read = Stopwatch.GetTimestamp();
+                    foreach (RecordBatch batch in batches)
+                    {
+                        int node = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(field);
+                        Vorticity.Writing.VariantShredder.KeyColumns(batch.Arena, new Vorticity.Types.DTypeArena(), node, keys);
+                    }
+
+                    pathing = Math.Min(pathing, Stopwatch.GetElapsedTime(read).TotalMilliseconds);
+                    pathKeys = keys.Length;
                 }
 
                 (double time, long bytes) = await WriteAsync(batches, target, null, 0);
@@ -105,6 +120,7 @@ internal static class ShredWriteMicro
             Console.WriteLine($"  write shredded    {shredded,8:F1} ms  {shredded * 1e6 / rows,6:F1} ns/row  {shreddedBytes,11} B");
             Console.WriteLine($"  shredding's cost  {census + shredded - whole,8:F1} ms  {(census + shredded - whole) * 1e6 / rows,6:F1} ns/row");
             Console.WriteLine($"  shapes coded      {coding,8:F1} ms  {coding * 1e6 / rows,6:F1} ns/row  {shapes} shapes in a batch at most");
+            Console.WriteLine($"  paths read        {pathing,8:F1} ms  {pathing * 1e6 / rows,6:F1} ns/row  {pathKeys} keys");
             foreach (RecordBatch batch in batches)
             {
                 batch.Dispose();

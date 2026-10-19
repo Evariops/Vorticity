@@ -725,9 +725,17 @@ chose and the shapes that repeat, on a sample of 16 384 of its rows (`SliceSort.
 synthetic mixes of a million rows (independent, correlated, nested, shaped), the greedy order stores
 as few runs as the order by distinct values or fewer, 21 per cent fewer on the nested mix, and a
 sample of one row in 64 gives the order every row gives, in 3 to 7 ms where every row takes 160 to
-430 (`vortex-queries --micro runsorder`). Real mixes of logs are still to confirm both. The shredded
-paths whose values repeat are not candidates yet: the slice table would need an entry naming a path
-and its class, and the sort its values read per row.
+430 (`vortex-queries --micro runsorder`). Real mixes of logs are still to confirm both.
+
+The keys an object shreds as one class are its synopsis paths, which its slice table lists, each its
+variant column, its key and its class. The sort of each slice reads their values into a column of their
+class, in one pass over the slice's variants. The first slice places in the order those whose values
+repeat twice on average among the rows that hold them, where an entry from 2²⁴ up names a path, and
+the synopsis sums the numeric ones that do not, as it sums a declared number. A path then counts as a
+declared column of the same values does, table for table (`SynopsisPathTests`). Reading six keys'
+values takes 195 ns a row, the shapes' walk 101 of them, which one walk for both would save
+(`vortex-queries --micro shredwrite`). After the first slice, only the paths the order places and the
+numeric ones are read.
 
 ### 6.3 Typed questions
 

@@ -78,34 +78,47 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
     }
 
     /// <summary>
-    /// The struct of the table's rows over a file of <paramref name="schema"/>, built in
-    /// <paramref name="types"/>: the bucket, each key at its field's type, the count, then per measure
-    /// its count of values, its sum's words (two for an integer, five for a float), its least and its
-    /// greatest, all 64-bit. The writer builds its rows at this type, and a reader decodes them at it.
+    /// The struct of the table's rows over a file of <paramref name="schema"/>, whose synopsis paths are
+    /// <paramref name="paths"/>, built in <paramref name="types"/>: the bucket, each key at its field's type
+    /// or its path's class, the count, then per measure its count of values, its sum's words (two for an
+    /// integer, five for a float), its least and its greatest, all 64-bit. The writer builds its rows at
+    /// this type, and a reader decodes them at it.
     /// </summary>
-    internal DType RowType(DType schema, DTypeArena types)
+    internal DType RowType(DType schema, IReadOnlyList<SynopsisPath> paths, DTypeArena types)
     {
         DType longs = types.Primitive(PType.I64, Nullability.NonNullable);
         List<string> names = ["bucket"];
         List<DType> fields = [longs];
         foreach (int key in Keys)
         {
-            names.Add(schema.GetFieldName(key));
-            fields.Add(VortexTypes.ToDType(VortexTypes.FromDType(schema.GetField(key)), types));
+            names.Add(NameOf(key, schema, paths));
+            fields.Add(SynopsisPath.Names(key)
+                ? ClassType(paths[SynopsisPath.Place(key)].Class, types)
+                : VortexTypes.ToDType(VortexTypes.FromDType(schema.GetField(key)), types));
         }
 
         names.Add("count");
         fields.Add(longs);
         foreach (int measure in Measures)
         {
-            string name = schema.GetFieldName(measure);
-            DType dtype = schema.GetField(measure);
-            while (dtype.Kind == DTypeKind.Extension)
+            string name = NameOf(measure, schema, paths);
+            bool floats;
+            if (SynopsisPath.Names(measure))
             {
-                dtype = dtype.StorageType;
+                floats = paths[SynopsisPath.Place(measure)].Class == Types.Variants.VariantClass.Double;
+            }
+            else
+            {
+                DType dtype = schema.GetField(measure);
+                while (dtype.Kind == DTypeKind.Extension)
+                {
+                    dtype = dtype.StorageType;
+                }
+
+                floats = dtype.PType.IsFloat();
             }
 
-            string[] words = dtype.PType.IsFloat() ? ["m0", "m1", "m2", "meta", "high"] : ["low", "high"];
+            string[] words = floats ? ["m0", "m1", "m2", "meta", "high"] : ["low", "high"];
             names.Add($"{name}.values");
             foreach (string word in words)
             {
@@ -122,6 +135,21 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
 
         return types.Struct([.. names], [.. fields], Nullability.NonNullable);
     }
+
+    /// <summary>The name a key or measure <paramref name="entry"/> takes in a table: its field's, or its path's, <c>field["key"]</c>.</summary>
+    internal static string NameOf(int entry, DType schema, IReadOnlyList<SynopsisPath> paths) =>
+        SynopsisPath.Names(entry) && paths[SynopsisPath.Place(entry)] is { } path
+            ? $"{schema.GetFieldName(path.Field)}[\"{path.Key}\"]"
+            : schema.GetFieldName(entry);
+
+    /// <summary>The nullable type a path's values of <paramref name="class"/> are read at: the typed column the shredder builds for it.</summary>
+    internal static DType ClassType(Types.Variants.VariantClass @class, DTypeArena types) => @class switch
+    {
+        Types.Variants.VariantClass.Integer => types.Primitive(PType.I64, Nullability.Nullable),
+        Types.Variants.VariantClass.Double => types.Primitive(PType.F64, Nullability.Nullable),
+        Types.Variants.VariantClass.String => types.Utf8(Nullability.Nullable),
+        _ => types.Bool(Nullability.Nullable),
+    };
 
     /// <summary>The table the options <paramref name="bytes"/> describe, or null when they do not decode.</summary>
     internal static SynopsisTableInfo? From(ReadOnlySpan<byte> bytes)
@@ -364,7 +392,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         DTypeArena types = new DTypeArena();
         string[] encodings = [.. contents.Encodings];
         return DecodeAsync(
-            source, new ScanContext(encodings, options ?? VortexReadOptions.Default), found, (table, _) => table.RowType(schema, types), cancellationToken);
+            source, new ScanContext(encodings, options ?? VortexReadOptions.Default), found, (table, _) => table.RowType(schema, contents.Slices.Paths, types), cancellationToken);
     }
 
     /// <summary>

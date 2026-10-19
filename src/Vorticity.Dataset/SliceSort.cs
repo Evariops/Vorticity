@@ -160,6 +160,13 @@ internal static class SliceSort
     }
 
     /// <summary>
+    /// Each row's code for the column node <paramref name="column"/>, its values in their order, nulls last,
+    /// and how many distinct values there are: a path's values, read into a column of their own.
+    /// </summary>
+    internal static (int[] Codes, int Distinct) CodesOfColumn(CanonicalArena arena, int column, int rows) =>
+        Codes(arena, EncodedForms.Canonical(arena, RowEncoder.Storage(arena, column)), rows);
+
+    /// <summary>
     /// How two rows of a column compare in a slice's order: by value, nulls last. The order
     /// <see cref="CodesOf"/> codes a column in.
     /// </summary>

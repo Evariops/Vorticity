@@ -66,8 +66,22 @@ internal sealed class SortedSlices : IDisposable
     /// <summary>The order the slices are sorted in: the table's until the first slice settles it.</summary>
     internal IReadOnlyList<int> Order => _order ?? (IReadOnlyList<int>)_table.Order;
 
-    /// <summary>The slices, sorted in the order the first slice settled: the table's, the shapes placed in it.</summary>
-    internal SliceTable Table => _order is { } order && !order.SequenceEqual(_table.Order) ? new SliceTable(_table.Unit, _table.Slices, order) : _table;
+    /// <summary>The slices, sorted in the order the first slice settled: the table's, the shapes and paths placed in it.</summary>
+    internal SliceTable Table => _order is { } order && !order.SequenceEqual(_table.Order)
+        ? new SliceTable(_table.Unit, _table.Slices, order, _table.Paths)
+        : _table;
+
+    /// <summary>
+    /// The column of each of the table's paths over the slice being written, in the order its rows are sorted
+    /// in, in its batch's arena: those the order places and the numeric ones the synopsis sums, -1 for another;
+    /// valid while the slice is written.
+    /// </summary>
+    internal IReadOnlyList<int> PathColumns => _pathColumns;
+
+    private readonly List<int> _pathColumns = [];
+
+    // Which of the table's paths each slice reads, once the first slice settled the order; every one before.
+    private bool[]? _wanted;
 
     /// <summary>Takes the next rows in time order, writing each slice they complete through <paramref name="write"/>.</summary>
     internal async ValueTask AppendAsync(RecordBatch rows, Func<RecordBatch, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
@@ -124,28 +138,46 @@ internal sealed class SortedSlices : IDisposable
     {
         List<(int[] Codes, int Distinct)> columns;
         _sortedCodes.Clear();
-        if (_order is null && (_shapes is not null || _table.Order.Count > 1))
+        _pathColumns.Clear();
+
+        // The paths' values, every path's on the first slice, then those the order and the synopsis read.
+        int[] paths = ReadPaths(arena, node);
+        if (_order is null && (_shapes is not null || _table.Order.Count > 1 || _table.Paths.Count > 0))
         {
             // The first slice settles the object's order, and sorts by the codes it measured it with.
-            (_order, columns) = Place(arena, node, rows);
+            (_order, columns) = Place(arena, node, rows, paths);
+            _wanted = new bool[_table.Paths.Count];
+            for (int p = 0; p < _wanted.Length; p++)
+            {
+                _wanted[p] = _order.Contains(SynopsisPath.Entry(p))
+                    || _table.Paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double;
+            }
         }
         else
         {
             _order ??= [.. _table.Order];
-            if (_order.Count == 0)
-            {
-                return node;
-            }
-
             columns = new List<(int[], int)>(_order.Count);
             foreach (int entry in _order)
             {
-                columns.Add(SliceSort.CodesOf(arena, node, entry, rows, _shapes));
+                columns.Add(SynopsisPath.Names(entry)
+                    ? SliceSort.CodesOfColumn(arena, paths[SynopsisPath.Place(entry)], rows)
+                    : SliceSort.CodesOf(arena, node, entry, rows, _shapes));
             }
         }
 
-        int[] permutation = SliceSort.Permutation(columns, rows);
-        bool identity = IsIdentity(permutation);
+        int[]? permutation = columns.Count == 0 ? null : SliceSort.Permutation(columns, rows);
+        bool identity = permutation is null || IsIdentity(permutation);
+
+        // Each path's values, in the order the rows are sorted in.
+        foreach (int column in paths)
+        {
+            _pathColumns.Add(column < 0 || identity ? column : CanonicalFilter.Apply(arena, column, permutation!));
+        }
+
+        if (permutation is null)
+        {
+            return node;
+        }
 
         // Each entry's codes, in the order the rows are sorted in: what the slice's synopsis groups by.
         if (_gathered.Length < rows)
@@ -189,10 +221,54 @@ internal sealed class SortedSlices : IDisposable
     private const int OrderSampleRows = 16_384;
 
     /// <summary>
-    /// The object's order and each entry's codes over this slice: the table's columns and the shapes that
-    /// repeat, ordered greedily by the runs each adds (<see cref="SliceSort.Greedy"/>), measured on a sample.
+    /// The column of each of the table's paths over the slice's rows <paramref name="node"/>, read in one pass
+    /// of each variant column: every path before the order is settled, then those the order or the synopsis
+    /// read, -1 for another.
     /// </summary>
-    private (List<int> Order, List<(int[] Codes, int Distinct)> Columns) Place(CanonicalArena arena, int node, int rows)
+    private int[] ReadPaths(CanonicalArena arena, int node)
+    {
+        IReadOnlyList<SynopsisPath> paths = _table.Paths;
+        int[] columns = new int[paths.Count];
+        columns.AsSpan().Fill(-1);
+        if (paths.Count == 0)
+        {
+            return columns;
+        }
+
+        Dictionary<int, List<int>> byField = [];
+        for (int p = 0; p < paths.Count; p++)
+        {
+            if (_wanted?[p] ?? true)
+            {
+                if (!byField.TryGetValue(paths[p].Field, out List<int>? places))
+                {
+                    byField[paths[p].Field] = places = [];
+                }
+
+                places.Add(p);
+            }
+        }
+
+        CanonicalNode root = arena.GetNode(node);
+        foreach ((int field, List<int> places) in byField)
+        {
+            (string, Types.Variants.VariantClass)[] keys = [.. places.Select(p => (paths[p].Key, paths[p].Class))];
+            int[] built = Writing.VariantShredder.KeyColumns(arena, _context.Types, root.GetFieldIndex(field), keys);
+            for (int i = 0; i < places.Count; i++)
+            {
+                columns[places[i]] = built[i];
+            }
+        }
+
+        return columns;
+    }
+
+    /// <summary>
+    /// The object's order and each entry's codes over this slice: the table's columns, the shapes that repeat
+    /// and the paths whose values repeat among the rows that hold them, ordered greedily by the runs each adds
+    /// (<see cref="SliceSort.Greedy"/>), measured on a sample.
+    /// </summary>
+    private (List<int> Order, List<(int[] Codes, int Distinct)> Columns) Place(CanonicalArena arena, int node, int rows, int[] paths)
     {
         List<int> entries = [.. _table.Order];
         List<(int[] Codes, int Distinct)> candidates = [];
@@ -211,6 +287,24 @@ internal sealed class SortedSlices : IDisposable
             {
                 entries.Add(-field - 1);
                 candidates.Add(shapes);
+            }
+        }
+
+        for (int p = 0; p < paths.Length; p++)
+        {
+            // A path whose values repeat twice on average among the rows that hold it, as a column's must;
+            // a null codes after every value, so the rows held are those coded below the distinct count.
+            (int[] Codes, int Distinct) values = SliceSort.CodesOfColumn(arena, paths[p], rows);
+            long held = 0;
+            foreach (int code in values.Codes)
+            {
+                held += code < values.Distinct ? 1 : 0;
+            }
+
+            if (values.Distinct > 0 && values.Distinct * 2L <= held)
+            {
+                entries.Add(SynopsisPath.Entry(p));
+                candidates.Add(values);
             }
         }
 

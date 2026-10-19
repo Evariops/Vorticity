@@ -46,32 +46,54 @@ internal sealed class SynopsisTables : IDisposable
     private static readonly long NoFloat = BitConverter.DoubleToInt64Bits(double.NaN);
 
     private readonly DType _schema;
-    private readonly int[] _measures;
-    private readonly Kind[] _kinds;
+    private readonly IReadOnlyList<SynopsisPath> _paths;
     private readonly TimeUnit _unit;
     private readonly ScanContext _context = new ScanContext([]);
     private readonly DTypeArena _types = new DTypeArena();
     private readonly Dictionary<int, DType> _keyTypes = [];
     private readonly List<Slice> _slices = [];
     private readonly Dictionary<long, int> _pairs = [];
+    private int[] _measures;
+    private Kind[] _kinds;
     private int[] _keys = [];
     private DType? _keysType;
+
+    // The columns of the slice being counted's paths, in its batch's arena, -1 for a path not read.
+    private IReadOnlyList<int> _pathColumns = [];
 
     // Each depth's group of every row of the slice counted, reused from slice to slice.
     private int[][] _groups = [];
 
-    /// <summary>The tables of an object of <paramref name="schema"/>, its instant in <paramref name="unit"/>, the measures <paramref name="measures"/>.</summary>
-    internal SynopsisTables(DType schema, TimeUnit unit, int[] measures)
+    /// <summary>
+    /// The tables of an object of <paramref name="schema"/>, its instant in <paramref name="unit"/>, the
+    /// measures <paramref name="measures"/>, its synopsis paths <paramref name="paths"/>: the first slice adds
+    /// to the measures the numeric paths the order does not place.
+    /// </summary>
+    internal SynopsisTables(DType schema, TimeUnit unit, int[] measures, IReadOnlyList<SynopsisPath>? paths = null)
     {
         _schema = schema;
         _unit = unit;
-        _measures = measures;
-        _kinds = new Kind[measures.Length];
+        _paths = paths ?? [];
+        (_measures, _kinds) = KindsOf(measures);
+    }
+
+    /// <summary>The measures <paramref name="measures"/>, fields or paths, and how each one's states are kept.</summary>
+    private (int[] Measures, Kind[] Kinds) KindsOf(int[] measures)
+    {
+        Kind[] kinds = new Kind[measures.Length];
         for (int m = 0; m < measures.Length; m++)
         {
-            PType ptype = Storage(schema.GetField(measures[m])).PType;
-            _kinds[m] = ptype.IsFloat() ? Kind.Float : ptype.IsUnsignedInteger() ? Kind.Unsigned : Kind.Signed;
+            if (SynopsisPath.Names(measures[m]))
+            {
+                kinds[m] = _paths[SynopsisPath.Place(measures[m])].Class == Types.Variants.VariantClass.Double ? Kind.Float : Kind.Signed;
+                continue;
+            }
+
+            PType ptype = Storage(_schema.GetField(measures[m])).PType;
+            kinds[m] = ptype.IsFloat() ? Kind.Float : ptype.IsUnsignedInteger() ? Kind.Unsigned : Kind.Signed;
         }
+
+        return (measures, kinds);
     }
 
     /// <summary>
@@ -96,10 +118,28 @@ internal sealed class SynopsisTables : IDisposable
     /// <summary>
     /// Counts the slice starting at <paramref name="start"/>, its rows in <paramref name="sorted"/>, sorted by
     /// the entries <paramref name="order"/> names, whose codes in the sorted order <paramref name="codes"/>
-    /// holds: the states of its groups at every depth, and the keys of its deepest groups.
+    /// holds, the columns of its paths in <paramref name="paths"/>: the states of its groups at every depth,
+    /// and the keys of its deepest groups.
     /// </summary>
-    internal void AddSlice(RecordBatch sorted, long start, IReadOnlyList<int> order, IReadOnlyList<int[]> codes)
+    internal void AddSlice(RecordBatch sorted, long start, IReadOnlyList<int> order, IReadOnlyList<int[]> codes, IReadOnlyList<int>? paths = null)
     {
+        _pathColumns = paths ?? [];
+        if (_slices.Count == 0)
+        {
+            // The numeric paths the order does not place are measures, summed as the numbers of the schema are.
+            List<int> measures = [.. _measures];
+            for (int p = 0; p < _paths.Count; p++)
+            {
+                if (_paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
+                    && !Contains(order, SynopsisPath.Entry(p)) && p < _pathColumns.Count && _pathColumns[p] >= 0)
+                {
+                    measures.Add(SynopsisPath.Entry(p));
+                }
+            }
+
+            (_measures, _kinds) = KindsOf([.. measures]);
+        }
+
         // The keys, and how many lead the order before a variant's shapes.
         List<int> keys = [];
         List<int[]> keyCodes = [];
@@ -382,7 +422,7 @@ internal sealed class SynopsisTables : IDisposable
         }
 
         states.Emit(arena, longs, fields);
-        tables.Add((info, arena.AddStruct(info.RowType(_schema, _types), buckets.Length, Validity.NonNullable, [.. fields])));
+        tables.Add((info, arena.AddStruct(info.RowType(_schema, _paths, _types), buckets.Length, Validity.NonNullable, [.. fields])));
     }
 
     /// <summary>The keys of a slice's deepest groups, gathered at their first rows in the order of their keys, copied into the tables' arena.</summary>
@@ -402,7 +442,7 @@ internal sealed class SynopsisTables : IDisposable
             DType[] dtypes = new DType[_keys.Length];
             for (int k = 0; k < _keys.Length; k++)
             {
-                names[k] = _schema.GetFieldName(_keys[k]);
+                names[k] = SynopsisTableInfo.NameOf(_keys[k], _schema, _paths);
                 dtypes[k] = KeyType(_keys[k]);
             }
 
@@ -412,7 +452,7 @@ internal sealed class SynopsisTables : IDisposable
         int[] fields = new int[_keys.Length];
         for (int k = 0; k < _keys.Length; k++)
         {
-            fields[k] = CanonicalFilter.Apply(arena, node.GetFieldIndex(_keys[k]), at);
+            fields[k] = CanonicalFilter.Apply(arena, ColumnOf(node, _keys[k]), at);
         }
 
         int keys = arena.AddStruct(_keysType.Value, at.Length, Validity.NonNullable, fields);
@@ -546,7 +586,7 @@ internal sealed class SynopsisTables : IDisposable
         CanonicalNode node = arena.GetNode(root);
         for (int m = 0; m < _measures.Length; m++)
         {
-            int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, node.GetFieldIndex(_measures[m])));
+            int column = EncodedForms.Canonical(arena, RowEncoder.Storage(arena, ColumnOf(node, _measures[m])));
             ref readonly CanonicalRecord record = ref arena.RecordRef(column);
             states.Fold(m, record.PType, record.BufferA.Span, ArenaWords.Validity(arena, column), groupOf);
         }
@@ -592,16 +632,22 @@ internal sealed class SynopsisTables : IDisposable
 
     private SynopsisTableInfo Info(SynopsisTableKind kind, SynopsisBucket bucket, int[] keys, int rows) => new SynopsisTableInfo(kind, bucket, keys, _measures, rows);
 
-    /// <summary>The dtype of the object's field <paramref name="field"/>, in the tables' arena.</summary>
-    private DType KeyType(int field)
+    /// <summary>The dtype of key <paramref name="entry"/>, a field or a path, in the tables' arena.</summary>
+    private DType KeyType(int entry)
     {
-        if (!_keyTypes.TryGetValue(field, out DType dtype))
+        if (!_keyTypes.TryGetValue(entry, out DType dtype))
         {
-            _keyTypes[field] = dtype = VortexTypes.ToDType(VortexTypes.FromDType(_schema.GetField(field)), _types);
+            _keyTypes[entry] = dtype = SynopsisPath.Names(entry)
+                ? SynopsisTableInfo.ClassType(_paths[SynopsisPath.Place(entry)].Class, _types)
+                : VortexTypes.ToDType(VortexTypes.FromDType(_schema.GetField(entry)), _types);
         }
 
         return dtype;
     }
+
+    /// <summary>The column of a slice's struct <paramref name="node"/> a key or measure <paramref name="entry"/> reads: its field's, or its path's.</summary>
+    private int ColumnOf(CanonicalNode node, int entry) =>
+        SynopsisPath.Names(entry) ? _pathColumns[SynopsisPath.Place(entry)] : node.GetFieldIndex(entry);
 
     /// <summary>A non-null column of longs.</summary>
     private static int Longs(CanonicalArena arena, DType longs, ReadOnlySpan<long> values)

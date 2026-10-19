@@ -941,13 +941,15 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal long SynopsisBudget(long dataBytes) => dataBytes * _budgetPerMille / 1000;
 
-    /// <summary>Reports what became of a synopsis table, and why, with the choice's numbers.</summary>
-    internal void ReportSynopsis(SynopsisTableInfo table, bool kept, string verdict, long bytes)
+    /// <summary>Reports what became of a synopsis table, its keys fields or the paths <paramref name="paths"/> lists, and why, with the choice's numbers.</summary>
+    internal void ReportSynopsis(SynopsisTableInfo table, IReadOnlyList<SynopsisPath> paths, bool kept, string verdict, long bytes)
     {
         string[] keys = new string[table.Keys.Length];
         for (int k = 0; k < keys.Length; k++)
         {
-            keys[k] = _paths[table.Keys[k]];
+            keys[k] = SynopsisPath.Names(table.Keys[k]) && paths[SynopsisPath.Place(table.Keys[k])] is { } path
+                ? $"{_paths[path.Field]}[\"{path.Key}\"]"
+                : _paths[table.Keys[k]];
         }
 
         string grain = $"{table.Kind} per {table.Bucket} of ({string.Join(", ", keys)})";

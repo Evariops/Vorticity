@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -78,6 +79,115 @@ internal static class VariantShredder
         int tree = root.Typed(arena, types, rows, metadata, out _);
         int residual = root.Values.Build(arena, types, types.Binary(Nullability.Nullable), rows);
         return arena.AddStruct(variant.DType, rows, variant.Validity, [metadata, residual, tree]);
+    }
+
+    /// <summary>
+    /// The values of each of <paramref name="keys"/>, top-level keys of the objects of <paramref name="node"/>,
+    /// a <c>Struct{metadata, value}</c> wearing a variant dtype, each in a typed column of its class over the
+    /// rows: null where the row is null or no object, where its object does not hold the key, or holds a
+    /// value of another class. Each row's value is read once, and a key's name matched once per run of rows
+    /// whose metadata bytes are the same. The columns' dtypes are made in <paramref name="types"/>.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal static int[] KeyColumns(CanonicalArena arena, DTypeArena types, int node, IReadOnlyList<(string Key, VariantClass Class)> keys)
+    {
+        CanonicalNode variant = arena.GetNode(node);
+        int rows = variant.Length;
+        int metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
+        int value = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(1));
+        CanonicalNode metadataNode = arena.GetNode(metadata);
+        CanonicalNode valueNode = arena.GetNode(value);
+        TypedColumn[] columns = new TypedColumn[keys.Count];
+        byte[][] utf8 = new byte[keys.Count][];
+        for (int k = 0; k < columns.Length; k++)
+        {
+            columns[k] = TypedColumn.For(keys[k].Class);
+            utf8[k] = System.Text.Encoding.UTF8.GetBytes(keys[k].Key);
+        }
+
+        // Each dictionary id's key among those asked, -1 for another, -2 not yet matched: per run of the same metadata.
+        int[] matched = [];
+        ReadOnlySpan<byte> last = default;
+        bool[] seen = new bool[keys.Count];
+        for (int row = 0; row < rows; row++)
+        {
+            Array.Clear(seen);
+            if (ArenaWords.IsValid(arena, node, row) && ArenaWords.IsValid(arena, value, row))
+            {
+                ReadOnlySpan<byte> bytes = LiteralReader.ViewAt(valueNode, row);
+                if ((bytes[0] & 0x03) == ParquetVariant.BasicObject)
+                {
+                    ReadOnlySpan<byte> names = LiteralReader.ViewAt(metadataNode, row);
+                    VariantDictionary dictionary = VariantDictionary.Read(names);
+                    if (!names.SequenceEqual(last) || matched.Length < dictionary.Count)
+                    {
+                        matched = new int[dictionary.Count];
+                        matched.AsSpan().Fill(-2);
+                        last = names;
+                    }
+
+                    VariantNested fields = VariantNested.Read(bytes);
+                    for (int i = 0; i < fields.Count; i++)
+                    {
+                        int id = fields.IdAt(i);
+                        if (matched[id] == -2)
+                        {
+                            matched[id] = -1;
+                            ReadOnlySpan<byte> name = dictionary[id];
+                            for (int k = 0; k < keys.Count; k++)
+                            {
+                                if (name.SequenceEqual(utf8[k]))
+                                {
+                                    matched[id] = k;
+                                    break;
+                                }
+                            }
+                        }
+
+                        int key = matched[id];
+                        if (key >= 0 && !seen[key] && OfClass(keys[key].Class, fields.ValueAt(i)))
+                        {
+                            columns[key].Append(fields.ValueAt(i));
+                            seen[key] = true;
+                        }
+                    }
+                }
+            }
+
+            for (int k = 0; k < columns.Length; k++)
+            {
+                if (!seen[k])
+                {
+                    columns[k].AppendNull();
+                }
+            }
+        }
+
+        int[] built = new int[columns.Length];
+        for (int k = 0; k < built.Length; k++)
+        {
+            built[k] = columns[k].Build(arena, types, rows, out _);
+        }
+
+        return built;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="value"/> is of <paramref name="class"/>, from its header byte alone: a short
+    /// string or the string primitive, the four integers', the double's, the booleans'.
+    /// </summary>
+    private static bool OfClass(VariantClass @class, ReadOnlySpan<byte> value)
+    {
+        int header = value[0];
+        int basic = header & 0x03;
+        int primitive = basic == ParquetVariant.BasicPrimitive ? header >> 2 : -1;
+        return @class switch
+        {
+            VariantClass.Integer => primitive is >= 3 and <= 6,
+            VariantClass.Double => primitive == 7,
+            VariantClass.String => basic == ParquetVariant.BasicShortString || primitive == 16,
+            _ => primitive is 1 or 2,
+        };
     }
 
     /// <summary>

@@ -137,9 +137,9 @@ public sealed partial class ShreddedDatasetTests
 
     /// <summary>
     /// Three sources of attributes, a route and a status, a route and keys of data, a query alone,
-    /// beside a host among forty: the objects a job writes order each slice by the attributes' shape
-    /// before the host, since the shapes are fewer, so the rows of each shape lie together in every
-    /// slice; and the rows are the ones appended.
+    /// beside a host among forty: the objects a job writes order each slice by the attributes' shape,
+    /// then by the route the object shreds, nine values, before the host, so the rows of each shape lie
+    /// together in every slice; and the rows are the ones appended.
     /// </summary>
     [Fact]
     public async Task AnObjectOrdersItsSlicesByShape()
@@ -179,7 +179,9 @@ public sealed partial class ShreddedDatasetTests
             await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(leaf.Value.Span), Ct);
             int attributes = lease.File.DType.IndexOfField(nameof(Hosted.Attributes));
             SliceTable table = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            Assert.Equal([-attributes - 1, lease.File.DType.IndexOfField(nameof(Hosted.Host))], table.Order);
+            // The shape first, then the route, a shredded key of nine values, then the host.
+            Assert.Equal([new SynopsisPath(attributes, "route", Vorticity.Types.Variants.VariantClass.String)], table.Paths);
+            Assert.Equal([-attributes - 1, SynopsisPath.Entry(0), lease.File.DType.IndexOfField(nameof(Hosted.Host))], table.Order);
 
             // In every slice, the rows of one shape lie together: a route, or none.
             List<Hosted> stored = await lease.File.Scan<Hosted>().ToRecordsAsync(Ct).ToListAsync(Ct);

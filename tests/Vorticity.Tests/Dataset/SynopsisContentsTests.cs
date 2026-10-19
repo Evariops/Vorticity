@@ -31,8 +31,13 @@ public sealed partial class SynopsisContentsTests
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
+
+        // A session of its own: the default one gates the reads every test in flight makes, which would
+        // queue the objects' requests behind others' and count them as dependent.
+        await using VortexSession session = VortexSession.Create(static _ => { });
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
+            Session = session,
             ClusteringKey = [nameof(Call.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },

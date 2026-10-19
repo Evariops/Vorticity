@@ -92,15 +92,21 @@ public sealed partial class SynopsisOrderTests
     [Fact]
     public void ASliceTableKeepsItsOrderAndReadsTheFirstVersion()
     {
-        SliceTable table = new SliceTable(TimeUnit.Microseconds, [new TimeSlice(0, 60, 0, 10), new TimeSlice(60, 120, 10, 5)], [3, 1, 4]);
+        SliceTable table = new SliceTable(
+            TimeUnit.Microseconds,
+            [new TimeSlice(0, 60, 0, 10), new TimeSlice(60, 120, 10, 5)],
+            [3, -2, SynopsisPath.Entry(0), 1],
+            [new SynopsisPath(1, "http.route", Vorticity.Types.Variants.VariantClass.String)]);
         SliceTable read = SliceTable.FromBytes(table.ToBytes())!;
-        Assert.Equal([3, 1, 4], read.Order);
+        Assert.Equal([3, -2, SynopsisPath.Entry(0), 1], read.Order);
         Assert.Equal(table.Slices, read.Slices);
+        Assert.Equal(table.Paths, read.Paths);
 
-        // A table of the first version, with no order: rows in time order.
+        // A table of the first version, with no order: rows in time order. Its last two bytes are the
+        // counts of the order and of the paths, which later versions write.
         byte[] first = new SliceTable(TimeUnit.Microseconds, table.Slices).ToBytes();
         first[0] = 1;
-        SliceTable old = SliceTable.FromBytes(first[..^1])!;
+        SliceTable old = SliceTable.FromBytes(first[..^2])!;
         Assert.Empty(old.Order);
         Assert.Equal(table.Slices, old.Slices);
     }
