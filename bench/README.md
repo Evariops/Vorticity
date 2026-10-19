@@ -389,6 +389,13 @@ SIEVE ranged from 72 % to 89 %. The cache uses it since 2026-10-19. The trace is
 distinct regions, since the bench's hours keep a dozen tables each; replay it on a larger dataset
 before reading a gap under two points as a difference.
 
+The same run then asks its questions again through the cache itself, at no cache, a twentieth, a fifth
+and all of the regions' bytes, over a store that counts, and prints the reads each question sends to
+the store and the questions a second that keep a bucket under its limit: 5 500 reads a second per
+prefix on S3, 900 per bucket on OVHcloud. On seed 29, 9.7 reads a question without the cache (569 and
+93 questions a second), 7.5 at a twentieth, 6.9 at a fifth, 5.7 with every region held (972 and 159).
+The reads left are data, which the cache never holds.
+
 ## Where the figures live
 
 The figures are on [the benchmark page](../docs/guide/benchmarks.md), each section dated and signed

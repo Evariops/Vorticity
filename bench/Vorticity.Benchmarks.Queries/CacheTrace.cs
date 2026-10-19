@@ -73,7 +73,40 @@ internal static class CacheTrace
             Console.WriteLine($"{share,9:P0} {capacity / 1e6,8:F2}  " + string.Join("  ", cells));
         }
 
+        await LoadAsync(store, hours, questions, seed, distinct);
         return 0;
+    }
+
+    /// <summary>
+    /// The same questions asked again through the cache itself, at several capacities, over a store that counts:
+    /// the reads each question sends to the store, and so how many questions a second keep a bucket under its
+    /// limit, 5 500 reads a second per prefix on S3 and 900 per bucket on OVHcloud.
+    /// </summary>
+    private static async Task LoadAsync(MemoryObjectStore store, int hours, int questions, int seed, long distinct)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"{"cache",9} {"MB",8} {"hits",8} {"reads/question",15} {"questions/s, S3",16} {"OVHcloud",9}");
+        foreach (double share in new[] { 0.0, 0.05, 0.2, 1.0 })
+        {
+            string directory = System.IO.Directory.CreateTempSubdirectory("vortex-cacheload-").FullName;
+            try
+            {
+                long capacity = Math.Max(1, (long)(distinct * share));
+                SynopsisCache? cache = share > 0 ? new SynopsisCache(directory, capacity) : null;
+                await using CountingObjectStore counted = new CountingObjectStore(store);
+                await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = cache);
+                await using VortexDataset dataset = await VortexDataset.OpenAsync(counted, new DatasetOptions { Session = session });
+                counted.Reset();
+                await AskAsync(dataset, hours, questions, seed);
+                double reads = (double)counted.CountOf(ObjectOperation.Read) / questions;
+                double hits = cache is null || cache.Hits + cache.Misses == 0 ? 0 : (double)cache.Hits / (cache.Hits + cache.Misses);
+                Console.WriteLine($"{share,9:P0} {(cache is null ? 0 : capacity) / 1e6,8:F2} {hits,8:P1} {reads,15:F2} {5_500 / reads,16:F0} {900 / reads,9:F0}");
+            }
+            finally
+            {
+                System.IO.Directory.Delete(directory, recursive: true);
+            }
+        }
     }
 
     /// <summary>The run of questions: a kind drawn by its rank, a window drawn by its width, ending at a moving now.</summary>

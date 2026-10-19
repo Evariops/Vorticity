@@ -1613,6 +1613,16 @@ limit already throws on scans of rows, and phase 1 needs the marks, the put's bo
 | no allocation per batch | the allocation ratchets, extended to the walk of runs and the new kernels |
 | Rust reads every object | objects of sorted slices with synopses in the cross-check |
 
+As built, the load is measured by `vortex-queries --micro cachetrace`, which asks its 2 000 questions
+again through the cache at several capacities over a counting store. Without the cache, a question
+sends 9.7 reads to the store, so a prefix of S3 serves 569 questions a second and a bucket of OVHcloud
+93. With the cache at a twentieth of the regions' bytes, 54 % of the regions come from the disk and a
+question sends 7.5 reads; with every region held, 97 % do and it sends 5.7, 972 and 159 questions a
+second. What is left is data: the slices a window cuts, and the questions no table answers. A put of
+200 GB is planned without a byte under each profile's rules by the S3 emulator of the tests: a known
+length or a bound fits everywhere, and an unknown length past 168 GB on R2 and 106 GB on Scaleway needs
+its bound or a spool.
+
 ## 17. Documentation to change, and what to clean up
 
 | primitive | documents |
