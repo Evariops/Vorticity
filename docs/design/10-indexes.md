@@ -554,6 +554,13 @@ object that lacks one of the indexes a fragment, a batch of objects per commit, 
 again until a walk finds nothing to index, which is how it finds an object written by a compaction
 planned before its first commit.
 
+`IndexAsync(IndexPolicy.Auto)` commits `Auto` as the default of the dataset's policy, which takes the
+place of none when two policies join. Every column a writer meets that no override names then takes
+`Auto`'s indexes, those schema evolution adds after the policy included, and every key a job shreds
+from a variant column takes `Auto`'s Bloom filter in its class. The budget weighs them, since no
+column asked for them by name. The objects already written take them as compaction rewrites them:
+the walk gives fragments only to the columns a policy names.
+
 A key source needs complete coverage. A pruner uses whatever blocks the runs cover and leaves the
 others live, but a cursor over partial runs would miss keys, so a key source refuses an entry whose
 runs do not cover every block, and names the blocks it has.

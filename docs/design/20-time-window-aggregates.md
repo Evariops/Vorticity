@@ -1453,7 +1453,9 @@ after the dataset's creation.
    later ones included, and to every path of a variant column that an object shreds, one entry per
    type class the path holds ([what the format gives a path](21-variant-columns.md#510-what-the-format-gives-a-path-and-what-vorticity-adds)).
    Identifiers are the exception: the application declares them, since their index costs 10 to 25 % of
-   an object ([needles](#95-needles)).
+   an object ([needles](#95-needles)). As built, `IndexAsync(IndexPolicy.Auto)` commits `Auto` as the
+   default of the dataset's policy, and a column added by schema evolution takes its index in the
+   next object written.
 
 ## 14. The worst cases
 

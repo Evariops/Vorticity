@@ -110,9 +110,11 @@ internal static class DatasetIndexing
             names |= IndexKinds.Of(spec.Kind) is not null;
         }
 
-        if (!names)
+        // A default that indexes, such as IndexPolicy.Auto, gives every column a writer meets its index, those
+        // schema evolution adds later included; the objects already written take it as compaction rewrites them.
+        if (!names && wanted.Default.Kind == IndexPolicyKind.None)
         {
-            throw new ArgumentException("The policy names no index of a column.", nameof(policy));
+            throw new ArgumentException("The policy names no index of a column, and gives the others none.", nameof(policy));
         }
 
         CommitResult added = await dataset

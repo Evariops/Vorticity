@@ -220,6 +220,10 @@ written before takes a fragment that holds it. [dataset-maintenance.md](dataset-
 what it costs and what it buys, and the design is in
 [13-dataset.md](../design/13-dataset.md#64-fragments-in-commit-objects-transient).
 
+`dataset.IndexAsync(IndexPolicy.Auto)` gives every column its automatic indexes instead, the columns
+you add later with `EvolveSchemaAsync` included. Writers apply it from the next object they write,
+within the budget, and the objects already there take it when compaction rewrites them.
+
 ## Identifiers of a dataset
 
 A column whose values a question looks up one at a time, a request's id or a trace's, is declared when

@@ -1083,8 +1083,12 @@ internal static class DatasetCommitter
                 {
                     // Joined to the policy of the version it lands on, never put in its place: two
                     // indexings of two columns committed at once both keep their column.
+                    // A default that indexes, such as every column's automatic index, takes the place of none.
                     Indexes.WritePolicy current = Indexes.IndexDirectory.PolicyOf(schema.WritePolicy.Span);
-                    byte[] joined = Indexes.IndexDirectory.PolicyBytes(current.With(Indexes.IndexDirectory.PolicyOf(added.Policy.Span)));
+                    Indexes.WritePolicy adding = Indexes.IndexDirectory.PolicyOf(added.Policy.Span);
+                    Indexes.WritePolicy merged = current.With(adding);
+                    merged = adding.Default.Kind != Indexes.IndexPolicyKind.None ? merged.WithDefault(adding.Default) : merged;
+                    byte[] joined = Indexes.IndexDirectory.PolicyBytes(merged);
                     if (joined.AsSpan().SequenceEqual(Indexes.IndexDirectory.PolicyBytes(current)))
                     {
                         outcomes.Add(OperationOutcome.AlreadyThere);

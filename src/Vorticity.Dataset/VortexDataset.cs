@@ -831,6 +831,14 @@ public sealed class VortexDataset : IAsyncDisposable
             write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
         }
 
+        // A default the dataset was given, such as every column's automatic index: each column the write meets
+        // that no override names takes it, those schema evolution added after the policy included. The budget
+        // weighs it, since no column asked for it by name.
+        if (schema.IndexPolicy.Default.Kind != Indexes.IndexPolicyKind.None)
+        {
+            write = write.WithIndexes(write.WritePolicy.WithDefault(schema.IndexPolicy.Default));
+        }
+
         // Each declared identifier's hashed postings, required and spared by the budget as the clustering
         // key's run is: a lookup of one value reads the objects that hold it and almost no other, one
         // segment of about 64 KiB an object, at about four bytes a (value, block) pair. A Bloom filter,
