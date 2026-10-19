@@ -17,11 +17,11 @@ namespace Vorticity;
 /// strings.
 /// </summary>
 /// <remarks>Single-use and not thread-safe, like the typed scan.</remarks>
-public sealed class Scan
+public sealed partial class Scan
 {
     private readonly ScanSource _source;
     private readonly FieldMask? _projection;
-    private readonly ScanCounters _counters = new ScanCounters();
+    private readonly ScanCounters _counters;
     private VortexExpr? _filter;
     private RowRange? _rows;
     private long[]? _take;
@@ -30,8 +30,15 @@ public sealed class Scan
     private int _used;
 
     internal Scan(ScanSource source, ReadOnlySpan<string> columns)
+        : this(source, columns, new ScanCounters())
+    {
+    }
+
+    /// <summary>A scan whose metrics are <paramref name="counters"/>: a result's, which its query's scan fills.</summary>
+    internal Scan(ScanSource source, ReadOnlySpan<string> columns, ScanCounters counters)
     {
         _source = source;
+        _counters = counters;
         if (columns.IsEmpty)
         {
             Schema = source.Schema;

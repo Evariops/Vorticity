@@ -159,6 +159,30 @@ against the column when a scan takes the filter, as a hole is: a number goes to 
 value of another type to a column of that type, and a value the column cannot hold, or a null, matches
 no row.
 
+## Aggregates by name
+
+A group by takes its key and its results as text too, so a program can count by a column it learns
+at run time:
+
+```csharp
+Scan perService = file.Scan()
+    .Where($"Status >= {500}")
+    .GroupBy("Service")
+    .Select("Service", "count()", "sum(Bytes)", "avg(Duration)");
+await foreach (BatchView groups in perService)
+{
+    // Columns named "Service", "count()", "sum(Bytes)" and "avg(Duration)".
+}
+
+Scan totals = file.Scan().Aggregate("count()", "max(Bytes)");
+```
+
+A result is a column of the key, or one of `count()`, `count_distinct(c)`, `sum(c)`, `min(c)`,
+`max(c)` and `avg(c)`. A sum of integers is a 64-bit integer, signed or not, a sum of floats and a
+mean are doubles, and a minimum, a maximum and a key keep their column's type. Each result column is
+named by the text that asked for it. The engine and the plan are the typed path's: on a dataset by
+periods, the same question reads the same synopsis tables.
+
 ## Watch out
 
 * A non-nullable type over a nullable column is refused. `batch.Column<double>("Celsius")` throws
@@ -167,8 +191,9 @@ no row.
 * Names are matched exactly, case included, and an unknown name throws `VortexSchemaException` when
   the scan or the filter is built.
 * The tool scan is single-use, like the typed one. Its sinks are the borrowed batches,
-  `ToBatchesAsync`, `CountAsync`, `AnyAsync` and `ExplainAsync`. Rows, aggregates, `OrderBy` and the
-  key cursor need a record type.
+  `ToBatchesAsync`, `CountAsync`, `AnyAsync`, `ExplainAsync` and the group by. Rows, `OrderBy`, the
+  key cursor, and the operators on groups (a filter on their results, an order, a window) need a
+  record type.
 * The same scan exists on a dataset ([datasets.md](datasets.md)).
 
 The tool path is described in [the public API design](../design/14-public-api.md#58-the-tool-path),

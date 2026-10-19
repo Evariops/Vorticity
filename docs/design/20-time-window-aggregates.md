@@ -1444,7 +1444,9 @@ after the dataset's creation.
    per slice.
 2. Aggregates on the tool path. `Scan("Service", "At").Where(text)` exists, and a group by over it does
    not ([16-queries.md](16-queries.md#12-not-in-it-on-purpose)). Its API is the one the queries design
-   announces, over the same engine, and the planner serves both paths alike.
+   announces, over the same engine, and the planner serves both paths alike. As built,
+   `GroupBy(names).Select(texts)` and `Aggregate(texts)` ([the tool path](16-queries.md#11-the-tool-path))
+   give the typed path's bits and fold the same synopsis rows.
 3. An index policy for every column. `IndexAsync` refuses a policy that names no column (code:
    [DatasetIndexing.cs:113-116](../../src/Vorticity.Dataset/DatasetIndexing.cs#L113-L116)).
    `IndexPolicy.Auto`, committed as the dataset's policy, would apply to every column a writer meets,

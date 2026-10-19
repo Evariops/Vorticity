@@ -103,6 +103,19 @@ a symbol, and VX1010 for an `As<TRecord>` or an `AggregateAsync<TResult>` whose 
 the values. VX1011 accompanies the compiler's error of the last row and names the fix, `As<TRecord>()`
 and the record to declare.
 
+### 1.1 The tool path
+
+A program that learns its columns at run time groups the tool scan by names and writes its results
+as text: `file.Scan().Where(text).GroupBy("Service").Select("Service", "count()", "sum(Bytes)")`,
+and `Aggregate(results)` for a whole scan. A result is a column of the key, or one of `count()`,
+`count_distinct(c)`, `sum(c)`, `min(c)`, `max(c)` and `avg(c)`. The engine builds the nodes the typed
+path's lambdas build, so the plan is the same, synopses and indexes included, and the result is a
+tool scan of the groups whose columns the texts name. A sum takes the widest type of its kind, a long,
+an unsigned long or a double, and a minimum, a maximum and a key keep their column's .NET type,
+chosen by a switch over the storage rather than by reflection, which Native AOT would refuse. The
+operators on groups, a filter on their results, an order and a window, are left to the typed path for
+now.
+
 ## 2. The flow
 
 ### 2.1 Batches, pulled
@@ -1197,7 +1210,6 @@ early](#24-stopping-early) describes.
 | the same bits for a custom aggregator whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in ([how it is tested](#13-how-it-is-tested)), its consolidation made of merges alone. A merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, and a third more at a million groups, whose 32 bytes per group leave the cache. It is more accurate, and a second semantics would be a second test matrix |
 | approximate distinct counts, grouping sets | later, as aggregates and as operators of the same pipeline |
-| aggregates on the tool path | a later API, over the same engine |
 
 ## 13. How it is tested
 

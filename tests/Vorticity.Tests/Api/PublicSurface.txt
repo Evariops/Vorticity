@@ -1060,6 +1060,8 @@ Vorticity:     property int ChosenRows { get; init; }
 Vorticity:     property int Degree { get; init; }
 Vorticity:     property string NotStreaming { get; init; }
 Vorticity:     property string RowFilter { get; init; }
+Vorticity: sealed class Vorticity.GroupedScan
+Vorticity:     method Scan Select(ReadOnlySpan<string>)
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
 Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
 Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)
@@ -1820,7 +1822,9 @@ Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> RunEnds { get; }
 Vorticity:     property int RunCount { get; }
 Vorticity: sealed class Vorticity.Scan
+Vorticity:     method GroupedScan GroupBy(ReadOnlySpan<string>)
 Vorticity:     method IAsyncEnumerable<RecordBatch> ToBatchesAsync(CancellationToken = default)
+Vorticity:     method Scan Aggregate(ReadOnlySpan<string>)
 Vorticity:     method Scan Rows(ReadOnlySpan<long>)
 Vorticity:     method Scan Rows(RowRange)
 Vorticity:     method Scan Where(VortexExpr)
