@@ -425,7 +425,7 @@ internal sealed class DatasetScanBuilder
     {
         if (_states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant))
         {
-            await foreach (RecordBatch batch in AnsweredAsync(held, answer, contents, instant, open, cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in AnsweredAsync(held, answer, contents, instant, cancellationToken).ConfigureAwait(false))
             {
                 yield return batch;
             }
@@ -519,51 +519,172 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// An object answered by its synopsis: the batch of states of its table's kept buckets, read with no
-    /// open of the object, then the rows of the slices at the window's edges, read through the object.
+    /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept
+    /// buckets, then the rows of the slices at the window's edges, through its chunk directories.
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> AnsweredAsync(
-        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
+        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (answer.Parts.Count > 0)
+        // The slices cut are read beside the tables, not after them: their chunk directories and their
+        // chunks take two round trips, the tables one, so the object costs two.
+        Task<List<RecordBatch>>? edges = answer.Edges.Count > 0 ? EdgesAsync(held, answer, contents, cancellationToken) : null;
+        try
         {
-            SynopsisTableSet tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
-            using (tables)
+            if (answer.Parts.Count > 0)
             {
-                foreach (SynopsisPart part in answer.Parts)
+                SynopsisTableSet tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
+                using (tables)
                 {
-                    RecordBatch states = answer.Batch(tables, part, instant, held.FirstRow)
-                        ?? throw new VortexFormatException($"A synopsis table of object {held.Entry.Key} did not read.");
-                    using (states)
+                    foreach (SynopsisPart part in answer.Parts)
                     {
-                        _counters?.AddSynopsisRows(states.SelectedRows);
-                        yield return states;
+                        RecordBatch states = answer.Batch(tables, part, instant, held.FirstRow)
+                            ?? throw new VortexFormatException($"A synopsis table of object {held.Entry.Key} did not read.");
+                        using (states)
+                        {
+                            _counters?.AddSynopsisRows(states.SelectedRows);
+                            yield return states;
+                        }
                     }
                 }
             }
-        }
 
-        if (answer.Edges.Count == 0)
-        {
-            yield break;
-        }
-
-        ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
-        await using (lease.ConfigureAwait(false))
-        {
-            RecordOpen(lease, open);
-            RecordBatch? view = null;
-            foreach (TimeSlice slice in answer.Edges)
+            if (edges is null)
             {
-                ScanBuilder scan = Configure(lease.File.ScanBuilder(), _filter, _mask, canonical: false)
-                    .Rows(new RowRange(slice.FirstRow, slice.FirstRow + slice.Rows));
-                await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                yield break;
+            }
+
+            List<RecordBatch> slices = await edges.ConfigureAwait(false);
+            edges = null;
+            try
+            {
+                foreach (RecordBatch slice in slices)
                 {
-                    _counters?.AddEdgeRows(batch.SelectedRows);
-                    yield return InDataset(batch, held.FirstRow, ref view);
+                    using RecordBatch rows = slice.Rebased(held.FirstRow + slice.StartRow);
+                    _counters?.AddEdgeRows(rows.SelectedRows);
+                    if (rows.SelectedRows > 0)
+                    {
+                        yield return rows;
+                    }
                 }
             }
+            finally
+            {
+                foreach (RecordBatch slice in slices)
+                {
+                    slice.Dispose();
+                }
+            }
+        }
+        finally
+        {
+            // A consumer that stopped, or a failure: the edges read and not delivered are let go.
+            if (edges is not null)
+            {
+                try
+                {
+                    foreach (RecordBatch slice in await edges.ConfigureAwait(false))
+                    {
+                        slice.Dispose();
+                    }
+                }
+                catch (Exception) when (edges.IsFaulted || edges.IsCanceled)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The rows of the slices an answer cuts, read with no open of the object through its chunk directories:
+    /// the columns the pass reads and those the filter does, the filter's rows selected; batches the caller disposes.
+    /// </summary>
+    private async Task<List<RecordBatch>> EdgesAsync(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, CancellationToken cancellationToken)
+    {
+        int[]? columns = EdgeColumns(contents.SchemaIn(new DTypeArena()));
+        List<RecordBatch> slices = [];
+        try
+        {
+            await foreach (RecordBatch slice in _dataset.ReadSlicesAsync(held.Entry, contents, answer.Edges, columns, cancellationToken).ConfigureAwait(false))
+            {
+                slices.Add(slice);
+                if (_filter is { } filter)
+                {
+                    SelectBy(slice, filter);
+                }
+            }
+
+            return slices;
+        }
+        catch
+        {
+            foreach (RecordBatch slice in slices)
+            {
+                slice.Dispose();
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// The top-level columns of <paramref name="schema"/> an edge reads: those the pass projects and those
+    /// the filter names; null for every column, the pass projecting none.
+    /// </summary>
+    private int[]? EdgeColumns(DType schema)
+    {
+        if (_mask is not { } mask)
+        {
+            return null;
+        }
+
+        SortedSet<int> fields = [];
+        HashSet<string> named = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string path in PathsOf(mask, schema))
+        {
+            named.Add(path.Split('.')[0]);
+        }
+
+        _filter?.CollectFields(named);
+        foreach (string name in named)
+        {
+            int field = schema.IndexOfField(name.Split('.')[0]);
+            if (field >= 0)
+            {
+                fields.Add(field);
+            }
+        }
+
+        return [.. fields];
+    }
+
+    /// <summary>Selects the rows of <paramref name="batch"/> <paramref name="filter"/> holds for.</summary>
+    private static void SelectBy(RecordBatch batch, VortexExpr filter)
+    {
+        int rows = batch.RowCount;
+        byte[] states = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            FilterEvaluator.Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
+            int words = Math.Max((rows + 63) >> 6, 1);
+            Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+            bytes.Clear();
+            Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
+            int selected = 0;
+            for (int r = 0; r < rows; r++)
+            {
+                if (states[r] == Trilean.True)
+                {
+                    kept[r >> 6] |= 1UL << (r & 63);
+                    selected++;
+                }
+            }
+
+            batch.Select(selection, selected);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(states);
         }
     }
 
@@ -742,15 +863,12 @@ internal sealed class DatasetScanBuilder
             }
 
             // What an aggregation that takes states reads of the object: its tables, then its edges' rows,
-            // or its rows and why. An object whose tables answer it whole is not opened.
-            if (_states is { } request)
+            // or its rows and why. An object its synopsis answers is not opened, by the plan as by the pass.
+            if (_states is { } request && StatesOf(held, request, states) is not null)
             {
-                if (StatesOf(held, request, states) is { Edges.Count: 0 })
-                {
-                    keptRows += covered;
-                    mayMatch = true;
-                    continue;
-                }
+                keptRows += covered;
+                mayMatch = true;
+                continue;
             }
 
             ScanExplanation plan;

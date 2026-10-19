@@ -2082,6 +2082,28 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The rows of <paramref name="slices"/> of the object <paramref name="entry"/> names, read with no open of
+    /// the object through its table of contents <paramref name="contents"/>: per slice, in order, a batch of
+    /// <paramref name="columns"/>, every column when null, counted from the object's first row, which the
+    /// caller disposes. The columns' chunk directories are read once, with the first slice's.
+    /// </summary>
+    internal async IAsyncEnumerable<RecordBatch> ReadSlicesAsync(
+        ObjectEntry entry, Indexes.SynopsisContents contents, IReadOnlyList<Indexes.TimeSlice> slices, int[]? columns,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            Indexes.SliceReader reader = Indexes.SliceReader.Open(SessionReader.Wrap(source, Session), null, contents)
+                ?? throw new VortexFormatException($"The table of contents of object {entry.Key} names no chunk directory.");
+            foreach (Indexes.TimeSlice slice in slices)
+            {
+                yield return await reader.ReadRowsAsync(slice.FirstRow, slice.Rows, columns, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
     /// The rows of slice <paramref name="slice"/> of the object <paramref name="entry"/> names, of every column
     /// or of <paramref name="columns"/>, read with no open of the object: the chunk directories its entry's
     /// table of contents names, then the slice's chunks, in two round trips. Null when the entry carries no

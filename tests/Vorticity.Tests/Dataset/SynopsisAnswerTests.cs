@@ -85,6 +85,36 @@ public sealed partial class SynopsisAnswerTests
         Assert.Empty(rows.States);
     }
 
+    /// <summary>
+    /// A window inside one sealed hour, cutting it, on a store that answers in 20 ms, the tree's pages in hand:
+    /// the hour's tables and its edge slices are read beside each other, with no open of the object, two
+    /// dependent round trips, the chunk directories before the chunks; a window on the hour's bounds, one.
+    /// </summary>
+    [Fact]
+    public async Task AnUnalignedWindowCostsTwoRoundTripsAnAlignedOneOne()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await FilledAsync(store);
+
+        // The version's pages read once, by a count the summaries answer.
+        _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        foreach ((string name, DateTimeOffset from, DateTimeOffset to, long steps) in new[]
+        {
+            ("unaligned", Noon.AddMinutes(37.5), Noon.AddMinutes(52.25), 2L),
+            ("aligned", Noon.AddHours(1), Noon.AddHours(2), 1L),
+        })
+        {
+            store.Reset();
+            (List<string> on, ScanMetrics metrics) = await GroupsAsync(
+                dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+            Console.Out.Write($"ROUND TRIPS {name}: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.EdgeRows} edge rows.\n");
+            Assert.True(metrics.SynopsisRows > 0);
+            Assert.Equal(steps, store.DependentSteps);
+        }
+    }
+
     /// <summary>A whole scan's sums, extremes and means, over every row and over a window that cuts slices, are the bits of its rows.</summary>
     [Fact]
     public async Task AWholeScanGivesTheBitsOfItsRowsFromTheSynopses()
@@ -155,6 +185,12 @@ public sealed partial class SynopsisAnswerTests
             _ => scan.GroupBy(r => (r.At.Truncate(CalendarUnit.Hour), r.Service)).Select(g => (g.Key.Item1, g.Key.Service, g.Count(), g.Sum(r => r.Bytes))),
         };
 
+        return await GroupsAsync(aggregation);
+    }
+
+    /// <summary>An aggregation's groups, each a line of its key and results, and what reading them did.</summary>
+    private static async Task<(List<string> Groups, ScanMetrics Metrics)> GroupsAsync(Vorticity.Aggregation aggregation)
+    {
         List<string> groups = [];
         IAsyncEnumerator<RecordBatch> batches = aggregation.Query.Batches(Ct);
         await using (batches)
@@ -174,7 +210,7 @@ public sealed partial class SynopsisAnswerTests
     /// compacted: the first two hours sealed with their synopses, the rest in the fresh levels, whose jobs
     /// write synopses too. Slices of a minute, and every table kept.
     /// </summary>
-    private static async Task<VortexDataset> FilledAsync(MemoryObjectStore store)
+    private static async Task<VortexDataset> FilledAsync(Vorticity.IO.IObjectStore store)
     {
         // A budget of the data's bytes ten times over keeps every table, even on hours this small.
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions

@@ -1024,11 +1024,16 @@ and predicates on other columns, which must read keys only. Of the tables that h
 measures, the one of fewest rows answers each of its buckets that lies inside the window with one
 value of every key of time over it. A bucket is a slice, an hour holding the slices that start in it,
 or the whole object. Inside a bucket the window or a key of time cuts, the runs of the slices of fewest
-rows answer the slices left whole, and the slices cut are its edges, read as rows through their row
-range: exact edges are the only kind built so far. Without a table of slices, a bucket cut is read as
-rows, and an object whose answer would be rows alone is read as rows. The tables are read in one
-request, their buckets' start named as the instant, and the rows of the kept buckets that pass the
-key predicates go to the lanes as batches of states. On two hours and a quarter of requests, every
+rows answer the slices left whole, and the slices cut are its edges, read as rows: exact edges are the
+only kind built so far, the aligned one waiting on its decision. Without a table of slices, a bucket
+cut is read as rows, and an object whose answer would be rows alone is read as rows. A bucket spans no
+instant past those the object's summary holds, so an hour's object in slices of a day still folds as
+one hour. The tables are read in one request, their buckets' start named as the instant, and the rows
+of the kept buckets that pass the key predicates go to the lanes as batches of states. The edges are
+read beside them with no open of the object, the columns the pass and the filter read, through the
+chunk directories the table of contents names, then their chunks. An object cut by the window costs
+two dependent round trips cold, and one aligned on its bounds costs one (`SynopsisAnswerTests`, on a
+store that answers in 20 ms). On two hours and a quarter of requests, every
 question of `SynopsisAnswerTests` gives the bits of its rows. A count per service reads 15 table
 rows instead of 6 400 rows. A window that cuts two slices reads 189 run rows and 24 edge rows instead
 of 3 048 rows. A window across hours reads 84 table rows and 48 edge rows instead of 4 224 rows. An
