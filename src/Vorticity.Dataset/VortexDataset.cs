@@ -608,7 +608,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal ObjectDraft StartObjectUnder(
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
-        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null)
+        IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, IReadOnlyList<string>? synopsis = null)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
@@ -630,6 +630,13 @@ public sealed class VortexDataset : IAsyncDisposable
         if (directories is { Count: > 0 })
         {
             write = write with { VariantDirectories = directories };
+        }
+
+        // The synopsis columns lie together after the rest of the data, which a question that needs only
+        // them reads alone.
+        if (synopsis is { Count: > 0 })
+        {
+            write = write with { SynopsisColumns = synopsis };
         }
 
         if (_store is SealedObjectStore { Seals: true })

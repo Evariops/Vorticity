@@ -662,7 +662,7 @@ internal sealed class IndexWriter : IDisposable
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
             if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
-                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks
+                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -1619,6 +1619,36 @@ internal sealed class IndexWriter : IDisposable
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
     }
 
+    /// <summary>
+    /// Names where each synopsis column's chunks lie in the synopsis part, <paramref name="start"/> to
+    /// <paramref name="end"/>: an entry per column, its one run over every block of the file's
+    /// <paramref name="rows"/> holding the chunks' regions in row order, the part's extent in its options.
+    /// </summary>
+    internal void AddSynopsisColumns(IReadOnlyList<(int Field, IndexSegment Region)> regions, long start, long end, long rows, int blockRows)
+    {
+        int length = Math.Max(blockRows, 1);
+        byte[] options = new byte[16];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(options, start);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(options.AsSpan(8), end);
+        SortedDictionary<int, List<IndexSegment>> byField = [];
+        foreach ((int field, IndexSegment region) in regions)
+        {
+            if (!byField.TryGetValue(field, out List<IndexSegment>? list))
+            {
+                byField[field] = list = [];
+            }
+
+            list.Add(region);
+        }
+
+        foreach ((int field, List<IndexSegment> chunks) in byField)
+        {
+            _entries.Add(new IndexEntry(
+                IndexKinds.SynopsisColumns, [checked((uint)field)], (ulong)length, options,
+                [new IndexRun(0, Blocks(rows, length), chunks, [])]));
+        }
+    }
+
     /// <summary>The bytes the index budget of <paramref name="dataBytes"/> leaves the variants' indexes still to write.</summary>
     private long VariantBudget(long dataBytes) => Math.Max(0, (Math.Max(dataBytes, BudgetFloor) * _budgetPerMille / 1000) - _variantBytes);
 
@@ -1806,7 +1836,8 @@ internal sealed class IndexWriter : IDisposable
     {
         // A file's time slices and its variant paths ride in the directory whatever the policy asks.
         if (!Enabled && _preserved is not { Count: > 0 }
-            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks))
+            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
+                or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns))
         {
             return null;
         }

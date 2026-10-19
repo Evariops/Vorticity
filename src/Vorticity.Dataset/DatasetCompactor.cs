@@ -843,7 +843,7 @@ internal static class DatasetCompactor
                 ObjectPlan? plan = Plans?[(_level, _period)];
                 _draft = _dataset.StartObjectUnder(
                     _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks,
-                    directories: plan?.Directories);
+                    directories: plan?.Directories, synopsis: plan is null ? null : SynopsisColumns(plan.Slices));
                 if (plan is not null)
                 {
                     _table = plan.Slices;
@@ -860,6 +860,21 @@ internal static class DatasetCompactor
             }
 
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>The object's synopsis columns, by name: the columns its slices are sorted by, shapes aside.</summary>
+        private List<string> SynopsisColumns(SliceTable table)
+        {
+            List<string> columns = [];
+            foreach (int entry in table.Order)
+            {
+                if (entry >= 0)
+                {
+                    columns.Add(_schema.DType.GetFieldName(entry));
+                }
+            }
+
+            return columns;
         }
 
         /// <summary>A shape coder for each variant column the object shreds as an object, by its field; null for none.</summary>

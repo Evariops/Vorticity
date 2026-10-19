@@ -132,7 +132,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#48-the-file-level-filter)).
+file-level filter](#49-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -296,7 +296,18 @@ on the variant column gives each top-level key it shreds, in the class its typed
 filter judged against the bytes of that key's ranges. A filter's question of the same class probes it,
 and a question of another class never does. The locating kinds read no path yet.
 
-### 4.8 The file-level filter
+### 4.8 `vorticity.synopsis.columns.v1`: the synopsis part
+
+A writer told an object's synopsis columns ([20-time-window-aggregates.md](20-time-window-aggregates.md#72-the-synopsis-part))
+holds their chunks in a scratch store, under its memory budget and in its sealed file past it, and
+writes them together once the rest of the data is out, before the index regions: one contiguous range
+of the file, the synopsis part. A data segment is still a data segment, which the layout references
+and Rust reads, so the part changes no byte a reader sees, only where the chunks lie. Each synopsis
+column gets an entry: its run's payload regions are its chunks' segments, in row order, each with its
+XXH3-64, and its options the part's start and end, so that a reader of the part alone needs no footer.
+An append drops the entries, since its chunks go after the part.
+
+### 4.9 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

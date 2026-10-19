@@ -269,6 +269,13 @@ public sealed record VortexWriteOptions
     /// </summary>
     internal IReadOnlyDictionary<string, Indexes.VariantDirectory>? VariantDirectories { get; init; }
 
+    /// <summary>
+    /// The top-level columns whose chunks lie together after the rest of the data, the synopsis part,
+    /// each named in the index directory: the object's synopsis columns, which a question that needs
+    /// only them reads without the rest.
+    /// </summary>
+    internal IReadOnlyList<string>? SynopsisColumns { get; init; }
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

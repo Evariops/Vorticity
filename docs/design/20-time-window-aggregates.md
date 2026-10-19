@@ -720,6 +720,15 @@ six rows: its runs then lie with the data, and its value counts and postings in 
 The writer holds the synopsis part until the end of the object, and spools it to the local scratch
 through the governor ([writing the object of a period](#52-writing-the-object-of-a-period)).
 
+As built, a job tells the writer the object's synopsis columns, the columns its slices are sorted by,
+and the writer holds each of their chunks in a scratch store, in memory up to its budget and in its
+sealed file past it, then writes them together after the rest of the data. The index directory names
+each chunk's segment with its checksum, and the part's extent
+([the synopsis part](10-indexes.md#48-vorticitysynopsiscolumnsv1-the-synopsis-part)). The layout still
+references the chunks, so a Rust reader reads the object as before (`SynopsisPartTests`, and the
+cross-check of sorted slices). The depth the budget sets, and the tables written after the columns,
+come with the synopsis's tables.
+
 ### 7.3 What the synopsis keeps
 
 Every table is a candidate, each at each resolution: the depth of the synopsis part, run statistics
