@@ -172,6 +172,77 @@ public sealed partial class SynopsisAnswerTests
         Assert.Equal(off, on);
     }
 
+    /// <summary>
+    /// A window across three hours asked part by part: the parts come newest first, end to end, cut at the
+    /// hours; the newest is delivered while the oldest is still being asked, which waits for it; and the
+    /// parts' counts and sums add up to the whole window's.
+    /// </summary>
+    [Fact]
+    public async Task AWindowAskedPartByPartComesNewestFirst()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store);
+        DateTimeOffset from = Noon.AddMinutes(37.5);
+        DateTimeOffset to = Noon.AddMinutes(125.5);
+        TaskCompletionSource newestIn = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        List<WindowPart<List<ServiceTotals>>> parts = [];
+        await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
+        {
+            if (start == from)
+            {
+                await newestIn.Task.WaitAsync(TimeSpan.FromSeconds(30), ct);
+            }
+
+            return await TotalsAsync(dataset, start, end, ct);
+        }, Ct))
+        {
+            parts.Add(part);
+            newestIn.TrySetResult();
+        }
+
+        Assert.Equal([(Noon.AddHours(2), to), (Noon.AddHours(1), Noon.AddHours(2)), (from, Noon.AddHours(1))], parts.Select(part => (part.From, part.To)));
+        Dictionary<string, (long Count, long Bytes)> added = [];
+        foreach (ServiceTotals totals in parts.SelectMany(part => part.Answer))
+        {
+            (long count, long bytes) = added.GetValueOrDefault(totals.Service);
+            added[totals.Service] = (count + totals.Count, bytes + totals.Bytes);
+        }
+
+        Assert.Equal(
+            (await TotalsAsync(dataset, from, to, Ct)).OrderBy(totals => totals.Service, StringComparer.Ordinal).Select(totals => (totals.Service, totals.Count, totals.Bytes)),
+            added.OrderBy(pair => pair.Key, StringComparer.Ordinal).Select(pair => (pair.Key, pair.Value.Count, pair.Value.Bytes)));
+        Assert.Throws<ArgumentException>(() => dataset.AskNewestFirstAsync(to, from, (start, end, ct) => TotalsAsync(dataset, start, end, ct), Ct));
+    }
+
+    /// <summary>
+    /// A page of the 200 newest rows under a broad filter, three rows in four, on a store that answers in
+    /// 20 ms, from the fresh tail and from inside a sealed hour: the rows the rows' own sort gives, and what
+    /// reading them costs.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task APageOfTheNewestRowsUnderABroadFilter(bool sealedHour)
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await FilledAsync(store);
+        _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
+        List<Request> all = await dataset.Scan<Request>().ToRecordsAsync(Ct).ToListAsync(Ct);
+        DateTimeOffset before = sealedHour ? Noon.AddMinutes(50) : DateTimeOffset.MaxValue;
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        store.Reset();
+        Scan<Request> page = dataset.Scan<Request>().Where(r => r.Status != 500 && r.At < before).OrderByDescending(r => r.At);
+        List<Request> newest = await page.ToRecordsAsync(Ct).Take(200).ToListAsync(Ct);
+        Console.Out.Write($"NEWEST PAGE {(sealedHour ? "sealed" : "fresh")}: {store.DependentSteps} dependent steps, {store.Requests} requests, {store.BytesRead} bytes, {page.Metrics.Rows} rows of {all.Count}.\n");
+        Assert.Equal(all.Where(r => r.Status != 500 && r.At < before).OrderByDescending(r => r.At).Take(200), newest);
+    }
+
+    /// <summary>A count and a sum of bytes by service over a window.</summary>
+    private static async ValueTask<List<ServiceTotals>> TotalsAsync(VortexDataset dataset, DateTimeOffset from, DateTimeOffset to, CancellationToken cancellationToken) =>
+        await dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
+            .As<ServiceTotals>().ToRecordsAsync(cancellationToken).ToListAsync(cancellationToken);
+
     /// <summary>A whole scan's sums, extremes and means, over every row and over a window that cuts slices, are the bits of its rows.</summary>
     [Fact]
     public async Task AWholeScanGivesTheBitsOfItsRowsFromTheSynopses()
@@ -440,4 +511,7 @@ public sealed partial class SynopsisAnswerTests
 
     [VortexRecord]
     public partial record struct Totals(long Bytes, double Duration, double? Mean, long? Largest);
+
+    [VortexRecord]
+    public partial record struct ServiceTotals(string Service, long Count, long Bytes);
 }

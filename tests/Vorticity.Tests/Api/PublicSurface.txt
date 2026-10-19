@@ -3123,6 +3123,7 @@ Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VortexDataset : IAsyncDisposable
 Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ListObjectsAsync(CancellationToken = default)
+Vorticity.Dataset:     method IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(DateTimeOffset, DateTimeOffset, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>>, CancellationToken = default)
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
@@ -3171,6 +3172,19 @@ Vorticity.Dataset:     property long ObjectCount { get; }
 Vorticity.Dataset:     property long RowCount { get; }
 Vorticity.Dataset:     property ulong LastDataChange { get; }
 Vorticity.Dataset:     property ulong Version { get; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.WindowPart<TAnswer> : IEquatable<WindowPart<TAnswer>>
+Vorticity.Dataset:     ctor WindowPart<TAnswer>(DateTimeOffset, DateTimeOffset, TAnswer)
+Vorticity.Dataset:     method WindowPart<TAnswer> <Clone>$()
+Vorticity.Dataset:     method bool Equals(WindowPart<TAnswer>)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(WindowPart<TAnswer>, WindowPart<TAnswer>)
+Vorticity.Dataset:     method bool op_Inequality(WindowPart<TAnswer>, WindowPart<TAnswer>)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     method void Deconstruct(out DateTimeOffset, out DateTimeOffset, out TAnswer)
+Vorticity.Dataset:     property DateTimeOffset From { get; init; }
+Vorticity.Dataset:     property DateTimeOffset To { get; init; }
+Vorticity.Dataset:     property TAnswer Answer { get; init; }
 Vorticity.RowEncoding: static class Vorticity.RowEncoding.RowEncoder
 Vorticity.RowEncoding:     const string VortexVersion = 0.86.1
 Vorticity.RowEncoding:     method RowKeys Encode(BatchView, ReadOnlySpan<RowSortField>)

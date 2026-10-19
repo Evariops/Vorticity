@@ -600,6 +600,51 @@ public sealed class VortexDataset : IAsyncDisposable
     public Scan Scan(params ReadOnlySpan<string> columns) => new Scan(new DatasetScanSource(this, Snapshot), columns);
 
     /// <summary>
+    /// Asks <paramref name="question"/> over the window from <paramref name="from"/> to <paramref name="to"/>
+    /// part by part, newest first: the window cut at the starts of the periods it crosses, each part's
+    /// answer delivered once it and every newer part are in.
+    /// </summary>
+    /// <typeparam name="TAnswer">What the question answers.</typeparam>
+    /// <param name="from">The window's first instant.</param>
+    /// <param name="to">The instant past its last.</param>
+    /// <param name="question">
+    /// The question, asked with each part's bounds, the first in the part and the second past it, which it
+    /// applies to its own filter: <c>(from, to, ct) =&gt; dataset.Scan&lt;Request&gt;().Where(r =&gt; r.At &gt;= from &amp;&amp; r.At &lt; to)…</c>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the questions in flight.</param>
+    /// <returns>The parts, newest first, each with its bounds and its answer.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods (<see cref="DatasetOptions.Periods"/>).</exception>
+    /// <exception cref="ArgumentException">The window is empty.</exception>
+    /// <remarks>
+    /// A page that shows a month can show its newest day while the rest is read: a part's answer is final
+    /// for its range of time, so once a part is delivered the window from its start to the window's end is
+    /// answered. A question over one period reads the synopses of its sealed objects, a round trip for
+    /// them all, and the parts are asked several at once, as many as the session lets reads be in flight,
+    /// so a month asked part by part costs about the round trips of one question over it. Answers over
+    /// parts add up for counts and sums, and their extremes are the window's, but a mean over the window
+    /// is its sum over its count.
+    /// </remarks>
+    public IAsyncEnumerable<WindowPart<TAnswer>> AskNewestFirstAsync<TAnswer>(
+        DateTimeOffset from, DateTimeOffset to, Func<DateTimeOffset, DateTimeOffset, CancellationToken, ValueTask<TAnswer>> question,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(question);
+        if (to <= from)
+        {
+            throw new ArgumentException($"The window from {from:O} to {to:O} is empty.", nameof(to));
+        }
+
+        if (Snapshot.Header.Lateness is null || Key is not { } key)
+        {
+            throw new InvalidOperationException(
+                "A window is asked part by part on the periods of a dataset, and this dataset declares none (DatasetOptions.Periods): ask its question over the whole window.");
+        }
+
+        PeriodCalendar calendar = PeriodCalendar.Of(Snapshot.Header, PeriodOptions.InstantOf(key));
+        return WindowParts.AskAsync(WindowParts.Of(calendar, from, to), Session.Options.MaxConcurrentReads, question, cancellationToken);
+    }
+
+    /// <summary>
     /// Whether the version this handle holds may hold a row <paramref name="filter"/> is true for,
     /// from the object and subtree summaries of the pages it holds without a request, those its
     /// header carries and those it kept from the versions before: false is a proof, true is not.

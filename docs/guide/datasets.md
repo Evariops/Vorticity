@@ -138,6 +138,30 @@ edges (`EdgeRows`), and the question's `ExplainAsync()` lists in `States` what e
 table and the buckets it folds, the slices read at the edges, or its rows and why. Such a group by
 delivers its groups once the pass has run, rather than streaming.
 
+The objects a synopsis answers are read newest first and many at once, as many as the session lets
+reads be in flight (`VortexSessionOptions.MaxConcurrentReads`), so a day of hourly objects costs the
+round trip of one hour. A filter that leaves out one value of a declared identifier,
+`r.RequestId != id || r.RequestId == null`, is answered from the tables too: the identifier's index
+finds that value's few rows, and they are taken out of the tables' counts and sums.
+
+A page that shows a long window can show its newest part first. `AskNewestFirstAsync` cuts the window
+at the starts of the periods it crosses, asks your question over each part, several parts at once,
+and delivers each part's answer newest first, once it and every newer part are in:
+
+```csharp
+await foreach (WindowPart<List<ServiceTotals>> part in dataset.AskNewestFirstAsync(from, to, async (start, end, ct) =>
+    await dataset.Scan<Request>().Where(r => r.At >= start && r.At < end)
+        .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes)))
+        .As<ServiceTotals>().ToRecordsAsync(ct).ToListAsync(ct)))
+{
+    Show(part.From, part.To, part.Answer);
+}
+```
+
+Each part's answer is final for its range of time, so once a part arrives, the window from its start
+to the window's end is answered. Counts and sums over the parts add up, and so do minimums and
+maximums. A mean over the whole window is the sum of the parts' sums over the sum of their counts.
+
 ## Versions
 
 ```csharp

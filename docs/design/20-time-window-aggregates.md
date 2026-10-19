@@ -1146,6 +1146,19 @@ of a flat segment ([writing the object of a period](#52-writing-the-object-of-a-
 the rest down to the rows' own bytes. Whether the fresh levels should keep time order with a synopsis
 beside them is one of the [decisions to take](#18-decisions-to-take).
 
+As built, an aggregation that takes states walks its objects by their newest instant, newest first.
+The answers of the objects their synopses answer are read ahead of the engine, as many at once as the
+session lets reads be in flight, and an object read as rows is read in its turn. A day of 24 sealed
+hours on a store that answers in 20 ms costs one dependent round trip, where reading two objects at a
+time cost one round trip an hour. The engine still folds every object before it delivers a group.
+Progressive delivery comes from asking the question part by part: `AskNewestFirstAsync` cuts the
+window at the starts of the periods it crosses, as the calendar of the dataset's commits sets them. It
+asks the caller's question over each part, as many parts at once as the session lets reads be in
+flight, and delivers each answer newest first, once it and every newer part are in. A part's answer is
+final for its range. Merging the parts is the caller's: counts, sums and extremes combine, and a mean
+is a sum over a count. The newest rows under a filter come from the key-ordered merge of
+[the dataset's order](#65-what-the-order-costs-and-what-changes-in-the-dataset), descending.
+
 ### 9.7 What the plan and the metrics say
 
 `ExplainAsync` returns, per object, what it reads (coarse tables, runs at which depth, rows and why),
