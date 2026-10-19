@@ -27,6 +27,10 @@ namespace Vorticity.Indexes;
 /// <param name="PartEnd">Where it ends.</param>
 /// <param name="Tables">Each synopsis table, and its region.</param>
 /// <param name="Columns">Each synopsis column, and its chunks.</param>
+/// <param name="PathDirectories">
+/// Each variant column's path directory, and its region: what a question on a path the tables do not name
+/// reads first, before that path's regions.
+/// </param>
 internal sealed record SynopsisContents(
     byte[] Schema,
     IReadOnlyList<string> Encodings,
@@ -35,8 +39,13 @@ internal sealed record SynopsisContents(
     long PartStart,
     long PartEnd,
     IReadOnlyList<(SynopsisTableInfo Table, IndexSegment Region)> Tables,
-    IReadOnlyList<(int Field, ChunkSpan[] Chunks)> Columns)
+    IReadOnlyList<(int Field, ChunkSpan[] Chunks)> Columns,
+    IReadOnlyList<(int Field, IndexSegment Region)>? PathDirectories = null)
 {
+    private const int TagPathDirectory = 10;
+    private const int TagDirectoryField = 1;
+    private const int TagDirectoryRegion = 2;
+
     private const int Version = 1;
     private const int TagVersion = 1;
     private const int TagEncoding = 2;
@@ -91,6 +100,13 @@ internal sealed record SynopsisContents(
             }
 
             writer.WriteBytes(TagSchema, Schema);
+            foreach ((int field, IndexSegment region) in PathDirectories ?? [])
+            {
+                using ProtoWriter.MessageScope message = writer.BeginMessage(TagPathDirectory);
+                writer.WriteUInt32Always(TagDirectoryField, (uint)field);
+                IndexDirectory.WriteSegment(ref writer, TagDirectoryRegion, region);
+            }
+
             return writer.WrittenSpan.ToArray();
         }
         finally
@@ -113,6 +129,7 @@ internal sealed record SynopsisContents(
             long end = 0;
             List<(SynopsisTableInfo, IndexSegment)> tables = [];
             List<(int, ChunkSpan[])> columns = [];
+            List<(int, IndexSegment)> pathDirectories = [];
             byte[]? schema = null;
             while (reader.TryReadTag(out int field, out ProtoWireType wire))
             {
@@ -155,6 +172,14 @@ internal sealed record SynopsisContents(
                     case (TagSchema, ProtoWireType.LengthDelimited):
                         schema = reader.ReadLengthDelimited().ToArray();
                         break;
+                    case (TagPathDirectory, ProtoWireType.LengthDelimited):
+                        if (Directory(reader.ReadMessage()) is not { } directory)
+                        {
+                            return null;
+                        }
+
+                        pathDirectories.Add(directory);
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
@@ -162,7 +187,7 @@ internal sealed record SynopsisContents(
             }
 
             return version == Version && slices is not null && schema is not null && end >= start
-                ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, columns)
+                ? new SynopsisContents(schema, encodings, slices, directories, start, end, tables, columns, pathDirectories)
                 : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
@@ -192,6 +217,29 @@ internal sealed record SynopsisContents(
         }
 
         return table is not null && region is { } at ? (table, at) : null;
+    }
+
+    private static (int, IndexSegment)? Directory(ProtoReader reader)
+    {
+        int? field = null;
+        IndexSegment? region = null;
+        while (reader.TryReadTag(out int tag, out ProtoWireType wire))
+        {
+            switch (tag, wire)
+            {
+                case (TagDirectoryField, ProtoWireType.Varint):
+                    field = checked((int)reader.ReadVarint32());
+                    break;
+                case (TagDirectoryRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return field is { } at && region is { } segment ? (at, segment) : null;
     }
 
     private static (int, ChunkSpan[])? Column(ProtoReader reader)

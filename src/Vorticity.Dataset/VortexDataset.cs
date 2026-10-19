@@ -1831,6 +1831,98 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// The path directory of variant column <paramref name="field"/> of the object <paramref name="entry"/>
+    /// names, read with no open of the object: the region its entry's table of contents names, in one round
+    /// trip, none once the session's cache holds it. What a question on a path the tables do not name reads
+    /// first. Null when the entry carries no table of contents this library reads, or the column no directory.
+    /// </summary>
+    internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
+    {
+        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        {
+            return null;
+        }
+
+        foreach ((int column, Indexes.IndexSegment region) in contents.PathDirectories ?? [])
+        {
+            if (column != field)
+            {
+                continue;
+            }
+
+            ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+            await using (source.ConfigureAwait(false))
+            {
+                using Buffers.SegmentOwner bytes = await SessionReader.Wrap(source, Session)
+                    .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
+                    .ConfigureAwait(false);
+                return region.Holds(bytes.Buffer.Span) ? Indexes.VariantDirectory.From(bytes.Buffer.Span) : null;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The variant column <paramref name="field"/> of the slices of the object <paramref name="entry"/> names
+    /// that may hold a value at <paramref name="key"/>, a top-level key, read with no open of the object: its
+    /// path directory and the column's chunk directory together, then those slices' chunks together, two
+    /// round trips cold, none once the session's cache holds them. What a question on a path no synopsis
+    /// table names reads. Null when the entry carries no table of contents this library reads; empty when the
+    /// object holds no value there.
+    /// </summary>
+    internal async ValueTask<List<RecordBatch>?> ReadPathAsync(ObjectEntry entry, int field, string key, CancellationToken cancellationToken)
+    {
+        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            ISegmentReader reader = SessionReader.Wrap(source, Session);
+            if (Indexes.SliceReader.Open(reader, null, contents) is not { } slices)
+            {
+                return null;
+            }
+
+            // The first round trip: the path directory beside the column's chunk directory.
+            ValueTask<Indexes.VariantDirectory?> directory = ReadPathDirectoryAsync(entry, field, cancellationToken);
+            ValueTask<long> chunks = slices.ColumnBytesAsync(field, cancellationToken);
+            Indexes.VariantDirectory? paths = await directory.ConfigureAwait(false);
+            await chunks.ConfigureAwait(false);
+            if (paths is null)
+            {
+                return null;
+            }
+
+            // The second: every slice the path may hold a value in, at once.
+            ReadOnlySpan<Indexes.PathEntry> held = paths.Of([key]);
+            List<int> wanted = [];
+            for (int slice = 0; slice < slices.Slices.Slices.Count; slice++)
+            {
+                foreach (Indexes.PathEntry path in held)
+                {
+                    if (path.In(slice))
+                    {
+                        wanted.Add(slice);
+                        break;
+                    }
+                }
+            }
+
+            Task<RecordBatch>[] reads = new Task<RecordBatch>[wanted.Count];
+            for (int i = 0; i < reads.Length; i++)
+            {
+                reads[i] = slices.ReadSliceAsync(wanted[i], [field], cancellationToken).AsTask();
+            }
+
+            return [.. await Task.WhenAll(reads).ConfigureAwait(false)];
+        }
+    }
+
+    /// <summary>
     /// The rows of slice <paramref name="slice"/> of the object <paramref name="entry"/> names, of every column
     /// or of <paramref name="columns"/>, read with no open of the object: the chunk directories its entry's
     /// table of contents names, then the slice's chunks, in two round trips. Null when the entry carries no

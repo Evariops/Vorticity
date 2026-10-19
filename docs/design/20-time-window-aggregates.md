@@ -933,7 +933,7 @@ schema, so that a table's rows decode at a type rebuilt from it and the contents
 dtype, the encodings its blobs name, its slice table, each column's chunk directory, the synopsis
 part's extent, each table's region and each synopsis column's chunks. The dataset reads the tables of
 an object from it in one request set, and a slice through a reader that opens with no read at all.
-On two sealed hours of calls behind a 2 ms store, the tables of both objects read in one dependent
+On two sealed hours of calls behind a 20 ms store, the tables of both objects read in one dependent
 round trip and one request an object, 27 of the 32 KB of their parts, and a slice in two
 (`SynopsisContentsTests`). The entry of such an hour weighs 1.3 KB, its table of contents 1.1 KB. Every
 synopsis column stays in the part, since a reader takes the regions it needs, not the part whole. The

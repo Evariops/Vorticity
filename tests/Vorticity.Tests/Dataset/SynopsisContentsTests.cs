@@ -20,7 +20,7 @@ public sealed partial class SynopsisContentsTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
-    /// Two sealed hours of calls on a store that answers in 2 ms: every object's synopsis tables, read at
+    /// Two sealed hours of calls on a store that answers in 20 ms: every object's synopsis tables, read at
     /// once through the tables of contents their entries carry, take one dependent round trip and a request
     /// an object, read none of the bytes past their synopsis parts, and are the tables the directory names.
     /// A slice of one takes two round trips, its chunk directory then its chunks, and holds the rows a whole
@@ -67,8 +67,9 @@ public sealed partial class SynopsisContentsTests
         Assert.All(contents, c => Assert.NotEmpty(c.Tables));
         long partBytes = contents.Sum(c => c.PartEnd - c.PartStart);
 
-        // Cold, every object at once: one round trip, a request an object, nothing past the parts.
-        inner.Latency = TimeSpan.FromMilliseconds(2);
+        // Cold, every object at once: one round trip, a request an object, nothing past the parts. A latency
+        // longer than what readying a read takes, which the tests running beside this one stretch.
+        inner.Latency = TimeSpan.FromMilliseconds(20);
         store.Reset();
         SynopsisTableSet?[] sets = await Task.WhenAll(periods.Select(p => dataset.ReadSynopsisAsync(p, null, Ct).AsTask()));
         Assert.Equal(1, store.DependentSteps);
@@ -106,6 +107,100 @@ public sealed partial class SynopsisContentsTests
             columns.Column<long>(3).CopyTo(durations);
             Assert.Equal(stored.GetRange((int)slice.FirstRow, (int)slice.Rows).Select(r => (r.At, r.Duration)), at.Zip(durations));
         }
+    }
+
+    /// <summary>
+    /// An hour of calls whose attributes hold a route, and on about one row in a hundred a key no table
+    /// counts: a question on that key reads, cold, the path directory beside the column's chunk directory,
+    /// then the slices that may hold the key, two round trips, and warm none at all; it finds every row that
+    /// holds the key.
+    /// </summary>
+    [Fact]
+    public async Task APathNoTableNamesReadsInTwoRoundTripsColdAndNoneWarm()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+
+        // A session of its own, with a cache that keeps what a read fetched for the next.
+        await using VortexSession session = VortexSession.Create(static options => options.SegmentCache = new SegmentCache(64 << 20));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tagged.Schema, new DatasetOptions
+        {
+            Session = session,
+            ClusteringKey = [nameof(Tagged.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+        }, Ct);
+        Random random = new Random(3);
+        for (int part = 0; part < 16; part++)
+        {
+            Tagged[] rows = [.. Enumerable.Range(0, 400).Select(i =>
+            {
+                List<(string, Variant)> fields = [("route", Variant.From($"/r/{random.Next(9)}"))];
+                if (random.Next(97) == 0)
+                {
+                    fields.Add(("rare", Variant.From($"v{random.Next(3)}")));
+                }
+
+                return new Tagged(Noon.AddSeconds((part * 400 + i) * 1.25), Variant.Object([.. fields]));
+            })];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Tagged>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }, Ct) is not null)
+        {
+        }
+
+        ObjectEntry hour = default!;
+        await foreach (TreeEntry leaf in dataset.Levels[PeriodLevels.Periods].EnumerateAsync(dataset.Pages, Ct))
+        {
+            hour = ObjectEntry.FromBytes(leaf.Value.Span);
+            break;
+        }
+
+        SynopsisContents contents = SynopsisContents.From(hour.Synopsis.Span)!;
+        Assert.DoesNotContain(contents.Slices.Paths, p => p.Key == "rare");
+        int field = Call.Schema.Count;
+        await using (ObjectLease lease = await dataset.RentAsync(hour, Ct))
+        {
+            field = lease.File.DType.IndexOfField(nameof(Tagged.Attributes));
+            List<Tagged> stored = await lease.File.Scan<Tagged>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            long expected = stored.Count(r => r.Attributes.Has("rare"));
+            Assert.True(expected > 0);
+
+            // Cold: the directories, then the slices.
+            inner.Latency = TimeSpan.FromMilliseconds(20);
+            store.Reset();
+            List<RecordBatch> cold = (await dataset.ReadPathAsync(hour, field, "rare", Ct))!;
+            Assert.Equal(2, store.DependentSteps);
+            Assert.Equal(expected, Held(cold, "rare"));
+
+            // Warm: the session's cache holds every region.
+            store.Reset();
+            List<RecordBatch> warm = (await dataset.ReadPathAsync(hour, field, "rare", Ct))!;
+            Assert.Equal(0, store.Requests);
+            Assert.Equal(expected, Held(warm, "rare"));
+        }
+    }
+
+    /// <summary>The rows of <paramref name="batches"/>, each holding its variant column alone, whose object holds <paramref name="key"/>.</summary>
+    private static long Held(List<RecordBatch> batches, string key)
+    {
+        long held = 0;
+        foreach (RecordBatch batch in batches)
+        {
+            using (batch)
+            {
+                int column = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(0);
+                int values = Vorticity.Writing.VariantShredder.KeyColumns(batch.Arena, new Vorticity.Types.DTypeArena(), column, [(key, Vorticity.Types.Variants.VariantClass.String)])[0];
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    held += ArenaWords.IsValid(batch.Arena, values, row) ? 1 : 0;
+                }
+            }
+        }
+
+        return held;
     }
 
     /// <summary>A table of contents reads back as it was written, and an entry carries it through its bytes.</summary>
@@ -162,4 +257,7 @@ public sealed partial class SynopsisContentsTests
 
     [VortexRecord]
     public partial record struct Call(DateTimeOffset At, string Region, int Status, long Duration);
+
+    [VortexRecord]
+    public partial record struct Tagged(DateTimeOffset At, Variant Attributes);
 }

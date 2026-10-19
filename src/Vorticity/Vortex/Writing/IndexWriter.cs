@@ -1602,7 +1602,7 @@ internal sealed class IndexWriter : IDisposable
     /// sink's position, within the index budget of the file's <paramref name="dataBytes"/>, and adds the
     /// entry that names it: on the column, one run over every block of the file's <paramref name="rows"/>.
     /// </summary>
-    internal async ValueTask AddVariantDirectoryAsync(
+    internal async ValueTask<IndexSegment> AddVariantDirectoryAsync(
         ISegmentSink sink, int field, VariantDirectory directory, long rows, int blockRows, long dataBytes, CancellationToken cancellationToken)
     {
         byte[] bytes = directory.Within(VariantBudget(dataBytes)).ToBytes();
@@ -1613,6 +1613,7 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             IndexKinds.VariantDirectory, [checked((uint)field)], (ulong)length, [],
             [new IndexRun(0, Blocks(rows, length), [region], [])]));
+        return region;
     }
 
     /// <summary>

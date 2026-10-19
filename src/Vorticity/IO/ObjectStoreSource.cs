@@ -58,12 +58,34 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _store = store;
         _key = key;
         _length = length;
+        _givenLength = length;
         _options = options ?? SegmentReadOptions.Default;
         _ownsStore = ownsStore;
     }
 
     /// <summary>The object's key.</summary>
     internal string Key => _key;
+
+    /// <summary>
+    /// Whether <paramref name="obj"/> reads the same object: the same store, key and length, the length
+    /// known to both. A session's cache keys segments by their source, so two readers of one object, as a
+    /// dataset opens one for each read that needs no footer, share what either read. A data object's key
+    /// names one version of its bytes, and an object rewritten under the same key with another length is
+    /// another source.
+    /// </summary>
+    public override bool Equals(object? obj) =>
+        ReferenceEquals(this, obj)
+        || (obj is ObjectStoreSource other && _givenLength >= 0 && other._givenLength == _givenLength && ReferenceEquals(other._store, _store)
+            && string.Equals(other._key, _key, StringComparison.Ordinal));
+
+    /// <inheritdoc/>
+    public override int GetHashCode() => _givenLength >= 0
+        ? HashCode.Combine(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_store), StringComparer.Ordinal.GetHashCode(_key), _givenLength)
+        : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this);
+
+    // The length the caller gave, -1 for none: what equality reads, since the length learned later would
+    // change the hash of a key already kept.
+    private readonly long _givenLength;
 
     /// <summary>The store the object lies in.</summary>
     internal IObjectStore Store => _store;

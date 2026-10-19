@@ -166,8 +166,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal byte[]? SynopsisContents { get; private set; }
 
-    /// <summary>The table of contents of a sliced file: its slices' table and chunk directories, its synopsis part's tables and columns.</summary>
-    private byte[] Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories)
+    /// <summary>
+    /// The table of contents of a sliced file: its slices' table and chunk directories, its synopsis part's
+    /// tables and columns, its variant columns' path directories.
+    /// </summary>
+    private byte[] Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
     {
         List<(SynopsisTableInfo, IndexSegment)> tables = [];
         List<(int, ChunkSpan[])> columns = [];
@@ -189,7 +192,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         return new SynopsisContents(
             Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories,
-            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, columns).ToBytes();
+            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, columns, pathDirectories).ToBytes();
     }
 
     /// <summary>
@@ -2292,11 +2295,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (_indexes is { } closed)
         {
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
-            if (_slices is { } sliced)
+            SliceChunks? chunks = null;
+            IndexSegment[] chunkDirectories = [];
+            if (_slices is not null)
             {
-                SliceChunks chunks = ChunkDirectory();
-                IndexSegment[] directories = await closed.AddSliceChunksAsync(_sink, chunks, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
-                SynopsisContents = Contents(sliced.Table, chunks, directories);
+                chunks = ChunkDirectory();
+                chunkDirectories = await closed.AddSliceChunksAsync(_sink, chunks, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
             }
 
             // Where each shredded key of a variant column lies, for a reader of one key.
@@ -2317,6 +2321,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             // Every path and class of a variant column, for a question that refutes the file by them.
+            List<(int Field, IndexSegment Region)> pathDirectories = [];
             for (int field = 0; field < (_directories?.Length ?? 0); field++)
             {
                 if (_directories![field] is { } paths)
@@ -2327,8 +2332,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                             $"The path directory of column {field} counts {paths.Rows} rows of a file of {_rowCount}: it counts each row once.");
                     }
 
-                    await closed.AddVariantDirectoryAsync(_sink, field, paths, _rowCount, _blockRows, dataEnd - interleaved, cancellationToken).ConfigureAwait(false);
+                    pathDirectories.Add((field, await closed.AddVariantDirectoryAsync(
+                        _sink, field, paths, _rowCount, _blockRows, dataEnd - interleaved, cancellationToken).ConfigureAwait(false)));
                 }
+            }
+
+            // A sliced file's table of contents, now that every region it names is written.
+            if (_slices is { } sliced)
+            {
+                SynopsisContents = Contents(sliced.Table, chunks!, chunkDirectories, pathDirectories);
             }
 
             // The block statistics of the shredded keys, where they can prune, within what the budget leaves.

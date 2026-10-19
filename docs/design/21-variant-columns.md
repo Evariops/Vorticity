@@ -770,6 +770,14 @@ path reads the directory first, then the path's regions: two round trips per obj
 since the cache keeps the directory. How many paths the table of contents names is the cost model's to
 decide, against the bytes it adds to every leaf entry.
 
+As built, the table of contents names every synopsis table an object keeps, its paths' tables with the
+others, about 30 bytes each: at the provisional prices, a byte of entry costs 10 ns where a round trip
+costs 50 ms, so naming a table pays until the entry weighs megabytes. It also names each variant column's
+path directory. A question on a path no table counts reads, cold, that directory beside the column's
+chunk directory, then the chunks of the slices the directory says may hold the path: two round trips,
+and warm none, since every reader of an object shares what the session's cache keeps of it
+(`SynopsisContentsTests`).
+
 ### 6.5 Examples
 
 Thirty periods of a day, warm unless said. Every figure is an estimate.
