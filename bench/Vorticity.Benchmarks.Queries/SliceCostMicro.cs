@@ -121,11 +121,15 @@ internal static class SliceCostMicro
                     continue;
                 }
 
-                foreach ((Indexes.SynopsisTableInfo info, Indexes.IndexSegment region) in contents.Tables)
+                foreach ((Indexes.SynopsisTableInfo info, System.Collections.Generic.IReadOnlyList<Indexes.TableChunk> chunks) in contents.Tables)
                 {
                     if (info.Bucket == Indexes.SynopsisBucket.Slice)
                     {
-                        sliceBytes += region.Length;
+                        foreach (Indexes.TableChunk chunk in chunks)
+                        {
+                            sliceBytes += chunk.Region.Length;
+                        }
+
                         sliceRows += info.Rows;
                     }
                 }

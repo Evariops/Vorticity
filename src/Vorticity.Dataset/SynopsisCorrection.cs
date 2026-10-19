@@ -21,14 +21,14 @@ namespace Vorticity.Dataset;
 internal static class SynopsisCorrection
 {
     /// <summary>
-    /// Takes the rows of <paramref name="removed"/> out of a table's rows, its count and state columns among
-    /// <paramref name="fields"/> replaced by corrected copies laid in <paramref name="arena"/>; false, the
-    /// columns left as they were, when a row cannot come out exactly or names no row of the table.
+    /// Takes the rows of <paramref name="removed"/> out of a table's rows, the count and state columns of each of its
+    /// chunks among <paramref name="chunks"/> replaced by corrected copies laid in <paramref name="arena"/>; false, the
+    /// columns left as they were, when a row cannot come out exactly or names no row of the chunks.
     /// </summary>
     /// <param name="arena">The arena the table's rows lie in.</param>
     /// <param name="table">The table.</param>
     /// <param name="rowType">Its rows' struct: bucket, keys, count, then each measure's states.</param>
-    /// <param name="fields">Its rows' columns, by field of <paramref name="rowType"/>.</param>
+    /// <param name="chunks">The columns of each chunk's rows read, by field of <paramref name="rowType"/>.</param>
     /// <param name="schema">The object's schema, which names the keys and measures.</param>
     /// <param name="removed">
     /// The rows taken out, each batch counted from the object's first physical row by its start row and
@@ -42,7 +42,7 @@ internal static class SynopsisCorrection
     /// no question reads is left as it is, and cannot make a row fail to come out.
     /// </param>
     internal static bool TryRemove(
-        CanonicalArena arena, SynopsisTableInfo table, DType rowType, int[] fields, DType schema,
+        CanonicalArena arena, SynopsisTableInfo table, DType rowType, IReadOnlyList<int[]> chunks, DType schema,
         IReadOnlyList<RecordBatch> removed, IReadOnlyList<TimeSlice> slices, TimeUnit unit, HashSet<long> folded,
         Func<string, (bool Sum, bool Least, bool Greatest)> reads)
     {
@@ -64,25 +64,42 @@ internal static class SynopsisCorrection
         }
 
         int count = keys + 1;
-        int rows = arena.GetNode(fields[0]).Length;
-        long[][] states = new long[fields.Length][];
-        for (int f = count; f < fields.Length; f++)
+        int width = rowType.FieldCount;
+
+        // The rows of every chunk one after another, by bucket and keys, and their count and state columns.
+        int rows = 0;
+        int[] firstRows = new int[chunks.Count];
+        for (int c = 0; c < chunks.Count; c++)
         {
-            states[f] = arena.GetNode(fields[f]).Values.Cast<long>().ToArray();
+            firstRows[c] = rows;
+            rows += arena.GetNode(chunks[c][0]).Length;
         }
 
-        // The table's rows by bucket and keys.
-        ReadOnlySpan<long> buckets = arena.GetNode(fields[0]).Values.Cast<long>();
-        Dictionary<RowKey, int> at = new Dictionary<RowKey, int>(rows);
-        for (int r = 0; r < rows; r++)
+        long[][] states = new long[width][];
+        for (int f = count; f < width; f++)
         {
-            FilterLiteral[] values = new FilterLiteral[keys];
-            for (int k = 0; k < keys; k++)
+            states[f] = new long[rows];
+            for (int c = 0; c < chunks.Count; c++)
             {
-                LiteralReader.TryRead(arena, fields[1 + k], r, out values[k]);
+                arena.GetNode(chunks[c][f]).Values.Cast<long>().CopyTo(states[f].AsSpan(firstRows[c]));
             }
+        }
 
-            at[new RowKey(buckets[r], values)] = r;
+        Dictionary<RowKey, int> at = new Dictionary<RowKey, int>(rows);
+        for (int c = 0; c < chunks.Count; c++)
+        {
+            int[] fields = chunks[c];
+            ReadOnlySpan<long> buckets = arena.GetNode(fields[0]).Values.Cast<long>();
+            for (int r = 0; r < buckets.Length; r++)
+            {
+                FilterLiteral[] values = new FilterLiteral[keys];
+                for (int k = 0; k < keys; k++)
+                {
+                    LiteralReader.TryRead(arena, fields[1 + k], r, out values[k]);
+                }
+
+                at[new RowKey(buckets[r], values)] = firstRows[c] + r;
+            }
         }
 
         // Per measure and table row, whether a row taken out held one of its extremes: past that, the top of
@@ -183,11 +200,15 @@ internal static class SynopsisCorrection
             }
         }
 
-        for (int f = count; f < fields.Length; f++)
+        for (int c = 0; c < chunks.Count; c++)
         {
-            VortexBuffer buffer = arena.AllocateUninitialized(rows * sizeof(long), sizeof(long), out Span<byte> bytes);
-            MemoryMarshal.AsBytes(states[f].AsSpan()).CopyTo(bytes);
-            fields[f] = arena.AddPrimitive(rowType.GetField(f), rows, Validity.NonNullable, PType.I64, buffer);
+            int length = arena.GetNode(chunks[c][0]).Length;
+            for (int f = count; f < width; f++)
+            {
+                VortexBuffer buffer = arena.AllocateUninitialized(length * sizeof(long), sizeof(long), out Span<byte> bytes);
+                MemoryMarshal.AsBytes(states[f].AsSpan(firstRows[c], length)).CopyTo(bytes);
+                chunks[c][f] = arena.AddPrimitive(rowType.GetField(f), length, Validity.NonNullable, PType.I64, buffer);
+            }
         }
 
         return true;

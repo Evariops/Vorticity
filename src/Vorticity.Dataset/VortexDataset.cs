@@ -2236,12 +2236,12 @@ public sealed class VortexDataset : IAsyncDisposable
     internal LevelZeroMemo LevelZero { get; } = new LevelZeroMemo();
 
     /// <summary>
-    /// The synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/> keeps,
-    /// every one when it is null, read with no open of the object: the regions its entry's table of
+    /// The chunks of the synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/>
+    /// keeps, every one when it is null, read with no open of the object: the regions its entry's table of
     /// contents names, in one round trip. Null when the entry carries no table of contents this library reads.
     /// </summary>
     internal async ValueTask<Indexes.SynopsisTableSet?> ReadSynopsisAsync(
-        ObjectEntry entry, Func<Indexes.SynopsisTableInfo, bool>? wanted, CancellationToken cancellationToken)
+        ObjectEntry entry, Func<Indexes.SynopsisTableInfo, Indexes.TableChunk, bool>? wanted, CancellationToken cancellationToken)
     {
         if (entry.Contents is not { } contents)
         {
@@ -2272,11 +2272,11 @@ public sealed class VortexDataset : IAsyncDisposable
             Session);
 
     /// <summary>
-    /// As <see cref="ReadSynopsisAsync(ObjectEntry, Func{Indexes.SynopsisTableInfo, bool}?, CancellationToken)"/>,
+    /// As <see cref="ReadSynopsisAsync(ObjectEntry, Func{Indexes.SynopsisTableInfo, Indexes.TableChunk, bool}?, CancellationToken)"/>,
     /// with the entry's table of contents already read: <paramref name="wanted"/> is asked of its tables.
     /// </summary>
     internal async ValueTask<Indexes.SynopsisTableSet> ReadSynopsisAsync(
-        ObjectEntry entry, Indexes.SynopsisContents contents, Func<Indexes.SynopsisTableInfo, bool>? wanted, CancellationToken cancellationToken)
+        ObjectEntry entry, Indexes.SynopsisContents contents, Func<Indexes.SynopsisTableInfo, Indexes.TableChunk, bool>? wanted, CancellationToken cancellationToken)
     {
         ISegmentReader source = await OpenFooterlessAsync(entry, contents, cancellationToken).ConfigureAwait(false);
         await using (source.ConfigureAwait(false))

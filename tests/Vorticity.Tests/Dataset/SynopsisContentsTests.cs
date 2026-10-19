@@ -216,7 +216,7 @@ public sealed partial class SynopsisContentsTests
             [new IndexSegment(100, 20, 0, 7), new IndexSegment(120, 30, 0, 8)],
             4_096,
             8_192,
-            [(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), new IndexSegment(4_096, 512, 6, 9))],
+            [(new SynopsisTableInfo(SynopsisTableKind.Coarse, SynopsisBucket.Hour, [1], [3], 4), [new TableChunk(new IndexSegment(4_096, 512, 6, 9), 0, 3_600_000_000, 3), new TableChunk(new IndexSegment(4_608, 128, 6, 10), 3_600_000_000, 3_600_000_000, 1)])],
             [(1, [new ChunkSpan(4_608, 300, 6, 0, 15)])]);
         SynopsisContents back = SynopsisContents.From(contents.ToBytes())!;
         Assert.Equal(contents.Schema, back.Schema);
@@ -224,7 +224,7 @@ public sealed partial class SynopsisContentsTests
         Assert.Equal(contents.Slices.Slices, back.Slices.Slices);
         Assert.Equal(contents.ChunkDirectories, back.ChunkDirectories);
         Assert.Equal((contents.PartStart, contents.PartEnd), (back.PartStart, back.PartEnd));
-        Assert.Equal(contents.Tables.Select(t => t.Region), back.Tables.Select(t => t.Region));
+        Assert.Equal(contents.Tables.SelectMany(t => t.Chunks), back.Tables.SelectMany(t => t.Chunks));
         Assert.Equal(contents.Tables.Select(t => t.Table), back.Tables.Select(t => t.Table), Same);
         Assert.Equal(contents.Columns.Select(c => (c.Field, c.Chunks.Single())), back.Columns.Select(c => (c.Field, c.Chunks.Single())));
         Assert.Null(SynopsisContents.From([1, 2, 3]));

@@ -25,7 +25,7 @@ namespace Vorticity.Indexes;
 /// <param name="ChunkDirectories">Each top-level column's chunk directory, the regions of its index entry.</param>
 /// <param name="PartStart">Where the synopsis part starts in the file.</param>
 /// <param name="PartEnd">Where it ends.</param>
-/// <param name="Tables">Each synopsis table, and its region.</param>
+/// <param name="Tables">Each synopsis table, and its chunks: their regions, the buckets they count over and their rows.</param>
 /// <param name="Columns">Each synopsis column, and its chunks.</param>
 /// <param name="PathDirectories">
 /// Each variant column's path directory, and its region: what a question on a path the tables do not name
@@ -38,7 +38,7 @@ internal sealed record SynopsisContents(
     IReadOnlyList<IndexSegment> ChunkDirectories,
     long PartStart,
     long PartEnd,
-    IReadOnlyList<(SynopsisTableInfo Table, IndexSegment Region)> Tables,
+    IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks)> Tables,
     IReadOnlyList<(int Field, ChunkSpan[] Chunks)> Columns,
     IReadOnlyList<(int Field, IndexSegment Region)>? PathDirectories = null)
 {
@@ -65,6 +65,11 @@ internal sealed record SynopsisContents(
     private const int TagSchema = 9;
     private const int TagTableInfo = 1;
     private const int TagTableRegion = 2;
+    private const int TagTableChunk = 3;
+    private const int TagChunkRegion = 1;
+    private const int TagChunkFirst = 2;
+    private const int TagChunkLast = 3;
+    private const int TagChunkRows = 4;
     private const int TagColumnField = 1;
     private const int TagColumnChunks = 2;
 
@@ -92,6 +97,33 @@ internal sealed record SynopsisContents(
     }
 
     private System.Runtime.CompilerServices.StrongBox<(Arrays.ArrayEncodingId[], string[])>? _encodingTableBox;
+
+    /// <summary>The regions the contents declare with a checksum, by offset and length; null until asked.</summary>
+    private IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment>? _declared;
+
+    /// <summary>
+    /// The regions the contents declare with a checksum, by their offset and length, which the synopsis cache may keep:
+    /// built the first time an object's read through the cache asks for them, and shared by every later read, which
+    /// built the map again for every object of every question.
+    /// </summary>
+    internal IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment> DeclaredRegions
+    {
+        get
+        {
+            if (System.Threading.Volatile.Read(ref _declared) is { } known)
+            {
+                return known;
+            }
+
+            Dictionary<(ulong, uint), IndexSegment> regions = [];
+            foreach (IndexSegment region in SynopsisCacheReader.Declared(this))
+            {
+                regions[(region.Offset, region.Length)] = region;
+            }
+
+            return System.Threading.Interlocked.CompareExchange(ref _declared, regions, null) ?? regions;
+        }
+    }
 
     /// <summary>The schema <see cref="SchemaType"/> read, in an arena of its own that nothing adds to; null until then.</summary>
     private System.Runtime.CompilerServices.StrongBox<DType>? _schema;
@@ -136,11 +168,18 @@ internal sealed record SynopsisContents(
 
             writer.WriteUInt64Always(TagPartStart, (ulong)PartStart);
             writer.WriteUInt64Always(TagPartEnd, (ulong)PartEnd);
-            foreach ((SynopsisTableInfo table, IndexSegment region) in Tables)
+            foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) in Tables)
             {
                 using ProtoWriter.MessageScope message = writer.BeginMessage(TagTable);
                 writer.WriteBytes(TagTableInfo, table.OptionBytes());
-                IndexDirectory.WriteSegment(ref writer, TagTableRegion, region);
+                foreach (TableChunk chunk in chunks)
+                {
+                    using ProtoWriter.MessageScope part = writer.BeginMessage(TagTableChunk);
+                    IndexDirectory.WriteSegment(ref writer, TagChunkRegion, chunk.Region);
+                    writer.WriteUInt64Always(TagChunkFirst, unchecked((ulong)chunk.FirstBucket));
+                    writer.WriteUInt64Always(TagChunkLast, unchecked((ulong)chunk.LastBucket));
+                    writer.WriteUInt64Always(TagChunkRows, (ulong)chunk.Rows);
+                }
             }
 
             foreach ((int field, ChunkSpan[] chunks) in Columns)
@@ -183,7 +222,7 @@ internal sealed record SynopsisContents(
             List<IndexSegment> directories = [];
             long start = 0;
             long end = 0;
-            List<(SynopsisTableInfo, IndexSegment)> tables = [];
+            List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
             List<(int, ChunkSpan[])> columns = [];
             List<(int, IndexSegment)> pathDirectories = [];
             IndexSegment? indexDirectory = null;
@@ -256,10 +295,15 @@ internal sealed record SynopsisContents(
         }
     }
 
-    private static (SynopsisTableInfo, IndexSegment)? Table(ProtoReader reader)
+    /// <summary>
+    /// A table and its chunks; a table of contents written before tables came in chunks names one region, which
+    /// is then the table's one chunk, over every bucket.
+    /// </summary>
+    private static (SynopsisTableInfo, IReadOnlyList<TableChunk>)? Table(ProtoReader reader)
     {
         SynopsisTableInfo? table = null;
         IndexSegment? region = null;
+        List<TableChunk> chunks = [];
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
             switch (field, wire)
@@ -270,13 +314,62 @@ internal sealed record SynopsisContents(
                 case (TagTableRegion, ProtoWireType.LengthDelimited):
                     region = IndexDirectory.ReadSegment(reader.ReadMessage());
                     break;
+                case (TagTableChunk, ProtoWireType.LengthDelimited):
+                    if (Chunk(reader.ReadMessage()) is not { } chunk)
+                    {
+                        return null;
+                    }
+
+                    chunks.Add(chunk);
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
             }
         }
 
-        return table is not null && region is { } at ? (table, at) : null;
+        if (table is null)
+        {
+            return null;
+        }
+
+        if (chunks.Count == 0 && region is { } whole)
+        {
+            chunks.Add(new TableChunk(whole, long.MinValue, long.MaxValue, table.Rows));
+        }
+
+        return chunks.Count > 0 ? (table, chunks) : null;
+    }
+
+    private static TableChunk? Chunk(ProtoReader reader)
+    {
+        IndexSegment? region = null;
+        long first = long.MinValue;
+        long last = long.MaxValue;
+        int rows = -1;
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (TagChunkRegion, ProtoWireType.LengthDelimited):
+                    region = IndexDirectory.ReadSegment(reader.ReadMessage());
+                    break;
+                case (TagChunkFirst, ProtoWireType.Varint):
+                    first = unchecked((long)reader.ReadVarint());
+                    break;
+                case (TagChunkLast, ProtoWireType.Varint):
+                    last = unchecked((long)reader.ReadVarint());
+                    break;
+                case (TagChunkRows, ProtoWireType.Varint):
+                    rows = checked((int)reader.ReadVarint());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return region is { } at && rows >= 0 && first <= last ? new TableChunk(at, first, last, rows) : null;
     }
 
     private static (int, IndexSegment)? Directory(ProtoReader reader)
@@ -324,4 +417,19 @@ internal sealed record SynopsisContents(
 
         return field is { } at && chunks is not null ? (at, chunks) : null;
     }
+}
+
+/// <summary>
+/// A chunk of a synopsis table: the region that holds its rows, the first and the last bucket they count over,
+/// and how many there are. A table's rows lie in the order of their buckets, so its chunks follow each other in
+/// time, and a question reads only the chunks of the buckets it folds.
+/// </summary>
+/// <param name="Region">Where the chunk's rows lie, with their checksum.</param>
+/// <param name="FirstBucket">The bucket of its first row: a slice's start, an hour's, or 0 for the object.</param>
+/// <param name="LastBucket">The bucket of its last row.</param>
+/// <param name="Rows">Its rows.</param>
+internal readonly record struct TableChunk(IndexSegment Region, long FirstBucket, long LastBucket, int Rows)
+{
+    /// <summary>Whether the chunk may hold a row of a bucket from <paramref name="first"/> to <paramref name="last"/>.</summary>
+    internal bool Overlaps(long first, long last) => FirstBucket <= last && LastBucket >= first;
 }

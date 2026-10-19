@@ -1715,15 +1715,25 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Names each table of the synopsis part: an entry on the root, its one run's payload the table's rows.</summary>
-    internal void AddSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, IndexSegment Region, byte[] DType)> tables, long rows, int blockRows)
+    /// <summary>
+    /// Names each table of the synopsis part: an entry on the root, its one run's payloads the table's chunks, whose
+    /// buckets and rows the entry's options say after the table's own.
+    /// </summary>
+    internal void AddSynopsisTables(
+        IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> tables, long rows, int blockRows)
     {
         int length = Math.Max(blockRows, 1);
-        foreach ((SynopsisTableInfo table, IndexSegment region, byte[] dtype) in tables)
+        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks, IReadOnlyList<byte[]> dtypes) in tables)
         {
+            IndexSegment[] regions = new IndexSegment[chunks.Count];
+            for (int c = 0; c < regions.Length; c++)
+            {
+                regions[c] = chunks[c].Region;
+            }
+
             _entries.Add(new IndexEntry(
-                IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(),
-                [new IndexRun(0, Blocks(rows, length), [region], [dtype], (ulong)table.Rows, [])]));
+                IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(chunks.Count > 1 ? chunks : null),
+                [new IndexRun(0, Blocks(rows, length), regions, [.. dtypes], (ulong)table.Rows, [])]));
         }
     }
 

@@ -175,13 +175,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private SynopsisContents Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories, List<(int Field, IndexSegment Region)> pathDirectories)
     {
-        List<(SynopsisTableInfo, IndexSegment)> tables = [];
+        List<(SynopsisTableInfo, IReadOnlyList<TableChunk>)> tables = [];
         List<(int, ChunkSpan[])> columns = [];
         if (_synopsisPart is { } part)
         {
-            foreach ((SynopsisTableInfo info, IndexSegment region, byte[] _) in part.Tables)
+            foreach ((SynopsisTableInfo info, IReadOnlyList<TableChunk> held, IReadOnlyList<byte[]> _) in part.Tables)
             {
-                tables.Add((info, region));
+                tables.Add((info, held));
             }
 
             for (int field = 0; field < _fieldCount; field++)
@@ -319,13 +319,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // The tables declared, their rows in the caller's arena; then, once written, each with its region and its dtype.
         private CanonicalArena? _arena;
         private IReadOnlyList<(SynopsisTableInfo Table, int Node)> _declared = [];
-        private readonly List<(SynopsisTableInfo Table, IndexSegment Region, byte[] DType)> _tables = [];
+        private readonly List<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> _tables = [];
 
         /// <summary>Each chunk of the part as written: its column, and its region with its checksum.</summary>
         internal IReadOnlyList<(int Field, IndexSegment Region)> Regions => _regions;
 
-        /// <summary>Each table of the part as written: what it is, its region and its rows' dtype.</summary>
-        internal IReadOnlyList<(SynopsisTableInfo Table, IndexSegment Region, byte[] DType)> Tables => _tables;
+        /// <summary>Each table of the part as written: what it is, its chunks, and the dtype of each one's rows.</summary>
+        internal IReadOnlyList<(SynopsisTableInfo Table, IReadOnlyList<TableChunk> Chunks, IReadOnlyList<byte[]> DTypes)> Tables => _tables;
 
         /// <summary>The tables to write after the columns, their rows nodes of <paramref name="arena"/>.</summary>
         internal void Declare(CanonicalArena arena, IReadOnlyList<(SynopsisTableInfo Table, int Node)> tables)
@@ -425,7 +425,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
                     await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
                     TableBytes += bytes.Length;
-                    _tables.Add((_declared[i].Table, IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), encoded[i].DType));
+                    (long first, long last) = BucketsOf(_arena!, _declared[i].Node);
+                    TableChunk chunk = new TableChunk(IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), first, last, _declared[i].Table.Rows);
+                    _tables.Add((_declared[i].Table, [chunk], [encoded[i].DType]));
                 }
             }
             finally
@@ -435,6 +437,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     blob.Dispose();
                 }
             }
+        }
+
+        /// <summary>The bucket of a table's first row and of its last, the rows lying in the order of their buckets.</summary>
+        private static (long First, long Last) BucketsOf(CanonicalArena arena, int node)
+        {
+            CanonicalNode rows = arena.GetNode(node);
+            if (rows.Length == 0)
+            {
+                return (0, 0);
+            }
+
+            ReadOnlySpan<long> buckets = arena.GetNode(rows.GetFieldIndex(0)).Values.Cast<long>();
+            return (buckets[0], buckets[^1]);
         }
 
         public void Dispose() => _held.Dispose();

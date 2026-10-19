@@ -849,13 +849,11 @@ internal sealed class DatasetScanBuilder
 
                 foreach (SynopsisPart part in answer.Parts)
                 {
-                    if (!exact || answer.Batch(tables, part, instant, held.FirstRow, removed, schema, contents.Slices) is not { } batch)
+                    if (!exact || !answer.TryBatches(tables, part, contents, instant, held.FirstRow, states, removed, schema, contents.Slices))
                     {
                         exact = false;
                         break;
                     }
-
-                    states.Add(batch);
                 }
             }
         }

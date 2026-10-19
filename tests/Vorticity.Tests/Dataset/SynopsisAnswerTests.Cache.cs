@@ -286,7 +286,7 @@ public sealed partial class SynopsisAnswerTests
                     continue;
                 }
 
-                IEnumerable<IndexSegment> regions = contents.Tables.Select(table => table.Region)
+                IEnumerable<IndexSegment> regions = contents.Tables.SelectMany(table => table.Chunks.Select(chunk => chunk.Region))
                     .Concat(contents.ChunkDirectories)
                     .Concat((contents.PathDirectories ?? []).Select(path => path.Region))
                     .Concat(contents.DirectoryRegion is { } directoryRegion ? [directoryRegion] : []);

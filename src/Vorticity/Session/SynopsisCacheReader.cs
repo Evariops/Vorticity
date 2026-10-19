@@ -23,9 +23,9 @@ internal sealed class SynopsisCacheReader : ISegmentReader
     private readonly ISegmentReader _inner;
     private readonly SynopsisCache _cache;
     private readonly UInt128 _uid;
-    private readonly Dictionary<(ulong Offset, uint Length), IndexSegment> _regions;
+    private readonly IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment> _regions;
 
-    private SynopsisCacheReader(ISegmentReader inner, SynopsisCache cache, UInt128 uid, Dictionary<(ulong, uint), IndexSegment> regions)
+    private SynopsisCacheReader(ISegmentReader inner, SynopsisCache cache, UInt128 uid, IReadOnlyDictionary<(ulong, uint), IndexSegment> regions)
     {
         _inner = inner;
         _cache = cache;
@@ -44,12 +44,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             return inner;
         }
 
-        Dictionary<(ulong, uint), IndexSegment> regions = [];
-        foreach (IndexSegment region in Declared(contents))
-        {
-            regions[(region.Offset, region.Length)] = region;
-        }
-
+        IReadOnlyDictionary<(ulong, uint), IndexSegment> regions = contents.DeclaredRegions;
         return regions.Count == 0 ? inner : new SynopsisCacheReader(inner, cache, uid, regions);
     }
 
@@ -68,9 +63,12 @@ internal sealed class SynopsisCacheReader : ISegmentReader
             }
         }
 
-        foreach ((SynopsisTableInfo _, IndexSegment region) in contents.Tables)
+        foreach ((SynopsisTableInfo _, IReadOnlyList<TableChunk> chunks) in contents.Tables)
         {
-            Declare(region);
+            foreach (TableChunk chunk in chunks)
+            {
+                Declare(chunk.Region);
+            }
         }
 
         foreach (IndexSegment region in contents.ChunkDirectories)

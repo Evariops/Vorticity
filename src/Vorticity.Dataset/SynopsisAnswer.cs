@@ -31,6 +31,20 @@ internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept)
             Instants[bucket] = first;
         }
     }
+
+    /// <summary>Whether <paramref name="chunk"/> holds a bucket the part folds.</summary>
+    internal bool Folds(TableChunk chunk)
+    {
+        foreach (long bucket in Kept)
+        {
+            if (bucket >= chunk.FirstBucket && bucket <= chunk.LastBucket)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 }
 
 /// <summary>
@@ -219,7 +233,7 @@ internal sealed record SynopsisAnswer(
         // and the slices cut are read as rows. Without a table of slices, a bucket cut is read as rows.
         SynopsisTableInfo? coarsest = null;
         SynopsisTableInfo? sliced = null;
-        foreach ((SynopsisTableInfo table, IndexSegment _) in contents.Tables)
+        foreach ((SynopsisTableInfo table, IReadOnlyList<TableChunk> _) in contents.Tables)
         {
             if (Holds(table.Keys, keyed) && Holds(table.Measures, measured))
             {
@@ -451,12 +465,12 @@ internal sealed record SynopsisAnswer(
         return null;
     }
 
-    /// <summary>Whether <paramref name="table"/> is one of the answer's, which the read of the synopsis fetches.</summary>
-    internal bool Reads(SynopsisTableInfo table)
+    /// <summary>Whether <paramref name="chunk"/> of <paramref name="table"/> holds a bucket the answer folds, which the read of the synopsis fetches.</summary>
+    internal bool Reads(SynopsisTableInfo table, TableChunk chunk)
     {
         foreach (SynopsisPart part in Parts)
         {
-            if (ReferenceEquals(part.Table, table))
+            if (ReferenceEquals(part.Table, table) && part.Folds(chunk))
             {
                 return true;
             }
@@ -466,75 +480,123 @@ internal sealed record SynopsisAnswer(
     }
 
     /// <summary>
-    /// The batch of states of <paramref name="part"/>'s table, read into <paramref name="tables"/>: its bucket
-    /// named as the instant, its keys and states as they lie, and selected the rows of the part's buckets
-    /// the key filter holds for; null when the table is not among those read.
+    /// The batches of states of <paramref name="part"/>'s table, one for each chunk read into <paramref name="tables"/>
+    /// that holds a bucket the part folds: its bucket named as the instant, its keys and states as they lie, and
+    /// selected the rows of the part's buckets the key filter holds for, but a row whose every row was taken out,
+    /// whose group the rows would not make. Added to <paramref name="into"/>.
     /// </summary>
     /// <param name="tables">The tables, read.</param>
     /// <param name="part">The table and its buckets.</param>
+    /// <param name="contents">The object's table of contents, which says the chunks the part folds.</param>
     /// <param name="instant">The dataset's instant, whose name the buckets take.</param>
     /// <param name="startRow">The object's first row in the dataset.</param>
+    /// <param name="into">Where the batches go.</param>
     /// <param name="removed">
     /// Rows to take out of the table's states first, a delete's or those a question excludes (see
     /// <see cref="SynopsisCorrection"/>); null for none.
     /// </param>
     /// <param name="schema">The object's schema, which names the measures of the rows taken out.</param>
     /// <param name="slices">The object's slice table, which places a row taken out in its bucket.</param>
-    /// <returns>The batch; null when the table is not among those read, or a row cannot come out exactly.</returns>
-    internal RecordBatch? Batch(
-        SynopsisTableSet tables, SynopsisPart part, string instant, long startRow,
+    /// <returns>False when a chunk the part folds was not read, or a row cannot come out exactly.</returns>
+    internal bool TryBatches(
+        SynopsisTableSet tables, SynopsisPart part, SynopsisContents contents, string instant, long startRow, List<RecordBatch> into,
         IReadOnlyList<RecordBatch>? removed = null, DType schema = default, SliceTable? slices = null)
     {
         if (tables.Types is not { } types)
         {
-            return null;
+            return false;
         }
 
-        foreach ((SynopsisTableInfo table, int node) in tables.Tables)
+        // The chunks the part folds, each of which must have been read: one whose region failed its checksum is not.
+        int wanted = 0;
+        for (int t = 0; t < contents.Tables.Count; t++)
         {
-            if (!ReferenceEquals(table, part.Table))
+            (SynopsisTableInfo table, IReadOnlyList<TableChunk> chunks) = contents.Tables[t];
+            if (ReferenceEquals(table, part.Table))
+            {
+                for (int c = 0; c < chunks.Count; c++)
+                {
+                    wanted += part.Folds(chunks[c]) ? 1 : 0;
+                }
+            }
+        }
+
+        CanonicalArena arena = tables.Arena;
+        List<int[]> chunkFields = [];
+        DType rowType = default;
+        for (int t = 0; t < tables.Tables.Count; t++)
+        {
+            ReadTable read = tables.Tables[t];
+            if (!ReferenceEquals(read.Table, part.Table) || !part.Folds(read.Chunk))
             {
                 continue;
             }
 
-            CanonicalArena arena = tables.Arena;
-            CanonicalNode rows = arena.GetNode(node);
-            DType rowType = rows.DType;
-            int count = rows.Length;
-            int width = rowType.FieldCount;
-            int[] stated = new int[width];
-            for (int f = 0; f < width; f++)
+            CanonicalNode rows = arena.GetNode(read.Node);
+            rowType = rows.DType;
+            int[] stated = new int[rowType.FieldCount];
+            for (int f = 0; f < stated.Length; f++)
             {
                 stated[f] = rows.GetFieldIndex(f);
             }
 
-            if (removed is { Count: > 0 }
-                && (slices is null || !SynopsisCorrection.TryRemove(arena, table, rowType, stated, schema, removed, slices.Slices, slices.Unit, part.Kept, Request.Reads)))
+            chunkFields.Add(stated);
+        }
+
+        if (chunkFields.Count != wanted)
+        {
+            return false;
+        }
+
+        if (wanted == 0)
+        {
+            return true;
+        }
+
+        if (removed is { Count: > 0 }
+            && (slices is null || !SynopsisCorrection.TryRemove(arena, part.Table, rowType, chunkFields, schema, removed, slices.Slices, slices.Unit, part.Kept, Request.Reads)))
+        {
+            return false;
+        }
+
+        // The batch's struct: the table's columns renamed as the question reads them, then the partition's values.
+        int width = rowType.FieldCount;
+        string[] names = new string[width + Constants.Count];
+        DType[] dtypes = new DType[names.Length];
+        for (int f = 0; f < width; f++)
+        {
+            names[f] = f == 0 ? instant : Renamed(rowType.GetFieldName(f));
+            dtypes[f] = rowType.GetField(f);
+        }
+
+        int[] constantColumns = new int[Constants.Count];
+        for (int c = 0; c < Constants.Count; c++)
+        {
+            int column = schema.IsDefault ? -1 : schema.IndexOfField(Constants[c].Name);
+            if (column < 0)
             {
-                return null;
+                return false;
             }
 
-            string[] names = new string[width + Constants.Count];
-            DType[] dtypes = new DType[names.Length];
+            names[width + c] = Constants[c].Name;
+            constantColumns[c] = column;
+        }
+
+        DType? root = null;
+        foreach (int[] stated in chunkFields)
+        {
+            int count = arena.GetNode(stated[0]).Length;
             int[] fields = new int[names.Length];
-            for (int f = 0; f < width; f++)
-            {
-                names[f] = f == 0 ? instant : Renamed(rowType.GetFieldName(f));
-                dtypes[f] = rowType.GetField(f);
-                fields[f] = stated[f];
-            }
+            stated.AsSpan().CopyTo(fields);
 
             // The partition's one value, a column of the table's rows.
             for (int c = 0; c < Constants.Count; c++)
             {
-                (string name, FilterLiteral value) = Constants[c];
-                int column = schema.IsDefault ? -1 : schema.IndexOfField(name);
-                if (column < 0 || ConstantColumn(arena, DTypeImport.Into(types, schema.GetField(column)), count, value) is not { } constant)
+                if (ConstantColumn(arena, DTypeImport.Into(types, schema.GetField(constantColumns[c])), count, Constants[c].Value) is not { } constant)
                 {
-                    return null;
+                    return false;
                 }
 
-                names[width + c] = name;
                 dtypes[width + c] = arena.GetNode(constant).DType;
                 fields[width + c] = constant;
             }
@@ -545,12 +607,13 @@ internal sealed record SynopsisAnswer(
                 fields[0] = InstantsOf(arena, bucketed, dtypes[0], count, part.Instants);
             }
 
-            int root = arena.AddStruct(types.Struct(names, dtypes, Nullability.NonNullable), count, Validity.NonNullable, fields);
+            root ??= types.Struct(names, dtypes, Nullability.NonNullable);
+            int node = arena.AddStruct(root.Value, count, Validity.NonNullable, fields);
 
             // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
             // every row was taken out, whose group the rows would not make.
             ReadOnlySpan<long> buckets = arena.GetNode(bucketed).Values.Cast<long>();
-            ReadOnlySpan<long> stood = arena.GetNode(fields[table.Keys.Length + 1]).Values.Cast<long>();
+            ReadOnlySpan<long> stood = arena.GetNode(fields[part.Table.Keys.Length + 1]).Values.Cast<long>();
             int words = Math.Max((count + 63) >> 6, 1);
             VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
             bits.Clear();
@@ -558,7 +621,7 @@ internal sealed record SynopsisAnswer(
             Span<byte> states = KeyFilter is null ? default : new byte[count];
             if (KeyFilter is { } keyFilter)
             {
-                FilterEvaluator.Evaluate(keyFilter, arena, root, count, states);
+                FilterEvaluator.Evaluate(keyFilter, arena, node, count, states);
             }
 
             int selected = 0;
@@ -571,12 +634,12 @@ internal sealed record SynopsisAnswer(
                 }
             }
 
-            RecordBatch batch = new RecordBatch(arena, root, startRow) { CarriesStates = true };
+            RecordBatch batch = new RecordBatch(arena, node, startRow) { CarriesStates = true };
             batch.Select(selection, selected);
-            return batch;
+            into.Add(batch);
         }
 
-        return null;
+        return true;
     }
 
     /// <summary>

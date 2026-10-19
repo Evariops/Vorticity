@@ -70,7 +70,7 @@ public sealed partial class SynopsisPathTests
         using SynopsisTableSet declaredTables = await SynopsisTableInfo.ReadAsync(left.File, Ct);
         using SynopsisTableSet pathTables = await SynopsisTableInfo.ReadAsync(right.File, Ct);
         int compared = 0;
-        foreach ((SynopsisTableInfo table, int node) in pathTables.Tables)
+        foreach ((SynopsisTableInfo table, TableChunk _, int node) in pathTables.Tables)
         {
             Assert.Equal([SynopsisPath.Entry(latency)], table.Measures);
             Assert.All(table.Keys, key => Assert.Equal(SynopsisPath.Entry(route), key));
@@ -146,7 +146,7 @@ public sealed partial class SynopsisPathTests
         }
 
         using SynopsisTableSet tables = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
-        (SynopsisTableInfo info, int node) = Assert.Single(tables.Tables, t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)]));
+        (SynopsisTableInfo info, TableChunk _, int node) = Assert.Single(tables.Tables, t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)]));
         Assert.Contains(SynopsisPath.Entry(retries), info.Measures);
         int measure = Array.IndexOf(info.Measures, SynopsisPath.Entry(retries));
         CanonicalNode table = tables.Arena.GetNode(node);

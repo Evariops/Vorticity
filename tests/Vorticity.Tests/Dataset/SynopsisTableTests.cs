@@ -353,7 +353,7 @@ public sealed partial class SynopsisTableTests
         using SynopsisTableSet set = await SynopsisTableInfo.ReadAsync(file, Ct);
         IReadOnlyList<SynopsisPath> paths = (await SliceTable.ReadAsync(file, Ct))?.Paths ?? [];
         List<(SynopsisTableInfo, List<TableRow>)> tables = [];
-        foreach ((SynopsisTableInfo info, int node) in set.Tables)
+        foreach ((SynopsisTableInfo info, TableChunk _, int node) in set.Tables)
         {
             tables.Add((info, Read(set.Arena, node, info, Kinds(file.DType, info.Measures, paths))));
         }

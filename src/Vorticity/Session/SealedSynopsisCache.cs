@@ -16,11 +16,11 @@ internal sealed class SealedSynopsisCache : ISealedFrameCache
 {
     private readonly SynopsisCache _cache;
     private readonly UInt128 _uid;
-    private readonly Dictionary<(ulong Offset, uint Length), IndexSegment> _regions;
+    private readonly IReadOnlyDictionary<(ulong Offset, uint Length), IndexSegment> _regions;
     private readonly string _trailer;
     private long _admitted;
 
-    private SealedSynopsisCache(SynopsisCache cache, UInt128 uid, Dictionary<(ulong, uint), IndexSegment> regions)
+    private SealedSynopsisCache(SynopsisCache cache, UInt128 uid, IReadOnlyDictionary<(ulong, uint), IndexSegment> regions)
     {
         _cache = cache;
         _uid = uid;
@@ -39,12 +39,7 @@ internal sealed class SealedSynopsisCache : ISealedFrameCache
             return null;
         }
 
-        Dictionary<(ulong, uint), IndexSegment> regions = [];
-        foreach (IndexSegment region in SynopsisCacheReader.Declared(contents))
-        {
-            regions[(region.Offset, region.Length)] = region;
-        }
-
+        IReadOnlyDictionary<(ulong, uint), IndexSegment> regions = contents.DeclaredRegions;
         return regions.Count == 0 ? null : new SealedSynopsisCache(cache, uid, regions);
     }
 

@@ -48,20 +48,21 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
 
     /// <summary>
     /// The ceilings of each path: requests and bytes cold, requests and bytes warm, and the bytes one warm ask
-    /// allocates. Measured on 2026-10-20 at the commit that set them.
+    /// allocates, 2 % above what it measured alone: in the full suite, the pools other classes left hold more or
+    /// less, which moved a path by 1.3 %. Measured on 2026-10-20 at the commit that set them.
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["synopses: count by service"] = new(4, 6880, 0, 0, 101184),
-        ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 108544),
-        ["synopses: by minute, the last hour, under a predicate"] = new(3, 100970, 2, 35424, 76672),
-        ["synopses: an unaligned window"] = new(5, 198994, 2, 66728, 84672),
-        ["synopses: every row but one id"] = new(8, 297003, 4, 34768, 70720),
-        ["synopses: measures by region and hour"] = new(4, 4112, 0, 0, 117632),
-        ["synopses: count by route, a shredded path"] = new(8, 268137, 4, 5902, 78784),
-        ["rows: count by service and hour"] = new(8, 392747, 4, 130512, 89600),
-        ["rows: count by route, a shredded path"] = new(8, 268137, 4, 5902, 67264),
-        ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 193536),
+        ["synopses: count by service"] = new(4, 6880, 0, 0, 77248),
+        ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 86912),
+        ["synopses: by minute, the last hour, under a predicate"] = new(3, 100970, 2, 35424, 77376),
+        ["synopses: an unaligned window"] = new(5, 198994, 2, 66728, 79104),
+        ["synopses: every row but one id"] = new(8, 297003, 4, 34768, 71232),
+        ["synopses: measures by region and hour"] = new(4, 4112, 0, 0, 95232),
+        ["synopses: count by route, a shredded path"] = new(8, 268137, 4, 5902, 79360),
+        ["rows: count by service and hour"] = new(8, 392747, 4, 130512, 91008),
+        ["rows: count by route, a shredded path"] = new(8, 268137, 4, 5902, 68032),
+        ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 195392),
     };
 
     private readonly Fixture _fixture;
