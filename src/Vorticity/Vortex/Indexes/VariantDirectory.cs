@@ -263,7 +263,7 @@ internal sealed class VariantDirectory
         },
     };
 
-    private static (long Low, long High, bool NaNs, byte[]? Min, byte[]? Max) Bounds(PathCensus.PathCount count, PathClass @class)
+    internal static (long Low, long High, bool NaNs, byte[]? Min, byte[]? Max) Bounds(PathCensus.PathCount count, PathClass @class)
     {
         switch (@class)
         {
@@ -461,7 +461,7 @@ internal sealed class VariantDirectory
     }
 
     /// <summary>Whether a value between <paramref name="entry"/>'s bounds may compare to <paramref name="value"/> by <paramref name="op"/>.</summary>
-    private static bool Within(PathEntry entry, ComparisonOp op, FilterLiteral value)
+    internal static bool Within(PathEntry entry, ComparisonOp op, FilterLiteral value)
     {
         if (op == ComparisonOp.NotEqual)
         {

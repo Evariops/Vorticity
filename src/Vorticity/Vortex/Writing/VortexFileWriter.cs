@@ -245,6 +245,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>By column, the path directory of a variant column; null when none has one.</summary>
     private VariantDirectory?[]? _directories;
 
+    /// <summary>By column, the shredded keys whose values are counted block by block; null when no column shreds one.</summary>
+    private (int Index, string Key, Types.Variants.PathClass Class)[]?[]? _countedKeys;
+
+    /// <summary>By column, the block statistics of its shredded keys as its chunks are written.</summary>
+    private VariantBlockStats.Builder?[]? _blockStats;
+
+    /// <summary>The bytes a text bound of a key's block statistics keeps, the zones' own.</summary>
+    private int _variantTextBound;
+
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
 
@@ -678,6 +687,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             (writer._shredding ??= new VariantShredding?[writer._fieldCount])[field] = column.Value;
+            if (ChunkBlockBounds.Counted(column.Value) is { Length: > 0 } counted)
+            {
+                (writer._countedKeys ??= new (int, string, Types.Variants.PathClass)[]?[writer._fieldCount])[field] = counted;
+                writer._variantTextBound = options.StringBoundBytes;
+            }
+
             if (column.Value.Kind == VariantShreddingKind.Object)
             {
                 string[] keys = new string[column.Value.Keys.Count];
@@ -1722,9 +1737,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // A shredded variant's chunk is written as its residual and its typed columns, which the
         // statistics of its rows as they came do not describe.
         ChunkStats stats = default;
+        ChunkBlockBounds? bounds = null;
         if (_shredding?[field] is { } plan)
         {
-            node = VariantShredder.Shred(arena, new DTypeArena(), node, plan);
+            bounds = BoundsFor(field);
+            node = VariantShredder.Shred(arena, new DTypeArena(), node, plan, bounds);
         }
         else
         {
@@ -1732,8 +1749,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
-        await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+        await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, bounds).ConfigureAwait(false);
     }
+
+    /// <summary>Where a chunk of column <paramref name="field"/> counts its shredded keys block by block; null when it counts none.</summary>
+    private ChunkBlockBounds? BoundsFor(int field) =>
+        _countedKeys?[field] is { } keys ? new ChunkBlockBounds(keys, _blockRows, _variantTextBound) : null;
 
     /// <summary>
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
@@ -1772,8 +1793,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// what the column kept for the chunk.
     /// </summary>
     private async ValueTask WriteColumnBlobAsync(
-        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken)
+        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken, ChunkBlockBounds? bounds = null)
     {
+        // The chunk's shredded keys, block by block, in the file's blocks.
+        if (bounds is not null)
+        {
+            ((_blockStats ??= new VariantBlockStats.Builder?[_fieldCount])[field] ??= new VariantBlockStats.Builder(
+                [.. Array.ConvertAll(_countedKeys![field]!, static key => (key.Key, key.Class))])).Add(firstBlock, bounds);
+        }
+
         using (blob)
         {
             _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
@@ -2016,6 +2044,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
 
                     await closed.AddVariantDirectoryAsync(_sink, field, paths, _rowCount, _blockRows, dataEnd - interleaved, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // The block statistics of the shredded keys, where they can prune, within what the budget leaves.
+            for (int field = 0; field < (_blockStats?.Length ?? 0); field++)
+            {
+                if (_blockStats![field] is { } blockStats)
+                {
+                    await closed.AddVariantBlocksAsync(_sink, field, blockStats, _rowCount, _blockRows, dataEnd - interleaved, cancellationToken).ConfigureAwait(false);
                 }
             }
         }

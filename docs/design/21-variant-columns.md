@@ -619,6 +619,14 @@ writer drops them. A declared column's zone map would prune nothing there either
 budget, the statistics that prune least are dropped first ([the policy](10-indexes.md#6-the-policy)),
 with no threshold of their own.
 
+As built ([a shredded key's zone map](10-indexes.md#47-vorticityvariantblocksv1-a-shredded-keys-zone-map)),
+the shredder counts them as it routes each value, for the top-level keys shredded as an integer, a text
+or a boolean, whose typed columns hold every value of their class. A key shredded as a double is not
+counted, since a float lies beside its typed column and `AsDouble` reads both. What the writer measures
+is how much the blocks narrow the key's range, a block without the key counting whole; a key that
+narrows nothing is dropped. They cost 19 ns a row for five such keys on the shredded write (450 against
+431, `--micro shredwrite`). Nested keys, and the classes that are not counted, wait for a need.
+
 An index entry gains a variant path and a type class beside its column, and a reader checks that the
 class's dtype is one the kind supports, as it checks a column's today. An object shreds a path its own
 way in each chunk, so one path may hold integers in one chunk and text in another, with the same
@@ -884,7 +892,7 @@ Every figure is an estimate.
 | a path read fetches only its bytes | the bytes a question on one shredded path reads, against the bytes of that path's buffers plus its path map entry, on a counting store (`VariantKeyReadTests`: no byte of another key read beyond the padding two ranges share) |
 | a path read rebuilds no variant | an allocation ratchet on a question over one shredded path, which equals the same question over a declared column |
 | `As…` converts nothing and reads one class | on a path holding integers and text in the same chunks, the bytes `AsInt64()` reads: the typed column and none of the field's `value`, on a counting store |
-| a range on a path skips what it skips on a declared column | the blocks and bytes a range question reads over a shredded path that is no synopsis column, against the same question over a declared column holding the same values in the same order: the same blocks, on a counting store |
+| a range on a path skips what it skips on a declared column | the blocks and bytes a range question reads over a shredded path that is no synopsis column, against the same question over a declared column holding the same values in the same order: the same blocks, on a counting store (`VariantBlockStatsTests`: five ranges keep the same live blocks on the key and on the column) |
 | an index on a path never matches across classes | a path holding 502 as an integer in some chunks and `"502"` as text in others, probed by `AsInt64() == 502` and by `AsString() == "502"`: each finds its own rows and no other |
 | the integers of a path share one column | a path written as `int8`, `int16`, `int32` and `int64` across its rows reads back from one typed column, each value equal to the one written under the format's equivalence classes, in Vorticity and in Rust |
 | the path map and the trees stay within the column budget | their bytes, and the nodes of every tree, as ratchets on a bench of 10⁴ paths over a day of chunks (`VariantPathMapTests`: at most 90 bytes a key and a chunk) |

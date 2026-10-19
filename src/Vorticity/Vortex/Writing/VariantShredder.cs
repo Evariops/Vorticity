@@ -40,7 +40,7 @@ internal static class VariantShredder
     /// <c>vortex.variant</c>. The tree's dtypes are made in <paramref name="types"/>.
     /// </summary>
     /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
-    internal static int Shred(CanonicalArena arena, DTypeArena types, int node, VariantShredding plan)
+    internal static int Shred(CanonicalArena arena, DTypeArena types, int node, VariantShredding plan, Indexes.ChunkBlockBounds? bounds = null)
     {
         CanonicalNode variant = arena.GetNode(node);
         int rows = variant.Length;
@@ -49,6 +49,19 @@ internal static class VariantShredder
         CanonicalNode metadataNode = arena.GetNode(metadata);
         CanonicalNode valueNode = arena.GetNode(value);
         Group root = Group.For(plan);
+
+        // The keys whose values are counted block by block as they are typed.
+        if (bounds is not null && root is ObjectGroup keys)
+        {
+            foreach (Indexes.ChunkBlockBounds.KeyBlocks key in bounds.Keys)
+            {
+                if (keys.FieldAt(key.Index) is PrimitiveGroup typed)
+                {
+                    typed.Bounds = key;
+                }
+            }
+        }
+
         for (int row = 0; row < rows; row++)
         {
             if (!ArenaWords.IsValid(arena, node, row))
@@ -120,6 +133,9 @@ internal static class VariantShredder
     {
         private readonly TypedColumn _typed = TypedColumn.For(@class);
 
+        /// <summary>Where the values typed are counted block by block; null when they are not.</summary>
+        internal Indexes.ChunkBlockBounds.KeyBlocks? Bounds { get; set; }
+
         internal override void Absent()
         {
             Held.Append(false);
@@ -130,10 +146,12 @@ internal static class VariantShredder
         internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
         {
             Held.Append(true);
-            if (_typed.Fits(value))
+            VariantScalar scalar = VariantScalar.Read(value);
+            if (_typed.Takes(scalar.Kind))
             {
                 _typed.Append(value);
                 Values.AppendNull();
+                Bounds?.Note(Held.Count - 1, scalar);
                 return;
             }
 
@@ -153,6 +171,9 @@ internal static class VariantShredder
         private readonly int[] _found;
         private readonly Bits _objects = new Bits();
         private int[] _kept = new int[8];
+
+        /// <summary>The node of the plan's key <paramref name="index"/>.</summary>
+        internal Group FieldAt(int index) => _fields[index];
 
         internal ObjectGroup(VariantShredding plan)
         {
@@ -346,7 +367,10 @@ internal static class VariantShredder
         };
 
         /// <summary>Whether <paramref name="value"/> is of the column's class.</summary>
-        internal abstract bool Fits(ReadOnlySpan<byte> value);
+        internal bool Fits(ReadOnlySpan<byte> value) => Takes(VariantScalar.Read(value).Kind);
+
+        /// <summary>Whether a value of <paramref name="kind"/> is of the column's class.</summary>
+        internal abstract bool Takes(VariantKind kind);
 
         /// <summary>Appends <paramref name="value"/>, which fits.</summary>
         internal abstract void Append(ReadOnlySpan<byte> value);
@@ -361,7 +385,7 @@ internal static class VariantShredder
     {
         private long[] _values = new long[64];
 
-        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).IsInteger;
+        internal override bool Takes(VariantKind kind) => kind is VariantKind.Int8 or VariantKind.Int16 or VariantKind.Int32 or VariantKind.Int64;
 
         internal override void Append(ReadOnlySpan<byte> value) => Add((long)VariantScalar.Read(value).Integer, true);
 
@@ -391,7 +415,7 @@ internal static class VariantShredder
     {
         private double[] _values = new double[64];
 
-        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).Kind == VariantKind.Double;
+        internal override bool Takes(VariantKind kind) => kind == VariantKind.Double;
 
         internal override void Append(ReadOnlySpan<byte> value) => Add(VariantScalar.Read(value).Number, true);
 
@@ -421,7 +445,7 @@ internal static class VariantShredder
     {
         private readonly Bits _values = new Bits();
 
-        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).Kind == VariantKind.Bool;
+        internal override bool Takes(VariantKind kind) => kind == VariantKind.Bool;
 
         internal override void Append(ReadOnlySpan<byte> value)
         {
@@ -447,7 +471,7 @@ internal static class VariantShredder
     {
         private readonly BinaryColumn _values = new BinaryColumn();
 
-        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).Kind == VariantKind.String;
+        internal override bool Takes(VariantKind kind) => kind == VariantKind.String;
 
         internal override void Append(ReadOnlySpan<byte> value)
         {

@@ -217,14 +217,14 @@ public sealed partial class VortexFileWriter
 
                 ColumnChunksAcross++;
                 ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
-                await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+                await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, columns.TakeBounds(field)).ConfigureAwait(false);
             }
             else if (columns.Wrote(field))
             {
                 ColumnChunksAcross++;
                 (int first, int count, int rows) = columns.GatheredChunk(field);
                 ArrayBlobWriter.BlobLease blob = columns.Take(field, _arrayEncodings);
-                await WriteColumnBlobAsync(field, blob, first, count, cancellationToken).ConfigureAwait(false);
+                await WriteColumnBlobAsync(field, blob, first, count, cancellationToken, columns.TakeBounds(field)).ConfigureAwait(false);
                 gathering.ChunkRows.Add(rows);
             }
         }
@@ -276,6 +276,9 @@ public sealed partial class VortexFileWriter
         // column, the gathering its thread adds the chunk's rows to, and when the rows reach the
         // target, the blocks and rows of the chunk of its own it then wrote.
         private Gathering?[] _gathered = [];
+
+        // Per column, the block bounds of its shredded keys in this chunk; null for a writer that counts none.
+        private Indexes.ChunkBlockBounds?[]? _bounds;
         private int[] _gatheredFirst = [];
         private int[] _gatheredBlocks = [];
         private int[] _gatheredRows = [];
@@ -302,6 +305,11 @@ public sealed partial class VortexFileWriter
             Array.Clear(_took);
             Array.Clear(_known);
             Array.Clear(_gathered);
+            if (_bounds is not null)
+            {
+                Array.Clear(_bounds);
+            }
+
             foreach (string[] fresh in _fresh)
             {
                 Array.Clear(fresh);
@@ -312,9 +320,28 @@ public sealed partial class VortexFileWriter
             SpareSlots<ChunkColumns>.Give(this);
         }
 
+        /// <summary>The block bounds of column <paramref name="field"/>'s shredded keys in this chunk, given to the caller; null when it counted none.</summary>
+        internal Indexes.ChunkBlockBounds? TakeBounds(int field)
+        {
+            if (_bounds is null)
+            {
+                return null;
+            }
+
+            Indexes.ChunkBlockBounds? bounds = _bounds[field];
+            _bounds[field] = null;
+            return bounds;
+        }
+
         /// <summary>Makes room for <paramref name="fields"/> columns and takes the file's ids as the chunk begins.</summary>
         internal void Prepare(int fields, EncodingDictionary file)
         {
+            // Only a writer that counts shredded keys block by block holds a slot for their bounds.
+            if (_writer?._countedKeys is not null && (_bounds is null || _bounds.Length < fields))
+            {
+                _bounds = new Indexes.ChunkBlockBounds?[fields];
+            }
+
             if (_nodes.Length < fields)
             {
                 _nodes = new int[fields];
@@ -546,8 +573,13 @@ public sealed partial class VortexFileWriter
                 ChunkStats stats = _stats[field];
                 if (writer._shredding?[field] is { } plan)
                 {
-                    local = VariantShredder.Shred(lane.Arena, new Types.DTypeArena(), local, plan);
+                    Indexes.ChunkBlockBounds? bounds = writer.BoundsFor(field);
+                    local = VariantShredder.Shred(lane.Arena, new Types.DTypeArena(), local, plan, bounds);
                     stats = default;
+                    if (bounds is not null)
+                    {
+                        _bounds![field] = bounds;
+                    }
                 }
 
                 _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);

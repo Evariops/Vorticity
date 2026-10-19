@@ -132,7 +132,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#47-the-file-level-filter)).
+file-level filter](#48-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -265,7 +265,28 @@ names the step `path directory`). Otherwise it asks the same of each slice, and 
 lie wholly inside the runs of slices refuted. An append drops the entry, since it parses none of its
 rows.
 
-### 4.7 The file-level filter
+### 4.7 `vorticity.variant.blocks.v1`: a shredded key's zone map
+
+A writer that shreds a variant column counts, as it routes each value, the values of the top-level keys
+shredded as an integer, a text or a boolean, block by block: for each block that holds a value of the
+key's class, how many, and their bounds, as the path directory keeps them for the object. Those keys'
+typed columns hold every value of their class, so a block with no entry holds none, and a question of
+that class matches nothing there. A key shredded as a double is not counted, since a float lies beside
+its typed column and `AsDouble` reads both.
+
+The writer keeps a key's statistics where they can prune, measured on the file's own values: how much
+the blocks narrow the key's range, a block without the key counting whole. A key whose every block
+holds it over its whole range, as a scattered duration does, scores nothing and is dropped. Under the
+index budget, which the path directories share, the keys that narrow least go first. The entry is on
+the variant column, the keys and classes in its options, its run a region per key and class, behind a
+version byte and the body's length, the body one zstd frame.
+
+A scan whose filter reads one of those keys in its class (`AsInt64`, `AsString`, `AsBool`, a presence of
+the class, a membership) reads its region after the zone maps and kills each live block the
+statistics refute, under the filter's conjunctions and disjunctions, as a zone map kills a declared
+column's (`Explain` names the step `path statistics`). An append drops the entry.
+
+### 4.8 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

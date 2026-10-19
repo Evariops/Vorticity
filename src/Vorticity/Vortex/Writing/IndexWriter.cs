@@ -627,7 +627,7 @@ internal sealed class IndexWriter : IDisposable
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
             if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
-                    or IndexKinds.VariantDirectory
+                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -1545,14 +1545,50 @@ internal sealed class IndexWriter : IDisposable
     internal async ValueTask AddVariantDirectoryAsync(
         ISegmentSink sink, int field, VariantDirectory directory, long rows, int blockRows, long dataBytes, CancellationToken cancellationToken)
     {
-        byte[] bytes = directory.Within(Math.Max(dataBytes, BudgetFloor) * _budgetPerMille / 1000).ToBytes();
+        byte[] bytes = directory.Within(VariantBudget(dataBytes)).ToBytes();
         IndexSegment region = IndexSegment.Of(sink.Position, bytes, 0);
         await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+        _variantBytes += bytes.Length;
         int length = Math.Max(blockRows, 1);
         _entries.Add(new IndexEntry(
             IndexKinds.VariantDirectory, [checked((uint)field)], (ulong)length, [],
             [new IndexRun(0, Blocks(rows, length), [region], [])]));
     }
+
+    /// <summary>
+    /// Writes the block statistics of the variant column <paramref name="field"/> that can prune, within
+    /// what the index budget of the file's <paramref name="dataBytes"/> leaves the variants' indexes, a
+    /// region per key and class from the sink's position, and adds the entry that names them; nothing
+    /// when none can.
+    /// </summary>
+    internal async ValueTask AddVariantBlocksAsync(
+        ISegmentSink sink, int field, VariantBlockStats.Builder builder, long rows, int blockRows, long dataBytes, CancellationToken cancellationToken)
+    {
+        int length = Math.Max(blockRows, 1);
+        if (builder.Build(checked((int)Blocks(rows, length)), VariantBudget(dataBytes)) is not { } stats)
+        {
+            return;
+        }
+
+        IndexSegment[] regions = new IndexSegment[stats.Keys.Count];
+        for (int key = 0; key < regions.Length; key++)
+        {
+            byte[] bytes = stats.KeyBytes(key);
+            regions[key] = IndexSegment.Of(sink.Position, bytes, 0);
+            await sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+            _variantBytes += bytes.Length;
+        }
+
+        _entries.Add(new IndexEntry(
+            IndexKinds.VariantBlocks, [checked((uint)field)], (ulong)length, stats.OptionBytes(),
+            [new IndexRun(0, Blocks(rows, length), regions, [])]));
+    }
+
+    /// <summary>The bytes the index budget of <paramref name="dataBytes"/> leaves the variants' indexes still to write.</summary>
+    private long VariantBudget(long dataBytes) => Math.Max(0, (Math.Max(dataBytes, BudgetFloor) * _budgetPerMille / 1000) - _variantBytes);
+
+    // What the variants' path directories and block statistics took of the budget so far.
+    private long _variantBytes;
 
     private static uint Blocks(long rows, int length) => checked((uint)((rows + length - 1) / length));
 
@@ -1632,7 +1668,7 @@ internal sealed class IndexWriter : IDisposable
     {
         // A file's time slices and its variant paths ride in the directory whatever the policy asks.
         if (!Enabled && _preserved is not { Count: > 0 }
-            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory))
+            && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks))
         {
             return null;
         }

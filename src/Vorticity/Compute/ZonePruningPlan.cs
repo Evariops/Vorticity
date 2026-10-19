@@ -119,7 +119,8 @@ internal static class ZonePruningPlan
         Indexes.KeyIndexPruner? locating = indexes && blockRows > 0
             ? await Indexes.KeyIndexPruner.BuildAsync(file, filter, blockRows, cancellationToken).ConfigureAwait(false)
             : null;
-        if (zones is null && blooms is null && locating is null && pathRanges is null)
+        Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? keysRead = indexes && blockRows > 0 ? KeysRead(filter) : null;
+        if (zones is null && blooms is null && locating is null && pathRanges is null && keysRead is null)
         {
             if (pathSegments > 0)
             {
@@ -150,6 +151,18 @@ internal static class ZonePruningPlan
             }
 
             steps?.Add(new PruningStep("path directory", before - Counted(live, scope), pathSegments, pathBytes));
+        }
+
+        // The block statistics of the shredded keys the filter reads in one class, as a zone map's.
+        if (keysRead is not null && !live.IsEmpty)
+        {
+            before = Counted(live, scope);
+            (int read, long readBytes) = await RefineByKeysAsync(file, filter, keysRead, live, cancellationToken).ConfigureAwait(false);
+            Scanning.ScanCounters.Note(metrics, read, readBytes);
+            if (read > 0)
+            {
+                steps?.Add(new PruningStep("path statistics", before - Counted(live, scope), read, readBytes));
+            }
         }
 
         if (blooms is not null && !live.IsEmpty)
@@ -302,6 +315,194 @@ internal static class ZonePruningPlan
         }
 
         return (false, ranges, segments, bytes);
+    }
+
+    /// <summary>
+    /// The keys the fenced predicates of <paramref name="filter"/> read one step deep and in one class
+    /// whose typed column holds every value of it, an integer, a text or a boolean, by column; null for none.
+    /// </summary>
+    private static Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>>? KeysRead(VortexExpr filter)
+    {
+        Dictionary<string, List<(string, Types.Variants.PathClass)>>? keys = null;
+        Collect(filter, ref keys);
+        return keys;
+
+        static void Collect(VortexExpr expr, ref Dictionary<string, List<(string, Types.Variants.PathClass)>>? keys)
+        {
+            switch (expr)
+            {
+                case LogicalExpr logical:
+                    Collect(logical.Left, ref keys);
+                    Collect(logical.Right, ref keys);
+                    return;
+                case VariantFilterExpr fence when fence.Inner switch
+                {
+                    ComparisonExpr { Field: VariantFieldExpr compared } => compared,
+                    InExpr { Field: VariantFieldExpr member } => member,
+                    NullCheckExpr { Field: VariantFieldExpr held, IsNull: false } => held,
+                    _ => null,
+                } is { } path:
+                    if (KeyOf(path) is { } key)
+                    {
+                        keys ??= new Dictionary<string, List<(string, Types.Variants.PathClass)>>(StringComparer.Ordinal);
+                        if (!keys.TryGetValue(path.Column.Path, out List<(string, Types.Variants.PathClass)>? list))
+                        {
+                            keys[path.Column.Path] = list = [];
+                        }
+
+                        if (!list.Contains(key))
+                        {
+                            list.Add(key);
+                        }
+                    }
+
+                    return;
+            }
+        }
+    }
+
+    /// <summary>The one key and the class <paramref name="path"/> reads, when block statistics can answer it; null otherwise.</summary>
+    private static (string Key, Types.Variants.PathClass Class)? KeyOf(VariantFieldExpr path) =>
+        path.Steps is [{ IsKey: true } step] && path.Read switch
+        {
+            VariantRead.AsInt64 => Types.Variants.PathClass.Integer,
+            VariantRead.AsString => Types.Variants.PathClass.String,
+            VariantRead.AsBool => Types.Variants.PathClass.Boolean,
+            _ => (Types.Variants.PathClass?)null,
+        } is { } @class
+            ? (step.Key!, @class)
+            : null;
+
+    /// <summary>
+    /// Kills the live blocks of <paramref name="live"/> that the block statistics of the keys in
+    /// <paramref name="keys"/> prove hold no row matching <paramref name="filter"/>, and returns the
+    /// segments and bytes read for them.
+    /// </summary>
+    private static async ValueTask<(int Segments, long Bytes)> RefineByKeysAsync(
+        VortexFile file, VortexExpr filter, Dictionary<string, List<(string Key, Types.Variants.PathClass Class)>> keys, BlockMask live,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]>? stats = null;
+        int segments = 0;
+        long bytes = 0;
+        foreach ((string column, List<(string Key, Types.Variants.PathClass Class)> wanted) in keys)
+        {
+            int field = file.DType.Kind == DTypeKind.Struct ? file.DType.IndexOfField(column) : -1;
+            if (field < 0)
+            {
+                continue;
+            }
+
+            (Indexes.VariantBlockStats? read, int count, long readBytes) =
+                await Indexes.VariantBlockStats.ReadAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+            segments += count;
+            bytes += readBytes;
+            if (read is null)
+            {
+                continue;
+            }
+
+            foreach ((string key, Types.Variants.PathClass @class) in wanted)
+            {
+                if (read.IndexOf(key, @class) is int at and >= 0)
+                {
+                    (stats ??= [])[(column, key, @class)] = read.Blocks[at];
+                }
+            }
+        }
+
+        if (stats is null)
+        {
+            return (segments, bytes);
+        }
+
+        for (int block = 0; block < live.BlockCount; block++)
+        {
+            if (live.IsLive(block) && !BlockMayMatch(filter, stats, block))
+            {
+                live.Kill(block);
+            }
+        }
+
+        return (segments, bytes);
+    }
+
+    /// <summary>
+    /// Whether block <paramref name="block"/> may hold a row matching <paramref name="filter"/>, by the
+    /// block statistics in <paramref name="stats"/>: a key they cover with no entry for the block holds
+    /// no value of its class there.
+    /// </summary>
+    private static bool BlockMayMatch(
+        VortexExpr filter, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats, int block)
+    {
+        switch (filter)
+        {
+            case LogicalExpr { IsAnd: true } both:
+                return BlockMayMatch(both.Left, stats, block) && BlockMayMatch(both.Right, stats, block);
+            case LogicalExpr either:
+                return BlockMayMatch(either.Left, stats, block) || BlockMayMatch(either.Right, stats, block);
+            case VariantFilterExpr { Inner: ComparisonExpr { Field: VariantFieldExpr path } comparison }:
+                return Entry(path, stats, block, out Indexes.PathEntry? entry) is not true
+                    || (entry is not null && Indexes.VariantDirectory.Within(entry, comparison.Op, comparison.Value));
+            case VariantFilterExpr { Inner: InExpr { Field: VariantFieldExpr path } membership }:
+            {
+                if (Entry(path, stats, block, out Indexes.PathEntry? member) is not true)
+                {
+                    return true;
+                }
+
+                foreach (FilterLiteral literal in membership.Literals)
+                {
+                    if (member is not null && Indexes.VariantDirectory.Within(member, ComparisonOp.Equal, literal))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            case VariantFilterExpr { Inner: NullCheckExpr { Field: VariantFieldExpr path, IsNull: false } }:
+                return Entry(path, stats, block, out Indexes.PathEntry? held) is not true || held is not null;
+            default:
+                return true;
+        }
+    }
+
+    /// <summary>Whether the statistics cover <paramref name="path"/>, and its entry for <paramref name="block"/>, null when the block holds none of its values.</summary>
+    private static bool Entry(
+        VariantFieldExpr path, Dictionary<(string Column, string Key, Types.Variants.PathClass Class), (int Block, Indexes.PathEntry Entry)[]> stats,
+        int block, out Indexes.PathEntry? entry)
+    {
+        entry = null;
+        if (KeyOf(path) is not { } key || !stats.TryGetValue((path.Column.Path, key.Key, key.Class), out (int Block, Indexes.PathEntry Entry)[]? blocks))
+        {
+            return false;
+        }
+
+        int low = 0;
+        int high = blocks.Length - 1;
+        while (low <= high)
+        {
+            int middle = (low + high) >>> 1;
+            int at = blocks[middle].Block;
+            if (at == block)
+            {
+                entry = blocks[middle].Entry;
+                break;
+            }
+
+            if (at < block)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Kills the blocks of <paramref name="live"/> that lie wholly inside <paramref name="rows"/>.</summary>

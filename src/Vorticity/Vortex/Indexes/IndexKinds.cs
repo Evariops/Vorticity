@@ -60,6 +60,13 @@ internal static class IndexKinds
     public const string VariantDirectory = "vorticity.variant.directory.v1";
 
     /// <summary>
+    /// The block statistics of a variant column's shredded keys, on that column: per key and class, for
+    /// each block that holds a value of it, their count and bounds, the keys and classes in its options
+    /// and a payload region each (<see cref="VariantBlockStats"/>).
+    /// </summary>
+    public const string VariantBlocks = "vorticity.variant.blocks.v1";
+
+    /// <summary>
     /// Whether this library knows the kind. An unknown kind is ignored, never rejected: an index
     /// is only a hint, so a reader that cannot use one is slower and never wrong.
     /// </summary>
@@ -69,7 +76,7 @@ internal static class IndexKinds
         kind switch
         {
             BloomSbbf or BloomNgram3 or DictProbe or PostingsBlocks or SortedRuns
-                or PostingsNgram3 or Slices or SliceChunks or VariantPaths or VariantDirectory => true,
+                or PostingsNgram3 or Slices or SliceChunks or VariantPaths or VariantDirectory or VariantBlocks => true,
             _ => false,
         };
 
