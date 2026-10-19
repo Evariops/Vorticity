@@ -160,6 +160,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long DataBytes => _reportBytes.Data;
 
     /// <summary>
+    /// Once a sliced file is completed, its table of contents (<see cref="Indexes.SynopsisContents"/>), for
+    /// the entry a dataset keeps of it: what a reader of its synopsis or its slices needs with no open.
+    /// Null for a file without slices.
+    /// </summary>
+    internal byte[]? SynopsisContents { get; private set; }
+
+    /// <summary>The table of contents of a sliced file: its slices' table and chunk directories, its synopsis part's tables and columns.</summary>
+    private byte[] Contents(SliceTable table, SliceChunks chunks, IndexSegment[] directories)
+    {
+        List<(SynopsisTableInfo, IndexSegment)> tables = [];
+        List<(int, ChunkSpan[])> columns = [];
+        if (_synopsisPart is { } part)
+        {
+            foreach ((SynopsisTableInfo info, IndexSegment region, byte[] _) in part.Tables)
+            {
+                tables.Add((info, region));
+            }
+
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (_synopsis?[field] == true)
+                {
+                    columns.Add((field, chunks.Columns[field]));
+                }
+            }
+        }
+
+        return new SynopsisContents(
+            Types.Serialization.DTypeFlatBuffers.Serialize(_schema), chunks.Encodings, table, directories,
+            _synopsisPart?.Start ?? 0, _synopsisPart?.End ?? 0, tables, columns).ToBytes();
+    }
+
+    /// <summary>
     /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
     /// rather than from a walk of the chunk, the columns' children included. The width counterpart
     /// of <see cref="ChunksFromTable"/>.
@@ -2255,9 +2288,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (_indexes is { } closed)
         {
             await closed.WriteFencePagesAsync(_sink, cancellationToken).ConfigureAwait(false);
-            if (_slices is not null)
+            if (_slices is { } sliced)
             {
-                await closed.AddSliceChunksAsync(_sink, ChunkDirectory(), _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                SliceChunks chunks = ChunkDirectory();
+                IndexSegment[] directories = await closed.AddSliceChunksAsync(_sink, chunks, _rowCount, _blockRows, cancellationToken).ConfigureAwait(false);
+                SynopsisContents = Contents(sliced.Table, chunks, directories);
             }
 
             // Where each shredded key of a variant column lies, for a reader of one key.

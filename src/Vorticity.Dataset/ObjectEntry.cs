@@ -353,7 +353,26 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             return this;
         }
 
-        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt));
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(footerBytes, MarkedAt, Synopsis.Span));
+    }
+
+    /// <summary>
+    /// The table of contents of the object's synopsis and slices, as its writer gave it
+    /// (<see cref="Indexes.SynopsisContents"/>): what a reader of its synopsis tables or of a few slices
+    /// needs with no open of the object. Empty when the entry carries none.
+    /// </summary>
+    public ReadOnlyMemory<byte> Synopsis { get; private set; }
+
+    /// <summary>The entry with <paramref name="contents"/> as its synopsis's table of contents; itself when there are none.</summary>
+    /// <param name="contents">The writer's table of contents, or null.</param>
+    public ObjectEntry WithSynopsis(byte[]? contents)
+    {
+        if (contents is null || contents.Length == 0 || contents.AsSpan().SequenceEqual(Synopsis.Span))
+        {
+            return this;
+        }
+
+        return new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, contents));
     }
 
     /// <summary>
@@ -367,7 +386,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seconds);
         return MarkedAt > 0
             ? this
-            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds));
+            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, seconds, Synopsis.Span));
     }
 
     /// <summary>What an open reads of an object's end before it knows its footer: past it, a second request.</summary>
@@ -377,10 +396,10 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// The fields of format 4, tagged and in the order of their tags, those this library knows written
     /// afresh and those it does not carried as they were read; null when there are none.
     /// </summary>
-    private byte[]? Fields(long footerBytes, long markedAt)
+    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> synopsis)
     {
         ReadOnlySpan<byte> unknown = UnknownFields(_fields);
-        if (footerBytes == 0 && markedAt == 0 && unknown.IsEmpty)
+        if (footerBytes == 0 && markedAt == 0 && synopsis.IsEmpty && unknown.IsEmpty)
         {
             return null;
         }
@@ -396,6 +415,11 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             if (markedAt > 0)
             {
                 writer.WriteUInt64(FieldTag.MarkedAt, (ulong)markedAt);
+            }
+
+            if (!synopsis.IsEmpty)
+            {
+                writer.WriteBytes(FieldTag.Synopsis, synopsis);
             }
 
             byte[] fields = new byte[writer.WrittenSpan.Length + unknown.Length];
@@ -430,6 +454,9 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                     case (FieldTag.MarkedAt, ProtoWireType.Varint):
                         MarkedAt = Count(reader.ReadVarint());
                         break;
+                    case (FieldTag.Synopsis, ProtoWireType.LengthDelimited):
+                        Synopsis = reader.ReadLengthDelimited().ToArray();
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
@@ -461,7 +488,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             }
 
             reader.SkipField(wire);
-            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt))
+            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Synopsis))
             {
                 // Known fields come first, in the order of their tags, and a later library's after them.
                 start = at;
@@ -474,6 +501,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     {
         internal const int FooterBytes = 1;
         internal const int MarkedAt = 2;
+        internal const int Synopsis = 3;
     }
 
     /// <summary>

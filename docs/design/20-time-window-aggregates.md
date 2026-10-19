@@ -914,6 +914,18 @@ round trip 1   the columns and tables a question needs, for each object of its w
                (a window shorter than its period: the slice directory first, then its slices' ranges)
 ```
 
+As built, the writer of a sliced object completes it with its table of contents, which the seal puts
+in the object's entry ([the dataset's entries](13-dataset.md#4-the-tree)). It names the object's
+schema, so that a table's rows decode at a type rebuilt from it and the contents hold no table's
+dtype, the encodings its blobs name, its slice table, each column's chunk directory, the synopsis
+part's extent, each table's region and each synopsis column's chunks. The dataset reads the tables of
+an object from it in one request set, and a slice through a reader that opens with no read at all.
+On two sealed hours of calls behind a 2 ms store, the tables of both objects read in one dependent
+round trip and one request an object, 27 of the 32 KB of their parts, and a slice in two
+(`SynopsisContentsTests`). The entry of such an hour weighs 1.3 KB, its table of contents 1.1 KB. Every
+synopsis column stays in the part, since a reader takes the regions it needs, not the part whole. The
+paths of a variant column join the contents with the synopsis of paths.
+
 ### Done when
 
 On a counting store with injected latency, a question the runs and synopses answer makes one

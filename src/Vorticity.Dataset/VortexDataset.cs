@@ -1810,6 +1810,49 @@ public sealed class VortexDataset : IAsyncDisposable
         Snapshot.RentAsync(entry, cancellationToken);
 
     /// <summary>
+    /// The synopsis tables of the object <paramref name="entry"/> names that <paramref name="wanted"/> keeps,
+    /// every one when it is null, read with no open of the object: the regions its entry's table of
+    /// contents names, in one round trip. Null when the entry carries no table of contents this library reads.
+    /// </summary>
+    internal async ValueTask<Indexes.SynopsisTableSet?> ReadSynopsisAsync(
+        ObjectEntry entry, Func<Indexes.SynopsisTableInfo, bool>? wanted, CancellationToken cancellationToken)
+    {
+        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            return await Indexes.SynopsisTableInfo.ReadAsync(
+                SessionReader.Wrap(source, Session), contents, wanted, null, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The rows of slice <paramref name="slice"/> of the object <paramref name="entry"/> names, of every column
+    /// or of <paramref name="columns"/>, read with no open of the object: the chunk directories its entry's
+    /// table of contents names, then the slice's chunks, in two round trips. Null when the entry carries no
+    /// table of contents this library reads.
+    /// </summary>
+    internal async ValueTask<RecordBatch?> ReadSliceAsync(ObjectEntry entry, int slice, int[]? columns, CancellationToken cancellationToken)
+    {
+        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        {
+            return null;
+        }
+
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (source.ConfigureAwait(false))
+        {
+            return Indexes.SliceReader.Open(SessionReader.Wrap(source, Session), null, contents) is { } reader
+                ? await reader.ReadSliceAsync(slice, columns, cancellationToken).ConfigureAwait(false)
+                : null;
+        }
+    }
+
+    /// <summary>
     /// The bytes of one of this version's index fragments, checked against the reference an
     /// object's leaf entry carries.
     /// </summary>
@@ -1862,7 +1905,8 @@ public sealed class VortexDataset : IAsyncDisposable
             (summaries, prefix) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
-            .WithFooterBytes(draft.Writer.TailBytes);
+            .WithFooterBytes(draft.Writer.TailBytes)
+            .WithSynopsis(draft.Writer.SynopsisContents);
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 

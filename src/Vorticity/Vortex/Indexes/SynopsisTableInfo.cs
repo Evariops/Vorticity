@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -74,6 +75,52 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         {
             writer.Dispose();
         }
+    }
+
+    /// <summary>
+    /// The struct of the table's rows over a file of <paramref name="schema"/>, built in
+    /// <paramref name="types"/>: the bucket, each key at its field's type, the count, then per measure
+    /// its count of values, its sum's words (two for an integer, five for a float), its least and its
+    /// greatest, all 64-bit. The writer builds its rows at this type, and a reader decodes them at it.
+    /// </summary>
+    internal DType RowType(DType schema, DTypeArena types)
+    {
+        DType longs = types.Primitive(PType.I64, Nullability.NonNullable);
+        List<string> names = ["bucket"];
+        List<DType> fields = [longs];
+        foreach (int key in Keys)
+        {
+            names.Add(schema.GetFieldName(key));
+            fields.Add(VortexTypes.ToDType(VortexTypes.FromDType(schema.GetField(key)), types));
+        }
+
+        names.Add("count");
+        fields.Add(longs);
+        foreach (int measure in Measures)
+        {
+            string name = schema.GetFieldName(measure);
+            DType dtype = schema.GetField(measure);
+            while (dtype.Kind == DTypeKind.Extension)
+            {
+                dtype = dtype.StorageType;
+            }
+
+            string[] words = dtype.PType.IsFloat() ? ["m0", "m1", "m2", "meta", "high"] : ["low", "high"];
+            names.Add($"{name}.values");
+            foreach (string word in words)
+            {
+                names.Add($"{name}.sum.{word}");
+            }
+
+            names.Add($"{name}.min");
+            names.Add($"{name}.max");
+            for (int i = 0; i < words.Length + 3; i++)
+            {
+                fields.Add(longs);
+            }
+        }
+
+        return types.Struct([.. names], [.. fields], Nullability.NonNullable);
     }
 
     /// <summary>The table the options <paramref name="bytes"/> describe, or null when they do not decode.</summary>
@@ -287,10 +334,51 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
             return new SynopsisTableSet(new ScanContext([]), []);
         }
 
-        ScanContext context = file.CreateIndexContext(0);
+        DTypeArena types = new DTypeArena();
+        return await DecodeAsync(
+            file.Segments, file.CreateIndexContext(0), [.. found.Select(f => (f.Table, f.Region))], (_, i) => DTypeFlatBuffers.Read(found[i].DType, types), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The synopsis tables of a file its table of contents <paramref name="contents"/> names, read from
+    /// <paramref name="source"/> without an open: those <paramref name="wanted"/> keeps, every one when it is
+    /// null, their regions in one request set, each table's rows decoded at its <see cref="RowType"/> over
+    /// the file's schema, which the contents hold.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
+    internal static ValueTask<SynopsisTableSet> ReadAsync(
+        IO.ISegmentReader source, SynopsisContents contents, Func<SynopsisTableInfo, bool>? wanted, VortexReadOptions? options,
+        CancellationToken cancellationToken)
+    {
+        DType schema = contents.SchemaIn(new DTypeArena());
+        List<(SynopsisTableInfo, IndexSegment)> found = [];
+        foreach ((SynopsisTableInfo table, IndexSegment region) in contents.Tables)
+        {
+            if (wanted?.Invoke(table) ?? true)
+            {
+                found.Add((table, region));
+            }
+        }
+
+        DTypeArena types = new DTypeArena();
+        string[] encodings = [.. contents.Encodings];
+        return DecodeAsync(
+            source, new ScanContext(encodings, options ?? VortexReadOptions.Default), found, (table, _) => table.RowType(schema, types), cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads the regions of <paramref name="found"/> in one request set and decodes each into
+    /// <paramref name="context"/>'s arena at the dtype <paramref name="dtypeOf"/> gives it; a region that
+    /// does not hold its checksum, or does not decode, is left out.
+    /// </summary>
+    private static async ValueTask<SynopsisTableSet> DecodeAsync(
+        IO.ISegmentReader source, ScanContext context, List<(SynopsisTableInfo Table, IndexSegment Region)> found,
+        Func<SynopsisTableInfo, int, DType> dtypeOf, CancellationToken cancellationToken)
+    {
         try
         {
-            using IO.SegmentRequestSet requests = new IO.SegmentRequestSet(found.Count);
+            using IO.SegmentRequestSet requests = new IO.SegmentRequestSet(Math.Max(found.Count, 1));
             int[] slots = new int[found.Count];
             for (int i = 0; i < found.Count; i++)
             {
@@ -298,12 +386,16 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                 slots[i] = requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
             }
 
-            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             List<(SynopsisTableInfo, int)> tables = [];
-            DTypeArena types = new DTypeArena();
+            if (found.Count == 0)
+            {
+                return new SynopsisTableSet(context, tables);
+            }
+
+            await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             for (int i = 0; i < found.Count; i++)
             {
-                (SynopsisTableInfo table, IndexSegment region, byte[] dtype) = found[i];
+                (SynopsisTableInfo table, IndexSegment region) = found[i];
                 Buffers.VortexBuffer bytes = requests.GetBuffer(slots[i]);
                 if (!region.Holds(bytes.Span))
                 {
@@ -315,7 +407,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
                     // The rows copied into the arena: the bytes read go back with the requests.
                     context.Decode.LoadBlob(bytes);
                     ArrayNode root = context.Nodes.Root;
-                    int node = context.Decode.DecodeRoot(in root, DTypeFlatBuffers.Read(dtype, types), table.Rows);
+                    int node = context.Decode.DecodeRoot(in root, dtypeOf(table, i), table.Rows);
                     tables.Add((table, context.Canonical.CopyFrom(context.Canonical, node)));
                 }
                 catch (VortexFormatException)

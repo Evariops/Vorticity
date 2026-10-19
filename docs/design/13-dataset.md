@@ -171,6 +171,13 @@ A leaf entry describes one data object:
   for objects of hundreds of megabytes and wide tables. This field and those like it come after the
   summaries, as a zero where a count of deleted rows would stand, which no earlier entry holds there,
   then their length and their tagged bytes, so an entry without them keeps its bytes
+- for an object of sorted slices, the table of contents of its synopsis: the object's schema, the
+  encodings its blobs name, its slice table and the region of each column's chunk directory, the
+  extent of its synopsis part, and the region of each synopsis table and each synopsis column's
+  chunks ([reading the synopsis part](20-time-window-aggregates.md#8-reading-the-synopsis-part-without-the-data)).
+  A reader of its tables then reads them in one round trip, and a reader of a slice in two, with no
+  open of the object. It is a tagged field like the footer's length, about a kilobyte for a period
+  of an hour, most of it the slice table
 
 An internal entry holds a page reference to a child, the sum of its rows, the union of its children's
 summaries, and the tally of the objects under it: their bytes, the largest of them, the rows marked

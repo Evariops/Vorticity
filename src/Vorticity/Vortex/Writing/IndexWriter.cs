@@ -1555,7 +1555,7 @@ internal sealed class IndexWriter : IDisposable
     /// adds the entry that names them: on the root, the encodings in its options, one run over every
     /// block of the file's <paramref name="rows"/>, each region checksummed as every payload is.
     /// </summary>
-    internal async ValueTask AddSliceChunksAsync(
+    internal async ValueTask<IndexSegment[]> AddSliceChunksAsync(
         ISegmentSink sink, SliceChunks chunks, long rows, int blockRows, CancellationToken cancellationToken)
     {
         IndexSegment[] regions = new IndexSegment[chunks.Columns.Count];
@@ -1570,6 +1570,7 @@ internal sealed class IndexWriter : IDisposable
         _entries.Add(new IndexEntry(
             IndexKinds.SliceChunks, [], (ulong)length, chunks.OptionBytes(),
             [new IndexRun(0, Blocks(rows, length), regions, [])]));
+        return regions;
     }
 
     /// <summary>

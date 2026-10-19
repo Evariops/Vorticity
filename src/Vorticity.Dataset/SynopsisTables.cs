@@ -232,7 +232,7 @@ internal sealed class SynopsisTables : IDisposable
             }
 
             Accumulators states = Accumulators.Concat(_kinds, parts);
-            tables.Add((Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, _keys[..d], count), Table(keys, Positions(d), at, buckets, states)));
+            Add(tables, Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, _keys[..d], count), keys, Positions(d), at, buckets, states);
         }
 
         // The deepest run statistics coded across the object: each one's hour, and its keys' codes.
@@ -263,7 +263,7 @@ internal sealed class SynopsisTables : IDisposable
         for (int i = 0; i < hourly.Count; i++)
         {
             (int[] at, Accumulators states) = hourly[i];
-            tables.Add((Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, _keys[..(depth - i)], states.Groups), Table(keys, Positions(depth - i), at, Gather(hours, at), states)));
+            Add(tables, Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, _keys[..(depth - i)], states.Groups), keys, Positions(depth - i), at, Gather(hours, at), states);
         }
 
         // From the deepest of them, each later key's value counts per hour, the first key's being the coarse
@@ -274,7 +274,7 @@ internal sealed class SynopsisTables : IDisposable
         {
             (int[] firsts, Accumulators states) = Levels([hourOf, (Gather(keyCodes[k].Codes, deepFirsts), keyCodes[k].Distinct)], [2], deepHourly)[0];
             int[] at = Gather(deepFirsts, firsts);
-            tables.Add((Info(SynopsisTableKind.Values, SynopsisBucket.Hour, [_keys[k]], states.Groups), Table(keys, [k], at, Gather(hours, at), states)));
+            Add(tables, Info(SynopsisTableKind.Values, SynopsisBucket.Hour, [_keys[k]], states.Groups), keys, [k], at, Gather(hours, at), states);
         }
 
         if (hourCodes.Distinct > 1)
@@ -296,7 +296,7 @@ internal sealed class SynopsisTables : IDisposable
             {
                 (int[] firsts, Accumulators states) = whole[i];
                 int[] at = Gather(deepFirsts, firsts);
-                tables.Add((Info(SynopsisTableKind.Coarse, SynopsisBucket.Object, _keys[..(depth - i)], states.Groups), Table(keys, Positions(depth - i), at, new long[at.Length], states)));
+                Add(tables, Info(SynopsisTableKind.Coarse, SynopsisBucket.Object, _keys[..(depth - i)], states.Groups), keys, Positions(depth - i), at, new long[at.Length], states);
             }
         }
 
@@ -366,26 +366,23 @@ internal sealed class SynopsisTables : IDisposable
     }
 
     /// <summary>
-    /// A table's struct node: the bucket, the keys at <paramref name="positions"/> of <paramref name="keys"/>
-    /// gathered at rows <paramref name="at"/>, the count, then each measure's states.
+    /// Adds table <paramref name="info"/>, its rows a struct node at <see cref="SynopsisTableInfo.RowType"/>:
+    /// the bucket, the keys at <paramref name="positions"/> of <paramref name="keys"/> gathered at rows
+    /// <paramref name="at"/>, the count, then each measure's states.
     /// </summary>
-    private int Table(int keys, int[] positions, int[] at, long[] buckets, Accumulators states)
+    private void Add(
+        List<(SynopsisTableInfo, int)> tables, SynopsisTableInfo info, int keys, int[] positions, int[] at, long[] buckets, Accumulators states)
     {
         CanonicalArena arena = _context.Canonical;
         DType longs = _types.Primitive(PType.I64, Nullability.NonNullable);
-        List<string> names = ["bucket"];
         List<int> fields = [Longs(arena, longs, buckets)];
-        List<DType> dtypes = [longs];
         foreach (int k in positions)
         {
-            names.Add(_schema.GetFieldName(_keys[k]));
             fields.Add(CanonicalFilter.Apply(arena, arena.GetNode(keys).GetFieldIndex(k), at));
-            dtypes.Add(KeyType(_keys[k]));
         }
 
-        states.Emit(arena, longs, _measures, _schema, names, fields, dtypes);
-        DType dtype = _types.Struct([.. names], [.. dtypes], Nullability.NonNullable);
-        return arena.AddStruct(dtype, buckets.Length, Validity.NonNullable, [.. fields]);
+        states.Emit(arena, longs, fields);
+        tables.Add((info, arena.AddStruct(info.RowType(_schema, _types), buckets.Length, Validity.NonNullable, [.. fields])));
     }
 
     /// <summary>The keys of a slice's deepest groups, gathered at their first rows in the order of their keys, copied into the tables' arena.</summary>
@@ -926,21 +923,15 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
-        /// <summary>Appends the count and each measure's state columns.</summary>
-        internal void Emit(CanonicalArena arena, DType longs, int[] measures, DType schema, List<string> names, List<int> fields, List<DType> dtypes)
+        /// <summary>Appends the count and each measure's state columns, in the order <see cref="SynopsisTableInfo.RowType"/> names them.</summary>
+        internal void Emit(CanonicalArena arena, DType longs, List<int> fields)
         {
-            void Column(string name, ReadOnlySpan<long> values)
-            {
-                names.Add(name);
-                fields.Add(Longs(arena, longs, values));
-                dtypes.Add(longs);
-            }
+            void Column(ReadOnlySpan<long> values) => fields.Add(Longs(arena, longs, values));
 
-            Column("count", Count);
+            Column(Count);
             for (int m = 0; m < _kinds.Length; m++)
             {
-                string name = schema.GetFieldName(measures[m]);
-                Column($"{name}.values", _values[m]);
+                Column(_values[m]);
                 if (_kinds[m] == Kind.Float)
                 {
                     long[] m0 = new long[Groups];
@@ -949,23 +940,23 @@ internal sealed class SynopsisTables : IDisposable
                     long[] meta = new long[Groups];
                     long[] high = new long[Groups];
                     PersistedStates.Write(_floats[m], m0, m1, m2, meta, high);
-                    Column($"{name}.sum.m0", m0);
-                    Column($"{name}.sum.m1", m1);
-                    Column($"{name}.sum.m2", m2);
-                    Column($"{name}.sum.meta", meta);
-                    Column($"{name}.sum.high", high);
+                    Column(m0);
+                    Column(m1);
+                    Column(m2);
+                    Column(meta);
+                    Column(high);
                 }
                 else
                 {
                     long[] low = new long[Groups];
                     long[] high = new long[Groups];
                     PersistedStates.Write(_integers[m], low, high);
-                    Column($"{name}.sum.low", low);
-                    Column($"{name}.sum.high", high);
+                    Column(low);
+                    Column(high);
                 }
 
-                Column($"{name}.min", _least[m]);
-                Column($"{name}.max", _greatest[m]);
+                Column(_least[m]);
+                Column(_greatest[m]);
             }
         }
     }

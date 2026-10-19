@@ -118,6 +118,21 @@ internal sealed class SliceReader
     }
 
     /// <summary>
+    /// A reader of the slices of a file its table of contents <paramref name="contents"/> describes, opened
+    /// with no read at all: the contents name the file's schema, its slice table and the chunk directories
+    /// the directory would. Null when they do not cover the schema's columns.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The contents' schema does not decode.</exception>
+    internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, SynopsisContents contents)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        DType schema = contents.SchemaIn(new DTypeArena());
+        return schema.Kind == DTypeKind.Struct && contents.ChunkDirectories.Count == schema.FieldCount
+            ? new SliceReader(source, schema, options ?? VortexReadOptions.Default, contents.Slices, [.. contents.Encodings], contents.ChunkDirectories, contents.Slices.Rows)
+            : null;
+    }
+
+    /// <summary>
     /// The rows of slice <paramref name="slice"/>, as one batch whose first row is the slice's first row
     /// in the file: of every column, or of <paramref name="columns"/>, top-level indices in schema
     /// order. The chunks that hold them are read in one request set, after the chunk directories of the
