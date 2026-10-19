@@ -131,7 +131,27 @@ public sealed partial class SynopsisAnswerTests
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         await using VortexSession session = VortexSession.Create(static options => options.MaxConcurrentReads = 32);
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
+        await using VortexDataset dataset = await DayAsync(store, session);
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        store.Reset();
+        (List<string> on, ScanMetrics metrics) = await GroupsAsync(dataset.Scan<Request>().GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+        Console.Out.Write($"A DAY: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.Rows} rows.\n");
+        Assert.InRange(store.DependentSteps, 1, 2);
+        Assert.True(store.Requests >= 24, $"{store.Requests} requests for 24 hours");
+        Assert.Equal(0, metrics.Rows);
+
+        (List<string> off, _) = await GroupsAsync(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false })
+            .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+        Assert.Equal(off, on);
+    }
+
+    /// <summary>
+    /// A day of requests, a row every ten seconds appended half an hour at a time, compacted into sealed hours of
+    /// slices of a hundred rows, their tables kept whatever they weigh; every object's pages read once.
+    /// </summary>
+    private static async Task<VortexDataset> DayAsync(CountingObjectStore store, VortexSession session)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             Session = session,
             ClusteringKey = [nameof(Request.At)],
@@ -159,17 +179,7 @@ public sealed partial class SynopsisAnswerTests
         }
 
         _ = await dataset.Scan<Request>().Where(r => r.At >= midnight).CountAsync(Ct);
-        inner.Latency = TimeSpan.FromMilliseconds(20);
-        store.Reset();
-        (List<string> on, ScanMetrics metrics) = await GroupsAsync(dataset.Scan<Request>().GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
-        Console.Out.Write($"A DAY: {store.DependentSteps} dependent steps, {store.Requests} requests, {metrics.SynopsisRows} table rows, {metrics.Rows} rows.\n");
-        Assert.InRange(store.DependentSteps, 1, 2);
-        Assert.True(store.Requests >= 24, $"{store.Requests} requests for 24 hours");
-        Assert.Equal(0, metrics.Rows);
-
-        (List<string> off, _) = await GroupsAsync(dataset.Scan<Request>().With(new ScanOptions { UseSynopses = false })
-            .GroupBy(r => r.Service).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
-        Assert.Equal(off, on);
+        return dataset;
     }
 
     /// <summary>

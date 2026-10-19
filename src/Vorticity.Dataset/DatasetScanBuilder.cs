@@ -583,7 +583,8 @@ internal sealed class DatasetScanBuilder
         NewestFirst(objects);
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         int width = _dataset.Session.Options.MaxConcurrentReads;
-        Queue<(PositionedObject Held, Task<AnsweredObject?>? Answer)> ahead = new Queue<(PositionedObject, Task<AnsweredObject?>?)>(Math.Min(width, objects.Count));
+        bool prefetch = _options.Prefetch > 0;
+        Queue<Turn> ahead = new Queue<Turn>(Math.Min(width, objects.Count));
         int next = 0;
         try
         {
@@ -592,12 +593,12 @@ internal sealed class DatasetScanBuilder
                 while (ahead.Count < width && next < objects.Count)
                 {
                     PositionedObject held = objects[next++];
-                    ahead.Enqueue((held, Answer(held, request) is ({ } answer, { } contents, string instant)
+                    ahead.Enqueue(new Turn(held, Answer(held, request) is ({ } answer, { } contents, string instant)
                         ? AnswerObjectAsync(held, answer, contents, instant, stopped.Token)
                         : null));
                 }
 
-                if (!ahead.TryDequeue(out (PositionedObject Held, Task<AnsweredObject?>? Answer) turn))
+                if (!ahead.TryDequeue(out Turn? turn))
                 {
                     break;
                 }
@@ -615,28 +616,107 @@ internal sealed class DatasetScanBuilder
                     continue;
                 }
 
-                await foreach (RecordBatch batch in RowsAsync(turn.Held, 1, stopped.Token).ConfigureAwait(false))
+                // An object read as rows, opened ahead when it could be; the next one read as rows opens ahead
+                // while it is read, one at most, as a scan of rows opens its next object.
+#pragma warning disable VSTHRD003
+                ObjectBatches reading = await (turn.Rows ?? OpenRowsAsync(turn.Held, 1, stopped.Token)).ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                turn.Rows = null;
+                try
                 {
-                    yield return batch;
+                    if (prefetch && Unanswered(ahead) is { Rows: null } following)
+                    {
+                        following.Rows = OpenRowsAsync(following.Held, 2, stopped.Token);
+                    }
+
+                    for (bool more = reading.Any; more; more = await reading.Batches.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        yield return reading.Batches.Current;
+                    }
+                }
+                finally
+                {
+                    await reading.Batches.DisposeAsync().ConfigureAwait(false);
                 }
             }
         }
         finally
         {
-            // The answers read ahead of a consumer that stopped, or of a failure, are nobody's.
+            // The answers and the rows read ahead of a consumer that stopped, or of a failure, are nobody's.
             await stopped.CancelAsync().ConfigureAwait(false);
-            foreach ((_, Task<AnsweredObject?>? answer) in ahead)
+            foreach (Turn left in ahead)
             {
-                if (answer is null)
-                {
-                    continue;
-                }
+                await left.ReleaseAsync().ConfigureAwait(false);
+            }
+        }
+    }
 
+    /// <summary>The first object of <paramref name="ahead"/> its synopsis does not answer, which is read as rows; null for none.</summary>
+    private static Turn? Unanswered(Queue<Turn> ahead)
+    {
+        foreach (Turn turn in ahead)
+        {
+            if (turn.Answer is null)
+            {
+                return turn;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>An object's rows, opened and positioned on their first batch; <paramref name="open"/> is how many objects are open with it.</summary>
+    private async Task<ObjectBatches> OpenRowsAsync(PositionedObject held, int open, CancellationToken cancellationToken)
+    {
+        IAsyncEnumerator<RecordBatch> batches = RowsAsync(held, open, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        try
+        {
+            return new ObjectBatches(batches, await batches.MoveNextAsync().ConfigureAwait(false));
+        }
+        catch
+        {
+            await batches.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// An object of a walk that takes states, in the queue of those read ahead: the answer of its synopsis, started
+    /// when it has one, and its rows, once opened ahead.
+    /// </summary>
+    private sealed class Turn(PositionedObject held, Task<AnsweredObject?>? answer)
+    {
+        internal PositionedObject Held { get; } = held;
+
+        internal Task<AnsweredObject?>? Answer { get; } = answer;
+
+        internal Task<ObjectBatches>? Rows { get; set; }
+
+        /// <summary>Lets go what was read ahead and never delivered: the answer's states, the rows' lease.</summary>
+        internal async ValueTask ReleaseAsync()
+        {
+            if (Answer is { } answer)
+            {
                 try
                 {
+#pragma warning disable VSTHRD003
                     (await answer.ConfigureAwait(false))?.Dispose();
+#pragma warning restore VSTHRD003
                 }
                 catch (Exception) when (answer.IsFaulted || answer.IsCanceled)
+                {
+                }
+            }
+
+            if (Rows is { } rows)
+            {
+                try
+                {
+#pragma warning disable VSTHRD003
+                    await (await rows.ConfigureAwait(false)).Batches.DisposeAsync().ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                }
+                catch (Exception) when (rows.IsFaulted || rows.IsCanceled)
                 {
                 }
             }
