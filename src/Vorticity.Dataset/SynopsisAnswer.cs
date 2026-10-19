@@ -97,7 +97,7 @@ internal sealed record SynopsisAnswer(
         HashSet<int> keyed = [];
         foreach (VortexExpr conjunct in Conjuncts(filter))
         {
-            if (partition is not null && Decided(conjunct, partition) is { } holds)
+            if (partition is not null && PartitionFilter.Decided(conjunct, partition) is { } holds)
             {
                 if (!holds)
                 {
@@ -261,54 +261,6 @@ internal sealed record SynopsisAnswer(
         return parts.Count == 0 && edges.Count > 0
             ? null
             : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded) { Constants = constants };
-    }
-
-    /// <summary>
-    /// What <paramref name="expr"/> is for every row of an object whose partition columns hold <paramref name="values"/>:
-    /// true or false when it reads them alone through comparisons, sets, conjunctions, disjunctions and negations;
-    /// null when it reads another column or anything else, or compares across kinds.
-    /// </summary>
-    private static bool? Decided(VortexExpr expr, IReadOnlyDictionary<string, FilterLiteral> values)
-    {
-        switch (expr)
-        {
-            case ComparisonExpr comparison when comparison.Field.GetType() == typeof(FieldExpr)
-                && values.TryGetValue(comparison.Field.Path, out FilterLiteral value) && comparison.Value.Kind == value.Kind:
-                int order = Keys.KeyCursor.Compare(value, comparison.Value);
-                return comparison.Op switch
-                {
-                    ComparisonOp.Equal => order == 0,
-                    ComparisonOp.NotEqual => order != 0,
-                    ComparisonOp.Less => order < 0,
-                    ComparisonOp.LessOrEqual => order <= 0,
-                    ComparisonOp.Greater => order > 0,
-                    ComparisonOp.GreaterOrEqual => order >= 0,
-                    _ => null,
-                };
-            case InExpr set when set.Field.GetType() == typeof(FieldExpr) && values.TryGetValue(set.Field.Path, out FilterLiteral member):
-                bool found = false;
-                foreach (FilterLiteral candidate in set.Literals)
-                {
-                    if (candidate.Kind != member.Kind && candidate.Kind != FilterLiteralKind.Null)
-                    {
-                        return null;
-                    }
-
-                    found |= candidate.Kind == member.Kind && Keys.KeyCursor.Compare(member, candidate) == 0;
-                }
-
-                return found;
-            case LogicalExpr logical:
-                bool? left = Decided(logical.Left, values);
-                bool? right = Decided(logical.Right, values);
-                return logical.IsAnd
-                    ? left == false || right == false ? false : left == true && right == true ? true : null
-                    : left == true || right == true ? true : left == false && right == false ? false : null;
-            case NotExpr not:
-                return Decided(not.Operand, values) is { } operand ? !operand : null;
-            default:
-                return null;
-        }
     }
 
     /// <summary>

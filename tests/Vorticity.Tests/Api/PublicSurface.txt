@@ -3142,6 +3142,8 @@ Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(Comp
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullable<ulong> = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync(VortexExpr, DateTimeOffset, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate>, DateTimeOffset, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<IndexingResult> IndexAsync(IndexPolicy, IndexingOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveObjectsAsync(IReadOnlyList<DataObject>, CancellationToken = default)

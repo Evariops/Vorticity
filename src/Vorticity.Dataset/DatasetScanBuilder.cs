@@ -504,35 +504,11 @@ internal sealed class DatasetScanBuilder
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(contents, schema, key.InstantPath, request, _filter, instants, _version.Header.Identifiers, PartitionOf(held.Entry, key)) is { } answer
+            && SynopsisAnswer.Of(contents, schema, key.InstantPath, request, _filter, instants, _version.Header.Identifiers, PartitionFilter.ValuesOf(held.Entry, key)) is { } answer
             ? (answer, contents, key.InstantPath)
             : default;
     }
 
-    /// <summary>
-    /// The one value each partition column holds in an object, from its summaries; null without partition columns,
-    /// or when a summary does not say one value.
-    /// </summary>
-    internal static Dictionary<string, FilterLiteral>? PartitionOf(ObjectEntry entry, ClusteringKey key)
-    {
-        if (key.PartitionColumns == 0)
-        {
-            return null;
-        }
-
-        Dictionary<string, FilterLiteral> values = new Dictionary<string, FilterLiteral>(StringComparer.Ordinal);
-        foreach (string path in key.PartitionPaths)
-        {
-            if (!entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax || !column.Min.Equals(column.Max))
-            {
-                return null;
-            }
-
-            values[path] = column.Min;
-        }
-
-        return values;
-    }
 
     /// <summary>
     /// Whether the synopsis of an object the scan covers answers the states it asks: what the version's

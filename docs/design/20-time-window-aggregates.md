@@ -1396,6 +1396,14 @@ retention by up to a period, which is why a period stays below a share of its pa
 ([the length of a period](#54-the-length-of-a-period)). A filter on anything but partition columns is
 a delete, not an expiry.
 
+As built, `ExpireAsync(partition, before)` takes a filter that compares the partition columns with
+values, through comparisons, sets, conjunctions, disjunctions and negations, and refuses any other. The
+version's summaries leave out the partitions the filter refutes, and each object left decides the
+filter by the partition value its entry records. On the test dataset, once the version's pages are in
+hand, expiring one partition's first hour makes one request, the commit, and reads nothing. The
+summary pruner does not yet say "true for every live row" for a delete, and a period's length does
+not yet follow a partition's retention, which no option declares.
+
 ### 12.3 Late rows
 
 A row within the lateness horizon lands in the fresh levels, or in the late level when it is older

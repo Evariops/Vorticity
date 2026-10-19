@@ -180,6 +180,16 @@ columns should have a few values: an append that holds more than `MaxPartitionVa
 default, is refused. A question filtered or grouped on the partition column is still answered from the
 synopses, since each object holds a single value of it.
 
+Each partition then expires on its own schedule, reading no data:
+
+```csharp
+await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", DateTimeOffset.UtcNow.AddDays(-7));
+await dataset.ExpireAsync<Logged>(r => r.Retention == "info", DateTimeOffset.UtcNow.AddDays(-90));
+```
+
+The filter compares partition columns with values, nothing else: a filter on any other column is a
+delete, and `DeleteAsync` is the call for it.
+
 The tables a question reads can stay on the local disk, so that the next question over the same
 objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes
 it may hold:

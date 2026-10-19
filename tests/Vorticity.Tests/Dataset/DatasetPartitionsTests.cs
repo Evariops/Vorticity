@@ -133,13 +133,49 @@ public sealed partial class DatasetPartitionsTests
         Assert.Equal(2 * rows.Count(r => r.Retention == "audit" || r.Bytes < 6), await dataset.Scan<Logged>().Where(r => r.Retention == "audit").CountAsync(Ct));
     }
 
+    /// <summary>
+    /// Expiring one partition's old periods removes its objects before the aligned cutoff, and no other partition's,
+    /// with no read of the store once the version's pages are in hand; a filter on another column, or on a dataset
+    /// without partition columns, is refused.
+    /// </summary>
+    [Fact]
+    public async Task ExpiringAPartitionReadsNoDataObject()
+    {
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        (VortexDataset dataset, _) = await FilledAsync(store, partitions: true);
+        await using (dataset)
+        {
+            DateTimeOffset hour = Noon.AddHours(1);
+            long others = await dataset.Scan<Logged>().Where(r => r.Retention != "debug").CountAsync(Ct);
+            long debugLater = await dataset.Scan<Logged>().Where(r => r.Retention == "debug" && r.At >= hour).CountAsync(Ct);
+            Assert.True(await dataset.Scan<Logged>().Where(r => r.Retention == "debug" && r.At < hour).CountAsync(Ct) > 0);
+            store.Reset();
+            DateTimeOffset applied = await dataset.ExpireAsync<Logged>(r => r.Retention == "debug", Noon.AddMinutes(90), Ct);
+            Console.Out.Write($"EXPIRY: cutoff {applied:HH:mm}, {store.CountOf(ObjectOperation.Read)} reads, {store.Requests} requests.\n");
+            Assert.Equal(hour, applied);
+            Assert.Equal(0, store.CountOf(ObjectOperation.Read));
+            Assert.Equal(0, await dataset.Scan<Logged>().Where(r => r.Retention == "debug" && r.At < hour).CountAsync(Ct));
+            Assert.Equal(debugLater, await dataset.Scan<Logged>().Where(r => r.Retention == "debug").CountAsync(Ct));
+            Assert.Equal(others, await dataset.Scan<Logged>().Where(r => r.Retention != "debug").CountAsync(Ct));
+            await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.ExpireAsync<Logged>(r => r.Service == "api", hour, Ct));
+        }
+
+        await using MemoryObjectStore plainStore = new MemoryObjectStore();
+        (VortexDataset plain, _) = await FilledAsync(plainStore, partitions: false);
+        await using (plain)
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(async () => await plain.ExpireAsync<Logged>(r => r.Retention == "debug", Noon.AddHours(1), Ct));
+        }
+    }
+
     private const int Rows = 16 * 400;
 
     /// <summary>
     /// Two hours and a quarter of rows, every 1.25 s, appended in sixteen parts, the retention cycling row by row, and
     /// compacted until nothing is due: the rows each job rewrote, summed.
     /// </summary>
-    private static async Task<(VortexDataset Dataset, long Rewrites)> FilledAsync(MemoryObjectStore store, bool partitions)
+    private static async Task<(VortexDataset Dataset, long Rewrites)> FilledAsync(Vorticity.IO.IObjectStore store, bool partitions)
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Logged.Schema, Options(partitions), Ct);
         Random random = new Random(71);

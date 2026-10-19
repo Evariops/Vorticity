@@ -916,7 +916,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal async ValueTask<List<WrittenObject>> PartitionedAsync(WrittenObject produced, CancellationToken cancellationToken)
     {
-        if (Key is not { PartitionColumns: > 0 } key || DatasetScanBuilder.PartitionOf(produced.Entry, key) is not null)
+        if (Key is not { PartitionColumns: > 0 } key || key.PartitionOf(produced.Entry.Summaries) is not null)
         {
             return [produced];
         }
@@ -1427,7 +1427,47 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <see cref="DeleteAsync(VortexExpr, CancellationToken)"/>, which opens the objects it touches.
     /// </remarks>
     public ValueTask<DateTimeOffset> ExpireAsync(DateTimeOffset before, CancellationToken cancellationToken = default) =>
-        DatasetExpiry.RunAsync(this, before, cancellationToken);
+        DatasetExpiry.RunAsync(this, null, before, cancellationToken);
+
+    /// <summary>
+    /// Drops, in one commit and reading none of them, every object of the partitions <paramref name="partition"/> keeps
+    /// whose rows all lie before <paramref name="before"/>, aligned down to the start of the period holding it:
+    /// <c>dataset.ExpireAsync&lt;Logged&gt;(r =&gt; r.Retention == "debug", now - TimeSpan.FromDays(7))</c>.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="partition">A filter on the partition columns alone, each compared with values.</param>
+    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The cutoff applied: the start of the period holding <paramref name="before"/>.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns (<see cref="DatasetOptions.PartitionColumns"/>).</exception>
+    /// <exception cref="ArgumentException">The filter reads another column, or reads the partition columns otherwise than compared with values: a delete, not an expiry.</exception>
+    /// <remarks>
+    /// Each partition holds its own periods, so the objects of the partitions the filter keeps hold no row of another,
+    /// and their entries say which partition they hold: nothing is read but the version's pages.
+    /// </remarks>
+    public ValueTask<DateTimeOffset> ExpireAsync<TRecord>(Func<Probe<TRecord>, Predicate> partition, DateTimeOffset before, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        Predicate predicate = partition(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return DatasetExpiry.RunAsync(this, predicate.IsAll || predicate.IsNone ? null : Checked(predicate.Node), before, cancellationToken, removes: !predicate.IsNone);
+    }
+
+    /// <summary>
+    /// As <see cref="ExpireAsync{TRecord}(Func{Probe{TRecord}, Predicate}, DateTimeOffset, CancellationToken)"/>, for a
+    /// caller without a record type.
+    /// </summary>
+    /// <param name="partition">A filter on the partition columns alone, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="before">The instant rows are kept from, at the period's start before it.</param>
+    /// <param name="cancellationToken">Cancels the walk and the commit.</param>
+    /// <returns>The cutoff applied.</returns>
+    /// <exception cref="InvalidOperationException">The dataset declares no periods, or no partition columns.</exception>
+    /// <exception cref="ArgumentException">The filter is not one of the partition columns compared with values.</exception>
+    public ValueTask<DateTimeOffset> ExpireAsync(VortexExpr partition, DateTimeOffset before, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partition);
+        return DatasetExpiry.RunAsync(this, Checked(ToolPaths.Check(Schema, partition)), before, cancellationToken);
+    }
 
     /// <summary>
     /// Changes the rows <paramref name="filter"/> is true for, in one commit: each is read as a
