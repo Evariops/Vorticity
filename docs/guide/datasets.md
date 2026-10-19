@@ -136,7 +136,14 @@ read 15 table rows instead of 6 400 rows. `ScanOptions.UseSynopses = false` read
 synopsis. The scan's metrics count the table rows (`SynopsisRows`) and the rows read at the window's
 edges (`EdgeRows`), and the question's `ExplainAsync()` lists in `States` what each object reads: a
 table and the buckets it folds, the slices read at the edges, or its rows and why. Such a group by
-delivers its groups once the pass has run, rather than streaming.
+delivers its groups once the pass has run, rather than streaming. Three days of a request every five
+seconds, by service over the first two (the `time-windows` sample):
+
+```
+51840 requests over three days in 3 objects
+two days by service, synopses on: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 10 table rows, 0 rows read
+two days by service, synopses off: api 6944, auth 7000, billing 6867, cart 6870, search 6879; 0 table rows, 34560 rows read
+```
 
 A key of a variant column counts as a column too, when it is read strictly as an integer, a text or a
 boolean, and the objects shred it:
@@ -418,4 +425,11 @@ never lend its values to an unrelated column.
 
 ```
 dotnet run -c Release --project samples/Vorticity.Samples -- datasets
+```
+
+The dataset of periods, its synopses, the window asked newest first, the cache and the retentions are
+the `time-windows` sample, and the variant columns the `variants` sample:
+
+```
+dotnet run -c Release --project samples/Vorticity.Samples -- time-windows variants
 ```

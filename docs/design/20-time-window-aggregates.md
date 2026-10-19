@@ -174,7 +174,7 @@ finest grain of time, as the order of the rows themselves, and leaves the rest t
 | edge | the part of a question's window that cuts a time slice | |
 | needle | a question about one rare value, such as every row of one `RequestId` | |
 | lateness horizon | how late a row may arrive after its instant, declared by the application | the retention window |
-| partition column | a column of few values, a tenant or a source, whose rows a dataset of periods keeps and expires apart, every object holding one of its values | the partitions of a group by |
+| partition column | a leading clustering-key column of few values, a tenant, a source or a retention, whose rows a dataset of periods keeps and expires apart, every object holding one of its values | the partitions of a group by |
 | synopsis cache | the synopsis parts of objects, and what leads to them, kept on the machine's disk beyond the life of a process | the session's `SegmentCache` and a handle's page cache, both in memory |
 | round trip | a request whose answer the next request waits for, 10 to 100 ms on an object store | a network round trip inside a region |
 

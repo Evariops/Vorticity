@@ -791,8 +791,9 @@ one period, so none straddles the cutoff, and an object of level 0 that does sta
 cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
 read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
 
-A dataset of periods may also declare partition columns (`DatasetOptions.PartitionColumns`), a tenant
-or a source whose rows are kept and expired apart. An append splits its rows by their values, so every
+A dataset of periods may also declare its first clustering-key columns partition columns
+(`DatasetOptions.PartitionColumns`, a count), a tenant, a source or a retention whose rows are kept and
+expired apart. An append splits its rows by their values, so every
 object holds one value of each partition column, which its entry records as exact summaries even for
 a text column, which file statistics would not bound. Compaction plans each partition's periods apart,
 so no job mixes two, and an append that would hold more values than `MaxPartitionValues` is refused.

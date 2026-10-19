@@ -392,3 +392,9 @@ columns: see [scan-a-table.md](scan-a-table.md) and [read-rows.md](read-rows.md)
 ```
 dotnet run -c Release --project samples/Vorticity.Samples -- records
 ```
+
+The variant event above, and a dataset whose objects shred its attributes, are the `variants` sample:
+
+```
+dotnet run -c Release --project samples/Vorticity.Samples -- variants
+```

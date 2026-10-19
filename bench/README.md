@@ -358,6 +358,22 @@ A red gate is not believed on the first run. The spread from run to run reaches 
 and a run can come out red with no byte changed. Replay it three times: two reds out of three is a
 regression, and anything else is noise.
 
+## The benches of datasets by periods
+
+The query bench (`bench/Vorticity.Benchmarks.Queries`, the `vortex-queries` runner) holds the benches
+that measure a dataset compacted by periods, on generated data at a fraction of the design's example
+([20-time-window-aggregates.md](../docs/design/20-time-window-aggregates.md)). Each counts requests,
+round trips and rows rather than relying on time alone, since the counts are what holds from one
+machine to another. Run each with `DOTNET_TieredCompilation=0`.
+
+| mode | what it measures | a run |
+|---|---|---|
+| `--micro generator` | a minute of generated requests, and the runs of each synopsis column against the design's figures | seconds |
+| `--micro questions [--hours 24] [--rate 20] [--latency 30] [--budget 100]` | the design's example questions over generated requests and logs, cold and warm, from the synopses and from the rows, with each one's plan | about 10 minutes at the defaults, nearly all of it waiting for the rows |
+| `--micro facets` | the worst case of many facets, spans with a dozen repeating columns and a route under them | under a minute |
+| `--micro lifecycle [--style periods\|leveled] [--period-hours 1] [--fanout F] [--writers 4] [--late on\|off] [--deletes N\|off]` | the rows and bytes each row's jobs rewrite, the seals, the jobs abandoned, and the objects a window covers | one to two minutes |
+| `--micro cachetrace` | the regions a run of questions asks of the synopsis cache, replayed through three eviction policies, then the reads a question sends to the store at several capacities | about 25 seconds |
+
 ## Choosing the synopsis cache's eviction policy
 
 The synopsis cache keeps on the local disk the regions a question reads of a dataset's objects without
