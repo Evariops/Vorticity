@@ -589,7 +589,7 @@ internal static class DatasetCompactor
             }
 
             plans[(level, period)] = new ObjectPlan(
-                new SliceTable(table.Unit, table.Slices, table.Order, SynopsisPaths(schema.DType, shredded)),
+                new SliceTable(table.Unit, table.Slices, table.Order, SynopsisPaths(schema.DType, variants, paths, shredded)),
                 shredded,
                 chunks,
                 directories);
@@ -599,11 +599,15 @@ internal static class DatasetCompactor
     }
 
     /// <summary>
-    /// The paths an object's synopsis may count: each key its variant columns shred as one class, in the
-    /// order of the columns and of their keys. The first slice places those whose values repeat in the
-    /// object's order, and the synopsis sums the numeric ones that do not.
+    /// The paths an object's synopsis may count. First each key its variant columns shred as one class, in
+    /// the order of the columns and of their keys: the first slice places those whose values repeat in the
+    /// object's order, and the synopsis sums the numeric ones that do not. Then, per column, the top-level
+    /// keys it leaves in the residual that a table could answer for less than parsing their rows, in their
+    /// class most of their values hold, those held most first, as many as read into columns of their own
+    /// take no more memory than the column's values: the synopsis counts their values, or sums them.
     /// </summary>
-    private static List<SynopsisPath> SynopsisPaths(Vorticity.Types.DType schema, ImmutableDictionary<string, VariantShredding> shredded)
+    private static List<SynopsisPath> SynopsisPaths(
+        Vorticity.Types.DType schema, int[] variants, PathCensus[] censuses, ImmutableDictionary<string, VariantShredding> shredded)
     {
         List<SynopsisPath> paths = [];
         for (int field = 0; field < schema.FieldCount; field++)
@@ -620,8 +624,52 @@ internal static class DatasetCompactor
             }
         }
 
+        for (int v = 0; v < variants.Length; v++)
+        {
+            PathCensus census = censuses[v];
+            shredded.TryGetValue(schema.GetFieldName(variants[v]), out VariantShredding? plan);
+            List<(string Key, VariantClass Class, long Held)> residual = [];
+            foreach ((string key, PathCensus.PathCount count) in census.Root.Keys)
+            {
+                if (plan is not null && plan.Kind == VariantShreddingKind.Object && plan.IndexOf(System.Text.Encoding.UTF8.GetBytes(key)) >= 0)
+                {
+                    continue;
+                }
+
+                VariantClass best = VariantClass.Integer;
+                foreach (VariantClass @class in (ReadOnlySpan<VariantClass>)[VariantClass.Double, VariantClass.String, VariantClass.Boolean])
+                {
+                    best = count.Of(@class) > count.Of(best) ? @class : best;
+                }
+
+                // A question over the key parses at least its occurrences' bytes and groups its rows; the
+                // smallest table costs its bytes. Past that, a table may answer it for less.
+                long held = count.Of(best);
+                SynopsisPrices prices = SynopsisPrices.Default;
+                if (held * ((ShreddingChoice.ResidualBytesOf(best) * prices.ByteSeconds) + prices.RowSeconds) > SmallestTableBytes * prices.ByteSeconds)
+                {
+                    residual.Add((key, best, held));
+                }
+            }
+
+            // A column of a path takes up to 16 bytes a row, its value or its view: no more paths than the
+            // variant column takes in memory a row, its value's bytes and the views of its metadata and value.
+            long room = census.Rows == 0 ? 0 : ((census.ValueBytes / census.Rows) + 32) / 16;
+            foreach ((string key, VariantClass @class, long _) in residual.OrderByDescending(r => r.Held).ThenBy(r => r.Key, StringComparer.Ordinal).Take((int)Math.Min(room, int.MaxValue)))
+            {
+                paths.Add(new SynopsisPath(variants[v], key, @class, Residual: true));
+            }
+        }
+
         return paths;
     }
+
+    /// <summary>
+    /// The bytes of the smallest synopsis table: one row, three measures, as the write bench measured it
+    /// (`vortex-queries --micro slicebytes`, 1 452 bytes). A table has no fewer, so a path whose question
+    /// costs less than reading them gains nothing from one.
+    /// </summary>
+    private const long SmallestTableBytes = 1_452;
 
     /// <summary>The top-level variant columns of <paramref name="schema"/>.</summary>
     private static int[] VariantColumns(Vorticity.Types.DType schema)
@@ -927,7 +975,7 @@ internal static class DatasetCompactor
 
         private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken)
         {
-            _synopsis?.AddSlice(sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes, _sorter.PathColumns);
+            _synopsis?.AddSlice(sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes, _sorter.PathColumns, _sorter.CountedPaths);
             _slice++;
             return _draft!.Writer.WriteBatchAsync(sorted, cancellationToken);
         }

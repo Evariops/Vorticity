@@ -118,20 +118,26 @@ internal sealed class SynopsisTables : IDisposable
     /// <summary>
     /// Counts the slice starting at <paramref name="start"/>, its rows in <paramref name="sorted"/>, sorted by
     /// the entries <paramref name="order"/> names, whose codes in the sorted order <paramref name="codes"/>
-    /// holds, the columns of its paths in <paramref name="paths"/>: the states of its groups at every depth,
-    /// and the keys of its deepest groups.
+    /// holds, the columns of its paths in <paramref name="paths"/>, the paths left in the residual whose
+    /// values it counts <paramref name="counted"/>: the states of its groups at every depth, the keys of its
+    /// deepest groups, and the states of each counted path's values.
     /// </summary>
-    internal void AddSlice(RecordBatch sorted, long start, IReadOnlyList<int> order, IReadOnlyList<int[]> codes, IReadOnlyList<int>? paths = null)
+    internal void AddSlice(
+        RecordBatch sorted, long start, IReadOnlyList<int> order, IReadOnlyList<int[]> codes, IReadOnlyList<int>? paths = null,
+        IReadOnlyList<int>? counted = null)
     {
         _pathColumns = paths ?? [];
         if (_slices.Count == 0)
         {
-            // The numeric paths the order does not place are measures, summed as the numbers of the schema are.
+            // The numeric paths the order does not place, and whose values are not counted, are measures,
+            // summed as the numbers of the schema are.
+            _counted = [.. counted ?? []];
             List<int> measures = [.. _measures];
             for (int p = 0; p < _paths.Count; p++)
             {
                 if (_paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double
-                    && !Contains(order, SynopsisPath.Entry(p)) && p < _pathColumns.Count && _pathColumns[p] >= 0)
+                    && !Contains(order, SynopsisPath.Entry(p)) && !Contains(_counted, SynopsisPath.Entry(p))
+                    && p < _pathColumns.Count && _pathColumns[p] >= 0)
                 {
                     measures.Add(SynopsisPath.Entry(p));
                 }
@@ -219,7 +225,7 @@ internal sealed class SynopsisTables : IDisposable
             }
         }
 
-        _slices.Add(new Slice(start, depth == 0 ? -1 : Keys(sorted, firsts[depth], places[depth]), counts[depth], states, keyRows));
+        _slices.Add(new Slice(start, depth == 0 ? -1 : Keys(sorted, firsts[depth], places[depth]), counts[depth], states, keyRows, Counted(sorted)));
     }
 
     /// <summary>
@@ -232,7 +238,13 @@ internal sealed class SynopsisTables : IDisposable
         List<(SynopsisTableInfo, int)> tables = [];
         int depth = _keys.Length;
         int first = _measures.Length > 0 ? 0 : 1;
-        if (_slices.Count == 0 || first > depth)
+        if (_slices.Count == 0)
+        {
+            return tables;
+        }
+
+        CountedTables(tables);
+        if (first > depth)
         {
             return tables;
         }
@@ -341,6 +353,45 @@ internal sealed class SynopsisTables : IDisposable
         }
 
         return tables;
+    }
+
+    /// <summary>
+    /// The value counts per hour of each path left in the residual whose values repeat: every slice's values
+    /// and their states, coded across the object, sorted by hour and value, and merged.
+    /// </summary>
+    private void CountedTables(List<(SynopsisTableInfo, int)> tables)
+    {
+        for (int c = 0; c < _counted.Length; c++)
+        {
+            int total = 0;
+            int[] nodes = new int[_slices.Count];
+            List<Accumulators> parts = new List<Accumulators>(_slices.Count);
+            for (int s = 0; s < _slices.Count; s++)
+            {
+                nodes[s] = _slices[s].Counted[c].Values;
+                parts.Add(_slices[s].Counted[c].States);
+                total += _slices[s].Counted[c].States.Groups;
+            }
+
+            if (total == 0)
+            {
+                continue;
+            }
+
+            long[] hours = new long[total];
+            int at = 0;
+            foreach (Slice slice in _slices)
+            {
+                hours.AsSpan(at, slice.Counted[c].States.Groups).Fill(TimeSlicer.Floor(slice.Start, _unit, SliceWidth.Hour));
+                at += slice.Counted[c].States.Groups;
+            }
+
+            CanonicalArena arena = _context.Canonical;
+            int values = nodes.Length == 1 ? nodes[0] : CanonicalConcat.Concat(_context.Decode, CountedType(_counted[c]), total, nodes);
+            (int[] Codes, int Distinct) codes = SliceSort.CodesOfColumn(arena, arena.GetNode(values).GetFieldIndex(0), total);
+            (int[] firsts, Accumulators states) = Levels([Dense(hours), codes], [2], Accumulators.Concat(_kinds, parts))[0];
+            Add(tables, Info(SynopsisTableKind.Values, SynopsisBucket.Hour, [_counted[c]], states.Groups), values, [0], firsts, Gather(hours, firsts), states);
+        }
     }
 
     /// <summary>The arena the tables' nodes lie in.</summary>
@@ -684,7 +735,58 @@ internal sealed class SynopsisTables : IDisposable
     /// A slice counted: its start, the keys of its deepest groups (a struct node of the tables' arena, -1
     /// without keys) and how many, each depth's states, and where each depth's groups find their keys.
     /// </summary>
-    private sealed record Slice(long Start, int Keys, int Deep, Accumulators[] States, int[][] KeyRows);
+    private sealed record Slice(long Start, int Keys, int Deep, Accumulators[] States, int[][] KeyRows, (int Values, Accumulators States)[] Counted);
+
+    /// <summary>
+    /// Each counted path's values in the slice <paramref name="sorted"/>, in their order, and the states of the
+    /// rows holding each: the rows that do not hold the path are left out. The values are a struct node of
+    /// one field, copied into the tables' arena.
+    /// </summary>
+    private (int Values, Accumulators States)[] Counted(RecordBatch sorted)
+    {
+        (int, Accumulators)[] counted = new (int, Accumulators)[_counted.Length];
+        CanonicalArena arena = sorted.Arena;
+        int rows = sorted.RowCount;
+        for (int c = 0; c < counted.Length; c++)
+        {
+            int column = _pathColumns[SynopsisPath.Place(_counted[c])];
+            (int[] codes, int distinct) = SliceSort.CodesOfColumn(arena, column, rows);
+
+            // A null codes after every value: a group of its own, folded, then left out.
+            int[] first = new int[distinct];
+            first.AsSpan().Fill(-1);
+            for (int row = 0; row < rows; row++)
+            {
+                if (codes[row] < distinct && first[codes[row]] < 0)
+                {
+                    first[codes[row]] = row;
+                }
+            }
+
+            Accumulators states = Fold(arena, sorted.RootIndex, rows, codes, distinct + 1).Prefix(distinct);
+            int values = CanonicalFilter.Apply(arena, column, first);
+            int node = arena.AddStruct(CountedType(_counted[c]), distinct, Validity.NonNullable, [values]);
+            counted[c] = (_context.Canonical.CopyFrom(arena, node), states);
+        }
+
+        return counted;
+    }
+
+    /// <summary>The struct of one field that holds a counted path's values.</summary>
+    private DType CountedType(int entry)
+    {
+        if (!_countedTypes.TryGetValue(entry, out DType dtype))
+        {
+            _countedTypes[entry] = dtype = _types.Struct([SynopsisTableInfo.NameOf(entry, _schema, _paths)], [KeyType(entry)], Nullability.NonNullable);
+        }
+
+        return dtype;
+    }
+
+    private readonly Dictionary<int, DType> _countedTypes = [];
+
+    // The paths left in the residual whose values the tables count, which the first slice settles.
+    private int[] _counted = [];
 
     /// <summary>How a measure's states are kept: an exact signed or unsigned integer sum, or a float sum.</summary>
     private enum Kind : byte
@@ -737,6 +839,29 @@ internal sealed class SynopsisTables : IDisposable
         internal int Groups => Count.Length;
 
         internal long[] Count { get; }
+
+        /// <summary>The states of the first <paramref name="count"/> groups.</summary>
+        internal Accumulators Prefix(int count)
+        {
+            Accumulators head = new Accumulators(_kinds, count);
+            Count.AsSpan(0, count).CopyTo(head.Count);
+            for (int m = 0; m < _kinds.Length; m++)
+            {
+                _values[m].AsSpan(0, count).CopyTo(head._values[m]);
+                _least[m].AsSpan(0, count).CopyTo(head._least[m]);
+                _greatest[m].AsSpan(0, count).CopyTo(head._greatest[m]);
+                if (_kinds[m] == Kind.Float)
+                {
+                    _floats[m].AsSpan(0, count).CopyTo(head._floats[m]);
+                }
+                else
+                {
+                    _integers[m].AsSpan(0, count).CopyTo(head._integers[m]);
+                }
+            }
+
+            return head;
+        }
 
         /// <summary>The states of <paramref name="parts"/>, one after another.</summary>
         internal static Accumulators Concat(Kind[] kinds, List<Accumulators> parts)

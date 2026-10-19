@@ -86,6 +86,206 @@ public sealed partial class SynopsisPathTests
         Assert.True(compared >= 2, $"only {compared} tables to compare");
     }
 
+    /// <summary>
+    /// Calls whose attributes hold a route on every row, a flag on one row in three and a count of retries on
+    /// one in four: the objects shred the route and leave the flag and the retries in the residual. The sealed
+    /// hour counts the flag's values per hour, as many as the parsed rows that hold each, and sums the
+    /// retries over the rows that hold them, in its value counts as in its other tables.
+    /// </summary>
+    [Fact]
+    public async Task APathLeftInTheResidualIsCountedFromTheParsedRows()
+    {
+        Random random = new Random(11);
+        Pathed[] rows = [.. Enumerable.Range(0, 6_400).Select(i =>
+        {
+            List<(string, Variant)> fields = [("route", Variant.From($"/r/{random.Next(9)}"))];
+            if (i % 3 == 0)
+            {
+                fields.Add(("flag", Variant.From(random.Next(2) == 0 ? "on" : "off")));
+            }
+
+            if (i % 4 == 0)
+            {
+                fields.Add(("retries", Variant.From(random.NextInt64(1_000_000))));
+            }
+
+            return new Pathed(Noon.AddSeconds(i * 1.25), Variant.Object([.. fields]));
+        })];
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await SealedAsync(store, Pathed.Schema, async draft =>
+        {
+            foreach (Pathed[] part in rows.Chunk(400))
+            {
+                await draft(writer => writer.WriteAsync<Pathed>(part, Ct));
+            }
+        });
+
+        await using ObjectLease lease = await dataset.RentAsync(await FirstPeriodAsync(dataset), Ct);
+        SliceTable slices = (await SliceTable.ReadAsync(lease.File, Ct))!;
+        int attributes = lease.File.DType.IndexOfField(nameof(Pathed.Attributes));
+        List<SynopsisPath> paths = [.. slices.Paths];
+        int flag = paths.IndexOf(new SynopsisPath(attributes, "flag", VariantClass.String, Residual: true));
+        int retries = paths.IndexOf(new SynopsisPath(attributes, "retries", VariantClass.Integer, Residual: true));
+        Assert.True(flag >= 0 && retries >= 0, string.Join(", ", paths));
+        Assert.DoesNotContain(SynopsisPath.Entry(flag), slices.Order);
+
+        // What the parsed rows hold: per flag, the rows, and the retries' count and sum.
+        List<Pathed> stored = await lease.File.Scan<Pathed>().ToRecordsAsync(Ct).ToListAsync(Ct);
+        Dictionary<string, (long Rows, long Retries, long Sum)> expected = [];
+        foreach (Pathed row in stored)
+        {
+            if (row.Attributes["flag"]?.AsString() is not { } value)
+            {
+                continue;
+            }
+
+            long? count = row.Attributes["retries"]?.AsInt64();
+            (long seen, long held, long sum) = expected.GetValueOrDefault(value);
+            expected[value] = (seen + 1, held + (count is null ? 0 : 1), sum + (count ?? 0));
+        }
+
+        using SynopsisTableSet tables = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+        (SynopsisTableInfo info, int node) = Assert.Single(tables.Tables, t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)]));
+        Assert.Contains(SynopsisPath.Entry(retries), info.Measures);
+        int measure = Array.IndexOf(info.Measures, SynopsisPath.Entry(retries));
+        CanonicalNode table = tables.Arena.GetNode(node);
+        Dictionary<string, (long Rows, long Retries, long Sum)> counted = [];
+        for (int row = 0; row < info.Rows; row++)
+        {
+            // The bucket, the flag, the count, then each measure's values, two words of its sum, least and greatest.
+            int states = 3 + (5 * measure);
+            long low = ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(states + 1))[row];
+            counted[Encoding.UTF8.GetString(ColumnData.Bytes(tables.Arena, table.GetFieldIndex(1), row))] = (
+                ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(2))[row],
+                ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(states))[row],
+                low);
+        }
+
+        Assert.Equal(expected.OrderBy(e => e.Key, StringComparer.Ordinal), counted.OrderBy(e => e.Key, StringComparer.Ordinal));
+    }
+
+    /// <summary>
+    /// A schedule of appends in time order, deletes of a status and compactions over two hours and a half:
+    /// at every version, each object that counts the flag left in the residual counts, per hour, the rows of
+    /// its own that hold each value, those a delete only marked included, and sums their retries.
+    /// </summary>
+    [Fact]
+    public async Task AScheduleCountsTheResidualPathsAtEveryVersion()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Tagged.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Tagged.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
+        }, Ct);
+        Random random = new Random(13);
+        DateTimeOffset at = Noon;
+        HashSet<UInt128> seen = [];
+        int checkedObjects = 0;
+        for (int round = 0; round < 60; round++)
+        {
+            Tagged[] rows = [.. Enumerable.Range(0, 100 + random.Next(150)).Select(i =>
+            {
+                at = at.AddSeconds(1 + random.Next(2));
+                List<(string, Variant)> fields = [("route", Variant.From($"/r/{random.Next(5)}"))];
+                if (random.Next(3) == 0)
+                {
+                    fields.Add(("flag", Variant.From(random.Next(2) == 0 ? "on" : "off")));
+                }
+
+                if (random.Next(4) == 0)
+                {
+                    fields.Add(("retries", Variant.From(random.NextInt64(1_000))));
+                }
+
+                return new Tagged(at, 200 + random.Next(20), Variant.Object([.. fields]));
+            })];
+            await using (ObjectDraft draft = dataset.StartObject())
+            {
+                await draft.Writer.WriteAsync<Tagged>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            if (random.Next(10) == 0)
+            {
+                await dataset.DeleteAsync(VortexExpr.Parse($"Status = {200 + random.Next(20)}"), Ct);
+            }
+
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, Fanout = 3 }, Ct) is not null)
+            {
+            }
+
+            checkedObjects += await ResidualCountsAsync(dataset, seen);
+        }
+
+        Assert.True(checkedObjects > 2, $"only {checkedObjects} objects counted the flag");
+    }
+
+    /// <summary>
+    /// Every object not seen before that counts the flag in its residual: its value counts per hour equal what
+    /// its own rows hold. Returns how many it checked.
+    /// </summary>
+    private static async Task<int> ResidualCountsAsync(VortexDataset dataset, HashSet<UInt128> seen)
+    {
+        int checkedObjects = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+            {
+                ObjectEntry stored = ObjectEntry.FromBytes(entry.Value.Span);
+                if (!seen.Add(stored.Uid))
+                {
+                    continue;
+                }
+
+                await using ObjectLease lease = await dataset.RentAsync(stored, Ct);
+                if (await SliceTable.ReadAsync(lease.File, Ct) is not { } slices
+                    || slices.Paths.ToList().FindIndex(p => p.Key == "flag" && p.Residual) is not (>= 0 and var flag))
+                {
+                    continue;
+                }
+
+                using SynopsisTableSet tables = await SynopsisTableInfo.ReadAsync(lease.File, Ct);
+                if (tables.Tables.FirstOrDefault(t => t.Table.Kind == SynopsisTableKind.Values && t.Table.Keys.SequenceEqual([SynopsisPath.Entry(flag)])) is not
+                    { Table: { } info, Node: int node })
+                {
+                    continue;
+                }
+
+                // The rows of each slice, and the hour of its start.
+                List<Tagged> rows = await lease.File.Scan<Tagged>().ToRecordsAsync(Ct).ToListAsync(Ct);
+                Dictionary<(long, string), long> expected = [];
+                foreach (TimeSlice slice in slices.Slices)
+                {
+                    long hour = TimeSlicer.Floor(slice.Start, slices.Unit, SliceWidth.Hour);
+                    foreach (Tagged row in rows.GetRange((int)slice.FirstRow, (int)slice.Rows))
+                    {
+                        if (row.Attributes["flag"]?.AsString() is { } value)
+                        {
+                            expected[(hour, value)] = expected.GetValueOrDefault((hour, value)) + 1;
+                        }
+                    }
+                }
+
+                CanonicalNode table = tables.Arena.GetNode(node);
+                Dictionary<(long, string), long> counted = [];
+                for (int row = 0; row < info.Rows; row++)
+                {
+                    long hour = ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(0))[row];
+                    string value = Encoding.UTF8.GetString(ColumnData.Bytes(tables.Arena, table.GetFieldIndex(1), row));
+                    counted[(hour, value)] = ColumnData.Values<long>(tables.Arena, table.GetFieldIndex(2))[row];
+                }
+
+                Assert.Equal(expected.OrderBy(e => e.Key), counted.OrderBy(e => e.Key));
+                checkedObjects++;
+            }
+        }
+
+        return checkedObjects;
+    }
+
     /// <summary>A dataset of periods of an hour with a budget as large as the data, written by <paramref name="write"/>, then compacted until its first hour is sealed.</summary>
     private static async Task<VortexDataset> SealedAsync(
         MemoryObjectStore store, VortexSchema schema, Func<Func<Func<VortexFileWriter, ValueTask>, Task>, Task> write)
@@ -148,4 +348,7 @@ public sealed partial class SynopsisPathTests
 
     [VortexRecord]
     public partial record struct Pathed(DateTimeOffset At, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct Tagged(DateTimeOffset At, long Status, Variant Attributes);
 }

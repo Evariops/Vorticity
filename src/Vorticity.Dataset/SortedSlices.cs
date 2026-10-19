@@ -83,6 +83,14 @@ internal sealed class SortedSlices : IDisposable
     // Which of the table's paths each slice reads, once the first slice settled the order; every one before.
     private bool[]? _wanted;
 
+    /// <summary>
+    /// The paths left in the residual whose values repeat, which the first slice found: the synopsis counts
+    /// their values per hour rather than sort by them.
+    /// </summary>
+    internal IReadOnlyList<int> CountedPaths => _counted;
+
+    private readonly List<int> _counted = [];
+
     /// <summary>Takes the next rows in time order, writing each slice they complete through <paramref name="write"/>.</summary>
     internal async ValueTask AppendAsync(RecordBatch rows, Func<RecordBatch, CancellationToken, ValueTask> write, CancellationToken cancellationToken)
     {
@@ -149,7 +157,7 @@ internal sealed class SortedSlices : IDisposable
             _wanted = new bool[_table.Paths.Count];
             for (int p = 0; p < _wanted.Length; p++)
             {
-                _wanted[p] = _order.Contains(SynopsisPath.Entry(p))
+                _wanted[p] = _order.Contains(SynopsisPath.Entry(p)) || _counted.Contains(SynopsisPath.Entry(p))
                     || _table.Paths[p].Class is Types.Variants.VariantClass.Integer or Types.Variants.VariantClass.Double;
             }
         }
@@ -293,7 +301,8 @@ internal sealed class SortedSlices : IDisposable
         for (int p = 0; p < paths.Length; p++)
         {
             // A path whose values repeat twice on average among the rows that hold it, as a column's must;
-            // a null codes after every value, so the rows held are those coded below the distinct count.
+            // a null codes after every value, so the rows held are those coded below the distinct count. A
+            // path left in the residual keys its value counts instead, since its runs could not be read.
             (int[] Codes, int Distinct) values = SliceSort.CodesOfColumn(arena, paths[p], rows);
             long held = 0;
             foreach (int code in values.Codes)
@@ -303,6 +312,12 @@ internal sealed class SortedSlices : IDisposable
 
             if (values.Distinct > 0 && values.Distinct * 2L <= held)
             {
+                if (_table.Paths[p].Residual)
+                {
+                    _counted.Add(SynopsisPath.Entry(p));
+                    continue;
+                }
+
                 entries.Add(SynopsisPath.Entry(p));
                 candidates.Add(values);
             }

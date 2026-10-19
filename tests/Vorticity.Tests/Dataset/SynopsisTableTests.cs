@@ -15,6 +15,7 @@ using Vorticity.Arrays;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
 using Vorticity.Types;
+using Vorticity.Types.Variants;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -295,7 +296,7 @@ public sealed partial class SynopsisTableTests
             return 0;
         }
 
-        Kind[] kinds = Kinds(file.DType, tables[0].Info.Measures);
+        Kind[] kinds = Kinds(file.DType, tables[0].Info.Measures, slices.Paths);
         long BucketOf(long start, SynopsisBucket bucket) => bucket switch
         {
             SynopsisBucket.Slice => start,
@@ -318,7 +319,15 @@ public sealed partial class SynopsisTableTests
                 counted[row.Bucket] = counted.GetValueOrDefault(row.Bucket) + row.Count;
             }
 
-            Assert.Equal(expected.OrderBy(s => s.Key), counted.OrderBy(c => c.Key));
+            // A path left in the residual counts the rows that hold it only.
+            if (table.Keys.Any(k => SynopsisPath.Names(k) && slices.Paths[SynopsisPath.Place(k)].Residual))
+            {
+                Assert.All(counted, c => Assert.InRange(c.Value, 0, expected.GetValueOrDefault(c.Key)));
+            }
+            else
+            {
+                Assert.Equal(expected.OrderBy(s => s.Key), counted.OrderBy(c => c.Key));
+            }
 
             // Its rows in the order of their bucket then their keys, each combination once.
             Assert.Equal(Show(Merge(rows, static row => row.Bucket, [.. Enumerable.Range(0, table.Keys.Length)], kinds), kinds), Show(rows, kinds));
@@ -342,10 +351,11 @@ public sealed partial class SynopsisTableTests
     private static async Task<List<(SynopsisTableInfo Info, List<TableRow> Rows)>> TablesAsync(VortexFile file)
     {
         using SynopsisTableSet set = await SynopsisTableInfo.ReadAsync(file, Ct);
+        IReadOnlyList<SynopsisPath> paths = (await SliceTable.ReadAsync(file, Ct))?.Paths ?? [];
         List<(SynopsisTableInfo, List<TableRow>)> tables = [];
         foreach ((SynopsisTableInfo info, int node) in set.Tables)
         {
-            tables.Add((info, Read(set.Arena, node, info, Kinds(file.DType, info.Measures))));
+            tables.Add((info, Read(set.Arena, node, info, Kinds(file.DType, info.Measures, paths))));
         }
 
         return tables;
@@ -535,8 +545,13 @@ public sealed partial class SynopsisTableTests
         _ => key.ToString()!,
     };
 
-    private static Kind[] Kinds(DType schema, int[] measures) => [.. measures.Select(m =>
+    private static Kind[] Kinds(DType schema, int[] measures, IReadOnlyList<SynopsisPath>? paths = null) => [.. measures.Select(m =>
     {
+        if (SynopsisPath.Names(m))
+        {
+            return paths![SynopsisPath.Place(m)].Class == VariantClass.Double ? Kind.Float : Kind.Signed;
+        }
+
         PType ptype = Storage(schema.GetField(m)).PType;
         return ptype.IsFloat() ? Kind.Float : ptype.IsUnsignedInteger() ? Kind.Unsigned : Kind.Signed;
     })];

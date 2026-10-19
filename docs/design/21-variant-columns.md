@@ -737,6 +737,16 @@ values takes 195 ns a row, the shapes' walk 101 of them, which one walk for both
 (`vortex-queries --micro shredwrite`). After the first slice, only the paths the order places and the
 numeric ones are read.
 
+The keys a column leaves in the residual join the paths when a table could answer a question on them for
+less than parsing their rows. That question reads at least its occurrences' bytes and groups its rows,
+and the smallest table holds 1 452 bytes, so a text key needs about 370 occurrences in the object.
+Those held most come first, as many as their columns, up to 16 bytes a row each, fit in what the variant
+column takes in memory a row. A residual path never sorts the slices, since its runs could not be read.
+The first slice counts the values of those whose values repeat: a table per hour of each value, its rows
+and the states of every measure, over the rows that hold the path. The numeric ones whose values do not
+repeat are summed as measures. At every version of a schedule of appends, deletes and compactions, each
+object's value counts are the rows of its own that hold each value (`SynopsisPathTests`).
+
 ### 6.3 Typed questions
 
 A question asks a path for one type: `AsInt64()`, `AsString()`. Under strict types, a row whose value

@@ -179,8 +179,9 @@ public sealed partial class ShreddedDatasetTests
             await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(leaf.Value.Span), Ct);
             int attributes = lease.File.DType.IndexOfField(nameof(Hosted.Attributes));
             SliceTable table = (await SliceTable.ReadAsync(lease.File, Ct))!;
-            // The shape first, then the route, a shredded key of nine values, then the host.
-            Assert.Equal([new SynopsisPath(attributes, "route", Vorticity.Types.Variants.VariantClass.String)], table.Paths);
+            // The shape first, then the route, a shredded key of nine values, then the host; the keys left in
+            // the residual are counted, never sorted by.
+            Assert.Equal([new SynopsisPath(attributes, "route", Vorticity.Types.Variants.VariantClass.String)], table.Paths.Where(p => !p.Residual));
             Assert.Equal([-attributes - 1, SynopsisPath.Entry(0), lease.File.DType.IndexOfField(nameof(Hosted.Host))], table.Order);
 
             // In every slice, the rows of one shape lie together: a route, or none.

@@ -36,6 +36,9 @@ internal sealed class SliceTable
     // object's synopsis paths after the order, which its entries from SynopsisPath.Base name.
     private const byte Version = 4;
     private const byte ShapesVersion = 3;
+
+    // A path's class word: the class, and above the classes whether the path lies in the residual.
+    private const uint ResidualFlag = 0x100;
     private const byte OrderVersion = 2;
     private const byte FirstVersion = 1;
 
@@ -146,7 +149,9 @@ internal sealed class SliceTable
                 writer.WriteVarint((ulong)path.Field);
                 writer.WriteVarint((ulong)key.Length);
                 writer.WriteRawBytes(key);
-                writer.WriteVarint((byte)path.Class);
+
+                // The class, and whether the path lies in the residual in the bit above the classes'.
+                writer.WriteVarint((byte)path.Class | (path.Residual ? ResidualFlag : 0u));
             }
 
             return writer.WrittenSpan.ToArray();
@@ -222,13 +227,14 @@ internal sealed class SliceTable
                 {
                     int field = checked((int)reader.ReadVarint());
                     string key = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
-                    ulong @class = reader.ReadVarint();
-                    if (!Enum.IsDefined((Types.Variants.VariantClass)(byte)Math.Min(@class, byte.MaxValue)))
+                    ulong word = reader.ReadVarint();
+                    ulong @class = word & ~(ulong)ResidualFlag;
+                    if (@class > byte.MaxValue || !Enum.IsDefined((Types.Variants.VariantClass)(byte)@class))
                     {
                         return null;
                     }
 
-                    paths[i] = new SynopsisPath(field, key, (Types.Variants.VariantClass)(byte)@class);
+                    paths[i] = new SynopsisPath(field, key, (Types.Variants.VariantClass)(byte)@class, (word & ResidualFlag) != 0);
                 }
             }
 

@@ -43,6 +43,9 @@ internal static class ShreddingChoice
     /// <summary>The bytes a row of a typed column takes, a null row as much as another, by class.</summary>
     private static readonly double[] TypedBytes = [2.1, 2.0, 1.1, 0.55];
 
+    /// <summary>The bytes an occurrence of <paramref name="class"/> takes in the residual, compressed.</summary>
+    internal static double ResidualBytesOf(VariantClass @class) => ResidualBytes[(int)@class];
+
     /// <summary>The bytes shredding <paramref name="occurrences"/> of a class over <paramref name="rows"/> rows saves, before the path's fixed cost.</summary>
     internal static double Saving(VariantClass @class, long occurrences, long rows) =>
         (occurrences * ResidualBytes[(int)@class]) - (rows * TypedBytes[(int)@class]);
