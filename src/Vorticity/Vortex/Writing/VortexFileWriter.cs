@@ -19,6 +19,7 @@ using Vorticity.Serialization.FlatBuffers;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
+using Vorticity.Types.Variants;
 using Vorticity.Writing;
 
 namespace Vorticity;
@@ -234,6 +235,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// null for a column chunked with the file; null when every column is.
     /// </summary>
     private Gathering?[]? _gathering;
+
+    /// <summary>By column, what a variant column shreds, null for a column written whole; null when none shreds.</summary>
+    private VariantShredding?[]? _shredding;
 
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
@@ -646,6 +650,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         foreach (KeyValuePair<string, int> target in options.ColumnChunkTargetBytes)
         {
             (writer._gathering ??= new Gathering?[writer._fieldCount])[schema.IndexOfField(target.Key)] = new Gathering(target.Value);
+        }
+
+        foreach (KeyValuePair<string, VariantShredding> column in options.ShreddedVariants ?? ImmutableDictionary<string, VariantShredding>.Empty)
+        {
+            int field = writer._isTabular ? schema.IndexOfField(column.Key) : -1;
+            if (field < 0 || schema.GetField(field).Kind != DTypeKind.Variant)
+            {
+                throw new ArgumentException($"'{column.Key}' is no top-level variant column of the file, and only those are shredded.", nameof(options));
+            }
+
+            (writer._shredding ??= new VariantShredding?[writer._fieldCount])[field] = column.Value;
         }
 
         return writer;
@@ -1677,7 +1692,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask EmitColumnChunkAsync(
         int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken)
     {
-        ChunkStats stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+        // A shredded variant's chunk is written as its residual and its typed columns, which the
+        // statistics of its rows as they came do not describe.
+        ChunkStats stats = default;
+        if (_shredding?[field] is { } plan)
+        {
+            node = VariantShredder.Shred(arena, new DTypeArena(), node, plan);
+        }
+        else
+        {
+            stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+        }
+
         ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
         await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
     }

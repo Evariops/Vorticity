@@ -541,7 +541,16 @@ public sealed partial class VortexFileWriter
                     local = ChunkCompactor.Compact(lane.Arena, local);
                 }
 
-                _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, _stats[field]);
+                // A shredded variant's chunk is its residual and its typed columns, which the
+                // statistics of its rows as they came do not describe.
+                ChunkStats stats = _stats[field];
+                if (writer._shredding?[field] is { } plan)
+                {
+                    local = VariantShredder.Shred(lane.Arena, new Types.DTypeArena(), local, plan);
+                    stats = default;
+                }
+
+                _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
                 KeepFresh(field, lane.Encodings);
             }
             finally

@@ -22,9 +22,10 @@ namespace Vorticity.Tests.Parquet;
 /// <remarks>
 /// The suite's cases come from another implementation's tests, whose writer chose the encoding a
 /// rebuilt value takes here, the fewest bytes for every id, offset and count and the fields in name
-/// order: the comparison is of bytes. Seven files it marks invalid, a variant or a field without its
-/// value column and fields both shredded and in the value, may be refused or read; they are read,
-/// as the suite's values say.
+/// order: the comparison is of bytes. Seven files it marks invalid may be refused or read. The five of
+/// a variant or a field without its value column are read, as the suite's values say. The two of a
+/// field both shredded and in the value are refused, as the Arrow reader the reference relies on
+/// refuses them: the row would hold two values of one key.
 /// </remarks>
 public sealed class VariantTests : IDisposable
 {
@@ -101,6 +102,11 @@ public sealed class VariantTests : IDisposable
                 refused++;
                 Assert.Contains("variant", e.Message, StringComparison.Ordinal);
             }
+            catch (ParquetFormatException e) when (test.GetProperty("test").GetString()!.EndsWith("FieldConflict", StringComparison.Ordinal))
+            {
+                refused++;
+                Assert.Contains("both shredded and in its value", e.Message, StringComparison.Ordinal);
+            }
             catch (Exception e) when (e is not OperationCanceledException)
             {
                 failures.Add($"case {number}: {e.GetType().Name}: {e.Message}");
@@ -108,7 +114,7 @@ public sealed class VariantTests : IDisposable
         }
 
         Assert.Empty(failures);
-        Assert.Equal((131, 6), (read, refused));
+        Assert.Equal((129, 8), (read, refused));
     }
 
     /// <summary>

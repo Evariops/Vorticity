@@ -33,9 +33,9 @@ namespace Vorticity.Types.Variants;
 /// <para>
 /// An object is written in its fields' name order, the unsigned order of their UTF-8 bytes,
 /// whichever column each comes from: the shredded fields, sorted once, are merged with the fields
-/// of a partially shredded row's <c>value</c>, which the standard keeps in that order, and a name
-/// both hold is the shredded field's, since a field the typed columns hold may not be in
-/// <c>value</c>. Ids, offsets and counts take the fewest bytes that hold them. The ids are those of
+/// of a partially shredded row's <c>value</c>, which the standard keeps in that order. A name both
+/// hold is refused, since a field the typed columns hold may not be in <c>value</c>, whether the row
+/// defines it or not. Ids, offsets and counts take the fewest bytes that hold them. The ids are those of
 /// the row's metadata, looked up again only when a row's metadata differs from the last one's.
 /// </para>
 /// <para>
@@ -350,12 +350,15 @@ internal sealed class ShreddedVariant
                     count++;
                 }
 
-                next++;
                 if (order == 0)
                 {
-                    // The value's field of a shredded name gives way to the shredded one.
-                    other++;
+                    // A shredded name never appears in the value, as the Arrow reader the reference
+                    // relies on also refuses: the row would hold two values of one key.
+                    throw new VortexFormatException(
+                        $"{Name(shred.Path)} holds the field '{System.Text.Encoding.UTF8.GetString(name)}' both shredded and in its value.");
                 }
+
+                next++;
             }
             else
             {

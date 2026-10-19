@@ -164,7 +164,7 @@ binary for the rest, and the format's own name for both, so a Rust reader reads 
 | the arrays `vortex.variant` and `vortex.parquet.variant`, added by the edition `core2026.08.3`, read by Rust 0.85.0 and later, frozen with a read-forever guarantee | (code: [core2026.08.3.toml](../../spec/editions/core2026.08.3.toml)) |
 | `vortex.parquet.variant`: a `metadata` child, a `value` child, and an optional `typed_value` child holding shredded paths | (code: [VariantMetadata.cs](../../src/Vorticity/Vortex/Arrays/Metadata/VariantMetadata.cs#L89-L105)) |
 | `vortex.variant`: a variant over its storage, with an optional shredded child | (code: [VariantMetadata.cs](../../src/Vorticity/Vortex/Arrays/Metadata/VariantMetadata.cs#L7-L21)) |
-| Vorticity writes the unshredded form, and reads both shredded forms, the reference's tree and the Parquet layout, by mapping each onto the Parquet groups its Parquet reader rebuilds rows from | (code: [VariantDecoder.cs](../../src/Vorticity/Vortex/Arrays/Decoders/Compressed/VariantDecoder.cs), `ShreddedTree`) |
+| Vorticity writes the unshredded form, or the reference's tree when a writer is given a shredding, and reads both shredded forms, the reference's tree and the Parquet layout, by mapping each onto the Parquet groups its Parquet reader rebuilds rows from | (code: [VariantDecoder.cs](../../src/Vorticity/Vortex/Arrays/Decoders/Compressed/VariantDecoder.cs), `ShreddedTree`) |
 | no .NET type maps a variant column | [07-dotnet-mapping.md](07-dotnet-mapping.md) |
 | maps are written under `core2026.08.3`, and refused below it | [90-registry.md](90-registry.md) |
 | a column added after creation is a commit of the schema | [13-dataset.md](13-dataset.md#13-schema-evolution) |
@@ -806,8 +806,8 @@ Every figure is an estimate.
 
 | promise | gate |
 |---|---|
-| a variant reads back as it was written, whatever the shredding | a fuzzer of documents of every shape (nesting, lists, mixed types, keys that are data, keys with dots), written under random choices and read back equal, value for value, integers equal under their class |
-| the format's rules | tests of a missing key, a type mismatch, a residual disjoint from the shredded keys, and a key present in both, which is refused |
+| a variant reads back as it was written, whatever the shredding | a fuzzer of documents of every shape (nesting, lists, mixed types, keys that are data, keys with dots), written under random choices and read back equal, value for value, integers equal under their class (`ShreddedVariantWriteTests`) |
+| the format's rules | tests of a missing key, a type mismatch, a residual disjoint from the shredded keys, and a key present in both, which is refused (`ShreddedVariantWriteTests`, and the two conflict cases of the Parquet suite) |
 | Rust reads what we write, and we read what Rust writes | shredded variants in the cross-check, both ways |
 | the same answers shredded or not | every question of a matrix over paths, on the same rows written shredded and unshredded |
 | a shredded path is as fast as a declared column | a ratchet on the same question over a path and over a declared column holding the same values |

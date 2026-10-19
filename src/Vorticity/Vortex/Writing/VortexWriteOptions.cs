@@ -256,6 +256,13 @@ public sealed record VortexWriteOptions
     /// </summary>
     internal bool CarriesSlices { get; init; }
 
+    /// <summary>
+    /// What each top-level variant column shreds, by its name: its chunks are written as the reference
+    /// stores a shredded variant, the values the shredding names in typed columns. A column not named
+    /// is written whole.
+    /// </summary>
+    internal IReadOnlyDictionary<string, Types.Variants.VariantShredding>? ShreddedVariants { get; init; }
+
     /// <summary>What the chunk runs may hold in memory before they move to <see cref="ScratchDirectory"/>.</summary>
     internal long ScratchMemoryBytes { get; init; } = IndexWriter.DefaultScratchMemoryBytes;
 

@@ -64,13 +64,17 @@ internal readonly struct VariantMetadata : IEquatable<VariantMetadata>
     /// <summary>Writes the message body: no outer tag, no length prefix.</summary>
     /// <param name="writer">Writer to append to; must be passed by reference.</param>
     /// <param name="value">The metadata.</param>
-    /// <exception cref="ArgumentException">The metadata declares a shredded child.</exception>
+    /// <exception cref="ArgumentException">The metadata declares a shredded child of no dtype.</exception>
     public static void Write(ref ProtoWriter writer, in VariantMetadata value)
     {
-        if (value.HasShreddedDType)
+        if (value.ShreddedDType is { } shredded)
         {
-            throw new ArgumentException(
-                "This build does not write a shredded variant.", nameof(value));
+            if (shredded.Length == 0)
+            {
+                throw new ArgumentException("A shredded child is written with its dtype.", nameof(value));
+            }
+
+            writer.WriteBytes(1, shredded);
         }
     }
 

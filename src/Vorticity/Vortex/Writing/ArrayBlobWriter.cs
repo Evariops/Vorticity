@@ -2483,11 +2483,16 @@ internal static class ArrayBlobWriter
         Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings,
         bool compress, ChunkStats stats = default)
     {
+        if (node.FieldCount == 3)
+        {
+            return WriteShreddedVariant(blob, arena, node, encodings, compress);
+        }
+
         if (node.FieldCount != 2)
         {
             throw new InvalidOperationException(
-                $"A variant column is a two-field struct of {{metadata, value}}; this one has " +
-                $"{node.FieldCount} fields.");
+                $"A variant column is a two-field struct of {{metadata, value}}, or a shredded one of " +
+                $"{{metadata, residual, tree}}; this one has {node.FieldCount} fields.");
         }
 
         CanonicalNode valueNode = arena.GetNode(arena.GetNode(node.Index).GetFieldIndex(1));
@@ -2513,6 +2518,51 @@ internal static class ArrayBlobWriter
         return Node(
             blob, encodings, "vortex.parquet.variant"u8, ParquetVariantBytes(blob, valueNullable),
             children[..(validityCount + 2)], []);
+    }
+
+    /// <summary>
+    /// Writes a variant the shredder split (<see cref="VariantShredder"/>) as the reference stores one:
+    /// a <c>vortex.variant</c> whose core storage is the <c>vortex.parquet.variant</c> of the rows'
+    /// metadata and residual, and whose second child is the shredded tree, its dtype in the metadata. A
+    /// key of the tree that kept values of its own is a variant of the same form, written here again.
+    /// </summary>
+    private static int WriteShreddedVariant(
+        Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings, bool compress)
+    {
+        CanonicalNode shredded = arena.GetNode(node.Index);
+        int metadata = shredded.GetFieldIndex(0);
+        int residual = shredded.GetFieldIndex(1);
+        int tree = shredded.GetFieldIndex(2);
+
+        // The core storage's children in the reader's order: the rows' validity when they carry one,
+        // then the metadata, then the residual.
+        Span<int> core = stackalloc int[3];
+        Span<int> validity = stackalloc int[1];
+        int validityCount = Validity(blob, arena, node, encodings, validity);
+        if (validityCount == 1)
+        {
+            core[0] = validity[0];
+        }
+
+        core[validityCount] = WriteChild(blob, arena, metadata, encodings, compress);
+        core[validityCount + 1] = WriteChild(blob, arena, residual, encodings, compress);
+        bool residualNullable = arena.GetNode(residual).DType.Nullability == Nullability.Nullable;
+        Span<int> children = stackalloc int[2];
+        children[0] = Node(
+            blob, encodings, "vortex.parquet.variant"u8, ParquetVariantBytes(blob, residualNullable),
+            core[..(validityCount + 2)], []);
+        children[1] = WriteChild(blob, arena, tree, encodings, compress);
+        return Node(
+            blob, encodings, "vortex.variant"u8, VariantBytes(blob, DTypeProtobuf.Serialize(arena.GetNode(tree).DType)),
+            children, []);
+    }
+
+    private static ReadOnlySpan<byte> VariantBytes(Workspace blob, byte[] shreddedDType)
+    {
+        ref ProtoWriter writer = ref blob.Metadata();
+        VariantMetadata value = new VariantMetadata(shreddedDType);
+        VariantMetadata.Write(ref writer, in value);
+        return writer.WrittenSpan;
     }
 
     private static ReadOnlySpan<byte> ParquetVariantBytes(Workspace blob, bool valueNullable)

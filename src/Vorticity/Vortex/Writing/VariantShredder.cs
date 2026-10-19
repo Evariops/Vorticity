@@ -1,0 +1,643 @@
+using System;
+using System.Runtime.InteropServices;
+using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
+using Vorticity.Compute;
+using Vorticity.Types;
+using Vorticity.Types.Variants;
+
+namespace Vorticity.Writing;
+
+/// <summary>
+/// A chunk of a variant column shredded as the writer writes it, in the form the reference stores: the
+/// rows' metadata, the residual, and the shredded tree. Each row's value is read once. What the
+/// shredding names goes to typed columns, a key's value of another class to that key's own values, and
+/// everything else stays in the residual, so a shredded key never appears in it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The tree follows the Parquet shredding with its wrappers taken off. An object is a struct by key,
+/// valid where the row's value is an object. A key whose values all fit its typed column is that
+/// column. A key that also holds values of its own is a variant of those values and its typed column,
+/// valid where the key is present, over the same rows' metadata. A list is a list of its elements'
+/// typed column, valid where every element fits. A row whose value is not of the node's shape keeps it
+/// whole in the node's values.
+/// </para>
+/// <para>
+/// Integers of every width go to one 64-bit column, and come back at that width: equal under the
+/// format's equivalence classes, not in width.
+/// </para>
+/// </remarks>
+internal static class VariantShredder
+{
+    private const int ViewSize = 16;
+
+    /// <summary>
+    /// Shreds <paramref name="node"/>, a <c>Struct{metadata, value}</c> wearing a variant dtype, as
+    /// <paramref name="plan"/> says: a node of three fields, the rows' metadata, the residual and the
+    /// shredded tree, wearing the same dtype and validity, which the blob writer writes as a
+    /// <c>vortex.variant</c>. The tree's dtypes are made in <paramref name="types"/>.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal static int Shred(CanonicalArena arena, DTypeArena types, int node, VariantShredding plan)
+    {
+        CanonicalNode variant = arena.GetNode(node);
+        int rows = variant.Length;
+        int metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
+        int value = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(1));
+        CanonicalNode metadataNode = arena.GetNode(metadata);
+        CanonicalNode valueNode = arena.GetNode(value);
+        Group root = Group.For(plan);
+        for (int row = 0; row < rows; row++)
+        {
+            if (!ArenaWords.IsValid(arena, node, row))
+            {
+                root.Absent();
+                continue;
+            }
+
+            ReadOnlySpan<byte> bytes = ArenaWords.IsValid(arena, value, row) ? LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue;
+            VariantDictionary dictionary = VariantDictionary.Read(LiteralReader.ViewAt(metadataNode, row));
+            root.Present(in dictionary, bytes);
+        }
+
+        int tree = root.Typed(arena, types, rows, metadata, out _);
+        int residual = root.Values.Build(arena, types, types.Binary(Nullability.Nullable), rows);
+        return arena.AddStruct(variant.DType, rows, variant.Validity, [metadata, residual, tree]);
+    }
+
+    /// <summary>
+    /// One node of the shredding over the rows: its typed column, what of each row it does not take, and
+    /// whether the row holds it at all.
+    /// </summary>
+    private abstract class Group
+    {
+        /// <summary>What the node does not take of each row: a value of another shape or class, an object's other keys.</summary>
+        internal BinaryColumn Values { get; } = new BinaryColumn();
+
+        /// <summary>Whether each row holds the node: the key is in its object.</summary>
+        protected Bits Held { get; } = new Bits();
+
+        internal static Group For(VariantShredding plan) => plan.Kind switch
+        {
+            VariantShreddingKind.Object => new ObjectGroup(plan),
+            VariantShreddingKind.List => new ListGroup(plan.Class),
+            _ => new PrimitiveGroup(plan.Class),
+        };
+
+        /// <summary>A row that does not hold the node.</summary>
+        internal abstract void Absent();
+
+        /// <summary>A row whose node holds <paramref name="value"/>, its keys named by <paramref name="dictionary"/>.</summary>
+        internal abstract void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value);
+
+        /// <summary>The node's typed column over <paramref name="rows"/> rows.</summary>
+        internal abstract int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype);
+
+        /// <summary>
+        /// What the node is in its object's struct: its typed column when no row kept a value of its
+        /// own, and otherwise a variant of its values and its typed column, valid where the key is
+        /// present, over the rows' metadata <paramref name="metadata"/>.
+        /// </summary>
+        internal int Field(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype)
+        {
+            int typed = Typed(arena, types, rows, metadata, out DType typedType);
+            if (!Values.HoldsAny)
+            {
+                dtype = typedType;
+                return typed;
+            }
+
+            int values = Values.Build(arena, types, types.Binary(Nullability.Nullable), rows);
+            dtype = types.Variant(Nullability.Nullable);
+            return arena.AddStruct(dtype, rows, Held.Validity(arena, types, rows), [metadata, values, typed]);
+        }
+    }
+
+    /// <summary>The values of one class in a typed column, any other kept whole.</summary>
+    private sealed class PrimitiveGroup(VariantClass @class) : Group
+    {
+        private readonly TypedColumn _typed = TypedColumn.For(@class);
+
+        internal override void Absent()
+        {
+            Held.Append(false);
+            _typed.AppendNull();
+            Values.AppendNull();
+        }
+
+        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        {
+            Held.Append(true);
+            if (_typed.Fits(value))
+            {
+                _typed.Append(value);
+                Values.AppendNull();
+                return;
+            }
+
+            _typed.AppendNull();
+            Values.Append(value);
+        }
+
+        internal override int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype) =>
+            _typed.Build(arena, types, rows, out dtype);
+    }
+
+    /// <summary>Some keys of an object, each a node of its own; the other keys kept in an object of their own.</summary>
+    private sealed class ObjectGroup : Group
+    {
+        private readonly VariantShredding _plan;
+        private readonly Group[] _fields;
+        private readonly int[] _found;
+        private readonly Bits _objects = new Bits();
+        private int[] _kept = new int[8];
+
+        internal ObjectGroup(VariantShredding plan)
+        {
+            _plan = plan;
+            _fields = new Group[plan.Keys.Count];
+            for (int i = 0; i < _fields.Length; i++)
+            {
+                _fields[i] = For(plan.Keys[i].Field);
+            }
+
+            _found = new int[_fields.Length];
+        }
+
+        internal override void Absent()
+        {
+            Held.Append(false);
+            _objects.Append(false);
+            foreach (Group field in _fields)
+            {
+                field.Absent();
+            }
+
+            Values.AppendNull();
+        }
+
+        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        {
+            Held.Append(true);
+            if ((value[0] & 0x03) != ParquetVariant.BasicObject)
+            {
+                _objects.Append(false);
+                foreach (Group field in _fields)
+                {
+                    field.Absent();
+                }
+
+                Values.Append(value);
+                return;
+            }
+
+            VariantNested fields = VariantNested.Read(value);
+            if (_kept.Length < fields.Count)
+            {
+                _kept = new int[Math.Max(fields.Count, 2 * _kept.Length)];
+            }
+
+            _found.AsSpan().Fill(-1);
+            int kept = 0;
+            for (int i = 0; i < fields.Count; i++)
+            {
+                int key = _plan.IndexOf(dictionary[fields.IdAt(i)]);
+                if (key >= 0)
+                {
+                    _found[key] = i;
+                }
+                else
+                {
+                    _kept[kept++] = i;
+                }
+            }
+
+            _objects.Append(true);
+            for (int k = 0; k < _fields.Length; k++)
+            {
+                if (_found[k] >= 0)
+                {
+                    _fields[k].Present(in dictionary, fields.ValueAt(_found[k]));
+                }
+                else
+                {
+                    _fields[k].Absent();
+                }
+            }
+
+            if (kept == 0)
+            {
+                Values.AppendNull();
+            }
+            else
+            {
+                Values.AppendObject(fields, _kept.AsSpan(0, kept));
+            }
+        }
+
+        internal override int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype)
+        {
+            int[] nodes = new int[_fields.Length];
+            DType[] fields = new DType[_fields.Length];
+            string[] names = new string[_fields.Length];
+            for (int k = 0; k < _fields.Length; k++)
+            {
+                nodes[k] = _fields[k].Field(arena, types, rows, metadata, out fields[k]);
+                names[k] = _plan.Keys[k].Name;
+            }
+
+            dtype = types.Struct(names, fields, Nullability.Nullable);
+            return arena.AddStruct(dtype, rows, _objects.Validity(arena, types, rows), nodes);
+        }
+    }
+
+    /// <summary>A list whose elements are all of one class, in a list of its elements' typed column; any other kept whole.</summary>
+    private sealed class ListGroup(VariantClass @class) : Group
+    {
+        private readonly TypedColumn _elements = TypedColumn.For(@class);
+        private readonly Bits _lists = new Bits();
+        private int[] _sizes = new int[64];
+        private int _rows;
+
+        internal override void Absent()
+        {
+            Held.Append(false);
+            _lists.Append(false);
+            Size(0);
+            Values.AppendNull();
+        }
+
+        internal override void Present(in VariantDictionary dictionary, ReadOnlySpan<byte> value)
+        {
+            Held.Append(true);
+            if ((value[0] & 0x03) == ParquetVariant.BasicArray)
+            {
+                VariantNested elements = VariantNested.Read(value);
+                bool fit = true;
+                for (int i = 0; i < elements.Count && fit; i++)
+                {
+                    fit = _elements.Fits(elements.ValueAt(i));
+                }
+
+                if (fit)
+                {
+                    for (int i = 0; i < elements.Count; i++)
+                    {
+                        _elements.Append(elements.ValueAt(i));
+                    }
+
+                    _lists.Append(true);
+                    Size(elements.Count);
+                    Values.AppendNull();
+                    return;
+                }
+            }
+
+            _lists.Append(false);
+            Size(0);
+            Values.Append(value);
+        }
+
+        internal override int Typed(CanonicalArena arena, DTypeArena types, int rows, int metadata, out DType dtype)
+        {
+            int elements = _elements.Build(arena, types, _elements.Count, out DType elementType);
+            dtype = types.List(elementType, Nullability.Nullable);
+            VortexBuffer offsets = arena.AllocateUninitialized(Math.Max(rows * sizeof(int), 1), 8, out Span<byte> into).Slice(0, rows * sizeof(int));
+            VortexBuffer sizes = arena.AllocateUninitialized(Math.Max(rows * sizeof(int), 1), 8, out Span<byte> sized).Slice(0, rows * sizeof(int));
+            Span<int> starts = MemoryMarshal.Cast<byte, int>(into);
+            int at = 0;
+            for (int row = 0; row < rows; row++)
+            {
+                starts[row] = at;
+                at += _sizes[row];
+            }
+
+            MemoryMarshal.AsBytes(_sizes.AsSpan(0, rows)).CopyTo(sized);
+            return arena.AddListView(dtype, rows, _lists.Validity(arena, types, rows), elements, offsets, PType.I32, sizes, PType.I32);
+        }
+
+        private void Size(int count)
+        {
+            if (_rows == _sizes.Length)
+            {
+                Array.Resize(ref _sizes, 2 * _sizes.Length);
+            }
+
+            _sizes[_rows++] = count;
+        }
+    }
+
+    /// <summary>The typed column of one class, its rows appended one at a time.</summary>
+    private abstract class TypedColumn
+    {
+        protected Bits Valid { get; } = new Bits();
+
+        /// <summary>The rows appended.</summary>
+        internal int Count => Valid.Count;
+
+        internal static TypedColumn For(VariantClass @class) => @class switch
+        {
+            VariantClass.Integer => new IntegerColumn(),
+            VariantClass.Double => new DoubleColumn(),
+            VariantClass.String => new StringColumn(),
+            _ => new BooleanColumn(),
+        };
+
+        /// <summary>Whether <paramref name="value"/> is of the column's class.</summary>
+        internal abstract bool Fits(ReadOnlySpan<byte> value);
+
+        /// <summary>Appends <paramref name="value"/>, which fits.</summary>
+        internal abstract void Append(ReadOnlySpan<byte> value);
+
+        internal abstract void AppendNull();
+
+        internal abstract int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype);
+    }
+
+    /// <summary>Integers of every width, as 64-bit integers.</summary>
+    private sealed class IntegerColumn : TypedColumn
+    {
+        private long[] _values = new long[64];
+
+        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).IsInteger;
+
+        internal override void Append(ReadOnlySpan<byte> value) => Add((long)VariantScalar.Read(value).Integer, true);
+
+        internal override void AppendNull() => Add(0, false);
+
+        internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
+        {
+            dtype = types.Primitive(PType.I64, Nullability.Nullable);
+            return Fixed(arena, dtype, rows, Valid.Validity(arena, types, rows), PType.I64, MemoryMarshal.AsBytes(_values.AsSpan(0, rows)));
+        }
+
+        private void Add(long value, bool valid)
+        {
+            int row = Valid.Count;
+            if (row == _values.Length)
+            {
+                Array.Resize(ref _values, 2 * _values.Length);
+            }
+
+            _values[row] = value;
+            Valid.Append(valid);
+        }
+    }
+
+    /// <summary>64-bit floats.</summary>
+    private sealed class DoubleColumn : TypedColumn
+    {
+        private double[] _values = new double[64];
+
+        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).Kind == VariantKind.Double;
+
+        internal override void Append(ReadOnlySpan<byte> value) => Add(VariantScalar.Read(value).Number, true);
+
+        internal override void AppendNull() => Add(0, false);
+
+        internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
+        {
+            dtype = types.Primitive(PType.F64, Nullability.Nullable);
+            return Fixed(arena, dtype, rows, Valid.Validity(arena, types, rows), PType.F64, MemoryMarshal.AsBytes(_values.AsSpan(0, rows)));
+        }
+
+        private void Add(double value, bool valid)
+        {
+            int row = Valid.Count;
+            if (row == _values.Length)
+            {
+                Array.Resize(ref _values, 2 * _values.Length);
+            }
+
+            _values[row] = value;
+            Valid.Append(valid);
+        }
+    }
+
+    /// <summary>Booleans.</summary>
+    private sealed class BooleanColumn : TypedColumn
+    {
+        private readonly Bits _values = new Bits();
+
+        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).Kind == VariantKind.Bool;
+
+        internal override void Append(ReadOnlySpan<byte> value)
+        {
+            _values.Append(VariantScalar.Read(value).Integer != 0);
+            Valid.Append(true);
+        }
+
+        internal override void AppendNull()
+        {
+            _values.Append(false);
+            Valid.Append(false);
+        }
+
+        internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
+        {
+            dtype = types.Bool(Nullability.Nullable);
+            return arena.AddBool(dtype, rows, Valid.Validity(arena, types, rows), _values.Buffer(arena, rows), 0);
+        }
+    }
+
+    /// <summary>UTF-8 text.</summary>
+    private sealed class StringColumn : TypedColumn
+    {
+        private readonly BinaryColumn _values = new BinaryColumn();
+
+        internal override bool Fits(ReadOnlySpan<byte> value) => VariantScalar.Read(value).Kind == VariantKind.String;
+
+        internal override void Append(ReadOnlySpan<byte> value)
+        {
+            _values.Append(VariantScalar.Read(value).Bytes);
+            Valid.Append(true);
+        }
+
+        internal override void AppendNull()
+        {
+            _values.AppendNull();
+            Valid.Append(false);
+        }
+
+        internal override int Build(CanonicalArena arena, DTypeArena types, int rows, out DType dtype)
+        {
+            dtype = types.Utf8(Nullability.Nullable);
+            return _values.Build(arena, types, dtype, rows);
+        }
+    }
+
+    /// <summary>A fixed-width column of <paramref name="values"/>, copied into the arena.</summary>
+    private static int Fixed(CanonicalArena arena, DType dtype, int rows, Validity validity, PType ptype, ReadOnlySpan<byte> values)
+    {
+        VortexBuffer buffer = arena.AllocateUninitialized(Math.Max(values.Length, 1), 64, out Span<byte> into).Slice(0, values.Length);
+        values.CopyTo(into);
+        return arena.AddPrimitive(dtype, rows, validity, ptype, buffer);
+    }
+
+    /// <summary>Bits appended one at a time, as a validity or a column of booleans.</summary>
+    private sealed class Bits
+    {
+        private ulong[] _words = new ulong[1];
+        private int _set;
+
+        internal int Count { get; private set; }
+
+        internal void Append(bool bit)
+        {
+            int at = Count;
+            if (at >> 6 == _words.Length)
+            {
+                Array.Resize(ref _words, 2 * _words.Length);
+            }
+
+            if (bit)
+            {
+                _words[at >> 6] |= 1UL << (at & 63);
+                _set++;
+            }
+
+            Count = at + 1;
+        }
+
+        /// <summary>The validity of <paramref name="rows"/> rows these bits say are valid.</summary>
+        internal Validity Validity(CanonicalArena arena, DTypeArena types, int rows)
+        {
+            if (_set == rows)
+            {
+                return Vorticity.Arrays.Validity.AllValid;
+            }
+
+            if (_set == 0)
+            {
+                return Vorticity.Arrays.Validity.AllInvalid;
+            }
+
+            return Vorticity.Arrays.Validity.Bitmap(arena.AddBool(types.Bool(Nullability.NonNullable), rows, Vorticity.Arrays.Validity.NonNullable, Buffer(arena, rows), 0));
+        }
+
+        /// <summary>The first <paramref name="rows"/> bits, LSB first, copied into the arena.</summary>
+        internal VortexBuffer Buffer(CanonicalArena arena, int rows)
+        {
+            int bytes = (rows + 7) / 8;
+            VortexBuffer buffer = arena.Allocate(Math.Max(bytes, 1), 8, out Span<byte> into).Slice(0, bytes);
+            MemoryMarshal.AsBytes(_words.AsSpan()).Slice(0, bytes).CopyTo(into);
+            return buffer;
+        }
+    }
+
+    /// <summary>Byte strings appended one at a time, held end to end until they are copied into the arena as views and one data buffer.</summary>
+    private sealed class BinaryColumn
+    {
+        private readonly Bits _valid = new Bits();
+        private byte[] _data = new byte[256];
+        private int[] _starts = new int[64];
+        private int _used;
+        private int _held;
+
+        /// <summary>Whether any row holds a value.</summary>
+        internal bool HoldsAny => _held > 0;
+
+        internal void Append(ReadOnlySpan<byte> value)
+        {
+            Reserve(value.Length);
+            value.CopyTo(_data.AsSpan(_used));
+            Close(_used + value.Length, true);
+        }
+
+        internal void AppendNull() => Close(_used, false);
+
+        /// <summary>Appends the object of the fields <paramref name="kept"/> of <paramref name="fields"/>, in their order, which is their keys'.</summary>
+        internal void AppendObject(VariantNested fields, ReadOnlySpan<int> kept)
+        {
+            int maxId = 0;
+            int size = 0;
+            foreach (int i in kept)
+            {
+                maxId = Math.Max(maxId, fields.IdAt(i));
+                size = checked(size + fields.ValueAt(i).Length);
+            }
+
+            int count = kept.Length;
+            int countWidth = count > 0xFF ? 4 : 1;
+            int idWidth = ParquetVariant.WidthOf((uint)maxId);
+            int offsetWidth = ParquetVariant.WidthOf((uint)size);
+            int length = checked(1 + countWidth + (count * idWidth) + ((count + 1) * offsetWidth) + size);
+            Reserve(length);
+            Span<byte> into = _data.AsSpan(_used, length);
+            into[0] = (byte)(((((countWidth == 4 ? 1 : 0) << 4) | ((idWidth - 1) << 2) | (offsetWidth - 1)) << 2) | ParquetVariant.BasicObject);
+            int at = 1;
+            ParquetVariant.Put(into, ref at, (uint)count, countWidth);
+            foreach (int i in kept)
+            {
+                ParquetVariant.Put(into, ref at, (uint)fields.IdAt(i), idWidth);
+            }
+
+            int offset = 0;
+            foreach (int i in kept)
+            {
+                ParquetVariant.Put(into, ref at, (uint)offset, offsetWidth);
+                offset += fields.ValueAt(i).Length;
+            }
+
+            ParquetVariant.Put(into, ref at, (uint)offset, offsetWidth);
+            foreach (int i in kept)
+            {
+                ReadOnlySpan<byte> value = fields.ValueAt(i);
+                value.CopyTo(into[at..]);
+                at += value.Length;
+            }
+
+            Close(_used + length, true);
+        }
+
+        /// <summary>The column of <paramref name="rows"/> rows as a node wearing <paramref name="dtype"/>, its validity's dtype made in <paramref name="types"/>.</summary>
+        internal int Build(CanonicalArena arena, DTypeArena types, DType dtype, int rows)
+        {
+            int bytes = checked(rows * ViewSize);
+            VortexBuffer views = arena.Allocate(Math.Max(bytes, 1), 64, out Span<byte> into).Slice(0, bytes);
+            for (int row = 0; row < rows; row++)
+            {
+                int start = _starts[row];
+                int length = _starts[row + 1] - start;
+                if (length > 0)
+                {
+                    CanonicalSupport.WriteView(into.Slice(row * ViewSize, ViewSize), _data.AsSpan(start, length), length, 0, start);
+                }
+            }
+
+            Validity validity = _valid.Validity(arena, types, rows);
+            if (_used == 0)
+            {
+                return arena.AddVarBinView(dtype, rows, validity, views, []);
+            }
+
+            VortexBuffer data = arena.AllocateUninitialized(_used, 64, out Span<byte> written).Slice(0, _used);
+            _data.AsSpan(0, _used).CopyTo(written);
+            return arena.AddVarBinView(dtype, rows, validity, views, [data]);
+        }
+
+        private void Reserve(int length)
+        {
+            if (_data.Length - _used < length)
+            {
+                Array.Resize(ref _data, Math.Max(checked(_used + length), 2 * _data.Length));
+            }
+        }
+
+        private void Close(int end, bool valid)
+        {
+            int row = _valid.Count;
+            if (row + 2 > _starts.Length)
+            {
+                Array.Resize(ref _starts, 2 * _starts.Length);
+            }
+
+            _starts[row + 1] = end;
+            _used = end;
+            _held += valid ? 1 : 0;
+            _valid.Append(valid);
+        }
+    }
+}

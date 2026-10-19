@@ -48,7 +48,7 @@ only the frames or chunks that hold them, while the others decode the chunk once
 | `vortex.zstd` | zstd frames | `core2025.06.0` | yes, one frame per block | selective, by frame |
 | `vortex.pco` | Pcodec: entropy-coded bins after a delta or a divisor | `core2025.06.0` | yes, under the size-first profile and a hint, for numbers of 16 bits and more | gather |
 | `vortex.zstd_buffers` | each buffer of another array compressed separately | draft `zstd2026.02.0` | no | gather |
-| `vortex.variant` | a variant over its storage | `core2026.08.3` | no, written as `vortex.parquet.variant` | selective |
+| `vortex.variant` | a variant over its storage | `core2026.08.3` | a shredded variant only, an unshredded one written as `vortex.parquet.variant` | selective |
 | `vortex.parquet.variant` | the Parquet variant binary format | `core2026.08.3` | yes | gather |
 | `vortex.patched` | patches over a patch-free child | none, only written with edition enforcement off | no | gather |
 
@@ -69,7 +69,15 @@ primitive its typed column, and a field that kept values of its own beside its t
 `vortex.variant`. The other spelling is a `vortex.parquet.variant` with a `typed_value` child shaped
 as the Parquet standard shreds. The decoder maps either onto the standard's groups of a value and a
 typed value and rebuilds each row as the standard's `construct_variant` does, with the plan the Parquet
-reader uses, so a row reads the same shredded or not.
+reader uses, so a row reads the same shredded or not. A key both shredded and in a row's values is
+refused, as the Arrow reader the reference relies on refuses it.
+
+A writer given a shredding for a variant column writes the canonical spelling too, the one Rust
+writes. Each chunk's rows are read once: the values the shredding names go to typed columns,
+integers of every width to one 64-bit column, a key's value of another class to that key's own
+values beside its typed column, and every other key, or a row of another shape, to the residual. A
+list is shredded only when every element fits its typed column. No shredded key is ever left in the
+residual.
 
 A selection is pushed down, not gathered up. A decoder that has nothing to say about a take decodes
 the node once and gathers. One with `DecodeSelected` receives the selection through the layout tree,
