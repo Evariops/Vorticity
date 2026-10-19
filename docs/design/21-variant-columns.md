@@ -274,7 +274,14 @@ from the counts of every path and type its rows hold.
    every question that touches it, the residual bytes and the parsing of the rows that hold it. It
    costs its `typed_value` and its `value` in the encoding tree of every chunk that shreds it, and
    their entries in the path map (item 3). The costs are measured as everywhere in the time-window
-   design.
+   design. On one chunk of 10⁵ rows (`vortex-queries --micro shredcost`), a shredded path adds 172 to
+   217 bytes to its chunk, its name included, and 4 to 6 tables to its encoding tree, while each
+   occurrence moved out of the residual saves 1.2 to 1.6 bytes once compressed. So a path pays its
+   bytes from about 170 occurrences a chunk, and the choice shreds a path, in the class most of its
+   values hold, when its occurrences save more than it adds to the object's chunks. The bytes are the
+   lower bound of what a path saves, since a question over it also stops parsing the residual. On
+   attributes of four keys every row holds and ten thousand keys that are data, each held by a few
+   rows, the choice shreds the four and the file is 16 % smaller than unshredded.
 2. Rows are sorted by shape ([shapes](#55-shapes)), so a path held by one source's rows lies in a few
    contiguous ranges, and its column is null everywhere else. Those nulls cost almost nothing only if
    the writer encodes them. Ours keeps a validity bitmap plain, a bit per row, and takes
@@ -292,7 +299,9 @@ from the counts of every path and type its rows hold.
    therefore counted per chunk, and the column budget bounds the sum: the nodes of every chunk's tree,
    kept far below the 10⁶ tables a traversal may visit ([limits.md](../guide/limits.md#the-fixed-caps)),
    and the bytes of the path map ([reading one path without the others](#59-reading-one-path-without-the-others)).
-   Two things keep it small. The variant column is written in long chunks of its own
+   The budget is half the tables a traversal may visit, the bound a large object's layout keeps too:
+   when more paths pay than a chunk's tree may hold at the measured 6 tables a path, those that save
+   the most are kept. Two things keep it small. The variant column is written in long chunks of its own
    (`ColumnChunkTargetBytes`, [blocks-and-chunks.md](../guide/blocks-and-chunks.md)), about 10⁶ rows
    each, so a day of the example holds about 4 300 of them rather than one per megabyte. And a chunk
    shreds only the paths of the shapes it holds. Rows sorted by shape do not keep those few by
@@ -811,7 +820,7 @@ Every figure is an estimate.
 | Rust reads what we write, and we read what Rust writes | shredded variants in the cross-check, both ways |
 | the same answers shredded or not | every question of a matrix over paths, on the same rows written shredded and unshredded |
 | a shredded path is as fast as a declared column | a ratchet on the same question over a path and over a declared column holding the same values |
-| the column budget | footer bytes and layout nodes as ratchets, on a bench of 10⁴ paths |
+| the column budget | footer bytes and layout nodes as ratchets, on a bench of 10⁴ paths (`ShreddingChoiceTests`: the bytes of the file and the tables of its largest tree) |
 | ingestion does not pay for shredding | the append throughput of rows with variant columns is the same with shredding on and off, since appends never shred (a ratchet on the write bench) |
 | shredding costs little where it happens | the time of a level 0 exit with shredding against the same exit without it, recorded on the write bench and held as a ratchet |
 | a path read fetches only its bytes | the bytes a question on one shredded path reads, against the bytes of that path's buffers plus its path map entry, on a counting store |

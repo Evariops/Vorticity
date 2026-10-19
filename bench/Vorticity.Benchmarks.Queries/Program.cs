@@ -83,6 +83,12 @@ if (Text(args, "--micro") == "slicesort")
     return await SliceSortMicro.Run(rounds);
 }
 
+// --micro shredcost: what shredding a path costs and saves in a file's bytes (ShredCostMicro.cs).
+if (Text(args, "--micro") == "shredcost")
+{
+    return await ShredCostMicro.Run();
+}
+
 // --micro slicebytes: what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs).
 if (Text(args, "--micro") == "slicebytes")
 {
