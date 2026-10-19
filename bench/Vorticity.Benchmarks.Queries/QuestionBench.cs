@@ -155,7 +155,7 @@ internal static class QuestionBench
     }
 
     /// <summary>Compacts until nothing is due, and says what the dataset then holds: its objects, and those with synopsis tables.</summary>
-    private static async Task CompactAsync(VortexDataset dataset)
+    internal static async Task CompactAsync(VortexDataset dataset)
     {
         while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2 }) is not null)
         {
@@ -184,7 +184,7 @@ internal static class QuestionBench
     /// <paramref name="rounds"/>. <paramref name="bytes"/> is the store under the count, whose wait is lifted for a
     /// first ask.
     /// </summary>
-    private static async Task AskAsync<TRecord>(MemoryObjectStore bytes, CountingObjectStore store, string name, Func<Scan<TRecord>, Aggregation> ask, int rounds)
+    internal static async Task AskAsync<TRecord>(MemoryObjectStore bytes, CountingObjectStore store, string name, Func<Scan<TRecord>, Aggregation> ask, int rounds)
         where TRecord : IVortexRecord<TRecord>
     {
         // Asked once each way first, with no wait and nothing kept, so that neither cold ask pays the question's

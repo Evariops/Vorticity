@@ -143,6 +143,12 @@ if (Text(args, "--micro") == "questions")
     return await QuestionBench.Run((int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100));
 }
 
+// --micro facets: the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs).
+if (Text(args, "--micro") == "facets")
+{
+    return await FacetsBench.Run((int)Option(args, "--hours", 12), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100));
+}
+
 // --micro lifecycle: what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs).
 if (Text(args, "--micro") == "lifecycle")
 {
