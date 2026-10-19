@@ -83,6 +83,12 @@ if (Text(args, "--micro") == "slicesort")
     return await SliceSortMicro.Run(rounds);
 }
 
+// --micro sliceorder: the time order of an object sorted slice by slice (SliceOrderMicro.cs).
+if (Text(args, "--micro") == "sliceorder")
+{
+    return await SliceOrderMicro.Run(rounds, Option(args, "--slice-rows", 500_000));
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {

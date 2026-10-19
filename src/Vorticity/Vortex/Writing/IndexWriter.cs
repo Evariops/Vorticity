@@ -1589,7 +1589,8 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal byte[]? Directory(long rowCount, FragmentBinding? fragment = null)
     {
-        if (!Enabled && _preserved is not { Count: > 0 })
+        // A file's time slices ride in the directory whatever the policy asks.
+        if (!Enabled && _preserved is not { Count: > 0 } && !_entries.Exists(static entry => entry.Kind == IndexKinds.Slices))
         {
             return null;
         }

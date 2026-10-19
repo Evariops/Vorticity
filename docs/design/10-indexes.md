@@ -202,10 +202,14 @@ A file whose rows a dataset sorts slice by slice of their instant carries its sl
 its bounds on the instant, its first row and its row count, in time order, covering every row once.
 Like the dictionary probe it has no payload. The entry is on the instant column, one run over every
 block, and its options hold the table behind a version byte: the instant's unit, then per slice the
-gap from the previous slice's end, its width and its rows, each a varint, a few bytes a slice. A table
-that does not decode, or whose rows are not the file's, is not read. The writer that sorts the rows
-declares the slices before it completes the file, which checks that they cover its rows
-([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)).
+gap from the previous slice's end, its width and its rows, each a varint, a few bytes a slice, then the
+columns each slice's rows are sorted by before the instant (version 2; a table of version 1 names none,
+its rows in time order). A table that does not decode, or whose rows are not the file's, is not read.
+The writer that sorts the rows declares the slices before it completes the file, which checks that
+they cover its rows ([20-time-window-aggregates.md](20-time-window-aggregates.md#61-what-a-slice-is)),
+and writes an index directory for them even when its policy asks for no index. The table is also the
+instant's key source, so an object of a dataset of periods carries no sorted run on a key of its
+instant alone ([sources of order](12-index-reads.md#2-sources-of-order)).
 
 A sliced file also says where its chunks lie, under the kind `vorticity.slices.chunks.v1`, on the
 root. Its options hold the file's table of array encodings, and its one run has a payload region per

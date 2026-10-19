@@ -625,7 +625,12 @@ public sealed class VortexDataset : IAsyncDisposable
             write = write.WithIndexes(write.WritePolicy.With(schema.IndexPolicy)) with { BudgetSpares = schema.IndexedColumns };
         }
         bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
-        if (schema.Key is { } clustering && !bySortedColumn)
+
+        // An object in sorted slices on a key of its instant alone is walked through its slice table,
+        // which finds a key's slice, and the slice's instants ranked: a run on the key would repeat
+        // them, with a row for each.
+        bool bySlices = sliced && schema.Key is { IsComposite: false };
+        if (schema.Key is { } clustering && !bySortedColumn && !bySlices)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
@@ -634,6 +639,7 @@ public sealed class VortexDataset : IAsyncDisposable
         return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write))
         {
             BySortedColumn = bySortedColumn,
+            BySlices = bySlices,
         };
     }
 
@@ -1808,7 +1814,7 @@ public sealed class VortexDataset : IAsyncDisposable
         if (!streamed)
         {
             SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
-            (summaries, prefix) = await DescribeAsync(held, firstRow, draft.BySortedColumn, cancellationToken).ConfigureAwait(false);
+            (summaries, prefix) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -1825,7 +1831,7 @@ public sealed class VortexDataset : IAsyncDisposable
         if (streamed)
         {
             ISegmentReader stored = await SealedObjectStore.OpenDataAsync(_store, draft.Key, Uid(draft.Identity), bytes, cancellationToken).ConfigureAwait(false);
-            (summaries, prefix) = await DescribeAsync(stored, firstRow, draft.BySortedColumn, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
+            (summaries, prefix) = await DescribeAsync(stored, firstRow, draft, cancellationToken, draft.Writer.TailBytes).ConfigureAwait(false);
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes);
@@ -2012,11 +2018,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="source">The object's bytes, held or in the store; the file opened over it owns it.</param>
     /// <param name="firstRow">The position of its first row, for a dataset without a clustering key.</param>
-    /// <param name="bySortedColumn">Whether its rows were written in key order, which is checked.</param>
+    /// <param name="draft">The object's draft, which says what walks it by key without a run: its rows in key order, or its slices, which is checked.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <param name="tailBytes">The bytes of its footer when they pass an open's first read, so that the open reads them at once; 0 otherwise.</param>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
-        ISegmentReader source, long firstRow, bool bySortedColumn, CancellationToken cancellationToken, long tailBytes = 0)
+        ISegmentReader source, long firstRow, ObjectDraft draft, CancellationToken cancellationToken, long tailBytes = 0)
     {
         VortexOpenOptions options = tailBytes > ObjectEntry.FirstReadBytes
             ? ObjectCache.OpenOptions with { InitialReadBytes = (int)Math.Min(tailBytes, int.MaxValue) }
@@ -2025,9 +2031,13 @@ public sealed class VortexDataset : IAsyncDisposable
             .OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
-            if (bySortedColumn)
+            if (draft.BySortedColumn)
             {
                 await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
+            }
+            else if (draft.BySlices)
+            {
+                await CheckSlicedAsync(file, cancellationToken).ConfigureAwait(false);
             }
 
             ObjectSummaries summaries = Summaries(file);
@@ -2053,6 +2063,24 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         await cursor.DisposeAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Refuses an object written in sorted slices without a run whose slice table does not walk its
+    /// key: none, one on another column, or one that does not cover its rows. A key cursor would find
+    /// no source in it, and take it for an object without the key.
+    /// </summary>
+    private async ValueTask CheckSlicedAsync(VortexFile file, CancellationToken cancellationToken)
+    {
+        string instant = Key!.Paths[0];
+        (Keys.SlicedKeySource? source, string? reason) = await Keys.SlicedKeySource.OpenAsync(file, instant, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            throw new DatasetIntegrityException(
+                $"An object written in sorted slices carries no run on '{instant}' and no slice table that walks it: {reason}.");
+        }
+
+        await source.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>What orders an object's leaf: its smallest key, or its position.</summary>

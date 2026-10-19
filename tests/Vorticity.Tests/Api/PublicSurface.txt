@@ -1325,6 +1325,7 @@ Vorticity:     const KeySourceKind Dictionary = 4
 Vorticity:     const KeySourceKind InMemory = 5
 Vorticity:     const KeySourceKind None = 0
 Vorticity:     const KeySourceKind Postings = 3
+Vorticity:     const KeySourceKind Slices = 6
 Vorticity:     const KeySourceKind SortedColumn = 1
 Vorticity:     const KeySourceKind SortedRuns = 2
 Vorticity:     field byte value__

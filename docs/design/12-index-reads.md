@@ -50,14 +50,28 @@ locate a key in `O(log n)`. The cheapest source the file offers is used, and the
 |---|---|---|---|
 | sorted column | the file statistics say the column ascends, and it has a zone map | `(value, row)` per non-null row, in row order, which is key order | the zone bounds in memory, then one zone decoded and bisected |
 | sorted runs | the column carries `vorticity.sorted.runs.v1` | `(key, row)` per non-null row, per run | the runs' bounds exclude runs, then a binary search in each survivor, through its fences |
+| time slices | the column, of 64-bit instants, carries `vorticity.slices.v1`, its rows sorted slice by slice | `(key, row)` per row, one slice's instants read and sorted when a position first needs them | the table's bounds name the slice, then a binary search in its sorted instants |
 | postings | `vorticity.postings.blocks.v1` | the distinct keys of each run, without rows | the same, on keys only |
 | dictionary | `vorticity.dict.probe.v1` | the values of each dictionary chunk, sorted at open, without rows | in memory |
 | none | an unsorted, unindexed column | none | refused with a `VortexUnsupportedException` naming `IndexPolicy.SortedRuns` |
 
 The cheapest source wins: a sorted column costs one zone-map read and one zone decode, so it beats
-sorted runs whenever both exist. A cursor opened without `Distinct()` only takes the first two
-sources, because a postings or dictionary source cannot say where a key's rows are, and answering
-with a block's first row would make `Row` a lie.
+sorted runs whenever both exist, and sorted runs beat time slices, which read a slice's column. A
+cursor opened without `Distinct()` only takes the first three sources, because a postings or
+dictionary source cannot say where a key's rows are, and answering with a block's first row would
+make `Row` a lie.
+
+Time slices serve the objects a dataset of periods writes, whose rows are sorted inside each slice by
+other columns first, then by their instant ([sorted time
+slices](20-time-window-aggregates.md#6-sorted-time-slices)). The slices follow each other in time,
+so the slice table finds the one slice that may hold a key, and the rank of a key at or below a
+slice's start is the rows of the slices before it, without a read. Inside the slice, the instants are
+read, decoded and sorted by a radix over their distance from the slice's start, which keeps the rows
+of one instant in row order. Two slices are held at most: the position's, and the last one a rank
+read. A seek or a rank from a cursor just opened costs one slice's read and sort, 2.9 ms for a slice of
+half a million rows and 13 ms for two million (`vortex-queries --micro sliceorder`), where a sorted
+column answers in 0.02 ms. An instant outside its slice's bounds, or a null one, is a table that does
+not say what the file holds, and the read is refused with a `VortexFormatException`.
 
 The sorted-column source serves the files this writer produces, whose statistics carry the order
 flags in the reference's semantics. The reference writer drops those flags from its file statistics.
@@ -241,6 +255,17 @@ page](../guide/benchmarks.md#in-one-process-after-warm-up)). So it is the tool f
 a top-k or a merge, not for a whole uncorrelated column, where sorting the scan's output costs less.
 The plan's `OrderPlan` states the source, the runs the range reaches and the entries it admits
 before the read, and the scan's metrics count the windows and the splits they touched afterwards.
+
+Over time slices, rows are in key order slice by slice only, and a window touches about every split
+of its slice. The first window of a slice reads the splits its own rows lie in, which is all a page
+wants. From the second, the slice is decoded whole and once, in file order, the filter is evaluated
+on it once, and each window is gathered out of it. A window never spans two slices. On four million
+rows sorted inside each slice by three columns, a read of every row in key order took 137 ns a row
+with slices of half a million rows and 189 with slices of two million when every window read its
+splits, and takes 22 to 23 ns now. The same rows in time order take 64 ns a row through a sorted
+column's windows. A page of a hundred rows from an instant costs about the seek, 3.4 ms and 14 ms.
+Memory is one slice of the columns read, the size the windows held when they kept a slice's chunks
+decoded.
 
 The dataset's key-ordered reads and its compaction merge are built on this, one call per object (see
 [what a compaction does](13-dataset.md#53-what-a-compaction-does) and [order beyond the

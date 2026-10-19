@@ -901,7 +901,12 @@ internal sealed class ScanBuilder
             return (null, null, null);
         }
 
-        string structure = cover.Kind == KeySourceKind.SortedColumn ? "sorted column" : "sorted runs";
+        string structure = cover.Kind switch
+        {
+            KeySourceKind.SortedColumn => "sorted column",
+            KeySourceKind.Slices => "time slices",
+            _ => "sorted runs",
+        };
         long[]? proven;
         try
         {

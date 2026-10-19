@@ -7,7 +7,9 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.Expressions;
 using Vorticity.Indexes;
+using Vorticity.Keys;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -94,6 +96,153 @@ public sealed partial class SortedSliceTests
         Assert.Equal(appended.Select(r => r.At.ToUnixTimeMilliseconds() * 1000).Order(), walked);
     }
 
+    /// <summary>
+    /// The same rows in a dataset of periods, whose objects above level 0 are sorted slice by slice and
+    /// walked by their slice tables, and in a dataset of levels: every read in the key's order answers
+    /// alike, forward and backward, filtered or not, through the key cursor's seeks and ranks and
+    /// through a group by that streams on the instant, before and after a delete marks rows of the
+    /// sorted objects.
+    /// </summary>
+    [Fact]
+    public async Task EveryReadInKeyOrderAnswersAsADatasetOfLevels()
+    {
+        await using MemoryObjectStore periodsStore = new MemoryObjectStore();
+        await using MemoryObjectStore levelsStore = new MemoryObjectStore();
+        // Blocks of 16 rows, so that a read in key order takes a slice of a minute, 48 rows, in three
+        // windows; deleted rows marked rather than rewritten out.
+        VortexWriteOptions write = new VortexWriteOptions { BlockRows = 16 };
+        await using VortexDataset periods = await VortexDataset.CreateAsync(periodsStore, Span.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Span.At)],
+            Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 500 },
+            MarkedObjectBytes = 0,
+            MarkedVectorBytes = 1 << 20,
+            Write = write,
+        }, Ct);
+        await using VortexDataset levels = await VortexDataset.CreateAsync(levelsStore, Span.Schema, new DatasetOptions
+        {
+            ClusteringKey = [nameof(Span.At)],
+            MarkedObjectBytes = 0,
+            MarkedVectorBytes = 1 << 20,
+            Write = write,
+        }, Ct);
+
+        // Two hours and a quarter of spans, each at an instant of its own, and forty rows of the first
+        // hour that come late, once it is sealed.
+        Random random = new Random(21);
+        List<Span[]> parts = [];
+        for (int part = 0; part < 16; part++)
+        {
+            parts.Add([.. Enumerable.Range(0, 400).Select(i => new Span(
+                Noon.AddSeconds((part * 400 + i) * 1.25),
+                200 + (random.Next(5) * 100),
+                $"region-{random.Next(3)}",
+                $"host-{random.Next(100_000)}"))]);
+        }
+
+        parts.Insert(12, [.. Enumerable.Range(0, 40).Select(i => new Span(
+            Noon.AddSeconds((i * 80) + 0.1), 404, "region-0", $"late-{i}"))]);
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2 };
+        foreach (Span[] rows in parts)
+        {
+            foreach (VortexDataset dataset in new[] { periods, levels })
+            {
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Span>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+                while (await dataset.CompactAsync(compaction, Ct) is not null)
+                {
+                }
+            }
+        }
+
+        // The sealed hour carries no run on its key: its slice table walks it.
+        await using (ObjectLease lease = await periods.RentAsync(ObjectEntry.FromBytes((await FirstAsync(periods, PeriodLevels.Periods)).Value.Span), Ct))
+        {
+            Assert.Equal(KeySourceKind.Slices, (await lease.File.Keys(nameof(Span.At)).ExplainAsync(Ct)).Source);
+        }
+
+        await SameAsync(periods, levels);
+        foreach (VortexDataset dataset in new[] { periods, levels })
+        {
+            await dataset.DeleteAsync<Span>(r => r.Status == 300, Ct);
+        }
+
+        await SameAsync(periods, levels);
+    }
+
+    /// <summary>What every read in the key's order gives, alike on both datasets.</summary>
+    private static async Task SameAsync(VortexDataset periods, VortexDataset levels)
+    {
+        foreach (bool descending in new[] { false, true })
+        {
+            Assert.Equal(await OrderedAsync(levels, descending, filtered: false), await OrderedAsync(periods, descending, filtered: false));
+            Assert.Equal(await OrderedAsync(levels, descending, filtered: true), await OrderedAsync(periods, descending, filtered: true));
+        }
+
+        await using DatasetKeyCursor byLevels = await DatasetKeyCursor.OpenAsync(levels, Ct);
+        await using DatasetKeyCursor byPeriods = await DatasetKeyCursor.OpenAsync(periods, Ct);
+        List<long> walked = [];
+        for (bool on = await byPeriods.SeekFirstAsync(Ct); on; on = await byPeriods.NextAsync(Ct))
+        {
+            walked.Add(byPeriods.Key.SignedValue);
+        }
+
+        List<long> expected = [];
+        for (bool on = await byLevels.SeekFirstAsync(Ct); on; on = await byLevels.NextAsync(Ct))
+        {
+            expected.Add(byLevels.Key.SignedValue);
+        }
+
+        Assert.Equal(expected, walked);
+        List<long> backward = [];
+        for (bool on = await byPeriods.SeekLastAsync(Ct); on; on = await byPeriods.PreviousAsync(Ct))
+        {
+            backward.Add(byPeriods.Key.SignedValue);
+        }
+
+        backward.Reverse();
+        Assert.Equal(expected, backward);
+
+        for (int i = 0; i < expected.Count; i += 37)
+        {
+            foreach (long probe in new[] { expected[i] - 1, expected[i], expected[i] + 1 })
+            {
+                FilterLiteral key = FilterLiteral.From(probe);
+                foreach (SeekMode mode in new[] { SeekMode.AtOrAfter, SeekMode.After, SeekMode.AtOrBefore, SeekMode.Before, SeekMode.Exact })
+                {
+                    bool found = await byPeriods.SeekAsync(key, mode, Ct);
+                    Assert.Equal(await byLevels.SeekAsync(key, mode, Ct), found);
+                    if (found)
+                    {
+                        Assert.Equal(byLevels.Key, byPeriods.Key);
+                    }
+                }
+
+                Assert.Equal(await byLevels.RankAsync(key, Ct), await byPeriods.RankAsync(key, Ct));
+            }
+        }
+
+        for (int rank = 0; rank < expected.Count; rank += 97)
+        {
+            Assert.True(await byPeriods.SeekRankAsync(rank, Ct));
+            Assert.Equal(expected[rank], byPeriods.Key.SignedValue);
+        }
+
+        // A group by on the instant's minute streams over the sorted objects and gives the same groups.
+        Vorticity.Aggregation byMinute = periods.Scan<Span>().GroupBy(r => r.At.Truncate(CalendarUnit.Minute)).Select(g => (g.Key, g.Count(), g.Min(r => r.Status)));
+        Assert.True(Vorticity.Aggregating.StreamingGroupBatches.Streaming((Vorticity.Aggregating.AggregationQuery)byMinute.Query) >= 0);
+        Assert.Equal(
+            await levels.Scan<Span>().GroupBy(r => r.At.Truncate(CalendarUnit.Minute)).Select(g => (g.Key, g.Count(), g.Min(r => r.Status))).As<MinuteCount>().ToRecordsAsync(Ct).ToListAsync(Ct),
+            await byMinute.As<MinuteCount>().ToRecordsAsync(Ct).ToListAsync(Ct));
+    }
+
+    private static async Task<List<Span>> OrderedAsync(VortexDataset dataset, bool descending, bool filtered)
+    {
+        Scan<Span> scan = filtered ? dataset.Scan<Span>().Where(r => r.Region == "region-1") : dataset.Scan<Span>();
+        return await (descending ? scan.OrderByDescending(r => r.At) : scan.OrderBy(r => r.At)).ToRecordsAsync(Ct).ToListAsync(Ct);
+    }
+
     private static async Task<TreeEntry> FirstAsync(VortexDataset dataset, int level)
     {
         await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
@@ -106,4 +255,7 @@ public sealed partial class SortedSliceTests
 
     [VortexRecord]
     public partial record struct Span(DateTimeOffset At, int Status, string Region, string Host);
+
+    [VortexRecord]
+    public partial record struct MinuteCount(DateTimeOffset Minute, long Rows, int Status);
 }

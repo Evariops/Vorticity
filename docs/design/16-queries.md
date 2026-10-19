@@ -188,8 +188,11 @@ sorted column that holds a NaN, which is not sorted at all (see [key order per
 dtype](12-index-reads.md#34-key-order-per-dtype)). On a dataset it only streams on the first column of
 the clustering key, or a function of it, where the dataset reads its rows in key order, merging the
 objects and opening each one once it may hold the next row (see [order beyond the
-lookup](13-dataset.md#66-order-beyond-the-lookup)). The null group of the streaming component is
-final at the end, and comes last.
+lookup](13-dataset.md#66-order-beyond-the-lookup)). An object a dataset of periods sorted slice by
+slice is read the same way, slice after slice in time order, each slice decoded once and its rows
+gathered in key order ([rows in key order](12-index-reads.md#5-rows-in-key-order)), so the groups are
+those a dataset in time order gives. The null group of the streaming component is final at the end,
+and comes last.
 
 Under a descending order of the component, a group by streams backwards when a window follows the
 order, which stops the read: `orderby g.Key descending take 7` reads the last seven days of a year,

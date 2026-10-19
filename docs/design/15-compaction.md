@@ -247,10 +247,11 @@ first, so that rows of equal values keep their time order without a pass on the 
 gathered once through the permutation and written, and the slice table records the order. A slice of
 a million rows over three synopsis columns sorts in 43 ns a row (`vortex-queries --micro slicesort`),
 its rows copied, coded, sorted and gathered. The object then holds its rows in the key's order slice by
-slice only, so it carries the sorted run on the key, through which the key cursor and every read in
-key order find its rows, and a dataset of periods takes no row's rank for its row above level 0. A
-slice is held whole while it sorts: a slice past the query memory's grant, sorted in runs and merged,
-is not done yet. A period is a day at creation, and each seal weighs the load of the period it wrote and
+slice only, and a dataset of periods takes no row's rank for its row above level 0. On a key of the
+instant alone it carries no sorted run on the key: its slice table is the source through which the key
+cursor and every read in key order find its rows, a job's merge of its inputs included, which reads
+each slice once ([sources of order](12-index-reads.md#2-sources-of-order)). A slice is held whole while
+it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet. A period is a day at creation, and each seal weighs the load of the period it wrote and
 records the length that load calls for, from past the newest instant ([the length of a
 period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts
 the same. `DatasetPeriodsCompactionTests` runs 300 rounds of

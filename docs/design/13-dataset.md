@@ -255,15 +255,21 @@ merge of the inputs on the clustering key when there is one, and a concatenation
 writer builds the outputs' embedded indexes once, dropping the inputs' fragments, so compaction is
 also the index compaction of everything it touches.
 
-Level 0 is not sorted, and nothing ever sorts it. An append arrives in any order, and the writer
-streams with bounded memory ([11-write-strategy.md](11-write-strategy.md)). So the write policy
-requires a sorted run on the clustering key in every object whose rows may be out of order (see [the
+An append is not sorted. It arrives in any order, and the writer streams with bounded memory
+([11-write-strategy.md](11-write-strategy.md)). So the write policy requires a sorted run on the
+clustering key in every object whose rows may be out of order (see [the
 policy](10-indexes.md#6-the-policy)), and the compaction reads each input in key order through that
 run (see [rows in key order](12-index-reads.md#5-rows-in-key-order)). The merge's inputs are ordered,
-its outputs are sorted by construction, and the writer never has to learn to sort. The run is the
-object's structure rather than a hint, so the index budget spares it. On a narrow table it is as large
-as the column it orders, and a budget of a tenth of the data would refuse it on every object past a
-mebibyte, the merge's outputs included.
+and its outputs are sorted by construction. The run is the object's structure rather than a hint, so
+the index budget spares it. On a narrow table it is as large as the column it orders, and a budget of
+a tenth of the data would refuse it on every object past a mebibyte, the merge's outputs included.
+
+A dataset of periods sorts what leaves level 0. Its compaction writes every object in time slices,
+each sorted by the object's synopsis columns, then by its instant ([a dataset of
+periods](15-compaction.md#a-dataset-of-periods)). On a key of the instant alone such an object carries
+no run: its slice table is the key's source, which finds a key's slice and sorts the slice's instants
+when a read needs them ([sources of order](12-index-reads.md#2-sources-of-order)). A composite key
+keeps its run. Sealing the object checks that its slice table walks the key.
 
 An object whose rows come in key order carries no run when the key is a single integer column with
 no nulls, as is the case for a merge's output or its rewrite ([deleting
@@ -429,9 +435,9 @@ The trees are ordered by the clustering key, so the order of that one key is bou
 | need | mechanism | cost |
 |---|---|---|
 | walk the objects by key | an in-order walk of a level's tree, with the next pages prefetched eight ahead | O(log N + objects touched), about one dependent round trip per window of eight pages |
-| rows in key order, `OrderBy` | a merge of each object's key-ordered read. Inside a level above 0 the objects are key-disjoint | at most 8 + L objects open at once |
+| rows in key order, `OrderBy` | a merge of each object's key-ordered read. Inside a level above 0 the objects are key-disjoint. An object in sorted slices is read slice by slice, each slice decoded once ([rows in key order](12-index-reads.md#5-rows-in-key-order)) | at most 8 + L objects open at once, and a slice of each object in sorted slices |
 | rows by position, `Rows(a, b)` | the row sums of every node | O(log N) plus the objects the range touches |
-| count and rank on the clustering key | objects whose summaries lie wholly inside the range are counted unopened, and the core's exact cover handles the boundary objects | at most level 0's objects plus two per level opened |
+| count and rank on the clustering key | objects whose summaries lie wholly inside the range are counted unopened, and the core's exact cover handles the boundary objects | at most level 0's objects plus two per level opened, and in an object in sorted slices the instants of the slice a bound falls in |
 | an order on another column | no tree helps | one cursor per object the summaries cannot refute |
 | the rows of a time slice, in an object written with its slices | the object's slice table and chunk directory ([the rows of a time slice](12-index-reads.md#51-the-rows-of-a-time-slice-without-the-footer)) | a few small requests once per object, then one per slice, and never the object's footer |
 
