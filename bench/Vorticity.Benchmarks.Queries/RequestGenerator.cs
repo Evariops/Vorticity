@@ -178,6 +178,10 @@ internal sealed class RequestGenerator
         }
 
         Console.WriteLine(held ? "every column within 50 % of the design" : "a column is past 50 % of the design");
+
+        // The prefix an order led by what questions group by most would give a question by service under a method.
+        long servicesByMethod = minute.Select(r => (r.Service, r.Method)).Distinct().LongCount();
+        Console.WriteLine($"(Service, Method) {servicesByMethod} combinations, against {runs[3]} for the design's order down to Service");
         return held ? 0 : 1;
     }
 
