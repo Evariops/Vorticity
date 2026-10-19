@@ -691,7 +691,7 @@ public sealed class VortexDataset : IAsyncDisposable
         await foreach (PositionedObject held in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
             .ConfigureAwait(false))
         {
-            if (Indexes.SynopsisContents.From(held.Entry.Synopsis.Span) is { } contents)
+            if (held.Entry.Contents is { } contents)
             {
                 reads.Add(WarmObjectAsync(cache, held.Entry, contents, cancellationToken));
             }
@@ -2243,7 +2243,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal async ValueTask<Indexes.SynopsisTableSet?> ReadSynopsisAsync(
         ObjectEntry entry, Func<Indexes.SynopsisTableInfo, bool>? wanted, CancellationToken cancellationToken)
     {
-        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        if (entry.Contents is not { } contents)
         {
             return null;
         }
@@ -2296,7 +2296,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal async ValueTask<List<RecordBatch>?> LookupAsync(ObjectEntry entry, VortexExpr filter, CancellationToken cancellationToken)
     {
-        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { DirectoryRegion: { } region } contents)
+        if (entry.Contents is not { DirectoryRegion: { } region } contents)
         {
             return null;
         }
@@ -2311,7 +2311,7 @@ public sealed class VortexDataset : IAsyncDisposable
             }
 
             // The first round trip: the index directory, beside every column's chunk directory.
-            DType schema = contents.SchemaIn(new DTypeArena());
+            DType schema = contents.SchemaType;
             ValueTask<Buffers.SegmentOwner> read = reader.ReadAsync(
                 new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken);
             Task<long>[] chunks = new Task<long>[schema.FieldCount];
@@ -2388,7 +2388,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal async ValueTask<Indexes.VariantDirectory?> ReadPathDirectoryAsync(ObjectEntry entry, int field, CancellationToken cancellationToken)
     {
-        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        if (entry.Contents is not { } contents)
         {
             return null;
         }
@@ -2423,7 +2423,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal async ValueTask<List<RecordBatch>?> ReadPathAsync(ObjectEntry entry, int field, string key, CancellationToken cancellationToken)
     {
-        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        if (entry.Contents is not { } contents)
         {
             return null;
         }
@@ -2500,7 +2500,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     internal async ValueTask<RecordBatch?> ReadSliceAsync(ObjectEntry entry, int slice, int[]? columns, CancellationToken cancellationToken)
     {
-        if (Indexes.SynopsisContents.From(entry.Synopsis.Span) is not { } contents)
+        if (entry.Contents is not { } contents)
         {
             return null;
         }

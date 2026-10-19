@@ -72,6 +72,29 @@ internal sealed record SynopsisContents(
     /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
     internal DType SchemaIn(DTypeArena types) => DTypeFlatBuffers.Read(Schema, types);
 
+    /// <summary>The schema <see cref="SchemaType"/> read, in an arena of its own that nothing adds to; null until then.</summary>
+    private System.Runtime.CompilerServices.StrongBox<DType>? _schema;
+
+    /// <summary>
+    /// The file's schema, read the first time it is asked for into an arena of its own, which only readers
+    /// share: the contents of an entry are parsed once, and each question over the object asked for its schema
+    /// again.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The schema's bytes do not decode.</exception>
+    internal DType SchemaType
+    {
+        get
+        {
+            if (System.Threading.Volatile.Read(ref _schema) is { } known)
+            {
+                return known.Value;
+            }
+
+            System.Runtime.CompilerServices.StrongBox<DType> read = new System.Runtime.CompilerServices.StrongBox<DType>(SchemaIn(new DTypeArena()));
+            return (System.Threading.Interlocked.CompareExchange(ref _schema, read, null) ?? read).Value;
+        }
+    }
+
     /// <summary>The contents as an entry carries them: tagged fields, in the order of their tags.</summary>
     internal byte[] ToBytes()
     {

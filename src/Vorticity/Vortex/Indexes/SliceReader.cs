@@ -126,7 +126,7 @@ internal sealed class SliceReader
     internal static SliceReader? Open(ISegmentReader source, VortexReadOptions? options, SynopsisContents contents)
     {
         ArgumentNullException.ThrowIfNull(source);
-        DType schema = contents.SchemaIn(new DTypeArena());
+        DType schema = contents.SchemaType;
         return schema.Kind == DTypeKind.Struct && contents.ChunkDirectories.Count == schema.FieldCount
             ? new SliceReader(source, schema, options ?? VortexReadOptions.Default, contents.Slices, [.. contents.Encodings], contents.ChunkDirectories, contents.Slices.Rows)
             : null;

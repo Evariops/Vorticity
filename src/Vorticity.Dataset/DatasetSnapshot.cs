@@ -114,7 +114,7 @@ internal sealed class DatasetSnapshot
                 continue;
             }
 
-            yield return new PositionedObject(ObjectEntry.FromBytes(held.Value), firstRow) { Level = level, TreeKey = held.Key };
+            yield return new PositionedObject(_objects.Entries.Of(held.Value), firstRow) { Level = level, TreeKey = held.Key };
         }
     }
 

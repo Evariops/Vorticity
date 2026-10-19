@@ -65,7 +65,7 @@ internal static class WindowAlignment
             ObjectEntry entry = held.Entry;
             if (!entry.Summaries.TryGet(instant, out ColumnSummary summary)
                 || summary is not { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
-                || SynopsisContents.From(entry.Synopsis.Span) is not { } contents
+                || entry.Contents is not { } contents
                 || SchemaOf(contents) is not { } schema)
             {
                 continue;
@@ -190,7 +190,7 @@ internal static class WindowAlignment
     {
         try
         {
-            return contents.SchemaIn(new DTypeArena());
+            return contents.SchemaType;
         }
         catch (VortexFormatException)
         {

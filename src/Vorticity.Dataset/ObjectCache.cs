@@ -40,6 +40,9 @@ internal sealed class ObjectCache : IAsyncDisposable
     /// </summary>
     internal static VortexOpenOptions OpenOptions { get; } = new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse };
 
+    /// <summary>The entries the handle's walks parsed, shared by every version that holds their pages.</summary>
+    internal EntryMemo Entries { get; } = new EntryMemo();
+
     /// <summary>How many objects are open, leased or idle.</summary>
     internal int Count => _open.Count;
 

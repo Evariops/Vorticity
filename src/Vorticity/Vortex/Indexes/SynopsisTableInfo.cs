@@ -379,7 +379,7 @@ internal sealed record SynopsisTableInfo(SynopsisTableKind Kind, SynopsisBucket 
         IO.ISegmentReader source, SynopsisContents contents, Func<SynopsisTableInfo, bool>? wanted, VortexReadOptions? options,
         CancellationToken cancellationToken)
     {
-        DType schema = contents.SchemaIn(new DTypeArena());
+        DType schema = contents.SchemaType;
         List<(SynopsisTableInfo, IndexSegment)> found = [];
         foreach ((SynopsisTableInfo table, IndexSegment region) in contents.Tables)
         {

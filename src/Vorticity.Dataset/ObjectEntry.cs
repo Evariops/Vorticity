@@ -363,6 +363,31 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// </summary>
     public ReadOnlyMemory<byte> Synopsis { get; private set; }
 
+    /// <summary>What <see cref="Contents"/> parsed, <see cref="NoContents"/> for none; null until it is asked.</summary>
+    private object? _contents;
+
+    private static readonly object NoContents = new object();
+
+    /// <summary>
+    /// <see cref="Synopsis"/> parsed, the first time it is asked for and never again: an entry is immutable, and a
+    /// handle's walks share their entries, so a question asked again parses no table of contents. Null when the
+    /// entry carries none, or none this library reads.
+    /// </summary>
+    internal Indexes.SynopsisContents? Contents
+    {
+        get
+        {
+            object? known = Volatile.Read(ref _contents);
+            if (known is null)
+            {
+                known = (object?)Indexes.SynopsisContents.From(Synopsis.Span) ?? NoContents;
+                known = Interlocked.CompareExchange(ref _contents, known, null) ?? known;
+            }
+
+            return known as Indexes.SynopsisContents;
+        }
+    }
+
     /// <summary>The entry with <paramref name="contents"/> as its synopsis's table of contents; itself when there are none.</summary>
     /// <param name="contents">The writer's table of contents, or null.</param>
     public ObjectEntry WithSynopsis(byte[]? contents)

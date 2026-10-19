@@ -52,16 +52,16 @@ public sealed partial class QueryPathBudgetTests : IClassFixture<QueryPathBudget
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["synopses: count by service"] = new(4, 6880, 0, 0, 261312),
-        ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 270848),
-        ["synopses: by minute, the last hour, under a predicate"] = new(3, 100970, 2, 35424, 106176),
-        ["synopses: an unaligned window"] = new(5, 198994, 2, 66728, 179968),
-        ["synopses: every row but one id"] = new(8, 297003, 4, 34768, 188736),
-        ["synopses: measures by region and hour"] = new(4, 4112, 0, 0, 279104),
-        ["synopses: count by route, a shredded path"] = new(8, 268137, 4, 5902, 196800),
-        ["rows: count by service and hour"] = new(8, 392747, 4, 130512, 110144),
-        ["rows: count by route, a shredded path"] = new(8, 268137, 4, 5902, 87424),
-        ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 213568),
+        ["synopses: count by service"] = new(4, 6880, 0, 0, 172032),
+        ["synopses: count by service and hour"] = new(4, 6880, 0, 0, 181568),
+        ["synopses: by minute, the last hour, under a predicate"] = new(3, 100970, 2, 35424, 76672),
+        ["synopses: an unaligned window"] = new(5, 198994, 2, 66728, 102272),
+        ["synopses: every row but one id"] = new(8, 297003, 4, 34768, 70720),
+        ["synopses: measures by region and hour"] = new(4, 4112, 0, 0, 189824),
+        ["synopses: count by route, a shredded path"] = new(8, 268137, 4, 5902, 78784),
+        ["rows: count by service and hour"] = new(8, 392747, 4, 130512, 90112),
+        ["rows: count by route, a shredded path"] = new(8, 268137, 4, 5902, 67264),
+        ["rows: the rows of one id"] = new(6, 335643, 2, 73408, 193536),
     };
 
     private readonly Fixture _fixture;

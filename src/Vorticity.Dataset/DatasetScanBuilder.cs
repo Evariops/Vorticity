@@ -483,7 +483,7 @@ internal sealed class DatasetScanBuilder
     private (SynopsisAnswer? Answer, SynopsisContents? Contents, string? Instant) Answer(in PositionedObject held, StateRequest request)
     {
         if (Covered(held) != held.Entry.Rows || _dataset.Key is not { } key
-            || SynopsisContents.From(held.Entry.Synopsis.Span) is not { } contents)
+            || held.Entry.Contents is not { } contents)
         {
             return default;
         }
@@ -491,7 +491,7 @@ internal sealed class DatasetScanBuilder
         DType schema;
         try
         {
-            schema = contents.SchemaIn(new DTypeArena());
+            schema = contents.SchemaType;
         }
         catch (VortexFormatException)
         {
@@ -821,7 +821,7 @@ internal sealed class DatasetScanBuilder
 
         // The slices cut and the rows marked are read beside the tables, not after them: their chunk
         // directories and their chunks take two round trips, the tables one, so the object costs two.
-        DType schema = contents.SchemaIn(new DTypeArena());
+        DType schema = contents.SchemaType;
         Task<List<RecordBatch>>? edges = answer.Edges.Count > 0
             ? ReadSpansAsync(held, contents, answer.Edges, EdgeColumns(schema), select: true, cancellationToken)
             : null;
@@ -1469,7 +1469,7 @@ internal sealed class DatasetScanBuilder
                 key, "excluded", "rows the filter leaves out by an identifier, found by its index and taken out of the tables", answer.Excluded.Count));
         }
 
-        DType schema = contents.SchemaIn(new DTypeArena());
+        DType schema = contents.SchemaType;
         foreach (SynopsisPart part in answer.Parts)
         {
             string[] keys = Array.ConvertAll(part.Table.Keys, field => SynopsisTableInfo.NameOf(field, schema, contents.Slices.Paths));
