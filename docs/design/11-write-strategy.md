@@ -121,6 +121,16 @@ Per column chunk, in order:
    every such chunk as runs, and before a decimal's parts. A decimal whose values fit in 64 bits is
    then written as `vortex.decimal_byte_parts` over the integers, which the integer schemes price in
    turn.
+
+   The share of nulls is a price, measured. A sparse chunk takes fewer bytes than the dense one the
+   chooser picks from half its rows null, but it decodes slower until 98 rows in a hundred are null:
+   0.15 ns a row and 3.2 ns a valid row for integers and doubles, 0.45 ns and 5.7 ns for text,
+   against 0.23 ns a row for bit-packed integers (`vortex-queries --micro sparsecost`, nulls at
+   random places). Nine nulls in ten is where each byte sparse saves costs about a third of a
+   nanosecond of decode: 0.32 ns for integers at 90 % nulls, and at 85 % 0.35 for integers, 0.33 for
+   doubles and 0.55 for text. A choice per chunk at that price would make about the same choices on
+   these shapes, and it would need the dense plan's bytes and decode time when sparse is weighed,
+   which the chooser only has once it has priced every other candidate.
 3. Exact candidates are each priced by a formula equal to what their encoder will write: the plain
    form (for text, `vortex.varbin` or views, whichever is smaller), run-end (which wins outright
    below a quarter as many runs as rows), bit-packing in the raw, zigzag or frame-of-reference domain

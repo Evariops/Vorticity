@@ -1895,7 +1895,10 @@ internal static class ColumnCompressor
     /// besides. A sparse chunk pays for its valid rows only, a position each and a value, priced
     /// as a frame of reference packs them: the positions over the chunk's rows, the values over
     /// the bounds the pass took, or plain where it took none. Run-end is the one scheme that also
-    /// skips null rows, a run at a time, and is what it has to beat.
+    /// skips null rows, a run at a time, and is what it has to beat. Nine nulls in ten is a price:
+    /// sparse takes fewer bytes from half the rows null but decodes slower until nearly all are, and
+    /// at nine in ten each byte it saves costs about a third of a nanosecond of decode, for integers,
+    /// doubles and text alike (<c>vortex-queries --micro sparsecost</c>).
     /// </remarks>
     private static ColumnPlan SparseOf(
         CanonicalArena arena, in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,

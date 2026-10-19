@@ -131,6 +131,12 @@ if (Text(args, "--micro") == "synopsisanswer")
     return await SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds);
 }
 
+// --micro sparsecost: a sparse chunk's bytes and decode time against a dense one's, by the share of nulls (SparseCostMicro.cs).
+if (Text(args, "--micro") == "sparsecost")
+{
+    return await SparseCostMicro.Run(Option(args, "--rows", 1_000_000), rounds);
+}
+
 // --micro slicecost: the price of a row at a window's edge and of a row of a table of slices, the two a slice's target trades (SliceCostMicro.cs).
 if (Text(args, "--micro") == "slicecost")
 {
