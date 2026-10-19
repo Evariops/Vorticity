@@ -97,9 +97,10 @@ internal sealed class RequestGenerator
     /// <summary>
     /// The rows of <paramref name="span"/> from <paramref name="start"/>, at <paramref name="perSecond"/>, appended by
     /// <paramref name="writers"/> writers in batches of <paramref name="batch"/> each: most rows in their batch's time,
-    /// a share of them seconds late, a thin tail up to an hour late.
+    /// a share of them seconds late, a thin tail up to an hour late; all in time order when <paramref name="late"/> is
+    /// false.
     /// </summary>
-    internal IEnumerable<GeneratedRequest[]> Appends(DateTimeOffset start, TimeSpan span, double perSecond, TimeSpan batch, int writers)
+    internal IEnumerable<GeneratedRequest[]> Appends(DateTimeOffset start, TimeSpan span, double perSecond, TimeSpan batch, int writers, bool late = true)
     {
         long rows = (long)(span.TotalSeconds * perSecond);
         long perBatch = Math.Max(1, (long)(batch.TotalSeconds * perSecond / writers));
@@ -108,9 +109,9 @@ internal sealed class RequestGenerator
         for (long row = 0; row < rows; row++)
         {
             DateTimeOffset at = start.AddSeconds(row * step);
-            double late = _random.NextDouble();
-            at = late < 0.0001 ? at.AddSeconds(-_random.Next(60, 3_600))
-                : late < 0.02 ? at.AddSeconds(-_random.Next(1, 10))
+            double lag = late ? _random.NextDouble() : 1;
+            at = lag < 0.0001 ? at.AddSeconds(-_random.Next(60, 3_600))
+                : lag < 0.02 ? at.AddSeconds(-_random.Next(1, 10))
                 : at;
             pending.Add(Next(at < start ? start : at));
             if (pending.Count == perBatch)
