@@ -1209,7 +1209,7 @@ early](#24-stopping-early) describes.
 | an implicit order of groups | it used to change with the writer's encodings, so an order is asked for ([order](#63-order-orderby-thenby)). Without one, the order is not defined. At one lane the groups come in the order they were first met, and at more, in the merge's order: the largest lane's, then the others' as they merged in, or part by part of the key space, the parts cut by a hash seeded once per process, so two runs of a query in one process cut them alike. The repository's tests run with an internal switch that shuffles it, the same way for a process, so no test relies on it |
 | the same bits for a custom aggregator whose merge is not associative | every native aggregate gives the same bits whatever the caches' capacity, α and the order its states merge in ([how it is tested](#13-how-it-is-tested)), its consolidation made of merges alone. A merge that is not associative depends on that order, as it already depends on the order of the merges at more than one lane |
 | a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, and a third more at a million groups, whose 32 bytes per group leave the cache. It is more accurate, and a second semantics would be a second test matrix |
-| approximate distinct counts, grouping sets | later, as aggregates and as operators of the same pipeline |
+| grouping sets | later, as operators of the same pipeline |
 
 ## 13. How it is tested
 
