@@ -1,14 +1,18 @@
 // The synopsis cache on the local disk: warm, the questions read their tables with no request to the store,
-// across a restart; a region torn or flipped is dropped and read again; one cache owns a directory; only
-// the regions an object's table of contents declares enter it; past its capacity it drops entries; and
-// questions that miss the same region at once make one read of it.
+// across a restart, a sealed dataset's too with no plaintext on the disk; a region torn or flipped, or a
+// sealed frame flipped, is dropped and read again; one cache owns a directory; only the regions an object's
+// table of contents declares enter it; past its capacity it drops entries; and questions that miss the same
+// region at once make one read of it.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Vorticity.Indexes;
+using Vorticity.IO;
 using Vorticity.Tests.Writing;
 using Xunit;
 
@@ -67,6 +71,100 @@ public sealed partial class SynopsisAnswerTests
                 Assert.Equal(answer, restarted);
                 Assert.Equal(0, store.Requests);
             }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// A sealed dataset through the cache: a window aligned on an hour reads its tables from the store once, then
+    /// from the disk with no request, and so does a session that opens the directory after a restart. Every file
+    /// the cache keeps is bytes of a sealed object as the store holds them, a frame or a trailer: no plaintext.
+    /// </summary>
+    [Fact]
+    public async Task ASealedDatasetAnswersWarmFromTheDiskWithNoPlaintextThere()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            DateTimeOffset hour = Noon.AddHours(1);
+            List<string> answer;
+            await using (VortexSession session = Sealed(keyring, directory))
+            await using (VortexDataset dataset = await FilledAsync(store, session: session, encrypted: true))
+            {
+                _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
+                store.Reset();
+                (List<string> cold, _) = await WindowAsync(dataset, hour, hour.AddHours(1));
+                long coldRequests = store.Requests;
+                store.Reset();
+                (answer, ScanMetrics metrics) = await WindowAsync(dataset, hour, hour.AddHours(1));
+                Console.Out.Write($"SEALED CACHE: {coldRequests} requests cold, {store.Requests} warm.\n");
+                Assert.Equal(cold, answer);
+                Assert.True(metrics.SynopsisRows > 0);
+                Assert.True(coldRequests > 0);
+                Assert.Equal(0, store.Requests);
+                await AssertSealedBytesOnlyAsync(dataset, inner, directory);
+            }
+
+            await using (VortexSession session = Sealed(keyring, directory))
+            await using (VortexDataset reopened = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct))
+            {
+                _ = await reopened.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
+                store.Reset();
+                (List<string> restarted, _) = await WindowAsync(reopened, hour, hour.AddHours(1));
+                Assert.Equal(answer, restarted);
+                Assert.Equal(0, store.Requests);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The frames and the trailers a sealed dataset's cache keeps, each flipped on the disk: the next question
+    /// refuses them, reads them again from the store and answers the same; the one after asks the store nothing.
+    /// </summary>
+    [Fact]
+    public async Task ASealedFrameFlippedOnTheDiskIsReadAgainFromTheStore()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using VortexSession session = Sealed(keyring, directory);
+            await using VortexDataset dataset = await FilledAsync(store, session: session, encrypted: true);
+            _ = await dataset.Scan<Request>().Where(r => r.At >= Noon).CountAsync(Ct);
+            DateTimeOffset hour = Noon.AddHours(1);
+            (List<string> answer, _) = await WindowAsync(dataset, hour, hour.AddHours(1));
+            string[] files = [.. Directory.GetFiles(directory, "*", SearchOption.AllDirectories).Where(file => Path.GetFileName(file) != ".lock")];
+            foreach (string file in files)
+            {
+                byte[] bytes = System.IO.File.ReadAllBytes(file);
+                bytes[bytes.Length / 2] ^= 1;
+                System.IO.File.WriteAllBytes(file, bytes);
+            }
+
+            store.Reset();
+            (List<string> refused, _) = await WindowAsync(dataset, hour, hour.AddHours(1));
+            long again = store.Requests;
+            store.Reset();
+            (List<string> kept, _) = await WindowAsync(dataset, hour, hour.AddHours(1));
+            SynopsisCache cache = session.Options.SynopsisCache!;
+            Console.Out.Write($"SEALED FLIPPED: {files.Length} files flipped, {cache.Corrupt} dropped, {again} requests to read them again, {store.Requests} after.\n");
+            Assert.Equal(answer, refused);
+            Assert.Equal(answer, kept);
+            Assert.True(cache.Corrupt > 0);
+            Assert.True(again > 0);
+            Assert.Equal(0, store.Requests);
         }
         finally
         {
@@ -312,6 +410,54 @@ public sealed partial class SynopsisAnswerTests
     /// <summary>A count and a sum of bytes by method over a window, and what reading it did.</summary>
     private static Task<(List<string> Groups, ScanMetrics Metrics)> WindowAsync(VortexDataset dataset, DateTimeOffset from, DateTimeOffset to) =>
         GroupsAsync(dataset.Scan<Request>().Where(r => r.At >= from && r.At < to).GroupBy(r => r.Method).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))));
+
+    /// <summary>A session that seals under <paramref name="keyring"/>, with a synopsis cache in <paramref name="directory"/>.</summary>
+    private static VortexSession Sealed(VortexKeyring keyring, string directory) => VortexSession.Create(options =>
+    {
+        options.Keyring = keyring;
+        options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
+    });
+
+    /// <summary>
+    /// Every file the cache in <paramref name="directory"/> keeps is bytes of one of the dataset's sealed objects
+    /// as <paramref name="store"/> holds them: a frame, where its name places it, or a trailer, the object's end.
+    /// At least one of each.
+    /// </summary>
+    private static async Task AssertSealedBytesOnlyAsync(VortexDataset dataset, MemoryObjectStore store, string directory)
+    {
+        Dictionary<string, string> keys = new Dictionary<string, string>(StringComparer.Ordinal);
+        await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, Ct))
+        {
+            keys[held.Entry.Uid.ToString("x32", CultureInfo.InvariantCulture)] = held.Entry.Key;
+        }
+
+        int frames = 0;
+        int trailers = 0;
+        foreach (string file in Directory.GetFiles(directory, "*", SearchOption.AllDirectories).Where(file => Path.GetFileName(file) != ".lock"))
+        {
+            string[] parts = Path.GetFileName(file).Split('-');
+            byte[] kept = await System.IO.File.ReadAllBytesAsync(file, Ct);
+            string key = keys[parts[0]];
+            ObjectHead head = (await store.HeadAsync(key, Ct))!.Value;
+            using ObjectRange range = await store.GetRangeAsync(key, 0, (int)head.Length, Ct);
+            byte[] stored = range.Bytes.ToArray();
+            if (parts[^1] == "trailer")
+            {
+                Assert.Equal(stored[^kept.Length..], kept);
+                trailers++;
+                continue;
+            }
+
+            Assert.Equal("sealed", parts[^1]);
+            int offset = Convert.ToInt32(parts[1], 16);
+            Assert.Equal(stored.AsSpan(offset, kept.Length).ToArray(), kept);
+            frames++;
+        }
+
+        Console.Out.Write($"SEALED KEPT: {frames} frames and {trailers} trailers, each the store's bytes.\n");
+        Assert.True(frames > 0, "no frame kept");
+        Assert.True(trailers > 0, "no trailer kept");
+    }
 
     /// <summary>A fresh directory for a cache, which the test deletes.</summary>
     /// <summary>

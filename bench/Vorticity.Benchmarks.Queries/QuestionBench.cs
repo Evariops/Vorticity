@@ -23,26 +23,27 @@ namespace Vorticity.Benchmarks.Queries;
 /// tables weigh far more against its rows than a day's do at the design's rate, so the default budget of the
 /// tables (<c>--budget</c>, in thousandths of the data, 100) keeps the shallow ones only. The counts are the
 /// figures to hold; the times only say where the time goes. <c>--only</c> asks only the questions whose name holds
-/// its text.
+/// its text. <c>--sealed</c> seals the datasets under a keyring of one key, their caches keeping sealed bytes only.
 /// </remarks>
 internal static class QuestionBench
 {
     /// <summary>The instant the generated datasets start at.</summary>
     internal static readonly DateTimeOffset Start = new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero);
 
-    internal static async Task<int> Run(int hours, double rate, int latency, int rounds, int budget, string? only = null)
+    internal static async Task<int> Run(int hours, double rate, int latency, int rounds, int budget, string? only = null, bool encrypted = false)
     {
         await using MemoryObjectStore requestBytes = new MemoryObjectStore();
         await using CountingObjectStore requests = new CountingObjectStore(requestBytes);
         await using MemoryObjectStore logBytes = new MemoryObjectStore();
         await using CountingObjectStore logs = new CountingObjectStore(logBytes);
+        using VortexKeyring? keyring = encrypted ? VortexKeyring.FromKeys(new VortexKey("questions", System.Security.Cryptography.RandomNumberGenerator.GetBytes(32))) : null;
 
         long begin = Stopwatch.GetTimestamp();
         VortexWriteOptions write = new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(budget) };
-        (long requestRows, string needle) = await FillRequestsAsync(requests, hours, rate, write);
-        long logRows = await FillLogsAsync(logs, hours, rate / 2, write);
+        (long requestRows, string needle) = await FillRequestsAsync(requests, hours, rate, write, keyring);
+        long logRows = await FillLogsAsync(logs, hours, rate / 2, write, keyring);
         Console.WriteLine(
-            $"{requestRows} requests and {logRows} log records over {hours} periods of an hour, written and compacted in " +
+            $"{requestRows} requests and {logRows} log records over {hours} periods of an hour{(encrypted ? ", sealed" : string.Empty)}, written and compacted in " +
             $"{Stopwatch.GetElapsedTime(begin).TotalSeconds:F1} s; tables up to {budget} ‰ of the data; {latency} ms a round trip; warm is the best of {rounds}");
         requestBytes.Latency = TimeSpan.FromMilliseconds(latency);
         logBytes.Latency = TimeSpan.FromMilliseconds(latency);
@@ -72,7 +73,7 @@ internal static class QuestionBench
         {
             if (only is null || name.Contains(only, StringComparison.Ordinal))
             {
-                await AskAsync(requestBytes, requests, name, ask, rounds, align: name.Contains("AlignWindow", StringComparison.Ordinal));
+                await AskAsync(requestBytes, requests, name, ask, rounds, align: name.Contains("AlignWindow", StringComparison.Ordinal), keyring: keyring);
             }
         }
 
@@ -90,7 +91,7 @@ internal static class QuestionBench
         {
             if (only is null || name.Contains(only, StringComparison.Ordinal))
             {
-                await AskAsync(logBytes, logs, name, ask, rounds);
+                await AskAsync(logBytes, logs, name, ask, rounds, keyring: keyring);
             }
         }
 
@@ -100,11 +101,16 @@ internal static class QuestionBench
     /// <summary>
     /// The requests of <paramref name="hours"/> hours at <paramref name="rate"/> a second, appended a minute at a
     /// time and compacted until nothing is due; and the id of a request in the middle, a needle to leave out.
+    /// Sealed under <paramref name="keyring"/> when one is given.
     /// </summary>
-    internal static async Task<(long Rows, string Needle)> FillRequestsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write)
+    internal static async Task<(long Rows, string Needle)> FillRequestsAsync(
+        IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring = null)
     {
+        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options => options.Keyring = keyring);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {
+            Session = session ?? VortexSession.Default,
+            Encrypted = keyring is not null,
             ClusteringKey = [nameof(GeneratedRequest.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
             Identifiers = [nameof(GeneratedRequest.RequestId)],
@@ -132,10 +138,13 @@ internal static class QuestionBench
     }
 
     /// <summary>The log records of <paramref name="hours"/> hours at <paramref name="rate"/> a second, as the requests.</summary>
-    private static async Task<long> FillLogsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write)
+    private static async Task<long> FillLogsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring)
     {
+        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options => options.Keyring = keyring);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, LogRow.Schema, new DatasetOptions
         {
+            Session = session ?? VortexSession.Default,
+            Encrypted = keyring is not null,
             ClusteringKey = [nameof(LogRow.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour },
             Write = write,
@@ -190,10 +199,11 @@ internal static class QuestionBench
     /// One question, from the synopses and then from the rows: cold, by a handle and a session opened for it with an
     /// empty synopsis cache on disk, the open not counted; then warm, by that handle again, the best of
     /// <paramref name="rounds"/>. <paramref name="bytes"/> is the store under the count, whose wait is lifted for a
-    /// first ask.
+    /// first ask. A sealed dataset is read under <paramref name="keyring"/>.
     /// </summary>
     internal static async Task AskAsync<TRecord>(
-        MemoryObjectStore bytes, CountingObjectStore store, string name, Func<Scan<TRecord>, Aggregation> ask, int rounds, bool align = false)
+        MemoryObjectStore bytes, CountingObjectStore store, string name, Func<Scan<TRecord>, Aggregation> ask, int rounds, bool align = false,
+        VortexKeyring? keyring = null)
         where TRecord : IVortexRecord<TRecord>
     {
         // Asked once each way first, with no wait and nothing kept, so that neither cold ask pays the question's
@@ -202,7 +212,7 @@ internal static class QuestionBench
         bytes.Latency = TimeSpan.Zero;
         foreach (bool synopses in new[] { true, false })
         {
-            await using VortexSession session = VortexSession.Create(static _ => { });
+            await using VortexSession session = VortexSession.Create(options => options.Keyring = keyring);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
             await MeasureAsync(store, dataset, ask, synopses, align);
         }
@@ -213,7 +223,11 @@ internal static class QuestionBench
             string directory = System.IO.Directory.CreateTempSubdirectory("vortex-questions-").FullName;
             try
             {
-                await using VortexSession session = VortexSession.Create(options => options.SynopsisCache = new SynopsisCache(directory, 256L << 20));
+                await using VortexSession session = VortexSession.Create(options =>
+                {
+                    options.Keyring = keyring;
+                    options.SynopsisCache = new SynopsisCache(directory, 256L << 20);
+                });
                 await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session });
                 Measured cold = await MeasureAsync(store, dataset, ask, synopses, align);
                 Measured warm = await MeasureAsync(store, dataset, ask, synopses, align);

@@ -25,16 +25,23 @@ namespace Vorticity;
 /// again from the store.
 /// </para>
 /// <para>
+/// A sealed object leaves no plaintext on the disk. The cache keeps its trailer and the frames that hold a
+/// region its table of contents declares, the bytes its store holds, and its reader decrypts them at each
+/// read: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped and read again
+/// from the store. No key is kept: the session unwraps the object's data key as it does for a read from the
+/// store.
+/// </para>
+/// <para>
 /// An entry is a file, in directories sharded by the object's uid, written under a temporary name and
 /// then renamed, so a reader never sees half a file. The cache walks its directory when it opens to know
 /// what it holds. One cache owns a directory, through a lock of the operating system: a second one, in
-/// this process or another, is refused. Questions that miss the same region at once wait for one read.
+/// this process or another, is refused. Questions that miss the same region of a plain object at once wait
+/// for one read. Those that miss the same frames of a sealed object at once read them each.
 /// </para>
 /// <para>
-/// A dataset whose objects are sealed reads them through the cache only once the cache can keep their
-/// sealed bytes: until then, it reads them from the store. Past its capacity, the cache drops entries as
-/// S3-FIFO does, by their bytes: a new entry waits in a small queue, a tenth of the capacity, and only one
-/// read again there moves on to the main queue, so a sweep of a long window passes through without pushing
+/// Past its capacity, the cache drops entries as S3-FIFO does, by their bytes: a new entry waits in a small
+/// queue, a tenth of the capacity, and only one read again there moves on to the main queue, so a sweep of a
+/// long window passes through without pushing
 /// out what is read often. An entry dropped from the small queue and asked again soon goes straight to the
 /// main queue. A replay of question traces chose it over SIEVE and W-TinyLFU
 /// (<c>vortex-queries --micro cachetrace</c>).
@@ -136,18 +143,9 @@ public sealed class SynopsisCache : IDisposable
     internal bool TryRead(UInt128 uid, IndexSegment region, out SegmentOwner owner)
     {
         owner = null!;
-        string name = NameOf(uid, region);
-        Entry? entry;
-        lock (_gate)
+        if (Find(NameOf(uid, region)) is not { } entry)
         {
-            if (!_entries.TryGetValue(name, out entry))
-            {
-                _misses++;
-                VortexTelemetry.SynopsisMiss();
-                return false;
-            }
-
-            entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
+            return false;
         }
 
         int length = checked((int)region.Length);
@@ -155,30 +153,14 @@ public sealed class SynopsisCache : IDisposable
         try
         {
             Span<byte> bytes = block.WritableSpan[..length];
-            bool whole;
-            try
-            {
-                using SafeFileHandle file = System.IO.File.OpenHandle(PathOf(entry), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-                whole = RandomAccess.GetLength(file) == length && ReadAll(file, bytes);
-            }
-            catch (IOException)
-            {
-                whole = false;
-            }
-
-            if (!whole || !region.Holds(bytes))
+            if (!ReadWhole(entry, bytes) || !region.Holds(bytes))
             {
                 Drop(entry, corrupt: true);
                 return false;
             }
 
             owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, region.AlignmentExponent));
-            lock (_gate)
-            {
-                _hits++;
-            }
-
-            VortexTelemetry.SynopsisHit(length);
+            Served(length);
             return true;
         }
         finally
@@ -188,12 +170,154 @@ public sealed class SynopsisCache : IDisposable
     }
 
     /// <summary>
+    /// The bytes kept under <paramref name="name"/>, a sealed object's as its store holds them, read whole into
+    /// <paramref name="destination"/>, whose length the file must have; false when the cache does not hold them,
+    /// or held them torn, which it then drops. The reader authenticates them, and drops them through
+    /// <see cref="DropSealed"/> when they fail: they then count as read from the disk and as corrupt.
+    /// </summary>
+    internal bool TryReadSealed(string name, Span<byte> destination)
+    {
+        if (Find(name) is not { } entry)
+        {
+            return false;
+        }
+
+        if (!ReadWhole(entry, destination))
+        {
+            Drop(entry, corrupt: true);
+            return false;
+        }
+
+        Served(destination.Length);
+        return true;
+    }
+
+    /// <summary>
+    /// As <see cref="TryReadSealed(string, Span{byte})"/>, for bytes whose length only their file says, no more
+    /// than <paramref name="maxLength"/>: an object's trailer.
+    /// </summary>
+    internal bool TryReadSealed(string name, int maxLength, out SegmentOwner owner)
+    {
+        owner = null!;
+        if (Find(name) is not { } entry)
+        {
+            return false;
+        }
+
+        long length;
+        try
+        {
+            length = new FileInfo(PathOf(entry)).Length;
+        }
+        catch (IOException)
+        {
+            length = -1;
+        }
+
+        NativeSegmentOwner? block = length is > 0 && length <= maxLength ? AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment) : null;
+        if (block is null || !ReadWhole(entry, block.WritableSpan[..(int)length]))
+        {
+            block?.Release();
+            Drop(entry, corrupt: true);
+            return false;
+        }
+
+        owner = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(block.WritableSpan[..(int)length], 0));
+        block.Release();
+        Served((int)length);
+        return true;
+    }
+
+    /// <summary>
     /// Keeps the region of object <paramref name="uid"/> read from the store, when it holds its checksum and
     /// fits the capacity, and drops what the capacity no longer holds.
     /// </summary>
     internal void Admit(UInt128 uid, IndexSegment region, ReadOnlySpan<byte> bytes)
     {
-        if (region.Checksum is null || !region.Holds(bytes) || Volatile.Read(ref _disposed) != 0)
+        if (region.Checksum is null || !region.Holds(bytes))
+        {
+            return;
+        }
+
+        Keep(uid, NameOf(uid, region), bytes);
+    }
+
+    /// <summary>
+    /// Keeps, under <paramref name="name"/>, bytes of the sealed object <paramref name="uid"/> as its store holds
+    /// them, which its reader authenticated before handing them over, when they fit the capacity.
+    /// </summary>
+    internal void AdmitSealed(UInt128 uid, string name, ReadOnlySpan<byte> bytes) => Keep(uid, name, bytes);
+
+    /// <summary>Drops the sealed bytes kept under <paramref name="name"/>, which did not authenticate: a corrupt entry.</summary>
+    internal void DropSealed(string name)
+    {
+        Entry? entry;
+        lock (_gate)
+        {
+            _entries.TryGetValue(name, out entry);
+        }
+
+        if (entry is not null)
+        {
+            Drop(entry, corrupt: true);
+        }
+    }
+
+    /// <summary>Whether the cache holds the sealed bytes kept under <paramref name="name"/>, without reading them.</summary>
+    internal bool HoldsSealed(string name)
+    {
+        lock (_gate)
+        {
+            return _entries.ContainsKey(name);
+        }
+    }
+
+    /// <summary>The entry kept under <paramref name="name"/>, a read of it counted; null, counted a miss, when there is none.</summary>
+    private Entry? Find(string name)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(name, out Entry? entry))
+            {
+                _misses++;
+                VortexTelemetry.SynopsisMiss();
+                return null;
+            }
+
+            entry.Hits = Math.Min(MaxHits, entry.Hits + 1);
+            return entry;
+        }
+    }
+
+    /// <summary>Whether the file of <paramref name="entry"/> holds exactly as many bytes as <paramref name="bytes"/>, read into it.</summary>
+    private bool ReadWhole(Entry entry, Span<byte> bytes)
+    {
+        try
+        {
+            using SafeFileHandle file = System.IO.File.OpenHandle(PathOf(entry), FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            return RandomAccess.GetLength(file) == bytes.Length && ReadAll(file, bytes);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Counts <paramref name="length"/> bytes served from the disk.</summary>
+    private void Served(int length)
+    {
+        lock (_gate)
+        {
+            _hits++;
+        }
+
+        VortexTelemetry.SynopsisHit(length);
+    }
+
+    /// <summary>Writes <paramref name="bytes"/> to the disk under <paramref name="name"/>, and drops what the capacity no longer holds.</summary>
+    private void Keep(UInt128 uid, string name, ReadOnlySpan<byte> bytes)
+    {
+        if (Volatile.Read(ref _disposed) != 0)
         {
             return;
         }
@@ -210,7 +334,6 @@ public sealed class SynopsisCache : IDisposable
             return;
         }
 
-        string name = NameOf(uid, region);
         Entry entry = new Entry(name, ShardOf(uid), bytes.Length);
         lock (_gate)
         {
@@ -316,6 +439,13 @@ public sealed class SynopsisCache : IDisposable
     /// <summary>The file name of a region of an object: its uid, its place, its length and its checksum.</summary>
     internal static string NameOf(UInt128 uid, IndexSegment region) => string.Create(
         CultureInfo.InvariantCulture, $"{uid:x32}-{region.Offset:x}-{region.Length:x}-{region.Checksum ?? 0:x16}");
+
+    /// <summary>The file name of a frame of a sealed object: its uid, the frame's place in the object and its length.</summary>
+    internal static string FrameNameOf(UInt128 uid, long cipherOffset, int length) => string.Create(
+        CultureInfo.InvariantCulture, $"{uid:x32}-{cipherOffset:x}-{length:x}-sealed");
+
+    /// <summary>The file name of a sealed object's trailer.</summary>
+    internal static string TrailerNameOf(UInt128 uid) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-trailer");
 
     private long Count(ref long counter)
     {

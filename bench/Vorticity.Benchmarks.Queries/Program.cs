@@ -147,7 +147,8 @@ if (Text(args, "--micro") == "generator")
 if (Text(args, "--micro") == "questions")
 {
     return await QuestionBench.Run(
-        (int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100), Text(args, "--only"));
+        (int)Option(args, "--hours", 24), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100), Text(args, "--only"),
+        args.Contains("--sealed"));
 }
 
 // --micro facets: the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs).

@@ -383,7 +383,11 @@ through its keys.
 
 A sealed file is read positionally and never mapped, so it goes through the session's segment cache and
 bound on reads in flight, as a file read with `MapFiles = false` does. The cache then holds plaintext,
-which the session's documentation says, and which a session that keeps no cache avoids.
+which the session's documentation says, and which a session that keeps no cache avoids. That cache is
+in memory. The synopsis cache on the local disk keeps a sealed object's bytes as the store holds them,
+its trailer and the frames around each region its table of contents declares, and the reader decrypts
+and authenticates them at each read, so the disk holds neither a key nor a plaintext byte
+([19-object-storage.md](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)).
 
 A writer seals through a stage between itself and its sink. The stage is the pipe the writer writes
 into: it hands out the frame it is filling, encrypts it into the sink's buffer once it holds `F` bytes

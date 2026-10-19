@@ -35,9 +35,10 @@ namespace Vorticity.Dataset;
 /// <para>
 /// What it opens: the commit objects only, by their head, in the one request a plain one costs when the
 /// store gives the object's length with its answer. A data object is opened by the dataset's object
-/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken)"/>),
-/// which serves the Vortex open from the read that brought the trailer. A head says what the store
-/// holds: the sealed length.
+/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?)"/>),
+/// which serves the Vortex open from the read that brought the trailer. A read with no open keeps the
+/// trailer and the frames of the declared regions in the session's synopsis cache, the sealed bytes as
+/// the store holds them. A head says what the store holds: the sealed length.
 /// </para>
 /// </remarks>
 internal sealed class SealedObjectStore : IObjectStore
@@ -745,11 +746,13 @@ internal sealed class SealedObjectStore : IObjectStore
 
     /// <summary>
     /// A reader over the data object under <paramref name="key"/>: a sealed reader on an encrypted
-    /// dataset, its object id checked against <paramref name="uid"/> when the entry names one; the
-    /// object as it lies otherwise.
+    /// dataset, its object id checked against <paramref name="uid"/> when the entry names one, which
+    /// keeps its sealed bytes in <paramref name="cache"/> when one is given; the object as it lies
+    /// otherwise.
     /// </summary>
     /// <exception cref="VortexEncryptionException">The object is plain in an encrypted dataset, or not the one its entry names.</exception>
-    internal async ValueTask<ISegmentReader> OpenDataAsync(string key, UInt128 uid, long length, CancellationToken cancellationToken)
+    internal async ValueTask<ISegmentReader> OpenDataAsync(
+        string key, UInt128 uid, long length, CancellationToken cancellationToken, ISealedFrameCache? cache = null)
     {
         ObjectStoreSource source = new ObjectStoreSource(_inner, key, length);
         if (!Seals)
@@ -772,7 +775,8 @@ internal sealed class SealedObjectStore : IObjectStore
 
                     return _keys.UnwrapAsync(descriptor, token);
                 },
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken,
+                cache: cache).ConfigureAwait(false);
         }
         catch (VortexFormatException cause)
         {
@@ -802,12 +806,13 @@ internal sealed class SealedObjectStore : IObjectStore
 
     /// <summary>
     /// The reader over a data object of the dataset behind <paramref name="store"/>, sealed or plain as
-    /// the dataset is, told the object's length when its entry records it, which spares a request.
+    /// the dataset is, told the object's length when its entry records it, which spares a request. A
+    /// sealed reader keeps its sealed bytes in <paramref name="cache"/> when one is given.
     /// </summary>
     internal static ValueTask<ISegmentReader> OpenDataAsync(
-        IObjectStore store, string key, UInt128 uid, long length, CancellationToken cancellationToken) =>
+        IObjectStore store, string key, UInt128 uid, long length, CancellationToken cancellationToken, ISealedFrameCache? cache = null) =>
         store is SealedObjectStore sealedStore
-            ? sealedStore.OpenDataAsync(key, uid, length, cancellationToken)
+            ? sealedStore.OpenDataAsync(key, uid, length, cancellationToken, cache)
             : new ValueTask<ISegmentReader>(new ObjectStoreSource(store, key, length));
 
     /// <summary>

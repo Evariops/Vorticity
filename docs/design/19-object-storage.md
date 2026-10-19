@@ -650,6 +650,19 @@ and the entries an earlier cache left are its own. One cache owns a directory, t
 operating system. Every read from the disk checks the checksum, and a region that fails it is dropped
 and read again from the store. Questions that miss the same region at once wait for one read.
 
+A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the
+object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its
+table of contents declares, each a file named by the object's uid and the frame's place. A read with no
+open of the object opens it from the trailer kept, with no request, and reads from the disk every group
+of frames the cache keeps whole. The reader decrypts them as it decrypts the store's: a frame whose tag
+fails, or a region whose plaintext fails its checksum, is dropped with its group and read again from the
+store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk:
+the session unwraps the data key as it does for a read from the store, from its keyring or from the keys
+it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six
+hours of sealed requests, a count per service from the synopses takes 12 requests in two round trips cold
+and none warm, where every question read them again before. Questions that miss the same frames of a
+sealed object at once read them each.
+
 Past its capacity it drops entries as S3-FIFO does, counting bytes. A new region waits in a small
 queue of a tenth of the capacity, and only one read again there moves on to the main queue, which
 gives an entry another pass for each read it had, up to three. The names of the regions the small
@@ -662,8 +675,8 @@ the most bytes at every capacity up to half of what the regions weigh, and as ma
 What it saves the store is what keeps a deployment under the services' limits, 5 500 reads a second
 per prefix on S3 and 900 per bucket on OVHcloud. On the same questions, a question sends 9.7 reads to
 the store without the cache and 5.7 with every region held, the rest being data, which the cache never
-holds. `WarmAsync` reads a window's regions into the cache before the first question. A dataset whose
-objects are sealed is read from the store until the cache can keep sealed bytes. The cache reports
+holds. `WarmAsync` reads a window's regions into the cache before the first question, a sealed object's
+frames and trailer as well. The cache reports
 on the library's meter, under `vortex.synopsis_cache.*`: hits, misses, bytes from the disk and from the
 store, evictions, refused admissions, corrupt regions and bytes held.
 

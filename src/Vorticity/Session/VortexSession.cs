@@ -75,7 +75,9 @@ public sealed class VortexSessionOptions
     /// </summary>
     /// <remarks>
     /// Only the regions an object's table of contents declares with a checksum enter it, checked on every
-    /// read from the disk. A dataset whose objects are sealed reads them from the store.
+    /// read from the disk. Of a sealed object it keeps the bytes the store holds, its trailer and the frames
+    /// around those regions, which the reader decrypts and authenticates at each read: no key and no
+    /// plaintext reach the disk.
     /// </remarks>
     public SynopsisCache? SynopsisCache
     {

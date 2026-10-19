@@ -543,12 +543,13 @@ public sealed partial class SynopsisAnswerTests
     /// compacted: the first two hours sealed with their synopses, the rest in the fresh levels, whose jobs
     /// write synopses too. Slices of a minute, and every table kept.
     /// </summary>
-    private static async Task<VortexDataset> FilledAsync(Vorticity.IO.IObjectStore store, bool marking = false, VortexSession? session = null)
+    private static async Task<VortexDataset> FilledAsync(Vorticity.IO.IObjectStore store, bool marking = false, VortexSession? session = null, bool encrypted = false)
     {
         // A budget of the data's bytes ten times over keeps every table, even on hours this small.
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
             Session = session ?? VortexSession.Default,
+            Encrypted = encrypted,
             ClusteringKey = [nameof(Request.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000) },
