@@ -20,21 +20,33 @@ internal sealed class ClusteringKey
     private readonly DType[] _dtypes;
     private readonly RowSortField[] _fields;
 
-    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull)
+    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull, int partitionColumns)
     {
         _paths = paths;
         _dtypes = dtypes;
         MayHoldNull = mayHoldNull;
+        PartitionColumns = partitionColumns;
         _fields = new RowSortField[paths.Length];
         Array.Fill(_fields, RowSortField.Ascending);
     }
 
     /// <summary>The key a dataset declares, in key order, or null when it declares none.</summary>
-    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema)
+    /// <param name="paths">The key's columns, in key order.</param>
+    /// <param name="schema">The dataset's schema.</param>
+    /// <param name="partitionColumns">How many leading columns are partition columns.</param>
+    /// <exception cref="ArgumentException">The partition columns leave no column of the key after them.</exception>
+    public static ClusteringKey? For(IReadOnlyList<string>? paths, DType schema, int partitionColumns = 0)
     {
         if (paths is null || paths.Count == 0)
         {
             return null;
+        }
+
+        if (partitionColumns < 0 || partitionColumns >= paths.Count)
+        {
+            throw new ArgumentException(
+                $"A key of {paths.Count} column(s) has at most {paths.Count - 1} partition column(s) before the column they partition, not {partitionColumns}.",
+                nameof(partitionColumns));
         }
 
         string[] kept = [.. paths];
@@ -46,7 +58,65 @@ internal sealed class ClusteringKey
             mayHoldNull |= ColumnPath.MayBeNull(schema, kept[i]);
         }
 
-        return new ClusteringKey(kept, dtypes, mayHoldNull);
+        return new ClusteringKey(kept, dtypes, mayHoldNull, partitionColumns);
+    }
+
+    /// <summary>How many leading columns of the key are partition columns: each object holds one value of them.</summary>
+    public int PartitionColumns { get; }
+
+    /// <summary>The partition columns, in key order; none for a dataset without.</summary>
+    public ReadOnlySpan<string> PartitionPaths => _paths.AsSpan(0, PartitionColumns);
+
+    /// <summary>
+    /// The key's first column past its partition columns: a dataset by periods' instant, and the column a level's
+    /// ranges are judged on inside a partition.
+    /// </summary>
+    public string InstantPath => _paths[PartitionColumns];
+
+    /// <summary>The dtype of <see cref="InstantPath"/>.</summary>
+    internal DType InstantType => _dtypes[PartitionColumns];
+
+    /// <summary>
+    /// The one value of each partition column an object holds, in key order, from its summaries: a bound may lie
+    /// outwards, so a minimum equal to the maximum is the value. Null without partition columns, or when a summary
+    /// does not say one value.
+    /// </summary>
+    internal FilterLiteral[]? PartitionOf(ObjectSummaries summaries)
+    {
+        if (PartitionColumns == 0)
+        {
+            return null;
+        }
+
+        FilterLiteral[] values = new FilterLiteral[PartitionColumns];
+        for (int i = 0; i < values.Length; i++)
+        {
+            if (!summaries.TryGet(_paths[i], out ColumnSummary column) || !column.HasMin || !column.HasMax || !column.Min.Equals(column.Max))
+            {
+                return null;
+            }
+
+            values[i] = column.Min;
+        }
+
+        return values;
+    }
+
+    /// <summary>The one partition value every one of <paramref name="objects"/> holds; null when they do not share one.</summary>
+    internal FilterLiteral[]? SharedPartition(IEnumerable<ObjectSummaries> objects)
+    {
+        FilterLiteral[]? shared = null;
+        foreach (ObjectSummaries summaries in objects)
+        {
+            if (PartitionOf(summaries) is not { } values || (shared is not null && !shared.AsSpan().SequenceEqual(values)))
+            {
+                return null;
+            }
+
+            shared = values;
+        }
+
+        return shared;
     }
 
     /// <summary>
@@ -60,10 +130,11 @@ internal sealed class ClusteringKey
     /// <param name="paths">The key's columns, in key order.</param>
     /// <param name="schema">The dataset's schema.</param>
     /// <param name="acceptsNullable">Whether a key of one column that may hold a null is accepted, as it was before: the tests of such datasets.</param>
+    /// <param name="partitionColumns">How many leading columns are partition columns.</param>
     /// <exception cref="ArgumentException">A path names no column, or a column of the key, or a struct on its path, may hold a null.</exception>
-    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema, bool acceptsNullable = false)
+    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema, bool acceptsNullable = false, int partitionColumns = 0)
     {
-        ClusteringKey? key = For(paths, schema);
+        ClusteringKey? key = For(paths, schema, partitionColumns);
         if (key is { MayHoldNull: true } && (key.IsComposite || !acceptsNullable))
         {
             throw new ArgumentException(

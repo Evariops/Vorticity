@@ -297,6 +297,12 @@ internal static class DatasetRowChanges
             // kept are the object's own in its own order, and an object above level 0 is a
             // compaction's, whose rows come in key order, or in sorted slices for a dataset of periods.
             ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema, inKeyOrder: version.Levels.RowsInKeyOrder(held.Level)) : null;
+            if (draft is not null && version.Schema.Key is { } rewritten)
+            {
+                // The rows kept are the object's own: its one partition value, if it has one.
+                draft.Partition = rewritten.PartitionOf(held.Entry.Summaries);
+            }
+
             try
             {
                 long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
@@ -764,7 +770,8 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
 
         if (await _dataset.SealAsync(draft, _draftRows, _firstRow, cancellationToken).ConfigureAwait(false) is { } written)
         {
-            _written.Add(written);
+            // A changed row may carry another partition value: an object per value, as an append writes.
+            _written.AddRange(await _dataset.PartitionedAsync(written, cancellationToken).ConfigureAwait(false));
         }
 
         _firstRow += _draftRows;

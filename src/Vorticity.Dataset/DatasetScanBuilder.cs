@@ -499,14 +499,39 @@ internal sealed class DatasetScanBuilder
         }
 
         // The instants the object's rows hold, which bound its buckets however wide its slices' unit.
-        (long, long)? instants = held.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary summary)
+        (long, long)? instants = held.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
             && summary is { HasMin: true, HasMax: true, Min.Kind: FilterLiteralKind.Signed, Max.Kind: FilterLiteralKind.Signed }
             ? (summary.Min.SignedValue, summary.Max.SignedValue)
             : null;
         return _version.Schema.ColumnsOf(schema, held.Entry.Key) is null
-            && SynopsisAnswer.Of(contents, schema, key.Paths[0], request, _filter, instants, _version.Header.Identifiers) is { } answer
-            ? (answer, contents, key.Paths[0])
+            && SynopsisAnswer.Of(contents, schema, key.InstantPath, request, _filter, instants, _version.Header.Identifiers, PartitionOf(held.Entry, key)) is { } answer
+            ? (answer, contents, key.InstantPath)
             : default;
+    }
+
+    /// <summary>
+    /// The one value each partition column holds in an object, from its summaries; null without partition columns,
+    /// or when a summary does not say one value.
+    /// </summary>
+    internal static Dictionary<string, FilterLiteral>? PartitionOf(ObjectEntry entry, ClusteringKey key)
+    {
+        if (key.PartitionColumns == 0)
+        {
+            return null;
+        }
+
+        Dictionary<string, FilterLiteral> values = new Dictionary<string, FilterLiteral>(StringComparer.Ordinal);
+        foreach (string path in key.PartitionPaths)
+        {
+            if (!entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasMin || !column.HasMax || !column.Min.Equals(column.Max))
+            {
+                return null;
+            }
+
+            values[path] = column.Min;
+        }
+
+        return values;
     }
 
     /// <summary>
@@ -656,7 +681,7 @@ internal sealed class DatasetScanBuilder
         (long Newest, int At)[] order = new (long, int)[objects.Count];
         for (int i = 0; i < order.Length; i++)
         {
-            long newest = objects[i].Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary summary)
+            long newest = objects[i].Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
                 && summary is { HasMax: true, Max.Kind: FilterLiteralKind.Signed }
                 ? summary.Max.SignedValue
                 : long.MinValue;

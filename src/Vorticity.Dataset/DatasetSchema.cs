@@ -36,7 +36,7 @@ internal sealed class DatasetSchema
     private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(
-        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy)
+        ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering, ReadOnlyMemory<byte> policy, int partitionColumns)
     {
         Bytes = bytes;
         Retired = retired;
@@ -45,7 +45,7 @@ internal sealed class DatasetSchema
         IndexedColumns = new HashSet<string>(IndexPolicy.Columns.Keys, StringComparer.Ordinal);
         DType = bytes.IsEmpty ? default : DTypeProtobuf.Read(bytes.Span, new DTypeArena());
         Columns = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
-        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType);
+        Key = DType.IsDefault ? null : ClusteringKey.For(clustering, DType, partitionColumns);
         _hash = DType.IsDefault ? 0 : DType.GetHashCode();
         _renamed = new Dictionary<string, string>(StringComparer.Ordinal);
         _retired = new HashSet<string>(StringComparer.Ordinal);
@@ -94,7 +94,7 @@ internal sealed class DatasetSchema
         previous is not null && previous.Bytes.Span.SequenceEqual(header.Schema.Span) && Same(previous.Retired, header.Retired)
             && previous.PolicyBytes.Span.SequenceEqual(header.WritePolicy.Span)
             ? previous
-            : new DatasetSchema(header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy);
+            : new DatasetSchema(header.Schema, header.Retired, header.ClusteringKey, header.WritePolicy, header.PartitionColumns);
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the

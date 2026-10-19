@@ -33,10 +33,98 @@ internal static partial class CompactionPolicy
         PlannedVersion dataset, List<List<CompactionInput>> levels, CompactionOptions settings, HashSet<int> taken)
     {
         ClusteringKey key = dataset.Key!;
+        bool exitDue = Held(levels, 0) > settings.LevelZeroCeiling;
+        if (key.PartitionColumns == 0)
+        {
+            return ChoosePeriodsOf(dataset, levels, settings, taken, exitDue);
+        }
+
+        // Each partition grows its own periods, and no job takes objects of two. Past level 0's ceiling, which
+        // holds over the whole level, the partition with the most objects in it exits first.
+        List<List<List<CompactionInput>>> partitions = Partitioned(levels, key);
+        int loaded = 0;
+        for (int p = 1; p < partitions.Count; p++)
+        {
+            loaded = Held(partitions[p], 0) > Held(partitions[loaded], 0) ? p : loaded;
+        }
+
+        for (int i = 0; i < partitions.Count; i++)
+        {
+            int p = i == 0 ? loaded : i <= loaded ? i - 1 : i;
+            if (ChoosePeriodsOf(dataset, partitions[p], settings, taken, exitDue && p == loaded) is { } job)
+            {
+                return job;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The levels of each partition, in the order of the partitions' values: every object of one value of the
+    /// partition columns, from its summaries. Objects whose summaries do not say one value, none a split append
+    /// writes, are a group of their own, first.
+    /// </summary>
+    private static List<List<List<CompactionInput>>> Partitioned(List<List<CompactionInput>> levels, ClusteringKey key)
+    {
+        SortedDictionary<byte[], List<List<CompactionInput>>> partitions = new SortedDictionary<byte[], List<List<CompactionInput>>>(ByteOrder.Instance);
+        FilterLiteral[] values = new FilterLiteral[key.PartitionColumns];
+        for (int level = 0; level < levels.Count; level++)
+        {
+            foreach (CompactionInput input in levels[level])
+            {
+                byte[] partition = [];
+                bool one = true;
+                for (int i = 0; i < values.Length && one; i++)
+                {
+                    one = input.Entry.Summaries.TryGet(key.PartitionPaths[i], out ColumnSummary column)
+                        && column.HasMin && column.HasMax && column.Min.Equals(column.Max);
+                    values[i] = one ? column.Min : default;
+                }
+
+                if (one)
+                {
+                    partition = key.Encode(values);
+                }
+
+                if (!partitions.TryGetValue(partition, out List<List<CompactionInput>>? of))
+                {
+                    of = new List<List<CompactionInput>>(levels.Count);
+                    for (int l = 0; l < levels.Count; l++)
+                    {
+                        of.Add([]);
+                    }
+
+                    partitions[partition] = of;
+                }
+
+                of[level].Add(input);
+            }
+        }
+
+        return [.. partitions.Values];
+    }
+
+    /// <summary>Byte strings in ordinal order: the order of encoded keys.</summary>
+    private sealed class ByteOrder : IComparer<byte[]>
+    {
+        internal static readonly ByteOrder Instance = new ByteOrder();
+
+        public int Compare(byte[]? x, byte[]? y) => x.AsSpan().SequenceCompareTo(y);
+    }
+
+    /// <summary>
+    /// <see cref="ChoosePeriods"/> over the levels of one partition, or of the whole dataset without partition
+    /// columns; <paramref name="exitDue"/> says whether level 0's exit is due for these objects.
+    /// </summary>
+    private static CompactionJob? ChoosePeriodsOf(
+        PlannedVersion dataset, List<List<CompactionInput>> levels, CompactionOptions settings, HashSet<int> taken, bool exitDue)
+    {
+        ClusteringKey key = dataset.Key!;
         TimeUnit unit = PeriodOptions.InstantOf(key);
         PeriodCalendar calendar = PeriodCalendar.Of(dataset.Header, unit);
         TimeSpan lateness = dataset.Header.Lateness ?? TimeSpan.Zero;
-        string path = key.Paths[0];
+        string path = key.InstantPath;
         long? after = NewestHeld(levels, path);
 
         // A period is closed once the newest instant held is past its end by the horizon: the horizon
@@ -45,7 +133,7 @@ internal static partial class CompactionPolicy
         bool Closed(long period) =>
             after is { } newest && newest != long.MaxValue && calendar.Next(period) <= newest - horizon;
 
-        if (Held(levels, 0) > settings.LevelZeroCeiling
+        if (exitDue && Held(levels, 0) > 0
             && !taken.Contains(0) && !taken.Contains(PeriodLevels.Late) && !taken.Contains(PeriodLevels.FirstFresh))
         {
             List<CompactionInput> sources = levels[0];

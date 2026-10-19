@@ -54,6 +54,12 @@ internal sealed record SynopsisAnswer(
     IReadOnlyList<(VortexExpr Part, VortexExpr Kept)> Excluded)
 {
     /// <summary>
+    /// The keys of the question no table holds but the object holds one value of, its partition columns: each a
+    /// column of that value beside the table's own in every batch of states.
+    /// </summary>
+    internal IReadOnlyList<(string Name, FilterLiteral Value)> Constants { get; init; } = [];
+
+    /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
     /// <paramref name="filter"/>, or null when its rows are read whole: a part of the filter on the instant
     /// that is not a bound, or on a column no table keys, a key or a measure no table holds, or a window and
@@ -70,9 +76,13 @@ internal sealed record SynopsisAnswer(
     /// in slices of a day still holds one hour. Null when the summary does not say.
     /// </param>
     /// <param name="identifiers">The dataset's identifiers, whose values a filter may leave out (<see cref="Excluded"/>).</param>
+    /// <param name="partition">
+    /// The one value each partition column holds in the object: a conjunct on them alone is true or false for every
+    /// row, a false one leaving nothing to fold; null without partition columns.
+    /// </param>
     internal static SynopsisAnswer? Of(
         SynopsisContents contents, DType schema, string instant, StateRequest request, VortexExpr? filter, (long Least, long Greatest)? held = null,
-        IReadOnlyList<string>? identifiers = null)
+        IReadOnlyList<string>? identifiers = null, IReadOnlyDictionary<string, FilterLiteral>? partition = null)
     {
         if (contents.Tables.Count == 0 || contents.Slices.Slices.Count == 0 || schema.IndexOfField(instant) < 0)
         {
@@ -87,6 +97,16 @@ internal sealed record SynopsisAnswer(
         HashSet<int> keyed = [];
         foreach (VortexExpr conjunct in Conjuncts(filter))
         {
+            if (partition is not null && Decided(conjunct, partition) is { } holds)
+            {
+                if (!holds)
+                {
+                    return new SynopsisAnswer([], [], null, request, []);
+                }
+
+                continue;
+            }
+
             if (Exclusion(conjunct, identifiers) is { } part)
             {
                 excluded.Add((part, conjunct));
@@ -119,10 +139,18 @@ internal sealed record SynopsisAnswer(
             onKeys.Add(conjunct);
         }
 
-        // The keys: a column a table keys, or functions of one; a function of the instant, a key of time.
+        // The keys: a column a table keys, or functions of one; a function of the instant, a key of time; a partition
+        // column, one value over the object.
         List<FunctionFieldExpr> times = [];
+        List<(string, FilterLiteral)> constants = [];
         foreach (FieldExpr key in request.Keys)
         {
+            if (key.GetType() == typeof(FieldExpr) && partition is not null && partition.TryGetValue(key.Path, out FilterLiteral constant))
+            {
+                constants.Add((key.Path, constant));
+                continue;
+            }
+
             FieldExpr column = key;
             while (column is FunctionFieldExpr function)
             {
@@ -230,7 +258,57 @@ internal sealed record SynopsisAnswer(
             parts.Add(runs);
         }
 
-        return parts.Count == 0 && edges.Count > 0 ? null : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded);
+        return parts.Count == 0 && edges.Count > 0
+            ? null
+            : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request, excluded) { Constants = constants };
+    }
+
+    /// <summary>
+    /// What <paramref name="expr"/> is for every row of an object whose partition columns hold <paramref name="values"/>:
+    /// true or false when it reads them alone through comparisons, sets, conjunctions, disjunctions and negations;
+    /// null when it reads another column or anything else, or compares across kinds.
+    /// </summary>
+    private static bool? Decided(VortexExpr expr, IReadOnlyDictionary<string, FilterLiteral> values)
+    {
+        switch (expr)
+        {
+            case ComparisonExpr comparison when comparison.Field.GetType() == typeof(FieldExpr)
+                && values.TryGetValue(comparison.Field.Path, out FilterLiteral value) && comparison.Value.Kind == value.Kind:
+                int order = Keys.KeyCursor.Compare(value, comparison.Value);
+                return comparison.Op switch
+                {
+                    ComparisonOp.Equal => order == 0,
+                    ComparisonOp.NotEqual => order != 0,
+                    ComparisonOp.Less => order < 0,
+                    ComparisonOp.LessOrEqual => order <= 0,
+                    ComparisonOp.Greater => order > 0,
+                    ComparisonOp.GreaterOrEqual => order >= 0,
+                    _ => null,
+                };
+            case InExpr set when set.Field.GetType() == typeof(FieldExpr) && values.TryGetValue(set.Field.Path, out FilterLiteral member):
+                bool found = false;
+                foreach (FilterLiteral candidate in set.Literals)
+                {
+                    if (candidate.Kind != member.Kind && candidate.Kind != FilterLiteralKind.Null)
+                    {
+                        return null;
+                    }
+
+                    found |= candidate.Kind == member.Kind && Keys.KeyCursor.Compare(member, candidate) == 0;
+                }
+
+                return found;
+            case LogicalExpr logical:
+                bool? left = Decided(logical.Left, values);
+                bool? right = Decided(logical.Right, values);
+                return logical.IsAnd
+                    ? left == false || right == false ? false : left == true && right == true ? true : null
+                    : left == true || right == true ? true : left == false && right == false ? false : null;
+            case NotExpr not:
+                return Decided(not.Operand, values) is { } operand ? !operand : null;
+            default:
+                return null;
+        }
     }
 
     /// <summary>
@@ -318,20 +396,42 @@ internal sealed record SynopsisAnswer(
             CanonicalNode rows = arena.GetNode(node);
             DType rowType = rows.DType;
             int count = rows.Length;
-            string[] names = new string[rowType.FieldCount];
-            DType[] dtypes = new DType[rowType.FieldCount];
-            int[] fields = new int[rowType.FieldCount];
-            for (int f = 0; f < names.Length; f++)
+            int width = rowType.FieldCount;
+            int[] stated = new int[width];
+            for (int f = 0; f < width; f++)
             {
-                names[f] = f == 0 ? instant : rowType.GetFieldName(f);
-                dtypes[f] = rowType.GetField(f);
-                fields[f] = rows.GetFieldIndex(f);
+                stated[f] = rows.GetFieldIndex(f);
             }
 
             if (removed is { Count: > 0 }
-                && (slices is null || !SynopsisCorrection.TryRemove(arena, table, rowType, fields, schema, removed, slices.Slices, slices.Unit, part.Kept, Request.Reads)))
+                && (slices is null || !SynopsisCorrection.TryRemove(arena, table, rowType, stated, schema, removed, slices.Slices, slices.Unit, part.Kept, Request.Reads)))
             {
                 return null;
+            }
+
+            string[] names = new string[width + Constants.Count];
+            DType[] dtypes = new DType[names.Length];
+            int[] fields = new int[names.Length];
+            for (int f = 0; f < width; f++)
+            {
+                names[f] = f == 0 ? instant : rowType.GetFieldName(f);
+                dtypes[f] = rowType.GetField(f);
+                fields[f] = stated[f];
+            }
+
+            // The partition's one value, a column of the table's rows.
+            for (int c = 0; c < Constants.Count; c++)
+            {
+                (string name, FilterLiteral value) = Constants[c];
+                int column = schema.IsDefault ? -1 : schema.IndexOfField(name);
+                if (column < 0 || ConstantColumn(arena, DTypeImport.Into(types, schema.GetField(column)), count, value) is not { } constant)
+                {
+                    return null;
+                }
+
+                names[width + c] = name;
+                dtypes[width + c] = arena.GetNode(constant).DType;
+                fields[width + c] = constant;
             }
 
             int bucketed = fields[0];
@@ -369,6 +469,29 @@ internal sealed record SynopsisAnswer(
             RecordBatch batch = new RecordBatch(arena, root, startRow) { CarriesStates = true };
             batch.Select(selection, selected);
             return batch;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// A column of <paramref name="rows"/> rows of one value, at <paramref name="type"/>: a text or a binary value's
+    /// bytes, a primitive's in its width; null for any other type, which no partition column of this library has.
+    /// </summary>
+    private static int? ConstantColumn(CanonicalArena arena, DType type, int rows, FilterLiteral value)
+    {
+        Validity valid = type.IsNullable ? Validity.AllValid : Validity.NonNullable;
+        if (type.Kind is DTypeKind.Utf8 or DTypeKind.Binary && value.Kind == FilterLiteralKind.Bytes)
+        {
+            return arena.AddConstant(type, rows, valid, value.BytesValue);
+        }
+
+        if (type.Kind == DTypeKind.Primitive && value.Kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned or FilterLiteralKind.Bool)
+        {
+            Span<byte> element = stackalloc byte[16];
+            int width = type.PType.ByteWidth();
+            Writing.ZoneMapWriter.Write(element[..width], type.PType, value);
+            return arena.AddConstant(type, rows, valid, element[..width]);
         }
 
         return null;

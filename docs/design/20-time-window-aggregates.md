@@ -1358,6 +1358,24 @@ partition columns:
 3. Each partition grows its own periods of sorted slices, and a period holds one retention: what dies
    together is written together.
 
+As built, `DatasetOptions.PartitionColumns` requires `Periods`, and the instant is the key's first
+column past the partition columns. An append through batches routes its rows as they come, one
+evaluation of the partition's value per value met in a batch. An append through a draft, whose rows
+the dataset does not see, is read back once when its object holds several values, and split. An update
+that moves rows to another value writes an object per value too. `MaxPartitionValues`, 64 by default,
+bounds the values one append may hold, and an append past it commits nothing. A file's statistics give
+a text column no bounds, so every writer that knows its object's partition, a split append, a
+compaction job or a rewrite, records the value in the object's summaries as an exact bound. Level 0's
+ceiling holds over the whole level, and past it the partition with the most objects there exits first.
+Every other job is chosen inside one partition, and a level's range carries its partition, so that
+overlap is judged on the partition and then on the instant.
+
+On two hours and a quarter of rows in sixteen appends, each holding three retention values in turn,
+compaction rewrites each row 1.90 times, as it does for the same rows in order without partitions. A
+question whose filter reads the partition columns alone is decided per object by the value it holds,
+and a grouping by them carries that value beside the tables' rows, so both are answered from the
+synopses.
+
 ### 12.2 Expiry without opening objects
 
 A delete opens and counts every object its summaries do not refute (code:

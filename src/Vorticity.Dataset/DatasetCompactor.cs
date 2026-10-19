@@ -131,13 +131,14 @@ internal static class DatasetCompactor
         // cuts each object's slices, picks the order inside them and the paths its variant columns
         // shred, the second sorts and writes them. The instant must be a top-level column, which
         // slices are declared on. Appends write neither slices nor shredded variants.
-        IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = merge && job.Cut is not null && !key!.Paths[0].Contains('.')
+        IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = merge && job.Cut is not null && !key!.InstantPath.Contains('.')
             ? await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false)
             : null;
         ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel)
         {
             Plans = plans,
-            InstantPath = plans is null ? null : key!.Paths[0],
+            InstantPath = plans is null ? null : key!.InstantPath,
+            Partition = key?.SharedPartition(job.Inputs.Select(static input => input.Entry.Summaries)),
         };
         long rows;
         try
@@ -451,7 +452,7 @@ internal static class DatasetCompactor
                     // An object per period, and in level 0's exit, per level: a run whose rows cross a
                     // period's end, or the last fresh instant, is written in parts. One key has one
                     // instant, so no part splits a key.
-                    CutRun(run, paths[0], cut, job.ToLevel, cuts);
+                    CutRun(run, key.InstantPath, cut, job.ToLevel, cuts);
                     int at = 0;
                     foreach ((int end, int level, long period) in cuts)
                     {
@@ -523,7 +524,7 @@ internal static class DatasetCompactor
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
     {
         PeriodCut cut = job.Cut!;
-        string instant = key.Paths[0];
+        string instant = key.InstantPath;
         long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
         int[] candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
         int[] variants = VariantColumns(schema.DType);
@@ -724,7 +725,7 @@ internal static class DatasetCompactor
     private static DatasetOperation.ChangePeriodLength? Reweigh(VortexDataset dataset, PeriodCut cut, WrittenObject written, long newest)
     {
         ObjectEntry period = written.Entry;
-        if (dataset.Key is not { } key || !period.Summaries.TryGet(key.Paths[0], out ColumnSummary instant)
+        if (dataset.Key is not { } key || !period.Summaries.TryGet(key.InstantPath, out ColumnSummary instant)
             || !instant.HasMin || instant.Min.Kind != Vorticity.Expressions.FilterLiteralKind.Signed || period.Rows == 0)
         {
             return null;
@@ -875,6 +876,9 @@ internal static class DatasetCompactor
         /// <summary>The instant column, top-level, the slices are declared on; null without plans.</summary>
         internal string? InstantPath { get; init; }
 
+        /// <summary>The partition every input holds, which every output then holds; null without one.</summary>
+        internal Vorticity.Expressions.FilterLiteral[]? Partition { get; init; }
+
         // The slices of the object being written, sorted as they fill; null without plans.
         private SortedSlices? _sorter;
         private SliceTable? _table;
@@ -938,6 +942,7 @@ internal static class DatasetCompactor
                 _draft = _dataset.StartObjectUnder(
                     _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks,
                     directories: plan?.Directories, synopsis: plan is null ? null : SynopsisColumns(plan.Slices));
+                _draft.Partition = Partition;
                 if (plan is not null)
                 {
                     _table = plan.Slices;

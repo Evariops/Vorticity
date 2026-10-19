@@ -163,6 +163,12 @@ internal sealed record CommitHeader
     internal SliceWidth? PeriodLength { get; init; }
 
     /// <summary>
+    /// How many leading clustering-key columns are partition columns (<see cref="DatasetOptions.PartitionColumns"/>),
+    /// fixed at creation; 0 for none. A header that carries some names <see cref="DatasetFeatures.Partitions"/>.
+    /// </summary>
+    internal int PartitionColumns { get; init; }
+
+    /// <summary>
     /// The changes of the period length the dataset made since its creation, in order
     /// (<see cref="PeriodCalendar"/>); empty for none.
     /// </summary>
@@ -201,6 +207,7 @@ internal sealed record CommitHeader
         internal const int Identifiers = 20;
         internal const int PeriodLength = 21;
         internal const int PeriodChanges = 22;
+        internal const int PartitionColumns = 23;
     }
 
     internal static class PeriodChangeField
@@ -338,6 +345,11 @@ internal sealed record CommitHeader
             {
                 inner.Dispose();
             }
+        }
+
+        if (PartitionColumns > 0)
+        {
+            writer.WriteUInt64Always(Field.PartitionColumns, (ulong)PartitionColumns);
         }
     }
 
@@ -522,6 +534,7 @@ internal sealed record CommitHeader
         List<string> identifiers = [];
         SliceWidth? periodLength = null;
         List<PeriodChange> periodChanges = [];
+        int partitionColumns = 0;
 
         try
         {
@@ -596,6 +609,9 @@ internal sealed record CommitHeader
                     case (Field.PeriodChanges, ProtoWireType.LengthDelimited):
                         periodChanges.Add(ReadPeriodChange(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.PartitionColumns, ProtoWireType.Varint):
+                        partitionColumns = (int)Math.Min(reader.ReadVarint(), int.MaxValue);
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -638,6 +654,7 @@ internal sealed record CommitHeader
             Identifiers = identifiers,
             PeriodLength = periodLength,
             PeriodChanges = periodChanges,
+            PartitionColumns = partitionColumns,
         };
     }
 

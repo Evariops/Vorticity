@@ -64,10 +64,10 @@ public sealed record PeriodOptions
     }
 
     /// <summary>
-    /// The unit of the instant a dataset of periods leads its key with: its key's first column, a
+    /// The unit of the instant a dataset of periods leads its key with, past its partition columns: a
     /// timestamp stored in UTC, or naive, which a dataset of periods reads as UTC.
     /// </summary>
-    /// <exception cref="ArgumentException">The dataset declares no key, or its first column is not such a timestamp.</exception>
+    /// <exception cref="ArgumentException">The dataset declares no key, or its instant column is not such a timestamp.</exception>
     internal static TimeUnit InstantOf(ClusteringKey? key)
     {
         if (key is null)
@@ -77,15 +77,17 @@ public sealed record PeriodOptions
                 nameof(DatasetOptions.Periods));
         }
 
-        VortexType leading = VortexTypes.FromDType(key.LeadingType);
-        if (leading.ExtensionId != ExtensionIds.Timestamp || (leading.TimeZone is { } zone && !TimeZones.IsUtc(zone)))
+        VortexType instant = VortexTypes.FromDType(key.InstantType);
+        if (instant.ExtensionId != ExtensionIds.Timestamp || (instant.TimeZone is { } zone && !TimeZones.IsUtc(zone)))
         {
             throw new ArgumentException(
-                $"A dataset compacted by periods leads its clustering key with its instant, a timestamp in UTC, and '{key.Paths[0]}' is {leading}.",
+                key.PartitionColumns == 0
+                    ? $"A dataset compacted by periods leads its clustering key with its instant, a timestamp in UTC, and '{key.InstantPath}' is {instant}."
+                    : $"A dataset compacted by periods follows its partition columns with its instant, a timestamp in UTC, and '{key.InstantPath}' is {instant}.",
                 nameof(DatasetOptions.Periods));
         }
 
-        return leading.Unit ?? TimeUnit.Microseconds;
+        return instant.Unit ?? TimeUnit.Microseconds;
     }
 }
 

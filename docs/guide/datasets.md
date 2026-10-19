@@ -162,6 +162,24 @@ Each part's answer is final for its range of time, so once a part arrives, the w
 to the window's end is answered. Counts and sums over the parts add up, and so do minimums and
 maximums. A mean over the whole window is the sum of the parts' sums over the sum of their counts.
 
+Rows kept for different lengths of time can share a dataset by periods. Lead the clustering key with
+the column that says how long a row lives, and declare it a partition column:
+
+```csharp
+DatasetOptions options = new DatasetOptions
+{
+    ClusteringKey = [nameof(Logged.Retention), nameof(Logged.At)],
+    PartitionColumns = 1,
+    Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5) },
+};
+```
+
+Every object then holds one retention value. An append is split into an object per value, and each
+value grows its own periods, so a period never mixes rows that expire at different times. Partition
+columns should have a few values: an append that holds more than `MaxPartitionValues` of them, 64 by
+default, is refused. A question filtered or grouped on the partition column is still answered from the
+synopses, since each object holds a single value of it.
+
 The tables a question reads can stay on the local disk, so that the next question over the same
 objects asks the store nothing for them. Give the session a `SynopsisCache`, a directory and the bytes
 it may hold:

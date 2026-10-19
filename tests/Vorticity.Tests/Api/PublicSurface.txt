@@ -2931,6 +2931,8 @@ Vorticity.Dataset:     property bool Encrypted { get; init; }
 Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
+Vorticity.Dataset:     property int MaxPartitionValues { get; init; }
+Vorticity.Dataset:     property int PartitionColumns { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
 Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
 Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }

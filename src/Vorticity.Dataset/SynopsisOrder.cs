@@ -31,14 +31,18 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal static class SynopsisOrder
 {
-    /// <summary>The columns that may be synopsis columns: top-level, of a type whose values have an order of codes, not the instant nor an identifier.</summary>
+    /// <summary>
+    /// The columns that may be synopsis columns: top-level, of a type whose values have an order of codes, not the
+    /// instant, a partition column, whose one value an object holds, nor an identifier.
+    /// </summary>
     internal static int[] Candidates(DType schema, ClusteringKey key, IReadOnlyList<string>? identifiers)
     {
         List<int> candidates = [];
         for (int field = 0; field < schema.FieldCount; field++)
         {
             string name = schema.GetFieldName(field);
-            if (string.Equals(name, key.Paths[0], StringComparison.Ordinal)
+            if (string.Equals(name, key.InstantPath, StringComparison.Ordinal)
+                || key.PartitionPaths.Contains(name)
                 || (identifiers is not null && Contains(identifiers, name))
                 || !Coded(schema.GetField(field)))
             {

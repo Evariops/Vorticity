@@ -357,7 +357,7 @@ public sealed class VortexDataset : IAsyncDisposable
     private void ObserveLateness(WrittenObject? written)
     {
         if (written is not { } produced || _options.Periods is null || Key is not { } key
-            || !produced.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary summary)
+            || !produced.Entry.Summaries.TryGet(key.InstantPath, out ColumnSummary summary)
             || !summary.HasMin || !summary.HasMax
             || summary.Min.Kind != FilterLiteralKind.Signed || summary.Max.Kind != FilterLiteralKind.Signed)
         {
@@ -880,12 +880,123 @@ public sealed class VortexDataset : IAsyncDisposable
     public async ValueTask<ulong> AppendAsync(ObjectDraft draft, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(draft);
+        List<WrittenObject> written = await WrittenAsync(draft, cancellationToken).ConfigureAwait(false);
+        return written.Count > 0
+            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
+            : Version;
+    }
+
+    /// <summary>
+    /// The objects an append of <paramref name="draft"/> adds: the draft's own, completed and put; or, when the
+    /// dataset has partition columns and its rows hold several values of them, an object per value, its rows read
+    /// back and split, the draft's object left for vacuum.
+    /// </summary>
+    private async ValueTask<List<WrittenObject>> WrittenAsync(ObjectDraft draft, CancellationToken cancellationToken)
+    {
         WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
             .ConfigureAwait(false);
-        ObserveLateness(written);
-        return written is { } produced
-            ? await ApplyAsync([new DatasetOperation.AddObject(produced.Key, produced.Entry)], CommitKind.Append, cancellationToken).ConfigureAwait(false)
-            : Version;
+        return Observed(written is { } produced ? await PartitionedAsync(produced, cancellationToken).ConfigureAwait(false) : []);
+    }
+
+    /// <summary>Notes how late the rows of an append's objects came, and hands the objects on.</summary>
+    private List<WrittenObject> Observed(List<WrittenObject> written)
+    {
+        foreach (WrittenObject produced in written)
+        {
+            ObserveLateness(produced);
+        }
+
+        return written;
+    }
+
+    /// <summary>
+    /// An object a writer of this dataset put, as the objects it stands for: itself, unless the dataset has partition
+    /// columns and its rows hold several values of them, an object per value then, its rows read back and split and
+    /// the object itself left for vacuum.
+    /// </summary>
+    internal async ValueTask<List<WrittenObject>> PartitionedAsync(WrittenObject produced, CancellationToken cancellationToken)
+    {
+        if (Key is not { PartitionColumns: > 0 } key || DatasetScanBuilder.PartitionOf(produced.Entry, key) is not null)
+        {
+            return [produced];
+        }
+
+        PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
+        await using (split.ConfigureAwait(false))
+        {
+            ObjectLease lease = await RentAsync(produced.Entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                await foreach (RecordBatch batch in lease.File.ScanBuilder().ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            return await WrittenAsync(split, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The objects of a split append completed and put, an object per partition value its rows hold.</summary>
+    private async ValueTask<List<WrittenObject>> WrittenAsync(PartitionedAppend split, CancellationToken cancellationToken)
+    {
+        long end = await EndAsync(cancellationToken).ConfigureAwait(false);
+        List<WrittenObject> written = [];
+        foreach (ObjectDraft draft in split.Drafts)
+        {
+            if (await CompleteAsync(draft, end, cancellationToken).ConfigureAwait(false) is { } produced)
+            {
+                written.Add(produced);
+            }
+        }
+
+        return written;
+    }
+
+    /// <summary>The batches of an append, as one object, or one per partition value when the dataset has partition columns.</summary>
+    private async ValueTask<List<WrittenObject>> WrittenAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
+    {
+        if (Key is { PartitionColumns: > 0 } key)
+        {
+            PartitionedAppend split = new PartitionedAppend(this, key, _options.MaxPartitionValues);
+            await using (split.ConfigureAwait(false))
+            {
+                await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    await split.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                }
+
+                return Observed(await WrittenAsync(split, cancellationToken).ConfigureAwait(false));
+            }
+        }
+
+        ObjectDraft draft = StartObject();
+        try
+        {
+            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            await draft.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return await WrittenAsync(draft, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The additions of written objects, one commit's operations.</summary>
+    private static DatasetOperation[] Added(List<WrittenObject> written)
+    {
+        DatasetOperation[] operations = new DatasetOperation[written.Count];
+        for (int i = 0; i < operations.Length; i++)
+        {
+            operations[i] = new DatasetOperation.AddObject(written[i].Key, written[i].Entry);
+        }
+
+        return operations;
     }
 
     /// <summary>
@@ -901,21 +1012,10 @@ public sealed class VortexDataset : IAsyncDisposable
         IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(batches);
-        ObjectDraft draft = StartObject();
-        try
-        {
-            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
-            {
-                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            await draft.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        return await AppendAsync(draft, cancellationToken).ConfigureAwait(false);
+        List<WrittenObject> written = await WrittenAsync(batches, cancellationToken).ConfigureAwait(false);
+        return written.Count > 0
+            ? await ApplyAsync(Added(written), CommitKind.Append, cancellationToken).ConfigureAwait(false)
+            : Version;
     }
 
     /// <summary>
@@ -967,11 +1067,13 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(draft);
         SourceTable.Check(consumed, nameof(consumed));
-        WrittenObject? written = await CompleteAsync(draft, await EndAsync(cancellationToken).ConfigureAwait(false), cancellationToken)
-            .ConfigureAwait(false);
-        ObserveLateness(written);
-        DatasetOperation[] operations = written is { } produced ? [new DatasetOperation.AddObject(produced.Key, produced.Entry)] : [];
-        CommitResult commit = await CommitAsync(operations, CommitKind.Append, consumed, null, cancellationToken).ConfigureAwait(false);
+        return await CountedAsync(await WrittenAsync(draft, cancellationToken).ConfigureAwait(false), consumed, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Commits written objects with the source ranges they take into account, as one commit.</summary>
+    private async ValueTask<SourceCommit> CountedAsync(List<WrittenObject> written, IReadOnlyList<SourceRange> consumed, CancellationToken cancellationToken)
+    {
+        CommitResult commit = await CommitAsync(Added(written), CommitKind.Append, consumed, null, cancellationToken).ConfigureAwait(false);
         if (commit.Created)
         {
             await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
@@ -999,21 +1101,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(batches);
         SourceTable.Check(consumed, nameof(consumed));
-        ObjectDraft draft = StartObject();
-        try
-        {
-            await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
-            {
-                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-        }
-        catch
-        {
-            await draft.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        return await AppendAsync(draft, consumed, cancellationToken).ConfigureAwait(false);
+        return await CountedAsync(await WrittenAsync(batches, cancellationToken).ConfigureAwait(false), consumed, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1768,12 +1856,24 @@ public sealed class VortexDataset : IAsyncDisposable
             await ((SealedObjectStore)store).StartSealedAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey);
+        if (options.PartitionColumns > 0 && options.Periods is null)
+        {
+            throw new ArgumentException(
+                "Partition columns split a dataset compacted by periods, each partition growing its own: declare DatasetOptions.Periods with them.",
+                nameof(options));
+        }
+
+        ClusteringKey? key = global::Vorticity.Dataset.ClusteringKey.Declared(options.ClusteringKey, schema, options.AcceptsNullableKey, options.PartitionColumns);
         DatasetFeatures features = options.ErasureDelay is null ? DatasetFeatures.None : DatasetFeatures.ErasureDelay;
         if (options.Periods is not null)
         {
             _ = PeriodOptions.InstantOf(key);
             features |= DatasetFeatures.Periods;
+        }
+
+        if (options.PartitionColumns > 0)
+        {
+            features |= DatasetFeatures.Partitions;
         }
 
         string[] declared = [];
@@ -1797,6 +1897,7 @@ public sealed class VortexDataset : IAsyncDisposable
             ErasureDelay = options.ErasureDelay,
             Lateness = options.Periods?.Lateness,
             PeriodLength = options.Periods?.Length,
+            PartitionColumns = options.PartitionColumns,
             Identifiers = declared,
             Features = features,
             Chunker = new ChunkerSettings(
@@ -2474,7 +2575,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// an object with no cursor has no minimum to fall back on, and a scan cannot prune on the
     /// column a reader is most likely to filter by.
     /// </summary>
-    private ObjectSummaries Summaries(VortexFile file)
+    /// <param name="file">The object, open.</param>
+    /// <param name="partition">The one value of each partition column its writer knows it holds, an exact bound of each; null for none.</param>
+    private ObjectSummaries Summaries(VortexFile file, Expressions.FilterLiteral[]? partition = null)
     {
         IReadOnlyList<ColumnSummary> columns = _options.SummaryColumns is { } declared
             ? ColumnSummaries.Of(file, declared)
@@ -2484,11 +2587,24 @@ public sealed class VortexDataset : IAsyncDisposable
             return ObjectSummaries.From(columns);
         }
 
-        List<ColumnSummary> all = [.. columns];
+        // The partition first: its exact value stands for whatever bounds the file states, or does not.
+        List<ColumnSummary> all = [];
         HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+        if (partition is not null && partition.Length == clustering.PartitionColumns)
+        {
+            for (int i = 0; i < partition.Length; i++)
+            {
+                all.Add(new ColumnSummary(clustering.PartitionPaths[i], partition[i], true, partition[i], true, true, 0, true));
+                seen.Add(clustering.PartitionPaths[i]);
+            }
+        }
+
         foreach (ColumnSummary column in columns)
         {
-            seen.Add(column.Path);
+            if (seen.Add(column.Path))
+            {
+                all.Add(column);
+            }
         }
 
         foreach (ColumnSummary column in ColumnSummaries.Of(file, clustering.Paths))
@@ -2531,7 +2647,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 await CheckSlicedAsync(file, cancellationToken).ConfigureAwait(false);
             }
 
-            ObjectSummaries summaries = Summaries(file);
+            ObjectSummaries summaries = Summaries(file, draft.Partition);
             return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
                 .ConfigureAwait(false));
         }

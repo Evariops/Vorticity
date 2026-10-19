@@ -33,7 +33,7 @@ internal static class DatasetExpiry
         }
 
         TimeUnit unit = PeriodOptions.InstantOf(key);
-        string path = key.Paths[0];
+        string path = key.InstantPath;
         for (int attempt = 1; attempt <= Attempts; attempt++)
         {
             DatasetSnapshot version = dataset.Snapshot;
