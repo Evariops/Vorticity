@@ -116,6 +116,19 @@ internal sealed class ScanBuilder
         return this;
     }
 
+    /// <summary>
+    /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
+    /// top-level keys: where the file's path map holds them, each chunk reads the keys' ranges alone
+    /// and decodes them as columns (<see cref="Indexes.VariantKeyReads"/>), never the variant whole.
+    /// </summary>
+    internal ScanBuilder WithVariantKeys(IReadOnlyDictionary<string, string[]>? keys)
+    {
+        _variantKeys = keys;
+        return this;
+    }
+
+    private IReadOnlyDictionary<string, string[]>? _variantKeys;
+
     internal ScanBuilder(VortexFile file)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -555,6 +568,31 @@ internal sealed class ScanBuilder
 
     private IAsyncEnumerable<RecordBatch> BatchesAsync(IRowExclusion? excluded)
     {
+        IAsyncEnumerable<RecordBatch> scan = WholeAsync(excluded, out BatchAsyncEnumerable batches);
+        return _variantKeys is { } keys ? new KeyedBatches(scan, batches, _file, keys) : scan;
+    }
+
+    /// <summary>
+    /// A scan whose variant columns are read through some shredded keys alone: the file's path maps
+    /// are read once, before its first batch, and the lanes told which chunks they read by keys.
+    /// </summary>
+    private sealed class KeyedBatches(
+        IAsyncEnumerable<RecordBatch> scan, BatchAsyncEnumerable batches, VortexFile file, IReadOnlyDictionary<string, string[]> keys)
+        : IAsyncEnumerable<RecordBatch>
+    {
+        public async IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            batches.VariantKeys ??= await Indexes.VariantKeyReads.LoadAsync(file, keys, cancellationToken).ConfigureAwait(false);
+            await foreach (RecordBatch batch in scan.WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                yield return batch;
+            }
+        }
+    }
+
+    /// <summary>The scan's batches, its variants read whole until <see cref="KeyedBatches"/> says otherwise; <paramref name="batches"/> the split reader under them.</summary>
+    private IAsyncEnumerable<RecordBatch> WholeAsync(IRowExclusion? excluded, out BatchAsyncEnumerable batches)
+    {
         // Parsed at most once per open file rather than once per scan: the tree is a function of
         // the file's bytes and nothing else.
         LayoutTree tree = _file.LayoutTree;
@@ -566,7 +604,7 @@ internal sealed class ScanBuilder
         (RowRange rows, long natural, long cap) = Frame(tree);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
-        BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
+        batches = new BatchAsyncEnumerable(
             _file, tree, read, keep, plan, _reverse ? 1 : _degree, _filter, _take, _metrics, _reverse && _orderPath is null)
         {
             Prefetch = _prefetch,

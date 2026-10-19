@@ -4418,13 +4418,23 @@ internal static class AggregationEngine
         }
 
         // The columns the filters of filtered groups read, evaluated on each batch of the pass.
+        List<FieldExpr> uses = new List<FieldExpr>(columns.Length);
         foreach (FieldExpr field in plan.Filters.Fields())
         {
             mask.Include(ToolPaths.Resolve(schema, field.Segments ?? field.Path.Split('.'), field.Path));
+            uses.Add(field);
+        }
+
+        // A variant column every key, input and filter reads through one top-level key is read by
+        // those keys alone.
+        foreach (ColumnShape column in columns)
+        {
+            uses.Add(column.Field);
         }
 
         return spec with
         {
+            VariantKeys = Indexes.VariantKeyReads.Of(uses, spec.Filter),
             Projection = mask.Build(),
             KeepEncodings = true,
             SinkDecodes = true,

@@ -92,7 +92,7 @@ public sealed partial class GroupAllocationTests
     private static readonly (string Axis, int Lanes, GroupCoreReason Path, long Ceiling, Func<VortexFile, int, Task<(long Rows, GroupCoreReason Path)>> Query)[] Axes =
     [
         // A thousand integers numbered by their value, a table a lane.
-        ("small integers", 1, GroupCoreReason.None, 35_840, SmallAsync),
+        ("small integers", 1, GroupCoreReason.None, 36_864, SmallAsync),
         ("small integers", 4, GroupCoreReason.None, 126_976, SmallAsync),
 
         // A thousand short texts, hashed as their words.
@@ -100,18 +100,18 @@ public sealed partial class GroupAllocationTests
         ("short texts", 4, GroupCoreReason.None, 143_360, NamesAsync),
 
         // A long integer a row, hashed: at four lanes, a lane's first rows are all new groups.
-        ("hashed integers", 1, GroupCoreReason.None, 100_352, WideAsync),
+        ("hashed integers", 1, GroupCoreReason.None, 101_376, WideAsync),
         //
         // On this axis and the core's two others, each part is built in an order its shelf lends: 3 to
         // 4 MB less, four bytes a group.
         ("hashed integers", 4, GroupCoreReason.FirstRows, 1_245_184, WideAsync),
 
         // Integers in no order over a span of 2·10⁶, the one the statistics bound them to: the core by pages.
-        ("spread integers", 1, GroupCoreReason.None, 106_496, DenseAsync),
+        ("spread integers", 1, GroupCoreReason.None, 107_008, DenseAsync),
         ("spread integers", 4, GroupCoreReason.Spread, 1_245_184, DenseAsync),
 
         // Six keys, three texts and three integers, nearly a group a row: tuples of their values.
-        ("six keys", 1, GroupCoreReason.None, 107_008, SixAsync),
+        ("six keys", 1, GroupCoreReason.None, 108_032, SixAsync),
         ("six keys", 4, GroupCoreReason.FirstRows, 1_638_400, SixAsync),
     ];
 

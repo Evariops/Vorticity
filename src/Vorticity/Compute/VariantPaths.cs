@@ -147,6 +147,11 @@ internal sealed class VariantFieldExpr : FieldExpr
     internal int Apply(CanonicalArena arena, int node)
     {
         CanonicalNode variant = arena.GetNode(node);
+        if (variant.Kind == CanonicalKind.Struct && variant.FieldCount == 3)
+        {
+            return ApplyKeyed(arena, variant);
+        }
+
         if (variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
         {
             throw new VortexFormatException($"'{Column.Path}' decoded as {variant.Kind}, not as a variant's struct of its metadata and its value.");
@@ -193,6 +198,137 @@ internal sealed class VariantFieldExpr : FieldExpr
         }
 
         return output.Finish(arena, values);
+    }
+
+    /// <summary>
+    /// The path's values over a variant read through its shredded keys alone (<see cref="Indexes.VariantKeyReads"/>):
+    /// a struct of a group per key, each the key's values of other classes and its typed column. The
+    /// class a typed column holds lies nowhere else, so reading that class is the typed column itself,
+    /// its buffers shared; any other read takes the values of other classes, and the typed column's
+    /// rows where a conversion or a presence asks for them. No variant is rebuilt.
+    /// </summary>
+    private int ApplyKeyed(CanonicalArena arena, CanonicalNode variant)
+    {
+        CanonicalNode tree = arena.GetNode(variant.GetFieldIndex(2));
+        int field = Steps is [{ IsKey: true } step] ? tree.DType.IndexOfField(step.Key!) : -1;
+        if (field < 0)
+        {
+            throw new VortexFormatException($"'{Column.Path}' was read through keys that do not hold {Text}.");
+        }
+
+        CanonicalNode group = arena.GetNode(tree.GetFieldIndex(field));
+        int rows = group.Length;
+        int typedIndex = EncodedForms.Canonical(arena, group.GetFieldIndex(2));
+        int valueIndex = EncodedForms.Canonical(arena, group.GetFieldIndex(1));
+        CanonicalNode typed = arena.GetNode(typedIndex);
+        CanonicalNode values = arena.GetNode(valueIndex);
+        if (Shared(arena, typed) is int shared)
+        {
+            return shared;
+        }
+
+        ReadOnlySpan<ulong> valueValid = ArenaWords.Validity(arena, valueIndex);
+        ReadOnlySpan<ulong> typedValid = ArenaWords.Validity(arena, typedIndex);
+        bool hasValues = values.Validity.Kind != ValidityKind.AllInvalid;
+        ReadOnlySpan<byte> valueViews = hasValues ? values.Views.Span : default;
+        Output output = new(arena, Read, rows);
+        Span<byte> scratch = stackalloc byte[ShortString + 1];
+        bool typedAny = typed.Validity.Kind != ValidityKind.AllInvalid;
+        for (int row = 0; row < rows; row++)
+        {
+            if (hasValues && Valid(valueValid, row))
+            {
+                ReadOnlySpan<byte> value = Bytes(in values, valueViews, row);
+                output.Write(row, value, valueViews, value);
+            }
+            else if (typedAny && Valid(typedValid, row))
+            {
+                // A presence reads no value; a conversion reads the typed row as the value it stands for.
+                if (Read == VariantRead.Has)
+                {
+                    output.Write(row, default, default, default);
+                }
+                else if (Typed(arena, typedIndex, row, scratch, out ReadOnlySpan<byte> encoded))
+                {
+                    output.Write(row, encoded, default, default);
+                }
+            }
+        }
+
+        return output.Finish(arena, values);
+    }
+
+    /// <summary>
+    /// The typed column itself, read as it is, when the read is of the class it holds and every value
+    /// of that class lies in it: its buffers shared under the read's dtype. Null otherwise.
+    /// </summary>
+    private int? Shared(CanonicalArena arena, in CanonicalNode typed)
+    {
+        bool integers = typed.Kind == CanonicalKind.Primitive && typed.PType == PType.I64;
+        switch (Read)
+        {
+            case VariantRead.AsInt64 when integers:
+                return arena.AddPrimitive(Int64Type, typed.Length, typed.Validity, PType.I64, typed.Values);
+            case VariantRead.AsString when typed.Kind == CanonicalKind.VarBinView && typed.DType.Kind == DTypeKind.Utf8:
+            {
+                int count = typed.DataBufferCount;
+                Span<VortexBuffer> stack = stackalloc VortexBuffer[16];
+                using Scratch<VortexBuffer> buffers = new(count, stack);
+                for (int i = 0; i < count; i++)
+                {
+                    buffers.Span[i] = typed.GetDataBuffer(i);
+                }
+
+                return arena.AddVarBinView(StringType, typed.Length, typed.Validity, typed.Views, buffers.Span);
+            }
+
+            case VariantRead.AsBool when typed.Kind == CanonicalKind.Bool:
+                return arena.AddBool(BoolType, typed.Length, typed.Validity, typed.Bits, typed.BitOffset);
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>The longest text the encoding writes as a short string, its length in its header.</summary>
+    private const int ShortString = 63;
+
+    /// <summary>
+    /// Row <paramref name="row"/> of the typed column as the variant value it stands for, in
+    /// <paramref name="scratch"/>: what a conversion reads of it. False for a text longer than a short
+    /// string, which no conversion to a number takes.
+    /// </summary>
+    private static bool Typed(CanonicalArena arena, int typed, int row, Span<byte> scratch, out ReadOnlySpan<byte> encoded)
+    {
+        encoded = default;
+        if (!LiteralReader.TryRead(arena, typed, row, out FilterLiteral literal))
+        {
+            return false;
+        }
+
+        switch (literal.Kind)
+        {
+            case FilterLiteralKind.Signed:
+                scratch[0] = ParquetVariant.Primitive(6);
+                BinaryPrimitives.WriteInt64LittleEndian(scratch[1..], literal.SignedValue);
+                encoded = scratch[..9];
+                return true;
+            case FilterLiteralKind.Float:
+                scratch[0] = ParquetVariant.Primitive(7);
+                BinaryPrimitives.WriteDoubleLittleEndian(scratch[1..], literal.FloatValue);
+                encoded = scratch[..9];
+                return true;
+            case FilterLiteralKind.Bool:
+                scratch[0] = ParquetVariant.Primitive(literal.BoolValue ? 1 : 2);
+                encoded = scratch[..1];
+                return true;
+            case FilterLiteralKind.Bytes when literal.BytesValue.Length <= ShortString:
+                scratch[0] = (byte)((literal.BytesValue.Length << 2) | ParquetVariant.BasicShortString);
+                literal.BytesValue.CopyTo(scratch[1..]);
+                encoded = scratch[..(1 + literal.BytesValue.Length)];
+                return true;
+            default:
+                return false;
+        }
     }
 
     /// <summary>The ids of the path's keys in <paramref name="metadata"/>'s dictionary, -1 for a key it lacks; whether the dictionary is sorted.</summary>

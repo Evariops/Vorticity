@@ -230,6 +230,18 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
+    /// Says that the variant columns of <paramref name="keys"/>, by name, are read only through those
+    /// top-level keys, which each object's path map lets its scan read alone.
+    /// </summary>
+    internal DatasetScanBuilder WithVariantKeys(IReadOnlyDictionary<string, string[]>? keys)
+    {
+        _variantKeys = keys;
+        return this;
+    }
+
+    private IReadOnlyDictionary<string, string[]>? _variantKeys;
+
+    /// <summary>
     /// Runs every object's scan under <paramref name="options"/>: the batch cap, zone-map pruning,
     /// the degree of parallelism, the prefetch and compaction; <paramref name="keepEncodings"/> lets
     /// the decoders deliver dictionary and run-end columns encoded, <paramref name="sinkDecodes"/>
@@ -1553,6 +1565,13 @@ internal sealed class DatasetScanBuilder
         if (filter is not null)
         {
             scan.Where(filter);
+        }
+
+        // An object read in the dataset's own columns reads its variants by keys where its path map
+        // allows; one reshaped from an earlier schema reads them whole.
+        if (!canonical)
+        {
+            scan.WithVariantKeys(_variantKeys);
         }
 
         if (projection is { } mask)

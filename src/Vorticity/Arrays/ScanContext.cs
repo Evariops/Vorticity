@@ -499,6 +499,12 @@ internal sealed class ScanContext : IDisposable
     internal bool KeepEncodings { get; set; }
 
     /// <summary>
+    /// The chunks of the variant columns the scan reads through some shredded keys alone, per scan
+    /// like <see cref="Metrics"/>; null when it reads every chunk whole.
+    /// </summary>
+    internal Indexes.VariantKeyReads? VariantKeys { get; set; }
+
+    /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
@@ -1510,6 +1516,7 @@ internal sealed class ScanContext : IDisposable
         _ownsRetained = true;
         _building = null;
         _child = null;
+        VariantKeys = null;
         if (_memory is { } memory)
         {
             memory.Checks = default;

@@ -129,10 +129,27 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// identically.
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-        new BatchAsyncEnumerator(
+        Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead);
+            readAhead: ReadsAhead));
+
+    /// <summary>
+    /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
+    /// reads every chunk whole. Set before the scan starts.
+    /// </summary>
+    internal Indexes.VariantKeyReads? VariantKeys { get; set; }
+
+    /// <summary>The enumerator, its lanes told which chunks of variants they read by keys.</summary>
+    private BatchAsyncEnumerator Keyed(BatchAsyncEnumerator enumerator)
+    {
+        if (VariantKeys is { } keys)
+        {
+            enumerator.VariantKeys = keys;
+        }
+
+        return enumerator;
+    }
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own; or, below zero, <see cref="ReadsAhead"/>.</summary>
     internal int Prefetch { get; init; }
@@ -187,10 +204,10 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="zones">The zone maps that pass read, which prove some splits whole; or null.</param>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, CancellationToken cancellationToken, ZonePruner? zones = null) =>
-        new BatchAsyncEnumerator(
+        Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead);
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -209,10 +226,10 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
-        new BatchAsyncEnumerator(
+        Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead);
+            readAhead: ReadsAhead));
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -504,7 +521,24 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private Lane NextLane()
     {
         ScanContext first = _lanes[0]!.Context;
-        return NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
+        Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
+        lane.Context.VariantKeys = first.VariantKeys;
+        return lane;
+    }
+
+    /// <summary>Tells the lanes which chunks of variants they read through shredded keys alone.</summary>
+    internal Indexes.VariantKeyReads? VariantKeys
+    {
+        set
+        {
+            foreach (Lane? lane in _lanes)
+            {
+                if (lane is not null)
+                {
+                    lane.Context.VariantKeys = value;
+                }
+            }
+        }
     }
 
     /// <summary>

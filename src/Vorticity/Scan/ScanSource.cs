@@ -43,6 +43,12 @@ internal sealed record ScanSpec
     internal bool KeepEncodings { get; init; }
 
     /// <summary>
+    /// The variant columns, by name, the consumer reads only through these top-level keys, which a
+    /// file's path map lets a scan read alone; null when it reads every variant whole.
+    /// </summary>
+    internal IReadOnlyDictionary<string, string[]>? VariantKeys { get; init; }
+
+    /// <summary>
     /// Whether the consumer reads the encoded forms itself, as an aggregation does, so that a block
     /// counts as decoded only when a column of it reached canonical form.
     /// </summary>
@@ -313,7 +319,7 @@ internal sealed class FileScanSource : ScanSource
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
     internal ScanBuilder Builder(ScanSpec spec, ScanCounters metrics)
     {
-        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics);
+        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys);
         if (spec.Projection is { } mask)
         {
             builder.ProjectMask(in mask);

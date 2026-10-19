@@ -516,6 +516,16 @@ row before extracting the field would pay back everything shredding saved, which
 engine's reader had to remove and what a scan that does not push field projections into shredded
 columns still pays (source).
 
+As built, a projection or an aggregation that reads a variant column only through top-level keys
+says so to its scan, and the scan reads the file's path map once, before its first batch. Each chunk
+of the column then registers the keys' ranges instead of its segment, and decodes each key from its
+range into a group of its typed column and its values of other classes, the same dtypes in every
+chunk. A read of the class a key's typed column holds is that column itself, its buffers shared,
+since no value of that class lies anywhere else. A read of another class, or a conversion, takes the
+values of other classes, and the typed rows a conversion or a presence asks for. A column also read
+whole, or by a deeper path, and an object without a path map, are read whole as before
+(`VariantKeyReadTests`).
+
 A Rust reader knows nothing of the path map. It reads each segment whole, as it reads every flat
 segment, and gets the same values. A path read in Vorticity costs the bytes of the path, as a declared
 column's does, plus one small read per object that the cache keeps. In requests it costs one per chunk
@@ -836,7 +846,7 @@ Every figure is an estimate.
 | the column budget | footer bytes and layout nodes as ratchets, on a bench of 10⁴ paths (`ShreddingChoiceTests`: the bytes of the file and the tables of its largest tree) |
 | ingestion does not pay for shredding | the append throughput of rows with variant columns is the same with shredding on and off, since appends never shred (a ratchet on the write bench) |
 | shredding costs little where it happens | the time of a level 0 exit with shredding against the same exit without it, recorded on the write bench and held as a ratchet |
-| a path read fetches only its bytes | the bytes a question on one shredded path reads, against the bytes of that path's buffers plus its path map entry, on a counting store |
+| a path read fetches only its bytes | the bytes a question on one shredded path reads, against the bytes of that path's buffers plus its path map entry, on a counting store (`VariantKeyReadTests`: no byte of another key read beyond the padding two ranges share) |
 | a path read rebuilds no variant | an allocation ratchet on a question over one shredded path, which equals the same question over a declared column |
 | `As…` converts nothing and reads one class | on a path holding integers and text in the same chunks, the bytes `AsInt64()` reads: the typed column and none of the field's `value`, on a counting store |
 | a range on a path skips what it skips on a declared column | the blocks and bytes a range question reads over a shredded path that is no synopsis column, against the same question over a declared column holding the same values in the same order: the same blocks, on a counting store |
