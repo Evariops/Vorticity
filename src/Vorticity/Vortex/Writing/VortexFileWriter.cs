@@ -156,6 +156,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal long TailBytes { get; private set; }
 
+    /// <summary>The bytes of the column chunks, once the file is completed: its data, without its indexes and synopsis tables.</summary>
+    internal long DataBytes => _reportBytes.Data;
+
     /// <summary>
     /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
     /// rather than from a walk of the chunk, the columns' children included. The width counterpart
@@ -292,6 +295,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _declared = tables;
         }
 
+        /// <summary>The bytes of the tables written, which count with the indexes rather than the data.</summary>
+        internal long TableBytes { get; private set; }
+
         /// <summary>Where the part starts and ends in the file, once written.</summary>
         internal long Start { get; private set; }
 
@@ -343,8 +349,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         /// <summary>
         /// Writes the tables declared after the columns, each an array blob in the file's encodings, those
-        /// worth their bytes only (<see cref="SynopsisTableInfo.WorthTheirBytes"/>), against the bytes of
-        /// the columns written.
+        /// the choice keeps only (<see cref="SynopsisTableInfo.Choose"/>), against the bytes of the columns
+        /// written and within the synopsis's budget, every verdict reported.
         /// </summary>
         private async ValueTask WriteTablesAsync(VortexFileWriter writer, CancellationToken cancellationToken)
         {
@@ -360,9 +366,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     sizes.Add((table, blob.Length + dtype.Length));
                 }
 
-                bool[] kept = SynopsisTableInfo.WorthTheirBytes(sizes, writer._indexes!.ColumnBytes);
+                IndexWriter indexes = writer._indexes!;
+                long dataBytes = writer._sink.Position - indexes.FileBytes;
+                (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(
+                    sizes, indexes.ColumnBytes, writer._rowCount, indexes.SynopsisBudget(dataBytes), SynopsisPrices.Default);
                 for (int i = 0; i < encoded.Count; i++)
                 {
+                    indexes.ReportSynopsis(sizes[i].Table, kept[i], verdicts[i], sizes[i].Bytes);
                     if (!kept[i])
                     {
                         continue;
@@ -371,6 +381,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     ReadOnlyMemory<byte> bytes = encoded[i].Blob.Memory;
                     long aligned = await writer.PadAsync(cancellationToken).ConfigureAwait(false);
                     await writer._sink.WriteAsync(bytes, cancellationToken).ConfigureAwait(false);
+                    TableBytes += bytes.Length;
                     _tables.Add((_declared[i].Table, IndexSegment.Of(aligned, bytes.Span, (byte)VortexLimits.MaxAlignmentExponent), encoded[i].DType));
                 }
             }
@@ -2215,7 +2226,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // The last runs, after the last data segment and before the zone maps: the generation the
         // end of the data left open, and the file-level filter.
         long dataEnd = _sink.Position;
-        long interleaved = _indexes?.FileBytes ?? 0;
+
+        // The synopsis's tables lie in its part, among the data, but count with the indexes.
+        long interleaved = (_indexes?.FileBytes ?? 0) + (_synopsisPart?.TableBytes ?? 0);
         if (_indexes is not null)
         {
             await _indexes.EndOfDataAsync(cancellationToken).ConfigureAwait(false);

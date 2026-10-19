@@ -24,6 +24,10 @@ public sealed partial class DatasetPeriodsCompactionTests
     {
         ClusteringKey = [nameof(Request.At)],
         Periods = new PeriodOptions { Lateness = lateness ?? TimeSpan.FromHours(1), Length = length },
+
+        // A synopsis budget as large as the data, so that the tables of the schedules' small objects that
+        // save anything are kept, and checked.
+        Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(1_000) },
     };
 
     /// <summary>
@@ -377,6 +381,8 @@ public sealed partial class DatasetPeriodsCompactionTests
         List<long> statuses = [];
         DateTimeOffset newest = Noon;
         Dictionary<CompactionTrigger, int> triggers = [];
+        HashSet<UInt128> seen = [];
+        int tabled = 0;
         long ingested = 0;
         long rewritten = 0;
         int widest = 0;
@@ -419,6 +425,9 @@ public sealed partial class DatasetPeriodsCompactionTests
             }
 
             await CheckAsync(dataset, appended, SliceWidth.Hour);
+
+            // Every object a round adds sorted as its slice table says, its synopsis tables the merge of its runs.
+            tabled += (await SortedAsTheirTablesAsync(dataset, seen)).WithTables;
             widest = Math.Max(widest, await ObjectsOverAsync(dataset, newest - TimeSpan.FromMinutes(15), newest));
             int[] counts = await CountsAsync(dataset);
             Assert.InRange(counts[0], 0, compaction.LevelZeroCeiling);
@@ -431,9 +440,9 @@ public sealed partial class DatasetPeriodsCompactionTests
 
         (int sortedObjects, int withTables) = await SortedAsTheirTablesAsync(dataset);
         Assert.True(sortedObjects > 0, "the schedule must leave objects in sorted slices");
-        Assert.True(withTables > 0, "the schedule must leave objects whose synopsis tables are worth their bytes");
+        Assert.True(tabled > 0, "the schedule must write objects whose synopsis tables are worth their bytes");
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {sortedObjects} objects in sorted slices, {withTables} with synopsis tables.\n"));
+            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {sortedObjects} objects in sorted slices, {withTables} with synopsis tables, {tabled} over the schedule.\n"));
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.FreshMerge) > 0, "the schedule must merge fresh objects up");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.LevelZeroCeiling) > 0, "the schedule must empty level 0");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.Seal) > 0, "the schedule must seal a period");

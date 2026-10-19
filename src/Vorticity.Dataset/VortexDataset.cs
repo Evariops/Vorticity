@@ -20,7 +20,7 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// A data object that has reached the store, and its tree key: what orders it, then its uid.
 /// </summary>
-internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key);
+internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<byte> Key, long DataBytes = 0);
 
 /// <summary>
 /// A versioned dataset over an object store: immutable Vortex files as its data objects, one commit
@@ -1863,7 +1863,7 @@ public sealed class VortexDataset : IAsyncDisposable
         }
         ObjectEntry entry = new ObjectEntry(draft.Key, Uid(draft.Identity), rows, bytes, hash, summaries)
             .WithFooterBytes(draft.Writer.TailBytes);
-        return new WrittenObject(entry, KeyOf(prefix, entry));
+        return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes);
     }
 
     /// <summary>

@@ -40,10 +40,73 @@ public sealed partial class SynopsisTableTests
     {
         SliceWidth length = days ? SliceWidth.Day : SliceWidth.Hour;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
+
+        // A budget as large as the data, so that every kind of table that saves anything is kept and checked.
+        await using VortexDataset dataset = await CallsAsync(store, length, 1_000);
+        int sealedObjects = 0;
+        int spanningHours = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+            {
+                await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
+                if (await SliceTable.ReadAsync(lease.File, Ct) is not { } slices)
+                {
+                    continue;
+                }
+
+                List<(SynopsisTableInfo Info, List<TableRow> Rows)> tables = await CountsExactlyAsync(lease.File, slices);
+                if (level == PeriodLevels.Periods)
+                {
+                    // The run statistics of both columns, about a row for three rows of data, cost more to read
+                    // than the columns they sum and are left out; those of the first column are kept.
+                    Assert.Contains(tables, t => t.Info.Kind == SynopsisTableKind.Runs && t.Info.Keys.Length == 1);
+                    Assert.DoesNotContain(tables, t => t.Info.Kind == SynopsisTableKind.Runs && t.Info.Keys.Length == 2);
+                    sealedObjects++;
+                }
+
+                spanningHours += tables.Any(t => t.Info.Bucket == SynopsisBucket.Object) ? 1 : 0;
+            }
+        }
+
+        Assert.Equal(length == SliceWidth.Hour ? 2 : 0, sealedObjects);
+        Assert.True(length == SliceWidth.Hour || spanningHours > 0, "an object of a day must span hours");
+    }
+
+    /// <summary>
+    /// The same calls under the default budget, a tenth of the data's bytes: every object's tables hold no
+    /// more, and the sealed hours keep some.
+    /// </summary>
+    [Fact]
+    public async Task TheTablesStayWithinTheirBudget()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await CallsAsync(store, SliceWidth.Hour, null);
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+            {
+                await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
+                IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(Ct))!;
+                long bytes = directory.Entries.Where(e => e.Kind == IndexKinds.SynopsisTable).Sum(e => (long)e.Runs[0].Payload[0].Length);
+                Assert.InRange(bytes, 0, lease.File.FileLength / 10);
+                Assert.True(level != PeriodLevels.Periods || bytes > 0, "a sealed hour keeps tables");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A dataset of periods of <paramref name="length"/> holding two hours and a quarter of calls, compacted:
+    /// sealed periods, or fresh objects merged two by two; its index budget <paramref name="budgetPerMille"/>,
+    /// the default when null.
+    /// </summary>
+    private static async Task<VortexDataset> CallsAsync(MemoryObjectStore store, SliceWidth length, int? budgetPerMille)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Call.Schema, new DatasetOptions
         {
             ClusteringKey = [nameof(Call.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = length, SliceTargetRows = 500 },
+            Write = budgetPerMille is { } perMille ? new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(perMille) } : VortexWriteOptions.Default,
         }, Ct);
         Random random = new Random(5);
         for (int part = 0; part < 16; part++)
@@ -66,34 +129,7 @@ public sealed partial class SynopsisTableTests
         {
         }
 
-        int sealedObjects = 0;
-        int spanningHours = 0;
-        for (int level = 1; level < dataset.Levels.Count; level++)
-        {
-            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
-            {
-                await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
-                if (await SliceTable.ReadAsync(lease.File, Ct) is not { } slices)
-                {
-                    continue;
-                }
-
-                List<(SynopsisTableInfo Info, List<TableRow> Rows)> tables = await CountsExactlyAsync(lease.File, slices);
-                if (level == PeriodLevels.Periods)
-                {
-                    // The run statistics of both columns, about a row for three rows of data, hold more bytes
-                    // than the columns they sum and are left out; those of the first column are kept.
-                    Assert.Contains(tables, t => t.Info.Kind == SynopsisTableKind.Runs && t.Info.Keys.Length == 1);
-                    Assert.DoesNotContain(tables, t => t.Info.Kind == SynopsisTableKind.Runs && t.Info.Keys.Length == 2);
-                    sealedObjects++;
-                }
-
-                spanningHours += tables.Any(t => t.Info.Bucket == SynopsisBucket.Object) ? 1 : 0;
-            }
-        }
-
-        Assert.Equal(length == SliceWidth.Hour ? 2 : 0, sealedObjects);
-        Assert.True(length == SliceWidth.Hour || spanningHours > 0, "an object of a day must span hours");
+        return dataset;
     }
 
     /// <summary>The tables of <paramref name="file"/>, each row what the rows it covers give, and each coarse table the merge of the finer ones.</summary>
@@ -152,32 +188,41 @@ public sealed partial class SynopsisTableTests
     }
 
     /// <summary>
-    /// Two synopsis columns of 100 and 400 bytes and a measure of 10 000: a table is kept when it holds
-    /// fewer bytes than the smallest kept table that answers its questions, or than its columns when none
-    /// does, and of two tables holding the same rows, only the first.
+    /// Two synopsis columns of 100 and 400 bytes and a measure of 10 000 over 10 000 rows, a byte and a row
+    /// at 10 ns each: the choice keeps, round after round, the table that saves the most per byte over the
+    /// questions it answers, the hour's tables first, then the slices' at depth 1, until the budget of
+    /// 6 000 bytes leaves no room for the run statistics of both columns nor for the object's table. A
+    /// table holding the same rows as one kept saves nothing. The same tables give the same verdicts.
     /// </summary>
     [Fact]
-    public void ATableIsKeptWhenItHoldsFewerBytesThanWhatAnswersWithoutIt()
+    public void TheChoiceKeepsWhatSavesMostPerByteWithinTheBudget()
     {
-        static SynopsisTableInfo Info(SynopsisTableKind kind, SynopsisBucket bucket, params int[] keys) => new(kind, bucket, keys, [3], 0);
+        static SynopsisTableInfo Info(SynopsisTableKind kind, SynopsisBucket bucket, int rows, params int[] keys) => new(kind, bucket, keys, [3], rows);
         (SynopsisTableInfo, long)[] tables =
         [
-            // More than its columns, 10 500 bytes.
-            (Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, 1, 2), 12_000),
-            (Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, 1), 3_000),
-            // No finer table kept holds the second column: against the columns.
-            (Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, 1, 2), 2_000),
-            (Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, 1), 500),
-            // As many bytes as the hour's, which answers it.
-            (Info(SynopsisTableKind.Coarse, SynopsisBucket.Object, 1), 500),
-            // The same rows as the hour's at depth 1.
-            (Info(SynopsisTableKind.Values, SynopsisBucket.Hour, 1), 500),
-            (Info(SynopsisTableKind.Values, SynopsisBucket.Hour, 2), 300),
+            (Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, 3_000, 1, 2), 12_000),
+            (Info(SynopsisTableKind.Runs, SynopsisBucket.Slice, 300, 1), 3_000),
+            (Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, 200, 1, 2), 2_000),
+            (Info(SynopsisTableKind.Coarse, SynopsisBucket.Hour, 20, 1), 500),
+            (Info(SynopsisTableKind.Coarse, SynopsisBucket.Object, 10, 1), 400),
+            (Info(SynopsisTableKind.Values, SynopsisBucket.Hour, 20, 2), 300),
+            (Info(SynopsisTableKind.Values, SynopsisBucket.Hour, 20, 1), 500),
         ];
+        static long Columns(int field) => field switch { 1 => 100, 2 => 400, 3 => 10_000, _ => 0 };
+        SynopsisPrices prices = new SynopsisPrices(1e-8, 1e-8);
 
-        Assert.Equal(
-            [false, true, true, true, false, false, true],
-            SynopsisTableInfo.WorthTheirBytes(tables, static field => field switch { 1 => 100, 2 => 400, 3 => 10_000, _ => 0 }));
+        (bool[] kept, string[] verdicts) = SynopsisTableInfo.Choose(tables, Columns, 10_000, 6_000, prices);
+        Assert.Equal([false, true, true, true, false, true, false], kept);
+        Assert.StartsWith("left out: 12000 bytes past the 200 the budget of 6000 left", verdicts[0]);
+        Assert.StartsWith("kept: saves", verdicts[3]);
+        Assert.StartsWith("left out: 400 bytes past", verdicts[4]);
+        Assert.StartsWith("left out: its 500 bytes save nothing", verdicts[6]);
+        (bool[] again, string[] reasons) = SynopsisTableInfo.Choose(tables, Columns, 10_000, 6_000, prices);
+        Assert.Equal(kept, again);
+        Assert.Equal(verdicts, reasons);
+
+        // With room for every table, all are kept but the one holding the hour's rows a second time.
+        Assert.Equal([true, true, true, true, true, true, false], SynopsisTableInfo.Choose(tables, Columns, 10_000, 1_000_000, prices).Kept);
     }
 
     /// <summary>

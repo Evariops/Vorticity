@@ -319,10 +319,15 @@ the table is (run statistics per slice, a coarse table per hour or per object, o
 counts per hour), its key fields, its measure fields and its row count. Its run's payload names the
 region, and its payload dtype the struct's.
 
-The writer keeps a table only when it holds fewer bytes than what would answer its questions without it:
-the smallest table it keeps that answers them by merging its rows, a finer bucket with the same keys
-and more, or else the columns the table sums. Two tables that hold the same rows never both stay, and an
-object of a few hundred rows keeps none. An append drops the entries, as it does the part's.
+The writer chooses which tables to keep, greedily, as views are classically selected. The questions are
+the grains the tables hold, a bucket and keys each, weighed alike. Answering one costs its source's
+bytes at a price per byte and its rows at a price per row grouped: the columns it sums over the object's
+rows, or the cheapest table kept that answers it by merging its rows, a finer bucket with the same keys
+and more. Each round keeps the table that lowers the questions' costs the most per byte it holds, while
+it lowers them and fits the budget: the indexes' share of the data's bytes, with no floor, so that a
+small object keeps none. The tables' bytes count with the indexes in the write report, which also
+holds every table's verdict with its numbers, as it holds `Auto`'s. An append drops the entries, as it
+does the part's.
 
 ### 4.10 The file-level filter
 

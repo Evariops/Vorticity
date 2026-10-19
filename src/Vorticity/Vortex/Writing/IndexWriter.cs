@@ -935,6 +935,25 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>The bytes of the chunks of column <paramref name="field"/> written so far.</summary>
     internal long ColumnBytes(int field) => _columnBytes[field];
 
+    /// <summary>
+    /// The bytes the synopsis's tables may take over <paramref name="dataBytes"/> of data: the indexes' share,
+    /// a budget of their own, with no floor, so that a small object keeps none.
+    /// </summary>
+    internal long SynopsisBudget(long dataBytes) => dataBytes * _budgetPerMille / 1000;
+
+    /// <summary>Reports what became of a synopsis table, and why, with the choice's numbers.</summary>
+    internal void ReportSynopsis(SynopsisTableInfo table, bool kept, string verdict, long bytes)
+    {
+        string[] keys = new string[table.Keys.Length];
+        for (int k = 0; k < keys.Length; k++)
+        {
+            keys[k] = _paths[table.Keys[k]];
+        }
+
+        string grain = $"{table.Kind} per {table.Bucket} of ({string.Join(", ", keys)})";
+        _reports.Add(new IndexWriteReport(grain, IndexKinds.SynopsisTable, kept ? IndexOutcome.Built : IndexOutcome.Abandoned, verdict, kept ? bytes : 0));
+    }
+
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
     {

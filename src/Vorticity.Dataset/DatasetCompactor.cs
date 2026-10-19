@@ -192,7 +192,7 @@ internal static class DatasetCompactor
         // calls for, from past the newest instant: the periods already written keep their bounds.
         List<DatasetOperation> operations = [replacement];
         if (job.Cut is { Slices: true, Newest: { } newest } sealing && outputs.Written.Count == 1
-            && Reweigh(dataset, sealing, outputs.Written[0].Entry, newest) is { } change)
+            && Reweigh(dataset, sealing, outputs.Written[0], newest) is { } change)
         {
             operations.Add(change);
         }
@@ -626,10 +626,13 @@ internal static class DatasetCompactor
     /// <summary>
     /// The change of period length the load of the period a seal wrote calls for, or null: its bytes
     /// and rows over its span of data time, its columns, the object cap, the erasure delay. A row's
-    /// bytes bound its widest column's, which keeps the chunk constraint on the safe side.
+    /// bytes of data bound its widest column's, which keeps the chunk constraint on the safe side; the
+    /// object's indexes and synopsis tables belong to no column, and would make a small period's rows
+    /// look wide.
     /// </summary>
-    private static DatasetOperation.ChangePeriodLength? Reweigh(VortexDataset dataset, PeriodCut cut, ObjectEntry period, long newest)
+    private static DatasetOperation.ChangePeriodLength? Reweigh(VortexDataset dataset, PeriodCut cut, WrittenObject written, long newest)
     {
+        ObjectEntry period = written.Entry;
         if (dataset.Key is not { } key || !period.Summaries.TryGet(key.Paths[0], out ColumnSummary instant)
             || !instant.HasMin || instant.Min.Kind != Vorticity.Expressions.FilterLiteralKind.Signed || period.Rows == 0)
         {
@@ -642,7 +645,7 @@ internal static class DatasetCompactor
             period.Bytes / seconds,
             period.Rows / seconds,
             LeafColumns(dataset.Snapshot.Schema.DType),
-            (double)period.Bytes / period.Rows,
+            (double)(written.DataBytes > 0 ? written.DataBytes : period.Bytes) / period.Rows,
             dataset.Options.MaxObjectBytes,
             dataset.Snapshot.Header.ErasureDelay,
             Retention: null);

@@ -110,10 +110,33 @@ internal static class SynopsisTablesMicro
                 }
             }
 
+            // What a question pays to group a row instead: the engine on one lane, by the three columns, a count
+            // and the three measures summed, the price of a row the synopsis choice weighs tables with.
+            double bestGroup = double.MaxValue;
+            await using (VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 1))
+            {
+                await using VortexFile grouped = await session.OpenAsync(path);
+                for (int round = 0; round < rounds; round++)
+                {
+                    long begin = Stopwatch.GetTimestamp();
+                    long groups = 0;
+                    await foreach (Columns<SynopsisGroup> part in grouped.Scan<SynopsisSpan>()
+                        .GroupBy(s => (s.Region, s.Status, s.Service))
+                        .Select(g => (g.Key.Region, g.Key.Status, g.Key.Service, g.Count(), g.Sum(s => s.Duration), g.Sum(s => s.Bytes), g.Sum(s => s.Retries)))
+                        .As<SynopsisGroup>())
+                    {
+                        groups += Vorticity.Bench.Scenarios.Consume.Typed(part);
+                    }
+
+                    bestGroup = Math.Min(bestGroup, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
+                }
+            }
+
             Console.WriteLine($"{Rows} rows in {Rows / SliceRows} slices, 3 synopsis columns, {measures.Length} measures; best of {rounds}");
             Console.WriteLine($"sort and count   {bestTotal,8:F1} ms  {bestTotal * 1e6 / Rows,6:F1} ns/row");
             Console.WriteLine($"  count slices   {bestCount,8:F1} ms  {bestCount * 1e6 / Rows,6:F1} ns/row");
             Console.WriteLine($"build tables     {bestBuild,8:F1} ms  {bestBuild * 1e6 / Rows,6:F1} ns/row, {tables} tables of {tableRows} rows");
+            Console.WriteLine($"group, one lane  {bestGroup,8:F1} ms  {bestGroup * 1e6 / Rows,6:F1} ns/row, read and decode included");
             foreach (RecordBatch batch in batches)
             {
                 batch.Dispose();
@@ -130,3 +153,6 @@ internal static class SynopsisTablesMicro
 
 [VortexRecord]
 internal partial record struct SynopsisSpan(DateTimeOffset At, string Region, int Status, string Service, long Duration, double Bytes, int? Retries);
+
+[VortexRecord]
+internal partial record struct SynopsisGroup(string Region, int Status, string Service, long Rows, long Duration, double Bytes, long? Retries);

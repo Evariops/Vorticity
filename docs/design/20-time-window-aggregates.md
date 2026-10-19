@@ -753,14 +753,24 @@ one value over a long window in one ranged read: one host per minute over a day 
 entries, not the host's runs. A deep column may keep both orders, each admitted by its own benefit per
 byte.
 
-As built so far, the writer weighs bytes alone ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)).
-A table is kept when it holds fewer bytes than the smallest kept table that answers its questions by
-merging its rows, or than the columns it sums when none does, the finest tables weighed first. That
-rule already drops what costs more than it saves: the run statistics of a deep column whose runs are
-a few rows long, a table that holds the same rows as another, and every table of an object of a few
-hundred rows, whose fixed bytes would otherwise double the object's. The costs of walking and grouping,
-the budget, the verdicts recorded, the value counts sorted by value then bucket and the postings come
-with the choice under the budget.
+As built ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)), the
+questions are the grains the candidate tables hold, and a question's cost is its source's bytes at a
+price per byte plus its rows at a price per row grouped, a row of data or of a table alike. The price of
+a row is measured: 12 ns on one lane over three keys, a count and three sums, reading and decoding
+included (`vortex-queries --micro synopsistables`). The price of a byte is provisional, a tenth of a
+gigabyte a second, an object store's one stream as the encoding advice takes it, until the bench of
+questions measures each store's and the local cache's. The budget is the indexes' share of the data's
+bytes, a tenth by default, with no floor. The verdicts go to the write report, which `Auto`'s reasons
+go to, rather than to the index directory. The choice drops the run statistics of a deep column whose
+runs are a few rows long, which cost more to read than the columns, and a table that holds the same rows
+as one kept. A table holds about 1.9 KB even for one row, the nodes of its twenty-odd columns of states,
+so a small object keeps few. The value counts sorted by value then bucket, the postings and the
+distributions are not candidates yet.
+
+A seal weighs the length of the next periods from the period it wrote, the bytes of a row bounding its
+widest column's. Those are the bytes of its data alone: an object's tables and indexes belong to no
+column, and counted in, they made a small period's rows look wide enough to shorten the periods to a
+minute.
 
 ### 7.4 How the synopsis is built and merged
 
