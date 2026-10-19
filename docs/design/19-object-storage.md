@@ -635,6 +635,38 @@ carry XXH3, the index regions carry checksums, and a file's structures are valid
 parsed. Azure's structured body would verify a read segment by segment, and waits for its layout to
 be checked against the service ([Azure's checksums](#83-checksums)).
 
+### 10.5 The synopsis cache on the local disk
+
+A session may keep on the local disk what questions read of a dataset's objects without their data
+(`VortexSessionOptions.SynopsisCache`): their synopsis tables, their slices' chunk directories, their
+index directories and their variant columns' path directories. Only a region an object's table of
+contents declares, with a checksum, enters it, never the data nor the footer. An object never changes,
+so an entry is never stale: its key is the object's uid, the region's place and length and its
+checksum, all known from the dataset's entry before any read.
+
+An entry is a file named by that key, in directories sharded by the uid, written under a temporary
+name and then renamed, so a reader never sees half a file. The cache walks its directory when it opens,
+and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
+operating system. Every read from the disk checks the checksum, and a region that fails it is dropped
+and read again from the store. Questions that miss the same region at once wait for one read.
+
+Past its capacity it drops entries as S3-FIFO does, counting bytes. A new region waits in a small
+queue of a tenth of the capacity, and only one read again there moves on to the main queue, which
+gives an entry another pass for each read it had, up to three. The names of the regions the small
+queue dropped are kept, and one asked again soon goes straight to the main queue. A sweep of thirteen
+months thus passes through without pushing out the tables of the last days. The policy was chosen by
+replaying the regions 2 000 questions asked through SIEVE, S3-FIFO and Window TinyLFU: S3-FIFO served
+the most bytes at every capacity up to half of what the regions weigh, and as many at half
+(`vortex-queries --micro cachetrace`, [bench/README.md](../../bench/README.md)).
+
+What it saves the store is what keeps a deployment under the services' limits, 5 500 reads a second
+per prefix on S3 and 900 per bucket on OVHcloud. On the same questions, a question sends 9.7 reads to
+the store without the cache and 5.7 with every region held, the rest being data, which the cache never
+holds. `WarmAsync` reads a window's regions into the cache before the first question. A dataset whose
+objects are sealed is read from the store until the cache can keep sealed bytes. The cache reports
+on the library's meter, under `vortex.synopsis_cache.*`: hits, misses, bytes from the disk and from the
+store, evictions, refused admissions, corrupt regions and bytes held.
+
 ## 11. Writing
 
 ### 11.1 A file written to a location

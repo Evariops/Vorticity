@@ -660,7 +660,11 @@ second over a day at 50 ms an object) are the design's example until the benches
 The horizon is a property of the sources, which the application declares, kept to the second, and the
 dataset reports the lateness it sees: each append records how far its oldest row came behind the
 newest instant the handle appended before (`vortex.dataset.lateness`, in seconds, zero for rows in
-order), so that a horizon too short shows. Identifier columns (`DatasetOptions.Identifiers`) name the
+order), so that a horizon too short shows. A row later than the horizon behind the newest instant
+the dataset held is kept, in the late level, and sealed into its period with the next late rows, and
+the dataset counts it (`vortex.dataset.rows_past_horizon`). A handle created with
+`PeriodOptions.RefuseLateRows` refuses an append that holds one instead, before anything is written.
+Identifier columns (`DatasetOptions.Identifiers`) name the
 columns whose values questions look up one at a time; each names a column of the schema, once. A key
 that leads with a timestamp is encoded as the timestamp's storage, its seek keys too
 ([06-row-encoding.md](06-row-encoding.md#6-unsupported-types)).
@@ -786,6 +790,15 @@ removed in one commit, from what the leaves say, without reading one. Every obje
 one period, so none straddles the cutoff, and an object of level 0 that does stays until its exit
 cuts it by period. A row thus outlives the cutoff by up to a period. `DatasetExpiryTests` counts no
 read of a data object for an expiry of two sealed hours, nor for a delete of the rows before them.
+
+A dataset of periods may also declare partition columns (`DatasetOptions.PartitionColumns`), a tenant
+or a source whose rows are kept and expired apart. An append splits its rows by their values, so every
+object holds one value of each partition column, which its entry records as exact summaries even for
+a text column, which file statistics would not bound. Compaction plans each partition's periods apart,
+so no job mixes two, and an append that would hold more values than `MaxPartitionValues` is refused.
+`ExpireAsync(partition, before)` then removes one partition's periods from what the leaves say, and a
+question's conjunct on a partition column is decided object by object, true or false for all its rows,
+without a read. The header carries the columns, in commit format 4.
 
 An update is a delete and an insert applied together. The rows it takes are marked where they were,
 read as records, passed through the caller's function, and written into new level 0 objects, where

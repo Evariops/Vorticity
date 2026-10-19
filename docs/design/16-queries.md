@@ -849,9 +849,11 @@ streams and the groups come in the order they would have. A dataset's objects do
 their files still count the rows a deletion removed.
 
 A dataset of periods answers part of a pass with states instead
-([answering a question](20-time-window-aggregates.md#9-answering-a-question)). When every aggregate is
-a count of the rows, a sum, a minimum, a maximum or a mean of a number column, none of them filtered,
-and every key is a column or a function of one, the pass asks its source for states. An object whose
+([aggregations from a dataset's synopsis](12-index-reads.md#45-aggregations-from-a-datasets-synopsis)).
+When every aggregate is a count of the rows, a sum, a minimum, a maximum or a mean of a number column
+or of a variant's integer path, none of them filtered, and every key is a column, a function of one or
+a variant's path read strictly, the pass asks its source for states. A path's states carry the
+path's text as their name. An object whose
 synopsis answers then comes as a batch of states: a row per bucket of a table and per value of its
 keys. The key columns carry the names and types the rows' have, the instant holds the bucket's start,
 and beside them are the rows the row stands for and each measure's states. A lane gives each row its

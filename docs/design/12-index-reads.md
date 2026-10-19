@@ -221,6 +221,53 @@ refused, naming `IndexPolicy.Postings`, the cheapest structure that would serve 
 filled into a hash set bounded by the column. Distinct is a property of the cursor, not a terminal
 returning a list, because it is an ordered walk with an early exit, and a list would buffer it.
 
+### 4.5 Aggregations from a dataset's synopsis
+
+An object a dataset of periods writes keeps, beside its data, a synopsis: tables of counts, exact
+sums and extremes for the combinations of its synopsis columns, by slice, by hour and over the whole
+object ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)). Its
+entry in the dataset's tree carries the table of contents, each table's keys, measures, bucket, rows
+and region with its checksum, so deciding what an object answers reads nothing.
+
+An aggregation that asks for states ([states](16-queries.md#93-statistics-and-zone-maps)) is answered
+object by object. The filter splits into bounds on the instant, which make the window, and predicates
+on other columns, which must be keys of a table. The table of fewest rows that holds the question's
+keys, the columns its filter reads and its measures folds every bucket the window keeps whole. A table
+by slice folds the whole slices of a bucket the window cuts, and the slices the window cuts themselves
+are read as rows, through the chunk directories, without the footer
+([the rows of a time slice](#51-the-rows-of-a-time-slice-without-the-footer)). An object that no table
+answers, or whose every row lies at an edge, is read as rows. The predicates on keys run once per table
+row. A key may be a column, a function of the instant, a partition column, whose one value the object
+holds, or a key of a variant column read strictly as an integer, a text or a boolean, which the
+object's synopsis path of the same class stands for. A key the object leaves in its residual is counted
+over the rows that hold it alone, so it answers as a measure only.
+
+Two kinds of rows come out of a table's states rather than make the object read its rows. The rows a
+delete marked are found by their positions, charged to the table row of their bucket and keys, and
+their counts and exact sums subtracted. A filter that leaves out one value of a declared identifier,
+`id != v || id == null`, or `id != v` alone on a column without nulls, is the whole minus the part the
+identifier's index finds, taken out the same way. When a removed row holds an extreme the question
+reads, or the top of a float sum, the object is read as rows.
+
+The objects a synopsis answers are read newest first and many at once, as many as the session lets
+reads be in flight, so a day of hourly objects costs one round trip, and the objects read as rows open
+the next one ahead as a scan of rows does. Every region read is one the table of contents declares, so
+the session's synopsis cache keeps it on the local disk ([the synopsis
+cache](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)). On 24 hours of generated requests at 30 ms a round trip, a count by
+service over the day takes 24 requests in two dependent steps cold and none warm, against 120
+requests in 120 steps and 3.9 s through the rows (`vortex-queries --micro questions`). The question's
+`ExplainAsync()` lists in `States` what each object reads: a table and its buckets, the edges, the
+rows left out, or its rows and why. Every answer gives the bits of its rows, at every degree, over
+objects of one slice, of many and of minutes, before and after compaction, under marks and
+exclusions (`SynopsisAnswerTests`).
+
+A page that shows a long window can show its newest part first. `VortexDataset.AskNewestFirstAsync`
+cuts the window at the starts of the periods it crosses, asks the caller's question over each part,
+several at once, and delivers each part's answer newest first, once it and every newer part are in.
+The engine still folds every object of one question before it delivers a group, so the parts are
+what makes the delivery progressive, and merging them is the caller's: counts and sums add, extremes
+compare, a mean is a sum over a count.
+
 ## 5. Rows in key order
 
 `OrderBy(r => r.Column)` and `OrderByDescending(r => r.Column)` make the scan deliver its rows in the

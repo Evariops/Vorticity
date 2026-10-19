@@ -413,7 +413,37 @@ outside CI against the twenty column shapes of `--tradeoffs`, it names the choic
 measured as best on every one. Taking the advice by default would change what a write produces and
 its determinism, so it is not done.
 
-## 9. Deliberately not done
+## 9. Sorted time slices, and shredded variants
+
+A dataset compacted by periods hands the writer rows it has already sorted. Its jobs cut each object
+into time slices, ranges of instants of a few thousand rows to a few hundred thousand, and sort the
+rows of a slice by the object's synopsis columns, the columns whose values repeat, then by the
+instant ([13-dataset.md](13-dataset.md#5-levels-and-compaction)).
+The order is one per object: its columns are those whose values repeat twice on average, and the
+object's first slice settles their order greedily, by the runs each adds over a sample of 16 384 of its
+rows. The slice table records it, beside each slice's instants.
+
+A slice is sorted in memory before the writer sees it. Each synopsis column becomes codes, the ranks
+of the slice's distinct values, and stable counting sorts over the codes, the last column first, give
+one permutation, through which every column is gathered once. A million rows sorted on three columns
+take about 57 ns a row (`vortex-queries --micro slicesort`). The writer then finds long runs in the
+synopsis columns, which it encodes as runs, and the job counts the synopsis tables from the codes
+while the slice is still in memory. An object written so is 4 % smaller than the same rows in time
+order, and 10 % smaller than a leveled object with its sorted run.
+
+A variant column is written whole by an append, and shredded by the job that rewrites it. The job's
+first pass counts each top-level key, its class and its bytes (`PathCensus`). From those counts a cost
+model chooses the keys the object shreds: a key earns a typed column when what its occurrences cost in
+the residual, at the measured price of each class, outweighs the column's overhead of about 200 bytes a
+chunk. The keys chosen are written in the reference's form, the `vortex.variant` encoding with a typed
+tree, integers of every width in one 64-bit column, each key encoded the same way in every chunk, and a
+chunk shreds only the keys its rows hold. The validity of a shredded field goes through the compressor
+as any column does, as runs where it has few of them, as a bitmap otherwise. A path map in each chunk's
+metadata (`vorticity.variant.paths.v1`) says which keys it holds and where. Counting and writing cost
+about 80 ns an attribute: 181 ns a row to count, and 310 ns a row more to write six to eight
+attributes shredded.
+
+## 10. Deliberately not done
 
 | approach | why not |
 |---|---|
