@@ -214,8 +214,9 @@ public sealed partial class DatasetPeriodsCompactionTests
             await CheckAsync(reader, appended, SliceWidth.Hour);
         }
 
+        int sortedObjects = await SortedAsTheirTablesAsync(reader);
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS INTERLEAVED seed {seed}: {appended.Count} rows, version {reader.Version}, {string.Join(", ", outcomes.OrderBy(o => o.Key).Select(o => $"{o.Key.Item1} {o.Key.Item2} {o.Value}"))}.\n"));
+            $"PERIODS INTERLEAVED seed {seed}: {appended.Count} rows, version {reader.Version}, {sortedObjects} objects in sorted slices, {string.Join(", ", outcomes.OrderBy(o => o.Key).Select(o => $"{o.Key.Item1} {o.Key.Item2} {o.Value}"))}.\n"));
         // Half the exits or so are abandoned: another handle emptied level 0 first.
         Assert.True(outcomes.Where(o => o.Key.Item2 == OperationOutcome.Applied).Sum(o => o.Value) > 5, "the schedule must compact");
         Assert.True(outcomes.Where(o => o.Key.Item2 == OperationOutcome.Abandoned).Sum(o => o.Value) > 0, "the schedule must commit a job the ground moved under");
@@ -424,8 +425,10 @@ public sealed partial class DatasetPeriodsCompactionTests
             }
         }
 
+        int sortedObjects = await SortedAsTheirTablesAsync(dataset);
+        Assert.True(sortedObjects > 0, "the schedule must leave objects in sorted slices");
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes.\n"));
+            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {sortedObjects} objects in sorted slices.\n"));
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.FreshMerge) > 0, "the schedule must merge fresh objects up");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.LevelZeroCeiling) > 0, "the schedule must empty level 0");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.Seal) > 0, "the schedule must seal a period");
@@ -437,6 +440,64 @@ public sealed partial class DatasetPeriodsCompactionTests
         // 9 to 10 measured.
         Assert.InRange((double)rewritten / ingested, 0, 5);
         Assert.InRange(widest, 1, compaction.LevelZeroCeiling + compaction.LevelZeroCeiling + (3 * (compaction.Fanout - 1)) + 1);
+    }
+
+    /// <summary>
+    /// Every object above level 0 that carries a slice table holds each slice's rows sorted as the table
+    /// says: by its synopsis column, the status here when it repeats enough, then by instant. Returns the
+    /// objects checked; an object a delete rewrote carries no table.
+    /// </summary>
+    private static async Task<int> SortedAsTheirTablesAsync(VortexDataset dataset)
+    {
+        int checkedObjects = 0;
+        for (int level = 1; level < dataset.Levels.Count; level++)
+        {
+            await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
+            {
+                await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
+                if (await SliceTable.ReadAsync(lease.File, Ct) is not { } table)
+                {
+                    continue;
+                }
+
+                // The order names the status, and the request id where ids repeat, as deletes make them.
+                Dictionary<int, Comparison<Request>> by = new()
+                {
+                    [lease.File.DType.IndexOfField(nameof(Request.Status))] = static (l, r) => l.Status.CompareTo(r.Status),
+                    [lease.File.DType.IndexOfField(nameof(Request.RequestId))] = static (l, r) => string.CompareOrdinal(l.RequestId, r.RequestId),
+                };
+                Assert.All(table.Order, field => Assert.True(by.ContainsKey(field), $"order {string.Join(',', table.Order)}"));
+                List<Request> rows = [];
+                await foreach (Request row in lease.File.Scan<Request>().ToRecordsAsync(Ct))
+                {
+                    rows.Add(row);
+                }
+
+                foreach (TimeSlice slice in table.Slices)
+                {
+                    List<Request> part = rows.GetRange((int)slice.FirstRow, (int)slice.Rows);
+                    for (int i = 1; i < part.Count; i++)
+                    {
+                        int order = 0;
+                        foreach (int field in table.Order)
+                        {
+                            order = by[field](part[i - 1], part[i]);
+                            if (order != 0)
+                            {
+                                break;
+                            }
+                        }
+
+                        order = order != 0 ? order : part[i - 1].At.CompareTo(part[i].At);
+                        Assert.True(order <= 0, $"row {slice.FirstRow + i} comes before the row above it in its slice's order");
+                    }
+                }
+
+                checkedObjects++;
+            }
+        }
+
+        return checkedObjects;
     }
 
     /// <summary>
