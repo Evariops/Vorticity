@@ -437,6 +437,17 @@ minute of the example, in memory or in a mapped file of the local scratch, reser
 governor (estimate). When compaction runs on the machines that ingest, that share of a core is what
 ingestion shares with it.
 
+As built, the count comes from the first pass a job of a dataset of periods already makes to cut its
+slices, and each object's choice from its own rows. Measured on a million rows of six to eight
+attributes (`vortex-queries --micro shredwrite`): counting the paths and choosing takes 181 ns a row,
+and writing the rows shredded takes 310 ns a row more than writing them whole. That is about 80 ns an
+attribute where the estimate said 10 to 20, or 25 ms of one lane per second of rows at 5 × 10⁴ rows
+a second for six attributes, 2.5 per cent of a core, and some 8 per cent for twenty. The count parses
+every value once. The shredded write routes each value and then encodes six typed columns where the
+whole write compressed one column of binaries, and the encoders' searches and zstd make most of the
+difference. The file comes out 28 per cent smaller. Appends write no slice and shred nothing
+(`ShreddedDatasetTests`).
+
 Rows not yet out of level 0 cost the other side. Every question that touches a path parses their
 variants: eight appends of three seconds, 1.2 × 10⁶ rows, 60 to 120 ms of one core (estimate). At
 hundreds of questions a second over the last minutes, that is six to twelve cores parsing the same
@@ -844,8 +855,8 @@ Every figure is an estimate.
 | the same answers shredded or not | every question of a matrix over paths, on the same rows written shredded and unshredded |
 | a shredded path is as fast as a declared column | a ratchet on the same question over a path and over a declared column holding the same values |
 | the column budget | footer bytes and layout nodes as ratchets, on a bench of 10⁴ paths (`ShreddingChoiceTests`: the bytes of the file and the tables of its largest tree) |
-| ingestion does not pay for shredding | the append throughput of rows with variant columns is the same with shredding on and off, since appends never shred (a ratchet on the write bench) |
-| shredding costs little where it happens | the time of a level 0 exit with shredding against the same exit without it, recorded on the write bench and held as a ratchet |
+| ingestion does not pay for shredding | the append throughput of rows with variant columns is the same with shredding on and off, since appends never shred (`ShreddedDatasetTests`: appended objects carry no path map, and the append path takes no shredding) |
+| shredding costs little where it happens | the time of a level 0 exit with shredding against the same exit without it, recorded on the write bench and held as a ratchet (`--micro shredwrite`: 181 ns a row to count and choose, 310 more to write shredded, for six to eight attributes) |
 | a path read fetches only its bytes | the bytes a question on one shredded path reads, against the bytes of that path's buffers plus its path map entry, on a counting store (`VariantKeyReadTests`: no byte of another key read beyond the padding two ranges share) |
 | a path read rebuilds no variant | an allocation ratchet on a question over one shredded path, which equals the same question over a declared column |
 | `As…` converts nothing and reads one class | on a path holding integers and text in the same chunks, the bytes `AsInt64()` reads: the typed column and none of the field's `value`, on a counting store |

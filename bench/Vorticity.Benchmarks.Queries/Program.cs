@@ -89,6 +89,12 @@ if (Text(args, "--micro") == "shredcost")
     return await ShredCostMicro.Run();
 }
 
+// --micro shredwrite: what shredding costs a job in time, counted, chosen and written (ShredWriteMicro.cs).
+if (Text(args, "--micro") == "shredwrite")
+{
+    return await ShredWriteMicro.Run(Option(args, "--rows", 1_000_000), rounds);
+}
+
 // --micro slicebytes: what sorted slices weigh against the same rows in time order (SliceBytesMicro.cs).
 if (Text(args, "--micro") == "slicebytes")
 {

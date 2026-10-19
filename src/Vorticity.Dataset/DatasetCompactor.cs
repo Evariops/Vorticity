@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -13,6 +14,7 @@ using Vorticity.Indexes;
 using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
+using Vorticity.Types.Variants;
 using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
@@ -126,9 +128,10 @@ internal static class DatasetCompactor
         DatasetSchema schema = dataset.Snapshot.Schema;
 
         // A job of a dataset of periods writes its objects in sorted slices: a first pass over its rows
-        // cuts each object's slices and picks the order inside them, the second sorts and writes them.
-        // The instant must be a top-level column, which slices are declared on.
-        IReadOnlyDictionary<(int Level, long Period), SliceTable>? plans = merge && job.Cut is not null && !key!.Paths[0].Contains('.')
+        // cuts each object's slices, picks the order inside them and the paths its variant columns
+        // shred, the second sorts and writes them. The instant must be a top-level column, which
+        // slices are declared on. Appends write neither slices nor shredded variants.
+        IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? plans = merge && job.Cut is not null && !key!.Paths[0].Contains('.')
             ? await PlanSlicesAsync(dataset, schema, job, key, cancellationToken).ConfigureAwait(false)
             : null;
         ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge && plans is null, rowBound: job.Rows, job.ToLevel)
@@ -507,22 +510,24 @@ internal static class DatasetCompactor
 
     /// <summary>
     /// The first pass of a job of a dataset of periods: its rows merged once, each object it writes,
-    /// by level and period, counting its rows per second and the distinct values of the columns that may
-    /// be synopsis columns. Each object's slices are then cut from its seconds and its order picked from
-    /// its counts, before a row is written.
+    /// by level and period, counting its rows per second, the distinct values of the columns that may
+    /// be synopsis columns, and the paths of its variant columns. Each object's slices are then cut from
+    /// its seconds, its order picked from its counts, and what each variant column shreds chosen from
+    /// its paths (<see cref="ShreddingChoice"/>), before a row is written.
     /// </summary>
     /// <remarks>
     /// The pass reads the inputs whole a second time: the instant and the candidate columns alone would
     /// do, read through a projection, which a later change takes.
     /// </remarks>
-    private static async ValueTask<IReadOnlyDictionary<(int Level, long Period), SliceTable>> PlanSlicesAsync(
+    private static async ValueTask<IReadOnlyDictionary<(int Level, long Period), ObjectPlan>> PlanSlicesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, ClusteringKey key, CancellationToken cancellationToken)
     {
         PeriodCut cut = job.Cut!;
         string instant = key.Paths[0];
         long target = dataset.Options.Periods?.SliceTargetRows ?? TimeSlicer.DefaultTargetRows;
         int[] candidates = SynopsisOrder.Candidates(schema.DType, key, dataset.Options.Identifiers);
-        Dictionary<(int, long), (SecondCounts Seconds, CardinalitySketch[] Sketches)> tallies = [];
+        int[] variants = VariantColumns(schema.DType);
+        Dictionary<(int, long), (SecondCounts Seconds, CardinalitySketch[] Sketches, PathCensus[] Paths)> tallies = [];
         List<Cut> cuts = [];
         KeyOrderedMerge merge = InputsMerged(dataset, schema, job, key, cancellationToken);
         await using (merge.ConfigureAwait(false))
@@ -536,20 +541,25 @@ internal static class DatasetCompactor
                 {
                     if (!tallies.TryGetValue((level, period), out var tally))
                     {
-                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())]);
+                        tally = (new SecondCounts(cut.Unit), [.. candidates.Select(static _ => new CardinalitySketch())], [.. variants.Select(static _ => new PathCensus())]);
                         tallies[(level, period)] = tally;
                     }
 
                     RecordBatch part = at == 0 && end == run.RowCount ? run : run.Window(at, end - at);
                     tally.Seconds.Add(Instants(part, instant));
                     SynopsisOrder.Count(part, candidates, tally.Sketches);
+                    for (int v = 0; v < variants.Length; v++)
+                    {
+                        tally.Paths[v].Add(part, variants[v]);
+                    }
+
                     at = end;
                 }
             }
         }
 
-        Dictionary<(int Level, long Period), SliceTable> plans = [];
-        foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches)) in tallies)
+        Dictionary<(int Level, long Period), ObjectPlan> plans = [];
+        foreach (((int level, long period), (SecondCounts seconds, CardinalitySketch[] sketches, PathCensus[] paths)) in tallies)
         {
             (int, long)[] counted = new (int, long)[candidates.Length];
             for (int i = 0; i < candidates.Length; i++)
@@ -557,12 +567,49 @@ internal static class DatasetCompactor
                 counted[i] = (candidates[i], sketches[i].Estimate());
             }
 
-            plans[(level, period)] = new SliceTable(
-                cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows));
+            // Each variant column shreds what its rows in the object pay for, in chunks of its own.
+            ImmutableDictionary<string, VariantShredding> shredded = ImmutableDictionary<string, VariantShredding>.Empty;
+            ImmutableDictionary<string, int> chunks = ImmutableDictionary<string, int>.Empty;
+            for (int v = 0; v < variants.Length; v++)
+            {
+                if (ShreddingChoice.Choose(paths[v]) is { } chosen)
+                {
+                    string name = schema.DType.GetFieldName(variants[v]);
+                    shredded = shredded.SetItem(name, chosen);
+                    chunks = chunks.SetItem(name, ShreddingChoice.ChunkTargetBytes(paths[v]));
+                }
+            }
+
+            plans[(level, period)] = new ObjectPlan(
+                new SliceTable(cut.Unit, TimeSlicer.Cut(seconds.Seconds, cut.Unit, target), SynopsisOrder.Choose(counted, seconds.Rows)),
+                shredded,
+                chunks);
         }
 
         return plans;
     }
+
+    /// <summary>The top-level variant columns of <paramref name="schema"/>.</summary>
+    private static int[] VariantColumns(Vorticity.Types.DType schema)
+    {
+        List<int> variants = [];
+        for (int field = 0; field < schema.FieldCount; field++)
+        {
+            if (schema.GetField(field).Kind == Vorticity.Types.DTypeKind.Variant)
+            {
+                variants.Add(field);
+            }
+        }
+
+        return [.. variants];
+    }
+
+    /// <summary>
+    /// What a job writes an object of a level and period with: its slices and the order inside them,
+    /// and what each variant column shreds, with its chunk target.
+    /// </summary>
+    internal sealed record ObjectPlan(
+        SliceTable Slices, ImmutableDictionary<string, VariantShredding> Shredded, ImmutableDictionary<string, int> VariantChunks);
 
     /// <summary>
     /// The change of period length the load of the period a seal wrote calls for, or null: its bytes
@@ -714,10 +761,10 @@ internal static class DatasetCompactor
         internal IReadOnlyList<int> Levels => _levels;
 
         /// <summary>
-        /// Each object's slice table, by level and period, when the objects are written in sorted slices;
-        /// null for rows written as they come.
+        /// Each object's plan, by level and period, when the objects are written in sorted slices: its
+        /// slices and what its variant columns shred; null for rows written as they come.
         /// </summary>
-        internal IReadOnlyDictionary<(int Level, long Period), SliceTable>? Plans { get; init; }
+        internal IReadOnlyDictionary<(int Level, long Period), ObjectPlan>? Plans { get; init; }
 
         /// <summary>The instant column, top-level, the slices are declared on; null without plans.</summary>
         internal string? InstantPath { get; init; }
@@ -777,18 +824,25 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder, _rowBound, sliced: Plans is not null);
-            _rows += batch.RowCount;
-            if (Plans is { } plans)
+            if (_draft is null)
             {
-                // Rows come in time order; each slice they complete is sorted and written whole.
-                if (_sorter is null)
+                // An object of a dataset of periods is written as its plan says: its slices, and what its
+                // variant columns shred.
+                ObjectPlan? plan = Plans?[(_level, _period)];
+                _draft = _dataset.StartObjectUnder(
+                    _schema, _inKeyOrder, _rowBound, sliced: plan is not null, shredded: plan?.Shredded, variantChunks: plan?.VariantChunks);
+                if (plan is not null)
                 {
-                    _table = plans[(_level, _period)];
+                    _table = plan.Slices;
                     _sorter = new SortedSlices(_table, _schema.DType.IndexOfField(InstantPath!), _schema.DType);
                 }
+            }
 
-                await _sorter.AppendAsync(batch, WriteSortedAsync, cancellationToken).ConfigureAwait(false);
+            _rows += batch.RowCount;
+            if (_sorter is { } sorter)
+            {
+                // Rows come in time order; each slice they complete is sorted and written whole.
+                await sorter.AppendAsync(batch, WriteSortedAsync, cancellationToken).ConfigureAwait(false);
                 return;
             }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -604,13 +605,25 @@ public sealed class VortexDataset : IAsyncDisposable
     /// rows come in key order says so with <paramref name="inKeyOrder"/>, and a key whose column then
     /// orders the object by itself takes no run.
     /// </summary>
-    internal ObjectDraft StartObjectUnder(DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false)
+    internal ObjectDraft StartObjectUnder(
+        DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool sliced = false,
+        IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null)
     {
         RequireConditionalCreation(_store);
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes);
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with { RowBound = rowBound, CarriesSlices = sliced };
+
+        // The variant columns a job shreds, each in long chunks of its own; an append shreds nothing.
+        if (shredded is { Count: > 0 })
+        {
+            write = write with
+            {
+                ShreddedVariants = shredded,
+                ColumnChunkTargetBytes = write.ColumnChunkTargetBytes.SetItems(variantChunks ?? ImmutableDictionary<string, int>.Empty),
+            };
+        }
         if (_store is SealedObjectStore { Seals: true })
         {
             // The runs an index of the object moves to disk hold its values: sealed as the object is.

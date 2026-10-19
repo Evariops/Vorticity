@@ -31,6 +31,31 @@ internal sealed class PathCensus
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
 
+    /// <summary>Counts every row of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct.</summary>
+    /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+    internal void Add(RecordBatch batch, int field)
+    {
+        Arrays.CanonicalArena arena = batch.Arena;
+        int column = arena.GetNode(batch.RootIndex).GetFieldIndex(field);
+        Arrays.CanonicalNode variant = arena.GetNode(column);
+        int metadata = EncodedForms.Canonical(arena, variant.GetFieldIndex(0));
+        int value = EncodedForms.Canonical(arena, variant.GetFieldIndex(1));
+        Arrays.CanonicalNode metadataNode = arena.GetNode(metadata);
+        Arrays.CanonicalNode valueNode = arena.GetNode(value);
+        for (int row = 0; row < batch.RowCount; row++)
+        {
+            if (!Arrays.ArenaWords.IsValid(arena, column, row))
+            {
+                AddNull();
+                continue;
+            }
+
+            Add(
+                Compute.LiteralReader.ViewAt(metadataNode, row),
+                Arrays.ArenaWords.IsValid(arena, value, row) ? Compute.LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue);
+        }
+    }
+
     /// <summary>Counts a row of <paramref name="value"/>, its keys named by <paramref name="metadata"/>.</summary>
     /// <exception cref="VortexFormatException">The value or the metadata does not decode.</exception>
     internal void Add(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)

@@ -251,7 +251,15 @@ slice only, and a dataset of periods takes no row's rank for its row above level
 instant alone it carries no sorted run on the key: its slice table is the source through which the key
 cursor and every read in key order find its rows, a job's merge of its inputs included, which reads
 each slice once ([sources of order](12-index-reads.md#2-sources-of-order)). A slice is held whole while
-it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet. A period is a day at creation, and each seal weighs the load of the period it wrote and
+it sorts: a slice past the query memory's grant, sorted in runs and merged, is not done yet.
+
+The first pass also counts the paths of each variant column, value by value, and the object shreds
+those its own rows pay for, each column in long chunks of its own, with a path map that lets a
+question read one key alone ([what an object shreds](21-variant-columns.md#53-what-an-object-shreds)).
+Counting and choosing take 181 ns a row of six to eight attributes, and the shredded write 310 ns a
+row more than the whole one (`vortex-queries --micro shredwrite`). An append shreds nothing.
+
+A period is a day at creation, and each seal weighs the load of the period it wrote and
 records the length that load calls for, from past the newest instant ([the length of a
 period](13-dataset.md#84-sources-and-offsets)). The header keeps the lengths, so that every writer cuts
 the same. `DatasetPeriodsCompactionTests` runs 300 rounds of
