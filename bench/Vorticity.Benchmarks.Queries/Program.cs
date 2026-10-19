@@ -131,6 +131,12 @@ if (Text(args, "--micro") == "synopsisanswer")
     return await SynopsisAnswerMicro.Run(Option(args, "--rows", 2_000_000), rounds);
 }
 
+// --micro generator: a minute of the time-window design's requests, and the runs of each synopsis column against its figures (RequestGenerator.cs).
+if (Text(args, "--micro") == "generator")
+{
+    return RequestGenerator.Run((int)Option(args, "--seed", 17));
+}
+
 // --micro needles: what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs).
 if (Text(args, "--micro") == "needles")
 {
