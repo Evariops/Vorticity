@@ -104,9 +104,13 @@ internal static class QuestionBench
     /// Sealed under <paramref name="keyring"/> when one is given.
     /// </summary>
     internal static async Task<(long Rows, string Needle)> FillRequestsAsync(
-        IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring = null)
+        IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring = null, int degree = 1)
     {
-        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options => options.Keyring = keyring);
+        await using VortexSession? session = keyring is null && degree == 1 ? null : VortexSession.Create(options =>
+        {
+            options.Keyring = keyring;
+            options.MaxDegreeOfParallelism = degree;
+        });
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, GeneratedRequest.Schema, new DatasetOptions
         {
             Session = session ?? VortexSession.Default,
@@ -138,9 +142,13 @@ internal static class QuestionBench
     }
 
     /// <summary>The log records of <paramref name="hours"/> hours at <paramref name="rate"/> a second, as the requests.</summary>
-    private static async Task<long> FillLogsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring)
+    internal static async Task<long> FillLogsAsync(IObjectStore store, int hours, double rate, VortexWriteOptions write, VortexKeyring? keyring, int degree = 1)
     {
-        await using VortexSession? session = keyring is null ? null : VortexSession.Create(options => options.Keyring = keyring);
+        await using VortexSession? session = keyring is null && degree == 1 ? null : VortexSession.Create(options =>
+        {
+            options.Keyring = keyring;
+            options.MaxDegreeOfParallelism = degree;
+        });
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, LogRow.Schema, new DatasetOptions
         {
             Session = session ?? VortexSession.Default,

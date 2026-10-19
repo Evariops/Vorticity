@@ -185,6 +185,39 @@ if (Text(args, "--micro") == "needles")
     return await NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds);
 }
 
+// --micro paths: every query path of a dataset of periods at scale, over a store that waits a round trip per request (PathsBench.cs).
+if (Text(args, "--micro") == "paths")
+{
+    return await PathsBench.Run(new PathsBench.Settings
+    {
+        Store = Text(args, "--store") ?? new PathsBench.Settings().Store,
+        Design = args.Contains("--design"),
+        Hours = Option(args, "--hours", args.Contains("--design") ? 240 : 24),
+        Rate = Option(args, "--rate", args.Contains("--design") ? 50_000 : 1_000),
+        ParallelHours = Option(args, "--parallel-hours", 4),
+        PartMinutes = Option(args, "--part-minutes", 10),
+        LogHours = Option(args, "--log-hours", 12),
+        LogRate = Option(args, "--log-rate", 1_000),
+        Latency = args.Contains("--latency") ? int.Parse(Text(args, "--latency")!, CultureInfo.InvariantCulture) : 5,
+        BytesPerSecond = Option(args, "--mbps", 0) * 1e6,
+        LinkBitsPerSecond = args.Contains("--gbps") ? double.Parse(Text(args, "--gbps")!, CultureInfo.InvariantCulture) * 1e9 : 10e9,
+        Rounds = Option(args, "--rounds", 5),
+        RowsRounds = Option(args, "--rows-rounds", 1),
+        Degrees = args.Contains("--degrees") ? degrees : [1, Environment.ProcessorCount],
+        Only = Text(args, "--only"),
+        Paths = Text(args, "--paths") ?? "all",
+        Temperatures = Text(args, "--temperatures") ?? "all",
+        Budget = Option(args, "--budget", 100),
+        WriteDegree = Option(args, "--write-degree", Math.Max(1, Environment.ProcessorCount / 2)),
+        Rebuild = args.Contains("--rebuild"),
+        BuildOnly = args.Contains("--build-only"),
+        Verify = args.Contains("--verify"),
+        Tsv = Text(args, "--tsv"),
+        Label = Text(args, "--label"),
+        TraceReads = Text(args, "--trace-reads"),
+    });
+}
+
 // Each file is written the first time a query asks for it, and kept.
 Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Func<ValueTask<string>>>(StringComparer.Ordinal)
 {

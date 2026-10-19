@@ -49,8 +49,10 @@ internal sealed class RequestGenerator
     private long _next;
 
     /// <param name="seed">The seed: the same seed draws the same rows.</param>
-    internal RequestGenerator(int seed)
+    /// <param name="firstId">The number of the first request's id, so that generators of several hours draw ids apart.</param>
+    internal RequestGenerator(int seed, long firstId = 0)
     {
+        _next = firstId;
         _random = new Random(seed);
         _serviceWeights = Cumulative(Zipf(Services, 0.8));
         _endpointWeights = Cumulative(Zipf(EndpointsPerService, 2.0));
