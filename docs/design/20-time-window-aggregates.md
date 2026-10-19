@@ -753,6 +753,15 @@ one value over a long window in one ranged read: one host per minute over a day 
 entries, not the host's runs. A deep column may keep both orders, each admitted by its own benefit per
 byte.
 
+As built so far, the writer weighs bytes alone ([the synopsis tables](10-indexes.md#49-vorticitysynopsistablev1-the-synopsis-tables)).
+A table is kept when it holds fewer bytes than the smallest kept table that answers its questions by
+merging its rows, or than the columns it sums when none does, the finest tables weighed first. That
+rule already drops what costs more than it saves: the run statistics of a deep column whose runs are
+a few rows long, a table that holds the same rows as another, and every table of an object of a few
+hundred rows, whose fixed bytes would otherwise double the object's. The costs of walking and grouping,
+the budget, the verdicts recorded, the value counts sorted by value then bucket and the postings come
+with the choice under the budget.
+
 ### 7.4 How the synopsis is built and merged
 
 1. The sort gives the runs ([how a writer sorts a slice](#64-how-a-writer-sorts-a-slice)).
@@ -770,6 +779,23 @@ byte.
 The cost at write time, at 5 × 10⁴ rows a second (estimate): a radix pass per synopsis column and a
 gather per column, so a few nanoseconds per row and per column, a few milliseconds of one lane per
 second of rows.
+
+As built, a job counts each slice as it writes it, from the codes the slice's sort gave each row. Down
+to the first variant's shapes in the object's order, a combination's rows are one run and a group starts
+where a code changes. Past them, the rows of a combination may lie apart, and pairs of a group and a
+code number the groups. The measures are folded once per row, into the deepest groups, and each
+shallower depth merges their states. Depth 0, every row of a slice, is kept when there are measures. At
+the object's end, the deepest run statistics of every slice are coded across the object and sorted by
+hour and keys with a counting sort per column, which gives every depth's coarse table per hour, each
+merged from the one below it. The value counts of each key after the first, the first's being the coarse
+table of depth 1, and the coarse tables per object, built only when the object spans more than an hour,
+merge the deepest table per hour. Run statistics merge into coarse tables before a seal or a fresh merge
+merges two objects' tables, which comes with the synopsis's merges.
+
+On a million rows in twenty slices, sorted by three synopsis columns of 5, 5 and 600 values, with three
+measures, a slice's sort takes 58 ns a row, counting it 38 ns, and building the object's ten tables
+31 ns (`vortex-queries --micro synopsistables`). The 600 values make runs of three and a half rows at
+the third depth, the worst case of this mix: the tables' 305 000 rows are a third of the data's.
 
 ### 7.5 States
 

@@ -189,6 +189,8 @@ public sealed partial class ShreddedDatasetTests
                 Assert.Equal(1, routes.Zip(routes.Skip(1)).Count(pair => pair.First != pair.Second));
             }
 
+            // The host's rows lie apart, on either side of the shapes, and its run statistics count them alike.
+            Assert.True(await SynopsisTableTests.CoarseTablesAreTheMergeOfTheirRunsAsync(lease.File, table) > 0);
             sealedObjects++;
         }
 

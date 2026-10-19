@@ -152,6 +152,7 @@ public sealed partial class DatasetPeriodsCompactionTests
         List<DateTimeOffset> appended = [];
         List<long> statuses = [];
         Dictionary<(CompactionTrigger, OperationOutcome), int> outcomes = [];
+        HashSet<UInt128> seen = [];
         DateTimeOffset newest = Noon;
         for (int step = 0; step < 240; step++)
         {
@@ -212,11 +213,14 @@ public sealed partial class DatasetPeriodsCompactionTests
 
             await reader.RefreshAsync(Ct);
             await CheckAsync(reader, appended, SliceWidth.Hour);
+
+            // Every object a version adds sorted as its slice table says, its synopsis tables the merge of its runs.
+            await SortedAsTheirTablesAsync(reader, seen);
         }
 
-        int sortedObjects = await SortedAsTheirTablesAsync(reader);
+        (int sortedObjects, int withTables) = await SortedAsTheirTablesAsync(reader);
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS INTERLEAVED seed {seed}: {appended.Count} rows, version {reader.Version}, {sortedObjects} objects in sorted slices, {string.Join(", ", outcomes.OrderBy(o => o.Key).Select(o => $"{o.Key.Item1} {o.Key.Item2} {o.Value}"))}.\n"));
+            $"PERIODS INTERLEAVED seed {seed}: {appended.Count} rows, version {reader.Version}, {sortedObjects} objects in sorted slices, {withTables} with synopsis tables, {string.Join(", ", outcomes.OrderBy(o => o.Key).Select(o => $"{o.Key.Item1} {o.Key.Item2} {o.Value}"))}.\n"));
         // Half the exits or so are abandoned: another handle emptied level 0 first.
         Assert.True(outcomes.Where(o => o.Key.Item2 == OperationOutcome.Applied).Sum(o => o.Value) > 5, "the schedule must compact");
         Assert.True(outcomes.Where(o => o.Key.Item2 == OperationOutcome.Abandoned).Sum(o => o.Value) > 0, "the schedule must commit a job the ground moved under");
@@ -425,10 +429,11 @@ public sealed partial class DatasetPeriodsCompactionTests
             }
         }
 
-        int sortedObjects = await SortedAsTheirTablesAsync(dataset);
+        (int sortedObjects, int withTables) = await SortedAsTheirTablesAsync(dataset);
         Assert.True(sortedObjects > 0, "the schedule must leave objects in sorted slices");
+        Assert.True(withTables > 0, "the schedule must leave objects whose synopsis tables are worth their bytes");
         Console.Out.Write(FormattableString.Invariant(
-            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {sortedObjects} objects in sorted slices.\n"));
+            $"PERIODS FUZZ seed {seed}: {appended.Count} rows, levels {string.Join('/', await CountsAsync(dataset))}, triggers {string.Join(", ", triggers.Select(t => $"{t.Key} {t.Value}"))}, rewrites per row {(double)rewritten / ingested:F2}, at most {widest} objects over 15 minutes, {sortedObjects} objects in sorted slices, {withTables} with synopsis tables.\n"));
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.FreshMerge) > 0, "the schedule must merge fresh objects up");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.LevelZeroCeiling) > 0, "the schedule must empty level 0");
         Assert.True(triggers.GetValueOrDefault(CompactionTrigger.Seal) > 0, "the schedule must seal a period");
@@ -444,17 +449,26 @@ public sealed partial class DatasetPeriodsCompactionTests
 
     /// <summary>
     /// Every object above level 0 that carries a slice table holds each slice's rows sorted as the table
-    /// says: by its synopsis column, the status here when it repeats enough, then by instant. Returns the
-    /// objects checked; an object a delete rewrote carries no table.
+    /// says: by its synopsis column, the status here when it repeats enough, then by instant, and its
+    /// synopsis tables count its rows. Returns the objects checked, an object a delete rewrote carrying no
+    /// table, and those of them with synopsis tables. Objects <paramref name="seen"/> holds are not checked
+    /// again, and those checked are added to it.
     /// </summary>
-    private static async Task<int> SortedAsTheirTablesAsync(VortexDataset dataset)
+    private static async Task<(int Objects, int WithTables)> SortedAsTheirTablesAsync(VortexDataset dataset, HashSet<UInt128>? seen = null)
     {
         int checkedObjects = 0;
+        int withTables = 0;
         for (int level = 1; level < dataset.Levels.Count; level++)
         {
             await foreach (TreeEntry entry in dataset.Levels[level].EnumerateAsync(dataset.Pages, Ct))
             {
-                await using ObjectLease lease = await dataset.RentAsync(ObjectEntry.FromBytes(entry.Value.Span), Ct);
+                ObjectEntry stored = ObjectEntry.FromBytes(entry.Value.Span);
+                if (seen is not null && !seen.Add(stored.Uid))
+                {
+                    continue;
+                }
+
+                await using ObjectLease lease = await dataset.RentAsync(stored, Ct);
                 if (await SliceTable.ReadAsync(lease.File, Ct) is not { } table)
                 {
                     continue;
@@ -493,11 +507,13 @@ public sealed partial class DatasetPeriodsCompactionTests
                     }
                 }
 
+                // Its runs count its rows, and its coarse tables are the merge of its slices' runs.
+                withTables += await SynopsisTableTests.CoarseTablesAreTheMergeOfTheirRunsAsync(lease.File, table) > 0 ? 1 : 0;
                 checkedObjects++;
             }
         }
 
-        return checkedObjects;
+        return (checkedObjects, withTables);
     }
 
     /// <summary>
@@ -594,7 +610,9 @@ public sealed partial class DatasetPeriodsCompactionTests
     private static async Task AppendAsync(
         VortexDataset dataset, List<DateTimeOffset> instants, List<DateTimeOffset> appended, List<long>? statuses = null)
     {
-        Request[] requests = [.. instants.Select((at, i) => new Request(at, $"r-{appended.Count + i}", 200 + i))];
+        // A size drawn from the instant, which seldom repeats where ids do once deletes shrink the
+        // model: a measure the synopsis tables sum, never a synopsis column.
+        Request[] requests = [.. instants.Select((at, i) => new Request(at, $"r-{appended.Count + i}", 200 + i, at.ToUnixTimeSeconds() * 7_919L % 1_000_003))];
         await using ObjectDraft draft = dataset.StartObject();
         await draft.Writer.WriteAsync<Request>(requests, Ct);
         await dataset.AppendAsync(draft, Ct);
@@ -603,5 +621,5 @@ public sealed partial class DatasetPeriodsCompactionTests
     }
 
     [VortexRecord]
-    public partial record struct Request(DateTimeOffset At, string RequestId, long Status);
+    public partial record struct Request(DateTimeOffset At, string RequestId, long Status, long Bytes);
 }

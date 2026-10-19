@@ -662,7 +662,7 @@ internal sealed class IndexWriter : IDisposable
             // The slice kinds and the variant paths describe the file as its writer cut it, which an
             // append changes, and the path directory counts rows the append does not parse.
             if (entry.Kind is IndexKinds.DictProbe or IndexKinds.Slices or IndexKinds.SliceChunks or IndexKinds.VariantPaths
-                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns
+                    or IndexKinds.VariantDirectory or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable
                 || Kept(entry, boundary) is not { } kept)
             {
                 continue;
@@ -931,6 +931,9 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
+
+    /// <summary>The bytes of the chunks of column <paramref name="field"/> written so far.</summary>
+    internal long ColumnBytes(int field) => _columnBytes[field];
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
@@ -1649,6 +1652,18 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>Names each table of the synopsis part: an entry on the root, its one run's payload the table's rows.</summary>
+    internal void AddSynopsisTables(IReadOnlyList<(SynopsisTableInfo Table, IndexSegment Region, byte[] DType)> tables, long rows, int blockRows)
+    {
+        int length = Math.Max(blockRows, 1);
+        foreach ((SynopsisTableInfo table, IndexSegment region, byte[] dtype) in tables)
+        {
+            _entries.Add(new IndexEntry(
+                IndexKinds.SynopsisTable, [], (ulong)length, table.OptionBytes(),
+                [new IndexRun(0, Blocks(rows, length), [region], [dtype], (ulong)table.Rows, [])]));
+        }
+    }
+
     /// <summary>The bytes the index budget of <paramref name="dataBytes"/> leaves the variants' indexes still to write.</summary>
     private long VariantBudget(long dataBytes) => Math.Max(0, (Math.Max(dataBytes, BudgetFloor) * _budgetPerMille / 1000) - _variantBytes);
 
@@ -1837,7 +1852,7 @@ internal sealed class IndexWriter : IDisposable
         // A file's time slices and its variant paths ride in the directory whatever the policy asks.
         if (!Enabled && _preserved is not { Count: > 0 }
             && !_entries.Exists(static entry => entry.Kind is IndexKinds.Slices or IndexKinds.VariantPaths or IndexKinds.VariantDirectory
-                or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns))
+                or IndexKinds.VariantBlocks or IndexKinds.SynopsisColumns or IndexKinds.SynopsisTable))
         {
             return null;
         }

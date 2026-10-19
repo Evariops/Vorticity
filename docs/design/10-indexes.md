@@ -132,7 +132,7 @@ clamped to `max_blocks` (4 096 blocks, 128 KiB). A block with fewer than `min_di
 values gets no filter, since the zone map or the dictionary answers equality there. A tree node is
 sized from the exact union of its blocks' values, never clamped into a saturated filter. The
 file-level filter is the root of the tree when the policy asks for three resolutions (see [the
-file-level filter](#49-the-file-level-filter)).
+file-level filter](#410-the-file-level-filter)).
 
 The filters act as a pruner after the zone maps in the scan's block mask (see [reading what the
 writer produced](11-write-strategy.md#6-reading-what-the-writer-produced)), with these rules:
@@ -307,7 +307,24 @@ column gets an entry: its run's payload regions are its chunks' segments, in row
 XXH3-64, and its options the part's start and end, so that a reader of the part alone needs no footer.
 An append drops the entries, since its chunks go after the part.
 
-### 4.9 The file-level filter
+### 4.9 `vorticity.synopsis.table.v1`: the synopsis tables
+
+The tables of an object's synopsis ([20-time-window-aggregates.md](20-time-window-aggregates.md#73-what-the-synopsis-keeps))
+follow the synopsis columns in the synopsis part, one array payload each, in the file's encodings and
+checksummed with XXH3-64. A table's rows are a struct: the start of its bucket, the values of its keys,
+a count of rows, then for each measure column the count of its values, its exact sum in the words
+of its persisted state (two for an integer's 128 bits, five for a float's indexed sum), and its least and
+greatest widened to 64 bits. The entry sits on the root, takes no column, and holds in its options what
+the table is (run statistics per slice, a coarse table per hour or per object, or one column's value
+counts per hour), its key fields, its measure fields and its row count. Its run's payload names the
+region, and its payload dtype the struct's.
+
+The writer keeps a table only when it holds fewer bytes than what would answer its questions without it:
+the smallest table it keeps that answers them by merging its rows, a finer bucket with the same keys
+and more, or else the columns the table sums. Two tables that hold the same rows never both stay, and an
+object of a few hundred rows keeps none. An append drops the entries, as it does the part's.
+
+### 4.10 The file-level filter
 
 The root of each run's tree filters the whole run. A scan's plan reads the roots along with the file
 statistics and the path directories, and `ScanPlan.MayMatch` is false when any of them proves the scan empty. `VortexFile.MayMatch`

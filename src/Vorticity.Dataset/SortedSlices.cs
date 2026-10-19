@@ -63,6 +63,9 @@ internal sealed class SortedSlices : IDisposable
         _shapes = shapes is { Count: > 0 } ? shapes : null;
     }
 
+    /// <summary>The order the slices are sorted in: the table's until the first slice settles it.</summary>
+    internal IReadOnlyList<int> Order => _order ?? (IReadOnlyList<int>)_table.Order;
+
     /// <summary>The slices, sorted in the order the first slice settled: the table's, the shapes placed in it.</summary>
     internal SliceTable Table => _order is { } order && !order.SequenceEqual(_table.Order) ? new SliceTable(_table.Unit, _table.Slices, order) : _table;
 
@@ -119,13 +122,12 @@ internal sealed class SortedSlices : IDisposable
     /// </summary>
     private int Sort(CanonicalArena arena, int node, int rows)
     {
-        int[] permutation;
+        List<(int[] Codes, int Distinct)> columns;
+        _sortedCodes.Clear();
         if (_order is null && (_shapes is not null || _table.Order.Count > 1))
         {
             // The first slice settles the object's order, and sorts by the codes it measured it with.
-            (List<int> order, List<(int[] Codes, int Distinct)> columns) = Place(arena, node, rows);
-            _order = order;
-            permutation = SliceSort.Permutation(columns, rows);
+            (_order, columns) = Place(arena, node, rows);
         }
         else
         {
@@ -135,11 +137,48 @@ internal sealed class SortedSlices : IDisposable
                 return node;
             }
 
-            permutation = SliceSort.Permutation(arena, node, _order, rows, _shapes);
+            columns = new List<(int[], int)>(_order.Count);
+            foreach (int entry in _order)
+            {
+                columns.Add(SliceSort.CodesOf(arena, node, entry, rows, _shapes));
+            }
         }
 
-        return IsIdentity(permutation) ? node : CanonicalFilter.Apply(arena, node, permutation);
+        int[] permutation = SliceSort.Permutation(columns, rows);
+        bool identity = IsIdentity(permutation);
+
+        // Each entry's codes, in the order the rows are sorted in: what the slice's synopsis groups by.
+        if (_gathered.Length < rows)
+        {
+            _gathered = new int[rows];
+        }
+
+        foreach ((int[] codes, int _) in columns)
+        {
+            if (!identity)
+            {
+                for (int i = 0; i < rows; i++)
+                {
+                    _gathered[i] = codes[permutation[i]];
+                }
+
+                _gathered.AsSpan(0, rows).CopyTo(codes);
+            }
+
+            _sortedCodes.Add(codes);
+        }
+
+        return identity ? node : CanonicalFilter.Apply(arena, node, permutation);
     }
+
+    /// <summary>
+    /// The codes of each entry of <see cref="Order"/> over the slice being written, in the order its rows are
+    /// sorted in, values in their order and nulls last; valid while the slice is written.
+    /// </summary>
+    internal IReadOnlyList<int[]> SortedCodes => _sortedCodes;
+
+    private readonly List<int[]> _sortedCodes = [];
+    private int[] _gathered = [];
 
     /// <summary>
     /// The rows of a slice the order is measured on, at most: on mixes of columns independent, correlated,

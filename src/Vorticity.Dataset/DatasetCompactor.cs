@@ -847,8 +847,12 @@ internal static class DatasetCompactor
                 if (plan is not null)
                 {
                     _table = plan.Slices;
-                    _sorter = new SortedSlices(_table, _schema.DType.IndexOfField(InstantPath!), _schema.DType, Shapes(plan.Shredded));
-                }
+                    int instant = _schema.DType.IndexOfField(InstantPath!);
+                    _sorter = new SortedSlices(_table, instant, _schema.DType, Shapes(plan.Shredded));
+
+                    // The synopsis's tables, counted from each slice as it is sorted.
+                    _synopsis = new SynopsisTables(_schema.DType, _table.Unit, SynopsisTables.Measures(_schema.DType, instant, _table.Order));
+                    _slice = 0;                }
             }
 
             _rows += batch.RowCount;
@@ -893,8 +897,16 @@ internal static class DatasetCompactor
             return shapes;
         }
 
-        private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken) =>
-            _draft!.Writer.WriteBatchAsync(sorted, cancellationToken);
+        private ValueTask WriteSortedAsync(RecordBatch sorted, CancellationToken cancellationToken)
+        {
+            _synopsis?.AddSlice(sorted, _table!.Slices[_slice].Start, _sorter!.Order, _sorter.SortedCodes);
+            _slice++;
+            return _draft!.Writer.WriteBatchAsync(sorted, cancellationToken);
+        }
+
+        // The tables of the object's synopsis as its slices are sorted, and the next slice's index.
+        private SynopsisTables? _synopsis;
+        private int _slice;
 
         internal ValueTask RollIfFullAsync(CancellationToken cancellationToken) =>
             WantsRoll ? RollAsync(cancellationToken) : ValueTask.CompletedTask;
@@ -927,7 +939,21 @@ internal static class DatasetCompactor
                     draft.Writer.DeclareSlices(InstantPath!, _table!);
                 }
 
-                await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                SynopsisTables? synopsis = _synopsis;
+                _synopsis = null;
+                try
+                {
+                    if (synopsis is not null)
+                    {
+                        draft.Writer.DeclareSynopsisTables(synopsis.Arena, synopsis.Build());
+                    }
+
+                    await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    synopsis?.Dispose();
+                }
             }
 
             WrittenObject? written = await _dataset
@@ -956,6 +982,8 @@ internal static class DatasetCompactor
             _draft = null;
             _sorter?.Dispose();
             _sorter = null;
+            _synopsis?.Dispose();
+            _synopsis = null;
             await draft.Writer.DisposeAsync().ConfigureAwait(false);
             draft.Sink.Discard();
         }

@@ -77,6 +77,12 @@ if (Text(args, "--micro") == "sketches")
     return SketchMicro.Run(rounds);
 }
 
+// --micro synopsistables: what the synopsis tables cost a job, counted per slice and built (SynopsisTablesMicro.cs).
+if (Text(args, "--micro") == "synopsistables")
+{
+    return await SynopsisTablesMicro.Run(rounds);
+}
+
 // --micro slicesort: one time slice sorted as a dataset of periods writes it (SliceSortMicro.cs).
 if (Text(args, "--micro") == "slicesort")
 {

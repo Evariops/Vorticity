@@ -31,23 +31,6 @@ namespace Vorticity.Dataset;
 /// </remarks>
 internal static class SliceSort
 {
-    /// <summary>
-    /// The permutation of <paramref name="rows"/> rows, in time order, sorted by the entries <paramref name="order"/>
-    /// of the struct node <paramref name="root"/>: a field, or, below zero, the shape of variant field
-    /// <c>-entry - 1</c> against what <paramref name="shapes"/> holds for it.
-    /// </summary>
-    internal static int[] Permutation(
-        CanonicalArena arena, int root, IReadOnlyList<int> order, int rows, IReadOnlyDictionary<int, Types.Variants.VariantShapes>? shapes = null)
-    {
-        (int[] Codes, int Distinct)[] columns = new (int[], int)[order.Count];
-        for (int k = 0; k < order.Count; k++)
-        {
-            columns[k] = CodesOf(arena, root, order[k], rows, shapes);
-        }
-
-        return Permutation(columns, rows);
-    }
-
     /// <summary>The permutation of <paramref name="rows"/> rows sorted by <paramref name="columns"/>' codes, the first the most significant, ties in time order.</summary>
     internal static int[] Permutation(IReadOnlyList<(int[] Codes, int Distinct)> columns, int rows)
     {
