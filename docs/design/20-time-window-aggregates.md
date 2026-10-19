@@ -883,6 +883,17 @@ that the sorted synopsis columns take off the data itself. With them it is about
 synopsis should come out smaller than the same rows in time order without one, which the write bench
 checks.
 
+As measured on requests at 50 000 a second with seven synopsis columns (`vortex-queries --micro
+slicebytes`), the sorted slices and their synopsis columns weigh 2.4 % less than the rows in time
+order under the default profile, about the same under the size-first one, and 8 % less than an
+object of a dataset of levels with its key's run. The tables come on top, as many as the choice keeps
+under the budget: 0.93 bytes a row on a million rows in one slice, 2.3 % of the data, and 2.44 bytes
+a row on four million in 79 slices, 6 %, where a coarse table per hour down to the service, 7.5 MB,
+saves 428 ms of a question. With them the object can outweigh the rows in time order, by choice: the
+tables trade bytes for the time of questions, and the budget, not an estimate, bounds what they take.
+A table takes about 1.5 to 1.9 KB even for one row, a node for each of its twenty-odd columns of
+states. The distributions are not candidates yet.
+
 ## 8. Reading the synopsis part without the data
 
 ### The problem today
