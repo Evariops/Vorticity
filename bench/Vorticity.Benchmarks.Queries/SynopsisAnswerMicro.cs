@@ -75,7 +75,69 @@ internal static class SynopsisAnswerMicro
             Console.WriteLine($"{name,-44} {on,12:F2} {off,10:F2} {off / on,8:F1}x {metrics.SynopsisRows,11} {metrics.Rows,11} {without.Rows,13}");
         }
 
+        // A page's questions: a walk of each object's tables the page's questions shared would save, at most,
+        // the read and the decode of the tables by every question but one.
+        Func<Scan<AnsweredRequest>, Vorticity.Aggregation>[] page =
+        [
+            .. questions.Select(question => question.Ask),
+            scan => scan.GroupBy(r => r.Method).Select(g => (g.Key, g.Count())),
+            scan => scan.GroupBy(r => r.Status).Select(g => (g.Key, g.Count(), g.Sum(r => r.Bytes))),
+            scan => scan.GroupBy(r => r.Service).Select(g => (g.Key, g.Max(r => r.Duration))),
+        ];
+        double alone = await BestAsync(rounds, async () =>
+        {
+            foreach (Func<Scan<AnsweredRequest>, Vorticity.Aggregation> ask in page)
+            {
+                await DrainAsync(ask(dataset.Scan<AnsweredRequest>()));
+            }
+        });
+        double together = await BestAsync(rounds, () => Task.WhenAll(page.Select(ask => DrainAsync(ask(dataset.Scan<AnsweredRequest>())))));
+        System.Collections.Generic.List<ObjectEntry> entries = [];
+        await foreach (PositionedObject held in dataset.Snapshot.WalkAsync(null, 0, long.MaxValue, null, default))
+        {
+            entries.Add(held.Entry);
+        }
+
+        double tables = await BestAsync(rounds, async () =>
+        {
+            foreach (Indexes.SynopsisTableSet? set in await Task.WhenAll(entries.Select(entry => dataset.ReadSynopsisAsync(entry, null, default).AsTask())))
+            {
+                set?.Dispose();
+            }
+        });
+        Console.WriteLine(
+            $"a page of {page.Length} questions: {alone:F2} ms one after another, {together:F2} ms at once; every object's tables read once in {tables:F2} ms, " +
+            $"so a walk the page shared would save at most {(page.Length - 1) * tables:F2} ms of work");
         return 0;
+    }
+
+    /// <summary>The best time of <paramref name="work"/> over the rounds, the first one not counted.</summary>
+    private static async Task<double> BestAsync(int rounds, Func<Task> work)
+    {
+        double best = double.MaxValue;
+        for (int round = 0; round <= rounds; round++)
+        {
+            long begin = Stopwatch.GetTimestamp();
+            await work();
+            if (round > 0)
+            {
+                best = Math.Min(best, Stopwatch.GetElapsedTime(begin).TotalMilliseconds);
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>Runs an aggregation through its last batch.</summary>
+    private static async Task DrainAsync(Vorticity.Aggregation aggregation)
+    {
+        System.Collections.Generic.IAsyncEnumerator<RecordBatch> batches = aggregation.Query.Batches(default);
+        await using (batches)
+        {
+            while (await batches.MoveNextAsync())
+            {
+            }
+        }
     }
 
     private static async Task<(double Milliseconds, ScanMetrics Metrics)> TimedAsync(
