@@ -22,10 +22,11 @@ internal sealed class StateRequest
     /// <summary>The column of the rows of the data a row of states stands for.</summary>
     internal const string RowsColumn = "count";
 
-    private StateRequest(FieldExpr[] keys, string?[] inputs)
+    private StateRequest(FieldExpr[] keys, string?[] inputs, AggregateKind[] kinds)
     {
         Keys = keys;
         Inputs = inputs;
+        Kinds = kinds;
     }
 
     /// <summary>The fields the keys read, functions included, in the plan's order.</summary>
@@ -33,6 +34,26 @@ internal sealed class StateRequest
 
     /// <summary>Per aggregate of the plan, the column it folds; null for a count of rows, or for one the statistics settled.</summary>
     internal IReadOnlyList<string?> Inputs { get; }
+
+    /// <summary>Per aggregate of the plan, what it is: which of a column's states it reads, its sum or one of its extremes.</summary>
+    internal IReadOnlyList<AggregateKind> Kinds { get; }
+
+    /// <summary>Whether an aggregate reads <paramref name="column"/>'s sum (a sum or a mean), its least (a minimum), its greatest (a maximum).</summary>
+    internal (bool Sum, bool Least, bool Greatest) Reads(string column)
+    {
+        (bool sum, bool least, bool greatest) = (false, false, false);
+        for (int i = 0; i < Inputs.Count; i++)
+        {
+            if (string.Equals(Inputs[i], column, System.StringComparison.Ordinal))
+            {
+                sum |= Kinds[i] is AggregateKind.Sum or AggregateKind.Average;
+                least |= Kinds[i] == AggregateKind.Min;
+                greatest |= Kinds[i] == AggregateKind.Max;
+            }
+        }
+
+        return (sum, least, greatest);
+    }
 
     /// <summary>The column of how many values of <paramref name="column"/> a row of states folds.</summary>
     internal static string ValuesOf(string column) => column + ".values";
@@ -69,6 +90,7 @@ internal sealed class StateRequest
         }
 
         string?[] inputs = new string?[plan.Aggregates.Length];
+        AggregateKind[] kinds = new AggregateKind[plan.Aggregates.Length];
         for (int i = 0; i < inputs.Length; i++)
         {
             // An aggregate the statistics settled is folded by no batch, of rows or of states.
@@ -90,13 +112,14 @@ internal sealed class StateRequest
                 case AggregateKind.Sum or AggregateKind.Min or AggregateKind.Max or AggregateKind.Average
                     when aggregate.Input is { Kind: StorageKind.Primitive } input && Column(input.Field) && Numeric(input.PType):
                     inputs[i] = input.Path;
+                    kinds[i] = aggregate.Kind;
                     break;
                 default:
                     return null;
             }
         }
 
-        return new StateRequest(keys, inputs);
+        return new StateRequest(keys, inputs, kinds);
     }
 
     /// <summary>A key a batch of states carries: a top-level column, or functions of one.</summary>

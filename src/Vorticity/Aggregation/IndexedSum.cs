@@ -48,6 +48,9 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
     // From this top up an extractor passes the doubles: the values are split scaled down by
     // 2^(-27 · 4), four bins lower, where the parts are the same integers.
     private const int HugeTop = 76;
+
+    /// <summary>The top from which values are split scaled, past the doubles' extractors.</summary>
+    internal const int SplitScaledTop = HugeTop;
     private const int HugeBins = 4;
 
     private const int TopShift = 48;

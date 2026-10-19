@@ -423,16 +423,19 @@ internal sealed class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> ObjectAsync(
         PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        if (_states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant))
+        IAsyncEnumerable<RecordBatch> batches = _states is { } request && Answer(held, request) is ({ } answer, { } contents, string instant)
+            ? AnsweredAsync(held, answer, contents, instant, open, cancellationToken)
+            : RowsAsync(held, open, cancellationToken);
+        await foreach (RecordBatch batch in batches.ConfigureAwait(false))
         {
-            await foreach (RecordBatch batch in AnsweredAsync(held, answer, contents, instant, cancellationToken).ConfigureAwait(false))
-            {
-                yield return batch;
-            }
-
-            yield break;
+            yield return batch;
         }
+    }
 
+    /// <summary>One object's rows as the dataset's, its lease held until the last is read.</summary>
+    private async IAsyncEnumerable<RecordBatch> RowsAsync(
+        PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         ObjectLease lease = await RentAsync(held, cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
@@ -469,7 +472,7 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private (SynopsisAnswer? Answer, SynopsisContents? Contents, string? Instant) Answer(in PositionedObject held, StateRequest request)
     {
-        if (held.Entry.HasDeletions || Covered(held) != held.Entry.Rows || _dataset.Key is not { } key
+        if (Covered(held) != held.Entry.Rows || _dataset.Key is not { } key
             || SynopsisContents.From(held.Entry.Synopsis.Span) is not { } contents)
         {
             return default;
@@ -520,45 +523,78 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>
     /// An object answered by its synopsis, with no open of it: the batches of states of its tables' kept
-    /// buckets, then the rows of the slices at the window's edges, through its chunk directories.
+    /// buckets, the rows its deletion marked taken out of them, then the rows of the slices at the window's
+    /// edges, through its chunk directories, the marked ones left out. When a marked row cannot come out of
+    /// a table exactly, the object's rows instead.
     /// </summary>
     private async IAsyncEnumerable<RecordBatch> AnsweredAsync(
-        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant,
+        PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, string instant, int open,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        // The slices cut are read beside the tables, not after them: their chunk directories and their
-        // chunks take two round trips, the tables one, so the object costs two.
-        Task<List<RecordBatch>>? edges = answer.Edges.Count > 0 ? EdgesAsync(held, answer, contents, cancellationToken) : null;
+        // A deletion vector kept out of line is read before the rows it marks are.
+        if (held.Entry.HasDeletions && !held.Entry.IsResolved)
+        {
+            await held.Entry.ResolveAsync(_version.Pages, cancellationToken).ConfigureAwait(false);
+        }
+
+        // The slices cut and the rows marked are read beside the tables, not after them: their chunk
+        // directories and their chunks take two round trips, the tables one, so the object costs two.
+        DType schema = contents.SchemaIn(new DTypeArena());
+        Task<List<RecordBatch>>? edges = answer.Edges.Count > 0
+            ? ReadSpansAsync(held, contents, answer.Edges, EdgeColumns(schema), select: true, cancellationToken)
+            : null;
+        Task<List<RecordBatch>>? marked = held.Entry.HasDeletions && answer.Parts.Count > 0
+            ? ReadSpansAsync(held, contents, MarkedSpans(held.Entry.Deletions), MeasuredColumns(answer), select: false, cancellationToken)
+            : null;
+        List<RecordBatch> states = [];
+        SynopsisTableSet? tables = null;
+        bool exact = true;
         try
         {
             if (answer.Parts.Count > 0)
             {
-                SynopsisTableSet tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
-                using (tables)
+                tables = await _dataset.ReadSynopsisAsync(held.Entry, contents, answer.Reads, cancellationToken).ConfigureAwait(false);
+                List<RecordBatch>? removed = marked is null ? null : await marked.ConfigureAwait(false);
+                foreach (SynopsisPart part in answer.Parts)
                 {
-                    foreach (SynopsisPart part in answer.Parts)
+                    if (answer.Batch(tables, part, instant, held.FirstRow, removed, schema, contents.Slices) is not { } batch)
                     {
-                        RecordBatch states = answer.Batch(tables, part, instant, held.FirstRow)
-                            ?? throw new VortexFormatException($"A synopsis table of object {held.Entry.Key} did not read.");
-                        using (states)
-                        {
-                            _counters?.AddSynopsisRows(states.SelectedRows);
-                            yield return states;
-                        }
+                        exact = false;
+                        break;
                     }
+
+                    states.Add(batch);
                 }
             }
+        }
+        catch
+        {
+            await LetGoAsync(states, tables, marked, edges).ConfigureAwait(false);
+            throw;
+        }
 
-            if (edges is null)
+        if (!exact)
+        {
+            await LetGoAsync(states, tables, marked, edges).ConfigureAwait(false);
+            await foreach (RecordBatch batch in RowsAsync(held, open, cancellationToken).ConfigureAwait(false))
             {
-                yield break;
+                yield return batch;
             }
 
-            List<RecordBatch> slices = await edges.ConfigureAwait(false);
-            edges = null;
-            try
+            yield break;
+        }
+
+        try
+        {
+            foreach (RecordBatch batch in states)
             {
-                foreach (RecordBatch slice in slices)
+                _counters?.AddSynopsisRows(batch.SelectedRows);
+                yield return batch;
+            }
+
+            if (edges is not null)
+            {
+                foreach (RecordBatch slice in await edges.ConfigureAwait(false))
                 {
                     using RecordBatch rows = slice.Rebased(held.FirstRow + slice.StartRow);
                     _counters?.AddEdgeRows(rows.SelectedRows);
@@ -568,63 +604,142 @@ internal sealed class DatasetScanBuilder
                     }
                 }
             }
-            finally
-            {
-                foreach (RecordBatch slice in slices)
-                {
-                    slice.Dispose();
-                }
-            }
         }
         finally
         {
-            // A consumer that stopped, or a failure: the edges read and not delivered are let go.
-            if (edges is not null)
+            // Every batch given back, delivered or not: a consumer that stopped, or a failure, leaves them.
+            await LetGoAsync(states, tables, marked, edges).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>The batches and tables of an answer given back, those read beside it once their reads end.</summary>
+    private static async ValueTask LetGoAsync(List<RecordBatch> states, SynopsisTableSet? tables, params Task<List<RecordBatch>>?[] reads)
+    {
+        foreach (RecordBatch batch in states)
+        {
+            batch.Dispose();
+        }
+
+        states.Clear();
+        tables?.Dispose();
+        foreach (Task<List<RecordBatch>>? read in reads)
+        {
+            if (read is null)
             {
-                try
+                continue;
+            }
+
+            try
+            {
+                foreach (RecordBatch batch in await read.ConfigureAwait(false))
                 {
-                    foreach (RecordBatch slice in await edges.ConfigureAwait(false))
-                    {
-                        slice.Dispose();
-                    }
+                    batch.Dispose();
                 }
-                catch (Exception) when (edges.IsFaulted || edges.IsCanceled)
-                {
-                }
+            }
+            catch (Exception) when (read.IsFaulted || read.IsCanceled)
+            {
             }
         }
     }
 
     /// <summary>
-    /// The rows of the slices an answer cuts, read with no open of the object through its chunk directories:
-    /// the columns the pass reads and those the filter does, the filter's rows selected; batches the caller disposes.
+    /// Rows of the object read with no open of it, through its chunk directories, a batch per span of
+    /// <paramref name="columns"/>, the rows its deletion marked left out; with <paramref name="select"/>, the
+    /// rows the filter holds for alone. Batches counted from the object's first physical row, which the
+    /// caller disposes.
     /// </summary>
-    private async Task<List<RecordBatch>> EdgesAsync(PositionedObject held, SynopsisAnswer answer, SynopsisContents contents, CancellationToken cancellationToken)
+    private async Task<List<RecordBatch>> ReadSpansAsync(
+        PositionedObject held, SynopsisContents contents, IReadOnlyList<TimeSlice> spans, int[]? columns, bool select, CancellationToken cancellationToken)
     {
-        int[]? columns = EdgeColumns(contents.SchemaIn(new DTypeArena()));
-        List<RecordBatch> slices = [];
+        List<RecordBatch> batches = [];
         try
         {
-            await foreach (RecordBatch slice in _dataset.ReadSlicesAsync(held.Entry, contents, answer.Edges, columns, cancellationToken).ConfigureAwait(false))
+            await foreach (RecordBatch batch in _dataset.ReadSlicesAsync(held.Entry, contents, spans, columns, cancellationToken).ConfigureAwait(false))
             {
-                slices.Add(slice);
-                if (_filter is { } filter)
+                batches.Add(batch);
+                if (select && _filter is { } filter)
                 {
-                    SelectBy(slice, filter);
+                    SelectBy(batch, filter);
+                }
+
+                if (select && held.Entry.HasDeletions)
+                {
+                    LeaveOutMarked(batch, held.Entry.Deletions);
                 }
             }
 
-            return slices;
+            return batches;
         }
         catch
         {
-            foreach (RecordBatch slice in slices)
+            foreach (RecordBatch batch in batches)
             {
-                slice.Dispose();
+                batch.Dispose();
             }
 
             throw;
         }
+    }
+
+    /// <summary>The runs of rows a deletion marked, as spans of the object's physical rows.</summary>
+    private static List<TimeSlice> MarkedSpans(DeletionVector deletions)
+    {
+        List<TimeSlice> spans = new List<TimeSlice>(deletions.Runs);
+        for (int run = 0; run < deletions.Runs; run++)
+        {
+            spans.Add(new TimeSlice(0, 1, deletions.StartOf(run), deletions.EndOf(run) - deletions.StartOf(run)));
+        }
+
+        return spans;
+    }
+
+    /// <summary>The columns the answer's tables key and measure: what charges a row taken out to its table's row.</summary>
+    private static int[] MeasuredColumns(SynopsisAnswer answer)
+    {
+        SortedSet<int> fields = [];
+        foreach (SynopsisPart part in answer.Parts)
+        {
+            foreach (int field in part.Table.Keys)
+            {
+                if (!SynopsisPath.Names(field))
+                {
+                    fields.Add(field);
+                }
+            }
+
+            foreach (int field in part.Table.Measures)
+            {
+                if (!SynopsisPath.Names(field))
+                {
+                    fields.Add(field);
+                }
+            }
+        }
+
+        return [.. fields];
+    }
+
+    /// <summary>Leaves the rows a deletion marked out of a batch of an object's physical rows.</summary>
+    private static void LeaveOutMarked(RecordBatch batch, DeletionVector deletions)
+    {
+        int rows = batch.RowCount;
+        int words = Math.Max((rows + 63) >> 6, 1);
+        Buffers.VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
+        Span<ulong> live = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
+        deletions.Live(batch.StartRow, rows, live);
+        ReadOnlySpan<ulong> kept = batch.SelectionWords;
+        int selected = 0;
+        for (int w = 0; w < words; w++)
+        {
+            if (!kept.IsEmpty)
+            {
+                live[w] &= kept[w];
+            }
+
+            selected += System.Numerics.BitOperations.PopCount(live[w]);
+        }
+
+        batch.Select(selection, selected);
     }
 
     /// <summary>
@@ -992,12 +1107,16 @@ internal sealed class DatasetScanBuilder
         (SynopsisAnswer? answer, SynopsisContents? contents, _) = Answer(held, request);
         if (answer is null || contents is null)
         {
-            string why = held.Entry.HasDeletions ? "rows marked deleted"
-                : Covered(held) != held.Entry.Rows ? "a part of its rows asked"
+            string why = Covered(held) != held.Entry.Rows ? "a part of its rows asked"
                 : held.Entry.Synopsis.IsEmpty ? "no synopsis"
                 : "no table holds the keys, the measures and the window";
             into.Add(new StatesStep(key, "rows", why, held.Entry.Rows));
             return null;
+        }
+
+        if (held.Entry.HasDeletions && answer.Parts.Count > 0)
+        {
+            into.Add(new StatesStep(key, "marked", "rows a delete marked, taken out of the tables, or the object's rows if one cannot be", held.Entry.DeletedRows));
         }
 
         DType schema = contents.SchemaIn(new DTypeArena());

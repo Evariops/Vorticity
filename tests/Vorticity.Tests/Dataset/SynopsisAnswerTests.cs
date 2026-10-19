@@ -142,21 +142,70 @@ public sealed partial class SynopsisAnswerTests
     }
 
     /// <summary>
-    /// Rows deleted from a sealed hour: its synopsis still counts them, so its rows are read, and the other
-    /// hour's states answer beside them, to the bits of the rows left.
+    /// Rows a delete marked in every object: each is read by its place, through the chunk directories, and
+    /// taken out of its table's row, its count, its sums and its extremes, so every question gives the bits of
+    /// the rows left; where a marked row holds an extreme of its group, its object is read as rows.
     /// </summary>
-    [Fact]
-    public async Task AnObjectWithDeletedRowsIsReadAsRows()
+    [Theory]
+    [MemberData(nameof(Questions))]
+    public async Task RowsADeleteMarkedComeOutOfTheStates(string question)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await FilledAsync(store);
+        await using VortexDataset dataset = await FilledAsync(store, marking: true);
         RowChangeResult deleted = await dataset.DeleteAsync(VortexExpr.Parse("Service = 'cart' and Status = 404"), Ct);
-        Assert.True(deleted.Rows > 0);
-        (List<string> on, ScanMetrics metrics) = await AskAsync(dataset, "every measure by service and method", synopses: true);
-        (List<string> off, ScanMetrics without) = await AskAsync(dataset, "every measure by service and method", synopses: false);
-        Console.Out.Write($"DELETED: {deleted.Rows} rows marked, {metrics.SynopsisRows} table rows and {metrics.Rows} rows, against {without.Rows} rows.\n");
+        Assert.True(deleted.ObjectsMarked > 0);
+        (List<string> on, ScanMetrics metrics) = await AskAsync(dataset, question, synopses: true);
+        (List<string> off, ScanMetrics without) = await AskAsync(dataset, question, synopses: false);
+        Console.Out.Write($"DELETED {question}: {deleted.Rows} rows marked, {metrics.SynopsisRows} table rows and {metrics.Rows} rows, against {without.Rows} rows.\n");
+        ScanPlan plan = await dataset.Scan<Request>().GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).ExplainAsync(Ct);
+        foreach (StatesStep step in plan.States)
+        {
+            Console.Out.Write($"DELETED STEP {step.Object}: {step.Read} {step.Detail} x{step.Count}\n");
+        }
         Assert.Equal(off, on);
-        Assert.True(metrics.Rows > 0, "an object with marked rows answered from its synopsis");
+
+        // A question that reads an extreme may meet a marked row holding it in every object, which then reads
+        // its rows; the others answer from the tables corrected.
+        if (question is not ("every measure by service and method" or "an unaligned window" or "a window across hours"))
+        {
+            Assert.True(metrics.SynopsisRows > 0, "no state folded under the marks");
+        }
+    }
+
+    /// <summary>
+    /// Deletes drawn at random, each marking rows of every object across services, statuses, methods and
+    /// spans of time, the marks of one object growing from one to the next: after each, every question gives
+    /// the bits of the rows left, with the tables corrected or the rows read.
+    /// </summary>
+    [Fact]
+    public async Task RandomDeletesKeepEveryQuestionsBits()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store, marking: true);
+        Random random = new Random(53);
+        long folded = 0;
+        for (int round = 0; round < 5; round++)
+        {
+            string service = Services[random.Next(Services.Length)];
+            string method = Methods[random.Next(Methods.Length)];
+            long from = Vorticity.Dataset.TimeSlicer.InstantOf(Noon.AddMinutes(random.Next(130)), TimeUnit.Microseconds);
+            string delete = random.Next(3) switch
+            {
+                0 => $"Service = '{service}' and Method = '{method}'",
+                1 => $"Status = {(random.Next(2) == 0 ? 500 : 201)} and At >= {from}",
+                _ => $"Duration < {random.Next(5, 50)}",
+            };
+            RowChangeResult deleted = await dataset.DeleteAsync(VortexExpr.Parse(delete), Ct);
+            foreach (string question in Questions().Select(row => row.Data))
+            {
+                (List<string> on, ScanMetrics metrics) = await AskAsync(dataset, question, synopses: true);
+                (List<string> off, _) = await AskAsync(dataset, question, synopses: false);
+                Assert.True(off.SequenceEqual(on), $"round {round}, delete '{delete}' ({deleted.Rows} rows), question '{question}'");
+                folded += metrics.SynopsisRows;
+            }
+        }
+
+        Assert.True(folded > 0, "no table answered under the marks");
     }
 
     private List<Totals> RowTotals { get; } = [];
@@ -210,7 +259,7 @@ public sealed partial class SynopsisAnswerTests
     /// compacted: the first two hours sealed with their synopses, the rest in the fresh levels, whose jobs
     /// write synopses too. Slices of a minute, and every table kept.
     /// </summary>
-    private static async Task<VortexDataset> FilledAsync(Vorticity.IO.IObjectStore store)
+    private static async Task<VortexDataset> FilledAsync(Vorticity.IO.IObjectStore store, bool marking = false)
     {
         // A budget of the data's bytes ten times over keeps every table, even on hours this small.
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
@@ -218,6 +267,8 @@ public sealed partial class SynopsisAnswerTests
             ClusteringKey = [nameof(Request.At)],
             Periods = new PeriodOptions { Lateness = TimeSpan.FromMinutes(5), Length = SliceWidth.Hour, SliceTargetRows = 100 },
             Write = new VortexWriteOptions { Indexes = IndexPolicy.None.WithBudgetPerMille(10_000) },
+            MarkedObjectBytes = marking ? 0 : 1L << 20,
+            MarkedShare = marking ? 1 : 8,
         }, Ct);
         Random random = new Random(41);
         for (int part = 0; part < 16; part++)

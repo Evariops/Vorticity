@@ -85,6 +85,41 @@ internal struct WideIndexedSum : IFloatSumState<WideIndexedSum>
         Settled(top);
     }
 
+    /// <summary>
+    /// Takes <paramref name="value"/> back out of the sum, to the bits a sum of the other values gives; false,
+    /// the sum left as it was, when that cannot be known: an infinity, which the sum keeps a mark of, or a
+    /// value whose bin is the top, which the other values may not reach, so that their own sum would keep
+    /// bits this one dropped. A NaN was never summed.
+    /// </summary>
+    /// <remarks>
+    /// A value's parts are the bins' under the top, whenever it was added, and the parts of its negation are
+    /// their negations, since the extractors round half to even around their own even middle: below the top
+    /// another value set and still holds, adding the negation leaves the bins of the others exactly.
+    /// </remarks>
+    /// <param name="value">The value taken out.</param>
+    /// <param name="topStays">
+    /// Whether the caller knows a value of the largest magnitude stays: the least and the greatest of the sum's
+    /// values both remain, and the top they call for with them, so that a value of the top bin may go too.
+    /// </param>
+    internal bool TryRemove(double value, bool topStays = false)
+    {
+        if (double.IsNaN(value))
+        {
+            return true;
+        }
+
+        int top = Sum.Top;
+        if (double.IsInfinity(value) || Sum.Count < 1 || top == 0 || top >= IndexedSum.SplitScaledTop
+            || IndexedSum.Needed(Math.Abs(value)) > top || (!topStays && IndexedSum.Needed(Math.Abs(value)) == top))
+        {
+            return false;
+        }
+
+        Sum.Add(-value);
+        Sum.Uncount(2);
+        return true;
+    }
+
     public void Merge(in WideIndexedSum other)
     {
         if (Count + other.Count > Capacity)

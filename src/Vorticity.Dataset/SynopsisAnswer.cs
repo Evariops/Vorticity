@@ -25,7 +25,8 @@ internal sealed record SynopsisPart(SynopsisTableInfo Table, HashSet<long> Kept)
 /// <param name="Parts">The tables read, each with the buckets it folds.</param>
 /// <param name="Edges">The slices whose rows are read, the window or a key of time cutting through them.</param>
 /// <param name="KeyFilter">The part of the filter on the tables' keys, evaluated on their rows; null for none.</param>
-internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter)
+/// <param name="Request">What the aggregation asks: the states a row taken out must be taken out of.</param>
+internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOnlyList<TimeSlice> Edges, VortexExpr? KeyFilter, StateRequest Request)
 {
     /// <summary>
     /// The answer of the object of <paramref name="contents"/> to <paramref name="request"/> under
@@ -195,7 +196,7 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
             parts.Add(runs);
         }
 
-        return parts.Count == 0 && edges.Count > 0 ? null : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys));
+        return parts.Count == 0 && edges.Count > 0 ? null : new SynopsisAnswer(parts, edges, onKeys.Count == 0 ? null : And(onKeys), request);
     }
 
     /// <summary>Whether <paramref name="table"/> is one of the answer's, which the read of the synopsis fetches.</summary>
@@ -221,7 +222,16 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
     /// <param name="part">The table and its buckets.</param>
     /// <param name="instant">The dataset's instant, whose name the buckets take.</param>
     /// <param name="startRow">The object's first row in the dataset.</param>
-    internal RecordBatch? Batch(SynopsisTableSet tables, SynopsisPart part, string instant, long startRow)
+    /// <param name="removed">
+    /// Rows to take out of the table's states first, a delete's or those a question excludes (see
+    /// <see cref="SynopsisCorrection"/>); null for none.
+    /// </param>
+    /// <param name="schema">The object's schema, which names the measures of the rows taken out.</param>
+    /// <param name="slices">The object's slice table, which places a row taken out in its bucket.</param>
+    /// <returns>The batch; null when the table is not among those read, or a row cannot come out exactly.</returns>
+    internal RecordBatch? Batch(
+        SynopsisTableSet tables, SynopsisPart part, string instant, long startRow,
+        IReadOnlyList<RecordBatch>? removed = null, DType schema = default, SliceTable? slices = null)
     {
         if (tables.Types is not { } types)
         {
@@ -249,10 +259,18 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
                 fields[f] = rows.GetFieldIndex(f);
             }
 
+            if (removed is { Count: > 0 }
+                && (slices is null || !SynopsisCorrection.TryRemove(arena, table, rowType, fields, schema, removed, slices.Slices, slices.Unit, part.Kept, Request.Reads)))
+            {
+                return null;
+            }
+
             int root = arena.AddStruct(types.Struct(names, dtypes, Nullability.NonNullable), count, Validity.NonNullable, fields);
 
-            // The rows of the buckets kept, then those the filter on the keys holds for.
+            // The rows of the buckets kept, then those the filter on the keys holds for, but a row whose
+            // every row was taken out, whose group the rows would not make.
             ReadOnlySpan<long> buckets = arena.GetNode(fields[0]).Values.Cast<long>();
+            ReadOnlySpan<long> stood = arena.GetNode(fields[table.Keys.Length + 1]).Values.Cast<long>();
             int words = Math.Max((count + 63) >> 6, 1);
             VortexBuffer selection = arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bits);
             bits.Clear();
@@ -266,7 +284,7 @@ internal sealed record SynopsisAnswer(IReadOnlyList<SynopsisPart> Parts, IReadOn
             int selected = 0;
             for (int r = 0; r < count; r++)
             {
-                if (part.Kept.Contains(buckets[r]) && (states.IsEmpty || states[r] == Trilean.True))
+                if (part.Kept.Contains(buckets[r]) && stood[r] > 0 && (states.IsEmpty || states[r] == Trilean.True))
                 {
                     kept[r >> 6] |= 1UL << (r & 63);
                     selected++;
